@@ -792,7 +792,7 @@ fn the_cli_release_ships_its_guest_runtime_signed_and_listed() {
     let lane = fs::read_to_string(".github/workflows/guest-bins.yml").expect("guest-bins.yml");
     assert!(
         lane.contains("  workflow_call:\n")
-            && lane.contains("build guest-bins --out dist")
+            && lane.contains("dev guest-bins --out dist")
             && lane.contains("name: mvm-guest-bins-attempt-${{ github.run_attempt }}"),
         "guest-bins.yml must be callable and upload the archive under the name the release reads"
     );

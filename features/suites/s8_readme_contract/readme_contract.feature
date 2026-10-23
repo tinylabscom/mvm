@@ -99,8 +99,8 @@ Feature: README CLI contract
   Scenario: every README example is executed or carries a reviewed exemption
     Then every README example is executed or carries a reviewed exemption
 
-  Scenario: `build compile` exposes the documented IR flags
-    When I run mvmctl with "build compile --help"
+  Scenario: `dev compile` exposes the documented IR flags
+    When I run mvmctl with "dev compile --help"
     Then the command exits with code 0
     And the help output contains "--from-ir"
     And the help output contains "--out"

@@ -371,7 +371,7 @@ fn sidecar_provenance_warning(origin: &str, marker: &std::path::Path) -> String 
         "SDK sidecar {origin}, so `libmvm_host_services.so` does not carry changes to \
          crates/mvm-host-services in this checkout. Host-service calls from the guest use \
          the verbs it shipped with; one added here answers `unknown method`. Run \
-         `mvmctl build sdk-sidecar build`, which repacks both libc variants on the host from \
+         `mvmctl dev sdk-sidecar build`, which repacks both libc variants on the host from \
          this checkout's guest runtime. Provenance marker: {}.",
         marker.display()
     )
@@ -418,7 +418,7 @@ mod sdk_sidecar_host_resolution_tests {
         // The remedy packs on the host from the guest runtime, so it needs
         // neither an image checkout nor the builder VM.
         assert!(
-            warning.contains("`mvmctl build sdk-sidecar build`"),
+            warning.contains("`mvmctl dev sdk-sidecar build`"),
             "{warning}"
         );
         assert!(!warning.contains("MVM_IMAGES_DIR"), "{warning}");

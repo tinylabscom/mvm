@@ -176,7 +176,7 @@ shasum -a 256 --check checksums-sha256.txt
 ```
 
 When a release that predates the guest-runtime asset installs this payload
-with `mvmctl build runtime-overlay build --source download`, into
+with `mvmctl dev runtime-overlay build --source download`, into
 `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`,
 it runs the same chain, then verifies the extracted inner files against the embedded
 `checksums-sha256.txt`, and later required-overlay boots recheck those cached
@@ -206,7 +206,7 @@ binaries:
 3. Run `mvmctl bootstrap` with the new release on hosts that should pick it up
    immediately; it assembles the overlay from the guest runtime. For a release
    without one, preload the cache with
-   `mvmctl build runtime-overlay build --source download`.
+   `mvmctl dev runtime-overlay build --source download`.
 4. Restart stopped VMs when you want them to adopt the new runtime overlay.
 5. Restart already-running VMs only during a planned maintenance window; they
    keep the runtime they booted with until then.
@@ -220,7 +220,7 @@ If you must roll back a release:
 1. Downgrade `mvmctl` to the older release.
 2. Ensure the older release's runtime overlay is available again: run
    `mvmctl bootstrap` with the older `mvmctl` if it ships a guest runtime, or
-   re-run `mvmctl build runtime-overlay build --source download` with it (it
+   re-run `mvmctl dev runtime-overlay build --source download` with it (it
    fetches from the image set that release pins), or restore the older cached
    artifact under
    `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`, where
@@ -260,9 +260,10 @@ manifest (`builder-vm-<arch>.pack-manifest.json`). Those assets stay on those
 releases, but no current `mvmctl` fetches them.
 
 :::note[What changed]
-This section used to also cover a dev-image variant, verified locally via
-`mvmctl dev import-image`. That command was removed along with `mvmctl dev`;
-the dev-image pack class has no publish/fetch path today. See
+This section used to also cover a locally verified dev-image import. That
+legacy import was removed; the current `mvmctl dev` namespace contains
+contributor build tools, and the dev-image pack class has no publish/fetch path
+today. See
 [Air-gapped Bootstrap](airgapped-bootstrap) for the current air-gapped path
 (signed `.mvmpkg` bundles).
 :::

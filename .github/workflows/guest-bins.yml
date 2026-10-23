@@ -52,7 +52,7 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Build the guest-bins artifact
-        run: cargo run --locked -p mvmctl -- build guest-bins --out dist
+        run: cargo run --locked -p mvmctl -- dev guest-bins --out dist
 
       - name: Retain the already-built canonical reader for pre-signing checks
         shell: bash

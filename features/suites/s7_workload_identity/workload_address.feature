@@ -1,6 +1,6 @@
 Feature: Workload content address
 
-  `mvmctl build address` prints a Workload IR's content identity: the
+  `mvmctl dev address` prints a Workload IR's content identity: the
   `sha256(JCS(ir))` workload address and the matching ir-hash. The identity is
   a property of the normalized Workload IR value, not how its JSON was written,
   so two encodings of the same value must address alike, different values must

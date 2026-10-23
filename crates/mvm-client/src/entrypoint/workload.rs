@@ -52,7 +52,7 @@ pub fn resolve_workload_slot(workload_id: &str) -> Result<String> {
         [only] => Ok(only.slot.clone()),
         [] => bail!(
             "no built image named {workload_id:?} on this host: build it (compile the \
-             script with `mvmctl build compile`, then `mvmctl machine build --flake <dir>`) \
+             script with `mvmctl dev compile`, then `mvmctl machine build --flake <dir>`) \
              or pass its manifest"
         ),
         many => {

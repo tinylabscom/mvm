@@ -221,17 +221,17 @@ fresh machine compiles the kernel from source. It can take several minutes
 depending on the host and is memory-heavy; later builds reuse the persistent
 Nix store.
 
-`mvmctl build kernel build` makes that compile explicit and one-time. Image
+`mvmctl dev kernel build` makes that compile explicit and one-time. Image
 backed runs from a source checkout also bootstrap this kernel automatically;
 prebuilding it is useful when you want the first interactive run to be warm:
 
 ```bash
 # Compile the builder kernel once into the cache + persistent nix store.
 # The next build reuses it (substituted, not rebuilt).
-just check::run -- build kernel build --which builder
+just check::run -- dev kernel build --which builder
 
 # Or both kernels:
-just check::run -- build kernel build --all
+just check::run -- dev kernel build --all
 
 # The same policy applies to the direct kernel recipe:
 MVM_KERNEL_SOURCE=download just kernel::workload
@@ -264,7 +264,7 @@ effect? The loop is build → boot-smoke → measure:
 
 ```bash
 # 1. Build the variant you touched (compiles your edited config in Stage 0).
-just check::run -- build kernel build --which workload
+just check::run -- dev kernel build --which workload
 
 # 2. Boot-smoke it — a kernel that builds isn't proof it boots. Boot a
 #    throwaway VM and confirm the in-guest agent answers over vsock.

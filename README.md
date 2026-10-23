@@ -156,12 +156,12 @@ def greet(name: str) -> str:
 ```
 
 ```bash
-mvmctl build compile app.py --out ./out
+mvmctl dev compile app.py --out ./out
 mvmctl machine build --flake ./out
 echo '[[], {"name": "ari"}]' | mvmctl machine run --entrypoint --flake ./out
 ```
 
-`build compile` parses the file without running it and writes a flake and a
+`dev compile` parses the file without running it and writes a flake and a
 launch plan. The decorator and the `mvm` import are stripped from the bundled
 source, so the guest runs the plain function. The entrypoint reads
 `[args, kwargs]` as JSON on stdin. For locked dependencies and sealed

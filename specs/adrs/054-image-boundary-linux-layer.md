@@ -133,8 +133,8 @@ and cite #4100 for the direction, never the reverse.
 - In a source checkout every route goes through that one archive and those
   assemblers. Bootstrap resolves the archive once and assembles all four
   pieces from it (`mvm_build::runtime_pieces::assemble_runtime_pieces`); the
-  explicit `mvmctl build runtime-overlay build` and
-  `mvmctl build sdk-sidecar build` assemble the piece they name from it, with
+  explicit `mvmctl dev runtime-overlay build` and
+  `mvmctl dev sdk-sidecar build` assemble the piece they name from it, with
   no `mvm-images` checkout and no builder VM; outside a checkout they assemble
   it from the published guest runtime of the CLI's version. Neither has a
   `--source download`: the image set carries no such piece. A source build

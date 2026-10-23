@@ -263,8 +263,8 @@ impl Commands {
             // keep their per-op verb; native lifecycle verbs report `machine`.
             Commands::Machine(a) => a.action.verb_name(),
             Commands::Storage(_) => "storage",
-            // `build <sub>` delegates to the per-op verb (image/compile/validate/kernel).
-            Commands::Build(a) => a.action.verb_name(),
+            // `dev <sub>` delegates while preserving each operation's audit verb.
+            Commands::Dev(a) => a.action.verb_name(),
             Commands::Deploy(_) => "deploy",
             Commands::Deployments(_) => "deployments",
             Commands::ShellInit(_) => "shell-init",

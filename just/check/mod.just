@@ -86,4 +86,4 @@ ebpf:
 
 # Prebuild or refresh the version-matched read-only runtime overlay
 overlay *ARGS:
-    bin/dev build runtime-overlay build {{ ARGS }}
+    bin/dev dev runtime-overlay build {{ ARGS }}

@@ -30,7 +30,7 @@ impl TopLevelCommand for Commands {
             Commands::Doctor(a) => env::doctor::run(cli, a, cfg),
             Commands::Dashboard(a) => dashboard::run(a),
             Commands::Prepare(a) => vm::prepare::run(a),
-            Commands::Build(a) => build::group::run(cli, a, cfg),
+            Commands::Dev(a) => build::group::run(cli, a, cfg),
             Commands::Deploy(a) => deploy::run(cli, a, cfg),
             Commands::Deployments(a) => deployments::run(cli, a, cfg),
             Commands::Kernel(a) => build::kernel::run(cli, a, cfg),
@@ -77,7 +77,7 @@ impl TopLevelCommand for Commands {
         matches!(
             self,
             Commands::QemuVsockBridge(_)
-                | Commands::Build(build::group::Args {
+                | Commands::Dev(build::group::Args {
                     action: build::group::BuildCmd::GuestBins(build::guest_bins::Args {
                         check_release_archive: Some(_),
                         ..
@@ -96,7 +96,7 @@ impl TopLevelCommand for Commands {
         }
         match self {
             Commands::QemuVsockBridge(a) => Some(qemu_bridge::run(a)),
-            Commands::Build(build::group::Args {
+            Commands::Dev(build::group::Args {
                 action:
                     build::group::BuildCmd::GuestBins(build::guest_bins::Args {
                         check_release_archive: Some(archive),

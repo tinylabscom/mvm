@@ -71,9 +71,9 @@ fn env_verify_runtime_help_and_parser_require_explicit_release_inputs() {
 #[test]
 fn build_compile_help_advertises_pinned_publication_input() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args(["build", "compile", "--help"])
+        .args(["dev", "compile", "--help"])
         .output()
-        .expect("run build compile help");
+        .expect("run dev compile help");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("--mvm-revision"), "{stdout}");
@@ -84,14 +84,14 @@ fn build_compile_help_advertises_pinned_publication_input() {
 fn build_compile_rejects_invalid_pin_before_reading_source() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args([
-            "build",
+            "dev",
             "compile",
             "/does/not/exist.py",
             "--mvm-revision",
             "main",
         ])
         .output()
-        .expect("run build compile with invalid revision");
+        .expect("run dev compile with invalid revision");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("40-character hexadecimal"), "{stderr}");
@@ -203,12 +203,29 @@ fn help_text(argv: &[&str]) -> String {
         .join(" ")
 }
 
-/// `build guest-bins` produces mvmctl's guest-runtime archive; its help names
+#[test]
+fn dev_help_lists_every_contributor_subcommand() {
+    let help = help_text(&["dev", "--help"]);
+    for command in [
+        "compile",
+        "validate",
+        "kernel",
+        "runtime-overlay",
+        "sdk-sidecar",
+        "address",
+        "image-set",
+        "guest-bins",
+    ] {
+        assert!(help.contains(command), "dev help missing {command}: {help}");
+    }
+}
+
+/// `dev guest-bins` produces mvmctl's guest-runtime archive; its help names
 /// the output directory, the per-architecture selector, and whose archive it
 /// is, and its long help says mvm-images is not a consumer.
 #[test]
 fn build_guest_bins_help_names_output_and_arch_controls() {
-    let short = help_text(&["build", "guest-bins", "--help"]);
+    let short = help_text(&["dev", "guest-bins", "--help"]);
     for expected in [
         "--out",
         "--arch",
@@ -218,7 +235,7 @@ fn build_guest_bins_help_names_output_and_arch_controls() {
     ] {
         assert!(short.contains(expected), "help missing {expected}: {short}");
     }
-    let long = help_text(&["help", "build", "guest-bins"]);
+    let long = help_text(&["help", "dev", "guest-bins"]);
     assert!(
         long.contains("Its consumer is mvmctl; mvm-images does not consume it"),
         "{long}"
@@ -234,7 +251,7 @@ fn build_guest_bins_archive_check_is_read_only_and_rejects_build_controls() {
         .env("HOME", &home)
         .env("MVM_HOME", &home)
         .current_dir(directory.path())
-        .args(["build", "guest-bins", "--check-release-archive"])
+        .args(["dev", "guest-bins", "--check-release-archive"])
         .arg(&missing)
         .output()
         .expect("check a missing archive outside a source checkout");
@@ -252,7 +269,7 @@ fn build_guest_bins_archive_check_is_read_only_and_rejects_build_controls() {
     );
     for control in [vec!["--out", "output"], vec!["--arch", "x86_64"]] {
         let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-            .args(["build", "guest-bins", "--check-release-archive"])
+            .args(["dev", "guest-bins", "--check-release-archive"])
             .arg(&missing)
             .args(&control)
             .output()
@@ -267,9 +284,9 @@ fn build_guest_bins_archive_check_is_read_only_and_rejects_build_controls() {
 #[test]
 fn build_guest_bins_rejects_an_unknown_arch() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args(["build", "guest-bins", "--arch", "riscv64"])
+        .args(["dev", "guest-bins", "--arch", "riscv64"])
         .output()
-        .expect("run build guest-bins with a bad arch");
+        .expect("run dev guest-bins with a bad arch");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(

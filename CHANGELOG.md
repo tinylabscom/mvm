@@ -11,6 +11,7 @@ All notable changes to mvm are documented in this file.
 - **core**: Bind application boot inputs to original signed members
 
 ### Changed
+- **cli**: Move contributor build and inspection subcommands from `mvmctl build` to `mvmctl dev` (#4584)
 - **nix**: Bump the libkrunfw kernel to Linux 6.12.114
 
 ### Documentation

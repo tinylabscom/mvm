@@ -32,8 +32,9 @@ local-first deploy store (`<mvm_home>/deployments/<ir-hash>/deploy.json`).
 Sits beside `deploy` (the write path) the way `deps` sits beside build.
 
 
-**`build/`** (D1) — `build image`(was the bare `build`) · `build compile`
-· `build validate` · `build kernel`(from flat `kernel.rs`).
+**`dev`** — contributor-only `dev compile` · `dev validate` · `dev kernel` ·
+`dev runtime-overlay` · `dev sdk-sidecar` · `dev address` · `dev image-set` ·
+`dev guest-bins`. User package construction is reserved for top-level `build`.
 
 **`vm/`** — act on an existing/running VM: `vm pause` · `resume` · `snapshot`
 · `ttl`(was `set-ttl`) · `wait` · `boot-report` · `diff` · `cp` · `fs`

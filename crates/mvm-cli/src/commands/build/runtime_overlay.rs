@@ -1,4 +1,4 @@
-//! `mvmctl build runtime-overlay build` — explicitly populate the read-only
+//! `mvmctl dev runtime-overlay build` — explicitly populate the read-only
 //! runtime-overlay cache without booting a VM: assembled on the host from a
 //! guest runtime — this checkout's, or the published one of this CLI's
 //! version. The image set carries no overlay, and a selected image checkout
@@ -196,7 +196,7 @@ mod tests {
     fn runtime_overlay_build_subcommand_parses() {
         let cli = Cli::try_parse_from([
             "mvmctl",
-            "build",
+            "dev",
             "runtime-overlay",
             "build",
             "--source",
@@ -208,7 +208,7 @@ mod tests {
             "--force",
         ])
         .expect("parse");
-        let Commands::Build(group) = cli.command else {
+        let Commands::Dev(group) = cli.command else {
             panic!("expected build group");
         };
         match group.action {
@@ -222,7 +222,7 @@ mod tests {
     fn source_download_is_no_longer_accepted() {
         let err = Cli::try_parse_from([
             "mvmctl",
-            "build",
+            "dev",
             "runtime-overlay",
             "build",
             "--source",

@@ -211,10 +211,10 @@ Rebuild or download the workload kernel explicitly:
 
 ```bash
 # Use the release's hash-verified kernel
-mvmctl build kernel build --which workload --source download
+mvmctl dev kernel build --which workload --source download
 
 # Or compile the host-architecture kernel from a source checkout
-mvmctl build kernel build --which workload --source compile
+mvmctl dev kernel build --which workload --source compile
 ```
 
 For a local compile, the cache also contains the resolved kernel config and

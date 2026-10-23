@@ -94,12 +94,12 @@ callable function.
 
 ```bash
 mvmctl doctor --workflow python-sdk                              # preflight
-mvmctl build compile my_app.py --out /tmp/my-app                 # compile (static parse)
+mvmctl dev compile my_app.py --out /tmp/my-app                 # compile (static parse)
 echo '[[], {"name":"ari"}]' | \
   mvmctl machine run --entrypoint --flake /tmp/my-app            # build + boot + call → "hello ari"
 ```
 
-`mvmctl build compile` parses the decorator statically; user code does not
+`mvmctl dev compile` parses the decorator statically; user code does not
 execute on the host (only inside the microVM). `mvmctl machine run --entrypoint`
 invokes the baked function, taking its arguments as an `[args, kwargs]` JSON
 payload on stdin (empty ⇒ `[[], {}]`). See
@@ -120,7 +120,7 @@ Same shape as the Python flow with a `.ts` (or `.js`) entry file.
 
 ```bash
 mvmctl doctor --workflow typescript-sdk                          # preflight
-mvmctl build compile my-app.ts --out /tmp/my-app                 # compile (static parse)
+mvmctl dev compile my-app.ts --out /tmp/my-app                 # compile (static parse)
 echo '[[], {"name":"ari"}]' | \
   mvmctl machine run --entrypoint --flake /tmp/my-app            # build + boot + call → "hello ari"
 ```

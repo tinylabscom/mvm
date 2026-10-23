@@ -1156,9 +1156,9 @@ fn build_image_subcommand_removed() {
 
 #[test]
 fn build_runtime_overlay_subcommand_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "runtime-overlay", "build"])
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "runtime-overlay", "build"])
         .expect("runtime-overlay build must parse");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group");
     };
     assert!(
@@ -1169,9 +1169,9 @@ fn build_runtime_overlay_subcommand_parses() {
 
 #[test]
 fn build_sdk_sidecar_subcommand_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "sdk-sidecar", "build"])
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "sdk-sidecar", "build"])
         .expect("SDK sidecar build command must parse");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group");
     };
     assert!(
@@ -1184,7 +1184,7 @@ fn build_sdk_sidecar_subcommand_parses() {
 fn build_guest_bins_subcommand_parses_repeated_arches() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "build",
+        "dev",
         "guest-bins",
         "--out",
         "/tmp/guest-bins",
@@ -1194,7 +1194,7 @@ fn build_guest_bins_subcommand_parses_repeated_arches() {
         "amd64",
     ])
     .expect("guest-bins build command must parse");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group");
     };
     let build_group::BuildCmd::GuestBins(args) = bg.action else {
@@ -1221,15 +1221,36 @@ fn top_level_kernel_build_subcommand_parses() {
 
 #[test]
 fn nested_kernel_build_subcommand_still_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "kernel", "build", "--which", "workload"])
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "kernel", "build", "--which", "workload"])
         .expect("nested kernel build must keep parsing");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group");
     };
     assert!(
         matches!(bg.action, build_group::BuildCmd::Kernel(_)),
         "expected nested kernel build command"
     );
+}
+
+#[test]
+fn dev_subcommands_keep_their_audit_verb_names() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["dev", "compile", "--from-ir", "/tmp/ir.json"], "compile"),
+        (&["dev", "validate"], "validate"),
+        (&["dev", "kernel", "build"], "kernel"),
+        (&["dev", "runtime-overlay", "build"], "runtime-overlay"),
+        (&["dev", "sdk-sidecar", "build"], "sdk-sidecar"),
+        (&["dev", "address", "--from-ir", "/tmp/ir.json"], "address"),
+        (&["dev", "image-set", "builder-vm"], "image-set"),
+        (&["dev", "guest-bins"], "guest-bins"),
+    ];
+
+    for (args, expected) in cases {
+        let command = Cli::try_parse_from(std::iter::once("mvmctl").chain(args.iter().copied()))
+            .unwrap_or_else(|error| panic!("{args:?} must parse: {error}"))
+            .command;
+        assert_eq!(command.verb_name(), *expected, "{args:?}");
+    }
 }
 
 #[test]
@@ -5429,7 +5450,7 @@ fn test_up_tenant_override_via_flag() {
 fn test_compile_from_recording_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "build",
+        "dev",
         "compile",
         "--from-recording",
         "/tmp/rec.json",
@@ -5437,7 +5458,7 @@ fn test_compile_from_recording_parses() {
         "/tmp/out",
     ])
     .expect("parse");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group")
     };
     match bg.action {
@@ -5467,7 +5488,7 @@ fn test_compile_from_recording_conflicts_with_from_ir() {
     // accept both.
     let err = Cli::try_parse_from([
         "mvmctl",
-        "build",
+        "dev",
         "compile",
         "--from-recording",
         "/tmp/rec.json",
@@ -5484,9 +5505,9 @@ fn test_compile_from_recording_conflicts_with_from_ir() {
 
 #[test]
 fn test_compile_default_no_from_flags_leaves_them_none() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "compile", "--from-ir", "/tmp/ir.json"])
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "compile", "--from-ir", "/tmp/ir.json"])
         .expect("parse");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group")
     };
     match bg.action {
@@ -5506,7 +5527,7 @@ fn test_compile_default_no_from_flags_leaves_them_none() {
 fn build_compile_accepts_an_explicit_publish_revision() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "build",
+        "dev",
         "compile",
         "--from-ir",
         "/tmp/ir.json",
@@ -5514,7 +5535,7 @@ fn build_compile_accepts_an_explicit_publish_revision() {
         "4e65b221744885e536ec91a3f2948cdc508dcb49",
     ])
     .expect("parse pinned compile");
-    let Commands::Build(group) = cli.command else {
+    let Commands::Dev(group) = cli.command else {
         panic!("expected build group");
     };
     let build_group::BuildCmd::Compile(args) = group.action else {
@@ -5911,7 +5932,7 @@ fn internal_helper_commands_short_circuit_before_startup_side_effects() {
 // --- Top-level help surface tests ---
 
 #[test]
-fn top_level_help_shows_user_facing_groups_and_hides_dev_tooling() {
+fn top_level_help_shows_user_facing_groups_and_hides_internal_tooling() {
     let visible: Vec<String> = cli_command()
         .get_subcommands()
         .filter(|cmd| !cmd.is_hide_set())
@@ -5925,7 +5946,7 @@ fn top_level_help_shows_user_facing_groups_and_hides_dev_tooling() {
     for shown in &[
         "machine",
         "run",
-        "build",
+        "dev",
         "kernel",
         "deploy",
         "generate",
@@ -5960,7 +5981,7 @@ fn top_level_help_shows_user_facing_groups_and_hides_dev_tooling() {
     }
 
     let help = cli_command().render_help().to_string();
-    // Dev tooling stays out of the way. It still works when typed.
+    // Internal tooling stays out of the way. It still works when typed.
     for hidden in &["storage", "reconcile", "seccomp-audit", "dashboard"] {
         // Commands are listed one per line; a hidden command's name should
         // not appear as a standalone word at the start of a help line.

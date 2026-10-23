@@ -1,11 +1,11 @@
-//! `mvmctl build image-set <role>` — build one target of the image checkout
+//! `mvmctl dev image-set <role>` — build one target of the image checkout
 //! named by `MVM_IMAGES_DIR` inside the builder VM, against the mvm checkout
 //! this binary was compiled from, and publish it to the local image cache.
 //!
-//! It lives under `build` beside `kernel`, which builds a member of the same
+//! It lives under `dev` beside `kernel`, which builds a member of the same
 //! image set; `image` acquires and manages images and builds none. The runtime
-//! overlay and SDK sidecars are not image-set members: `build runtime-overlay`
-//! and `build sdk-sidecar` assemble them from a guest runtime.
+//! overlay and SDK sidecars are not image-set members: `dev runtime-overlay`
+//! and `dev sdk-sidecar` assemble them from a guest runtime.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -59,7 +59,7 @@ mod build {
         let configured = configured_images_dir().with_context(|| {
             format!(
                 "{MVM_IMAGES_DIR_ENV} is not set; name the mvm-images checkout to build from \
-                 (for example `MVM_IMAGES_DIR=../mvm-images bin/dev build image-set {}`)",
+                 (for example `MVM_IMAGES_DIR=../mvm-images bin/dev dev image-set {}`)",
                 target.role
             )
         })?;

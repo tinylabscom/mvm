@@ -131,7 +131,7 @@ impl LaunchRecord {
 
 /// Constructed fresh for every scenario. Holds the result of the most
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
-/// workload identities parsed from successful `build address` runs, keyed by
+/// workload identities parsed from successful `dev address` runs, keyed by
 /// fixture name.
 #[derive(cucumber::World, Default)]
 pub struct CliWorld {
@@ -195,7 +195,7 @@ pub struct CliWorld {
     /// plan did not authorize.
     pub volume_admission_result: Option<Result<(), String>>,
     /// `workload_address` per fixture name, populated on a zero-exit
-    /// `build address` run.
+    /// `dev address` run.
     pub addresses: HashMap<String, String>,
     /// `ir_hash` per fixture name, from the same run as `addresses`.
     pub ir_hashes: HashMap<String, String>,

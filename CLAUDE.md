@@ -20,7 +20,7 @@ Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Pl
 
 ## Host dependencies (macOS)
 
-The libkrun-backed builder VM (started automatically by `mvmctl bootstrap`, `mvmctl build`, or `mvmctl machine run`) needs two Homebrew packages installed:
+The libkrun-backed builder VM (started automatically by `mvmctl bootstrap`, `mvmctl dev compile`, or `mvmctl machine run`) needs two Homebrew packages installed:
 
 ```sh
 brew install slp/krun/libkrun slp/krun/libkrunfw
@@ -98,7 +98,7 @@ After changing the guest-facing C ABI in `crates/mvm-host-services`, refresh
 the source sidecar explicitly:
 
 ```sh
-./target/debug/mvmctl build sdk-sidecar build
+./target/debug/mvmctl dev sdk-sidecar build
 ```
 
 It packs both libc variants on the host from this checkout's guest-runtime
@@ -121,7 +121,7 @@ initramfs, both sidecars) the same way, from one resolved archive
 tree, and the image set it used to install from in download mode carries none.
 The selector still decides how the OCI guest runtime is keyed (by the source
 under `build`, by this version otherwise) and opts bootstrap into source-built
-host helpers, which an unreleased version needs. `mvmctl build runtime-overlay
+host helpers, which an unreleased version needs. `mvmctl dev runtime-overlay
 build` assembles the overlay from the same archive, and a selected
 `MVM_IMAGES_DIR` checkout no longer turns it into a pair build. Each assembled
 piece records its archive digest in a file beside its files
@@ -286,7 +286,7 @@ BuildEnvironment : ShellEnvironment (extends)
   record_revision()
 ```
 
-- **Dev mode** (`mvmctl build`, `mvmctl machine build`): uses `dev_build()` with `&dyn ShellEnvironment`
+- **Dev mode** (`mvmctl dev compile`, `mvmctl machine build`): uses `dev_build()` with `&dyn ShellEnvironment`
 - **Fleet mode** (in mvmd): uses `pool_build()` with `&dyn BuildEnvironment`
 
 The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `BuildEnvironment` impl lives in mvmd-runtime.
@@ -589,7 +589,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     still exists, as `Extended CI`, and now runs nightly — it kept the
     lanes that are neither security-bearing nor duplicated by `ci.yml`,
     including the repository's only macOS coverage.) It exercises
-    `mvmctl build compile` on
+    `mvmctl dev compile` on
     `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
     fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
     asserts `mvmctl deps inspect --json` reports a well-formed report,
@@ -984,13 +984,13 @@ those, the owner wins and the note is stale.
 
 ```bash
 cargo build
-cargo run -- --help   # full verb surface: build/run/template/image/network/console/init/cache/doctor/…
+cargo run -- --help   # full verb surface: machine/run/dev/template/image/network/init/cache/doctor/…
 ```
 
 Every subcommand is self-documenting via `--help`; the complete reference is
-`public/src/content/docs/reference/cli-commands.md`. Build-time verbs
-(`image`/`run`/`template`) live under `build`; `console` is an interactive PTY,
-dev-mode only.
+`public/src/content/docs/reference/cli-commands.md`. Contributor compilation,
+validation, and artifact-preparation verbs live under `dev`; `console` is an
+interactive PTY, dev-mode only.
 
 ## Dev Network Layout
 

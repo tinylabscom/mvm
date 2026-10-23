@@ -837,7 +837,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$MVM_HOME" && chmod 0700 "$MVM_HOME"
-          cargo run -q --bin mvmctl -- build runtime-overlay build --source build --arch x86_64
+          cargo run -q --bin mvmctl -- dev runtime-overlay build --source build --arch x86_64
           mapfile -t dirs < <(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
           test "${#dirs[@]}" -eq 1
           ( cd "${dirs[0]}" && sha256sum -c checksums-sha256.txt )
@@ -951,7 +951,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$MVM_HOME" && chmod 0700 "$MVM_HOME"
-          cargo run -q --bin mvmctl -- build runtime-overlay build --source build --arch x86_64
+          cargo run -q --bin mvmctl -- dev runtime-overlay build --source build --arch x86_64
           mapfile -t dirs < <(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
           test "${#dirs[@]}" -eq 1
           ( cd "${dirs[0]}" && sha256sum -c checksums-sha256.txt )

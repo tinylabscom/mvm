@@ -1,6 +1,6 @@
 """hello-env: the landing-page quickstart example.
 
-`mvmctl build compile examples/python/hello-env/app.py --out /tmp/hello-env`
+`mvmctl dev compile examples/python/hello-env/app.py --out /tmp/hello-env`
 walks the AST statically and emits flake.nix + launch.json + bundled src/ —
 the host never imports or executes this script. `mvmctl machine run --flake
 /tmp/hello-env --entrypoint` then dispatches `main()` over the

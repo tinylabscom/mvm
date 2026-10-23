@@ -464,7 +464,7 @@ fi
 # sidecar this CLI reads. No builder VM starts.
 e2e_phase sdk-sidecar
 echo "==> packing the SDK sidecar from this tree's guest runtime"
-MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build --source build
+MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" dev sdk-sidecar build --source build
 
 # The dev default image (`mvmctl run` with no image) is the writable variant.
 # With no image checkout selected, `image dev ensure` installs it from the
@@ -499,7 +499,7 @@ fi
 warm_launch_artifacts() {
   echo "==> warming launch artifacts (runtime overlay + universal initramfs)"
 
-  MVM_HOME="$E2E_HOME" "$MVMCTL" build runtime-overlay build >/dev/null 2>&1 \
+  MVM_HOME="$E2E_HOME" "$MVMCTL" dev runtime-overlay build >/dev/null 2>&1 \
     && echo "    runtime overlay ready" \
     || echo "    runtime overlay: not warmed (scenarios needing it will say so)"
 

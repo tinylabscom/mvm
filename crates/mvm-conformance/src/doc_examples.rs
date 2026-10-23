@@ -1025,8 +1025,8 @@ mod tests {
     /// and the scenario exercising it are free to differ in spelling.
     #[test]
     fn a_value_binds_whether_spelled_with_a_space_or_an_equals() {
-        let spaced = flag_bindings(&argv("build kernel build --source download"));
-        let equals = flag_bindings(&argv("build kernel build --source=download"));
+        let spaced = flag_bindings(&argv("dev kernel build --source download"));
+        let equals = flag_bindings(&argv("dev kernel build --source=download"));
         assert_eq!(spaced.get("--source"), Some(&Some("download".to_string())));
         assert_eq!(spaced, equals);
     }
@@ -1035,12 +1035,8 @@ mod tests {
     /// identical flag *set* that select different operations.
     #[test]
     fn two_modes_of_one_flag_are_distinguishable() {
-        let download = flag_bindings(&argv(
-            "build kernel build --which workload --source download",
-        ));
-        let compile = flag_bindings(&argv(
-            "build kernel build --which workload --source compile",
-        ));
+        let download = flag_bindings(&argv("dev kernel build --which workload --source download"));
+        let compile = flag_bindings(&argv("dev kernel build --which workload --source compile"));
         assert_ne!(download, compile);
         assert_eq!(
             download.keys().collect::<Vec<_>>(),

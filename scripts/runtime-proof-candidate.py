@@ -314,7 +314,7 @@ def validate_unsigned_runtime(source, directory):
     with tempfile.TemporaryDirectory(prefix="mvm-runtime-reader-") as temporary:
         home = str(Path(temporary).resolve())
         result = subprocess.run(
-            [str(tool), "build", "guest-bins", "--check-release-archive", str(archive)],
+            [str(tool), "dev", "guest-bins", "--check-release-archive", str(archive)],
             cwd=home,
             env={"HOME": home, "MVM_HOME": home, "TMPDIR": home, "PATH": "/usr/bin:/bin"},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=60,
