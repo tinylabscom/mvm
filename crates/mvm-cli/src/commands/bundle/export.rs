@@ -85,7 +85,9 @@ pub(in crate::commands) struct ExportOptions {
 /// Read and check the descriptor at `path` before any artifact is hashed, so
 /// a malformed file is refused with its own name rather than as a verifier
 /// error about the sealed manifest.
-fn read_environment(path: &std::path::Path) -> Result<EnvironmentDescriptor> {
+pub(in crate::commands) fn read_environment(
+    path: &std::path::Path,
+) -> Result<EnvironmentDescriptor> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("reading environment descriptor at {}", path.display()))?;
     let descriptor: EnvironmentDescriptor = serde_json::from_slice(&bytes)
@@ -116,7 +118,7 @@ impl From<PostureProfile> for AgentProfile {
 }
 
 impl ExportOptions {
-    fn posture_inputs(&self) -> Option<PostureInputs> {
+    pub(in crate::commands) fn posture_inputs(&self) -> Option<PostureInputs> {
         self.posture.map(|profile| {
             PostureInputs::new(profile.into())
                 .requires_auth(!self.allow_unauthenticated)

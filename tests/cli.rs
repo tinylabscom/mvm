@@ -14,6 +14,26 @@ fn pack_build_help_advertises_explicit_input_observation() {
 }
 
 #[test]
+fn build_help_advertises_every_workload_source_and_image_control() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["build", "--help"])
+        .output()
+        .expect("run build help");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    let normalized = help.to_ascii_lowercase();
+    for source in ["pack", "manifest", "flake", "sdk", "image"] {
+        assert!(
+            normalized.contains(source),
+            "build help missing {source}:\n{help}"
+        );
+    }
+    for flag in ["--arch", "--production", "--debug-out"] {
+        assert!(help.contains(flag), "build help missing {flag}:\n{help}");
+    }
+}
+
+#[test]
 fn env_verify_runtime_missing_proof_emits_no_success_json() {
     let directory = tempfile::tempdir().expect("runtime verifier input directory");
     let config = directory.path().join("launch.json");
