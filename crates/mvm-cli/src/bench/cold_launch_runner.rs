@@ -133,7 +133,38 @@ impl ColdLaunchBench {
     }
 
     /// Spawn the binary once and read back the sample it wrote.
+    /// A claimed standby is replaced in the background and the replacement is
+    /// not ready for several seconds. A sample taken before then boots cold and
+    /// is refused as not a warm claim, so the next one waits for an idle
+    /// standby. The wait is outside the timed span; the ceiling is unchanged.
+    fn await_idle_standby(&self) -> Result<()> {
+        let deadline = Instant::now() + STANDBY_SETTLE_TIMEOUT;
+        loop {
+            let mut command = mvm_core::env_hygiene::helper_command(&self.mvmctl);
+            command.args(["pool", "status", "--json"]);
+            for (key, value) in &self.env {
+                command.env(key, value);
+            }
+            let output = command
+                .output()
+                .with_context(|| format!("spawning {}", self.mvmctl.display()))?;
+            if idle_standbys(&output.stdout).is_some_and(|idle| idle > 0) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "no idle standby appeared within {}s; a warm-claim sample needs one",
+                    STANDBY_SETTLE_TIMEOUT.as_secs()
+                );
+            }
+            std::thread::sleep(STANDBY_SETTLE_POLL);
+        }
+    }
+
     fn launch_once(&self, staging: &Path, kind: &str, index: u32) -> Result<MeasuredLaunch> {
+        if self.lane == LaunchLane::WarmClaim {
+            self.await_idle_standby()?;
+        }
         let sample_path = staging.join(format!("{kind}-{index}.json"));
         // A stale file from a prior iteration would be read as this
         // iteration's sample if the launch died before writing.
@@ -161,6 +192,19 @@ impl ColdLaunchBench {
             command_lifecycle_ms,
         })
     }
+}
+
+/// How long a warm-claim sample waits for the pool to refill. A refill took
+/// about 6.5 s on a quiet host; the rest is headroom for a loaded one.
+const STANDBY_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const STANDBY_SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The `idle` count of `mvmctl pool status --json`, or `None` for anything else.
+fn idle_standbys(stdout: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()?
+        .get("idle")?
+        .as_u64()
 }
 
 /// One child process observed from immediately before spawn through exit.
@@ -499,6 +543,18 @@ mod tests {
             backend_phases: Vec::new(),
             degraded: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_idle_count_is_read_from_pool_status_json() {
+        assert_eq!(
+            idle_standbys(br#"{"idle":1,"claimed":0,"standbys":[]}"#),
+            Some(1)
+        );
+        assert_eq!(idle_standbys(br#"{"idle":0}"#), Some(0));
+        assert_eq!(idle_standbys(b"Supervisor standby pool: 1 idle"), None);
+        assert_eq!(idle_standbys(br#"{"claimed":1}"#), None);
+        assert_eq!(idle_standbys(b""), None);
     }
 
     #[test]
