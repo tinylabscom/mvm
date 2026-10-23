@@ -122,6 +122,16 @@ fn startup_adopts_distinct_untrusted_files_once_with_cloexec() {
         })
         .collect::<Vec<_>>();
     let fds = files.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>();
+    // Pin each unlinked inode with a second descriptor so a concurrent test
+    // cannot be handed the freed inode (and descriptor number) while the
+    // post-drop identity check runs.
+    let pins = files
+        .iter()
+        .map(|file| file.try_clone().unwrap())
+        .collect::<Vec<_>>();
+    for pin in &pins {
+        assert!(!fds.contains(&pin.as_raw_fd()), "pin aliases an adopted fd");
+    }
     validate_startup_descriptors(&fds).unwrap();
     let cfg = serde_json::from_value(serde_json::json!({
         "console_capture":"encrypted", "vm_name":"fd-mechanics", "kernel":"/unused",
