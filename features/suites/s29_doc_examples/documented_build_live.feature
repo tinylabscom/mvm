@@ -23,7 +23,10 @@ Feature: The documented flake build runs for real
   # the expensive part and this scenario reuses what the one above just built.
   # Named so it takes the cold path: an unnamed launch has to claim a prepared
   # warm standby, and nothing warms one for a freshly built flake.
-  @live @release_gate_flake
+  # Native CLI invocation is deliberately refused on HVF until verified input
+  # custody and a held recovery lifetime are available there; this live witness
+  # therefore runs only on Firecracker.
+  @live @release_gate_flake @firecracker
   Scenario: the documented entrypoint launch runs the compiled workload
     When I run mvmctl in an isolated live home with "machine run --name bdd-documented-entrypoint --entrypoint --flake examples/exit_code"
     Then the command exits with code 7
