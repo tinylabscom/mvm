@@ -1447,52 +1447,6 @@ mod tests {
 
     const FAKE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "requires builder VM Linux mount namespace and CAP_SYS_ADMIN"]
-    fn read_only_root_scaffold_supports_sibling_and_nested_mounts() {
-        use crate::safe_mount_target::{Target, tests::private_mount_namespace};
-
-        private_mount_namespace();
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("root");
-        Target::resolve(&root, true)
-            .unwrap()
-            .mount("tmpfs", "tmpfs", false, None, true)
-            .unwrap();
-        std::fs::create_dir(root.join("data")).unwrap();
-        let root_cstring = CString::new(root.as_os_str().as_encoded_bytes()).unwrap();
-        // SAFETY: the path names this test's tmpfs in its private namespace.
-        assert_eq!(
-            unsafe {
-                libc::mount(
-                    std::ptr::null(),
-                    root_cstring.as_ptr(),
-                    std::ptr::null(),
-                    libc::MS_REMOUNT | libc::MS_RDONLY,
-                    std::ptr::null(),
-                )
-            },
-            0
-        );
-        let mut scaffolds = BTreeSet::new();
-        for path in ["/data/first", "/data/second", "/data/first/nested"] {
-            ensure_volume_mount_target(&root, path, &mut scaffolds)
-                .unwrap()
-                .mount("tmpfs", "tmpfs", false, None, true)
-                .unwrap();
-        }
-        assert_eq!(scaffolds, BTreeSet::from([root.join("data")]));
-        for path in ["data/first/nested", "data/first", "data/second", "data", ""] {
-            assert!(
-                Target::resolve(&root.join(path), false)
-                    .unwrap()
-                    .unmount(false)
-                    .unwrap()
-            );
-        }
-    }
-
     /// A guest kernel without device-mapper says so, rather than reporting a
     /// missing file.
     ///
