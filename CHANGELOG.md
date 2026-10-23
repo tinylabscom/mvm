@@ -2,6 +2,8 @@
 
 All notable changes to mvm are documented in this file.
 
+## [Unreleased]
+
 ## [0.24.1] — 2026-10-22
 
 ### Added
@@ -31,14 +33,10 @@ All notable changes to mvm are documented in this file.
 - **build**: Export MVM_WORKSPACE_PATH only when /work is the mvm workspace
 - **vmm**: Count a macOS zombie as not alive
 - **conformance**: Prepare all source-tree live homes
-
-## [Unreleased]
-
-### Fixed
 - **fs**: Hold a runtime overlay to the guest paths its own version promises, so a signed bundle pinned to the published image set's overlay boots again instead of being refused for the declared-command shims it predates
 - **bdd**: Accept the standby an unnamed run leaves behind, and the child preloaded for it, in the live warm-claim leak check, waiting a bounded time for the detached refill to register them
 - **bdd**: Expect the proxy-era denial from the entrypoint-denial example: the host names the blocked destination and curl exits 22
-- **sdk**: Pin the SDK release manifest's runtime to the 0.24.0 workspace it is compiled against
+- **sdk**: Pin the SDK release manifest's runtime to the 0.24.1 workspace it is compiled against
 
 ## [0.24.0] — 2026-10-12
 
