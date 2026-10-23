@@ -350,6 +350,8 @@ jobs:
       # can anchor to.
       - name: Boot a sealed OCI image as a signed .mvmpkg (bundle_boot_live)
         if: matrix.witness == 'bundle_boot_live'
+        env:
+          MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: "true"
         run: just bdd::live-ci bundle_boot_live
 
       - name: Dump VMM diagnostics on failure
@@ -391,6 +393,10 @@ jobs:
       # and a lane that is always red is one nobody reads, which is how the
       # claim-bearing lanes went stale before. Releases still block on it.
       macos_blocks_on_unusable_host: false
+      # Portable bundle creation requires the exact signed runtime candidate.
+      # Nightly has no versioned candidate for main, so its scenarios are
+      # named skips; release.yml supplies the candidate and runs them.
+      allow_runtime_candidate_skip: true
 
   # The documented-surface release lane fetches the pinned, signed builder
   # image, so it no longer proves a source checkout can build one. This lane

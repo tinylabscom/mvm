@@ -770,6 +770,13 @@ SUITE_STARTED=""
 # runner must never be that host, so opting this lane in would be the failure.
 ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share,needs-unenforceable-wall-clock,needs-warm-claim,needs-destructive-lab-opt-in"
 
+# Portable bundle creation needs a signed runtime for this exact release. The
+# nightly `main` run has no versioned candidate, so name those scenarios as
+# skipped there; release.yml supplies the signed candidate and must run them.
+if [[ "${MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP:-false}" == "true" && -z "${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}" ]]; then
+  ALLOWED_SKIPS="$ALLOWED_SKIPS,needs-runtime-candidate"
+fi
+
 # `needs-firecracker` is deliberately intolerable above, and stays that way on
 # the lane that runs Firecracker. On macOS there is no `/dev/kvm` and no
 # Firecracker to put on PATH, so the skip is a property of the tier rather than

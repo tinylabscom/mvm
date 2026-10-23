@@ -42,6 +42,14 @@ on:
         description: Candidate checksum signature bundle byte pin
         type: string
         default: ""
+      allow_runtime_candidate_skip:
+        description: >-
+          Allow the unreleased main nightly to report portable-creation
+          scenarios as named skips when no signed runtime candidate is supplied.
+          Release workflows must leave this false.
+        type: boolean
+        required: false
+        default: false
       macos_blocks_on_unusable_host:
         description: >-
           Whether a macOS host that cannot run any workload backend has to be
@@ -186,6 +194,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MVM_E2E_RUNTIME_CANDIDATE_DIR: ${{ steps.candidate.outputs.directory }}
+          MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: ${{ inputs.allow_runtime_candidate_skip }}
           RUNTIME_ARCHIVE_SHA256: ${{ inputs.runtime_archive_sha256 }}
           RUNTIME_CHECKSUM_SHA256: ${{ inputs.runtime_checksum_sha256 }}
           RUNTIME_ARCHIVE_BUNDLE_SHA256: ${{ inputs.runtime_archive_bundle_sha256 }}
@@ -400,6 +409,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MVM_E2E_RUNTIME_CANDIDATE_DIR: ${{ steps.candidate.outputs.directory }}
+          MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: ${{ inputs.allow_runtime_candidate_skip }}
           RUNTIME_ARCHIVE_SHA256: ${{ inputs.runtime_archive_sha256 }}
           RUNTIME_CHECKSUM_SHA256: ${{ inputs.runtime_checksum_sha256 }}
           RUNTIME_ARCHIVE_BUNDLE_SHA256: ${{ inputs.runtime_archive_bundle_sha256 }}
