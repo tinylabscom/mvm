@@ -70,6 +70,7 @@ static DECLARATIONS: LazyLock<Mutex<BTreeMap<(String, GuestArch), RuntimeAssembl
 /// Never builds guest binaries, takes a caller channel, or falls back from a
 /// failed release proof. Callers must dispatch an existing release proof to the
 /// release verifier, even when this executable permits source builds.
+#[tracing::instrument(skip_all)]
 pub fn check_source_runtime(
     cache_root: &Path,
     version: &str,
