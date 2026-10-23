@@ -689,7 +689,7 @@ fn invalidate_deps_cache(args: &Args) -> Result<()> {
 
     if invalidated.is_empty() {
         ui::info(
-            "No matching deps cache entries to invalidate. Run `mvmctl build` \
+            "No matching deps cache entries to invalidate. Run `mvmctl machine build` \
              without `--deps` to (re)populate the volume on next install.",
         );
     } else {

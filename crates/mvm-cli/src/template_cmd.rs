@@ -53,7 +53,7 @@ fn next_steps_lines(dir: &std::path::Path, name: &str) -> Vec<String> {
         "Next steps:".to_string(),
         format!("  cd {dir_display}"),
         "  mvmctl doctor --workflow cli-run    # preflight (audience-scoped)".to_string(),
-        "  mvmctl build                        # build the sealed rootfs".to_string(),
+        "  mvmctl machine build                # build the sealed rootfs".to_string(),
         "  mvmctl machine run --flake .        # boot and run the VM".to_string(),
         String::new(),
         "Cleanup when you're done:".to_string(),
@@ -1646,7 +1646,7 @@ mod tests {
     fn next_steps_lines_includes_runnable_sample_command() {
         let lines = next_steps_lines(std::path::Path::new("/tmp/my-app"), "my-app");
         assert!(
-            lines.iter().any(|l| l.contains("mvmctl build")),
+            lines.iter().any(|l| l.contains("mvmctl machine build")),
             "scaffold must include a build command; got: {lines:?}"
         );
         assert!(

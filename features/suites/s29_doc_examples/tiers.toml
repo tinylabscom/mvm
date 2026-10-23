@@ -762,10 +762,6 @@ path = "flake"
 reason = "renamed to `dev validate`; the reference records the rename"
 
 [[absent]]
-path = "dev"
-reason = "removed with `dev import-image`; the airgap and release guides describe its removal"
-
-[[absent]]
 path = "addon"
 reason = "the addon CLI is unbuilt; the migration guide says 'once the addon CLI lands'"
 
