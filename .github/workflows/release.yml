@@ -346,6 +346,29 @@ jobs:
               --features mvm-client/release-channel
           fi
 
+      # Attribution only: which packages the builds above compile more than once
+      # and what differs (profile, features, target), so a long release is
+      # explainable. The cargo arguments mirror the two build steps above and
+      # must change with them; a mismatch only skews this report. It asks Cargo
+      # for unit graphs and compiles nothing, and it never fails the release.
+      - name: Report compilation units
+        continue-on-error: true
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+        shell: bash
+        run: |
+          hostlib_target="${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}"
+          [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]] || hostlib_target="${BUILD_TARGET}"
+          size_args=()
+          for f in target/"${BUILD_TARGET}"/release-min/mvmctl; do
+            [[ -f "$f" ]] && size_args+=(--asset "$f")
+          done
+          cargo run --package xtask -- report-compile-units \
+            --build "mvmctl (release-min)=build --profile release-min --target ${BUILD_TARGET} --features ${MVMCTL_RELEASE_FEATURES}" \
+            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu" \
+            --build "mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel" \
+            "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
+
       - name: Verify Linux release payloads are statically linked
         if: endsWith(matrix.build_target, '-unknown-linux-musl')
         env:
