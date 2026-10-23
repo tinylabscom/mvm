@@ -1994,7 +1994,7 @@ dependencies = [
 
 [[package]]
 name = "libkrun-sys"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "libc",
  "mvm-core",
@@ -2100,7 +2100,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "mvm-agentd"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2125,7 +2125,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-backends"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2182,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-builder-guest"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "anyhow",
  "hex",
@@ -2201,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-compiler"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "flate2",
  "globset",
@@ -2221,7 +2221,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2238,7 +2238,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-fs"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "async-trait",
  "ed25519-dalek",
@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-macho-sign"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "plist",
  "sha1",
@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-net"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "mvm-contract",
  "mvm-core",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-runtime"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2388,14 +2388,14 @@ dependencies = [
 
 [[package]]
 name = "mvm-setpriv"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "mvm-vmm"
-version = "0.24.1"
+version = "0.24.1-rc.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
