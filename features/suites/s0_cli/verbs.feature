@@ -8,7 +8,7 @@ Feature: mvmctl top-level CLI surface
     When I run mvmctl with "--help"
     Then the command exits with code 0
     And the help output lists the "machine" verb
-    And the help output lists the "build" verb
+    And the help output lists the "dev" verb
     And the help output lists the "doctor" verb
     And the help output lists the "bootstrap" verb
 

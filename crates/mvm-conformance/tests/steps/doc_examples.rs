@@ -1582,7 +1582,7 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // paths are exercised by tests/cli.rs against a file:// registry. Image
 // `dev ensure` likewise needs a signed release endpoint; its selection and
 // verification have focused tests in `mvm-build`.
-// `build guest-bins` cross-compiles every guest binary for both guest
+// `dev guest-bins` cross-compiles every guest binary for both guest
 // architectures; its archive and verification logic have unit tests.
 // `secret login` waits for a human to consent in a browser at a real OAuth
 // provider; its flow is tested in-process against a loopback provider.

@@ -1,6 +1,6 @@
 //! CLI surface tests for the trace-hardening flags.
 //!
-//! Asserts that `--recording-sha256` appears on `mvmctl build compile --help`
+//! Asserts that `--recording-sha256` appears on `mvmctl dev compile --help`
 //! and that `mvmctl machine run --help` is reachable (the primary run surface).
 
 use assert_cmd::cargo::CommandCargoExt;
@@ -32,10 +32,10 @@ fn run_help_contains_ack_divergence() {
     );
 }
 
-/// `mvmctl build compile --help` must advertise `--recording-sha256`.
+/// `mvmctl dev compile --help` must advertise `--recording-sha256`.
 #[test]
 fn compile_help_contains_recording_sha256() {
-    let out = mvmctl(&["build", "compile", "--help"]);
+    let out = mvmctl(&["dev", "compile", "--help"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -45,6 +45,6 @@ fn compile_help_contains_recording_sha256() {
     );
     assert!(
         stdout.contains("--recording-sha256"),
-        "`mvmctl build compile --help` missing '--recording-sha256'; stdout:\n{stdout}"
+        "`mvmctl dev compile --help` missing '--recording-sha256'; stdout:\n{stdout}"
     );
 }

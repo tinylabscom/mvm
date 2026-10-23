@@ -15,7 +15,7 @@ pub(super) mod guest_bins;
 /// every compiled image produces a tamper-evident version-chain record anchored
 /// in the host-signed audit log.
 pub(in crate::commands) mod image_lineage;
-/// `build image-set`: one target of the local image checkout, built in the
+/// `dev image-set`: one target of the local image checkout, built in the
 /// builder VM and published to the local image cache.
 pub(super) mod image_set;
 /// Shared IR-JSON input loading (`--from-ir` / positional / `-` stdin) for the

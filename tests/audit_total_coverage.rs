@@ -124,7 +124,7 @@ const TEMPLATE_SUB: &[(&str, AuditPosture)] = &[
 
 const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
-// `build runtime-overlay build` primes the shared guest-runtime cache for the
+// `dev runtime-overlay build` primes the shared guest-runtime cache for the
 // current host version. Like the other build-time cache preparation verbs here,
 // it does not emit a local audit-chain entry of its own.
 const RUNTIME_OVERLAY_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
@@ -133,8 +133,8 @@ const RUNTIME_OVERLAY_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::R
 // supply-chain audit events to the shared Stage 0 runner.
 const SDK_SIDECAR_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
-// Plan 178 (D1) — build-time verbs grouped under `build <sub>`.
-const BUILD_SUB: &[(&str, AuditPosture)] = &[
+// Contributor build-time verbs grouped under `dev <sub>`.
+const DEV_SUB: &[(&str, AuditPosture)] = &[
     // Reads an IR document and prints its content identity; no state change.
     ("address", AuditPosture::ReadOnly),
     ("compile", AuditPosture::ReadOnly),
@@ -145,12 +145,12 @@ const BUILD_SUB: &[(&str, AuditPosture)] = &[
         AuditPosture::DelegatesToSub(RUNTIME_OVERLAY_SUB),
     ),
     ("sdk-sidecar", AuditPosture::DelegatesToSub(SDK_SIDECAR_SUB)),
-    // `build image-set` builds one target of the local image checkout in the
+    // `dev image-set` builds one target of the local image checkout in the
     // builder VM and publishes it into the pair-scoped local image cache.
     // Like the other build-time cache preparation verbs here, it does not
     // emit a local audit-chain entry of its own.
     ("image-set", AuditPosture::ReadOnly),
-    // `build guest-bins` packages guest binaries from the shared guest-build
+    // `dev guest-bins` packages guest binaries from the shared guest-build
     // cache into an archive in a caller-named directory. It produces a build
     // output and touches no security state, so it emits no audit-chain entry.
     ("guest-bins", AuditPosture::ReadOnly),
@@ -204,7 +204,7 @@ const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
 ];
 
 // `mvmctl image dev ensure` primes the dev default-tenant image cache, the
-// same build-time cache-preparation class as `build sdk-sidecar build`: it
+// same build-time cache-preparation class as `dev sdk-sidecar build`: it
 // does not emit a local audit-chain entry of its own.
 const IMAGE_DEV_SUB: &[(&str, AuditPosture)] = &[("ensure", AuditPosture::ReadOnly)];
 
@@ -266,7 +266,7 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("verify", AuditPosture::ReadOnly),
     ("search", AuditPosture::ReadOnly),
     // Both write only the file they were asked for (a lock or a flake
-    // directory) and touch no host state, like `build compile`.
+    // directory) and touch no host state, like `dev compile`.
     ("lock", AuditPosture::ReadOnly),
     ("compile", AuditPosture::ReadOnly),
     ("build", AuditPosture::Emits("PackBuild")),
@@ -710,9 +710,9 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
         "__builder-egress-supervisor",
         AuditPosture::InteractiveOrControl,
     ),
-    // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
-    // kernel grouped under `build <sub>`.
-    ("build", AuditPosture::DelegatesToSub(BUILD_SUB)),
+    // Contributor compilation and artifact preparation stay grouped under
+    // `dev <sub>` while retaining their existing per-operation audit verbs.
+    ("dev", AuditPosture::DelegatesToSub(DEV_SUB)),
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
     ("manifest", AuditPosture::DelegatesToSub(MANIFEST_SUB)),
     ("storage", AuditPosture::DelegatesToSub(STORAGE_SUB)),

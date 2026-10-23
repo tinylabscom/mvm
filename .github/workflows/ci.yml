@@ -1911,7 +1911,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$MVM_HOME" && chmod 0700 "$MVM_HOME"
-          cargo run -q --bin mvmctl -- build runtime-overlay build --source build --arch x86_64
+          cargo run -q --bin mvmctl -- dev runtime-overlay build --source build --arch x86_64
           mapfile -t dirs < <(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
           test "${#dirs[@]}" -eq 1
           mkdir -p /tmp/boot-image/overlay
@@ -2086,7 +2086,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$MVM_HOME" && chmod 0700 "$MVM_HOME"
-          cargo run -q --bin mvmctl -- build runtime-overlay build --source build --arch x86_64
+          cargo run -q --bin mvmctl -- dev runtime-overlay build --source build --arch x86_64
           mapfile -t dirs < <(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
           test "${#dirs[@]}" -eq 1
           mkdir -p overlay-staging
@@ -2108,7 +2108,7 @@ jobs:
         # reassembles from the same guest-runtime archive.
         run: |
           set -euo pipefail
-          cargo run -q --bin mvmctl -- build runtime-overlay build --source build --arch x86_64 --force
+          cargo run -q --bin mvmctl -- dev runtime-overlay build --source build --arch x86_64 --force
           dir=$(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
           for f in overlay.ext4 overlay.verity overlay.roothash; do
             cmp "overlay-staging/$f" "$dir/$f"

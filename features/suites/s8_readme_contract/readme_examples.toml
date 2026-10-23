@@ -111,7 +111,7 @@ command = "mvmctl machine build --flake ./out"
 witness = "suites/s29_doc_examples/documented_build_live.feature::the documented flake build produces an image"
 
 [[example]]
-command = "mvmctl build compile app.py --out ./out"
+command = "mvmctl dev compile app.py --out ./out"
 witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a decorator workload compiles from its source file"
 
 [[example]]

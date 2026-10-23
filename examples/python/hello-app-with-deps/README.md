@@ -16,14 +16,14 @@ backed by a pinned `uv.lock`. The compile step is the same shape as
 This example is the positive-path fixture for the Followup D CI gate
 (`.github/workflows/security.yml::app-deps-audit`): the lockfile is
 hash-pinned, the resolved deps scan clean under pip-audit at the time
-this example was added, and the `mvmctl build compile` step emits a launch.json
+this example was added, and the `mvmctl dev compile` step emits a launch.json
 with a `dependencies` field the supervisor wires into the workload's
 mount layout.
 
 ## Compile (no VM needed)
 
 ```sh
-mvmctl build compile examples/python/hello-app-with-deps/app.py --out /tmp/hello-with-deps
+mvmctl dev compile examples/python/hello-app-with-deps/app.py --out /tmp/hello-with-deps
 ls /tmp/hello-with-deps
 # flake.nix  launch.json  src/
 jq '.dependencies' /tmp/hello-with-deps/launch.json

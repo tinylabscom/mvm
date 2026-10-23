@@ -23,7 +23,7 @@ def add(a: int, b: int) -> int:
 ```
 
 ```sh
-mvmctl build compile app.py   # parse the script (no execution) → flake.nix + launch plan
+mvmctl dev compile app.py   # parse the script (no execution) → flake.nix + launch plan
 mvmctl machine run --flake .     # build the image and boot the microVM
 ```
 
@@ -51,7 +51,7 @@ def main(name: str) -> str:
 
 ## How it builds
 
-`mvmctl build compile` reads your file **statically** — the decorator and the
+`mvmctl dev compile` reads your file **statically** — the decorator and the
 `import mvm` line are parsed as data, never executed, so nothing in your module
 runs on the host. At image-build time the decorator and the `import mvm` line
 are **stripped** from the bundled source, so the guest runs your plain function
@@ -185,7 +185,7 @@ microVM through `entrypoint.call`, admitted under a signed plan and audited
 exactly as `mvmctl machine run --entrypoint` is; `mv.session(...)` holds one
 warm microVM across calls (`session.start`, `session.call`, `session.stop`).
 The workload is found among the images built on this host by the name it was
-declared with; build it first (`mvmctl build compile`, then
+declared with; build it first (`mvmctl dev compile`, then
 `mvmctl machine build --flake <dir>`). An error the function raised arrives as
 the generated `RemoteError` with its kind and id; a failure with no such
 envelope is `MvmTransportError` with the exit code and the end of stderr. A

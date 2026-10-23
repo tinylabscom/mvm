@@ -1021,7 +1021,7 @@ fn the_source_bootstrap_job_grants_nothing_only_qemu_needed() {
 fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
     let script = source_bootstrap_script();
     let steps = [
-        "\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build",
+        "\"$UNEMBEDDED_MVMCTL\" dev sdk-sidecar build",
         "\"$UNEMBEDDED_MVMCTL\" bootstrap",
         "\"$MVMCTL\" machine build --flake \"$FLAKE\"",
     ];
@@ -1537,7 +1537,7 @@ fn documented_surface_builds_the_sidecar_through_an_unembedded_cli() {
         )
         .expect("the live suite must restore its embedded binary");
     let sidecar_warm = script
-        .find("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build")
+        .find("\"$UNEMBEDDED_MVMCTL\" dev sdk-sidecar build")
         .expect("the sidecar warm must execute the unembedded witness");
     let explicit_bootstrap = script
         .find("\"$MVMCTL\" bootstrap")
@@ -1647,7 +1647,7 @@ fn the_documented_surface_builds_no_guest_piece_through_mvm_images() {
     );
     assert!(
         script.contains(
-            "MVM_HOME=\"$E2E_HOME\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build --source build"
+            "MVM_HOME=\"$E2E_HOME\" \"$UNEMBEDDED_MVMCTL\" dev sdk-sidecar build --source build"
         ),
         "the sidecar must be packed from the tree"
     );
@@ -1662,7 +1662,7 @@ fn documented_surface_warms_the_source_matched_sdk_sidecar() {
     let script = documented_surface_script();
 
     assert!(
-        script.contains("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build"),
+        script.contains("\"$UNEMBEDDED_MVMCTL\" dev sdk-sidecar build"),
         "the live SDK scenarios must use a sidecar built from the checkout under test"
     );
 }

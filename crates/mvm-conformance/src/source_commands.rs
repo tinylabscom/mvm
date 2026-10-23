@@ -212,10 +212,10 @@ mod tests {
     /// same line, so `\`-continued messages were dropped whole.
     #[test]
     fn reads_a_literal_spanning_lines() {
-        let source = "let e = format!(\n    \"`mvmctl run --prod` redirects to \\\n     `mvmctl build compile`, where record is default\"\n);";
+        let source = "let e = format!(\n    \"`mvmctl run --prod` redirects to \\\n     `mvmctl dev compile`, where record is default\"\n);";
         assert_eq!(
             commands(source),
-            ["mvmctl run", "mvmctl build compile"],
+            ["mvmctl run", "mvmctl dev compile"],
             "a continued literal must be scanned as one string"
         );
     }

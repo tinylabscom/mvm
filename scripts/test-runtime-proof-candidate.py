@@ -411,7 +411,7 @@ class CandidateTransportTests(unittest.TestCase):
         workflows = Path(__file__).resolve().parents[1] / ".github/workflows"
         guest = (workflows / "guest-bins.yml").read_text()
         capture = "emit-upload-context --kind unsigned --directory dist"
-        self.assertLess(guest.index("build guest-bins --out dist"), guest.index(capture))
+        self.assertLess(guest.index("dev guest-bins --out dist"), guest.index(capture))
         self.assertLess(guest.index(capture), guest.index("id: upload"))
         self.assertIn("name: mvm-guest-bins-attempt-${{ github.run_attempt }}", guest)
         self.assertNotIn("overwrite: true", guest)
@@ -438,7 +438,7 @@ class CandidateTransportTests(unittest.TestCase):
                 candidate.validate_unsigned_runtime(source, directory)
             command = run.call_args.args[0]
             self.assertEqual(command[0], str((directory / "mvmctl").resolve()))
-            self.assertEqual(command[1:4], ["build", "guest-bins", "--check-release-archive"])
+            self.assertEqual(command[1:4], ["dev", "guest-bins", "--check-release-archive"])
             options = run.call_args.kwargs
             self.assertEqual(set(options["env"]), {"HOME", "MVM_HOME", "TMPDIR", "PATH"})
             self.assertEqual(options["timeout"], 60)

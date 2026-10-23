@@ -238,7 +238,7 @@ cd my-app
 nix flake check --no-build
 ```
 
-`mvmctl build validate` does the same with extra `mvm.toml` checks layered on.
+`mvmctl dev validate` does the same with extra `mvm.toml` checks layered on.
 
 ## Cross-platform notes
 

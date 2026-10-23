@@ -437,7 +437,7 @@ pub(in crate::commands) struct SdkTransportArgs {
     /// - `--mode live`: spawn the user's script with `MVM_SDK_MODE=live`
     ///   so the SDK shells each `Sandbox` operation to existing
     ///   `mvmctl` verbs against a real microVM.
-    /// - `--mode record` redirects users to `mvmctl build compile` (where
+    /// - `--mode record` redirects users to `mvmctl dev compile` (where
     ///   record is the default mode).
     ///
     /// When unset, the verb behaves as a transient-sandbox runner
@@ -464,7 +464,7 @@ pub(in crate::commands) struct RunVerbArgs {
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
-/// `mvmctl build compile` but specialises the rejection messages to point
+/// `mvmctl dev compile` but specialises the rejection messages to point
 /// users at the right verb when they pick the wrong default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(in crate::commands) enum RunMode {
@@ -477,7 +477,7 @@ pub(in crate::commands) enum RunMode {
     Plan,
     /// Record transport — capture Sandbox operations into a
     /// recording and lower to a Workload. `mvmctl run --mode
-    /// record` redirects users to `mvmctl build compile`, whose default
+    /// record` redirects users to `mvmctl dev compile`, whose default
     /// mode is record.
     Record,
 }
@@ -601,7 +601,7 @@ pub(in crate::commands) fn run_secure_started(
     // When an SDK transport mode is requested, peel off the
     // SDK-shaped surface before the sandbox-runner validation kicks
     // in. `--dev` (alias for live) is refused in v1; `--prod` (alias
-    // for record) redirects to `mvmctl build compile`; `--mode plan` routes
+    // for record) redirects to `mvmctl dev compile`; `--mode plan` routes
     // through the plan-mode admission dry-run.
     validate_run_profile(&args)?;
     // Before anything reads `cpus` / `memory`, so every later step agrees.
@@ -2167,7 +2167,7 @@ mod tests {
         let mut args = run_args(RunProfile::Standard);
         args.prod = true;
         let err = resolve_run_mode(&sdk(None, false), &args).expect_err("--prod must bail");
-        assert!(err.to_string().contains("mvmctl build compile"));
+        assert!(err.to_string().contains("mvmctl dev compile"));
     }
 
     #[test]
@@ -2199,7 +2199,7 @@ mod tests {
         let args = run_args(RunProfile::Standard);
         let err = resolve_run_mode(&sdk(Some(RunMode::Record), false), &args)
             .expect_err("--mode record must bail");
-        assert!(err.to_string().contains("mvmctl build compile"));
+        assert!(err.to_string().contains("mvmctl dev compile"));
     }
 
     #[test]

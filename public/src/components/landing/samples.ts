@@ -41,7 +41,7 @@ def main() -> None:
     label: "Build",
     language: "bash",
     source: "examples/python/hello-env/README.md",
-    code: `mvmctl build compile examples/python/hello-env/app.py --out /tmp/hello-env`,
+    code: `mvmctl dev compile examples/python/hello-env/app.py --out /tmp/hello-env`,
   },
   {
     id: "walk-run",

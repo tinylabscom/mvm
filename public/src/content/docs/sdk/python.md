@@ -16,7 +16,7 @@ Current:
 - `sandbox.files.write/read/list/stat/mkdir/remove/move(...)` — everything but `write` is live mode only
 - `sandbox.copy_in(...)` / `sandbox.copy_out(...)`
 - context-manager cleanup with `with` (or `async with`)
-- record mode for `mvmctl build compile` and `mvmctl run --mode plan`
+- record mode for `mvmctl dev compile` and `mvmctl run --mode plan`
 - live mode for `mvmctl run --mode live`
 
 Planned:

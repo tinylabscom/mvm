@@ -1370,7 +1370,7 @@ mod tests {
         );
         assert!(
             guest.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build")
-                && guest.contains("build runtime-overlay build --source build"),
+                && guest.contains("dev runtime-overlay build --source build"),
             "the guest runtime under test must be assembled from this tree"
         );
         assert!(
@@ -1379,7 +1379,7 @@ mod tests {
         );
         assert!(guest.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
         assert!(
-            guest.contains("build runtime-overlay build --source build --arch x86_64 --force")
+            guest.contains("dev runtime-overlay build --source build --arch x86_64 --force")
                 && guest.contains("cmp \"overlay-staging/$f\" \"$dir/$f\""),
             "the overlay must be reassembled and its bytes compared"
         );
@@ -1923,7 +1923,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{lane} must stay in security.yml under its name"));
             for assembled in [
                 "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build",
-                "build runtime-overlay build --source build --arch x86_64",
+                "dev runtime-overlay build --source build --arch x86_64",
                 "sha256sum -c checksums-sha256.txt",
             ] {
                 assert!(
@@ -1951,7 +1951,7 @@ mod tests {
         let ci = workflow("ci.yml");
         let latency = job_body(&ci, "boot-latency").expect("boot-latency must stay in ci.yml");
         assert!(
-            latency.contains("build runtime-overlay build --source build --arch x86_64")
+            latency.contains("dev runtime-overlay build --source build --arch x86_64")
                 && !latency.contains("runtime-overlay-x86_64.tar.gz"),
             "boot-latency must boot the overlay mvmctl assembles, not the set's member"
         );

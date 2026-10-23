@@ -30,7 +30,7 @@ fn compile_with(files: &[(&str, &str)]) -> (bool, String) {
     let output = Command::cargo_bin("mvmctl")
         .expect("locate mvmctl")
         .args([
-            "build",
+            "dev",
             "compile",
             dir.path().join("app.ts").to_str().unwrap(),
             "--out",

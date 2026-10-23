@@ -22,18 +22,18 @@ tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
-path = "build compile"
+path = "dev compile"
 tier = "exec"
 fixture = "decorator-script"
 env = { PYTHONPATH = "crates/mvm-sdk/sdks/python" }
 
 [[command]]
-path = "build guest-bins"
+path = "dev guest-bins"
 tier = "parse"
 reason = "cross-compiles every guest artifact for both guest architectures with the pinned zig toolchain, which takes minutes and needs that toolchain installed; its packaging and verification have focused unit tests"
 
 [[command]]
-path = "build kernel build"
+path = "dev kernel build"
 tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
@@ -583,22 +583,22 @@ tier = "parse"
 reason = "boots VMs in a measurement loop; the runtime is a benchmark budget, not a test budget"
 
 [[command]]
-path = "build address"
+path = "dev address"
 tier = "parse"
 reason = "needs a compiled workload fixture to address"
 
 [[command]]
-path = "build runtime-overlay build"
+path = "dev runtime-overlay build"
 tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
-path = "build sdk-sidecar build"
+path = "dev sdk-sidecar build"
 tier = "parse"
 reason = "boots the Stage 0 builder and builds a multi-megabyte guest artifact; the documented-surface runner performs it as shared setup"
 
 [[command]]
-path = "build validate"
+path = "dev validate"
 tier = "parse"
 reason = "needs a generated launch plan to validate"
 
@@ -759,11 +759,7 @@ reason = "folded into `doctor`; the CLI reference documents the fold in the past
 
 [[absent]]
 path = "flake"
-reason = "renamed to `build validate`; the reference records the rename"
-
-[[absent]]
-path = "dev"
-reason = "removed with `dev import-image`; the airgap and release guides describe its removal"
+reason = "renamed to `dev validate`; the reference records the rename"
 
 [[absent]]
 path = "addon"

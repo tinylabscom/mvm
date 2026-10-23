@@ -48,13 +48,13 @@ printf '%s' "$REAL_KEY" | mvmctl secret set echo-key \
 Compile the app to local boot artifacts, then boot it on a `/dev/kvm` host:
 
 ```sh
-mvmctl build compile examples/python/secret-egress/app.py --out /tmp/secret-egress
+mvmctl dev compile examples/python/secret-egress/app.py --out /tmp/secret-egress
 mvmctl machine run --flake /tmp/secret-egress --entrypoint \
     --from-workload-ir /tmp/secret-egress/workload.json \
     --allow-host httpbin.org:80
 ```
 
-`mvmctl build compile` strips the managed `SecretRef` out of the baked image — the
+`mvmctl dev compile` strips the managed `SecretRef` out of the baked image — the
 rootfs is secret-free by construction — and writes the binding into
 `workload.json`, the admission input. Nothing discovers that file on its own:
 `--from-workload-ir` lowers its `SecretRef` into a signed

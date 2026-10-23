@@ -17,7 +17,7 @@ mvm release ships the substrate and the SDK in lockstep.
 | `mvmforge-ir` crate                | `crates/mvm-contract/src/ir/`                               |
 | `mvmforge-sdk` crate (Rust builder)| `crates/mvm-sdk` (`builder` module)                         |
 | `mvmforge-addon` crate             | `crates/mvm-sdk/src/addon/`                                 |
-| `mvmforge` host CLI compile path   | `crates/mvm-compiler/` (re-exported by `mvm-sdk::compile`) + `mvmctl build compile` |
+| `mvmforge` host CLI compile path   | `crates/mvm-compiler/` (re-exported by `mvm-sdk::compile`) + `mvmctl dev compile` |
 | `mvmforge-runtime` (in-guest)      | `crates/mvm-agentd` + `nix/lib/factories/mkFunctionService` |
 | Python SDK (`@mv.func`)            | `crates/mvm-sdk/sdks/python/mvm/` (`@mvm.app`)                             |
 | TypeScript SDK                     | `crates/mvm-sdk/sdks/typescript/`                                          |

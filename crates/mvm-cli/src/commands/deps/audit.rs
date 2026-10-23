@@ -270,7 +270,7 @@ fn audit_one(
     let derived = verify_sealed_volume(&volume_dir).with_context(|| {
         format!(
             "refusing to re-audit tampered volume {}; rebuild the \
-             workload (mvmctl build --deps) to restore a clean seal",
+             workload (mvmctl machine build --deps) to restore a clean seal",
             volume_dir.display()
         )
     })?;
@@ -402,7 +402,7 @@ fn recover_language(manifest: &VolumeManifest, volume_dir: &Path) -> Result<Lang
     anyhow::bail!(
         "volume {} has no `language` annotation in its meta.json; \
          this volume was sealed before Plan 73 Followup B.2 recorded \
-         the language token. Rebuild the workload with `mvmctl build \
+         the language token. Rebuild the workload with `mvmctl machine build \
          --deps` to repopulate the annotation.",
         volume_dir.display(),
     )
