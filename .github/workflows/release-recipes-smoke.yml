@@ -23,9 +23,11 @@ jobs:
       matrix:
         include:
           - format: aur
-            runner: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
           - format: nix
-            runner: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
           - format: nix
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}

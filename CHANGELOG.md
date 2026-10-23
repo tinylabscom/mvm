@@ -2,7 +2,7 @@
 
 All notable changes to mvm are documented in this file.
 
-## [0.24.1-rc.1] — 2026-10-22
+## [0.24.1-rc.1] — 2026-10-23
 
 ### Added
 - **core**: Require independent current feeds for applications
@@ -20,6 +20,7 @@ All notable changes to mvm are documented in this file.
 - **specs**: Record the green scheduled Security run as lane evidence
 - Explain PHP2Shell containment boundary
 - **specs**: Record the dispatched claim-witness freshness run as watcher evidence
+- **changelog**: Complete v0.24.1 notes
 
 ### Fixed
 - **hvf**: Reap a stopped standby and remove its state
@@ -33,13 +34,11 @@ All notable changes to mvm are documented in this file.
 - **vmm**: Count a macOS zombie as not alive
 - **conformance**: Prepare all source-tree live homes
 
-## [Unreleased]
+### Testing
+- Host-userland-independent tests and wider CI VMM diagnostics
+- **hostd**: Pin unlinked inodes so fd identity check cannot alias a concurrent test
 
-### Fixed
-- **fs**: Hold a runtime overlay to the guest paths its own version promises, so a signed bundle pinned to the published image set's overlay boots again instead of being refused for the declared-command shims it predates
-- **bdd**: Accept the standby an unnamed run leaves behind, and the child preloaded for it, in the live warm-claim leak check, waiting a bounded time for the detached refill to register them
-- **bdd**: Expect the proxy-era denial from the entrypoint-denial example: the host names the blocked destination and curl exits 22
-- **sdk**: Pin the SDK release manifest's runtime to the 0.24.0 workspace it is compiled against
+## [Unreleased]
 
 ## [0.24.0] — 2026-10-12
 

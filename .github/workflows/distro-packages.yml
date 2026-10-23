@@ -62,7 +62,8 @@ permissions:
 
 jobs:
   contracts:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
@@ -86,7 +87,8 @@ jobs:
 
   package:
     needs: contracts
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
       version: ${{ steps.source.outputs.version }}
@@ -143,9 +145,11 @@ jobs:
           tag="${RELEASE_TAG}"
           if [ -z "${tag}" ]; then
             # CLI releases are the `v<semver>` tags; the repository also
-            # publishes SDK and revocation releases under other prefixes.
-            tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --exclude-drafts --limit 50 \
-              --json tagName --jq '[.[].tagName | select(test("^v[0-9]"))][0]')"
+            # publishes SDK, revocation and per-commit source-helper
+            # releases. The helpers are pre-releases and outnumber the CLI
+            # releases, so they are excluded before the window is applied.
+            tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --exclude-drafts --exclude-pre-releases --limit 50 \
+              --json tagName --jq '[.[].tagName | select(test("^v[0-9]"))] | first // empty')"
           fi
           [ -n "${tag}" ] || { echo "::error::no published CLI release to package" >&2; exit 1; }
           gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
@@ -263,7 +267,8 @@ jobs:
         arch: [x86_64, aarch64]
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
             deb_arch: amd64
           - arch: aarch64
             runner: ubuntu-24.04-arm

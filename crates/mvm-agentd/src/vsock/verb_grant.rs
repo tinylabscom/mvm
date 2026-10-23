@@ -2079,16 +2079,24 @@ mod tests {
         }
     }
 
-    /// A root-owned, canonical executable present on every supported host,
-    /// standing in for an application binary.
-    const ROOT_OWNED_PROGRAM: &str = "/usr/bin/id";
+    /// A root-owned executable present on every supported host, standing in
+    /// for an application binary. Resolved to the file itself because `/usr/bin`
+    /// entries are symlinks on some distributions (multicall coreutils), and a
+    /// grant naming a symlink is refused.
+    static ROOT_OWNED_PROGRAM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        std::fs::canonicalize("/usr/bin/id")
+            .expect("/usr/bin/id resolves")
+            .to_str()
+            .expect("utf-8 path")
+            .to_string()
+    });
 
     #[test]
     fn an_application_terminal_grant_admits_only_its_exact_argv() {
-        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM]);
+        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM.as_str()]);
         assert!(
             enforce_application_terminal_grant(
-                &console_open(&[ROOT_OWNED_PROGRAM], Vec::new()),
+                &console_open(&[ROOT_OWNED_PROGRAM.as_str()], Vec::new()),
                 Some(&grant)
             )
             .is_none()
@@ -2109,7 +2117,10 @@ mod tests {
             ("HTTPS_PROXY", "http://attacker.example:8080"),
         ] {
             let refused = refusal_message(enforce_application_terminal_grant(
-                &console_open(&[ROOT_OWNED_PROGRAM], vec![(env.0.into(), env.1.into())]),
+                &console_open(
+                    &[ROOT_OWNED_PROGRAM.as_str()],
+                    vec![(env.0.into(), env.1.into())],
+                ),
                 Some(&grant),
             ));
             assert!(
@@ -2120,7 +2131,7 @@ mod tests {
         assert!(
             enforce_application_terminal_grant(
                 &console_open(
-                    &[ROOT_OWNED_PROGRAM],
+                    &[ROOT_OWNED_PROGRAM.as_str()],
                     vec![("HTTPS_PROXY".into(), "http://127.0.0.1:1080".into())],
                 ),
                 Some(&grant)
@@ -2135,7 +2146,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(dir.path()).unwrap();
         let link = dir.join("app");
-        std::os::unix::fs::symlink(ROOT_OWNED_PROGRAM, &link).unwrap();
+        std::os::unix::fs::symlink(ROOT_OWNED_PROGRAM.as_str(), &link).unwrap();
         let link = link.to_str().unwrap();
         let grant = verb_grant_with_terminal(&[link]);
         let refused = refusal_message(enforce_application_terminal_grant(
@@ -2270,7 +2281,7 @@ mod tests {
         assert!(
             enforce_application_terminal_grant(&request, Some(&verb_grant_with_drive())).is_none()
         );
-        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM]);
+        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM.as_str()]);
         assert!(
             enforce_application_terminal_grant(
                 &GuestRequest::ConsoleResize {

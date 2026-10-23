@@ -1961,12 +1961,22 @@ jobs:
         # Without this a launch failure surfaces only as "API socket did not
         # appear", which is a symptom and never the cause.
         run: |
-          for d in "$HOME"/.mvm/vms/*/; do
+          echo "--- host ---"
+          uname -r || true
+          systemctl --version | head -1 || true
+          findmnt /tmp || true
+          id || true
+          stat -c '%U %a' /dev/kvm || true
+          # The job's own overlay home, the default home, and the per-test
+          # temp homes the BDD harness creates all hold VM state dirs.
+          for d in "$GITHUB_WORKSPACE"/.boot-latency-overlay-home/vms/*/ \
+                   "$HOME"/.mvm/vms/*/ /tmp/.tmp*/vms/*/; do
+            [ -d "$d" ] || continue
             echo "===== $d ====="
             ls -la "$d" || true
             for f in firecracker.log console.log; do
               if [ -s "$d$f" ]; then
-                echo "--- $f ---"; tail -50 "$d$f"
+                echo "--- $f ---"; tail -n 200 "$d$f"
               fi
             done
           done

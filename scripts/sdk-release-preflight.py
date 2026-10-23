@@ -33,8 +33,9 @@ def validate_metadata(root, event, tag, dry_run):
     hostlib = tomllib.loads((root / "crates/mvm-hostlib/Cargo.toml").read_text())
     python = tomllib.loads((sdk / "python/pyproject.toml").read_text())["project"]
     npm = json.loads((sdk / "typescript/package.json").read_text())
-    for key in ("version", "runtime_version"):
-        if not re.fullmatch(r"\d+\.\d+\.\d+", release[key]):
+    # The runtime mirror may be a release candidate; the SDK's own version may not.
+    for key, pattern in (("version", r"\d+\.\d+\.\d+"), ("runtime_version", r"\d+\.\d+\.\d+(-rc\.\d+)?")):
+        if not re.fullmatch(pattern, release[key]):
             raise ValueError(f"invalid {key}")
     if hostlib["package"]["version"] != {"workspace": True}:
         raise ValueError("hostlib must inherit workspace version")
