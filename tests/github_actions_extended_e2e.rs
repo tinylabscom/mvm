@@ -480,22 +480,57 @@ fn documented_launches_are_cold_and_warm_scenarios_override_explicitly() {
 
 #[test]
 fn only_native_invocation_positives_require_firecracker() {
+    fn tags_for<'a>(feature: &'a str, title: &str) -> std::collections::BTreeSet<&'a str> {
+        let lines: Vec<_> = feature.lines().collect();
+        let scenario = format!("Scenario: {title}");
+        let index = lines
+            .iter()
+            .position(|line| line.trim() == scenario)
+            .expect("keep the documented scenario");
+        let mut tags = std::collections::BTreeSet::new();
+        for line in lines[..index].iter().rev().map(|line| line.trim()) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if !line.starts_with('@') {
+                break;
+            }
+            tags.extend(line.split_whitespace());
+        }
+        tags
+    }
+
     let feature =
         fs::read_to_string("features/suites/s29_doc_examples/documented_build_live.feature")
             .expect("read documented build scenarios");
     assert!(
-        feature.contains(
-            "@live @release_gate_flake\n  Scenario: the documented flake build produces an image"
-        ),
+        feature
+            .lines()
+            .take_while(|line| !line.trim_start().starts_with("Feature:"))
+            .filter(|line| line.trim_start().starts_with('@'))
+            .all(|line| !line.split_whitespace().any(|tag| tag == "@firecracker")),
+        "do not restrict the whole feature to Firecracker"
+    );
+    assert_eq!(
+        tags_for(&feature, "the documented flake build produces an image"),
+        std::collections::BTreeSet::from(["@live", "@release_gate_flake"]),
         "ordinary image building must retain macOS positive coverage"
     );
-    assert!(
-        feature.contains(
-            "@live @firecracker @release_gate_flake\n  Scenario: the documented entrypoint launch runs the compiled workload"
-        ) && feature.contains(
-            "@live @firecracker @documented_pack_live\n  Scenario: the documented pack build health-boots and signs a frozen workload"
+    assert_eq!(
+        tags_for(
+            &feature,
+            "the documented entrypoint launch runs the compiled workload"
         ),
-        "native invocation positives must run on Firecracker without weakening the HVF custody gate"
+        std::collections::BTreeSet::from(["@live", "@release_gate_flake", "@firecracker"]),
+        "entrypoint invocation must retain its Firecracker positive"
+    );
+    assert_eq!(
+        tags_for(
+            &feature,
+            "the documented pack build health-boots and signs a frozen workload"
+        ),
+        std::collections::BTreeSet::from(["@live", "@documented_pack_live", "@firecracker"]),
+        "pack health must retain its Firecracker positive"
     );
 }
 
