@@ -718,10 +718,14 @@ fn distro_packages_discover_an_exact_stable_cli_release_across_all_pages() {
         .expect("published tarball downloader must end before package download");
 
     assert!(
-        downloader.contains(
-            "gh api --paginate --slurp \"repos/${GITHUB_REPOSITORY}/releases?per_page=100\""
-        ),
+        downloader
+            .contains("gh api --paginate \"repos/${GITHUB_REPOSITORY}/releases?per_page=100\"")
+            && downloader.contains("| jq -s"),
         "release discovery must exhaust every releases API page, not inspect a fixed window"
+    );
+    assert!(
+        !downloader.contains("gh api --paginate --slurp") && !downloader.contains("--slurp"),
+        "gh api does not support combining --slurp with --jq; aggregate the paginated JSON with jq"
     );
     assert!(
         downloader.contains(
