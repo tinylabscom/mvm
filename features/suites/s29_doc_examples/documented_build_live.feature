@@ -49,7 +49,10 @@ Feature: The documented flake build runs for real
   # runtime and workload kernel, and network access to the pinned Nix inputs.
   # The ordinary hermetic lane skips this scenario through the @live gate.
   # A successful build includes a zero-exit health boot before signing.
-  @live @documented_pack_live
+  # The health boot is an entrypoint boot, which HVF refuses until verified
+  # input custody and a held recovery lifetime exist there (#4655), so this
+  # witness runs only on Firecracker.
+  @live @documented_pack_live @firecracker
   Scenario: the documented pack build health-boots and signs a frozen workload
     Given a local pack build fixture
     And the isolated mvm home is prepared for live launches
