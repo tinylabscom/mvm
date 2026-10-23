@@ -236,10 +236,9 @@ jobs:
           validate guest_image "$GUEST_IMAGE"
 
   # Decide, before the heavy lanes start, whether the x86_64 workspace suite
-  # runs on the idle self-hosted KVM box or on hosted runners. The box keeps a
-  # warm target directory, so it runs the whole suite as one shard in about the
-  # time a hosted runner spends compiling the archive. It is one machine: when
-  # it is busy, or the picker cannot see it, the suite stays hosted.
+  # runs on the idle self-hosted KVM box or on hosted runners. Checkout cleans
+  # the box's target directory; source workers must budget for a cold build.
+  # When it is busy, or the picker cannot see it, the suite stays hosted.
   #
   # Routing is opt-in through the repository variable
   # `RUNNER_PICKER_WORKSPACE=true`. The box's first run of the suite was
@@ -376,6 +375,14 @@ jobs:
       # decision; they do not run clippy.
       - name: Pre-commit hook scoping tests
         run: bash .githooks/pre-commit.test.sh
+
+      - name: Install just for scoped feedback tests
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Scoped feedback recipe tests
+        run: python3 scripts/test_scoped_tests.py
 
 
       - name: Clippy
@@ -737,12 +744,19 @@ jobs:
 
 
   lint-features:
-    name: Lint feature coverage
+    name: Lint feature coverage (${{ matrix.suite }})
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # These feature graphs compile independently. Keep signature/refusal
+    # coverage off the serial portable-feature critical path.
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        suite: [portable, signatures]
     steps:
       - uses: actions/checkout@v6
 
@@ -758,6 +772,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
 
       - name: Clippy (mvm-client tracing-bridge)
+        if: matrix.suite == 'portable'
         run: ./scripts/cargo-stable.sh clippy -p mvm-client --all-targets --features tracing-bridge -- -D warnings
 
       - name: Install cargo-nextest
@@ -766,19 +781,23 @@ jobs:
           tool: nextest
 
       - name: hostd-transport feature tests (mvm-core)
+        if: matrix.suite == 'portable'
         run: cargo nextest run -p mvm-core --features hostd-transport
 
       - name: client facade tests (mvm-core)
+        if: matrix.suite == 'portable'
         run: cargo nextest run -p mvm-core --features client-remote
 
       # `schema` is off by default so the shipped closure carries no schemars;
       # the schema-shape tests and the three emitter bins only exist under it.
       - name: schema feature tests (mvm-sdk)
+        if: matrix.suite == 'portable'
         run: |
           cargo nextest run -p mvm-sdk --features schema
           cargo check -p mvm-sdk --features schema --bins
 
       - name: compiler compatibility and deployment feature tests (mvm-sdk)
+        if: matrix.suite == 'portable'
         run: |
           cargo nextest run -p mvm-compiler
           cargo nextest run -p mvm-sdk --no-default-features
@@ -790,6 +809,7 @@ jobs:
       # runs the tests that parse a real Sigstore bundle with the feature named.
       # The claim 20 ledger cites them; this is the lane that runs them.
       - name: release signature tests (manifest-verify)
+        if: matrix.suite == 'signatures'
         run: |
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
@@ -806,6 +826,7 @@ jobs:
       # off: selected beside mvm-core it would unify the verifier back into
       # mvm-core and compile every refusal test out.
       - name: verifier-absent refusal tests (no manifest-verify)
+        if: matrix.suite == 'signatures'
         run: |
           filter='test(/without_the_verifier|cannot_verify|without_manifest_verify|no_feature_build/)'
           cargo nextest run -p mvm-core -p mvm-build -E "$filter"
@@ -815,6 +836,7 @@ jobs:
       # published twice (schema/ and the docs reference page); the drift tests
       # and the emitter bin exist only under `schema`.
       - name: policy schema drift (mvm-client schema)
+        if: matrix.suite == 'portable'
         run: |
           cargo nextest run -p mvm-client --features schema -E 'test(/policy_profiles::/)'
       # Instruction-file provenance: the keyless half verifies a real Sigstore
@@ -823,6 +845,7 @@ jobs:
       # the default lane, and this step names `manifest-verify` rather than
       # relying on the root default to unify it in.
       - name: instruction provenance tests (manifest-verify + schema)
+        if: matrix.suite == 'portable'
         run: |
           cargo nextest run -p mvm-client --features manifest-verify,schema -E 'test(/instruction/)'
           cargo check -p mvm-client --features schema --bins
@@ -837,6 +860,7 @@ jobs:
       # booting a real VM. `--bins` because the loopback proxy is a `[[bin]]`
       # and a lib-only run would not build its entrypoint.
       - name: addons feature tests (guest egress data path)
+        if: matrix.suite == 'portable'
         run: |
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
@@ -1230,8 +1254,8 @@ jobs:
           check "Nix flake check" "$NIX_RESULT" "$nix_required"
 
   # Hosted: two shards run the archive `test-workspace-build` compiled. Self-
-  # hosted: one shard builds and runs the whole suite on the box, where the
-  # target directory is warm. The archive cannot move to the box anyway: it is
+  # hosted: one shard builds and runs the whole suite on the box. Checkout
+  # cleans its target directory. The archive cannot move to the box: it is
   # linked against the hosted image's newer glibc.
   test-workspace:
     name: Test workspace
@@ -1259,8 +1283,8 @@ jobs:
   test-workspace-build:
     name: Build workspace tests
     needs: [scope, runners]
-    # The self-hosted box builds the suite itself against its warm target
-    # directory; only the hosted path needs an archive.
+    # The self-hosted box builds the suite itself; only the hosted path needs
+    # an archive.
     if: needs.scope.outputs.code == 'true' && needs.runners.outputs.workspace != 'hetzner'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
@@ -1424,9 +1448,6 @@ jobs:
       # The workspace suite only. The arch-independent extras Test workspace
       # also runs (man pages, the addons feature, doctests) are covered on
       # x86_64 and would only duplicate cost here.
-      - name: Build the aarch64 workspace tests
-        run: cargo nextest run --workspace --exclude mvm-fs --all-targets --no-run
-
       - name: Run the privileged CRNG reseed helper tests
         # The reseed helper is killed on any syscall outside its seccomp
         # allowlist, and aarch64 is what HVF guests run. The suite below drives
@@ -1457,8 +1478,8 @@ jobs:
 
       # The same per-job HOME, MVM_HOME and TMPDIR the x86_64 shards run under.
       # Set after the root-run witnesses above, so nothing they leave behind
-      # is inside the state the suite runs against. Nothing in the build
-      # reads these variables, so the run below reuses the build.
+      # is inside the state the suite runs against. Set this before compiling:
+      # the CLI build script reads HOME to discover its embedded payload store.
       - name: Isolate test state
         run: |
           set -euo pipefail

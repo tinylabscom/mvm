@@ -353,6 +353,23 @@ and removes its isolated home, state and temporary directories;
 it. An hourly sweep on the box removes stale temporary directories that both
 miss. `nix/ops/hetzner/README.md` has the details and the install steps.
 
+## Targeted test feedback
+
+Source `scripts/dev-env.sh` once in each worktree shell, then select the target
+that owns the failure. Filtering test names alone still compiles the crate's
+other integration targets; `--lib` and `--test` avoid that work:
+
+```bash
+source scripts/dev-env.sh
+just tests::scoped mvm-cli roundtrip --lib
+just tests::scoped mvmctl "" --test workspace_shard_isolation
+```
+
+Omitting the target flags preserves the existing whole-crate selection. The
+command propagates nextest failures and keeps the pinned fast toolchain and
+worktree-isolated target directory. This is the edit/test loop, not a replacement
+for the final workspace tests, clippy and applicable Linux/BDD checks.
+
 ## Profiling
 
 Functions carrying `#[instrument]` are timed when `MVM_SPAN_TIMINGS` is set.
