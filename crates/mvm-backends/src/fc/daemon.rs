@@ -1143,7 +1143,7 @@ mod sudo_elision_tests {
         for euid in [0, 1000] {
             let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", euid);
             assert!(
-                script.contains(r#"echo $$ > "$0""#),
+                script.contains(r#"write_marker "$0" "$$""#),
                 "euid {euid} must write the pid from inside: {script}"
             );
             assert!(
