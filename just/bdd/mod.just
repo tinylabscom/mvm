@@ -7,10 +7,21 @@ set working-directory := "../.."
 
 # Run the hermetic BDD conformance suite
 run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/e2e-phase-timings.sh
+    bdd_phase_summary() {
+        local status=$?
+        e2e_phase_summary "BDD phase timings" "$status" || true
+        exit "$status"
+    }
+    trap bdd_phase_summary EXIT
+    e2e_phase mvmctl-build
     # `user` pulls the sigstore/aws-lc verifier. Keep that native dependency on
     # the standard compiler/linker path: Cranelift leaves its symbols unresolved
     # on Linux, while the rest of this hermetic suite can retain the fast path.
     cargo build --bin mvmctl --features user
+    e2e_phase schema-emitters
     ./scripts/cargo-fast.sh build -p xtask
     # The schema emitters `check-stubs` runs, built here rather than through
     # `cargo run` from inside a scenario. `cargo run` takes cargo's package
@@ -21,8 +32,11 @@ run:
     ./scripts/cargo-fast.sh build -p mvm-agentd --features schema --bin emit_protocol_schema
     ./scripts/cargo-fast.sh build -p mvm-core --features schema --bin emit_broker_schema
     ./scripts/cargo-fast.sh build -p mvm-sdk --bin emit_sdk_env --bin emit_sdk_errors --bin emit_sdk_ctors
+    e2e_phase typescript-preparation
     just sdk::install-typescript
     just sdk::build-typescript
+    # Cargo compiles the runner here as well as executing it.
+    e2e_phase conformance-compile-and-run
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
 
 # The part of the suite a documentation-only change can affect: the `@docs`

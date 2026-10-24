@@ -47,14 +47,78 @@ on:
         description: Parent run containing a shared workspace test archive
         required: false
         type: string
+      inventory_only:
+        description: Read-only Hetzner host inventory instead of running tests (runner_kind must be hetzner)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   actions: read
 
 jobs:
+  inventory:
+    name: Read-only runner inventory
+    if: github.event_name == 'workflow_dispatch' && inputs.inventory_only
+    permissions: {}
+    # Invalid selectors fail on a hosted runner, never silently skip.
+    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    steps:
+      - name: Inventory provisioned host
+        shell: bash
+        env:
+          RUNNER_KIND: ${{ inputs.runner_kind }}
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_KIND" != hetzner ]]; then
+            echo "inventory_only requires runner_kind=hetzner" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # No checkout, compiler shims, installs, or persistent test state.
+          # Only the Actions-owned summary is written; no cleanup is needed.
+          {
+            printf '## Read-only runner inventory\n\n```text\n'
+            printf '\nArchitecture\n'
+            uname -m
+            printf '\nCPU model and count\n'
+            LC_ALL=C lscpu | awk -F: '/^(Architecture|CPU\(s\)|Model name|Socket\(s\)|Core\(s\) per socket|Thread\(s\) per core):/ { print }'
+            printf 'Available CPUs: '
+            nproc
+            printf '\nRAM\n'
+            free -h
+            printf '\nDisk capacity (root and runner workspace)\n'
+            df -h / "$GITHUB_WORKSPACE"
+            printf '\nBlock device capacity\n'
+            lsblk -o NAME,TYPE,SIZE
+            printf '\nInstalled Rust toolchains (no compiler shims invoked)\n'
+            if command -v rustup >/dev/null 2>&1; then
+              rustup toolchain list
+            else
+              printf 'rustup not installed\n'
+            fi
+            printf '\nProvisioned tool paths (presence only; no executables invoked)\n'
+            for tool in rustc cargo gcc clang cc zig cargo-zigbuild cargo-nextest ld.lld nix go python3 node; do
+              command -v "$tool" || printf '%s: not on PATH\n' "$tool"
+            done
+            printf '\nKVM device (metadata only; not opened)\n'
+            if [[ -e /dev/kvm ]]; then
+              ls -l /dev/kvm
+              if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+                printf 'Runner has read/write access to /dev/kvm\n'
+              else
+                printf 'Runner lacks read/write access to /dev/kvm\n'
+              fi
+            else
+              printf '/dev/kvm is absent\n'
+            fi
+            printf '```\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
   test:
     name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }})
+    if: github.event_name != 'workflow_dispatch' || !inputs.inventory_only
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
     # Archive workers on one persistent host share the build-time source path.
