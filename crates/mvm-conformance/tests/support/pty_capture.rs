@@ -108,7 +108,8 @@ async fn capture(
     mut read: impl FnMut(&File, &mut [u8]) -> io::Result<usize>,
 ) -> io::Result<Output> {
     let (master, slave) = terminal_pair()?;
-    let master = AsyncFd::new(master)?;
+    // SAFETY: `master` is a live PTY descriptor the AsyncFd now owns and never swaps.
+    let master = unsafe { AsyncFd::register(master) }?;
     let mut command = tokio::process::Command::from(command);
     command
         .stdin(Stdio::from(slave.try_clone()?))

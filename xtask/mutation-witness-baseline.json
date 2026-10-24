@@ -746,11 +746,6 @@
       "reason": "provably equivalent: `ClientOperationCapabilities::builder` returns `ClientOperationCapabilitiesBuilder::default()` directly, so the mutant evaluates the identical expression. No test can distinguish the two, while the adjacent builder test asserts that `build` preserves every enabled operation."
     },
     {
-      "file": "crates/mvm-core/src/plan/synthesis.rs",
-      "mutant": "replace SynthesisInput<'a>::builder -> SynthesisInputBuilder<'a> with Default::default()",
-      "reason": "provably equivalent: `SynthesisInput::builder` is a one-line alias for `SynthesisInputBuilder::new()`, and this file's `impl Default for SynthesisInputBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
-    },
-    {
       "file": "crates/mvm-fs/src/os_inventory.rs",
       "mutant": "replace || with && in parse_dpkg_status",
       "reason": "Provably equivalent: a continuation beginning with a space or tab cannot start with the exact Package: or Version: prefixes checked immediately afterward. Removing its early skip changes no parsed component or limitation."
