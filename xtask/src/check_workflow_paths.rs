@@ -962,7 +962,6 @@ mod tests {
             "\"$SHARD\" -le \"$SHARD_COUNT\"",
             "|| 'ubuntu-24.04' }}",
             "name: workspace-tests\n",
-            "cargo nextest run -p xtask --features man",
             "cargo nextest run --workspace --all-targets --partition \"hash:${SHARD}/${SHARD_COUNT}\"",
             "actions: read",
             "workspace-archive-{0}",
@@ -1154,7 +1153,6 @@ mod tests {
             "name: Test workspace (aarch64)",
             "needs: [scope]",
             "runs-on: ubuntu-24.04-arm",
-            "cargo nextest run --workspace --exclude mvm-fs --all-targets --no-run",
             "run: cargo nextest run --workspace --exclude mvm-fs --all-targets\n",
             "MVM_GUEST_PRIVILEGED_TESTS=1",
             "grep -q \"test result: ok. 4 passed\" \"$RUNNER_TEMP/helper.log\"",
@@ -1167,6 +1165,7 @@ mod tests {
             );
         }
         for absent in [
+            "--all-targets --no-run",
             "--partition",
             "strategy:",
             "workspace-shard.yml",

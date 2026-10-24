@@ -132,18 +132,8 @@ jobs:
             printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
           } >> "$GITHUB_ENV"
 
-      - name: Build
-        if: inputs.archive_run_id == ''
-        run: cargo build --all-targets
-
-      - name: Validate nextest override filters
-        if: inputs.archive_run_id == ''
-        run: cargo run -p xtask -- check-nextest-groups
-
-      - name: xtask man-page tests
-        if: inputs.archive_run_id == ''
-        run: cargo nextest run -p xtask --features man
-
+      # Nextest builds the exact workspace selection itself. Queue-owned
+      # doctests, feature suites and filter validation live in the extras job.
       - name: Run tests
         if: inputs.archive_run_id == ''
         env:
@@ -156,14 +146,6 @@ jobs:
             exit 1
           }
           cargo nextest run --workspace --all-targets --partition "hash:${SHARD}/${SHARD_COUNT}"
-
-      - name: Run addon/egress helper tests
-        if: inputs.archive_run_id == '' && inputs.shard == '1'
-        run: cargo nextest run -p mvm-agentd --features addons
-
-      - name: Run doctests
-        if: inputs.archive_run_id == '' && inputs.shard == '1'
-        run: cargo test --workspace --doc
 
       - name: Download shared workspace test archive
         if: inputs.archive_run_id != ''

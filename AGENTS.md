@@ -297,7 +297,10 @@ do not extend a foreground timeout and rerun the same command.
 ## Scoped feedback and worktree shell
 
 Debug with `just tests::scoped <crate> <filter>`: read the failure, make one
-change, and rerun that scoped test. Run the full workspace suite once before
+change, and rerun that scoped test. Append `--lib` for a library unit test or
+`--test <name>` for one integration target, avoiding compilation of unrelated
+test binaries. Use an empty filter (`""`) to run every test in that target.
+Run the full workspace suite once before
 declaring the task done, not after each edit. Source `scripts/dev-env.sh` once
 per worktree shell and then use plain commands; do not repeat inline
 `MVM_HOME`/`CARGO_TARGET_DIR`/`CARGO_HOME` or `cd` prefixes. Use
