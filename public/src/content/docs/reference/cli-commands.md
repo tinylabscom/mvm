@@ -52,8 +52,8 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl capture`                                                                                                        | Inspect a Linux project and selected commands, resolve the evidence into canonical MVM IR, and render or verify the resulting environment (`project`, `resolve`, and `verify` subcommands)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `mvmctl machine run --flake <ref>`                                                                                      | Build a Nix flake and boot a transient VM                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `mvmctl machine run --manifest <path>`                                                                                  | Boot a pre-built manifest (`mvm.toml`, its directory, or a slot name; short form `-m`). Mutually exclusive with `--flake`/`--image`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `mvmctl machine run <app.mvmpkg> [-- <cmd>...]`                                                                         | The same run with the signed bundle named as the positional source. A path ending in `.mvmpkg` before `--` is always a bundle, never a program: the archive is verified against the trust store on every run, a dry run included, and an unsigned, altered, or unenrolled archive is refused before anything is installed. `mvmctl run <app.mvmpkg>` is the same command. See [Booting a signed bundle](#booting-a-signed-bundle) |
-| `mvmctl machine run --manifest <app.mvmpkg> [-- <cmd>...]`                                                              | Verify a signed `.mvmpkg` bundle against the publisher trust store (`~/.mvm/trusted-publishers/`), install it into `~/.mvm/bundles/<sha>/` (an identical installed bundle is reused), then boot it exactly as `--manifest <bundle-sha256>` does: the same signed plan and the same admit-time bundle re-verification. An unsigned, tampered, or unknown-publisher archive is refused before any backend is touched. `--dry-run` verifies without installing. See [Booting a signed bundle](#booting-a-signed-bundle) |
+| `mvmctl machine run <app.mvmpkg> [-- <cmd>...]`                                                                         | The same run with the signed bundle named as the positional source. A path ending in `.mvmpkg` before `--` is always a bundle, never a program: release bundles verify against publisher trust, while a local build must carry the signed local-build label and this host's key. Verification repeats on every run, including dry runs. `mvmctl run <app.mvmpkg>` is the same command. See [Booting a signed bundle](#booting-a-signed-bundle) |
+| `mvmctl machine run --manifest <app.mvmpkg> [-- <cmd>...]`                                                              | Verify and boot a signed `.mvmpkg`: release bundles use `~/.mvm/trusted-publishers/`; a directly named local build uses only the matching host key, reports that it is not release-verified, and is refused under `--prod`. The archive is cached under `~/.mvm/bundles/` and re-verified at admission. `bundle install` still refuses local builds. `--dry-run` verifies without caching. See [Booting a signed bundle](#booting-a-signed-bundle) |
 | `mvmctl machine run --image <ref>`                                                                                      | Boot an OCI image (pulled/cached). Mutually exclusive with `--flake`/`--manifest`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `mvmctl machine run --prod --image <ref@sha256:...>`                                                                    | Verify and boot a sealed production OCI image, then run its declared Entrypoint/Cmd through the production-safe `RunEntrypoint` path. Do not pass a command after `--`: ad-hoc commands are DevOnly and remain refused. Accepted only for transient `--image` and catalog `--runtime` launches. Persistent runs and `--runtime-pack`, `--deployment`, `--flake`, or `--manifest` are refused before source resolution because those paths cannot preserve or build the sealed production variant                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `mvmctl machine run --no-build`                                                                                         | Fail instead of building when a cache is cold: the run exits naming the artifact it would have built and how to allow it. For CI, perf gates and scripts that must not start a tens-of-minutes build. `MVM_COLD_BUILD=refuse` does the same without the flag. Without either, `machine run` builds what a cold cache lacks (a source checkout's guest runtime, host helpers and initramfs, plus the pair images when an mvm-images checkout is selected) and prints one notice before the first such build; `mvmctl bootstrap` is an optional way to do that ahead of time. Downloads of published artifacts are never refused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -196,8 +196,15 @@ by its `mvm.pack-spec/v1` schema marker, a directory or file holding
 TypeScript SDK source with one statically declared `mvm` app, or an OCI image
 reference. A directory matching more than one class is refused; select it
 explicitly with `--from pack|manifest|flake|sdk|image`. The result is signed by
-this host and marked as a local build. Registry push, pull, fetch, and install
-paths always refuse that origin; it is not release-verified.
+this host and marked as a local build. Run that archive directly on the same
+host with `mvmctl run ./app.mvmpkg`; the CLI reports `local build, signed by
+this host's key; not release-verified`, independently re-verifies that identity
+at admission, and records `origin=local-build` plus the bundle SHA-256 in the
+signed audit plan. `--prod`, a different host key, a missing origin label, and
+tampered bytes are refused. The narrow run path may cache the verified archive
+for that boot, but `bundle install` and every registry push, pull, or fetch path
+still refuse the local-build origin. Running it does not enroll the host key in
+publisher trust.
 
 `mvmctl dev compile app.py --mvm-revision 4e65b221744885e536ec91a3f2948cdc508dcb49`
 renders the SDK workload with an immutable mvm flake input for a publishable image source. It
@@ -750,10 +757,14 @@ mvmctl run -- npm test                     # infer the runtime from the command
 
 The positional source is classified by its shape, never by what exists on
 disk. A path ending in `.mvmpkg` is a signed bundle, and anything else is an
-image reference, as `--image` takes it. A bundle is verified against the trust
-store every time it runs and installed into the content-addressed bundle
-registry on first use, then booted the way `--manifest <bundle-sha256>` boots an
-installed bundle; it is the same run as `--manifest ./app.mvmpkg`. Any other path is refused with a pointer to `--manifest` or
+image reference, as `--image` takes it. A release bundle is verified against
+the publisher trust store every time it runs. A host-built bundle instead needs
+both the signed `mvm.origin=local-build` label and the current host key; neither
+condition grants authority alone. The verified archive is cached in the
+content-addressed bundle registry on first use, then booted the way
+`--manifest <bundle-sha256>` boots an installed bundle; it is the same run as
+`--manifest ./app.mvmpkg`. A local build prints its non-release status and is
+refused under `--prod`. Any other path is refused with a pointer to `--manifest` or
 `--deployment`, and `app.mvmpkg` without a leading `./` is refused rather than
 pulled from a registry. The guest command must follow `--`: a command written
 without it is a parse error.
@@ -822,7 +833,7 @@ never served from a standby and always boots cold.
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl run -- <cmd>...`                                            | Boot the bundled default microVM image, run `<cmd>`, exit                                                                                                                                                                                                                                                                                                                             |
 | `mvmctl run <image> -- <cmd>...`                                    | Boot an OCI image; the same as `--image <image>`                                                                                                    |
-| `mvmctl run ./app.mvmpkg -- <cmd>...`                               | Verify a signed bundle against the trust store, install it on first use, and boot it                                                                 |
+| `mvmctl run ./app.mvmpkg -- <cmd>...`                               | Verify and boot a publisher-trusted bundle or a same-host local build; local builds are reported as not release-verified and refused under `--prod` |
 | `mvmctl run <namespace/name[@version]> -- <cmd>...`                 | Boot an installed application (`mvmctl pack pull` first); `-a`, `--app` and `--application` take the same reference with no fallback to an image |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...`                  | Boot a registered manifest/template instead of the default                                                                                                                                                                                                                                                                                                                            |
 | `mvmctl run --manifest <app.mvmpkg> -- <cmd>...`                    | Verify, install, and boot a signed `.mvmpkg` bundle, as `machine run --manifest <app.mvmpkg>` does |
@@ -1446,7 +1457,10 @@ streams verification of the signed manifest and every artifact's size and hash,
 enforces the size caps (2 GiB per entry, 4 GiB in total), checks posture
 coherence (a `sealed-prod` posture must cover a dm-verity rootfs and require
 authentication), and confirms the host architecture before printing a preview.
-Verification success (exit 0) is not a launch-readiness or freshness guarantee.
+Release verification success (exit 0) is not a launch-readiness or freshness
+guarantee. A same-host local build also exits successfully but prints `local
+build, signed by this host's key; not release-verified`; JSON reports
+`origin: "local-build"`, `verified: false`, and `release_verified: false`.
 The read-only preview does not prepare a runtime, apply a revocation feed,
 install the archive, or boot a VM. JSON reports `runnable_here: null` (unknown),
 `host_arch_compatible: true`, and `backend_compatibility_checked`, which is true
@@ -1547,14 +1561,24 @@ mvmctl machine run ./app.mvmpkg -- python -m app
 mvmctl machine run --manifest ./app.mvmpkg -- python -m app
 ```
 
-The archive is verified against the publisher trust store and installed into
-the bundle registry, then the run continues as
+The archive is verified against the publisher trust store, or against the
+current host key when its signed manifest marks it as a local build, and cached
+in the bundle registry. The run then continues as
 `mvmctl machine run --manifest <bundle-sha256>`, so admission is unchanged: the
 plan is synthesized and signed by the host, and the bundle is re-verified at
 admit time. A bundle that is already installed is verified again and reused
 rather than re-extracted. An unsigned, tampered, or unknown-publisher archive
 is refused with the verifier's error before anything boots, and nothing is
 written to the registry.
+
+A local build is a development-only exception for a local artifact path. Its
+host key is not added to publisher trust, `bundle install` cannot import it,
+and registry and application-package ingress cannot supply it. Admission
+requires the local-build label and the same host key again; key rotation or a
+copied archive therefore fails closed. The signed plan and `plan.admitted`
+entry carry `origin=local-build` and the archive's `bundle_sha256`. Diagnostic and
+run output calls it `local build, signed by this host's key; not
+release-verified`; it is never described as verified, secure, or trusted.
 
 A bundle sealed with `bundle export --posture` bounds every launch of it. Before
 boot, the run reads the installed bundle's manifest and checks its signature
