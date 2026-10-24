@@ -253,15 +253,31 @@ fn artifact_warm_home(world: &mut CliWorld) {
     world.e2e_home = Some(home);
 }
 
+/// Images already pulled into the shared home by this run. The cache is the
+/// same for every scenario, so only the first needing an image pays for the
+/// pull; the explicit `image pull` scenario still exercises the verb itself.
+static PREPARED_IMAGES: mvm_conformance::prepared_once::PreparedOnce =
+    mvm_conformance::prepared_once::PreparedOnce::new();
+
 #[given(expr = "the documented launch images are prepared")]
 fn documented_launch_images_are_prepared(_world: &mut CliWorld) {
+    let home = e2e_home();
     for image in ["alpine", "rust", "python:3.12", "curlimages/curl:8.21.0"] {
-        let pull = run_in_e2e_home(&format!("image pull {image}"), &[]);
-        assert_eq!(
-            pull.exit_code, 0,
-            "failed to prepare the {image} image\nstdout:\n{}\nstderr:\n{}",
-            pull.stdout, pull.stderr
-        );
+        let key = format!("{}\0{image}", home.display());
+        let prepared = PREPARED_IMAGES.ensure(&key, || {
+            let pull = run_in_e2e_home(&format!("image pull {image}"), &[]);
+            if pull.exit_code == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "failed to prepare the {image} image\nstdout:\n{}\nstderr:\n{}",
+                    pull.stdout, pull.stderr
+                ))
+            }
+        });
+        if let Err(problem) = prepared {
+            panic!("{problem}");
+        }
     }
     log_background_mark("images_prepared");
 }
