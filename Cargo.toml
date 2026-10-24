@@ -67,7 +67,6 @@ members = [
     # ADR-014 §"Runtime Ownership" — keep its dep closure small.
     "crates/mvm-fs",
     "crates/mvm-http",
-    "crates/mvm-observability",
     # Plan 72 W3 — PID-1 for the libkrun builder VM. Linux-only at
     # runtime; the crate compiles on macOS / Windows as an inert
     # binary so workspace builds stay green for non-Linux contributors.
@@ -408,7 +407,6 @@ mvm-vmm = { path = "crates/mvm-vmm", version = "0.24.2" }
 mvm-backends = { path = "crates/mvm-backends", version = "0.24.2" }
 mvm-fs = { path = "crates/mvm-fs", version = "0.24.2" }
 mvm-http = { path = "crates/mvm-http", version = "0.24.2" }
-mvm-observability = { path = "crates/mvm-observability", version = "0.24.2" }
 mvm-net = { path = "crates/mvm-net", version = "0.24.2" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.24.2", default-features = false }
 mvm-hostd = { path = "crates/mvm-hostd", version = "0.24.2", default-features = false }

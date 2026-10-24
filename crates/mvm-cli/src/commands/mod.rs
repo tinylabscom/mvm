@@ -394,7 +394,7 @@ fn run_command() -> Result<()> {
             if let Some(tip) = separator_tip(error.kind(), &args) {
                 eprintln!("{tip}");
             }
-            mvm_observability::exit(exit_code);
+            crate::observability::exit(exit_code);
         }
     };
     apply_startup_env(&cli);
@@ -414,7 +414,7 @@ fn run_command() -> Result<()> {
     register_builder_image_acquirer();
     register_stream_plane();
     // Bound for the rest of the command so queued trace spans are flushed as
-    // it returns. A verb that ends early goes through `mvm_observability::exit`,
+    // it returns. A verb that ends early goes through `crate::observability::exit`,
     // which flushes the same export first.
     let _observability = configure_runtime_logging(&cli);
 
@@ -855,7 +855,7 @@ fn configure_runtime_logging(cli: &Cli) -> logging::ObservabilityGuard {
 
 fn install_signal_handler() {
     let handler = termination_handler(Arc::clone(&CHILD_PIDS), |code| {
-        mvm_observability::exit_after_interrupt(code)
+        crate::observability::exit_after_interrupt(code)
     });
     if let Err(e) = crate::signal::set_ctrlc_handler(handler) {
         tracing::warn!("failed to install signal handler: {e}");

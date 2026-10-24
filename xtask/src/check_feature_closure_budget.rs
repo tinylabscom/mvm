@@ -107,7 +107,11 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// enter the default closure but do not increase this count. The identity
 /// path does not execute commands, filters, hooks, credential helpers or
 /// network clients; gix default/basic/extras/network-client features stay off.
-const FEATURE_CLOSURE_BUDGET: usize = 549;
+///
+/// 547 (was 549): `mvm-observability` folds into `mvm-cli`, its only consumer;
+/// the folded crate itself is the single removed node. The workspace tree had
+/// also been measuring one under the budget, so that slack goes with it.
+const FEATURE_CLOSURE_BUDGET: usize = 547;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

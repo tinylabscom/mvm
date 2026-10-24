@@ -77,7 +77,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             report_step(&step, journal_cursor, args.no_step_checkpoint);
             let code = call.exit_code();
             if code != 0 {
-                mvm_observability::exit(code);
+                crate::observability::exit(code);
             }
             Ok(())
         }

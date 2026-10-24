@@ -722,7 +722,7 @@ fn audit_receipts_verify(archive: &std::path::Path, json: bool) -> Result<()> {
 
     let code = report.exit_code();
     if code != 0 {
-        mvm_observability::exit(code);
+        crate::observability::exit(code);
     }
     Ok(())
 }

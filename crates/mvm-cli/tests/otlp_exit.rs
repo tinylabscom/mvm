@@ -1,4 +1,4 @@
-//! A process that ends through `mvm_observability::exit` still delivers its
+//! A process that ends through `mvm_cli::observability::exit` still delivers its
 //! queued spans.
 //!
 //! `std::process::exit` skips destructors, so the property only exists in a
@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mvm_observability::LogFormat;
+use mvm_cli::observability::LogFormat;
 
 /// Set in the child, to tell it to do the exiting.
 const CHILD_ENV: &str = "MVM_OTLP_EXIT_TEST_CHILD";
@@ -36,9 +36,9 @@ fn run_as_child_if_requested() {
     if std::env::var_os(CHILD_ENV).is_none() {
         return;
     }
-    let _guard = mvm_observability::init(LogFormat::Json);
+    let _guard = mvm_cli::observability::init(LogFormat::Json);
     tracing::info_span!(SPAN_NAME).in_scope(|| {});
-    mvm_observability::exit(CHILD_EXIT_CODE);
+    mvm_cli::observability::exit(CHILD_EXIT_CODE);
 }
 
 /// Re-run this binary, filtered to exactly `test`, as the child, exporting to

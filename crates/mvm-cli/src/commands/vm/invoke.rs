@@ -166,7 +166,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     if call.attach {
         let exit_code = dispatch_attached(call)?;
         if exit_code != 0 {
-            mvm_observability::exit(exit_code);
+            crate::observability::exit(exit_code);
         }
         return Ok(());
     }
@@ -214,7 +214,7 @@ pub(in crate::commands) fn dispatch_attached(call: EntrypointCall) -> Result<i32
 fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
     let exit_code = boot_entrypoint(call)?;
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }

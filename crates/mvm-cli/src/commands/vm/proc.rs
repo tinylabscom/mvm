@@ -248,14 +248,14 @@ fn cmd_wait(name: &str, token: &str, timeout: Option<u64>) -> Result<()> {
     drop(stderr);
 
     match terminal {
-        ProcWaitEvent::Exit { code } => mvm_observability::exit(code),
+        ProcWaitEvent::Exit { code } => crate::observability::exit(code),
         ProcWaitEvent::Killed { signal } => {
             eprintln!("killed by signal {signal}");
-            mvm_observability::exit(128 + signal);
+            crate::observability::exit(128 + signal);
         }
         ProcWaitEvent::TimedOut => {
             eprintln!("timed out");
-            mvm_observability::exit(124);
+            crate::observability::exit(124);
         }
         ProcWaitEvent::Error { kind, message } => {
             bail!("ProcWait error ({:?}): {}", kind, message)
