@@ -2,6 +2,18 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.24.2] — 2026-10-23
+
+### Changed
+- **ci**: Pin Linux CI and release jobs to ubuntu-24.04 (#4638, #4662)
+
+### Fixed
+- **bdd**: Gate the macOS HVF entrypoint scenarios to Firecracker (#4658, #4660, tracker #4655)
+- **bundle**: Keep the signed initramfs when its digest matches the release declaration (#4665)
+
+### Testing
+- **fuzz**: Run the application-locator fuzz target in the nightly lane (#4654)
+
 ## [0.24.1-rc.1] — 2026-10-23
 
 ### Added

@@ -1,5 +1,5 @@
 version = "0.15.2"
-runtime_version = "0.24.1-rc.1"
+runtime_version = "0.24.2"
 tag_prefix = "sdk-v"
 cli_binary_names = ["mvmctl"]
 
