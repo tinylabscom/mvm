@@ -46,7 +46,7 @@ few extra steps, covered in
 mvmctl doctor --workflow cli-run
 mvmctl bootstrap
 mvmctl image pull alpine
-MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref)"
+MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref )"
 mvmctl machine run --name local-demo --profile dev \
   --image "${MVM_DEMO_IMAGE:?Run preparation in this terminal first}" \
   --cpus 1 --memory 256M --timeout 30 \

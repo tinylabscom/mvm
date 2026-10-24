@@ -22,7 +22,7 @@ Run these commands in the same terminal:
 mvmctl doctor --workflow cli-run
 mvmctl bootstrap
 mvmctl image pull alpine
-MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref)"
+MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref )"
 printf '%s\n' "$MVM_DEMO_IMAGE"
 ```
 

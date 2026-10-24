@@ -513,6 +513,16 @@ fn output_mentions(world: &mut CliWorld, expected: String) {
     );
 }
 
+#[then(expr = "the output does not mention {string}")]
+fn output_does_not_mention(world: &mut CliWorld, expected: String) {
+    let record = last(world);
+    assert!(
+        !record.combined().contains(&expected),
+        "output unexpectedly mentioned {expected:?}.\n--- combined ---\n{}",
+        record.combined()
+    );
+}
+
 /// The regression guard proper.
 ///
 /// A guest that boots without its runtime overlay dies as a kernel panic, and

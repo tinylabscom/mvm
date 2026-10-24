@@ -31,3 +31,12 @@ Feature: The documented setup commands run on a real host
     Given an artifact-warm mvm home
     When I launch "doctor"
     Then the launch succeeds
+
+  # The quick start opens with the workflow-scoped form, not bare `doctor`: it
+  # is the readiness probe for the demo run that follows it, and filtering the
+  # blocking set to one workflow is its own code path.
+  @live
+  Scenario: doctor --workflow cli-run reports the host ready for the documented demo
+    Given an artifact-warm mvm home
+    When I launch "doctor --workflow cli-run"
+    Then the launch succeeds
