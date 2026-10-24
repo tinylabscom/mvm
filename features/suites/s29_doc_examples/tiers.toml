@@ -788,14 +788,6 @@ text = "mvmctl with it"
 reason = "\"...rebuild mvmctl with it enabled\" — a preposition"
 
 [[prose]]
-text = "mvmctl build will"
-reason = "\"a `mvmctl build` will...\" — the verb is real; `will` is the sentence"
-
-[[prose]]
-text = "mvmctl build to"
-reason = "\"...asks mvmctl build to emit\" — the verb is real; `to` is the sentence"
-
-[[prose]]
 text = "mvmctl build with"
 reason = "\"...a mvmctl build with keyless pack verification\" — a preposition"
 

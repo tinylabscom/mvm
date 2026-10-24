@@ -13,7 +13,7 @@
 //!   and atomically rename the directory to the new hash (since
 //!   `cve.json` changed → `meta.json` changed → `volume_hash`
 //!   changed). Emits `LocalAuditKind::DepsAudit` per volume processed.
-//! - **`mvmctl build --deps`** — force a rebuild of the deps volume
+//! - **`mvmctl machine build --deps`** — force a rebuild of the deps volume
 //!   even on cache hit (handled in `crates/mvm-cli/src/commands/build/build.rs`,
 //!   not here).
 //!

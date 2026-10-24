@@ -30,7 +30,7 @@ pub(super) mod kernel;
 pub(super) mod persistent_builder;
 pub(super) mod runtime_overlay;
 /// Shared helpers for the SDK record-mode auto-exec path. Used by
-/// `mvmctl compile <Sandbox-script>` and `mvmctl run --mode plan`.
+/// `mvmctl dev compile <Sandbox-script>` and `mvmctl run --mode plan`.
 pub(in crate::commands) mod sandbox_record;
 pub(super) mod sdk_sidecar;
 /// Host-side secret scan over a runtime recording. Walks every place

@@ -1,6 +1,6 @@
 //! Shared helpers for the SDK record-mode auto-exec path.
 //!
-//! Both `mvmctl compile <Sandbox-script>` (Phase 7e/7f) and
+//! Both `mvmctl dev compile <Sandbox-script>` (Phase 7e/7f) and
 //! `mvmctl run --mode plan <Sandbox-script>` (Followup H plan half)
 //! need to: spawn the user's script under
 //! `MVM_SDK_MODE=record + MVM_SDK_OUT_PATH=<tmp>`, then lower the
@@ -14,7 +14,7 @@
 //! user code on the host" rule. Documented in the SDK guide; the
 //! literal-only AST gate (Decision I) inside the language SDKs is
 //! the host-side defence. Callers should keep this routine
-//! opt-in — `mvmctl compile`'s decorator path stays the default.
+//! opt-in — `mvmctl dev compile`'s decorator path stays the default.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -144,7 +144,7 @@ pub(in crate::commands) fn auto_exec_record_script(
 /// digest, lower it through the SDK, and return the workload together
 /// with divergence findings and the captured digest.
 ///
-/// Reused by `mvmctl compile --from-recording` and the auto-exec path
+/// Reused by `mvmctl dev compile --from-recording` and the auto-exec path
 /// above. The `expected_sha256` argument is `None` in the auto-exec
 /// path (freshly captured) and `Some` when the caller supplies
 /// `--recording-sha256`.

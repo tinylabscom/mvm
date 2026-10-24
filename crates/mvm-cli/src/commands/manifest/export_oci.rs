@@ -11,7 +11,7 @@
 //! workloads to hosts without KVM.
 //!
 //! Failure modes (each surfaces with a clear message):
-//! - Template doesn't exist → "no slot named X; run mvmctl build"
+//! - Template doesn't exist → "no slot at … — run `mvmctl manifest ls`"
 //! - Slot exists but no current revision → "no current revision"
 //! - Revision exists but no image.tar.gz → "this template wasn't
 //!   built with the OCI output enabled — rebuild after wiring

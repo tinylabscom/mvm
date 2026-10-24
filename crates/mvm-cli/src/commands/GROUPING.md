@@ -34,7 +34,7 @@ Sits beside `deploy` (the write path) the way `deps` sits beside build.
 
 **`dev`** — contributor-only `dev compile` · `dev validate` · `dev kernel` ·
 `dev runtime-overlay` · `dev sdk-sidecar` · `dev address` · `dev image-set` ·
-`dev guest-bins`. User package construction is reserved for top-level `build`.
+`dev guest-bins`. User package construction lives at `machine build`.
 
 **`vm/`** — act on an existing/running VM: `vm pause` · `resume` · `snapshot`
 · `ttl`(was `set-ttl`) · `wait` · `boot-report` · `diff` · `cp` · `fs`

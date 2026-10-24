@@ -1,4 +1,4 @@
-//! TypeScript runner discovery — shared by `mvmctl compile` (auto-run
+//! TypeScript runner discovery — shared by `mvmctl dev compile` (auto-run
 //! of record-mode `.ts` scripts) and `mvmctl doctor` (host-environment
 //! probe). Lives in its own module so the install-hint string is one
 //! source of truth between the two surfaces.
@@ -67,7 +67,7 @@ pub(crate) fn resolve() -> Option<PathBuf> {
 }
 
 /// Single source of truth for the "install a TS runner" message
-/// surfaced by `mvmctl compile` (on `bail!`) and `mvmctl doctor`
+/// surfaced by `mvmctl dev compile` (on `bail!`) and `mvmctl doctor`
 /// (on a WARN result). Listing every install path keeps the two
 /// messages aligned and avoids users re-discovering the same
 /// recipes in two places.

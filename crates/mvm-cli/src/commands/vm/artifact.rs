@@ -58,7 +58,7 @@ pub(in crate::commands) enum Cmd {
     ModelConfig(ModelConfigArgs),
     /// Build a microVM artifact via the existing build pipeline.
     ///
-    /// This is a thin delegation stub — use `mvmctl build`
+    /// This is a thin delegation stub — use `mvmctl machine build`
     /// for the full build workflow. This subcommand
     /// exists to make the artifact group self-contained.
     #[command(name = "model-build")]
@@ -266,11 +266,11 @@ fn run_model_config(args: ModelConfigArgs) -> Result<()> {
 }
 
 fn run_model_build(_args: ModelBuildArgs) -> Result<()> {
-    // Thin stub: the full build pipeline lives in `mvmctl build`.
+    // Thin stub: the full build pipeline lives in `mvmctl machine build`.
     // Wiring NixMicrovmBuilder end-to-end here would require a running builder
     // VM, which is a larger slice. Delegate with a clear message.
     crate::ui::info(
-        "Use `mvmctl build` to build a microVM artifact.\n\
+        "Use `mvmctl machine build` to build a microVM artifact.\n\
          `mvmctl artifact model-build` is reserved for a future slice that \
          integrates directly with the artifact-model pipeline.",
     );
