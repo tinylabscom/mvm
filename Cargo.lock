@@ -1548,15 +1548,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "etherparse"
-version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aeebdb565da33451794551a771bd0b4e6f416d3182adc3ed2837f614d6168f9a"
-dependencies = [
- "arrayvec",
-]
-
-[[package]]
 name = "ext4-view"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3771,7 +3762,6 @@ dependencies = [
 name = "mvm-capture"
 version = "0.24.1-rc.1"
 dependencies = [
- "anyhow",
  "chrono",
  "hex",
  "mvm-compiler",
@@ -3782,7 +3772,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
- "tracing",
  "which",
 ]
 
@@ -4060,10 +4049,7 @@ dependencies = [
  "mvm-contract",
  "mvm-gpu-shim-core",
  "mvm-vmm",
- "serde",
- "serde_json",
  "tempfile",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4099,8 +4085,6 @@ version = "0.24.1-rc.1"
 dependencies = [
  "libc",
  "mvm-contract",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -4125,7 +4109,6 @@ dependencies = [
  "core-foundation 0.10.1",
  "ctor",
  "ed25519-dalek",
- "etherparse",
  "hex",
  "hickory-proto",
  "hickory-resolver",
