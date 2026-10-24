@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase timings for the live end-to-end harnesses. Sourced, not executed.
+# Phase timings for the BDD and live end-to-end harnesses. Sourced, not executed.
 #
 # A run that finishes in two hours says nothing about where the two hours went.
 # The documented-surface lane was twice cut down by its job budget while the
@@ -37,7 +37,17 @@ e2e_phase_end() {
 
 # Print every recorded phase and the total. `$1` titles the GitHub step summary
 # when one is available, so two lanes writing into one run stay distinguishable.
+# Optional `$2` records the exit status and failing phase. Callers using an EXIT
+# trap must preserve that status even if writing the summary fails.
 e2e_phase_summary() {
+  local outcome=""
+  if [[ -n "${2:-}" ]]; then
+    outcome="exit=$2"
+    if (( $2 != 0 )); then
+      outcome="$outcome failed-phase=${E2E_PHASE_NAME:-none}"
+    fi
+    echo "[phase-result] $outcome"
+  fi
   e2e_phase_end
   # Checked before expanding the array: an empty "${arr[@]}" is an unbound
   # variable under `set -u` on the bash 3.2 that macOS ships.
@@ -57,6 +67,10 @@ e2e_phase_summary() {
     {
       echo "### ${1:-Phase timings}"
       echo
+      if [[ -n "$outcome" ]]; then
+        echo "$outcome"
+        echo
+      fi
       echo "| phase | seconds |"
       echo "|---|---:|"
       for entry in "${E2E_PHASES[@]}"; do

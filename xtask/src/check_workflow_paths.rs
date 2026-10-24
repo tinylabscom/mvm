@@ -2005,6 +2005,33 @@ mod tests {
     }
 
     #[test]
+    fn test_support_cache_warms_the_exact_primary_consumer_selection() {
+        let selection = |job: &str, command: &str| {
+            let joined = job.replace("\\\n", " ");
+            joined
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(command))
+                .expect("test-support primary command must exist")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let warm = workflow("cache-warm.yml");
+        let ci = ci_workflow();
+        assert_eq!(
+            selection(
+                job_block(&warm, "warm-test-support"),
+                "cargo test --no-run ",
+            ),
+            selection(
+                job_block(&ci, "lint-features-test-support"),
+                "cargo nextest run ",
+            ),
+            "the trusted cache must compile the same packages, features and targets as its consumer"
+        );
+    }
+
+    #[test]
     fn trusted_main_warms_workspace_and_nix_outputs_for_validation() {
         let cache_action = workflow("../actions/rust-cache/action.yml");
         assert!(cache_action.contains("prefix-key: v1-rust"));
