@@ -2014,6 +2014,10 @@ fn pull_requests_compile_mvmctl_with_the_release_feature_set() {
         features.contains(&"embed-host-bins") && features.contains(&"release-artifact-bootstrap"),
         "the parsed set no longer looks like the release's: {features:?}"
     );
+    assert!(
+        !features.contains(&"template-registry-s3"),
+        "the general release must not carry the fleet-only S3 registry backend: {features:?}"
+    );
 
     let ci = ci_workflow();
     let lane = job_block(&ci, "lint-features-embed");
