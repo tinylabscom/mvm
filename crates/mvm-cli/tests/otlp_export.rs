@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mvm_observability::otlp::{OtlpConfig, spawn_exporter};
+use mvm_cli::observability::otlp::{OtlpConfig, spawn_exporter};
 use tracing_subscriber::prelude::*;
 
 /// One HTTP request as the collector received it.

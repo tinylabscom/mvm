@@ -3804,13 +3804,13 @@ dependencies = [
  "mvm-hostd",
  "mvm-http",
  "mvm-mcp",
- "mvm-observability",
  "mvm-runtime",
  "mvm-sdk",
  "mvm-vmm",
  "nix",
  "notify",
  "notify-debouncer-mini",
+ "percent-encoding",
  "rand 0.10.2",
  "rustls",
  "secrecy",
@@ -3823,6 +3823,7 @@ dependencies = [
  "toml 0.8.23",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "which",
  "zeroize",
@@ -4225,20 +4226,6 @@ dependencies = [
  "mvm-contract",
  "mvm-core",
  "serde_json",
-]
-
-[[package]]
-name = "mvm-observability"
-version = "0.24.2"
-dependencies = [
- "mvm-core",
- "mvm-http",
- "percent-encoding",
- "rand 0.10.2",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

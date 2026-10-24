@@ -315,14 +315,14 @@ fn run_linux(args: Args) -> Result<()> {
     }
 
     if args.fail_on_missing && !report.missing_syscalls.is_empty() {
-        mvm_observability::exit(1);
+        crate::observability::exit(1);
     }
 
     // Propagate the child's exit code so the audit is transparent to scripts.
     if let Some(code) = main_exit_code
         && code != 0
     {
-        mvm_observability::exit(code);
+        crate::observability::exit(code);
     }
 
     Ok(())

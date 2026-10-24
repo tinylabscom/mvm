@@ -6,9 +6,9 @@
 
 use std::time::Duration;
 
-use crate::otlp::ExportSlot;
+use super::otlp::ExportSlot;
 
-/// The process's trace export, installed by [`crate::ObservabilityConfig`] when a
+/// The process's trace export, installed by [`super::ObservabilityConfig`] when a
 /// collector is configured.
 pub(crate) static EXPORT: ExportSlot = ExportSlot::new();
 

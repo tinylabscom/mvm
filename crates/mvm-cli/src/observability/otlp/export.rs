@@ -123,7 +123,7 @@ pub(crate) fn span_queue(capacity: usize) -> (SpanQueue, Receiver<Message>) {
 ///
 /// `std::process::exit` does not run destructors. A process that holds the
 /// guard in [`ExportSlot`] instead can still flush on that path, which is what
-/// [`crate::exit`] does.
+/// [`crate::observability::exit`] does.
 #[must_use = "dropping the guard immediately stops export"]
 pub struct ExportGuard {
     queue: SpanQueue,

@@ -6,12 +6,16 @@
 //! `tracing-subscriber`: installing a global subscriber and the `Layer` that
 //! feeds that registry.
 //!
-//! The split is deliberate. Installing a subscriber is process-global state
-//! that only a binary should do, and `tracing-subscriber` pulls ~32 crates.
-//! Holding it here rather than in the foundation crate keeps it out of the
-//! sealed guest agent and the embedded musl host binaries, which emit through
-//! the `tracing` facade and never install a subscriber.
+//! Installing a subscriber is process-global state that only a binary should
+//! do, so the assembly lives in the CLI crate rather than the foundation
+//! crate: `tracing-subscriber` stays out of `mvm-core`'s graph and therefore
+//! off the sealed guest agent and the embedded musl host binaries, which emit
+//! through the `tracing` facade and never install a subscriber.
 
+// `exit` is the one sanctioned `std::process::exit` caller: the crate-level
+// `#![deny(clippy::exit)]` exists to force every early end through it, so the
+// wrapper itself carries the allow.
+#[allow(clippy::exit)]
 mod exit;
 pub mod logging;
 pub mod otlp;

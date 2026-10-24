@@ -352,7 +352,7 @@ pub(in crate::commands) fn exec_machine(
                     console::ConsoleSessionOptions::default(),
                 )?;
                 if exit_code != 0 {
-                    mvm_observability::exit(exit_code);
+                    crate::observability::exit(exit_code);
                 }
                 Ok(())
             }

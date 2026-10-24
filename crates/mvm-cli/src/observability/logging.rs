@@ -9,9 +9,9 @@ use tracing_subscriber::registry::LookupSpan;
 
 use mvm_core::observability::span_timing;
 
-use crate::exit::EXPORT;
-use crate::otlp;
-use crate::span_timing_layer::SpanTimingLayer;
+use super::exit::EXPORT;
+use super::otlp;
+use super::span_timing_layer::SpanTimingLayer;
 
 /// Log output format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +92,7 @@ fn fallback_log_filter(fallback: &str) -> EnvFilter {
 /// guard flushes queued spans, waiting at most the configured export timeout.
 /// Bind it in `main` (or the function that returns to it) so the flush runs
 /// as the program ends. The export itself is held process-wide rather than in
-/// the guard, so a path that ends early through [`crate::exit`] flushes it
+/// the guard, so a path that ends early through [`super::exit`] flushes it
 /// too; whichever runs first flushes and the other finds nothing left.
 #[must_use = "dropping the guard immediately stops trace export"]
 #[derive(Debug, Default)]
