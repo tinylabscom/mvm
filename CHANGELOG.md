@@ -6,6 +6,7 @@ All notable changes to mvm are documented in this file.
 
 ### Added
 - **cli**: Build pack specs, manifest projects, and Nix flakes into host-signed local `.mvmpkg` archives through `mvmctl build` (#4584)
+- **cli**: Build SDK-decorated sources and OCI image references through the same `mvmctl build` front door (#4584)
 - **core**: Require independent current feeds for applications
 - **core**: Retain current-trust application archive custody
 - **bundle**: Firecracker canonical kernel custody; open the canonical-bundle launch gate

@@ -41,6 +41,14 @@ Feature: mvmctl top-level CLI surface
     And the error output contains "ambiguous source"
     And the error output contains "--from manifest|flake"
 
+  Scenario: build help advertises every workload source class
+    When I run mvmctl with "build --help"
+    Then the command exits with code 0
+    And the help output contains "SDK app"
+    And the help output contains "OCI image"
+    And the help output contains "--production"
+    And the help output contains "--debug-out"
+
   Scenario: every CLI help item is one line shorter than 80 columns
     Then every mvmctl command and subcommand help item is one line shorter than 80 columns
 
