@@ -1,0 +1,22 @@
+{
+  "message_id": "018f7d6c-9d42-7a2a-bb42-7a3328d2a001",
+  "sender_workload_id": "018f7d6c-9d42-7a2a-bb42-7a3328d2a002",
+  "recipient": {
+    "organization_id": "018f7d6c-9d42-7a2a-bb42-7a3328d2a003",
+    "fleet_id": "018f7d6c-9d42-7a2a-bb42-7a3328d2a004",
+    "workload_id": "018f7d6c-9d42-7a2a-bb42-7a3328d2a005",
+    "mailbox_id": "018f7d6c-9d42-7a2a-bb42-7a3328d2a006"
+  },
+  "sender_boot_id": "018f7d6c-9d42-7a2a-bb42-7a3328d2a007",
+  "sender_assignment_generation": 1,
+  "recipient_assignment_generation": 2,
+  "schema": "prompt.v1",
+  "idempotency_key": "legacy-message",
+  "created_at": 1000,
+  "expires_at": 2000,
+  "ephemeral_public_key": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "nonce": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "ciphertext": [1, 2, 3],
+  "sender_signing_key_id": "legacy-sender",
+  "sender_signature": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+}
