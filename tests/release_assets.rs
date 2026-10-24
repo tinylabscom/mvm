@@ -921,7 +921,7 @@ fn every_release_archive_is_installed_and_its_hostlib_loaded_natively() {
     ] {
         assert!(smoke.contains(target), "{target} needs an installed smoke");
     }
-    for runner in ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-latest"] {
+    for runner in ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-15"] {
         assert!(
             smoke.contains(runner),
             "{runner} must run its native payload"

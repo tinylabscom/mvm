@@ -63,10 +63,18 @@ INSTALL_DIR="${MVM_INSTALL_DIR:-$HOME/.local/bin}"
 LIB_DIR="${MVM_INSTALL_LIB_DIR:-$(dirname "$INSTALL_DIR")/lib/mvm}"
 KEEP="${MVM_INSTALL_KEEP:-3}"
 
-# Payloads an archive may carry that a standard install deliberately leaves
-# out. Older releases bundled the optional libkrun supervisor; installing it
-# beside mvmctl would make that backend resolvable on hosts without libkrun.
-EXCLUDED_PAYLOADS="mvm-libkrun-supervisor"
+# The Apple Silicon archive carries both native backends. macOS 13–25 needs
+# libkrun; macOS 26 and newer uses HVF and leaves that compatibility tier out.
+EXCLUDED_PAYLOADS="mvm-libkrun-supervisor lib licenses sources SOURCE-OFFER.txt SOURCE-PINS"
+if [ "$(uname -s)" = "Darwin" ]; then
+  macos_major="$(sw_vers -productVersion | awk -F. '{print $1}')"
+  case "$macos_major" in
+    ''|*[!0-9]*) die "could not determine the macOS major version" ;;
+  esac
+  if [ "$macos_major" -lt 26 ]; then
+    EXCLUDED_PAYLOADS=""
+  fi
+fi
 
 # Markers naming what this installer created. uninstall.sh and
 # `mvmctl env update` read the same names.

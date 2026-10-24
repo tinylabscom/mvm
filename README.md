@@ -2,7 +2,8 @@
 
 mvm runs workloads in microVMs on macOS and Linux. Each workload gets its own
 Linux kernel under a hypervisor: the in-house HVF backend on macOS 26+ Apple
-Silicon, Firecracker on Linux with `/dev/kvm`. You can start one from an OCI
+Silicon, the bundled libkrun preview on macOS 13–25 Apple Silicon, and Firecracker
+on Linux with `/dev/kvm`. You can start one from an OCI
 image, a Nix flake, or a decorated Python or TypeScript function. The CLI is
 `mvmctl`. Python, TypeScript and Rust libraries drive the same operations from
 code.
@@ -23,7 +24,7 @@ There is no SSH server in any guest.
 ## Install
 
 ```bash
-# Release binary: macOS 26+ on Apple Silicon, or Linux x86_64/aarch64 with /dev/kvm
+# Release binary: macOS 13+ Apple Silicon (libkrun preview on 13–25), or Linux x86_64/aarch64 with /dev/kvm
 curl -fsSL https://runmvm.com/install.sh | sh
 
 # From source (run ./target/release/mvmctl from the checkout)

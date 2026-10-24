@@ -129,7 +129,7 @@ def producer_sign(payload, report, require_cli_inventory=False):
     code = targets(payload)
     if require_cli_inventory:
         names = {path.name for path, kind in code if kind == 2}
-        missing = {"mvmctl", "mvm-hvf-supervisor"} - names
+        missing = {"mvmctl", "mvm-hvf-supervisor", "mvm-libkrun-supervisor"} - names
         if missing:
             raise RuntimeError("missing required CLI inventory: " + ", ".join(sorted(missing)))
     entries = []
@@ -263,7 +263,7 @@ def main():
     parser.add_argument("--producer-adhoc", action="store_true",
                         help="sign and verify new staged Mach-O without Apple credentials")
     parser.add_argument("--require-cli-inventory", action="store_true",
-                        help="require executable mvmctl and mvm-hvf-supervisor")
+                        help="require mvmctl plus the HVF and libkrun supervisors")
     parser.add_argument(
         "--skip-unconfigured", action="store_true",
         help="exit 0 with an Unconfigured report when no Apple credential is set")

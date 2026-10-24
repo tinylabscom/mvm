@@ -175,7 +175,9 @@ Separately, the host-`wasmtime` `wasm` tier runs a user-supplied **WASI Preview 
 ### Choosing a tier
 
 - **Production / untrusted code** → Tier 1. Linux + KVM + Firecracker. No exceptions.
-- **macOS dev or CI on Apple Silicon** → Tier 2 native HVF. libkrun is an optional contributor integration, not a standard dependency. Verified boot is the open item.
+- **macOS 26+ dev or CI on Apple Silicon** → Tier 2 native HVF. libkrun is not
+  a dependency of that path. The signed macOS 13–25 release tier is an explicit
+  preview rather than an auto-selected fallback. Verified boot is the open item.
 - **Linux dev/test without `/dev/kvm`** → Tier 2 QEMU (`--hypervisor qemu`, TCG software emulation). A real microVM, slower; dev/test only.
 - **macOS Intel / native Windows** → unsupported for local microVM isolation today. There is no container fallback on any path: ADR-034 is retired, the Docker backend is removed, and `--hypervisor docker` is hard-refused. The one opt-in container-kernel tier is `apple-container`, which boots Apple's prebuilt container kernel on the in-house HVF VMM — a microVM, not a shared-kernel container. WSL2 has no standard libkrun workload path; a Hyper-V managed Linux builder remains future backend work.
 

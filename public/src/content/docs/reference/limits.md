@@ -29,7 +29,7 @@ Commit the manifest values once the sizing is intentional.
 | --- | --- | --- |
 | Firecracker on Linux/KVM | Strongest local microVM isolation. | Requires `/dev/kvm` and Linux host support. |
 | HVF | Supported Apple Silicon macOS builder and workload path. | Requires macOS 26+; standard builds and releases do not require libkrun. |
-| libkrun | Explicit integration development only. | Optional and excluded from standard release artifacts. |
+| libkrun | Explicit macOS 13–25 Apple Silicon preview. | Bundled in the signed Apple Silicon archive with no Homebrew dependency; select with `--hypervisor libkrun`. Packaged loading is verified, while the real guest-launch witness remains tracked in issue #4577. |
 | QEMU (TCG) | Linux dev/test without `/dev/kvm` (`--hypervisor qemu`). | Tier 2 dev/test; larger TCB, partial verified boot — not for production. |
 
 Always verify the active posture with:
