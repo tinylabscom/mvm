@@ -334,6 +334,7 @@ jobs:
                      scripts/security-lane-verdict.test.sh \
                      scripts/cargo-fast.sh \
                      scripts/cargo-stable.sh \
+                     scripts/e2e-phase-timings.sh \
                      scripts/dev-run-guard.test.sh \
                      scripts/cargo-target-dir-guard.sh \
                      scripts/cargo-target-dir-guard.test.sh \
@@ -384,6 +385,8 @@ jobs:
       - name: Scoped feedback recipe tests
         run: python3 scripts/test_scoped_tests.py
 
+      - name: BDD phase timing recipe tests
+        run: python3 scripts/test_bdd_phase_timings.py
 
       - name: Clippy
         run: ./scripts/cargo-stable.sh clippy --all-targets -- -D warnings
