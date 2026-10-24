@@ -1144,14 +1144,14 @@ fn machine_build_parses_image_and_flake() {
 }
 
 #[test]
-fn build_image_subcommand_removed() {
-    let err = Cli::try_parse_from(["mvmctl", "build", "image", "--flake", "."])
-        .expect_err("build image must not parse after removal");
-    assert_eq!(
-        err.kind(),
-        clap::error::ErrorKind::InvalidSubcommand,
-        "expected InvalidSubcommand, got: {err:?}"
-    );
+fn build_accepts_a_source_named_image() {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "image", "--flake", "."])
+        .expect("the unified build front door accepts any source path");
+    let Commands::Build(args) = cli.command else {
+        panic!("expected unified build command");
+    };
+    assert_eq!(args.source, Path::new("image"));
+    assert_eq!(args.flake.as_deref(), Some("."));
 }
 
 #[test]
@@ -5822,6 +5822,24 @@ fn emits_machine_readable_stdout(argv: &[&str]) -> bool {
         .unwrap()
         .command
         .emits_machine_readable_stdout()
+}
+
+#[test]
+fn registry_json_commands_reserve_stdout() {
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl",
+        "pull",
+        "runtime/go",
+        "--json",
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "search", "go", "--json",
+    ]));
+    assert!(!emits_machine_readable_stdout(&[
+        "mvmctl",
+        "pull",
+        "runtime/go",
+    ]));
 }
 
 #[test]

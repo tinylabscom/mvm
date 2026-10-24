@@ -680,7 +680,7 @@ fn manifest_for(
     members: Vec<BundleMember>,
     verity: Option<VerityInfo>,
 ) -> BundleManifest {
-    BundleManifest {
+    let mut manifest = BundleManifest {
         schema_version: schema_for(&members),
         publisher: signer.publisher_id(),
         key_id: key_id.clone(),
@@ -694,7 +694,11 @@ fn manifest_for(
         members,
         verity,
         resources: inputs.resources.clone(),
+    };
+    if inputs.local_build {
+        mvm_core::plan::bundle::mark_local_build(&mut manifest);
     }
+    manifest
 }
 
 /// A lazy private staging writer.
@@ -781,6 +785,50 @@ fn write_summary(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    struct TestSigner(ed25519_dalek::SigningKey);
+
+    impl BundleSigner for TestSigner {
+        fn publisher_id(&self) -> String {
+            "host:test".to_string()
+        }
+
+        fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+            self.0.verifying_key()
+        }
+
+        fn sign(&self, canonical_manifest: &[u8]) -> Result<[u8; 64]> {
+            use ed25519_dalek::Signer as _;
+            Ok(self.0.sign(canonical_manifest).to_bytes())
+        }
+    }
+
+    #[test]
+    fn local_build_inputs_stamp_the_signed_origin_label() {
+        let inputs = BundleExportInputs::new(
+            "/tmp/kernel",
+            "/tmp/rootfs",
+            "x86_64-linux",
+            Path::new("/tmp/app.mvmpkg"),
+        )
+        .local_build();
+        let signer = TestSigner(ed25519_dalek::SigningKey::from_bytes(&[7; 32]));
+        let manifest = manifest_for(
+            &inputs,
+            &signer,
+            &signer.key_id(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        assert_eq!(
+            manifest
+                .labels
+                .get(mvm_core::plan::bundle::BUNDLE_ORIGIN_LABEL)
+                .map(String::as_str),
+            Some(mvm_core::plan::bundle::LOCAL_BUILD_ORIGIN)
+        );
+    }
 
     #[test]
     fn sidecar_resolves_beside_the_rootfs() {

@@ -129,6 +129,9 @@ pub(in crate::commands) enum Commands {
     /// Beginner microVM workflows (run an OCI image and more)
     #[command(display_order = 1)]
     Machine(machine::Args),
+    /// Build a host-signed local workload archive
+    #[command(display_order = 2)]
+    Build(build::front_door::Args),
     /// Contributor build and inspection commands
     #[command(display_order = 20)]
     Dev(build::group::Args),
@@ -684,7 +687,9 @@ fn command_allows_helper_source_builds(command: &Commands) -> bool {
 
 fn command_allows_builder_auto_bootstrap(command: &Commands) -> bool {
     match command {
-        Commands::Dev(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => true,
+        Commands::Build(_) | Commands::Dev(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => {
+            true
+        }
         Commands::PersistentBuilder(_) => true,
         // `machine build` is `build` under its documented name.
         Commands::Machine(machine_args) => matches!(
@@ -726,6 +731,7 @@ fn apply_startup_env(cli: &Cli) {
     // path reads (`MVM_ALLOW_LOCAL_BUILDER_BUILD=1`) so callers that expect the
     // env-var semantics continue to work.
     let allow_local_builder = match &cli.command {
+        Commands::Build(args) => args.allow_local_builder_build,
         Commands::Dev(group_args) => group_args.allow_local_builder_build,
         Commands::Machine(m_args) => match &m_args.action {
             crate::commands::machine::MachineAction::Build(b) => b.allow_local_builder_build,

@@ -14,6 +14,26 @@ fn pack_build_help_advertises_explicit_input_observation() {
 }
 
 #[test]
+fn build_help_advertises_every_workload_source_and_image_control() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["build", "--help"])
+        .output()
+        .expect("run build help");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    let normalized = help.to_ascii_lowercase();
+    for source in ["pack", "manifest", "flake", "sdk", "image"] {
+        assert!(
+            normalized.contains(source),
+            "build help missing {source}:\n{help}"
+        );
+    }
+    for flag in ["--arch", "--production", "--debug-out"] {
+        assert!(help.contains(flag), "build help missing {flag}:\n{help}");
+    }
+}
+
+#[test]
 fn env_verify_runtime_missing_proof_emits_no_success_json() {
     let directory = tempfile::tempdir().expect("runtime verifier input directory");
     let config = directory.path().join("launch.json");
@@ -218,6 +238,48 @@ fn dev_help_lists_every_contributor_subcommand() {
     ] {
         assert!(help.contains(command), "dev help missing {command}: {help}");
     }
+}
+
+#[test]
+fn build_help_advertises_source_detection_and_export_controls() {
+    let help = help_text(&["build", "--help"]);
+    for expected in [
+        "SOURCE",
+        "--out",
+        "--from",
+        "--flake",
+        "--label",
+        "--posture",
+        "--environment",
+        "--health-timeout",
+        "--input-observation",
+    ] {
+        assert!(
+            help.contains(expected),
+            "build help missing {expected}: {help}"
+        );
+    }
+}
+
+#[test]
+fn build_rejects_an_ambiguous_source_before_building() {
+    let source = tempfile::tempdir().expect("create source directory");
+    std::fs::write(source.path().join("mvm.toml"), "schema_version = 1\n")
+        .expect("write manifest marker");
+    std::fs::write(source.path().join("flake.nix"), "{ outputs = _: {}; }\n")
+        .expect("write flake marker");
+    let state = tempfile::tempdir().expect("create isolated state");
+    let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("HOME", state.path())
+        .env("MVM_HOME", state.path())
+        .args(["build"])
+        .arg(source.path())
+        .output()
+        .expect("run build source detection");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ambiguous source"), "{stderr}");
+    assert!(stderr.contains("--from manifest|flake"), "{stderr}");
 }
 
 /// `dev guest-bins` produces mvmctl's guest-runtime archive; its help names
@@ -2376,7 +2438,13 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
         "{}",
         String::from_utf8_lossy(&pulled.stderr)
     );
-    let pull: serde_json::Value = serde_json::from_slice(&pulled.stdout).expect("pull JSON");
+    let pull: serde_json::Value = serde_json::from_slice(&pulled.stdout).unwrap_or_else(|error| {
+        panic!(
+            "pull JSON ({error}): stdout={} stderr={}",
+            String::from_utf8_lossy(&pulled.stdout),
+            String::from_utf8_lossy(&pulled.stderr)
+        )
+    });
     assert_eq!(pull["reference"], "runtime/go@1.0.0");
     let digest = pull["manifest_sha256"].as_str().expect("manifest digest");
 

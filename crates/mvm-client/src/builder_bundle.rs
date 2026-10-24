@@ -160,6 +160,7 @@ pub fn export_builder_result(
             posture: None,
             provenance: Some(request.provenance(verified.build())),
             environment: None,
+            local_build: false,
             boot_assets: None,
             cli_boot_assets: None,
             canonical_linux_proof: None,

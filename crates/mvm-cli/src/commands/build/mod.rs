@@ -9,6 +9,7 @@ pub(in crate::commands) mod build;
 pub(super) mod compile;
 #[cfg(test)]
 mod driver_builder_live;
+pub(super) mod front_door;
 pub(super) mod group;
 pub(super) mod guest_bins;
 /// Records an audited image-lineage node after a successful flake build, so

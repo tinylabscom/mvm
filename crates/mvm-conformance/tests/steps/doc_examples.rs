@@ -1596,7 +1596,7 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // signed runtime-archive fixture to execute that against, so the documented
 // example is parse-tier while the verifier's positive and refusal paths are
 // covered by its unit tests.
-const PARSE_TIER_PIN: usize = 85;
+const PARSE_TIER_PIN: usize = 86;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {

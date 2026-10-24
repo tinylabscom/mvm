@@ -160,6 +160,8 @@ impl Commands {
                 r.run.json || r.up_json || !r.run.argv.is_empty()
             }
             Commands::Why(a) => a.json,
+            Commands::Pull(a) => a.json,
+            Commands::Search(a) => a.json,
             Commands::SdkNoVm(_) => true,
             Commands::Machine(a) => match &a.action {
                 // Folded advanced ops delegate to their own check.
@@ -252,6 +254,7 @@ impl Commands {
             Commands::Doctor(_) => "doctor",
             Commands::Dashboard(_) => "dashboard",
             Commands::Prepare(_) => "prepare",
+            Commands::Build(_) => "build",
             Commands::Kernel(_) => "kernel",
             Commands::Generate(_) => "generate",
             Commands::Template(_) => "template",

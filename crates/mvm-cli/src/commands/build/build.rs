@@ -114,13 +114,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 
     if let Some(manifest_path) = resolve_manifest_for_args(&args)? {
-        return build_manifest(
+        build_manifest(
             &manifest_path,
             args.force,
             args.update_hash,
             args.json,
             args.build_mode.resolve(),
-        );
+        )?;
+        return Ok(());
     }
 
     build_mvmfile(&args.path, args.output.as_deref())
@@ -165,7 +166,7 @@ fn build_manifest(
     update_hash: bool,
     json: bool,
     mode: mvm_build::pipeline::BuildMode,
-) -> Result<()> {
+) -> Result<String> {
     let manifest = Manifest::read_file(manifest_path)?;
     let canonical = std::fs::canonicalize(manifest_path).with_context(|| {
         format!(
@@ -302,7 +303,20 @@ fn build_manifest(
         ));
     }
 
-    Ok(())
+    Ok(persisted.manifest_hash)
+}
+
+/// Build a manifest through the existing machine-build path and return its slot.
+pub(in crate::commands) fn build_manifest_to_slot(
+    manifest_path: &std::path::Path,
+) -> Result<String> {
+    build_manifest(
+        manifest_path,
+        false,
+        false,
+        false,
+        mvm_build::pipeline::BuildMode::Prod,
+    )
 }
 
 /// Build a slot from an `image`-source manifest.
@@ -317,7 +331,7 @@ fn build_manifest_from_image(
     image_ref: &str,
     json: bool,
     mode: mvm_build::pipeline::BuildMode,
-) -> Result<()> {
+) -> Result<String> {
     if json {
         PhaseEvent::new("build", "manifest", "started")
             .with_message(&format!(
@@ -405,7 +419,7 @@ fn build_manifest_from_image(
         ));
     }
 
-    Ok(())
+    Ok(persisted.manifest_hash)
 }
 
 /// Bring the builder image a flake build boots into the cache before the
