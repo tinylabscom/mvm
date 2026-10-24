@@ -16,6 +16,7 @@ pub mod doc_examples;
 pub mod journey;
 /// Same-page-merge confinement policy used by the warm-restore scenarios.
 pub mod page_merge;
+pub mod prepared_once;
 pub mod prompt_fixture;
 pub mod sharding;
 pub mod source_commands;
