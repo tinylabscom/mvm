@@ -198,7 +198,7 @@ mod tests {
         assert!(boots_oci_image(ImageNaming::Resolved(&pinned)).unwrap());
     }
 
-    /// Build `mvm.toml` into its slot the way `mvmctl build` does for a
+    /// Build `mvm.toml` into its slot the way `mvmctl machine build` does for a
     /// manifest that names an image, with `sidecar` as what materialization
     /// wrote. Returns the manifest path.
     fn build_manifest_slot(project: &Path, sidecar: &GuestSidecar) -> String {

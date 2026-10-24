@@ -1,7 +1,7 @@
 //! `mvmctl dev <sub>` — contributor build-time commands.
 //!
 //! `address`/`compile`/`validate`/`kernel`/`runtime-overlay`/`sdk-sidecar`/`image-set`/`guest-bins` are the
-//! contributor verbs. User-facing package builds belong to `mvmctl build`.
+//! contributor verbs. User-facing package builds belong to `mvmctl machine build`.
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};

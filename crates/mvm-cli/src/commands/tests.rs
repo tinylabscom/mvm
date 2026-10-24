@@ -5472,7 +5472,7 @@ fn test_up_tenant_override_via_flag() {
     );
 }
 
-// ---- `mvmctl compile --from-recording` ----
+// ---- `mvmctl dev compile --from-recording` ----
 
 #[test]
 fn test_compile_from_recording_parses() {

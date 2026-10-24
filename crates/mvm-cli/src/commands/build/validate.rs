@@ -1,4 +1,4 @@
-//! `mvmctl validate` — run `nix flake check` to validate a flake before
+//! `mvmctl dev validate` — run `nix flake check` to validate a flake before
 //! building. Flat verb (no subcommand layer) since `check` is the only
 //! action.
 

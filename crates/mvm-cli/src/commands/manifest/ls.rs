@@ -50,7 +50,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 .join(", ");
             println!("No built slots match tag filter [{tag_list}].");
         } else {
-            println!("No built slots. Run `mvmctl init` then `mvmctl build` to create one.");
+            println!(
+                "No built slots. Run `mvmctl init` then `mvmctl machine build` to create one."
+            );
         }
         return Ok(());
     }

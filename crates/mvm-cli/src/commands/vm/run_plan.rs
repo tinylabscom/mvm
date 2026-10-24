@@ -21,7 +21,7 @@
 //!
 //! 1. The user's script is auto-exec'd on the host under
 //!    `MVM_SDK_MODE=record + MVM_SDK_OUT_PATH=<tmp>` — the same
-//!    spawn-and-capture dance `mvmctl compile <Sandbox-script>`
+//!    spawn-and-capture dance `mvmctl dev compile <Sandbox-script>`
 //!    uses. The SDK's atexit hook writes the recording.
 //! 2. `mvm_sdk::runtime::compile_recording` lowers the recording
 //!    into a `Workload`.
@@ -48,7 +48,7 @@
 //! ## Security
 //!
 //! The Sandbox-script auto-exec runs *on the host* under the
-//! invoking user. Same posture as `mvmctl compile <script>` — the
+//! invoking user. Same posture as `mvmctl dev compile <script>` — the
 //! literal-only AST gate inside the language SDKs is the
 //! host-side defence. Callers who don't want host execution use
 //! the `@mvm.app` decorator path, which the decorator parser

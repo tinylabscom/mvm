@@ -26,7 +26,7 @@ pub(in crate::commands) enum CacheAction {
         /// source `mvm.toml` file is gone from disk. Equivalent to
         /// running `mvmctl manifest prune --orphans`; bundled here so
         /// "clean everything" is one command. ("Builds" is the user-
-        /// facing noun for what `mvmctl build` produces; internally
+        /// facing noun for what `mvmctl machine build` produces; internally
         /// these are slot directories under `~/.mvm/templates/`.)
         #[arg(long)]
         orphan_builds: bool,
