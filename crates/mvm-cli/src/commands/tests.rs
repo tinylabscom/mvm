@@ -5797,6 +5797,24 @@ fn emits_machine_readable_stdout(argv: &[&str]) -> bool {
 }
 
 #[test]
+fn registry_json_commands_reserve_stdout() {
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl",
+        "pull",
+        "runtime/go",
+        "--json",
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "search", "go", "--json",
+    ]));
+    assert!(!emits_machine_readable_stdout(&[
+        "mvmctl",
+        "pull",
+        "runtime/go",
+    ]));
+}
+
+#[test]
 fn a_transient_run_with_a_command_reserves_stdout_for_the_guest() {
     // The guest's own stdout is relayed to the caller, so host chrome must not
     // share the stream — a warning printed there lands glued to the workload's

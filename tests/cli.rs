@@ -2417,7 +2417,13 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
         "{}",
         String::from_utf8_lossy(&pulled.stderr)
     );
-    let pull: serde_json::Value = serde_json::from_slice(&pulled.stdout).expect("pull JSON");
+    let pull: serde_json::Value = serde_json::from_slice(&pulled.stdout).unwrap_or_else(|error| {
+        panic!(
+            "pull JSON ({error}): stdout={} stderr={}",
+            String::from_utf8_lossy(&pulled.stdout),
+            String::from_utf8_lossy(&pulled.stderr)
+        )
+    });
     assert_eq!(pull["reference"], "runtime/go@1.0.0");
     let digest = pull["manifest_sha256"].as_str().expect("manifest digest");
 
