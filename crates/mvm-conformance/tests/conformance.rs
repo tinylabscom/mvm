@@ -64,8 +64,18 @@ async fn main() {
     // the report.
     let writer = CliWorld::cucumber()
         .max_concurrent_scenarios(1)
+        .before(|_, _, _, _| {
+            Box::pin(async {
+                steps::launch_e2e::mark_scenario_start();
+            })
+        })
         .after(|_, _, scenario, _, world| {
             Box::pin(async move {
+                eprintln!(
+                    "[bdd-timing] scenario={:?} total={:.1}s",
+                    scenario.name,
+                    steps::launch_e2e::secs_since_scenario_start()
+                );
                 let Some(world) = world else { return };
                 if scenario
                     .tags
