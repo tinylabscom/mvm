@@ -170,7 +170,7 @@ fn verify_artifact(artifact: &RuntimeArtifact, expected: &std::path::Path) -> Re
         artifact.path == expected,
         "paused runtime artifact does not match the authenticated generation"
     );
-    let digest = mvm_core::crypto::image_verify::sha256_file(expected)?;
+    let digest = mvm_core::crypto::verified_digest::sha256_file_verified(expected)?;
     ensure!(
         artifact.sha256 == digest,
         "paused runtime artifact changed from the authenticated generation"

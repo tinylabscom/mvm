@@ -135,9 +135,9 @@ pub fn acquire_runtime_overlay_for_launch(
     let artifact = mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(resolver, arch)?;
     anyhow::ensure!(
         artifact.roothash == declaration.overlay_roothash
-            && mvm_core::crypto::image_verify::sha256_file(&artifact.overlay_ext4)?
+            && mvm_core::crypto::verified_digest::sha256_file_verified(&artifact.overlay_ext4)?
                 == declaration.overlay_sha256
-            && mvm_core::crypto::image_verify::sha256_file(&artifact.sidecar)?
+            && mvm_core::crypto::verified_digest::sha256_file_verified(&artifact.sidecar)?
                 == declaration.overlay_verity_sha256,
         "prepared runtime overlay differs from the selected archive"
     );
