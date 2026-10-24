@@ -661,7 +661,11 @@ pub(in crate::commands) fn run_dispatch(
     // flag or as the positional source) becomes the installed bundle's sha256
     // here, so nothing downstream parses the archive as an `mvm.toml` and the
     // boot is a plain `--manifest <bundle-sha256>`.
-    crate::commands::bundle::settle_manifest_archive(&mut args.run.manifest, args.run.dry_run)?;
+    crate::commands::bundle::settle_manifest_archive(
+        &mut args.run.manifest,
+        args.run.dry_run,
+        args.run.prod,
+    )?;
     // Before the flake is built into a slot below: the project's `[policy]`
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;

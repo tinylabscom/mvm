@@ -2747,8 +2747,8 @@ fn pack_update_dispatches_by_exact_target_shape() {
 }
 
 /// `machine run --manifest <app.mvmpkg> -- <cmd>` parses as a bundle-archive
-/// launch, and an archive that does not verify is refused at the install step,
-/// before the run reaches admission or any backend, with nothing installed.
+/// launch, and an archive that does not verify is refused at the verification
+/// step — before install, admission, or any backend — with nothing installed.
 #[test]
 fn machine_run_refuses_an_unverifiable_bundle_archive_before_booting() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2772,7 +2772,7 @@ fn machine_run_refuses_an_unverifiable_bundle_archive_before_booting() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("failed verification"),
+        stderr.contains("verifying bundle archive"),
         "the refusal must come from bundle verification: {stderr}"
     );
     let installed = std::fs::read_dir(state.join("bundles"))

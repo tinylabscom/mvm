@@ -105,7 +105,10 @@ pub use declarations::{
     BundleSizeBudget, forbidden_capabilities, unbound_environment_secret_slots,
     unsupported_environment_requirements,
 };
-pub use lookup::{BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, TrustStore};
+pub use lookup::{
+    BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, LocalBundleTrustStore,
+    TrustStore,
+};
 pub use signer::ManifestSigner;
 pub(crate) use stream::HashingWriter;
 pub use stream::{
@@ -118,6 +121,8 @@ pub use verify_error::{BundleVerifyError, ensure_safe_path};
 pub const BUNDLE_ORIGIN_LABEL: &str = "mvm.origin";
 /// Value identifying a bundle as a host-local build.
 pub const LOCAL_BUILD_ORIGIN: &str = "local-build";
+/// User-facing description of local-build authority.
+pub const LOCAL_BUILD_NOTICE: &str = "local build, signed by this host's key; not release-verified";
 
 /// Trust class derived from both the signed manifest and consumer-owned keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

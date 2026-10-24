@@ -51,6 +51,7 @@ pub mod audit;
 pub mod boot;
 pub mod builder_bundle;
 pub mod bundle;
+pub mod bundle_preview;
 pub mod checkpoint;
 pub mod connect;
 pub mod display_input;

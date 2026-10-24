@@ -82,7 +82,7 @@ Feature: machine run request contract
   Scenario Outline: machine run refuses production on a non-image source
     When I run mvmctl with "machine run <source> --prod -- /bin/true" and an isolated mvm home
     Then the command exits with code 1
-    And the error output contains "only with `--image` or `--runtime`"
+    And the error output contains "only with `--image`, `--runtime`, or a signed bundle artifact"
 
     Examples:
       | source                          |
@@ -95,7 +95,7 @@ Feature: machine run request contract
   Scenario: machine run refuses production on a manifest source
     When I run mvmctl with "machine run --manifest missing-manifest --prod -- /bin/true" and an isolated mvm home
     Then the command exits with code 1
-    And the error output contains "only with `--image` or `--runtime`"
+    And the error output contains "only with `--image`, `--runtime`, or a signed bundle artifact"
 
   # A positional source is an image or a signed `.mvmpkg`. A project directory
   # there is refused with the flags that take one, before anything is resolved.
