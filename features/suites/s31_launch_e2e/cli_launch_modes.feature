@@ -15,7 +15,6 @@ Feature: every README-documented CLI launch mode boots a real guest
   Background:
     Given an artifact-warm mvm home
     And the documented launch images are prepared
-    And an Alpine warm parent is ready
 
   @live
   Scenario: the documented preparation commands populate images and standbys explicitly
