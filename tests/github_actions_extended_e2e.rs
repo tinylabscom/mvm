@@ -538,7 +538,12 @@ fn only_native_invocation_positives_require_firecracker() {
             &feature,
             "the documented pack build health-boots and signs a frozen workload"
         ),
-        std::collections::BTreeSet::from(["@live", "@documented_pack_live", "@firecracker"]),
+        std::collections::BTreeSet::from([
+            "@live",
+            "@documented_pack_live",
+            "@firecracker",
+            "@runtime_candidate",
+        ]),
         "pack health must retain its Firecracker positive"
     );
 }
