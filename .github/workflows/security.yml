@@ -609,6 +609,9 @@ jobs:
     # See specs/VERIFICATION.md §"Mutation-tested witnesses" and plan 272 WS-2.
     strategy:
       fail-fast: false
+      # Leave hosted runners for merge-group CI. All shards still run;
+      # the full mutation sweep takes longer rather than consuming the pool.
+      max-parallel: 2
       matrix:
         package:
           - mvm-agentd
