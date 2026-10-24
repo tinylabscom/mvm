@@ -516,3 +516,53 @@ fn a_matrix_runner_naming_the_pool_counts() {
     let body = "    strategy:\n      matrix:\n        include:\n          - runner: [self-hosted, hetzner, kvm]\n    runs-on: ${{ matrix.runner }}\n";
     assert!(can_run_on_kvm_pool(body));
 }
+
+#[test]
+fn extended_ci_places_live_temp_state_on_the_runner_disk() {
+    let workflow =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read Extended CI workflow");
+    assert!(
+        workflow.contains("base=\"${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"),
+        "live OCI preparation must not use the small /tmp tmpfs"
+    );
+    assert!(
+        workflow.contains(
+            "job-cleanup.sh \"${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
+        ),
+        "the always-run cleanup must own the same disk-backed temp tree"
+    );
+}
+
+#[test]
+fn job_cleanup_accepts_a_private_base_under_runner_temp() {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let runner_temp = std::env::temp_dir().join(format!(
+        "mvm-runner-temp-cleanup-{}-{suffix}",
+        std::process::id()
+    ));
+    let base = runner_temp.join("mvm-w-123-1-1");
+    std::fs::create_dir_all(&base).expect("create isolated base");
+
+    let result = std::process::Command::new("bash")
+        .arg(JOB_CLEANUP)
+        .arg(&base)
+        .env("RUNNER_TEMP", &runner_temp)
+        .env("DRY_RUN", "1")
+        .output()
+        .expect("run cleanup validation");
+    assert!(
+        result.status.success(),
+        "cleanup rejected runner-temp base: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stdout).contains("removing"),
+        "dry-run should validate and report the base: {}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(base.is_dir(), "dry-run must leave the isolated base intact");
+    std::fs::remove_dir_all(runner_temp).expect("remove test directory");
+}

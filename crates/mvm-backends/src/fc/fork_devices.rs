@@ -211,7 +211,12 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
-        let root = tempfile::tempdir().unwrap();
+        // The default temp dir can be deep enough that the VM's sockets fall
+        // back to the short namespace; from_anchors then derives the parent's
+        // state dir from the relocated socket path and drive remapping breaks.
+        // Production refuses that layout, so the fixture keeps sockets inside
+        // the state dir by rooting at a short path.
+        let root = crate::driver::socket_tempdir();
         let image_dir = root.path().join("cache/image");
         let parent_dir = root.path().join("vms/parent");
         let child_dir = root.path().join("vms/child");
