@@ -518,70 +518,105 @@ fn admit(
     // The pinned bundle's signed environment, checked against this launch
     // once the plan is admitted (below), beside the posture.
     let mut pinned_environment: Option<mvm_core::plan::EnvironmentDescriptor> = None;
-    let (bundle_pin, bundle_resolver, bundle_trust, bundle_has_embedded_images, pinned_bundle) =
-        match p.bundle_pin {
-            Some(bundle) => {
-                let path = bundle.archive();
-                let bytes = std::fs::read(path)
-                    .with_context(|| format!("reading bundle archive at {}", path.display()))?;
-                let trust = mvm_core::plan::FsTrustStore::default_path()
-                    .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?;
-                let verified = mvm_core::plan::read_and_verify_bundle(&bytes, &trust)
-                    .with_context(|| format!("verifying bundle at {}", path.display()))?;
-                if !verified.embedded_image_sets.is_empty() {
-                    let kind = p.backend_kind.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "bundle {} embeds an image set but no boot backend was selected",
+    let (
+        bundle_pin,
+        bundle_resolver,
+        bundle_trust,
+        bundle_has_embedded_images,
+        pinned_bundle,
+        pinned_bundle_origin,
+    ) = match p.bundle_pin {
+        Some(bundle) => {
+            let path = bundle.archive();
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading bundle archive at {}", path.display()))?;
+            let release_trust = mvm_core::plan::FsTrustStore::default_path()
+                .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?;
+            let host_signer = match p.keys_dir {
+                Some(dir) => load_or_init_at(dir),
+                None => mvm_hostd::audit::host_keypair::load_or_init(),
+            }
+            .context("loading host signer for bundle admission")?;
+            let host_key_id = mvm_core::plan::bundle::key_id_from_pubkey(&host_signer.verifying);
+            let trust = mvm_core::plan::bundle::LocalBundleTrustStore::new(
+                release_trust,
+                host_key_id.clone(),
+                host_signer.verifying,
+            );
+            let verified = mvm_core::plan::read_and_verify_bundle(&bytes, &trust)
+                .with_context(|| format!("verifying bundle at {}", path.display()))?;
+            let origin = mvm_core::plan::bundle::bundle_origin(
+                &verified.manifest,
+                &host_key_id,
+                trust.release(),
+            );
+            match origin {
+                mvm_core::plan::bundle::BundleOrigin::LocalBuild => anyhow::ensure!(
+                    !bundle.is_production(),
+                    "refusing a local build for a production run: local builds are not release-verified"
+                ),
+                mvm_core::plan::bundle::BundleOrigin::ReleaseVerified => {}
+                mvm_core::plan::bundle::BundleOrigin::Untrusted => anyhow::bail!(
+                    "refusing bundle {}: its signed origin is neither release-verified nor a local build signed by this host",
+                    path.display()
+                ),
+            }
+            if !verified.embedded_image_sets.is_empty() {
+                let kind = p.backend_kind.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "bundle {} embeds an image set but no boot backend was selected",
+                        path.display()
+                    )
+                })?;
+                let support = bundle_image_support.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "backend {} has no Linux-direct embedded image-set contract",
+                        kind.as_str()
+                    )
+                })?;
+                for embedded in &verified.embedded_image_sets {
+                    mvm_core::plan::check_embedded_image_set_for_backend(
+                        embedded,
+                        mvm_core::arch::GuestArch::host(),
+                        support,
+                        &bundle_host_protocols,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "backend {} refuses embedded image set in {}",
+                            kind.as_str(),
                             path.display()
                         )
                     })?;
-                    let support = bundle_image_support.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "backend {} has no Linux-direct embedded image-set contract",
-                            kind.as_str()
-                        )
-                    })?;
-                    for embedded in &verified.embedded_image_sets {
-                        mvm_core::plan::check_embedded_image_set_for_backend(
-                            embedded,
-                            mvm_core::arch::GuestArch::host(),
-                            support,
-                            &bundle_host_protocols,
-                        )
-                        .with_context(|| {
-                            format!(
-                                "backend {} refuses embedded image set in {}",
-                                kind.as_str(),
-                                path.display()
-                            )
-                        })?;
-                    }
                 }
-                let has_embedded_images = !verified.embedded_image_sets.is_empty();
-                postures.extend(verified.manifest.security_posture().copied());
-                pinned_environment = verified.manifest.environment().cloned();
-                let pin = bundle_pin_from_archive(&bytes, verified.key_id.clone()).with_context(
-                    || format!("extracting signature from bundle at {}", path.display()),
-                )?;
-                // Use an in-memory resolver scoped to this admission —
-                // the caller supplied the path, so we already have the
-                // bytes; no need to walk the FS registry again.
-                let resolver = InMemoryBundleResolver::new(bytes);
-                let pinned = bundle_binding::PinnedBundle {
-                    pin: bundle,
-                    sha256: pin.bundle_sha256.clone(),
-                    signed: verified.manifest,
-                };
-                (
-                    Some(pin),
-                    Some(resolver),
-                    Some(trust),
-                    has_embedded_images,
-                    Some(pinned),
-                )
             }
-            None => (None, None, None, false, None),
-        };
+            let has_embedded_images = !verified.embedded_image_sets.is_empty();
+            postures.extend(verified.manifest.security_posture().copied());
+            pinned_environment = verified.manifest.environment().cloned();
+            let pin =
+                bundle_pin_from_archive(&bytes, verified.key_id.clone()).with_context(|| {
+                    format!("extracting signature from bundle at {}", path.display())
+                })?;
+            // Use an in-memory resolver scoped to this admission —
+            // the caller supplied the path, so we already have the
+            // bytes; no need to walk the FS registry again.
+            let resolver = InMemoryBundleResolver::new(bytes);
+            let pinned = bundle_binding::PinnedBundle {
+                pin: bundle,
+                sha256: pin.bundle_sha256.clone(),
+                signed: verified.manifest,
+            };
+            (
+                Some(pin),
+                Some(resolver),
+                Some(trust),
+                has_embedded_images,
+                Some(pinned),
+                Some(origin),
+            )
+        }
+        None => (None, None, None, false, None, None),
+    };
 
     // Pin the kernel alongside the image. Through the shared digest cache, the
     // same way `image_sha256` above is derived — a pin that re-read the whole
@@ -720,6 +755,18 @@ fn admit(
         &p.services,
         p.gpu,
     );
+    let mut bundle_audit_labels = std::collections::BTreeMap::new();
+    if pinned_bundle_origin == Some(mvm_core::plan::bundle::BundleOrigin::LocalBuild) {
+        bundle_audit_labels.insert("origin".to_string(), "local-build".to_string());
+        bundle_audit_labels.insert(
+            "bundle_sha256".to_string(),
+            bundle_pin
+                .as_ref()
+                .expect("a classified bundle has a pin")
+                .bundle_sha256
+                .clone(),
+        );
+    }
     let input = SynthesisInput {
         outputs: p.outputs.clone(),
         // The resolved permission set rides into the plan body, so the ceiling
@@ -769,7 +816,7 @@ fn admit(
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         tools: p.tools.clone(),
         caller_commitment: p.caller_commitment.clone(),
-        audit_labels: Default::default(),
+        audit_labels: bundle_audit_labels,
         agent_verbs: crate::admission::agent_verbs::parse_agent_verb_override(
             &p.agent_verb_override,
         )?

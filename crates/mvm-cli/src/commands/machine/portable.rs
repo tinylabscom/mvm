@@ -5,10 +5,12 @@
 //! The run path (`machine run --manifest <app.mvmpkg>`) verifies the same
 //! archive through the same streaming verifier.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::BackendImageSupport;
-use mvm_core::plan::bundle::verify_bundle_file;
+use mvm_core::plan::bundle::{
+    BundleOrigin, LocalBundleTrustStore, bundle_origin, verify_bundle_file,
+};
 use mvm_core::plan::{BundleManifest, FsTrustStore, check_embedded_image_set_for_backend};
 use std::path::PathBuf;
 
@@ -40,8 +42,12 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
         Some(path) => FsTrustStore::new(path),
         None => FsTrustStore::default_path()?,
     };
-    let verified = verify_bundle_file(&args.path, &trust)
-        .map_err(|error| anyhow::anyhow!("{}: {error}", args.path.display()))?;
+    let (verified, origin) = verify_for_preview(&args.path, trust)?;
+    anyhow::ensure!(
+        origin != BundleOrigin::Untrusted,
+        "{}: signed origin is neither release-verified nor a local build signed by this host",
+        args.path.display()
+    );
     let host_arch = GuestArch::require_host(&verified.manifest.arch)
         .map_err(|error| anyhow::anyhow!("{}: not runnable here: {error}", args.path.display()))?;
 
@@ -76,15 +82,29 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
                 "posture": posture_preview(&verified.manifest),
                 "kernel_cmdline": verified.manifest.kernel_cmdline(),
                 "built_from": verified.manifest.build_provenance().map(|p| p.input_ref.as_str()),
-                "verified": true,
+                "origin": match origin {
+                    BundleOrigin::ReleaseVerified => "release-verified",
+                    BundleOrigin::LocalBuild => "local-build",
+                    BundleOrigin::Untrusted => "untrusted",
+                },
+                "verified": origin == BundleOrigin::ReleaseVerified,
+                "release_verified": origin == BundleOrigin::ReleaseVerified,
             }))?
         );
     } else {
         // This is the requested verification report, not opt-in UI chatter.
         // It must remain visible without --verbose and when stdout is piped.
+        if origin == BundleOrigin::LocalBuild {
+            println!("{}", mvm_core::plan::bundle::LOCAL_BUILD_NOTICE);
+        }
         println!(
-            "{}: verified, architecture compatible with {host_arch} ({} artifacts, {} embedded image set{}); launch readiness not checked{}",
+            "{}: {}architecture compatible with {host_arch} ({} artifacts, {} embedded image set{}); launch readiness not checked{}",
             args.path.display(),
+            if origin == BundleOrigin::ReleaseVerified {
+                "verified, "
+            } else {
+                ""
+            },
             verified.manifest.artifacts.len(),
             verified.embedded_image_sets.len(),
             if verified.embedded_image_sets.len() == 1 {
@@ -110,6 +130,49 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
         }
     }
     Ok(())
+}
+
+fn verify_for_preview(
+    path: &std::path::Path,
+    release_trust: FsTrustStore,
+) -> Result<(mvm_core::plan::bundle::VerifiedBundleFile, BundleOrigin)> {
+    let Some(host_key) = existing_host_verifying_key()? else {
+        let verified = verify_bundle_file(path, &release_trust)
+            .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
+        let origin = if verified
+            .manifest
+            .labels
+            .get(mvm_core::plan::bundle::BUNDLE_ORIGIN_LABEL)
+            .is_some_and(|value| value == mvm_core::plan::bundle::LOCAL_BUILD_ORIGIN)
+        {
+            BundleOrigin::Untrusted
+        } else {
+            BundleOrigin::ReleaseVerified
+        };
+        return Ok((verified, origin));
+    };
+    let host_key_id = mvm_core::plan::bundle::key_id_from_pubkey(&host_key);
+    let trust = LocalBundleTrustStore::new(release_trust, host_key_id.clone(), host_key);
+    let verified = verify_bundle_file(path, &trust)
+        .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
+    let origin = bundle_origin(&verified.manifest, &host_key_id, trust.release());
+    Ok((verified, origin))
+}
+
+fn existing_host_verifying_key() -> Result<Option<ed25519_dalek::VerifyingKey>> {
+    let path = mvm_hostd::audit::host_keypair::default_keys_dir()?
+        .join(mvm_hostd::audit::host_keypair::PUBLIC_FILENAME);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{} is not a 32-byte Ed25519 public key", path.display()))?;
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        .map(Some)
+        .with_context(|| format!("parsing {}", path.display()))
 }
 
 /// The ceilings a bundle places on any launch of it, as the JSON verdict
