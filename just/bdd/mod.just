@@ -62,7 +62,14 @@ live-ci TAG="ci_live":
     cargo build --bin mvmctl --features user,embed-host-bins
     cargo build -p mvm-hostd --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint
     "${CARGO_TARGET_DIR:-target}/debug/mvmctl" kernel build --which workload --source download
-    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_ONLY_TAG={{ TAG }} MVM_BDD_STRICT_SKIPS=1 MVM_BDD_ALLOWED_SKIPS=outside-selected-tag cargo test -p mvm-conformance --test conformance --features bdd
+    @allowed_skips=outside-selected-tag; \
+    if [ "${MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP:-false}" = true ] && [ -z "${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}" ]; then allowed_skips="$allowed_skips,needs-runtime-candidate"; fi; \
+    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" \
+    MVM_BDD_LIVE=1 \
+    MVM_BDD_ONLY_TAG={{ TAG }} \
+    MVM_BDD_STRICT_SKIPS=1 \
+    MVM_BDD_ALLOWED_SKIPS="$allowed_skips" \
+    cargo test -p mvm-conformance --test conformance --features bdd
 
 # Nightly KVM witness for the one scenario that runs a warm claim end to end:
 # warm a parent, claim it, and require the child's run to be anchored in the

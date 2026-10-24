@@ -144,7 +144,15 @@ fn live_bdd_recipe_opts_in_and_selects_one_strict_witness() {
     assert!(recipe.contains("MVM_BDD_LIVE=1"));
     assert!(recipe.contains("MVM_BDD_ONLY_TAG={{ TAG }}"));
     assert!(recipe.contains("MVM_BDD_STRICT_SKIPS=1"));
-    assert!(recipe.contains("MVM_BDD_ALLOWED_SKIPS=outside-selected-tag"));
+    // The tolerated skips are the tag-selection reason alone. A lane without
+    // the signed runtime candidate may add exactly one more reason, and only
+    // by opting in explicitly — a lane handed the candidate runs those
+    // scenarios instead of skipping them.
+    assert!(recipe.contains("allowed_skips=outside-selected-tag"));
+    assert!(recipe.contains("MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP"));
+    assert!(recipe.contains("[ -z \"${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}\" ]"));
+    assert!(recipe.contains("allowed_skips=\"$allowed_skips,needs-runtime-candidate\""));
+    assert!(recipe.contains("MVM_BDD_ALLOWED_SKIPS=\"$allowed_skips\""));
     assert!(recipe.contains("cargo build --bin mvmctl --features user"));
     assert!(recipe.contains("CARGO_BIN_EXE_mvmctl=\"${CARGO_TARGET_DIR:-target}/debug/mvmctl\""));
     assert!(!recipe.contains("--tags"));

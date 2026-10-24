@@ -59,6 +59,12 @@ pub const NODE_TAG: &str = "node";
 /// produces both.
 pub const BUNDLE_TAG: &str = "bundle";
 
+/// Cucumber tag for portable artifacts that must be created with the exact
+/// signed runtime candidate being exercised. Nightly `main` has no versioned
+/// release candidate, so these scenarios run in the release workflow that
+/// supplies `MVM_E2E_RUNTIME_CANDIDATE_DIR` instead.
+pub const RUNTIME_CANDIDATE_TAG: &str = "runtime_candidate";
+
 /// Cucumber tag for a scenario that boots a guest from a prebuilt *workload*
 /// kernel rather than building one. The kernel is taken from
 /// `MVM_BDD_WORKLOAD_KERNEL`, or from the isolated cache then the host's
@@ -287,6 +293,8 @@ pub enum ScenarioGate {
     NeedsFirecracker,
     /// No `.mvmpkg` for a bundle-boot scenario to install.
     NeedsBundleFixture,
+    /// No signed CLI runtime candidate was supplied for portable creation.
+    NeedsRuntimeCandidate,
     /// No prebuilt workload kernel could be resolved.
     NeedsWorkloadKernel,
     /// The backend cannot capture a full-VM memory snapshot on this host.
@@ -335,6 +343,7 @@ impl ScenarioGate {
             Self::NeedsLiveOptIn => "needs-live-opt-in",
             Self::NeedsFirecracker => "needs-firecracker",
             Self::NeedsBundleFixture => "needs-bundle-fixture",
+            Self::NeedsRuntimeCandidate => "needs-runtime-candidate",
             Self::NeedsWorkloadKernel => "needs-workload-kernel",
             Self::NeedsMemorySnapshot => "needs-memory-snapshot",
             Self::NeedsDirShare => "needs-dir-share",
@@ -442,6 +451,29 @@ pub fn scenario_gate_for_selection(
     scenario_gate(tags, caps)
 }
 
+/// Apply the exact signed runtime-candidate gate after ordinary live
+/// capabilities and tag selection.
+///
+/// Portable creation cannot use an unsigned source build as a substitute for
+/// the signed runtime quartet. A nightly on unreleased `main` therefore names
+/// this skip, while the release e2e workflow supplies the signed candidate and
+/// runs the same scenarios.
+pub fn gate_selected_scenario_with_runtime_candidate(
+    tags: &[String],
+    caps: RuntimeCaps,
+    only_tag: Option<&str>,
+    runtime_candidate_available: bool,
+) -> ScenarioGate {
+    let gate = scenario_gate_for_selection(tags, caps, only_tag);
+    if !matches!(gate, ScenarioGate::Run) {
+        return gate;
+    }
+    if tags.iter().any(|tag| tag == RUNTIME_CANDIDATE_TAG) && !runtime_candidate_available {
+        return ScenarioGate::NeedsRuntimeCandidate;
+    }
+    ScenarioGate::Run
+}
+
 impl ScenarioGate {
     /// What to tell the operator, in the summary line.
     pub fn reason(self) -> Option<&'static str> {
@@ -453,6 +485,10 @@ impl ScenarioGate {
             Self::NeedsBundleFixture => Some(
                 "need MVM_BDD_BUNDLE to name a readable .mvmpkg and \
                  MVM_BDD_BUNDLE_PUBKEY its publisher key",
+            ),
+            Self::NeedsRuntimeCandidate => Some(
+                "need MVM_E2E_RUNTIME_CANDIDATE_DIR with the exact signed CLI runtime \
+                 candidate; unreleased main builds cannot substitute for its signed assets",
             ),
             Self::NeedsNode => Some("need node on PATH (TypeScript example checkers)"),
             Self::NeedsWorkloadKernel => Some(
@@ -1469,6 +1505,29 @@ mod tests {
     /// count them separately. `@live` without the opt-in is the one that
     /// matters most — those are the scenarios that boot a real microVM.
     #[test]
+    fn runtime_candidate_scenarios_require_the_signed_candidate_after_live_gates() {
+        let tagged = tags(&[LIVE_TAG, RUNTIME_CANDIDATE_TAG]);
+
+        assert_eq!(
+            gate_selected_scenario_with_runtime_candidate(&tagged, NONE, None, false),
+            ScenarioGate::NeedsLiveOptIn
+        );
+        assert_eq!(
+            gate_selected_scenario_with_runtime_candidate(&tagged, ALL, Some(CI_LIVE_TAG), false),
+            ScenarioGate::OutsideSelectedTag
+        );
+        assert_eq!(
+            gate_selected_scenario_with_runtime_candidate(&tagged, ALL, None, false),
+            ScenarioGate::NeedsRuntimeCandidate
+        );
+        assert_eq!(
+            gate_selected_scenario_with_runtime_candidate(&tagged, ALL, None, true),
+            ScenarioGate::Run
+        );
+    }
+
+    /// Capability skips are separately countable; a skipped scenario is not a pass.
+    #[test]
     fn each_skip_reason_is_reported_distinctly() {
         let none = RuntimeCaps {
             live_opted_in: false,
@@ -1549,6 +1608,7 @@ mod tests {
             ScenarioGate::NeedsLiveOptIn,
             ScenarioGate::NeedsFirecracker,
             ScenarioGate::NeedsBundleFixture,
+            ScenarioGate::NeedsRuntimeCandidate,
             ScenarioGate::OutsideSelectedTag,
         ] {
             assert!(g.reason().is_some(), "{g:?} must say why");
