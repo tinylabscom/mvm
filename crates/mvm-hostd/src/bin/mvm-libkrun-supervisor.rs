@@ -174,7 +174,9 @@ fn apply_egress_relay_override(cfg: &mut SupervisorConfig) {
 /// Failure is fatal. The guest is about to attach that image read-write, and
 /// booting it while another VM holds the lock is the filesystem corruption the
 /// lock exists to prevent.
-fn hold_exclusive_image_lock(cfg: &SupervisorConfig) -> Result<Option<std::fs::File>, ExitCode> {
+fn hold_exclusive_image_lock(
+    cfg: &SupervisorConfig,
+) -> Result<Option<mvm_build::builder_vm_runtime::HeldImageLock>, ExitCode> {
     hold_exclusive_image_lock_with(cfg, mvm_build::builder_vm_runtime::LockWait::from_env())
 }
 
@@ -190,18 +192,18 @@ fn hold_exclusive_image_lock(cfg: &SupervisorConfig) -> Result<Option<std::fs::F
 fn hold_exclusive_image_lock_with(
     cfg: &SupervisorConfig,
     wait: mvm_build::builder_vm_runtime::LockWait,
-) -> Result<Option<std::fs::File>, ExitCode> {
+) -> Result<Option<mvm_build::builder_vm_runtime::HeldImageLock>, ExitCode> {
     let Some(lock_path) = cfg.exclusive_image_lock.as_ref() else {
         return Ok(None);
     };
     match mvm_build::builder_vm_runtime::hold_image_lock(lock_path, wait) {
-        Ok(file) => {
+        Ok(guard) => {
             append_supervisor_breadcrumb(
                 std::path::Path::new(&cfg.vm_state_dir),
                 "image_lock",
                 format!("held {}", lock_path.display()),
             );
-            Ok(Some(file))
+            Ok(Some(guard))
         }
         Err(e) => {
             eprintln!(

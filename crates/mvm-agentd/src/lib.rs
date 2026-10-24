@@ -124,6 +124,8 @@ pub mod restore_clock;
 /// these testable units. Folded in from the former `mvm-runner` crate.
 pub mod runner;
 pub mod runtime_config;
+#[cfg(target_os = "linux")]
+mod safe_mount_target;
 /// Shared SOCKS5 UDP datagram wire codec for the guest proxy and relay.
 pub mod socks5_udp;
 /// Shared bounded pipe-reader and consumer handoff.
@@ -162,6 +164,7 @@ pub mod tool_decision_socket;
 pub mod tool_helper;
 pub mod tool_install;
 pub mod tool_map;
+pub mod trusted_env;
 pub mod volume;
 pub mod vsock;
 pub mod worker_pool;

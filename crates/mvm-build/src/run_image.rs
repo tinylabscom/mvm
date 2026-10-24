@@ -1554,7 +1554,23 @@ mod tests {
             drop(held);
             hold_image_lock(&path, LockWait::none())
         });
-        reacquired.expect("one-shot guard drop must release the lock before child exec");
+        let _reacquired =
+            reacquired.expect("one-shot guard drop must release the lock before child exec");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dropping_a_persistent_store_lock_releases_it_before_an_unrelated_child_execs() {
+        use crate::builder_vm_runtime::{LockWait, hold_image_lock};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.img.lock");
+        let held = hold_image_lock(&path, LockWait::none()).unwrap();
+        let reacquired = while_child_is_before_exec(|| {
+            drop(held);
+            hold_image_lock(&path, LockWait::none())
+        });
+        let _reacquired =
+            reacquired.expect("persistent guard drop must release the lock before child exec");
     }
 
     /// The locks the whole materialization runs under are held for exactly as

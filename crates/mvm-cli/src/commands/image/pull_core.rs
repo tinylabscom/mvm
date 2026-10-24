@@ -1757,6 +1757,93 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
         rel
     }
 
+    #[test]
+    fn inspect_digest_reference_resolves_tag_preparation_without_acquisition_or_alias_writes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let relative = seed_current_dev_image(tmp.path(), PINNED_DIGEST);
+        let index_path = tmp.path().join(super::super::oci_types::INDEX_FILE);
+        let before = fs::read(&index_path).unwrap();
+        let inspected = super::super::cache::inspect_image(tmp.path(), "alpine:3.20")
+            .expect("inspect the canonical preparation through its short tag");
+        let reference = inspected.image.digest_reference().unwrap();
+        assert_eq!(reference, PINNED);
+        let resolved = resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            refusing_runtime_materialize,
+            &RejectingVerifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect("the printed pin reuses the tag's prepared rootfs");
+        assert!(!resolved.pulled);
+        assert_eq!(resolved.rootfs_path, tmp.path().join(relative));
+        assert_eq!(fs::read(&index_path).unwrap(), before);
+        for invalid in [
+            reference.replace("docker.io", "evil.example"),
+            reference.replace("library/alpine", "library/other"),
+        ] {
+            let error = resolve_run_image_with(
+                tmp.path(),
+                &invalid,
+                false,
+                refusing_runtime_materialize,
+                &RejectingVerifier,
+                RunImageAcquisition::PreparedOnly,
+            )
+            .expect_err("a different repository or registry is not prepared");
+            assert!(error.to_string().contains("image pull"), "{error:#}");
+        }
+        assert_eq!(fs::read(&index_path).unwrap(), before);
+    }
+
+    #[test]
+    fn inspect_digest_reference_reuses_index_pin_without_introducing_a_child_alias() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let relative = seed_current_dev_image(tmp.path(), PINNED_DIGEST);
+        let index_path = tmp.path().join(super::super::oci_types::INDEX_FILE);
+        let index_digest = format!("sha256:{}", "b".repeat(64));
+        let original = format!("docker.io/library/alpine:3.20@{index_digest}");
+        let mut index = super::super::cache::load_index(tmp.path()).unwrap();
+        index.images[0].reference = original.clone();
+        super::super::cache::save_index(tmp.path(), &index).unwrap();
+        let before = fs::read(&index_path).unwrap();
+        let inspected = super::super::cache::inspect_image(tmp.path(), &original).unwrap();
+        let reference = inspected.image.digest_reference().unwrap();
+        assert_eq!(
+            reference,
+            format!("docker.io/library/alpine@{index_digest}")
+        );
+        let resolved = resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            refusing_runtime_materialize,
+            &RejectingVerifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect("the original immutable index pin reuses its prepared child");
+        assert!(!resolved.pulled);
+        assert_eq!(resolved.rootfs_path, tmp.path().join(relative));
+        for invalid in [
+            PINNED.to_string(),
+            reference.replace("docker.io", "evil.example"),
+            reference.replace("library/alpine", "library/other"),
+        ] {
+            let error = resolve_run_image_with(
+                tmp.path(),
+                &invalid,
+                false,
+                refusing_runtime_materialize,
+                &RejectingVerifier,
+                RunImageAcquisition::PreparedOnly,
+            )
+            .expect_err("no unproven child alias or cross-source alias is introduced");
+            assert!(error.to_string().contains("image pull"), "{error:#}");
+        }
+        assert_eq!(fs::read(&index_path).unwrap(), before);
+    }
+
     /// A local archive or stdin is read only by an explicit pull. A launch
     /// resolves the entry that pull published and never ingests the source
     /// itself. `--prod` makes each path refuse with its own message before

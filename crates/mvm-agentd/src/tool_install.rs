@@ -637,6 +637,7 @@ fn spawn_helper() -> Result<(), InstallError> {
     let write_ready = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe[1]) };
     let ready_fd = write_ready.as_raw_fd();
     let mut command = Command::new(TOOL_HELPER_OVERLAY);
+    crate::trusted_env::configure_command(&mut command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())

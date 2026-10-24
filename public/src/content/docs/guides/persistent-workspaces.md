@@ -11,6 +11,19 @@ Guest mount paths must be under `/data` or `/work` — those are the only two
 allow-roots. `/cache`, `/workspace` and anything under `/mnt` are refused.
 :::
 
+Guest mount destinations must be real directories: symlinks are refused in
+every destination component, including inside an earlier mounted volume.
+The guest pins destination directories with file descriptors and attaches
+mounts without resolving the destination pathname again. These checks apply
+to cold boot, warm-restore volume attachment, and live volume operations.
+They constrain the destination, not whether the source is an ad-hoc local
+directory, an explicit disk image, or a registered volume.
+
+Volume attachment requires Linux 5.2 or newer with the new mount APIs and
+support for the selected filesystem. Missing support fails the operation;
+there is no path-based fallback. Live unmount also requires the guest's
+trusted procfs at `/proc`.
+
 Persistent state is useful for agents, browser sessions, caches, databases, and
 long-running services. It is also where sensitive data accumulates. Choose the
 smallest state mechanism that fits the workflow, and make the retention policy
@@ -172,6 +185,19 @@ plaintext, checked before anything is created:
 A read-only image is only read by the guest, so none of these apply to it.
 
 ## Durable tenant volumes through mvmd
+
+:::caution[Daemon API compatibility]
+The remote client uses `/api/v1/tenants/{tenant_id}/volumes`. The current
+`mvmd` V1 API uses `/v1` routes and does not implement volume or bucket
+endpoints. The examples below require a daemon implementing the tenant-volume
+API; they do not establish support in V1. Local registered and ad-hoc volumes
+do not depend on this remote API.
+
+`MVM_TENANT_ID` selects a request namespace; it does not authorize access.
+The daemon must bind volume creation, registration, and attachment to the
+authenticated principal, and verify ownership of both the volume and target
+instance before attaching.
+:::
 
 Use remote mode when mvmd owns the tenant, storage provider, encryption keys,
 quota, and attachment policy. Configure the authenticated client without
