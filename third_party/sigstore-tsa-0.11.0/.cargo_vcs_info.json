@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "ef17cacdbd357befea4c1c768ef02ed9bf52672c"
+  },
+  "path_in_vcs": "crates/sigstore-tsa"
+}
