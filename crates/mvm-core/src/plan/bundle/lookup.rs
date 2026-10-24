@@ -101,6 +101,42 @@ pub trait TrustStore {
     fn lookup(&self, key_id: &KeyId) -> Option<VerifyingKey>;
 }
 
+/// Release trust extended with exactly this host's signing key.
+///
+/// This store is for the local-build execution path only. Callers must still
+/// classify the verified manifest with `bundle_origin`: a host signature
+/// alone does not make a bundle admissible without the signed local-build
+/// label, and a label alone does not grant trust.
+pub struct LocalBundleTrustStore<T> {
+    release: T,
+    host_key_id: KeyId,
+    host_key: VerifyingKey,
+}
+
+impl<T> LocalBundleTrustStore<T> {
+    pub fn new(release: T, host_key_id: KeyId, host_key: VerifyingKey) -> Self {
+        Self {
+            release,
+            host_key_id,
+            host_key,
+        }
+    }
+
+    pub fn release(&self) -> &T {
+        &self.release
+    }
+}
+
+impl<T: TrustStore> TrustStore for LocalBundleTrustStore<T> {
+    fn lookup(&self, key_id: &KeyId) -> Option<VerifyingKey> {
+        if key_id == &self.host_key_id {
+            Some(self.host_key)
+        } else {
+            self.release.lookup(key_id)
+        }
+    }
+}
+
 /// Filesystem-backed trust store rooted at `~/.mvm/trusted-publishers/`
 /// (or any directory). Pubkey files are named `<key_id>.pub` and
 /// hold the 32 raw Ed25519 public-key bytes (no PEM, no headers).
