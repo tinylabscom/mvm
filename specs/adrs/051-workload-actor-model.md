@@ -8,6 +8,9 @@ Validation: none — this is a reconciling design decision; no code implements i
 **Owner:** `mvm` maintainers
 **Reconciles:** ADR-045 (capability-secure intelligent workflow controllers) and
 ADR-046 (the secure message fabric).
+**Mailbox amendment:** ADR-057 preserves the actor model while replacing
+ADR-046's mailbox identity, envelope, delivery, durability, and ownership
+contract.
 **Complements:** ADR-001, ADR-014, ADR-020, ADR-031, ADR-035, ADR-042, ADR-047.
 **Implemented by:** no plan yet. The vertical slice below is the first one to write.
 
@@ -62,7 +65,7 @@ whoever writes the first plan.
 
 A **workload actor** is one microVM together with:
 
-- one `ExclusiveInbox` (ADR-046) — its only inbound message path;
+- one capability-bound mailbox (ADR-057) — its only inbound message path;
 - one `ActorHandle` (ADR-045) — the lifecycle capability its parent holds;
 - one attenuated authority envelope;
 - one audit lineage rooted in the signed `ExecutionPlan` it booted under.
@@ -86,13 +89,14 @@ through those four bindings at once.
 
 ### 3. One vocabulary — the fabric's
 
-ADR-046 defines the messaging contract. ADR-045 consumes it and defines no
-message types of its own.
+ADR-057 defines the mailbox contract. ADR-046 retains the other proposed
+message-fabric lanes. ADR-045 consumes those contracts and defines no message
+types of its own.
 
 Concretely: the WS7 "add dependency-light mailbox types under `mvm-contract`"
 list is **deleted** from the workflows plan. `MailboxAddress`, `MessageId`,
-envelopes, correlation, causation, attempts, acknowledgement, and cursors have
-exactly one definition, in `mvm_contract::fabric`.
+envelopes, correlation, causation, acknowledgement, and delivery outcomes have
+exactly one definition, in `mvm_contract::protocol::mailbox`.
 
 `ActorHandle` survives, because it is not an address. It is the lifecycle
 capability authorizing `observe_child` and `release_child` on one child. It
@@ -100,9 +104,9 @@ resolves to a `MailboxAddress`; it never carries a second addressing scheme, and
 in particular it never carries a VM name, node address, CID, socket path, or
 file descriptor — which ADR-046's route contracts already forbid.
 
-The reciprocal edge is added to ADR-045: it depends on ADR-046, and the fabric
-must reach its local mailbox milestone before the workflow layer's
-communication workstream can start.
+The reciprocal edge is added to ADR-045: it depends on ADR-057 for mailboxes
+and ADR-046 for other fabric lanes, and the local mailbox milestone must land
+before the workflow layer's communication workstream can start.
 
 ### 4. No third-party actor framework
 
