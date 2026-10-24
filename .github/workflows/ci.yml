@@ -43,7 +43,7 @@ jobs:
     name: CI scope
     # Merge groups only need git/grep classification, so avoid waiting for a
     # full hosted image while PR matrices occupy the standard runner pool.
-    runs-on: ${{ github.event_name == 'merge_group' && 'ubuntu-slim' || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'merge_group' && 'ubuntu-slim' || 'ubuntu-24.04' }}
     outputs:
       code: ${{ steps.validate.outputs.code }}
       docs: ${{ steps.validate.outputs.docs }}
@@ -299,7 +299,7 @@ jobs:
     name: Lint core (fmt + clippy)
     needs: [scope]
     if: needs.scope.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -403,7 +403,7 @@ jobs:
     name: Lint feature combinations (clippy)
     needs: [scope]
     if: needs.scope.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -469,7 +469,7 @@ jobs:
     # gate without another runner or workflow.
     name: Invariant
     needs: [scope]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -850,7 +850,7 @@ jobs:
     name: Lint feature coverage (test-support)
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -946,7 +946,7 @@ jobs:
     name: Lint feature coverage (embed-host-bins)
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -1015,7 +1015,7 @@ jobs:
     name: Windows compile check (portable crates)
     needs: [scope]
     if: needs.scope.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -1551,7 +1551,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}

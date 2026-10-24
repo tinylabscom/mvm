@@ -962,6 +962,35 @@ fn ci_full() -> String {
 }
 
 #[test]
+fn hosted_ubuntu_ci_uses_explicit_release_labels() {
+    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    // This is a text guard; historical alias mentions use full-line comments.
+    let moving_alias = ci
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .find(|line| line.contains("ubuntu-latest"));
+    assert!(
+        moving_alias.is_none(),
+        "hosted Ubuntu CI must use an explicit supported release: {moving_alias:?}"
+    );
+    for job in [
+        "lint-core",
+        "lint-feature-clippy",
+        "lint-policy",
+        "lint-features-test-support",
+        "lint-features-embed",
+        "lint-windows",
+    ] {
+        let body = job_block(&ci, job);
+        assert!(
+            body.lines()
+                .any(|line| line.trim() == "runs-on: ubuntu-24.04"),
+            "{job} must actually run on the pinned Ubuntu release"
+        );
+    }
+}
+
+#[test]
 fn guest_binary_producer_lanes_install_the_cross_toolchain_before_tests() {
     let ci = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
     for job in ["test-workspace-build", "test-workspace-aarch64"] {
