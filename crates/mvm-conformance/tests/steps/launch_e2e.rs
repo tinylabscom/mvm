@@ -139,6 +139,48 @@ fn shell_split(args: &str) -> Vec<String> {
     argv
 }
 
+/// When the running scenario began; set by the runner's `before` hook.
+static SCENARIO_START: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+pub(crate) fn mark_scenario_start() {
+    if let Ok(mut start) = SCENARIO_START.lock() {
+        *start = Some(Instant::now());
+    }
+}
+
+/// Seconds since `mark_scenario_start`, or 0 when no scenario is marked.
+pub(crate) fn secs_since_scenario_start() -> f64 {
+    SCENARIO_START
+        .lock()
+        .ok()
+        .and_then(|start| start.map(|at| at.elapsed().as_secs_f64()))
+        .unwrap_or(0.0)
+}
+
+/// Prints how far into the scenario a Background step finished.
+fn log_background_mark(step: &str) {
+    eprintln!(
+        "[bdd-timing] background_step={step} scenario_elapsed={:.1}s",
+        secs_since_scenario_start()
+    );
+}
+
+/// The greppable per-command line: the verb words up to `--` (at most five)
+/// and the command's wall time.
+fn timing_line(argv: &[String], wall: std::time::Duration) -> String {
+    let summary: Vec<&str> = argv
+        .iter()
+        .map(String::as_str)
+        .take_while(|arg| *arg != "--")
+        .take(5)
+        .collect();
+    format!(
+        "[bdd-timing] cmd={} wall={:.1}s",
+        summary.join(" "),
+        wall.as_secs_f64()
+    )
+}
+
 fn run_in_e2e_home(args: &str, extra_env: &[(&str, &str)]) -> LaunchRecord {
     run_argv_in_e2e_home(&shell_split(args), extra_env)
 }
@@ -183,6 +225,7 @@ fn run_argv_in_e2e_home(argv: &[String], extra_env: &[(&str, &str)]) -> LaunchRe
     let started = Instant::now();
     let output = command.output().expect("failed to spawn mvmctl");
     let wall = started.elapsed();
+    eprintln!("{}", timing_line(argv, wall));
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -222,6 +265,7 @@ fn documented_launch_images_are_prepared(_world: &mut CliWorld) {
             pull.stdout, pull.stderr
         );
     }
+    log_background_mark("images_prepared");
 }
 
 #[when(expr = "I prepare launch artifacts with {string}")]
@@ -269,6 +313,7 @@ fn warm_parent_is_ready(image: &str) {
         "failed to prepare the {image} warm parent\nstdout:\n{}\nstderr:\n{}",
         result.stdout, result.stderr
     );
+    log_background_mark("warm_parent_ready");
 }
 
 /// Wait for the standby an unnamed run leaves behind. The run starts the
@@ -650,6 +695,17 @@ fn dispatch_window_recorded(world: &mut CliWorld) {
 }
 
 mod tests {
+    #[test]
+    fn timing_line_stops_at_the_double_dash_and_reports_seconds() {
+        let argv: Vec<String> = ["machine", "run", "--image", "alpine", "--", "sh", "-c", "x"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            super::timing_line(&argv, std::time::Duration::from_millis(2500)),
+            "[bdd-timing] cmd=machine run --image alpine wall=2.5s"
+        );
+    }
+
     #[test]
     fn the_host_pty_ends_do_not_leak_into_spawned_children() {
         use nix::fcntl::{FcntlArg, FdFlag, fcntl};
