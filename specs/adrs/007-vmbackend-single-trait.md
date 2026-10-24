@@ -171,6 +171,16 @@ tier, and removes the temporary archive. `backend add` later downloads that
 same release archive again; it does not introduce a second asset, package
 manager, update channel, or trust root.
 
+The libkrun tier's kernel source of truth is the explicit kernel version and
+digest in `scripts/release/build-libkrun-tier.sh`, combined with the immutable
+`libkrunfw` commit's patches and configuration. Both appear in the release's
+`SOURCE-PINS`, and the repository's kernel freshness gate watches this pin. It
+is deliberately not the kernel in an `mvm-images` image set: the tier is a host
+release component built and signed with `mvmctl`, while `mvm-images` owns Linux
+image layers. Changing the kernel, libkrunfw, or libkrun pin requires updating
+the source offer and passing the packaged tier's relocation, signing, and
+launch witnesses again.
+
 ### Installer selection
 
 `install.sh` accepts `--backend NAME`; the equivalent non-interactive setting

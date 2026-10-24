@@ -21,6 +21,7 @@ All notable changes to mvm are documented in this file.
 - **cli**: Build SDK-decorated sources and OCI image references through the same `mvmctl build` front door (#4584)
 - **cli**: Run a host-signed local build on its producing host with explicit non-release audit provenance and production refusal (#4584)
 - **core**: Require independent current feeds for applications
+- **release**: Ship a signed, relocatable libkrun runtime preview for macOS 13–25 Apple Silicon (#4577)
 - **core**: Retain current-trust application archive custody
 - **bundle**: Firecracker canonical kernel custody; open the canonical-bundle launch gate
 - **core**: Bind application boot inputs to original signed members

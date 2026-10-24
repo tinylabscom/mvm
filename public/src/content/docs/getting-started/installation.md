@@ -62,8 +62,9 @@ whether a newer release exists.
 
 ## Where install.sh Puts Things
 
-Each release is unpacked whole into its own directory, and the commands on
-`PATH` reach it through a single `current` link:
+Each release is unpacked into staging, its host tier is selected, and the
+retained payload is promoted into its own directory. Commands on `PATH` reach
+it through a single `current` link:
 
 ```text
 ~/.local/lib/mvm/<n>-<version>/   mvmctl, its host binaries, assets/
@@ -71,6 +72,11 @@ Each release is unpacked whole into its own directory, and the commands on
 ~/.local/bin/mvmctl               -> ~/.local/lib/mvm/current/mvmctl
 ~/.local/bin/mvm-*                -> ~/.local/lib/mvm/current/mvm-*
 ```
+
+The Apple Silicon archive carries both native supervisors. macOS 13–25 keeps
+`mvm-libkrun-supervisor`, `lib/`, the license inventory and exact-source
+directions; macOS 26+ keeps the HVF path and removes that compatibility tier.
+Linux archives do not carry the macOS tier.
 
 Re-running `install.sh` upgrades: it stages and verifies the new release, then
 switches `current` in one rename, so `mvmctl` and the host binaries it spawns
@@ -257,9 +263,11 @@ Cached build artifacts are refreshed separately with `mvmctl pack update <KIND>`
 
 ## Prerequisites
 
-- **macOS 26+ on Apple Silicon** or **Linux with `/dev/kvm`** (x86_64 or aarch64)
-- No Homebrew VMM package is required on macOS; the native HVF path ships with
-  the operating system.
+- **macOS 13+ on Apple Silicon** or **Linux with `/dev/kvm`** (x86_64 or aarch64).
+  macOS 13–25 is an explicitly selected libkrun preview; macOS 26+ uses HVF by
+  default.
+- No Homebrew VMM package is required on macOS. HVF ships with the operating
+  system, and the macOS 13–25 libkrun tier ships in the same signed archive.
 
 ### Backend Auto-Detection
 
@@ -269,6 +277,7 @@ mvmctl automatically detects your platform at startup and selects the best VM ba
 |----------|---------|-------------|
 | **Linux with `/dev/kvm`** | Firecracker | Runs directly on KVM. Smallest attack surface, fastest cold boot. |
 | **macOS 26+ Apple Silicon** | HVF | Hypervisor.framework, bundled with the OS; vsock-only and no third-party VMM dependency. |
+| **macOS 13–25 Apple Silicon** | libkrun preview | Not auto-selected. The release archive includes the tier; pass `--hypervisor libkrun`. Packaged loading is verified, while the real guest-launch witness remains open. |
 
 There is no Docker or container backend on the runtime path. A `qemu`
 (microvm.nix) backend exists for local dev/test only and is never auto-selected.
@@ -294,6 +303,7 @@ You can force a specific backend with `--hypervisor`:
 ```bash
 mvmctl machine run --flake . --hypervisor firecracker  # Linux KVM
 mvmctl machine run --flake . --hypervisor hvf          # macOS 26+ Apple Silicon (default)
+mvmctl machine run --flake . --hypervisor libkrun      # macOS 13–25 Apple Silicon preview
 mvmctl machine run --flake . --hypervisor qemu         # microvm.nix — dev/test only
 ```
 

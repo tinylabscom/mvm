@@ -129,7 +129,11 @@ class PackageTests(unittest.TestCase):
             self.verify()
 
     def test_cli_roles_exact_entitlements(self):
-        files = {"mvmctl": macho(2), "mvm-hvf-supervisor": macho(2)}
+        files = {
+            "mvmctl": macho(2),
+            "mvm-hvf-supervisor": macho(2),
+            "mvm-libkrun-supervisor": macho(2),
+        }
         self.inventory = [{
             "path": name, "role": name,
             "required_entitlements": gate.sign_macos.ROLES[name],
@@ -144,6 +148,28 @@ class PackageTests(unittest.TestCase):
             return ""
         self.run.side_effect = readback
         self.verify(require_cli_inventory=True)
+
+    def test_cli_package_rejects_host_specific_macho_paths(self):
+        files = {
+            "mvmctl": macho(2),
+            "mvm-hvf-supervisor": macho(2),
+            "mvm-libkrun-supervisor": macho(2),
+        }
+        self.inventory = [{
+            "path": name, "role": name,
+            "required_entitlements": gate.sign_macos.ROLES[name],
+            "sha256": hashlib.sha256(data).hexdigest(),
+        } for name, data in files.items()]
+        self.write_producer()
+        self.pack(files)
+        self.run.side_effect = lambda *args: (
+            "/opt/homebrew/opt/libkrun/lib/libkrun.dylib" if args[0] == "otool" else
+            plistlib.dumps(dict.fromkeys(
+                gate.sign_macos.ROLES[args[-1].name], True)).decode()
+            if args[1] == "-d" else ""
+        )
+        with self.assertRaisesRegex(ValueError, "non-relocatable path"):
+            self.verify(require_cli_inventory=True)
 
     def test_zip_unsafe_normalized_duplicate_and_link_reject(self):
         for names in (["/abs"], ["../up"], ["a/../up"], ["a\\b"],
