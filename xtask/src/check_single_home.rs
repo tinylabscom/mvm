@@ -149,13 +149,6 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "structural release tests inspect the boot workflow's shell command and pin its canonical \
          production cache path; the test derives no host path",
     ),
-    (
-        "tests/github_actions_extended_e2e.rs",
-        &[Rule::HomeLiteral],
-        "negative assertions only: the literal names the default-home pattern the workflows must \
-         NOT reference, so failure diagnostics stay inside each shard's isolated home; the test \
-         derives no host path",
-    ),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

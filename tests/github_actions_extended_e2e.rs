@@ -427,7 +427,7 @@ fn macos_documented_surface_uses_isolated_sequential_shards() {
         .1;
     assert!(
         diagnostics.contains("for d in \"$MVM_E2E_HOME\"/vms/*/; do")
-            && !diagnostics.contains("\"$HOME\"/.mvm/vms"),
+            && !diagnostics.contains("$HOME"),
         "failure diagnostics must inspect only this shard's isolated home"
     );
     assert!(
