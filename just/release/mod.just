@@ -102,7 +102,7 @@ tag VERSION:
 
 # Cross-compile release binary for a target
 build-target TARGET:
-    cargo build --release --target {{ TARGET }} --features host,user,template-registry-s3,release-artifact-bootstrap,embed-host-bins
+    cargo build --release --target {{ TARGET }} --features host,user,release-artifact-bootstrap,embed-host-bins
 
 # Dry-run crates.io publish (the public crates only)
 publish-dry-run:
