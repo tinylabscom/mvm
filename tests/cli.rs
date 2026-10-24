@@ -250,6 +250,7 @@ fn build_rejects_an_ambiguous_source_before_building() {
         .expect("write flake marker");
     let state = tempfile::tempdir().expect("create isolated state");
     let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("HOME", state.path())
         .env("MVM_HOME", state.path())
         .args(["build"])
         .arg(source.path())
