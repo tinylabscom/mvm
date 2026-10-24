@@ -265,6 +265,17 @@ replace the original command's exit status, and a failed command still stops
 the recipe immediately. These measurements retain the existing hermetic suite
 selection and do not enable live scenarios.
 
+The manual `workspace-shard.yml` dispatch also offers `benchmark_workers=true`
+with `runner_kind=hetzner` and an exact `commit_sha`. This is an operator-approved
+experiment, not a merge check: dispatch only after confirming the runner is idle,
+because it can occupy that runner for up to 60 minutes. Do not combine it with
+`inventory_only`. It compares two and six Cargo build workers sequentially using
+private target directories, without changing the repository's worker defaults or
+installing tools. Missing installed prerequisites fail the experiment rather than
+triggering provisioning. Separate build and test timings are reported; GNU time's
+maximum RSS is a process-level high-water mark, not aggregate machine peak memory.
+A single fixed-order pair is exploratory evidence, not a latency guarantee.
+
 Two notes from experience:
 
 - **Clippy is a gate, not a suggestion.** Never suppress with `#[allow(...)]`;

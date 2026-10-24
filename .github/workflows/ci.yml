@@ -388,6 +388,9 @@ jobs:
       - name: BDD phase timing recipe tests
         run: python3 scripts/test_bdd_phase_timings.py
 
+      - name: Cargo worker benchmark harness tests
+        run: python3 scripts/test_benchmark_cargo_workers.py
+
       - name: Clippy
         run: ./scripts/cargo-stable.sh clippy --all-targets -- -D warnings
 
