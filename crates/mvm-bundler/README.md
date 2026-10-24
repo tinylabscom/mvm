@@ -11,7 +11,7 @@ disk into a manifest and hands both to that writer.
 
 ## Who uses it
 
-`mvm-cli` uses it for `mvmctl bundle export`, signing under the host key.
+`mvm-cli` uses it for `mvmctl build`, signing under the host key.
 `mvm-client` re-exports it so a library consumer can produce the same bundle
 without linking the CLI.
 

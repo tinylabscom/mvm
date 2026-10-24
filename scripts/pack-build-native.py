@@ -502,7 +502,7 @@ def workflow(commands, workspace, evidence, revision):
     commands.call(producer, "lock", ["pack", "lock", spec, "--mvm-revision", revision,
                                     "--out", lock])
     input_observation = evidence / "frozen-input-observation.json"
-    commands.call(producer, "build", ["pack", "build", spec, "--lock", lock,
+    commands.call(producer, "build", ["build", spec, "--lock", lock,
                                      "--out", archive, "--hypervisor", "firecracker",
                                      "--input-observation", input_observation])
     if input_observation.exists() or input_observation.is_symlink():

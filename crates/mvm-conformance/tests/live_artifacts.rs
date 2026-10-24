@@ -210,12 +210,12 @@ fn source_tree_live_scenarios_prepare_their_home_before_selecting_tree_runtime()
         (
             documented,
             "the documented pack build health-boots and signs a frozen workload",
-            "When I run mvmctl against the live pack fixture with \"pack build pack.json --out build.mvmpkg\"",
+            "When I run mvmctl against the live pack fixture with \"build pack.json --out build.mvmpkg\"",
         ),
         (
             oci_bundle,
-            "Build and verify an Alpine OCI package with explicit publisher trust",
-            "When I run mvmctl in the scratch directory with \"bundle build --image docker.io/library/alpine:3.20 --out alpine.mvmpkg --debug-out alpine.bundle.json\"",
+            "Build and inspect an Alpine OCI package under local authority",
+            "When I run mvmctl in the scratch directory with \"build docker.io/library/alpine:3.20 --from image --out alpine.mvmpkg --debug-out alpine.bundle.json\"",
         ),
     ] {
         scenario_prepares_home_before_command(feature, name, command)

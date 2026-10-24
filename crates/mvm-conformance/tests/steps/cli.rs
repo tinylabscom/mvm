@@ -1545,11 +1545,11 @@ fn seal_live_build(world: &mut CliWorld) {
     let bundle = dir.path().join("build.mvmpkg");
     let output = mvmctl_command()
         .current_dir(workspace_root())
-        .args(["bundle", "export", &slot, "--out"])
+        .args(["dev", "export-template", &slot, "--out"])
         .arg(&bundle)
         .isolated_home(&home)
         .output()
-        .expect("failed to spawn mvmctl bundle export");
+        .expect("failed to spawn internal template exporter");
     if output.status.success() {
         fs::copy(
             home.join("keys/host-signer.pub"),

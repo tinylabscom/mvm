@@ -112,7 +112,7 @@ and retains nearby bounded config/result/log observations. It never selects the
 "newest" disk or treats path existence as an invocation binding. These are
 candidate observations with `association: unobserved`, not positive proof.
 
-The driver explicitly requests `pack build --input-observation PATH`, retaining
+The driver explicitly requests `build PACK.json --input-observation PATH`, retaining
 the product diagnostic separately from raw transport observations, with a
 1 MiB report limit. It does not treat a success-shaped report as proof.
 Raw input/config/job/result/output-staging association has not been established.

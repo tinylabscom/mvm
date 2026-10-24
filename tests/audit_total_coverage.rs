@@ -154,6 +154,8 @@ const DEV_SUB: &[(&str, AuditPosture)] = &[
     // cache into an archive in a caller-named directory. It produces a build
     // output and touches no security state, so it emits no audit-chain entry.
     ("guest-bins", AuditPosture::ReadOnly),
+    // Hidden fixture command: writes a caller-owned archive only.
+    ("export-template", AuditPosture::ReadOnly),
 ];
 
 const NETWORK_SUB: &[(&str, AuditPosture)] = &[
@@ -269,7 +271,6 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     // directory) and touch no host state, like `dev compile`.
     ("lock", AuditPosture::ReadOnly),
     ("compile", AuditPosture::ReadOnly),
-    ("build", AuditPosture::Emits("PackBuild")),
     ("pull", AuditPosture::Emits("RegistryPackPin")),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
@@ -479,29 +480,17 @@ const SNAPSHOT_SUB: &[(&str, AuditPosture)] = &[
     ("rm", AuditPosture::Emits("SnapshotDelete")),
 ];
 
-// `mvmctl artifact`. `pack` is `bundle export` under its older name: it
-// writes a signed `.mvmpkg` and touches no host audit-chain state, exactly as
-// `bundle export` does.
 const ARTIFACT_SUB: &[(&str, AuditPosture)] = &[
-    ("pack", AuditPosture::ReadOnly),
-    // Plan 134 — architecture-aware artifact-model commands. All static
+    // Architecture-aware artifact-model commands. All static
     // (read manifest / validate / emit a Firecracker config / build an
-    // artifact via the builder); none touch the host audit chain — like
-    // `pack` above, they only produce local artifacts.
+    // artifact via the builder); none touch the host audit chain.
     ("model-inspect", AuditPosture::ReadOnly),
     ("model-validate", AuditPosture::ReadOnly),
     ("model-config", AuditPosture::ReadOnly),
     ("model-build", AuditPosture::ReadOnly),
 ];
 
-// Sprint 52 W2 — bundle / trust subcommand tables.
-//
-// `bundle export` writes a `.mvmpkg` archive to disk under the
-// host's `--out` path; that's a local artifact, not host-side
-// state that the audit chain tracks, so it shipped as
-// `InteractiveOrControl` rather than `Emits` for now. Bumping it
-// to a `BundleExport` emission is the natural follow-up when the
-// host-side bundle registry lands.
+// Bundle / trust subcommand tables.
 //
 // `bundle fetch` is verify-only in this commit (no extraction),
 // so it's `ReadOnly`. When the registry-replacement flow lands
@@ -512,9 +501,6 @@ const ARTIFACT_SUB: &[(&str, AuditPosture)] = &[
 // audit entries (publisher trust is host-trust-boundary state);
 // list is `ReadOnly`.
 const BUNDLE_SUB: &[(&str, AuditPosture)] = &[
-    // Like export, build produces a caller-owned archive, not a registry install.
-    ("build", AuditPosture::InteractiveOrControl),
-    ("export", AuditPosture::InteractiveOrControl),
     ("fetch", AuditPosture::ReadOnly),
     // `bundle install` mutates the local bundle registry under
     // `~/.mvm/bundles/<sha>/` and emits
@@ -755,7 +741,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Plan 73 Followup C — sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
     ("capture", AuditPosture::DelegatesToSub(CAPTURE_SUB)),
-    // Plan 76 Phase 6 — `artifact pack` and the artifact-model commands.
+    // Artifact-model commands.
     ("artifact", AuditPosture::DelegatesToSub(ARTIFACT_SUB)),
     // Host-side developer tool: ptrace a command and report syscalls. No host
     // audit-chain emission of its own; classified as interactive/control.

@@ -17,7 +17,7 @@ spec.write("pack.json")
 
 The builder only assembles and validates authored data. It never resolves a
 package, reads the source tree, builds, boots or signs: ``mvmctl pack lock``,
-``mvmctl pack compile`` and ``mvmctl pack build`` do that in the shared Rust
+``mvmctl pack compile`` and ``mvmctl build`` do that in the shared Rust
 path, reading the file this writes as data. The bytes :meth:`Pack.to_json`
 returns are the same canonical bytes every language SDK emits for the same
 spec, so a lock's ``spec_sha256`` does not depend on which language wrote it.

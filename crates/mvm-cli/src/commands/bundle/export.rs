@@ -1,5 +1,5 @@
-//! `mvmctl bundle export <template> --out <path>` — seal a built
-//! template into a signed `.mvmpkg`.
+//! Shared template-to-bundle implementation for `mvmctl build` and the hidden
+//! `mvmctl dev export-template` fixture command.
 //!
 //! Resolves the template's current revision artifacts (kernel,
 //! rootfs, optional initrd, optional dm-verity sidecar) and hands

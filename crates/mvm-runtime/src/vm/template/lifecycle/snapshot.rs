@@ -118,7 +118,7 @@ fn require_slot_key(id_or_slot: &str) -> Result<std::path::PathBuf> {
 /// This is a separate entry point rather than a check inside
 /// [`template_artifacts_dispatched`] on purpose. That resolver is shared with
 /// callers that legitimately resolve foreign-arch artifacts without booting
-/// them — `bundle export` and `manifest export-oci` both reach it — so gating
+/// them — the build front door and `manifest export-oci` both reach it — so gating
 /// it there breaks cross-arch export. Boot sites call this; everyone else keeps
 /// calling the un-suffixed function.
 #[instrument(skip_all, fields(id_or_slot = id_or_slot))]
@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(installed_bundle_archive("not-a-key").expect("name"), None);
     }
 
-    /// The regression the first attempt at this gate broke: `bundle export` and
+    /// The regression the first attempt at this gate broke: archive export and
     /// `manifest export-oci` legitimately resolve foreign-arch artifacts
     /// without booting them, and reach the registry through the *un-suffixed*
     /// resolver. Placing the gate in the shared path blocked them.
@@ -496,7 +496,7 @@ mod tests {
         );
     }
 
-    /// `bundle export` re-stamping the exporting host's arch onto a re-exported
+    /// Archive export re-stamping the exporting host's arch onto a re-exported
     /// foreign-arch bundle would produce a mislabelled `.mvmpkg` — and the label
     /// is exactly what the boot gate above trusts.
     #[test]

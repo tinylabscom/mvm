@@ -101,7 +101,7 @@ async fn pull_image_to_dir_with_fetcher(
     })
 }
 
-/// Keeps the output directory alive through bundle export. There is no public
+/// Keeps the output directory alive through archive export. There is no public
 /// constructor or deserializer: metadata can only come from verified acquisition.
 /// Unique outputs avoid collisions with concurrent runs and cache publishers.
 /// This is not a sandbox against other code running with the same host identity.

@@ -33,7 +33,7 @@ mkdir -p "$OUT"
 PKG="$OUT/mvm-bdd-fixture.mvmpkg"
 PUB="$OUT/mvm-bdd-fixture.pub"
 
-"$MVMCTL" bundle export "$TEMPLATE" --out "$PKG"
+"$MVMCTL" dev export-template "$TEMPLATE" --out "$PKG"
 
 # The archive is signed by this host's signer; its public half is the trust
 # anchor a fresh MVM_HOME needs before `bundle install` will admit the archive.

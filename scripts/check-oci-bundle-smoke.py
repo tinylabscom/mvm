@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Platform-aware dev-tier package witness; never builds binaries or seals prod images.
+"""Platform-aware host-local OCI witness; never builds binaries or seals prod images.
 
 With previously prepared, source-matched host binaries:
   python3 scripts/check-oci-bundle-smoke.py --backend hvf --bin-dir "$CARGO_TARGET_DIR/debug"
 
 --self-test never invokes mvmctl. Live artifacts remain in a new private /tmp
-directory. Only evidence/ is for review: producer/ contains private signing keys.
+directory. Only evidence/ is for review: local-host/ contains private signing keys.
 Linux requires root (use explicit sudo -n), KVM, and --linux-test-environment
 unless invoked by the repository GCP runner. That runner provisions Firecracker
 and jailer, NOT mvmctl or its helpers; provision --bin-dir separately first.
@@ -13,8 +13,8 @@ Its dev-env target directory resolves to /opt/mvm/.mvm-test/target. After
 separately arranging source-matched Linux binaries in its debug/ directory:
   just lab::gcp-kvm python3 scripts/check-oci-bundle-smoke.py --backend firecracker --bin-dir /opt/mvm/.mvm-test/target/debug
 This command needs operator authorization for billing and source transfer.
-Linux proves fresh HOME/install-path isolation, not producer filesystem denial.
-Production admission and enforced Linux producer-file denial are separate witnesses.
+Linux proves isolated HOME/install-path reuse, not producer filesystem denial.
+Production admission and enforced Linux producer-input denial are separate witnesses.
 """
 
 import argparse
@@ -343,7 +343,7 @@ def live(args):
               "backend": args.backend,
               "root": str(root), "commands": [], "cleanup": []}
     runner = Runner(evidence, report)
-    print(f"Evidence: {evidence}\nPrivate producer retained; do not publish {root / 'producer'}")
+    print(f"Evidence: {evidence}\nPrivate local host retained; do not publish {root / 'local-host'}")
     active = []
     recipient_env = None
     offline = []
@@ -359,13 +359,14 @@ def live(args):
             require((bins / name).is_file() and os.access(bins / name, os.X_OK),
                     f"missing executable: {bins / name}; provision binaries, no host builds")
         cli = bins / "mvmctl"
-        producer = root / "producer"
-        recipient = root / "recipient"
-        producer_env = isolated_env(producer, bins, args.backend)
+        producer = root / "producer-inputs"
+        recipient = root / "local-host"
+        producer.mkdir(mode=0o700)
         recipient_env = isolated_env(recipient, bins, args.backend)
-        report["isolation"] = {"producer": str(producer), "recipient": str(recipient),
-                               "recipient_initially_empty": True,
-                               "producer_file_denial_enforced": args.backend == "hvf"}
+        report["isolation"] = {"producer_inputs": str(producer),
+                               "local_host": str(recipient),
+                               "local_host_initially_empty": True,
+                               "producer_input_denial_enforced": args.backend == "hvf"}
         sentinel = producer / "read-denial-probe"
         sentinel.write_text("not a secret\n")
         if args.backend == "hvf":
@@ -377,7 +378,7 @@ def live(args):
             probe_argv = [sys.executable, "-c", PROBE, recipient / "probe.sock", sentinel]
             probe_marker = "IP_DENIED_UNIX_ALLOWED_PRODUCER_DENIED"
             runner.run("supervisor-signature", ["/usr/bin/codesign", "--verify",
-                       "--strict", bins / "mvm-hvf-supervisor"], producer_env)
+                       "--strict", bins / "mvm-hvf-supervisor"], recipient_env)
         else:
             kvm = Path("/dev/kvm")
             require(kvm.exists() and stat.S_ISCHR(kvm.stat().st_mode)
@@ -401,15 +402,15 @@ def live(args):
             probe_marker = "NO_IP_INTERFACES_OR_ROUTES_UNIX_ALLOWED"
             report["isolation"]["limitation"] = (
                 "Linux producer files remain readable to root; proof is fresh HOME, "
-                "public-only handoff and unchanged installed paths, not filesystem denial. "
+                "host-local authority and unchanged installed paths, not filesystem denial. "
                 "Enforced denial requires a repository-supported confinement launcher."
             )
         probe = runner.run("sandbox-probe", offline + probe_argv, recipient_env, timeout=15)
         require(probe_marker in probe["stdout"], "offline isolation proof absent")
         archive = evidence / "alpine.mvmpkg"
         debug = evidence / "build-report.json"
-        built = runner.run("bundle-build", [cli, "bundle", "build", "--image", IMAGE,
-                           "--out", archive, "--debug-out", debug], producer_env,
+        built = runner.run("bundle-build", [cli, "build", IMAGE, "--from", "image",
+                           "--out", archive, "--debug-out", debug], recipient_env,
                            timeout=args.build_timeout)
         match = re.search(r"^OCI digest: (sha256:[0-9a-f]{64})$", built["stdout"], re.M)
         require(match is not None, "build did not report resolved OCI digest")
@@ -418,20 +419,8 @@ def live(args):
         require(summary["bundle_sha256"] == package_sha, "debug/package digest mismatch")
         require(summary["manifest"]["schema_version"] == 4, "expected schema 4 package")
         report.update(package_sha256=package_sha, source_oci_digest=match.group(1))
-        # Existing trust surface exports this PUBLIC file. Never open the seed.
-        public = Path(producer_env["MVM_HOME"]) / "keys" / "host-signer.pub"
-        require(not public.is_symlink() and public.stat().st_size == 32,
-                "missing raw 32-byte host signer public key")
-        public_copy = evidence / "publisher.pub"
-        public_copy.write_bytes(public.read_bytes())
-        runner.run("trust-add", offline + [cli, "trust", "add", public_copy], recipient_env)
-        runner.run("bundle-verify", offline + [cli, "bundle", "fetch", archive, "--json"],
-                   recipient_env)
-        runner.run("bundle-install", offline + [cli, "bundle", "install", archive],
-                   recipient_env)
         installed = Path(recipient_env["MVM_HOME"]) / "bundles" / package_sha
-        initial = installed_snapshot(installed)
-        report["installed_assets"] = initial
+        initial = None
         for attempt in ("first", "repeat"):
             name = f"bundle-{root.name.rsplit('-', 1)[-1]}-{attempt}"
             marker = f"{args.backend.upper()}_OCI_BUNDLE_{attempt.upper()}_OK"
@@ -441,16 +430,26 @@ def live(args):
                 "--manifest", archive, "--", "/bin/sh", "-c", f"printf '%s\\n' {marker}",
             ], recipient_env, timeout=args.run_timeout)
             require(marker in output["stdout"].splitlines(), f"{attempt}: guest marker absent")
-            require(f"bundle {package_sha} is already installed" in output["stderr"],
-                    f"{attempt}: missing verified content-addressed reuse evidence")
+            require("local build, signed by this host's key; not release-verified"
+                    in output["stderr"], f"{attempt}: missing local-authority notice")
+            expected_install = (f"bundle {package_sha} is already installed" if initial
+                                else f"installed it as bundle {package_sha}")
+            require(expected_install in output["stderr"],
+                    f"{attempt}: missing verified content-addressed install evidence")
             require(str(producer) not in output["stdout"] + output["stderr"],
                     f"{attempt}: runtime output references producer")
             runner.run(f"{attempt}-stop", offline + [
                 cli, "machine", "stop", name, "--yes"], recipient_env)
             active.remove(name)
             report["cleanup"].append({"name": name, "status": "stopped"})
-            require_reused_install(initial, installed_snapshot(installed))
-            report[attempt] = {"marker": marker, "exit_code": 0, "install_unchanged": True}
+            current = installed_snapshot(installed)
+            if initial is None:
+                initial = current
+                report["installed_assets"] = initial
+            else:
+                require_reused_install(initial, current)
+            report[attempt] = {"marker": marker, "exit_code": 0,
+                               "install_unchanged": attempt == "repeat"}
         probe = runner.run("sandbox-probe-after", offline + probe_argv,
                            recipient_env, timeout=15)
         require(probe_marker in probe["stdout"], "offline isolation changed during witness")
