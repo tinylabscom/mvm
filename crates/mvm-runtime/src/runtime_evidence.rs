@@ -212,7 +212,7 @@ pub fn verify_runtime_binding(binding: &RuntimeLaunchBinding) -> Result<()> {
             bail!("retained runtime artifact is not a private read-only regular file");
         }
         check_owner(&metadata)?;
-        if mvm_core::crypto::image_verify::sha256_reader(file)? != *expected {
+        if mvm_core::crypto::verified_digest::sha256_open_file_verified(&file)? != *expected {
             bail!("retained runtime artifact differs from its checked declaration");
         }
     }
