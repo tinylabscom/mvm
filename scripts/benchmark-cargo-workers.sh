@@ -59,7 +59,7 @@ umask 077
 mkdir -- "$base"
 active=
 # Invoked indirectly by the EXIT trap, including failed commands and signals.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2329,SC2317
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
