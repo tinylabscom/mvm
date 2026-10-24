@@ -4,13 +4,43 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
-fn pack_build_help_advertises_explicit_input_observation() {
-    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args(["pack", "build", "--help"])
+fn legacy_build_verbs_are_removed() {
+    for args in [
+        &["pack", "build", "--help"][..],
+        &["bundle", "build", "--help"],
+        &["bundle", "export", "--help"],
+        &["artifact", "pack", "--help"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .args(args)
+            .output()
+            .expect("run removed build verb");
+        assert!(!out.status.success(), "{args:?} unexpectedly parsed");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn internal_template_export_is_callable_but_hidden_from_dev_help() {
+    let direct = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["dev", "export-template", "--help"])
         .output()
-        .expect("pack build help");
-    assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("--input-observation <PATH>"));
+        .expect("run internal template exporter help");
+    assert!(direct.status.success());
+
+    let group = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["dev", "--help"])
+        .output()
+        .expect("run dev help");
+    assert!(group.status.success());
+    assert!(
+        !String::from_utf8_lossy(&group.stdout).contains("export-template"),
+        "internal fixture command must stay out of user-facing help"
+    );
 }
 
 #[test]
@@ -28,7 +58,12 @@ fn build_help_advertises_every_workload_source_and_image_control() {
             "build help missing {source}:\n{help}"
         );
     }
-    for flag in ["--arch", "--production", "--debug-out"] {
+    for flag in [
+        "--arch",
+        "--production",
+        "--debug-out",
+        "--input-observation",
+    ] {
         assert!(help.contains(flag), "build help missing {flag}:\n{help}");
     }
 }
@@ -137,51 +172,11 @@ fn machine_workspace_apply_verbs_are_discoverable() {
 }
 
 #[test]
-fn artifact_pack_takes_the_arguments_of_bundle_export() {
-    let help = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-            .args(args)
-            .output()
-            .expect("run help");
-        assert!(out.status.success(), "{args:?} --help failed");
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    };
-    let pack = help(&["artifact", "pack", "--help"]);
-    let export = help(&["bundle", "export", "--help"]);
-    for flag in [
-        "<TEMPLATE>",
-        "--out",
-        "--cmdline",
-        "--posture",
-        "--allow-egress",
-        "--allow-volumes",
-        "--allow-unauthenticated",
-    ] {
-        assert!(
-            pack.contains(flag),
-            "artifact pack help missing {flag}: {pack}"
-        );
-        assert!(
-            export.contains(flag),
-            "bundle export help missing {flag}: {export}"
-        );
-    }
-    assert!(pack.contains("Alias of `mvmctl bundle export`"), "{pack}");
-}
-
-#[test]
-fn bundle_export_refuses_an_allow_flag_without_a_posture() {
+fn build_refuses_an_allow_flag_without_a_posture() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args([
-            "bundle",
-            "export",
-            "tmpl",
-            "--out",
-            "/tmp/never.mvmpkg",
-            "--allow-egress",
-        ])
+        .args(["build", ".", "--allow-egress"])
         .output()
-        .expect("run bundle export");
+        .expect("run build");
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("--posture"),
@@ -1210,31 +1205,19 @@ fn bundle_help_lists_push() {
         .expect("run mvmctl bundle --help");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for sub in ["build", "export", "fetch", "install", "push", "gc"] {
+    for sub in ["fetch", "install", "push", "gc"] {
         assert!(
             stdout.contains(sub),
             "bundle help must list {sub}:\n{stdout}"
         );
     }
-}
-
-#[test]
-fn bundle_build_help_names_oci_packaging_controls() {
-    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args(["bundle", "build", "--help"])
-        .output()
-        .expect("run bundle build help");
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    for flag in [
-        "--image",
-        "--out",
-        "--arch",
-        "--production",
-        "--label",
-        "--debug-out",
-    ] {
-        assert!(stdout.contains(flag), "missing {flag}: {stdout}");
+    for removed in ["build", "export"] {
+        assert!(
+            !stdout
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(removed)),
+            "bundle help still lists removed {removed}:\n{stdout}"
+        );
     }
 }
 
@@ -2747,7 +2730,7 @@ fn pack_update_dispatches_by_exact_target_shape() {
 }
 
 /// `machine run --manifest <app.mvmpkg> -- <cmd>` parses as a bundle-archive
-/// launch, and an archive that does not verify is refused at the install step,
+/// launch, and an archive that does not verify is refused by the verifier,
 /// before the run reaches admission or any backend, with nothing installed.
 #[test]
 fn machine_run_refuses_an_unverifiable_bundle_archive_before_booting() {
@@ -2772,7 +2755,8 @@ fn machine_run_refuses_an_unverifiable_bundle_archive_before_booting() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("failed verification"),
+        stderr.contains("verifying bundle archive")
+            && stderr.contains("manifest JSON parse failed"),
         "the refusal must come from bundle verification: {stderr}"
     );
     let installed = std::fs::read_dir(state.join("bundles"))

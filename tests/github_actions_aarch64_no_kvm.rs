@@ -48,7 +48,8 @@ const REQUIRED_SOURCE_KERNEL_BUILD: &str =
 const REQUIRED_SOURCE_KERNEL_VERIFY: &str = "bzImage.sha256";
 const REQUIRED_ENTRYPOINT_PATCH: &str = "write /tmp/exit-code-entrypoint /etc/mvm/entrypoint";
 const REQUIRED_VERITY_SEAL: &str = "veritysetup format";
-const REQUIRED_BUNDLE_EXPORT: &str = "/tmp/mvmctl-source-under-test bundle export \"$slot_hash\"";
+const REQUIRED_BUNDLE_EXPORT: &str =
+    "/tmp/mvmctl-source-under-test dev export-template \"$slot_hash\"";
 const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
 const REQUIRED_BAKED_ENTRYPOINT: &str = "--entrypoint";
 const FORBIDDEN_ENTRYPOINT_OVERRIDE: &str = "-- /bin/true";

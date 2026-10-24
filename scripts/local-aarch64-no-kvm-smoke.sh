@@ -96,7 +96,7 @@ echo "Exporting, installing, and re-running the bundle ..."
 slot_hash=$(/tmp/mvmctl-source-under-test manifest ls --json 2>&1 \
     | sed '"'"'s/\x1b\[[0-9;]*m//g'"'"' \
     | jq -r '"'"'.[0].slot_hash'"'"')
-/tmp/mvmctl-source-under-test bundle export "$slot_hash" \
+/tmp/mvmctl-source-under-test dev export-template "$slot_hash" \
     --out /tmp/exit-code-aarch64.mvmpkg \
     > /tmp/mvmctl-export.log 2>&1
 

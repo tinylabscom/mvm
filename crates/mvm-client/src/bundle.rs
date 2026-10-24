@@ -2,7 +2,7 @@
 //!
 //! The export is `mvm-bundler`'s, re-exported here so a caller names this
 //! crate alone. [`HostBundleSigner`] signs under this host's key, which is the
-//! key `mvmctl bundle export` signs under.
+//! key `mvmctl build` signs under.
 
 use std::path::Path;
 

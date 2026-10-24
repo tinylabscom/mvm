@@ -920,7 +920,7 @@ fn non_image_run_refuses_prod_before_source_work() {
             .expect_err("non-image production run must be refused");
         assert!(
             err.to_string()
-                .contains("only with `--image` or `--runtime`"),
+                .contains("only with `--image`, `--runtime`, or a signed bundle artifact"),
             "argv {argv:?}: {err}"
         );
     }

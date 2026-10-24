@@ -4,10 +4,10 @@ mod fixture;
 #[test]
 fn candidate_prefix_is_used_only_for_live_pack_production() {
     for (command, live, expected) in [
-        ("pack build --out app.mvmpkg", true, true),
-        ("pack build --out app.mvmpkg", false, false),
-        ("bundle build --image alpine --out app.mvmpkg", true, true),
-        ("bundle build --image alpine --out app.mvmpkg", false, false),
+        ("build pack.json --out app.mvmpkg", true, true),
+        ("build pack.json --out app.mvmpkg", false, false),
+        ("build alpine --from image --out app.mvmpkg", true, true),
+        ("build alpine --from image --out app.mvmpkg", false, false),
         ("bundle inspect app.mvmpkg", true, false),
         ("pack pull acme/hello", true, false),
         ("machine run --manifest app.mvmpkg", true, false),
@@ -65,6 +65,6 @@ fn live_pack_build_witness_drives_the_documented_request_shape() {
     assert!(
         commands
             .iter()
-            .any(|args| args == &["pack", "build", "pack.json", "--out", "build.mvmpkg"])
+            .any(|args| args == &["build", "pack.json", "--out", "build.mvmpkg"])
     );
 }
