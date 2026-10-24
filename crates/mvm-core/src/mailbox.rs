@@ -25,6 +25,9 @@ const CAPABILITY_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.capability.v1\0";
 const RECEIPT_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.receipt.v1\0";
 const ENVELOPE_AEAD_DOMAIN: &[u8] = b"mvm.mailbox.payload.v1\0";
 
+/// Overlay resolution and authenticated, bounded byte-transport seams.
+pub mod transport;
+
 /// Plaintext plus its complete immutable signed header.
 pub struct SealRequest<'a> {
     pub routing: MailboxRoutingFrame,

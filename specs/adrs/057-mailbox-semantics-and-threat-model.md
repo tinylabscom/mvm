@@ -387,6 +387,12 @@ and store or forward opaque ciphertext. It cannot define a second envelope,
 signature domain, receipt, ACK format, or payload schema; decrypt payloads in
 an ordinary coordinator; or become required for local delivery.
 
+The MVM interfaces reuse operational lessons from the earlier `mvmd`
+`AgentTransport` work without importing an `mvmd` crate or runtime dependency.
+Optional coordinator metadata enters through a narrow route-hint adapter that
+selects an already authorized path; it cannot edit, decrypt, or re-sign the
+canonical envelope.
+
 ### 14. Prototype `mvmd` type migration
 
 The existing prototype types are migration inputs, not protocol authority:

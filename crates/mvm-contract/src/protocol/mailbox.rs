@@ -67,6 +67,21 @@ fixed_id!(BootId, 32, "Fresh identity for one guest boot.");
 fixed_id!(MessageId, 32, "Stable message identity across retries.");
 fixed_id!(DeliveryId, 32, "Identity of one delivery attempt stream.");
 fixed_id!(
+    AuthorizationDomainRouteLabel,
+    32,
+    "Opaque authorization-domain label visible to mailbox routers."
+);
+fixed_id!(
+    DestinationRouteToken,
+    32,
+    "Opaque destination lookup token; never mailbox authority."
+);
+fixed_id!(
+    TransportBindingId,
+    32,
+    "Identity of one rotatable certified transport binding."
+);
+fixed_id!(
     CorrelationId,
     32,
     "Identity correlating one call and reply."
@@ -464,14 +479,14 @@ impl MailboxMessage {
 #[serde(deny_unknown_fields)]
 pub struct MailboxRoutingFrame {
     pub protocol_version: ProtocolVersion,
-    pub authorization_domain_route_label: [u8; 32],
-    pub destination_route_token: [u8; 32],
+    pub authorization_domain_route_label: AuthorizationDomainRouteLabel,
+    pub destination_route_token: DestinationRouteToken,
     pub delivery_id: DeliveryId,
     pub ciphertext_len: u32,
     pub padding: CiphertextPadding,
     pub expires_at_unix_ms: i64,
     pub hop_limit: u8,
-    pub transport_binding_id: [u8; 32],
+    pub transport_binding_id: TransportBindingId,
 }
 
 /// Padding contract visible to routers without revealing payload semantics.
