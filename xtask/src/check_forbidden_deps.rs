@@ -15,6 +15,12 @@
 //!    list: the default build carries the image-set signature verifier, and
 //!    the sigstore-verify stack depends on it unconditionally.
 //!
+//! 3. **Product-surface closure ban.** The `host,user` surfaces carry the
+//!    Sigstore verifier, which compiled an HTTP client stack nothing in `mvm`
+//!    calls until `third_party/sigstore-patches.md` made it optional. The
+//!    client crates must stay out of that closure; `sigstore-network` is the
+//!    off-by-default way back in.
+//!
 //! `tokio` staying out of `mvm-core` is covered by the separate
 //! `check-core-runtime-free` gate, not here.
 
@@ -30,6 +36,19 @@ const FORBIDDEN_SUBSTRINGS: &[&str] = &["mysql"];
 /// stock CLI. `sigstore` is the monolithic crate the modular sigstore-verify
 /// stack replaced, not that stack.
 const FORBIDDEN_IN_DEFAULT_CLOSURE: &[&str] = &["sigstore", "opendal", "pgp"];
+
+/// Banned from `mvmctl`'s `host,user` closure: the HTTP client stack the
+/// Sigstore Rekor, timestamp and TUF crates link only behind
+/// `sigstore-network`. `mvm` talks HTTP through `mvm-http`.
+const FORBIDDEN_IN_PRODUCT_CLOSURE: &[&str] = &[
+    "reqwest",
+    "hyper",
+    "hyper-util",
+    "hyper-rustls",
+    "tower",
+    "tower-http",
+    "sigstore-tuf",
+];
 
 pub fn run(workspace: &Path) -> Result<()> {
     let mut failures: Vec<String> = Vec::new();
@@ -52,7 +71,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     }
 
     // (2) Default-closure ban.
-    let tree = mvmctl_default_closure(workspace)?;
+    let tree = mvmctl_closure(workspace, None)?;
     let names: Vec<&str> = package_names_from_tree(&tree).collect();
     let closure_hits = closure_violations(&names, FORBIDDEN_IN_DEFAULT_CLOSURE);
     if !closure_hits.is_empty() {
@@ -60,6 +79,18 @@ pub fn run(workspace: &Path) -> Result<()> {
             "deliberately-gated dep(s) re-entered mvmctl's default-feature closure: {} \
              (allowed only behind off-by-default features)",
             closure_hits.join(", ")
+        ));
+    }
+
+    // (3) Product-surface closure ban.
+    let tree = mvmctl_closure(workspace, Some("host,user"))?;
+    let names: Vec<&str> = package_names_from_tree(&tree).collect();
+    let product_hits = closure_violations(&names, FORBIDDEN_IN_PRODUCT_CLOSURE);
+    if !product_hits.is_empty() {
+        failures.push(format!(
+            "HTTP client stack re-entered mvmctl's host,user closure: {} \
+             (allowed only behind `sigstore-network`)",
+            product_hits.join(", ")
         ));
     }
 
@@ -75,16 +106,20 @@ pub fn run(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Resolve `mvmctl`'s default-feature, normal-edge dependency closure via
-/// `cargo tree`. Uses the `CARGO` the parent invocation was launched with
-/// so the gate honours the active toolchain in CI.
-fn mvmctl_default_closure(workspace: &Path) -> Result<String> {
+/// Resolve `mvmctl`'s normal-edge dependency closure via `cargo tree`, with
+/// its default features or with the given feature list. Uses the `CARGO` the
+/// parent invocation was launched with so the gate honours the active
+/// toolchain in CI.
+fn mvmctl_closure(workspace: &Path, features: Option<&str>) -> Result<String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let output = std::process::Command::new(&cargo)
-        .current_dir(workspace)
-        .args([
-            "tree", "-p", "mvmctl", "--edges", "normal", "--prefix", "none",
-        ])
+    let mut command = std::process::Command::new(&cargo);
+    command.current_dir(workspace).args([
+        "tree", "-p", "mvmctl", "--edges", "normal", "--prefix", "none",
+    ]);
+    if let Some(features) = features {
+        command.args(["--features", features]);
+    }
+    let output = command
         .output()
         .with_context(|| format!("running `{cargo} tree` for the mvmctl closure"))?;
     if !output.status.success() {
@@ -199,5 +234,16 @@ rustls v0.23.37
         // verifier and the aws-lc it links are expected in the closure.
         let names = ["mvmctl", "sigstore-verify", "sigstore-crypto", "aws-lc-rs"];
         assert!(closure_violations(&names, FORBIDDEN_IN_DEFAULT_CLOSURE).is_empty());
+    }
+
+    #[test]
+    fn the_http_client_stack_is_banned_from_the_product_closure() {
+        let with_client = ["anyhow", "reqwest", "mvm-http", "hyper-util"];
+        assert_eq!(
+            closure_violations(&with_client, FORBIDDEN_IN_PRODUCT_CLOSURE),
+            ["hyper-util", "reqwest"]
+        );
+        let without = ["anyhow", "mvm-http", "rustls", "hyperlocal-unrelated"];
+        assert!(closure_violations(&without, FORBIDDEN_IN_PRODUCT_CLOSURE).is_empty());
     }
 }
