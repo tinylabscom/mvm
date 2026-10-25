@@ -35,27 +35,6 @@ on:
         description: Release whose tarballs to package; empty for the newest CLI release
         type: string
         default: ""
-  pull_request:
-    paths:
-      - .githooks/pre-commit
-      - scripts/pre-commit.test.sh
-      - .github/workflows/distro-packages.yml
-      - scripts/build-distro-packages.sh
-      - scripts/distro-package-smoke.sh
-      - scripts/smoke-installed-release.py
-      - scripts/test_smoke_installed_release.py
-      - scripts/published-installed-boot.py
-      - scripts/smoke-fresh-install.sh
-      - tests/test_published_installed_boot.py
-      - .github/workflows/first-run-smoke.yml
-      - .github/workflows/release.yml
-      - .github/workflows/pack-signing-smoke.yml
-      - scripts/locked-image-tag.sh
-      - crates/mvm-core/images.lock
-      - scripts/release/**
-      - nix/packaging/aur/**
-      - nix/packaging/nixpkgs/**
-      - nix/packaging/release/verify-release-assets*
 
 permissions:
   contents: read

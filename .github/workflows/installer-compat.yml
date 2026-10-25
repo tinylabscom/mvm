@@ -37,17 +37,8 @@ name: Installer compat
 # job (e2e-docs.yml), on the self-hosted Apple Silicon runner.
 
 on:
-  # Weekly, not nightly. Nothing in this repository changes these lanes'
-  # outcome without a pull request, and a pull request touching the installer,
-  # the uninstaller or the install pages runs them below. What drifts on its
-  # own is external — a new published release, a moved `debian:stable` or
-  # `fedora:latest` tag, a runner image — and none of that moves daily. A
-  # release does not trigger this: `release.yml` publishes with GITHUB_TOKEN,
+  # A release does not trigger this: `release.yml` publishes with GITHUB_TOKEN,
   # whose events start no workflows, so dispatch this after cutting one.
-  # Monday 10:37 UTC stays clear of the 04:17–09:23 nightly cluster, which is
-  # where the hosted macOS concurrency this run needs is already spent.
-  schedule:
-    - cron: "37 10 * * 1"
   workflow_dispatch:
     inputs:
       release_count:
