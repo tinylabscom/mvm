@@ -597,13 +597,25 @@ fn assert_read_only_inventory(body: &str) {
             "missing inventory guard: {required}"
         );
     }
-    assert_eq!(body.matches("      - ").count(), 1);
+    assert_eq!(
+        body.lines()
+            .filter(|line| line.starts_with("      - "))
+            .count(),
+        1
+    );
     assert!(!body.contains("uses:"));
     assert!(!body.contains("secrets."));
     assert!(!body.contains("GITHUB_ENV"));
-    assert!(body.contains(&format!(
-        "runs-on: ${{{{ inputs.runner_kind == 'hetzner' && fromJSON('{KVM_POOL}') || 'ubuntu-24.04' }}}}"
-    )));
+    assert!(body.contains(
+        "runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON(matrix.labels) || 'ubuntu-24.04' }}"
+    ));
+    for pool in [
+        KVM_POOL,
+        r#"["self-hosted","macOS","ARM64","m1"]"#,
+        r#"["self-hosted","Linux","ARM64","raspberry-pi"]"#,
+    ] {
+        assert!(body.contains(pool));
+    }
     let allowed = [
         "set -euo pipefail",
         "if [[ \"$RUNNER_KIND\" != hetzner ]]; then",
@@ -612,6 +624,11 @@ fn assert_read_only_inventory(body: &str) {
         "fi",
         "{",
         "uname -m",
+        "uname -s",
+        "if command -v sw_vers >/dev/null 2>&1; then",
+        "sw_vers -productVersion",
+        "if command -v lscpu >/dev/null 2>&1; then",
+        "if command -v lsblk >/dev/null 2>&1; then",
         "LC_ALL=C lscpu | awk -F: '/^(Architecture|CPU\\(s\\)|Model name|Socket\\(s\\)|Core\\(s\\) per socket|Thread\\(s\\) per core):/ { print }'",
         "nproc",
         "free -h",
@@ -620,8 +637,15 @@ fn assert_read_only_inventory(body: &str) {
         "if command -v rustup >/dev/null 2>&1; then",
         "rustup toolchain list",
         "else",
-        "for tool in rustc cargo gcc clang cc zig cargo-zigbuild cargo-nextest ld.lld nix go python3 node; do",
+        "for tool in rustc cargo gcc clang cc zig cargo-zigbuild cargo-nextest ld.lld nix go python3 node mvmctl mvm-libkrun-supervisor; do",
         "command -v \"$tool\" || printf '%s: not on PATH\\n' \"$tool\"",
+        r#"for path in /usr/lib/libkrun* /usr/lib64/libkrun* /usr/lib/*/libkrun* /usr/local/lib/libkrun* /opt/homebrew/lib/libkrun* "${HOME:-/nonexistent}"/.local/lib/libkrun* "${HOME:-/nonexistent}"/.local/bin/mvmctl "${HOME:-/nonexistent}"/.local/bin/mvm-libkrun-supervisor "$GITHUB_WORKSPACE"/target/debug/mvmctl "$GITHUB_WORKSPACE"/target/debug/mvm-libkrun-supervisor "$GITHUB_WORKSPACE"/.mvm-test/target/debug/mvmctl "$GITHUB_WORKSPACE"/.mvm-test/target/debug/mvm-libkrun-supervisor; do"#,
+        r#"if [[ -e "$path" ]]; then"#,
+        r#"ls -l "$path""#,
+        r#"for root in "${HOME:-/nonexistent}/.mvm/cache" "$GITHUB_WORKSPACE/.mvm-test/cache"; do"#,
+        r#"if [[ -d "$root" ]]; then"#,
+        r#"find "$root" -maxdepth 4 -type f \( -name 'vmlinux*' -o -name '*rootfs*' -o -name '*kernel*' -o -name '*builder*.img' \) -print"#,
+        r#"printf '%s: absent\n' "$root""#,
         "done",
         "if [[ -e /dev/kvm ]]; then",
         "ls -l /dev/kvm",
@@ -690,6 +714,7 @@ fn inventory_reports_to_stdout_and_summary_and_rejects_other_runners() {
     // Compiler/tool shims deliberately fail if the script ever invokes them.
     let mocks = r#"
 uname() { echo x86_64; }
+sw_vers() { echo 26.0; }
 lscpu() { printf 'Model name: fixture CPU\nCPU(s): 8\n'; }
 nproc() { echo 8; }
 free() { echo 'Mem: 16Gi'; }

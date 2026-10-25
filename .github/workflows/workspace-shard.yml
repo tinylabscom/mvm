@@ -62,8 +62,14 @@ jobs:
     name: Read-only runner inventory
     if: github.event_name == 'workflow_dispatch' && inputs.inventory_only
     permissions: {}
-    # Invalid selectors fail on a hosted runner, never silently skip.
-    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        labels:
+          - '["self-hosted","Linux","X64","mvm","hetzner","kvm"]'
+          - '["self-hosted","macOS","ARM64","m1"]'
+          - '["self-hosted","Linux","ARM64","raspberry-pi"]'
+    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON(matrix.labels) || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - name: Inventory provisioned host
@@ -82,16 +88,25 @@ jobs:
             printf '## Read-only runner inventory\n\n```text\n'
             printf '\nArchitecture\n'
             uname -m
+            printf '\nOperating system\n'
+            uname -s
+            if command -v sw_vers >/dev/null 2>&1; then
+              sw_vers -productVersion
+            fi
             printf '\nCPU model and count\n'
+            if command -v lscpu >/dev/null 2>&1; then
             LC_ALL=C lscpu | awk -F: '/^(Architecture|CPU\(s\)|Model name|Socket\(s\)|Core\(s\) per socket|Thread\(s\) per core):/ { print }'
             printf 'Available CPUs: '
             nproc
             printf '\nRAM\n'
             free -h
+            fi
             printf '\nDisk capacity (root and runner workspace)\n'
             df -h / "$GITHUB_WORKSPACE"
             printf '\nBlock device capacity\n'
-            lsblk -o NAME,TYPE,SIZE
+            if command -v lsblk >/dev/null 2>&1; then
+              lsblk -o NAME,TYPE,SIZE
+            fi
             printf '\nInstalled Rust toolchains (no compiler shims invoked)\n'
             if command -v rustup >/dev/null 2>&1; then
               rustup toolchain list
@@ -99,8 +114,22 @@ jobs:
               printf 'rustup not installed\n'
             fi
             printf '\nProvisioned tool paths (presence only; no executables invoked)\n'
-            for tool in rustc cargo gcc clang cc zig cargo-zigbuild cargo-nextest ld.lld nix go python3 node; do
+            for tool in rustc cargo gcc clang cc zig cargo-zigbuild cargo-nextest ld.lld nix go python3 node mvmctl mvm-libkrun-supervisor; do
               command -v "$tool" || printf '%s: not on PATH\n' "$tool"
+            done
+            printf '\nLibkrun libraries and existing host binaries (metadata only)\n'
+            for path in /usr/lib/libkrun* /usr/lib64/libkrun* /usr/lib/*/libkrun* /usr/local/lib/libkrun* /opt/homebrew/lib/libkrun* "${HOME:-/nonexistent}"/.local/lib/libkrun* "${HOME:-/nonexistent}"/.local/bin/mvmctl "${HOME:-/nonexistent}"/.local/bin/mvm-libkrun-supervisor "$GITHUB_WORKSPACE"/target/debug/mvmctl "$GITHUB_WORKSPACE"/target/debug/mvm-libkrun-supervisor "$GITHUB_WORKSPACE"/.mvm-test/target/debug/mvmctl "$GITHUB_WORKSPACE"/.mvm-test/target/debug/mvm-libkrun-supervisor; do
+              if [[ -e "$path" ]]; then
+                ls -l "$path"
+              fi
+            done
+            printf '\nCached kernel/rootfs inputs (names only; no contents or trust claims)\n'
+            for root in "${HOME:-/nonexistent}/.mvm/cache" "$GITHUB_WORKSPACE/.mvm-test/cache"; do
+              if [[ -d "$root" ]]; then
+                find "$root" -maxdepth 4 -type f \( -name 'vmlinux*' -o -name '*rootfs*' -o -name '*kernel*' -o -name '*builder*.img' \) -print
+              else
+                printf '%s: absent\n' "$root"
+              fi
             done
             printf '\nKVM device (metadata only; not opened)\n'
             if [[ -e /dev/kvm ]]; then
