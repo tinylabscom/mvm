@@ -253,18 +253,32 @@ fn artifact_warm_home(world: &mut CliWorld) {
     world.e2e_home = Some(home);
 }
 
-/// Images already pulled into the shared home by this run. The cache is the
-/// same for every scenario, so only the first needing an image pays for the
-/// pull; the explicit `image pull` scenario still exercises the verb itself.
-static PREPARED_IMAGES: mvm_conformance::prepared_once::PreparedOnce =
-    mvm_conformance::prepared_once::PreparedOnce::new();
+#[path = "../support/launch_image_fixture.rs"]
+mod launch_image_fixture;
+
+/// Reuse each image's preparation while its identity and artifacts still match.
+/// Explicit `image pull` scenarios continue to exercise the verb itself.
+static PREPARED_IMAGES: mvm_conformance::prepared_once::PreparedOnce<
+    launch_image_fixture::Snapshot,
+> = mvm_conformance::prepared_once::PreparedOnce::new();
 
 #[given(expr = "the documented launch images are prepared")]
 fn documented_launch_images_are_prepared(_world: &mut CliWorld) {
     let home = e2e_home();
     for image in ["alpine", "rust", "python:3.12", "curlimages/curl:8.21.0"] {
-        let key = format!("{}\0{image}", home.display());
-        let prepared = PREPARED_IMAGES.ensure(&key, || {
+        let key = launch_image_fixture::preparation_key(&home, image)
+            .expect("canonical artifact-warm home");
+        let inspect = || {
+            let result = run_in_e2e_home(&format!("image inspect {image} --json"), &[]);
+            if result.exit_code != 0 {
+                return Err(format!("failed to inspect {image}: {}", result.stderr));
+            }
+            let output = serde_json::from_str(&result.stdout).map_err(|error| error.to_string())?;
+            let cache = mvm_core::config::mvm_cache_dir_at(&home).join("oci");
+            launch_image_fixture::inspect_snapshot(&cache, &output)
+                .map_err(|error| format!("incomplete prepared {image}: {error}"))
+        };
+        let prepared = PREPARED_IMAGES.ensure_observed(&key, inspect, || {
             let pull = run_in_e2e_home(&format!("image pull {image}"), &[]);
             if pull.exit_code == 0 {
                 Ok(())

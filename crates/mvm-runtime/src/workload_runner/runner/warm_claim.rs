@@ -23,6 +23,24 @@ pub(super) fn record_phase(
     }
 }
 
+/// Record how long into a standby spawn a step finished, beside the claim
+/// phases. A refill runs as a detached process, so the same trace file the claim
+/// writes (`MVM_HVF_AGENT_DEBUG`) carries these.
+pub(super) fn record_standby_phase(started: Instant, scope: &'static str, phase: &'static str) {
+    let elapsed_us = started.elapsed().as_micros();
+    tracing::debug!(
+        target: "mvm_runtime::standby_spawn",
+        scope,
+        phase,
+        elapsed_us,
+        "standby spawn phase"
+    );
+    mvm_vmm::agent_debug::line(
+        "standby-spawn",
+        format_args!("scope={scope} phase={phase} elapsed_us={elapsed_us}"),
+    );
+}
+
 /// Write a saved-state claimed child's runtime metadata: the record a cold boot
 /// writes from its start config, plus the device anchors its materialized
 /// checkpoint carries, which its restored VMM keeps naming.

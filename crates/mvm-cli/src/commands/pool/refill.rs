@@ -96,6 +96,13 @@ fn spawn_refill_helper(refill: &StandbyRefill) -> Result<()> {
     // also cancel the standby it leaves behind.
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     command.spawn().context("starting the standby refill")?;
+    let unix_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros());
+    mvm_vmm::agent_debug::line(
+        "pool-refill",
+        format_args!("phase=scheduled unix_us={unix_us}"),
+    );
     Ok(())
 }
 
@@ -111,6 +118,21 @@ fn open_refill_log(path: &Path) -> Result<std::fs::File> {
         .mode(0o600)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))
+}
+
+/// Record a step of the refill helper, with wall-clock time so it lines up with
+/// the launch that scheduled it. The helper is detached, so the trace file the
+/// warm claim writes (`MVM_HVF_AGENT_DEBUG`) carries these.
+fn refill_phase(started: std::time::Instant, phase: &'static str) {
+    let elapsed_us = started.elapsed().as_micros();
+    let unix_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros());
+    tracing::debug!(target: "mvm_cli::pool_refill", phase, elapsed_us, "standby refill phase");
+    mvm_vmm::agent_debug::line(
+        "pool-refill",
+        format_args!("phase={phase} elapsed_us={elapsed_us} unix_us={unix_us}"),
+    );
 }
 
 /// `mvmctl pool refill`: prepare the standby a run asked for, within budget,
@@ -141,6 +163,8 @@ fn refill_one(
     target: u32,
     idle_timeout: std::time::Duration,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
+    refill_phase(started, "begin");
     let req = WarmRequest {
         source: super::WarmSource::Image(refill.image.clone()),
         cpus: refill.cpus,
@@ -149,6 +173,7 @@ fn refill_one(
         egress: refill.egress,
     };
     let launch = resolve_warm_launch(&req)?;
+    refill_phase(started, "launch_resolved");
     let want = compat_for_launch(&launch.start_config)?;
     let missing = target.saturating_sub(pool.idle_count_compatible(&want)? as u32);
     if missing == 0 {
@@ -168,7 +193,9 @@ fn refill_one(
         ));
         return Ok(());
     }
+    refill_phase(started, "room_made");
     let signer = host_signer::load_or_init()?;
+    refill_phase(started, "signer_loaded");
     let result = warm_to_target(
         pool,
         &WarmParams {
@@ -179,6 +206,7 @@ fn refill_one(
             launch: &launch.start_config,
         },
     )?;
+    refill_phase(started, "warmed");
     mvm_core::audit_emit!(
         PoolWarm,
         "spawned={} failed={} target={target} trigger=run",

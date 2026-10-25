@@ -5,21 +5,23 @@
 //! every scenario's `Background` costs minutes per scenario for no new
 //! guarantee. Anything a scenario consumes (a warm standby) must not go here.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 /// Keys whose preparation has already succeeded in this process.
-pub struct PreparedOnce {
-    done: Mutex<BTreeSet<String>>,
+pub struct PreparedOnce<S = ()> {
+    done: Mutex<BTreeMap<String, S>>,
+}
+
+impl<S> PreparedOnce<S> {
+    pub const fn new() -> Self {
+        Self {
+            done: Mutex::new(BTreeMap::new()),
+        }
+    }
 }
 
 impl PreparedOnce {
-    pub const fn new() -> Self {
-        Self {
-            done: Mutex::new(BTreeSet::new()),
-        }
-    }
-
     /// Run `prepare` unless it already succeeded for `key`. A failure is not
     /// recorded, so the next scenario retries rather than inheriting a
     /// half-prepared home.
@@ -28,16 +30,43 @@ impl PreparedOnce {
             .done
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if done.contains(key) {
+        if done.contains_key(key) {
             return Ok(());
         }
         prepare()?;
-        done.insert(key.to_owned());
+        done.insert(key.to_owned(), ());
         Ok(())
     }
 }
 
-impl Default for PreparedOnce {
+impl<S: PartialEq> PreparedOnce<S> {
+    /// Reuse preparation only while its observed outputs still match. An
+    /// unavailable observation invalidates the memo; failed preparation or
+    /// post-preparation inspection leaves no remembered success.
+    pub fn ensure_observed<E>(
+        &self,
+        key: &str,
+        inspect: impl Fn() -> Result<S, E>,
+        prepare: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut done = self
+            .done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let unchanged = done
+            .remove(key)
+            .and_then(|previous| inspect().ok().filter(|current| previous == *current));
+        if let Some(current) = unchanged {
+            done.insert(key.to_owned(), current);
+            return Ok(());
+        }
+        prepare()?;
+        done.insert(key.to_owned(), inspect()?);
+        Ok(())
+    }
+}
+
+impl<S> Default for PreparedOnce<S> {
     fn default() -> Self {
         Self::new()
     }
