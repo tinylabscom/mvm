@@ -60,10 +60,11 @@ env:
   RUSTFLAGS: "-D warnings"
 
 # One warm at a time. Merges can land faster than a build completes, and the
-# newest main is the one worth caching, so a newer push cancels the stale one.
+# newest main is the one worth caching — but let an in-flight build finish
+# rather than cancelling, since a half-built target dir caches nothing useful.
 concurrency:
   group: cache-warm
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   warm:
