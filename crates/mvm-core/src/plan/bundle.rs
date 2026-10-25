@@ -84,8 +84,8 @@ pub use mvm_contract::plan::bundle::{
 };
 pub use mvm_contract::plan::environment::{
     ApplicationService, ENVIRONMENT_DESCRIPTOR_VERSION, EnvironmentCapability,
-    EnvironmentDescriptor, EnvironmentDescriptorError, EnvironmentEntrypoint, EnvironmentVolume,
-    SecretSlot,
+    EnvironmentDescriptor, EnvironmentDescriptorError, EnvironmentEntrypoint, EnvironmentPolicy,
+    EnvironmentVolume, SecretSlot,
 };
 
 use crate::arch::GuestArch;
@@ -102,8 +102,8 @@ mod signer;
 mod stream;
 mod verify_error;
 pub use declarations::{
-    BundleSizeBudget, forbidden_capabilities, unbound_environment_secret_slots,
-    unsupported_environment_requirements,
+    BundleSizeBudget, environment_network_permitted, forbidden_capabilities,
+    unbound_environment_secret_slots, unsupported_environment_requirements,
 };
 pub use lookup::{
     BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, LocalBundleTrustStore,

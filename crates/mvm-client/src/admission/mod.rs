@@ -902,6 +902,7 @@ fn admit(
                 secrets: &p.secrets,
                 entrypoint: &p.entrypoint,
                 postures: &postures,
+                network_policy: &p.network_policy,
             },
         );
         if !refused.is_empty() {

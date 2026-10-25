@@ -751,7 +751,7 @@ it:
 ```sh
 mvmctl run alpine:3.20 -- echo hi          # an OCI image
 mvmctl run ./app.mvmpkg -- python app.py   # a signed bundle
-mvmctl run agent/claude@1.0.1 -- true      # an installed application
+mvmctl run agent/claude -- true           # an installed application, explicit command
 mvmctl run -- npm test                     # infer the runtime from the command
 ```
 
@@ -786,7 +786,52 @@ re-verification are the ones a `.mvmpkg` gets. The exact application reference
 and descriptor digest are also bound into that signed plan; client and host
 admission each reopen the typed descriptor, and host boot preparation retains
 the independently reverified archive while checking the final boot files. The
-resolution is recorded as an
+normal installed application workflow needs no launch flags:
+
+```sh
+mvmctl search agent/claude
+mvmctl pull agent/claude
+printf '%s\n' 'tell me a joke' | mvmctl run agent/claude
+```
+
+One-time setup requires a compatible CLI, helper and native caller identity,
+publisher trust (including independent bundle trust and current revocation
+trust), and one existing host-held provider-bound key. Running an application
+never implicitly enrolls a caller identity, publisher or key.
+
+On macOS builds with native caller identity support, explicitly enroll once with
+`mvmctl env caller-identity enroll`. `mvmctl env caller-identity show` (alias
+`status`) reads only the saved public pin. Enrollment refuses an existing or
+pending identity instead of replacing it; the private credential stays in the
+native store.
+
+With no command after `--`, an authenticated installed application selects its
+baked entrypoint; implicit piped input is a bounded one-shot payload. An explicit
+command is preserved, and conflicting entrypoint or interactive selections are
+refused. Advisory resources and network defaults come from the authenticated
+bundle's signed environment. Operator policy is folded after resource defaults
+and before missing secret slots are filled. Explicit network selections do not
+inherit additional signed destinations and cannot exceed the signed
+`policy.allow_hosts` ceiling; the host independently enforces actual network
+policy. Older descriptors without `policy` keep their existing network behavior.
+
+Required secret slots select exactly one existing provider-bound host binding
+whose conventional guest variable matches the slot. Selections from `--policy`,
+`--plan` or `--secret` satisfy slots before automatic selection; missing or
+ambiguous slots fail before boot. Automatic names obey applied policy secret
+denies. Selection reads binding metadata, not raw values, and does not change
+binding destinations or admission checks. These secret defaults apply only to
+authenticated application entrypoint launches, not OCI images or explicit
+commands. The immutable policy-only `agent/claude@1.0.1` is not runnable.
+
+The application entrypoint route refuses persistent and attached launches, and
+request dimensions it cannot preserve: `--grants-file`, `--cpu-limit`,
+`--dry-run`, `--launch-plan`, `--peer`, `--host-service`, `--asset`, `--receipt`,
+GPU options, `--mount`, `--env`, `--allow-env`, policy tool rules, policy shares
+and CPU-share ceilings. Other entrypoint and native-route restrictions still
+apply; defaults do not grant authority or bypass admission.
+
+The resolution is recorded as an
 `application_launch` audit entry (reference, descriptor digest, bundle digest),
 written once admission has produced the plan, so the entry also carries the
 `run_id` (the machine name) and the `plan_id` it booted under. A positional that

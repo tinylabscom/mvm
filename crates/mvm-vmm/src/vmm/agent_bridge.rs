@@ -22,7 +22,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::host_write::{HostWrite, HostWriteBacklog};
 use super::vsock_transport::{CONNECTION_IDLE_TIMEOUT, MAX_CONNECTIONS};
@@ -38,6 +38,9 @@ struct AgentConn {
     stream: UnixStream,
     /// The guest accepted (`OP_RESPONSE` seen); only then do we read host bytes.
     established: bool,
+    ready_deadline: Instant,
+    retry_at: Option<Instant>,
+    retry_delay: Duration,
     last_activity: Instant,
     /// Guest bytes the host socket has not taken yet.
     backlog: HostWriteBacklog,
@@ -139,6 +142,11 @@ impl AgentBridge {
         self.conns.contains_key(&conn_id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn stream_fd(&self, conn_id: u32) -> Option<RawFd> {
+        self.conns.get(&conn_id).map(|c| c.stream.as_raw_fd())
+    }
+
     /// Accept any pending host connections, assigning each a host vsock src_port.
     /// Returns the new conn ids — the device sends an `OP_REQUEST` to the guest
     /// agent (dst_port [`GUEST_AGENT_PORT`]) for each. No-op without a listener.
@@ -165,6 +173,10 @@ impl AgentBridge {
                         AgentConn {
                             stream,
                             established: false,
+                            ready_deadline: Instant::now()
+                                + mvm_agentd::vsock::COLD_GUEST_AGENT_READY_BUDGET,
+                            retry_at: None,
+                            retry_delay: Duration::from_millis(25),
                             last_activity: Instant::now(),
                             backlog: HostWriteBacklog::default(),
                         },
@@ -183,10 +195,94 @@ impl AgentBridge {
     /// this does [`Self::drain_host`] read the host socket, so request bytes the
     /// client wrote before the handshake completed stay ordered behind it.
     pub fn on_established(&mut self, conn_id: u32) {
+        if self
+            .conns
+            .get(&conn_id)
+            .is_some_and(|c| !c.established && Instant::now() >= c.ready_deadline)
+        {
+            self.close(conn_id);
+            self.host_closed.push(conn_id);
+            return;
+        }
         if let Some(c) = self.conns.get_mut(&conn_id) {
             c.established = true;
+            c.retry_at = None;
             c.last_activity = Instant::now();
         }
+    }
+
+    /// A refused initial request is not a new host connection. Keep the socket,
+    /// unread host bytes, and source port until this one cold readiness expires.
+    pub fn on_reset_at(&mut self, conn_id: u32, now: Instant) -> bool {
+        let Some(c) = self.conns.get_mut(&conn_id) else {
+            return false;
+        };
+        if c.established || now >= c.ready_deadline {
+            return false;
+        }
+        if c.retry_at.is_none() {
+            c.retry_at = Some(now + c.retry_delay);
+            c.retry_delay = (c.retry_delay * 2).min(Duration::from_millis(250));
+        }
+        true
+    }
+
+    /// Timer service independent of guest/host readiness. MSG_PEEK detects EOF
+    /// without consuming or copying the original client's buffered handshake.
+    pub fn readiness_at(&mut self, now: Instant) -> Vec<u32> {
+        let mut retry = Vec::new();
+        let mut closed = Vec::new();
+        for (&id, c) in &mut self.conns {
+            if c.established {
+                continue;
+            }
+            let mut byte = 0u8;
+            // SAFETY: the stream owns a live fd and byte is writable for one byte.
+            let peek = unsafe {
+                libc::recv(
+                    c.stream.as_raw_fd(),
+                    (&mut byte as *mut u8).cast(),
+                    1,
+                    libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                )
+            };
+            // HUP also detects a peer that closed after buffering its handshake.
+            let mut pfd = libc::pollfd {
+                fd: c.stream.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: pfd is a valid, single pollfd; timeout zero never blocks.
+            unsafe { libc::poll(&mut pfd, 1, 0) };
+            if now >= c.ready_deadline
+                || peek == 0
+                || pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+            {
+                closed.push(id);
+            } else if c.retry_at.is_some_and(|at| now >= at) {
+                c.retry_at = None;
+                retry.push(id);
+            }
+        }
+        for id in closed {
+            self.close(id);
+            self.host_closed.push(id);
+        }
+        retry
+    }
+
+    pub fn readiness_timeout(&self, now: Instant) -> Option<Duration> {
+        self.conns
+            .values()
+            .filter(|c| !c.established)
+            .map(|c| {
+                c.retry_at
+                    .unwrap_or(c.ready_deadline)
+                    .min(c.ready_deadline)
+                    .saturating_duration_since(now)
+                    .min(Duration::from_millis(250))
+            })
+            .min()
     }
 
     /// Read each established host connection once (non-blocking). Returns
@@ -316,6 +412,120 @@ mod tests {
     use crate::test_support::error_chain_has_permission_denied;
     use std::io::Write;
     use std::time::Duration;
+
+    fn cold_pair(now: Instant) -> (AgentBridge, UnixStream, u32, RawFd) {
+        let (stream, client) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let fd = stream.as_raw_fd();
+        let mut bridge = AgentBridge::new();
+        let id = FIRST_HOST_PORT;
+        bridge.conns.insert(
+            id,
+            AgentConn {
+                stream,
+                established: false,
+                ready_deadline: now + mvm_agentd::vsock::COLD_GUEST_AGENT_READY_BUDGET,
+                retry_at: None,
+                retry_delay: Duration::from_millis(25),
+                last_activity: now,
+                backlog: HostWriteBacklog::default(),
+            },
+        );
+        (bridge, client, id, fd)
+    }
+
+    #[test]
+    fn cold_readiness_early_reset_preserves_original_fd_port_and_bytes() {
+        let now = Instant::now();
+        let (mut bridge, mut client, id, fd) = cold_pair(now);
+        client.write_all(b"original handshake").unwrap();
+        for delay in [25, 50, 100, 200, 250] {
+            assert!(bridge.on_reset_at(id, now));
+            assert_eq!(
+                bridge.readiness_timeout(now),
+                Some(Duration::from_millis(delay))
+            );
+            assert!(
+                bridge
+                    .readiness_at(now + Duration::from_millis(delay - 1))
+                    .is_empty()
+            );
+            assert_eq!(
+                bridge.readiness_at(now + Duration::from_millis(delay)),
+                vec![id]
+            );
+            assert_eq!(bridge.conns.len(), 1);
+            assert_eq!(bridge.conns[&id].stream.as_raw_fd(), fd);
+        }
+        bridge.on_established(id);
+        assert_eq!(
+            bridge.drain_host(),
+            vec![(id, b"original handshake".to_vec())]
+        );
+        assert!(matches!(
+            bridge.write_to_host(id, b"response"),
+            HostWrite::Forwarded(8)
+        ));
+        let mut reply = [0; 8];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"response");
+        assert!(!bridge.on_reset_at(id, now));
+        bridge.close(id); // terminal handler path
+        assert!(bridge.readiness_at(now + Duration::from_secs(1)).is_empty());
+        assert!(!bridge.is_agent_stream(id));
+    }
+
+    #[test]
+    fn cold_readiness_deadline_closes_without_more_io() {
+        let now = Instant::now();
+        let (mut bridge, _client, id, _) = cold_pair(now);
+        assert!(bridge.on_reset_at(id, now));
+        assert!(
+            bridge
+                .readiness_at(now + mvm_agentd::vsock::COLD_GUEST_AGENT_READY_BUDGET)
+                .is_empty()
+        );
+        assert!(!bridge.is_agent_stream(id));
+        assert_eq!(bridge.take_host_closed(), vec![id]);
+        assert_eq!(bridge.readiness_timeout(now), None);
+        assert!(!bridge.on_reset_at(id, now));
+    }
+
+    #[test]
+    fn cold_readiness_peer_close_and_native_cancel_end_retries() {
+        let now = Instant::now();
+        for buffered in [false, true] {
+            let (mut bridge, mut client, id, _) = cold_pair(now);
+            if buffered {
+                client.write_all(b"buffered").unwrap();
+            }
+            assert!(bridge.on_reset_at(id, now));
+            drop(client);
+            assert!(bridge.readiness_at(now).is_empty());
+            assert!(!bridge.is_agent_stream(id));
+        }
+        let (mut bridge, _client, id, _) = cold_pair(now);
+        assert!(bridge.on_reset_at(id, now));
+        bridge.close_all();
+        assert!(bridge.readiness_at(now + Duration::from_secs(1)).is_empty());
+        assert_eq!(bridge.readiness_timeout(now), None);
+    }
+
+    #[test]
+    fn cold_readiness_never_retries_after_establishment() {
+        let now = Instant::now();
+        let (mut bridge, _client, id, _) = cold_pair(now);
+        assert!(bridge.on_reset_at(id, now));
+        bridge.on_established(id);
+        assert_eq!(bridge.readiness_timeout(now), None);
+        assert!(
+            bridge
+                .readiness_at(now + mvm_agentd::vsock::COLD_GUEST_AGENT_READY_BUDGET)
+                .is_empty()
+        );
+        assert!(!bridge.on_reset_at(id, now));
+        assert!(bridge.is_agent_stream(id));
+    }
 
     /// Full host→guest relay: a host client connects, the bridge accepts and
     /// assigns a stream, and once the guest "accepts" (on_established) the bridge
@@ -490,6 +700,9 @@ mod tests {
             AgentConn {
                 stream,
                 established: true,
+                ready_deadline: Instant::now(),
+                retry_at: None,
+                retry_delay: Duration::from_millis(25),
                 last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
                 backlog: HostWriteBacklog::default(),
             },

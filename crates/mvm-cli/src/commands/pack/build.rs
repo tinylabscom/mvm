@@ -386,6 +386,7 @@ fn pack_environment(
             working_dir: None,
         },
         resources: Some(spec.resources.clone()),
+        policy: None,
         volumes: Vec::new(),
         secret_slots: Vec::new(),
         capabilities: Vec::new(),

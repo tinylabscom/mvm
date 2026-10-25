@@ -48,6 +48,7 @@ pub mod warm_artifact_source {
 }
 
 pub(in crate::commands) use build::ir_input::load_ir_json_workload;
+pub(crate) use env::caller_identity::load_enrolled_identity;
 pub(crate) use shared::{DirShareSpec, parse_dir_share_spec};
 pub(crate) use vm::exec::RunProfile;
 

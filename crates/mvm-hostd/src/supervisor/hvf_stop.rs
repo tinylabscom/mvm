@@ -51,6 +51,8 @@ struct Shared {
     wake: UnixStream,
     #[cfg(test)]
     close_attempt: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+    #[cfg(test)]
+    connection_budget: Mutex<std::time::Duration>,
 }
 
 /// The capture controller borrows this gate; it cannot publish finalization.
@@ -103,6 +105,8 @@ impl StopControl {
             wake,
             #[cfg(test)]
             close_attempt: Mutex::new(None),
+            #[cfg(test)]
+            connection_budget: Mutex::new(wire::CONNECTION_BUDGET),
         });
         let service = shared.clone();
         let worker = std::thread::Builder::new()
@@ -418,7 +422,14 @@ fn serve(shared: &Shared, mut wake_read: UnixStream) -> Result<()> {
                     // Malformed/expired/refused connections do not end service.
                     // There is no replay table: every connection has one fresh
                     // challenge and consumes at most one stop request.
-                    let deadline = Instant::now() + wire::CONNECTION_BUDGET;
+                    #[cfg(not(test))]
+                    let budget = wire::CONNECTION_BUDGET;
+                    #[cfg(test)]
+                    let budget = *shared
+                        .connection_budget
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("control test budget poisoned"))?;
+                    let deadline = Instant::now() + budget;
                     if exchange(shared, &mut stream, deadline).is_err() {
                         let _ = wire::write_frame(
                             &mut stream,

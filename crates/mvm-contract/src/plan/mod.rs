@@ -14,6 +14,7 @@ pub mod verb;
 pub mod verb_grant;
 pub mod verb_trust;
 
+pub use environment::EnvironmentPolicy;
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 pub use output_grant::{OutputGrant, OutputGrantError, validate_output_grants};
 pub use sdk_sidecar::{

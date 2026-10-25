@@ -592,7 +592,8 @@ host = [
 ]
 
 # `user` — everything a user runs to create/drive sandboxes: cosign manifest
-# verification for `--prod` and `build --watch`. `default` already carries the
+# verification for `--prod`, `build --watch`, and native caller custody.
+# `default` already carries the
 # verifier; `user` names it too so a `default-features = false` build that asks
 # for the user surface still gets it.
 user = [
@@ -600,6 +601,7 @@ user = [
     "mvm-cli/manifest-verify",
     "mvm-core/manifest-verify",
     "mvm-cli/dev-watch",
+    "native-caller-identity",
 ]
 
 # `dev` — the local-development union. A contributor laptop is BOTH host and
@@ -620,6 +622,9 @@ dev = [
 # source builds and release artifacts never enable these features.
 libkrun-sys = ["mvm-cli/libkrun-sys"]
 libkrun-live = ["mvm-cli/libkrun-live"]
+
+# Platform-native caller custody, included in the standard user surface only.
+native-caller-identity = ["mvm-cli/native-caller-identity"]
 
 # Platform: link the TPM2 TSS provider. Kept root-owned so source-built host
 # packages remain cargo-auditable while selecting the Linux TPM dependency.

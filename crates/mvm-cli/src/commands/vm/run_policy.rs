@@ -242,14 +242,34 @@ fn launch_flags(args: &RunArgs) -> Result<LaunchFlags> {
 /// A policy that does not resolve, or a flag that asks for something the
 /// policy denies, blocks, or bounds — named.
 pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
-    let Some(selected) = select(args)? else {
+    let selected = select(args)?;
+    let environment = super::exec::application_source::environment(args)?;
+    if selected.is_none() && environment.as_ref().is_none_or(|env| env.policy.is_none()) {
         return Ok(());
-    };
+    }
+    let mut selected = selected.unwrap_or_else(|| Selected {
+        label: "signed application environment".into(),
+        policy: Default::default(),
+        notes: Vec::new(),
+        backend_conditioned: false,
+    });
     for note in &selected.notes {
         ui::warn(&format!("policy: {note}"));
     }
-    let folded = fold(&selected.policy, &launch_flags(args)?)
+    let flags = launch_flags(args)?;
+    let folded = if let Some(environment) = environment {
+        let (policy, folded) = mvm_client::policy_profiles::environment::fold_environment_policy(
+            &environment,
+            Some(&selected.policy),
+            &flags,
+            args.network_preset,
+        )
         .with_context(|| format!("applying {}", selected.label))?;
+        selected.policy = policy;
+        folded
+    } else {
+        fold(&selected.policy, &flags).with_context(|| format!("applying {}", selected.label))?
+    };
     args.allow_host = folded.allow_host;
     args.policy_routes = folded.routes;
     args.cpu_limit = folded.cpu_limit;

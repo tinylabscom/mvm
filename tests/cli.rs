@@ -4,6 +4,36 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn caller_identity_help_exposes_explicit_enrollment_and_read_only_show() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["env", "caller-identity", "--help"])
+        .output()
+        .expect("run caller identity help");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("enroll"), "{help}");
+    assert!(help.contains("show"), "{help}");
+}
+
+#[test]
+fn caller_identity_show_and_status_do_not_create_state() {
+    for action in ["show", "status"] {
+        let temp = tempfile::tempdir().expect("isolated caller identity home");
+        let home = temp.path().join("absent");
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .env("MVM_HOME", &home)
+            .args(["env", "caller-identity", action])
+            .output()
+            .expect("read missing caller identity");
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("explicitly run"), "{stderr}");
+        assert!(!home.exists(), "{action} created state");
+    }
+}
+
+#[test]
 fn legacy_build_verbs_are_removed() {
     for args in [
         &["pack", "build", "--help"][..],

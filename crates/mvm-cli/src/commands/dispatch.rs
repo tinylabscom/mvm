@@ -75,6 +75,8 @@ impl TopLevelCommand for Commands {
         // it is deciding whether to remove.
         // The archive-only reader likewise must not create keys or lifecycle
         // state while checking untrusted bytes.
+        // Caller identity reads must stay side-effect free, and enrollment
+        // creates only its explicit reservation and native credential.
         matches!(
             self,
             Commands::QemuVsockBridge(_)
@@ -87,6 +89,9 @@ impl TopLevelCommand for Commands {
                 })
                 | Commands::Env(env::group::Args {
                     action: env::group::EnvCmd::Uninstall(_),
+                })
+                | Commands::Env(env::group::Args {
+                    action: env::group::EnvCmd::CallerIdentity(_),
                 })
         )
     }
@@ -108,6 +113,9 @@ impl TopLevelCommand for Commands {
             Commands::Env(env::group::Args {
                 action: env::group::EnvCmd::Uninstall(a),
             }) => Some(env::uninstall::run(a)),
+            Commands::Env(env::group::Args {
+                action: env::group::EnvCmd::CallerIdentity(a),
+            }) => Some(env::caller_identity::run(a.clone())),
             _ => None,
         }
     }

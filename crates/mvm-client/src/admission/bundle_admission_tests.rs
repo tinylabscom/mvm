@@ -641,6 +641,65 @@ fn slot_environment() -> mvm_core::plan::EnvironmentDescriptor {
     .expect("environment fixture")
 }
 
+#[test]
+fn signed_environment_policy_refuses_missing_or_wider_runtime_and_audits() {
+    use mvm_core::network_policy::NetworkPolicy;
+    for supply_runtime in [false, true] {
+        let mut environment = slot_environment();
+        environment.secret_slots.clear();
+        environment.policy = Some(mvm_core::plan::EnvironmentPolicy {
+            allow_hosts: vec!["api.anthropic.com:443".into()],
+        });
+        let fixture =
+            InstalledFixture::with_members(vec![mvm_core::plan::BundleMember::Environment(
+                environment,
+            )]);
+        let (_, kernel, _, rootfs, _) =
+            mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(&fixture.sha256)
+                .expect("installed bundle resolves");
+        let archive =
+            mvm_runtime::vm::template::lifecycle::installed_bundle_archive(&fixture.sha256)
+                .expect("registry")
+                .expect("installed archive");
+        let (rootfs, kernel) = (
+            std::path::PathBuf::from(rootfs),
+            std::path::PathBuf::from(kernel),
+        );
+        let keys_dir = fixture.home.path().join("keys");
+        let audit_dir = fixture.audit_dir();
+        let ledger = InMemoryNonceLedger::new();
+        let runtime = mvm_core::vm_backend::VmStartConfig {
+            network_policy: NetworkPolicy::unrestricted(),
+            ..Default::default()
+        };
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.kernel_path = Some(&kernel);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        params.bundle_pin = Some(BundlePin::boots(&archive));
+        params.entrypoint = ResolvedEntrypoint::Known {
+            argv: vec!["/usr/bin/agent".into()],
+            shebang: None,
+        };
+        // The advertised launch policy is narrow; the actual runtime must
+        // independently be present and narrow too.
+        params.network_policy = NetworkPolicy::deny_all();
+        params.runtime_config = supply_runtime.then_some(&runtime);
+        let error = admit_plan_for_boot(params).expect_err("missing or wider runtime must refuse");
+        assert!(
+            format!("{error:#}").contains("actual launch network"),
+            "{error:#}"
+        );
+        let chain = fixture.chain();
+        assert!(chain.contains("plan.failed"), "{chain}");
+        assert!(
+            chain.contains(super::audit::BUNDLE_ENVIRONMENT_REFUSED_CLASS),
+            "{chain}"
+        );
+        assert!(!chain.contains("plan.admitted"), "{chain}");
+    }
+}
+
 /// A pinned bundle whose signed environment requires a secret slot the launch
 /// binds nothing to is refused before anything boots, and the refusal is in
 /// the chain-signed audit log against the plan that pinned it.

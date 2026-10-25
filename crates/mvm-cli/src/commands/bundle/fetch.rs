@@ -727,8 +727,19 @@ mod tests {
         key_id_from_pubkey(&SigningKey::from_bytes(&[250; 32]).verifying_key())
     }
 
+    fn isolated_registry_host() -> (tempfile::TempDir, mvm_core::util::test_env::TestEnv) {
+        let home = tempfile::tempdir().expect("host home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        // Pulls load the current host signer, unlike pushes which receive its
+        // ID explicitly. Never compare a publisher fixture against ambient
+        // host state left by another test (or the developer's real identity).
+        env.isolate_mvm_home(home.path());
+        (home, env)
+    }
+
     #[test]
     fn a_local_build_is_refused_by_push_and_by_pull() {
+        let (_home, _env) = isolated_registry_host();
         let registry = MemoryRegistry::start();
         let host = Publisher::trusted(7);
         let archive = host.local_bundle(b"kernel bytes");
@@ -852,6 +863,7 @@ mod tests {
 
     #[test]
     fn bounded_registry_pull_refuses_a_layer_above_the_signed_size() {
+        let (_home, _env) = isolated_registry_host();
         let registry = MemoryRegistry::start();
         let publisher = Publisher::trusted(7);
         let archive = publisher.bundle(b"kernel bytes");
@@ -887,6 +899,7 @@ mod tests {
 
     #[test]
     fn push_then_fetch_by_tag_and_digest_verifies_against_the_trust_store() {
+        let (_home, _env) = isolated_registry_host();
         let registry = MemoryRegistry::start();
         let publisher = Publisher::trusted(7);
         let archive = publisher.bundle(b"kernel bytes");
@@ -1062,6 +1075,7 @@ mod tests {
 
     #[test]
     fn a_global_token_the_registry_refuses_still_pulls_anonymously() {
+        let (_home, _env) = isolated_registry_host();
         // `MVM_OCI_BEARER_TOKEN` is offered to every registry. One that only
         // serves anonymous tokens refuses it, and the pull must still work.
         let registry = MemoryRegistry::start();
@@ -1106,6 +1120,7 @@ mod tests {
 
     #[test]
     fn a_tampered_bundle_blob_is_refused_before_verification() {
+        let (_home, _env) = isolated_registry_host();
         let registry = MemoryRegistry::start();
         let publisher = Publisher::trusted(7);
         let archive = publisher.bundle(b"kernel bytes");
@@ -1128,6 +1143,7 @@ mod tests {
 
     #[test]
     fn a_manifest_not_matching_the_pinned_digest_is_refused() {
+        let (_home, _env) = isolated_registry_host();
         let registry = MemoryRegistry::start();
         let publisher = Publisher::trusted(7);
         let (_, first) = publish_bundle(
@@ -1164,6 +1180,7 @@ mod tests {
 
     #[test]
     fn a_bundle_signed_by_an_untrusted_key_is_refused_after_a_clean_pull() {
+        let (_home, _env) = isolated_registry_host();
         let registry = MemoryRegistry::start();
         let consumer = Publisher::trusted(7);
         let stranger = Publisher::new(9);
@@ -1179,6 +1196,7 @@ mod tests {
 
     #[test]
     fn an_unsigned_bundle_is_refused_after_a_clean_pull() {
+        let (_home, _env) = isolated_registry_host();
         let registry = MemoryRegistry::start();
         let consumer = Publisher::trusted(7);
         let signed = consumer.bundle(b"kernel bytes");

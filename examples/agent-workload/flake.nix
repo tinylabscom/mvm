@@ -25,11 +25,14 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          agentRecipe = import "${mvm}/examples/llm-agent" { inherit pkgs; };
+          agentRecipe = import "${mvm}/examples/llm-agent" {
+            inherit pkgs;
+            tools = [ "WebFetch" ];
+          };
           agent = agentRecipe.agent;
           entrypoint = pkgs.writeShellScript "agent-workload-entrypoint" ''
             export HOME=/tmp
-            exec ${agent}/bin/mvm-agent
+            exec ${agent}/bin/mvm-agent --allowedTools WebFetch --max-turns 3 --max-budget-usd 0.50
           '';
         in
         {
@@ -38,7 +41,7 @@
             packages = [ agent ];
             # Workload IR injects ANTHROPIC_API_KEY only into this per-call
             # entrypoint. PID 1 receives neither the placeholder nor the proxy.
-            entrypoint.command = [ "${entrypoint}" ];
+            entrypoint.command = [ "/etc/mvm/entrypoint" ];
             extraFiles."/etc/mvm/entrypoint" = {
               source = entrypoint;
               mode = "0755";

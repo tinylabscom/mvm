@@ -20,6 +20,17 @@ fn owned_process_helper() {
     let owner = StopControl::start(&vm, stop).unwrap();
     let (notice, stopped) = mpsc::sync_channel(1);
     owner.authority.0.state.lock().unwrap().stop_notice = Some(notice);
+    if mode == "bridge" {
+        // A client must close an observation-only control connection, not
+        // rely on the serial server's timeout to service its next challenge.
+        *owner.authority.0.connection_budget.lock().unwrap() = wire::CONNECTION_BUDGET * 3;
+    }
+    let _bridge = (mode == "bridge").then(|| {
+        std::os::unix::net::UnixListener::bind(
+            wire::state_dir(&vm).unwrap().join("owned-agent.sock"),
+        )
+        .unwrap()
+    });
     println!("OWNED_READY");
     std::io::stdout().flush().unwrap();
     if mode != "natural" {
@@ -110,6 +121,30 @@ fn wait_readable(fd: libc::c_int, deadline: Instant) {
         }
         panic!("owned helper I/O did not become ready");
     }
+}
+
+#[test]
+#[ignore = "requires scoped control review before owned native execution"]
+fn native_owned_bridge_probes_release_the_serial_control_connection() {
+    let mut env = TestEnv::new();
+    let home = tempfile::tempdir().unwrap();
+    env.isolate_mvm_home(home.path());
+    let vm = "owned-bridge-probes";
+    let mut child = Some(spawn(vm, "bridge"));
+    let owner = OwnedInstance::adopt(&mut child, vm).unwrap();
+    let mut bridge = None;
+    let opened = owner.open_agent_bridge(
+        &wire::state_dir(vm).unwrap().join("owned-agent.sock"),
+        &mut bridge,
+    );
+    let checked = opened
+        .as_ref()
+        .ok()
+        .map(|_| owner.validate_agent_bridge(bridge.as_ref().unwrap()));
+    let stopped = owner.stop();
+    assert!(opened.is_ok(), "original bridge refused: {opened:?}");
+    assert!(checked.unwrap().is_ok());
+    assert!(stopped.is_ok(), "original owned child stop failed");
 }
 
 #[test]

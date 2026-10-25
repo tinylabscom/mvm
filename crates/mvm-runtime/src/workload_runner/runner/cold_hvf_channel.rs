@@ -26,12 +26,24 @@ pub(super) fn standby_compatibility_error(error: anyhow::Error) -> StandbyError 
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DispatchLane {
+    Exec,
+    Entrypoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CompletionBarrier {
+    FilesystemsSynced,
+    EntrypointTerminalNoWriteback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Phase {
     Prepared,
     Activated,
-    Dispatched,
-    Flushed,
+    Dispatched(DispatchLane),
+    Finalized(CompletionBarrier),
     Uncertain,
 }
 
@@ -93,10 +105,11 @@ pub struct ColdHvfChannel {
 /// Owning runtime return, not a VM-id DTO or admission permit.
 pub type OwnedRuntimeLaunch = ColdHvfChannel;
 
-/// Actual original exit after protected flush and required kernel cleanup.
+/// Actual original exit after a storage barrier and required kernel cleanup.
 /// Neither a caller result nor a deserialized status can construct this.
 pub struct NativeCompletion {
     _exit: mvm_vmm::host::hvf_stop::ConfirmedExit,
+    _barrier: CompletionBarrier,
     terminal: mvm_agentd::vsock::EntrypointEvent,
 }
 
@@ -157,7 +170,7 @@ impl ColdHvfChannel {
         anyhow::ensure!(
             matches!(
                 custody.phase,
-                Phase::Activated | Phase::Dispatched | Phase::Flushed
+                Phase::Activated | Phase::Dispatched(_) | Phase::Finalized(_)
             ),
             "retained session has no completed activation ACK"
         );
@@ -208,6 +221,10 @@ impl ColdHvfChannel {
             config.roothash.as_deref() == Some(preparation.images.root_hash()),
             "activation root hash differs from retained image facts"
         );
+        project_frozen_image_selectors(
+            &mut preparation.prepared.spec.cmdline,
+            preparation.images.root_hash(),
+        )?;
         preparation.launch.before_boot(&preparation.prepared.spec)?;
         let capture = ConsoleCapture {
             vm_name: &config.name,
@@ -275,7 +292,7 @@ impl ColdHvfChannel {
             .as_mut()
             .context("native owner missing")?
             .exec(&request, on_event)?;
-        custody.phase = Phase::Dispatched;
+        custody.phase = Phase::Dispatched(DispatchLane::Exec);
         Ok(terminal)
     }
 
@@ -291,6 +308,16 @@ impl ColdHvfChannel {
             custody.phase == Phase::Activated,
             "entrypoint requires activation ACK"
         );
+        anyhow::ensure!(
+            matches!(
+                request,
+                GuestRequest::RunEntrypoint {
+                    stream_input: false,
+                    ..
+                } | GuestRequest::AgentPrompt { .. }
+            ),
+            "entrypoint requires an original one-shot entrypoint request"
+        );
         custody.phase = Phase::Uncertain;
         let terminal = custody
             .native
@@ -298,15 +325,15 @@ impl ColdHvfChannel {
             .context("native owner missing")?
             .entrypoint(request, on_event)?;
         custody.entrypoint_terminal = Some(terminal.clone());
-        custody.phase = Phase::Dispatched;
+        custody.phase = Phase::Dispatched(DispatchLane::Entrypoint);
         Ok(terminal)
     }
 
     pub fn flush(&mut self) -> Result<()> {
         let custody = self.custody()?;
         anyhow::ensure!(
-            custody.phase == Phase::Dispatched,
-            "cold flush requires terminal Exec"
+            matches!(custody.phase, Phase::Dispatched(_)),
+            "cold flush requires a terminal dispatch"
         );
         custody.phase = Phase::Uncertain;
         let response = custody
@@ -318,7 +345,29 @@ impl ColdHvfChannel {
             matches!(response, GuestResponse::FilesystemsSynced),
             "guest flush not acknowledged"
         );
-        custody.phase = Phase::Flushed;
+        custody.phase = Phase::Finalized(CompletionBarrier::FilesystemsSynced);
+        Ok(())
+    }
+
+    /// Storage finalization only: no guest RPC and no admission authority.
+    /// The original authenticated terminal follows every streamed frame on the
+    /// retained session. Host capture flushing is not part of this proof.
+    pub fn finalize_readonly_entrypoint(&mut self) -> Result<()> {
+        let custody = self.custody()?;
+        require_entrypoint_terminal(custody.phase, custody.entrypoint_terminal.as_ref())?;
+        let preparation = &custody.preparation;
+        let config = preparation.launch.config();
+        require_no_writeback_substrate(config, &preparation.prepared.spec)?;
+        anyhow::ensure!(
+            config.roothash.as_deref() == Some(preparation.images.root_hash()),
+            "entrypoint completion root hash differs from retained frozen image facts"
+        );
+        custody
+            .native
+            .as_ref()
+            .context("original native owner missing")?
+            .validate_live()?;
+        custody.phase = Phase::Finalized(CompletionBarrier::EntrypointTerminalNoWriteback);
         Ok(())
     }
 
@@ -333,10 +382,8 @@ impl ColdHvfChannel {
             .custody
             .as_ref()
             .context("native completion already consumed")?;
-        anyhow::ensure!(
-            custody.phase == Phase::Flushed && custody.native.is_some(),
-            "native completion requires the original channel's actual terminal and flush ACK"
-        );
+        let barrier = require_completion_barrier(custody.phase)?;
+        anyhow::ensure!(custody.native.is_some(), "original native owner missing");
         let terminal = custody
             .entrypoint_terminal
             .clone()
@@ -346,6 +393,7 @@ impl ColdHvfChannel {
             .context("native completion has no original exit proof")?;
         Ok(NativeCompletion {
             _exit: proof,
+            _barrier: barrier,
             terminal,
         })
     }
@@ -398,6 +446,99 @@ impl ColdHvfChannel {
         release_terminal_custody(&mut self.custody);
         Ok(proof)
     }
+}
+
+fn require_entrypoint_terminal(
+    phase: Phase,
+    terminal: Option<&mvm_agentd::vsock::EntrypointEvent>,
+) -> Result<()> {
+    anyhow::ensure!(
+        phase == Phase::Dispatched(DispatchLane::Entrypoint)
+            && terminal.is_some_and(mvm_agentd::vsock::EntrypointEvent::is_terminal),
+        "readonly entrypoint finalization requires the original authenticated entrypoint terminal"
+    );
+    Ok(())
+}
+
+fn require_completion_barrier(phase: Phase) -> Result<CompletionBarrier> {
+    match phase {
+        Phase::Finalized(barrier) => Ok(barrier),
+        _ => anyhow::bail!("native completion requires a retained storage completion barrier"),
+    }
+}
+
+fn require_no_writeback_substrate(
+    config: &VmStartConfig,
+    spec: &mvm_vmm::driver::spec::VmmSpec,
+) -> Result<()> {
+    require_unmounted_substrate(config, &spec.shares)?;
+    require_readonly_blocks(config, &spec.blocks)
+}
+
+fn require_unmounted_substrate(
+    config: &VmStartConfig,
+    shares: &[mvm_vmm::driver::spec::VirtioFsShare],
+) -> Result<()> {
+    anyhow::ensure!(
+        config.volumes.is_empty() && shares.is_empty(),
+        "readonly entrypoint completion refuses volumes and host shares"
+    );
+    Ok(())
+}
+
+fn require_readonly_blocks(
+    config: &VmStartConfig,
+    blocks: &[mvm_vmm::driver::spec::BlockDev],
+) -> Result<()> {
+    anyhow::ensure!(
+        blocks.iter().all(|block| block.read_only),
+        "readonly entrypoint completion refuses writable blocks"
+    );
+    for (slot, source) in [
+        (0, Some(config.rootfs_path.as_str())),
+        (1, config.verity_path.as_deref()),
+    ] {
+        let source = source.context("readonly entrypoint completion requires root and verity")?;
+        let mut matching = blocks.iter().filter(|block| block.slot == slot);
+        anyhow::ensure!(
+            matching.next().is_some_and(|block| {
+                block.read_only && !block.ephemeral && block.source == std::path::Path::new(source)
+            }) && matching.next().is_none(),
+            "readonly entrypoint completion requires the original fixed readonly root and verity"
+        );
+    }
+    Ok(())
+}
+
+/// Bind physical boot selectors to the held frozen images before spawning.
+/// Conflicts and overflow leave the original command line unchanged.
+fn project_frozen_image_selectors(cmdline: &mut String, root_hash: &str) -> Result<()> {
+    let mut projected = cmdline.clone();
+    for (key, expected) in [
+        ("mvm.roothash", root_hash),
+        ("mvm.data", "/dev/vda"),
+        ("mvm.hash", "/dev/vdb"),
+    ] {
+        let mut values = cmdline
+            .split_ascii_whitespace()
+            .filter_map(|token| token.split_once('='))
+            .filter_map(|(name, value)| (name == key).then_some(value));
+        match (values.next(), values.next()) {
+            (None, None) => {
+                projected.push(' ');
+                projected.push_str(key);
+                projected.push('=');
+                projected.push_str(expected);
+            }
+            (Some(value), None) if value == expected => {}
+            _ => anyhow::bail!("physical boot image selector differs from original frozen images"),
+        }
+    }
+    if let Some(error) = cmdline::cmdline_overflow(&projected) {
+        anyhow::bail!("{error}");
+    }
+    *cmdline = projected;
+    Ok(())
 }
 
 impl Drop for ColdHvfChannel {
@@ -503,6 +644,139 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn readonly_entrypoint_requires_original_terminal_lane_and_storage_barrier() {
+        let terminal = mvm_agentd::vsock::EntrypointEvent::Exit { code: 0 };
+        let output = mvm_agentd::vsock::EntrypointEvent::Stdout { chunk: vec![] };
+        for phase in [
+            Phase::Prepared,
+            Phase::Activated,
+            Phase::Dispatched(DispatchLane::Exec),
+            Phase::Uncertain,
+        ] {
+            assert!(require_entrypoint_terminal(phase, Some(&terminal)).is_err());
+            assert!(require_completion_barrier(phase).is_err());
+        }
+        let dispatched = Phase::Dispatched(DispatchLane::Entrypoint);
+        assert!(require_entrypoint_terminal(dispatched, None).is_err());
+        assert!(require_entrypoint_terminal(dispatched, Some(&output)).is_err());
+        assert!(require_entrypoint_terminal(dispatched, Some(&terminal)).is_ok());
+        assert!(require_completion_barrier(dispatched).is_err());
+        for barrier in [
+            CompletionBarrier::FilesystemsSynced,
+            CompletionBarrier::EntrypointTerminalNoWriteback,
+        ] {
+            let phase = Phase::Finalized(barrier);
+            assert_eq!(require_completion_barrier(phase).unwrap(), barrier);
+            assert!(require_entrypoint_terminal(phase, Some(&terminal)).is_err());
+        }
+        let mut empty = ColdHvfChannel { custody: None };
+        assert!(empty.complete().is_err());
+        assert!(empty.finalize_readonly_entrypoint().is_err());
+    }
+
+    #[test]
+    fn readonly_entrypoint_rejects_writable_or_replaced_physical_blocks() {
+        use mvm_vmm::driver::spec::BlockDev;
+        let config = VmStartConfig {
+            rootfs_path: "/root.ext4".into(),
+            verity_path: Some("/root.verity".into()),
+            ..VmStartConfig::default()
+        };
+        let blocks = vec![
+            BlockDev {
+                source: "/root.ext4".into(),
+                read_only: true,
+                ephemeral: false,
+                slot: 0,
+            },
+            BlockDev {
+                source: "/root.verity".into(),
+                read_only: true,
+                ephemeral: false,
+                slot: 1,
+            },
+        ];
+        assert!(require_readonly_blocks(&config, &blocks).is_ok());
+        for index in 0..2 {
+            let mut changed = blocks.clone();
+            changed[index].read_only = false;
+            assert!(require_readonly_blocks(&config, &changed).is_err());
+            let mut changed = blocks.clone();
+            changed[index].ephemeral = true;
+            assert!(require_readonly_blocks(&config, &changed).is_err());
+            let mut changed = blocks.clone();
+            changed[index].source = "/other".into();
+            assert!(require_readonly_blocks(&config, &changed).is_err());
+            let mut changed = blocks.clone();
+            changed[index].slot = 2;
+            assert!(require_readonly_blocks(&config, &changed).is_err());
+        }
+        let mut changed = blocks.clone();
+        changed.push(BlockDev {
+            source: "/volume".into(),
+            read_only: false,
+            ephemeral: true,
+            slot: 2,
+        });
+        assert!(require_readonly_blocks(&config, &changed).is_err());
+        assert!(require_readonly_blocks(&config, &blocks[..1]).is_err());
+        let mut changed = blocks.clone();
+        changed.push(blocks[0].clone());
+        assert!(require_readonly_blocks(&config, &changed).is_err());
+        let mut missing_verity = config.clone();
+        missing_verity.verity_path = None;
+        assert!(require_readonly_blocks(&missing_verity, &blocks).is_err());
+    }
+
+    #[test]
+    fn readonly_entrypoint_rejects_config_volumes_and_even_readonly_host_shares() {
+        let mut config = VmStartConfig::default();
+        assert!(require_unmounted_substrate(&config, &[]).is_ok());
+        let shares = [mvm_vmm::driver::spec::VirtioFsShare {
+            tag: "host".into(),
+            host_path: "/host".into(),
+            read_only: true,
+            dax: false,
+        }];
+        assert!(require_unmounted_substrate(&config, &shares).is_err());
+        config.volumes.push(mvm_core::vm_backend::VmVolume {
+            read_only: true,
+            ..Default::default()
+        });
+        assert!(require_unmounted_substrate(&config, &[]).is_err());
+    }
+
+    #[test]
+    fn frozen_physical_selectors_extend_without_overriding_claims() {
+        let hash = "a".repeat(64);
+        let original = "console=hvc0 mvm.hostname=image-selector-unit mvm.require_grant=1";
+        let mut cmdline = original.to_owned();
+        project_frozen_image_selectors(&mut cmdline, &hash).unwrap();
+        assert!(cmdline.starts_with(original));
+        assert!(cmdline.contains(&format!("mvm.roothash={hash}")));
+        assert!(cmdline.contains("mvm.data=/dev/vda mvm.hash=/dev/vdb"));
+        let projected = cmdline.clone();
+        project_frozen_image_selectors(&mut cmdline, &hash).unwrap();
+        assert_eq!(cmdline, projected);
+        for suffix in [
+            " mvm.roothash=wrong",
+            " mvm.data=/dev/vdc",
+            " mvm.hash=/dev/vda",
+            " mvm.data=/dev/vda mvm.data=/dev/vda",
+            " mvm.hash=/dev/vdb mvm.hash=/dev/vdb",
+        ] {
+            let mut cmdline = format!("{original}{suffix}");
+            let held = cmdline.clone();
+            assert!(project_frozen_image_selectors(&mut cmdline, &hash).is_err());
+            assert_eq!(cmdline, held);
+        }
+        let mut overflow = "x".repeat(2047);
+        let held = overflow.clone();
+        assert!(project_frozen_image_selectors(&mut overflow, &hash).is_err());
+        assert_eq!(overflow, held);
+    }
 
     #[test]
     fn missing_index_with_remaining_generation_retains_release_and_drop_groups() {

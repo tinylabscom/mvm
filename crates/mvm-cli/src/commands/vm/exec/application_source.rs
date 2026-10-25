@@ -18,6 +18,167 @@ use mvm_core::registry_pack::application_bundle::{
 
 use super::RunArgs;
 
+/// Refuse routes whose synthesis cannot retain the application descriptor identity.
+pub(in crate::commands) fn require_bound_route(
+    application: Option<&ResolvedApplication>,
+    persistent: bool,
+    attach: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        application.is_none() || (!persistent && !attach),
+        "application references require foreground plan-bound launch without persistent options or --attach"
+    );
+    Ok(())
+}
+
+/// Refuse request dimensions the application entrypoint route cannot preserve.
+pub(in crate::commands) fn require_entrypoint_request(args: &RunArgs) -> Result<()> {
+    if args.resolved_application.is_none() {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        args.grants_file.is_none()
+            && args.cpu_limit.is_none()
+            && !args.dry_run
+            && args.launch_plan.is_none()
+            && args.peer.is_empty()
+            && args.host_service.is_empty()
+            && args.assets.is_empty()
+            && args.receipt.is_none()
+            && !args.gpu
+            && args.gpu_device.is_none()
+            && args.mounts.is_empty()
+            && args.env.is_empty()
+            && args.allow_env.is_empty()
+            && args
+                .applied_policy
+                .as_ref()
+                .is_none_or(|policy| policy.tools.to_tool_rules().is_empty()),
+        "application --entrypoint cannot yet preserve --grants-file, --cpu-limit, \
+         --dry-run, --launch-plan, --peer, --host-service, --asset, --receipt, \
+         GPU options, --mount, --env, --allow-env or policy tool rules"
+    );
+    Ok(())
+}
+
+/// Read defaults only after the installed application resolver authenticated its bundle.
+pub(in crate::commands) fn environment(
+    args: &RunArgs,
+) -> Result<Option<mvm_core::plan::EnvironmentDescriptor>> {
+    let Some(application) = &args.resolved_application else {
+        return Ok(None);
+    };
+    mvm_client::admission::bundle_environment::installed_bundle_environment(
+        &application.bundle_sha256,
+    )
+}
+
+/// Signed sizing must be applied before the operator policy resource fold.
+pub(in crate::commands) fn apply_entrypoint_resource_defaults(args: &mut RunArgs) -> Result<()> {
+    if let Some(environment) = environment(args)? {
+        super::environment_defaults::apply(args, &environment);
+    }
+    Ok(())
+}
+
+/// Fill only slots not already satisfied by the operator's folded selections.
+pub(in crate::commands) fn apply_entrypoint_secret_defaults(args: &mut RunArgs) -> Result<()> {
+    let Some(environment) = environment(args)? else {
+        return Ok(());
+    };
+    if environment.required_secret_slots().next().is_none() {
+        return Ok(());
+    }
+    let service = mvm_client::secret::SecretService::local()
+        .context("opening the local secret service for application slots")?;
+    apply_required_secret_defaults(args, &environment, &service)
+}
+
+fn apply_required_secret_defaults(
+    args: &mut RunArgs,
+    environment: &mvm_core::plan::EnvironmentDescriptor,
+    service: &mvm_client::secret::SecretService,
+) -> Result<()> {
+    let slots = environment.required_secret_slots().collect::<Vec<_>>();
+    if slots.is_empty() {
+        return Ok(());
+    }
+    let specs = crate::commands::vm::run_secrets::merged_secret_specs(args)?;
+    let explicit = mvm_client::admission::run_secrets::run_secret_refs(service, "local", &specs)?;
+    let missing = slots
+        .into_iter()
+        .filter(|slot| {
+            !explicit
+                .iter()
+                .any(|reference| reference.placeholder_var.as_deref() == Some(*slot))
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let metadata = service
+        .list("local")
+        .context("listing host secret bindings")?;
+    let selected = select_slot_bindings(&missing, &metadata)?;
+    // The ordinary policy fold ran first; its denies also bind automatically added names.
+    if let Some(policy) = &args.applied_policy {
+        let mut secret = args.secret.clone();
+        secret.extend(selected.iter().cloned());
+        mvm_client::policy_profiles::fold(
+            policy,
+            &mvm_client::policy_profiles::LaunchFlags {
+                secret,
+                declared_secrets: specs.iter().map(|spec| spec.name.clone()).collect(),
+                ..Default::default()
+            },
+        )
+        .context("applying operator policy to automatic application secret bindings")?;
+    }
+    args.secret.extend(selected);
+    let specs = crate::commands::vm::run_secrets::merged_secret_specs(args)?;
+    mvm_client::admission::run_secrets::run_secret_refs(service, "local", &specs)?;
+    Ok(())
+}
+
+fn select_slot_bindings(
+    slots: &[&str],
+    metadata: &[mvm_client::secret::SecretMetadata],
+) -> Result<Vec<String>> {
+    slots
+        .iter()
+        .map(|slot| {
+            let eligible = metadata
+                .iter()
+                .filter(|meta| {
+                    meta.binding.as_ref().is_some_and(|binding| {
+                        binding
+                            .provider
+                            .as_deref()
+                            .and_then(|provider| {
+                                mvm_contract::service_catalog::builtin().find(provider).cloned()
+                            })
+                            .is_some_and(|provider| provider.env_var.is_some())
+                            && mvm_client::admission::run_secrets::guest_env_var_for(
+                                &meta.name, binding,
+                            )
+                            .is_ok_and(|var| var == *slot)
+                    })
+                })
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                eligible.len() == 1,
+                "application requires secret slot {slot}; found {} eligible host bindings; \
+                 select exactly one with --secret NAME, or configure one provider-bound host secret",
+                eligible.len()
+            );
+            let [selected] = eligible.as_slice() else {
+                anyhow::bail!("application secret selection requires exactly one binding");
+            };
+            Ok(selected.name.clone())
+        })
+        .collect()
+}
+
 /// Replace an application reference with the installed bundle it resolves to.
 pub(in crate::commands) fn apply_application_source(args: &mut RunArgs) -> Result<()> {
     if args.application.is_none() && args.source.is_none() {
@@ -105,6 +266,16 @@ fn settle(
         return Ok(());
     };
     let resolved = resolve(&reference)?;
+    anyhow::ensure!(
+        args.source.is_none()
+            && args.image.is_none()
+            && args.manifest.is_none()
+            && args.flake.is_none()
+            && args.deployment.is_none()
+            && !args.runtime_pack
+            && args.runtime.is_none(),
+        "an application reference cannot be combined with another boot source"
+    );
     args.registry_pack_image = Some(mvm_core::registry_pack::PackPin::new(
         resolved.reference.clone(),
         mvm_core::packs::Sha256Hex::new(&resolved.descriptor_sha256)?,
@@ -123,6 +294,199 @@ mod tests {
     use super::*;
 
     const SHA: &str = "ab";
+
+    fn metadata(name: &str, provider: Option<&str>) -> mvm_client::secret::SecretMetadata {
+        mvm_client::secret::SecretMetadata {
+            tenant: "local".into(),
+            name: name.into(),
+            binding: Some(
+                serde_json::from_value(serde_json::json!({
+                    "auth_type": "bearer",
+                    "allowed_hosts": ["api.anthropic.com"],
+                    "provider": provider,
+                }))
+                .unwrap(),
+            ),
+            referenced_by: Vec::new(),
+        }
+    }
+
+    fn secret_fixture(names: &[&str]) -> (tempfile::TempDir, mvm_client::secret::SecretService) {
+        use mvm_client::secret::{SecretAudit, SecretService, SecretValueInput};
+        use mvm_core::crypto::secret_store::FileSecretStore;
+        use mvm_hostd::keyholder::FileBindingStore;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let service = SecretService::builder()
+            .store(Arc::new(FileSecretStore::with_dir(
+                dir.path().join("values"),
+            )))
+            .bindings(Arc::new(FileBindingStore::with_dir(
+                dir.path().join("bindings"),
+            )))
+            .machines_root(dir.path().join("machines"))
+            .audit(SecretAudit::with_path(dir.path().join("audit.jsonl")))
+            .build()
+            .unwrap();
+        for name in names {
+            service
+                .put(
+                    "local",
+                    name,
+                    SecretValueInput::new("unit-test-value".into()),
+                )
+                .unwrap();
+            service
+                .bind(
+                    "local",
+                    name,
+                    metadata(name, Some("anthropic")).binding.unwrap(),
+                )
+                .unwrap();
+        }
+        (dir, service)
+    }
+
+    fn secret_environment() -> mvm_core::plan::EnvironmentDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": "x86_64-linux",
+            "entrypoint": {"argv": ["/etc/mvm/entrypoint"]},
+            "secret_slots": [{"name": "ANTHROPIC_API_KEY", "required": true}],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn policy_and_plan_selections_precede_ambiguous_application_defaults() {
+        let (dir, service) = secret_fixture(&["first", "second"]);
+        let profile = dir.path().join("choose-first.toml");
+        std::fs::write(
+            &profile,
+            "[overrides.secrets]\nbind = [{ name = \"first\" }]\n",
+        )
+        .unwrap();
+        let plan = dir.path().join("choose-first.json");
+        std::fs::write(
+            &plan,
+            r#"{"policy":{"secrets":{"bind":[{"name":"first"}]}}}"#,
+        )
+        .unwrap();
+        for use_plan in [false, true] {
+            let mut args = RunArgs {
+                cpus: 2,
+                memory: "512M".into(),
+                policy: if use_plan {
+                    Vec::new()
+                } else {
+                    vec![profile.display().to_string()]
+                },
+                plan: use_plan.then(|| plan.clone()),
+                ..Default::default()
+            };
+            crate::commands::vm::run_policy::apply_run_policy(&mut args).unwrap();
+            assert_eq!(args.secret, ["first"]);
+            apply_required_secret_defaults(&mut args, &secret_environment(), &service).unwrap();
+            assert_eq!(args.secret, ["first"]);
+        }
+    }
+
+    #[test]
+    fn explicit_and_unique_secret_defaults_are_preserved() {
+        let (_dir, service) = secret_fixture(&["first", "second"]);
+        let mut args = RunArgs {
+            secret: vec!["second".into()],
+            ..Default::default()
+        };
+        apply_required_secret_defaults(&mut args, &secret_environment(), &service).unwrap();
+        assert_eq!(args.secret, ["second"]);
+        args.secret.clear();
+        assert!(
+            apply_required_secret_defaults(&mut args, &secret_environment(), &service).is_err()
+        );
+        let (_single, service) = secret_fixture(&["only"]);
+        apply_required_secret_defaults(&mut args, &secret_environment(), &service).unwrap();
+        assert_eq!(args.secret, ["only"]);
+    }
+
+    #[test]
+    fn automatic_selection_obeys_folded_secret_denies() {
+        let (_dir, service) = secret_fixture(&["only"]);
+        let mut policy = mvm_client::policy_profiles::PolicyBody::default();
+        policy.secrets.deny = vec!["only".into()];
+        let mut args = RunArgs {
+            applied_policy: Some(policy),
+            ..Default::default()
+        };
+        let error =
+            apply_required_secret_defaults(&mut args, &secret_environment(), &service).unwrap_err();
+        assert!(format!("{error:#}").contains("denied"));
+        assert!(args.secret.is_empty());
+    }
+
+    #[test]
+    fn required_slots_select_exactly_one_provider_bound_metadata_row() {
+        let rows = vec![
+            metadata("work-key", Some("anthropic")),
+            metadata("other-key", Some("openai")),
+            metadata("ANTHROPIC_API_KEY", None),
+        ];
+        assert_eq!(
+            select_slot_bindings(&["ANTHROPIC_API_KEY"], &rows).unwrap(),
+            ["work-key"]
+        );
+        assert!(select_slot_bindings(&["UNRELATED_KEY"], &rows).is_err());
+        assert!(select_slot_bindings(&["ANTHROPIC_API_KEY"], &[]).is_err());
+        assert!(
+            select_slot_bindings(
+                &["ANTHROPIC_API_KEY"],
+                &[metadata("ANTHROPIC_API_KEY", Some("unknown-provider"))],
+            )
+            .is_err()
+        );
+        let ambiguous = vec![
+            metadata("first", Some("anthropic")),
+            metadata("second", Some("anthropic")),
+        ];
+        let error = select_slot_bindings(&["ANTHROPIC_API_KEY"], &ambiguous)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("2 eligible host bindings") && error.contains("--secret"));
+        assert!(select_slot_bindings(&[], &ambiguous).unwrap().is_empty());
+    }
+
+    #[test]
+    fn application_sources_cannot_silently_replace_another_source() {
+        let mut args = RunArgs {
+            application: Some("agent/claude".into()),
+            source: Some("alpine".into()),
+            ..Default::default()
+        };
+        assert!(settle(&mut args, |_| true, |_| false, resolved).is_err());
+        assert_eq!(args.source.as_deref(), Some("alpine"));
+        assert!(args.resolved_application.is_none());
+    }
+
+    #[test]
+    fn application_routes_and_unforwarded_dimensions_fail_closed() {
+        let application = resolved(&"agent/claude@2.0.0".parse().unwrap()).unwrap();
+        for (persistent, attach) in [(true, false), (false, true), (true, true)] {
+            assert!(require_bound_route(Some(&application), persistent, attach).is_err());
+            require_bound_route(None, persistent, attach).unwrap();
+        }
+        require_bound_route(Some(&application), false, false).unwrap();
+        let mut args = RunArgs {
+            resolved_application: Some(application),
+            ..Default::default()
+        };
+        require_entrypoint_request(&args).unwrap();
+        args.env.push("MODE=dev".into());
+        assert!(require_entrypoint_request(&args).is_err());
+        args.env.clear();
+        args.grants_file = Some("/operator/grants.json".into());
+        assert!(require_entrypoint_request(&args).is_err());
+    }
 
     fn resolved(reference: &PackReference) -> Result<ResolvedApplication, ApplicationLaunchError> {
         let reference = if reference.version().is_some() {
@@ -216,7 +580,7 @@ mod tests {
 
     #[test]
     fn a_positional_naming_an_installed_policy_pack_is_refused_not_routed_to_oci() {
-        let mut args = positional("policy/strict@1.0.0");
+        let mut args = positional("agent/claude@1.0.1");
         let error = settle(
             &mut args,
             |_| false,
