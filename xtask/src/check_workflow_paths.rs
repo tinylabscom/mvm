@@ -1460,25 +1460,6 @@ mod tests {
     }
 
     #[test]
-    fn mutation_cli_shard_installs_its_embedded_host_toolchain() {
-        let workflow = workflow("security.yml");
-        let mutation = job_block(&workflow, "mutation-witnesses");
-        let install = concat!(
-            "      - name: Install mvm-cli embedded-host toolchain\n",
-            "        if: startsWith(matrix.package, 'mvm-cli')\n",
-            "        uses: ./.github/actions/install-zigbuild",
-        );
-        assert!(
-            mutation.contains(install),
-            "the mvm-cli mutation shard must install the pinned Zig toolchain"
-        );
-        assert!(
-            mutation.find(install) < mutation.find("Mutate this package's claim surface"),
-            "the embedded-host toolchain must be installed before cargo-mutants builds mvm-cli"
-        );
-    }
-
-    #[test]
     fn no_kvm_pipeline_prepares_a_bounded_bundle_then_boots_with_tcg() {
         let workflow = ci_full_workflow();
         let prepare = job_block(&workflow, "no-kvm-prepare");

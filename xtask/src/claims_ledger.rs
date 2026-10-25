@@ -1,11 +1,7 @@
 //! The claims ledger: one parser for the machine-checked claim →
 //! witness map embedded in `specs/adrs/001-microvm-security-posture.md`.
 //!
-//! Two gates read this table and they must agree on what it says.
-//! `check-claim-catalog` asserts every named witness still exists;
-//! `check-mutation-witnesses` derives the mutation surface from the same
-//! rows. A second parser would let the two disagree about which claims
-//! exist, which is precisely the drift the ledger is meant to prevent.
+//! `check-claim-catalog` asserts every named witness still exists.
 //!
 //! Row shape (a 5-column markdown table):
 //!   | # | Claim | Witnesses | Authority | Status |
