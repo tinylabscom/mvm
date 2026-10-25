@@ -75,7 +75,7 @@ fn broad_live_bdd_stays_extended_while_the_bounded_ps11_witness_runs_in_the_queu
     let ci = workflow("ci.yml");
     // BDD is full-matrix: the merge queue runs it, a pull request does not.
     assert!(ci.contains(
-        "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request'"
+        "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request' && github.event_name != 'merge_group'"
     ));
     assert!(ci.contains("run_ps11_live: ${{ needs.scope.outputs.code == 'true' }}"));
 

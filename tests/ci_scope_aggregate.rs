@@ -3,8 +3,9 @@
 //! CI has two tiers. A pull request runs the fast gate — formatting, clippy
 //! over the core build and the feature combinations, the policy gates, a
 //! compile of every workspace test target and the sharded x86_64 suite. The
-//! merge queue runs the full matrix: the same fast-gate lanes plus every slow
-//! lane, against the integrated commit. Within each tier the `scope` job still
+//! merge queue runs the same fast gate against the integrated commit. The full
+//! matrix — the fast-gate lanes plus every slow lane — runs on a push to main,
+//! after the merge. Within each tier the `scope` job still
 //! classifies changed paths, lanes skip when out of scope, and this aggregate
 //! asserts each lane's result *matches* what its tier and scope require.
 //!
@@ -76,8 +77,8 @@ const GATE_LANES: [&str; 5] = [
     "WORKSPACE_RESULT",
 ];
 
-/// Full-matrix lanes: skipped on every pull request, and following the
-/// `code` scope in the merge queue and on a manual dispatch.
+/// Full-matrix lanes: skipped on every pull request and in the merge queue,
+/// and following the `code` scope on a push to main and a manual dispatch.
 const FULL_LANES: [&str; 10] = [
     "FEATURES_RESULT",
     "FEATURES_SUPPORT_RESULT",
@@ -148,10 +149,10 @@ impl Verdict {
         }
     }
 
-    /// The same code change at the head of a merge group: everything runs.
-    fn queue_in_scope() -> Self {
+    /// The same code change after the merge, on a push to main: everything runs.
+    fn main_in_scope() -> Self {
         Self {
-            event_name: "merge_group",
+            event_name: "push",
             full: "success",
             bdd: "success",
             nix: "success",
@@ -159,10 +160,10 @@ impl Verdict {
         }
     }
 
-    /// An out-of-scope merge group: still only the policy lane.
-    fn queue_out_of_scope() -> Self {
+    /// An out-of-scope push: still only the policy lane.
+    fn main_out_of_scope() -> Self {
         Self {
-            event_name: "merge_group",
+            event_name: "push",
             ..Self::pr_out_of_scope()
         }
     }
@@ -177,12 +178,20 @@ impl Verdict {
         }
     }
 
-    /// That change in the queue, where the documentation scenarios run.
-    fn queue_docs_only() -> Self {
+    /// That change on a push to main, where the documentation scenarios run.
+    fn main_docs_only() -> Self {
         Self {
             docs: "true",
             bdd: "success",
-            ..Self::queue_out_of_scope()
+            ..Self::main_out_of_scope()
+        }
+    }
+
+    /// The same code change at the head of a merge group: the fast gate only.
+    fn queue_in_scope() -> Self {
+        Self {
+            event_name: "merge_group",
+            ..Self::pr_in_scope()
         }
     }
 
@@ -237,40 +246,45 @@ fn a_fully_out_of_scope_run_is_admitted() {
         Verdict::pr_out_of_scope().accepts(),
         "a PR touching no code and no bdd path must pass the aggregate"
     );
-    assert!(Verdict::queue_out_of_scope().accepts());
+    assert!(Verdict::main_out_of_scope().accepts());
 }
 
 #[test]
 fn a_fully_in_scope_green_run_is_admitted_on_every_event() {
     assert!(Verdict::pr_in_scope().accepts());
-    assert!(Verdict::queue_in_scope().accepts());
+    assert!(Verdict::main_in_scope().accepts());
     assert!(
         Verdict {
             event_name: "workflow_dispatch",
-            ..Verdict::queue_in_scope()
+            ..Verdict::main_in_scope()
         }
         .accepts(),
-        "a manual dispatch runs the full matrix, like the queue"
+        "a manual dispatch runs the full matrix, like a push to main"
     );
     assert!(
         Verdict {
             nix_scope: "false",
             nix: "skipped",
-            ..Verdict::queue_in_scope()
+            ..Verdict::main_in_scope()
         }
         .accepts()
     );
 }
 
-/// The pull-request tier is the fast gate and nothing else. An expensive lane
-/// that runs on a PR is a lane whose `if:` lost its event condition, and it
-/// puts the hour-long matrix back in front of every review.
+/// The pull-request and merge-queue tiers are the fast gate and nothing else.
+/// An expensive lane that runs there is a lane whose `if:` lost its event
+/// condition, and it puts the hour-long matrix back in front of every merge.
 #[test]
-fn every_full_matrix_lane_is_refused_on_a_pull_request() {
+fn every_full_matrix_lane_is_refused_on_a_pull_request_and_in_the_queue() {
+    assert!(Verdict::queue_in_scope().accepts());
     for lane in FULL_LANES {
         assert!(
             !Verdict::pr_in_scope().with(lane, "success").accepts(),
             "{lane} must not run on a pull request"
+        );
+        assert!(
+            !Verdict::queue_in_scope().with(lane, "success").accepts(),
+            "{lane} must not run in the merge queue"
         );
     }
     for (what, verdict) in [
@@ -293,14 +307,14 @@ fn every_full_matrix_lane_is_refused_on_a_pull_request() {
     }
 }
 
-/// The merge queue is the full matrix. Any lane that skipped there merged a
-/// change its tier never tested.
+/// A push to main is the full matrix. Any lane that skipped there left a
+/// merged change untested.
 #[test]
-fn every_lane_must_run_in_the_merge_queue() {
+fn every_lane_must_run_on_a_push_to_main() {
     for lane in GATE_LANES.into_iter().chain(FULL_LANES) {
         assert!(
-            !Verdict::queue_in_scope().with(lane, "skipped").accepts(),
-            "{lane} must run in the merge queue"
+            !Verdict::main_in_scope().with(lane, "skipped").accepts(),
+            "{lane} must run on a push to main"
         );
     }
     for (what, verdict) in [
@@ -308,32 +322,32 @@ fn every_lane_must_run_in_the_merge_queue() {
             "the workspace archive build",
             Verdict {
                 archive: "skipped",
-                ..Verdict::queue_in_scope()
+                ..Verdict::main_in_scope()
             },
         ),
         (
             "BDD",
             Verdict {
                 bdd: "skipped",
-                ..Verdict::queue_in_scope()
+                ..Verdict::main_in_scope()
             },
         ),
         (
             "Nix",
             Verdict {
                 nix: "skipped",
-                ..Verdict::queue_in_scope()
+                ..Verdict::main_in_scope()
             },
         ),
         (
             "the policy lane",
             Verdict {
                 policy: "skipped",
-                ..Verdict::queue_in_scope()
+                ..Verdict::main_in_scope()
             },
         ),
     ] {
-        assert!(!verdict.accepts(), "{what} must run in the merge queue");
+        assert!(!verdict.accepts(), "{what} must run on a push to main");
     }
 }
 
@@ -375,7 +389,7 @@ fn every_fast_gate_lane_must_run_on_a_pull_request() {
 /// to one of the two runners it can answer.
 #[test]
 fn the_runner_picker_moves_only_the_archive_build() {
-    for base in [Verdict::pr_in_scope(), Verdict::queue_in_scope()] {
+    for base in [Verdict::pr_in_scope(), Verdict::main_in_scope()] {
         assert!(
             Verdict {
                 workspace_runner: "hetzner",
@@ -433,13 +447,13 @@ fn the_runner_picker_moves_only_the_archive_build() {
 }
 
 /// A documentation-only change pays for the suite that reads the
-/// documentation, and only for that, in the queue.
+/// documentation, and only for that, on a push to main.
 #[test]
-fn a_docs_only_run_requires_the_bdd_lane_in_the_queue_and_nothing_else() {
+fn a_docs_only_run_requires_the_bdd_lane_on_main_and_nothing_else() {
     assert!(Verdict::pr_docs_only().accepts());
-    assert!(Verdict::queue_docs_only().accepts());
+    assert!(Verdict::main_docs_only().accepts());
     // Code and docs together is just a code run; `docs` adds nothing to it.
-    for base in [Verdict::pr_in_scope(), Verdict::queue_in_scope()] {
+    for base in [Verdict::pr_in_scope(), Verdict::main_in_scope()] {
         assert!(
             Verdict {
                 docs: "true",
@@ -459,7 +473,7 @@ fn a_docs_only_run_is_refused_when_its_lane_does_not_match() {
             "a docs-only merge group whose BDD lane skipped",
             Verdict {
                 bdd: "skipped",
-                ..Verdict::queue_docs_only()
+                ..Verdict::main_docs_only()
             },
         ),
         (
@@ -473,14 +487,14 @@ fn a_docs_only_run_is_refused_when_its_lane_does_not_match() {
             "a docs-only merge group whose BDD lane failed",
             Verdict {
                 bdd: "failure",
-                ..Verdict::queue_docs_only()
+                ..Verdict::main_docs_only()
             },
         ),
         (
             "a docs-only merge group that ran the compile and test lanes",
             Verdict {
                 full: "success",
-                ..Verdict::queue_docs_only()
+                ..Verdict::main_docs_only()
             },
         ),
     ];
@@ -498,7 +512,7 @@ fn a_genuine_failure_is_still_refused_in_either_tier() {
             "a bdd lane that ran while out of scope",
             Verdict {
                 bdd: "success",
-                ..Verdict::queue_out_of_scope()
+                ..Verdict::main_out_of_scope()
             },
         ),
         (
@@ -509,31 +523,31 @@ fn a_genuine_failure_is_still_refused_in_either_tier() {
             },
         ),
         (
-            "a failing fast-gate lane in the queue",
+            "a failing fast-gate lane on a push to main",
             Verdict {
                 gate: "failure",
-                ..Verdict::queue_in_scope()
+                ..Verdict::main_in_scope()
             },
         ),
         (
-            "a failing full-matrix lane in the queue",
+            "a failing full-matrix lane on a push to main",
             Verdict {
                 full: "failure",
-                ..Verdict::queue_in_scope()
+                ..Verdict::main_in_scope()
             },
         ),
         (
             "a full-matrix lane that ran while out of scope",
             Verdict {
                 full: "success",
-                ..Verdict::queue_out_of_scope()
+                ..Verdict::main_out_of_scope()
             },
         ),
         (
             "a bdd lane that skipped while in scope",
             Verdict {
                 bdd: "skipped",
-                ..Verdict::queue_in_scope()
+                ..Verdict::main_in_scope()
             },
         ),
         (
@@ -554,28 +568,28 @@ fn a_genuine_failure_is_still_refused_in_either_tier() {
             "a Nix job that ran for an unrelated diff",
             Verdict {
                 nix_scope: "false",
-                ..Verdict::queue_in_scope()
+                ..Verdict::main_in_scope()
             },
         ),
         (
             "an invalid Nix scope",
             Verdict {
                 nix_scope: "",
-                ..Verdict::queue_in_scope()
+                ..Verdict::main_in_scope()
             },
         ),
         (
             "a failing Nix witness",
             Verdict {
                 nix: "failure",
-                ..Verdict::queue_in_scope()
+                ..Verdict::main_in_scope()
             },
         ),
         (
             "an event the workflow does not declare",
             Verdict {
-                event_name: "push",
-                ..Verdict::queue_in_scope()
+                event_name: "schedule",
+                ..Verdict::main_in_scope()
             },
         ),
     ];
@@ -619,7 +633,7 @@ fn an_unparseable_scope_is_refused() {
         assert!(
             !Verdict {
                 docs,
-                ..Verdict::queue_docs_only()
+                ..Verdict::main_docs_only()
             }
             .accepts(),
             "docs scope {docs:?} must not be treated as a valid classification"

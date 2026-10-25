@@ -62,7 +62,7 @@ image and payload preparation excluded:
 
 "Before" fetched Zig 0.13 and 0.15, cargo-zigbuild and libclang on entry.
 `scripts/check-devshell-tiers.sh` keeps them out of the default shell and in
-`.#full`; the merge queue runs it in the Nix flake check lane.
+`.#full`; it runs in the Nix flake check lane after the merge, on every push to main.
 
 A full clone downloads about 215 MiB, roughly 150 MiB of which is a build
 directory committed by mistake in August 2026 and deleted in September. History
