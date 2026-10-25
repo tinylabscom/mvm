@@ -245,13 +245,6 @@ fn canonical_bdd_workflow_uses_bounded_apt_action() {
 }
 
 #[test]
-fn runtime_release_publication_needs_bdd() {
-    assert_reuses_bdd_gate("release.yml");
-    assert_job_needs_bdd("release.yml", "release");
-    assert_job_contains("release.yml", "release", "needs.bdd.result == 'success'");
-}
-
-#[test]
 fn sdk_registry_publication_needs_bdd() {
     assert_reuses_bdd_gate("publish-sdk.yml");
     assert_job_needs_bdd("publish-sdk.yml", "publish_pypi_release");

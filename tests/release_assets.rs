@@ -1630,7 +1630,7 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
     );
     assert!(
         promote.contains(
-            "    needs: [published-installed-boot, published-package-smoke, recipe-install-smoke]\n"
+            "    needs: [e2e-docs, published-installed-boot, published-package-smoke, recipe-install-smoke]\n"
         ) && promote.contains("needs.published-installed-boot.result == 'success'")
             && promote.contains("needs.published-package-smoke.result == 'success'")
             && promote.contains("needs.recipe-install-smoke.result == 'success'"),
