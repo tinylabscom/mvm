@@ -1484,6 +1484,14 @@ mvmctl machine check-artifact ./alpine.mvmpkg
 mvmctl run ./alpine.mvmpkg -- /bin/sh
 ```
 
+The archive above is a host-local build, not a publisher release. Fetching it
+through the publisher-verification surface is deliberately refused with exit
+code 1; use `machine check-artifact` to inspect it and `run` to launch it locally:
+
+```sh
+mvmctl bundle fetch ./alpine.mvmpkg
+```
+
 The package carries the workload kernel, rootfs, resolved entrypoint and libc
 metadata, universal initramfs, runtime overlay and its verity tree. The kernel
 comes from the authenticated Linux image-set pin; the original image-set
