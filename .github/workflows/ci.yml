@@ -25,11 +25,13 @@ on:
 # superseded run for that PR. Each merge group has its own ref, and the queue
 # builds several groups at once, so a group never shares a key with — or
 # cancels — another group's run; GitHub retires an invalidated group itself.
+# A push to main is superseded by the next one, whose full-matrix run covers
+# everything the older one tests; pushes share a ref only with pushes.
 # Manual dispatches receive a unique key so diagnostics do not block each
 # other.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 permissions:
   contents: read

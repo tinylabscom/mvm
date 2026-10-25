@@ -1694,7 +1694,7 @@ mod tests {
         // Each merge group has its own ref and the queue builds several at
         // once, so a shared queue key would make one group cancel another.
         let expected_group = "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}";
-        let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' }}";
+        let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}";
 
         let ci = ci_workflow();
         assert!(ci.contains(
