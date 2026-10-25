@@ -47,15 +47,6 @@ fn assert_job_needs_bdd(workflow_name: &str, job: &str) {
     );
 }
 
-fn assert_job_contains(workflow_name: &str, job: &str, expected: &str) {
-    let contents = workflow(workflow_name);
-    let block = job_block(&contents, job);
-    assert!(
-        block.contains(expected),
-        "{workflow_name}'s {job} job must contain {expected:?}"
-    );
-}
-
 #[test]
 fn canonical_bdd_workflow_runs_the_full_suite() {
     let contents = workflow("bdd.yml");
