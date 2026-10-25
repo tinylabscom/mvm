@@ -27,6 +27,7 @@ pub mod client;
 pub mod cold_build;
 pub mod config;
 pub mod dev_network;
+#[cfg(feature = "host-state")]
 pub mod did_key;
 /// The single `sha256:<64 lowercase hex>` shape check every prefixed
 /// content-address newtype in this crate shares (crate-private).
@@ -112,7 +113,9 @@ pub mod registry_pack_store;
 pub(crate) mod signed_feed_store;
 /// UOR-ADDR-compatible canonical content identity for the Workload IR,
 /// distinct from every exact-byte, trust, and replay identity type.
+#[cfg(feature = "host-state")]
 pub mod workload_address;
+#[cfg(feature = "host-state")]
 pub use workload_address::{
     WorkloadAddress, WorkloadAddressError, WorkloadAddressParseError, workload_address,
 };
@@ -120,7 +123,7 @@ pub mod user_config;
 
 /// Test-only drift-lock proving `mvm_contract::ir::canonicalize` and
 /// `serde_jcs` emit byte-identical canonical form for the same workload.
-#[cfg(test)]
+#[cfg(all(test, feature = "host-state"))]
 mod canonicalizer_equivalence;
 
 /// Cryptographic primitives — attestation, key rotation, keystore,
@@ -143,9 +146,11 @@ pub mod private_fs;
 pub mod protocol;
 #[cfg(feature = "provenance")]
 pub mod provenance;
+#[cfg(feature = "host-state")]
 pub mod receipt;
 /// The signed index of an evidence archive: manifest, citations, and the
 /// checked-versus-asserted completeness distinction.
+#[cfg(feature = "host-state")]
 pub mod receipt_archive;
 pub mod residency;
 /// What a caller declared a machine should boot from — the one type both the

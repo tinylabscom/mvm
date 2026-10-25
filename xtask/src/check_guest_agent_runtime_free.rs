@@ -52,6 +52,10 @@ const FORBIDDEN: &[&str] = &[
     "opentelemetry-otlp",
     "opentelemetry-proto",
     "tracing-opentelemetry",
+    // `mvm-core`'s `host-state` feature (DID keys, receipts, workload
+    // addresses): host crates turn it on, the guest never does.
+    "bs58",
+    "unicode-normalization",
 ];
 
 /// The guest's real build target. The async stack above is

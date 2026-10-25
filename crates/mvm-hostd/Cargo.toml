@@ -89,7 +89,7 @@ required-features = ["trusted-apfs"]
 [dependencies]
 # `egress-ca`: the https terminator mints per-SNI leaves
 # under the per-VM intermediate (`mvm_core::crypto::egress_ca`).
-mvm-core = { workspace = true, features = ["egress-ca"] }
+mvm-core = { workspace = true, features = ["egress-ca", "host-state"] }
 mvm-http.workspace = true
 # The EgressEnforcer seam this crate's SupervisorEgressEnforcer
 # implements. Acyclic HIGH->LOW: mvm-net deps only mvm-core + mvm-contract.

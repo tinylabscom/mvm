@@ -1346,6 +1346,7 @@ mod tests {
 
         // Same shape, independently re-validated — not a type conversion.
         assert!(crate::packs::OciDigest::new(digest.as_str().to_string()).is_ok());
+        #[cfg(feature = "host-state")]
         assert!(
             crate::workload_address::WorkloadAddress::parse(digest.as_str()).is_ok(),
             "the workload-address shape overlaps too"

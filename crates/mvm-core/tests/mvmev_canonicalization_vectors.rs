@@ -1,3 +1,5 @@
+#![cfg(feature = "host-state")]
+
 use ed25519_dalek::SigningKey;
 use mvm_core::receipt::{ReceiptError, canonical_json};
 use mvm_core::receipt_archive::{EVIDENCE_MANIFEST_SCHEMA_VERSION, SignedEvidenceManifest};

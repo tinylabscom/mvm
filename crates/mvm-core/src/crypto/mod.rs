@@ -1,6 +1,7 @@
 pub mod aead;
 pub mod attestation;
 pub mod checkpoint_object;
+#[cfg(feature = "host-state")]
 pub mod command_gate;
 pub mod constant_time;
 pub mod ed25519_keypair;
@@ -24,6 +25,7 @@ pub mod snapshot_crypto;
 pub mod snapshot_encryption;
 pub mod snapshot_hmac;
 pub mod snapshot_sign;
+#[cfg(feature = "host-state")]
 pub mod threat_classifier;
 pub mod verified_digest;
 pub mod vmgenid;
