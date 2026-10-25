@@ -588,7 +588,7 @@ fn a_genuine_failure_is_still_refused_in_either_tier() {
         (
             "an event the workflow does not declare",
             Verdict {
-                event_name: "push",
+                event_name: "schedule",
                 ..Verdict::main_in_scope()
             },
         ),
