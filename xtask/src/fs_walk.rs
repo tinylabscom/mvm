@@ -3,9 +3,7 @@
 //! Four gates had each hand-rolled the same `std::fs::read_dir` recursion
 //! with the same skip list. One copy is enough.
 //!
-//! Traversal order is deterministic. `check-mutation-witnesses` commits its
-//! resolved surface to a file, so two runs over the same tree have to agree;
-//! the other callers emit error lists that are simply nicer to read stable.
+//! Traversal order is deterministic, so the callers' error lists read stable.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -109,7 +107,7 @@ mod tests {
         })
         .unwrap();
 
-        // Sorted, not merely present: the mutation surface is committed.
+        // Sorted, not merely present: error lists read stable.
         assert_eq!(
             names,
             vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()]

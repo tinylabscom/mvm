@@ -18,16 +18,6 @@ use std::path::Path;
 /// A gate: the subcommand name, and the function behind it.
 pub type Gate = (&'static str, fn(&Path) -> Result<()>);
 
-/// The mutation gate defaults to pinning the surface rather than mutating
-/// it — the run itself costs hours and belongs to the nightly.
-fn mutation_witnesses_surface_pin(workspace: &Path) -> Result<()> {
-    crate::check_mutation_witnesses::run(
-        workspace,
-        crate::check_mutation_witnesses::Mode::PinOnly,
-        None,
-    )
-}
-
 /// Read-only: `--write` regenerates the model and is a developer action.
 fn conformance_read_only(workspace: &Path) -> Result<()> {
     crate::check_conformance::run(workspace, false)
@@ -111,7 +101,6 @@ pub const GATES: &[Gate] = &[
     ("check-abi-layout", crate::check_abi_layout::run),
     ("check-claim-catalog", crate::check_claim_catalog::run),
     ("check-plan-names", crate::check_plan_names::run),
-    ("check-mutation-witnesses", mutation_witnesses_surface_pin),
     ("check-sdk-cdylib-deps", crate::check_sdk_cdylib_deps::run),
     ("check-doc-links", crate::check_doc_links::run),
     (

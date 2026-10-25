@@ -45,7 +45,6 @@ pub const MIN_LEN: usize = 12;
 
 /// Words that look like identifiers but are prose, config keys, or paths.
 pub const IGNORED: &[&str] = &[
-    "cargo-mutants",
     "workflow_dispatch",
     "pull_request",
     "merge_group",

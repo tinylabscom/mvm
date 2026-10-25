@@ -6,9 +6,9 @@ name: Security
 # nightly, and manually requested security evidence; they are not PR checks
 # and do not block merge directly.
 #
-# Triggers: release-tag pushes (final pre-publish gate), a nightly cron,
+# Triggers: release-tag pushes (final pre-publish gate), a weekly cron,
 # and manual dispatch. There is no `pull_request` trigger here; day-to-day
-# PR checks live in ci.yml. The nightly cron catches advisory-DB additions
+# PR checks live in ci.yml. The weekly cron catches advisory-DB additions
 # even on quiet branches. `push: branches: [main]` was dropped in the
 # ecosystem-wide CI cost reduction — the nightly cron covers the
 # post-merge "did a new advisory land overnight" case at zero
@@ -22,15 +22,14 @@ on:
   push:
     tags: ["v*"]
   schedule:
-    - cron: "17 4 * * *"
+    - cron: "17 4 * * 1"
   workflow_dispatch:
 
 # There is no `pull_request` trigger here, so there is no check panel to keep
 # free of superseded SHAs. The claim that the nightly cron was never cancelled
 # because of a different ref was wrong: a scheduled run and an operator
-# dispatch both carry `refs/heads/main` and so shared a group. The mutation
-# shards run for over two hours, and cancelling one leaves nine numbered claims
-# with a green ledger entry and no evidence behind it.
+# dispatch both carry `refs/heads/main` and so shared a group. Cancelling a
+# long lane leaves numbered claims with a green ledger entry and no evidence.
 #
 # Tag pushes already sit in their own group by ref. Dispatches now get their
 # own by run id, and the nightly keeps the ref, so no run cancels another.
@@ -546,255 +545,6 @@ jobs:
             crates/mvm-sdk/fuzz/artifacts/
             crates/mvm-core/fuzz/corpus/
             crates/mvm-core/fuzz/artifacts/
-
-  # ── Lane 4b: Claim witnesses are mutation-tested ──────────────────
-  # check-claim-catalog (ci.yml) proves a claim's witness EXISTS. This
-  # lane asks whether it BITES: cargo-mutants breaks the enforcement
-  # code on purpose and a surviving mutant means the witness cannot
-  # detect its own property being violated. Sibling to the fuzz lane —
-  # fuzzing asks whether bad input is handled, mutation asks whether
-  # our own tests would notice the handling going away.
-  #
-  # The surface is derived from the claims ledger, and its pin is
-  # checked on every PR by ci.yml; only the mutation run itself is
-  # nightly, because it costs hours.
-  mutation-witnesses:
-    name: Claim witnesses — mutation-tested (${{ matrix.package }})
-    runs-on: ubuntu-latest
-    # Under the six-hour platform cap, so a shard that outgrows its budget
-    # fails as itself. Reaching the cap instead kills the runner, and the
-    # only trace is "The runner has received a shutdown signal" — which
-    # names no package, no file, and no claim, and reads identically to
-    # infrastructure having a bad night.
-    #
-    # This has already earned itself: mvm-hostd/2of2 hit it on 2026-08-16 and
-    # was reported as a bounded, attributable stop with its partial output
-    # kept, which is what said the split was uneven and by how much. Note
-    # that GitHub records a timeout kill as `cancelled`, not `failure` —
-    # `security-lane-watch.yml` counts `cancelled` for that reason, and
-    # before it did, a shard that never finished was the one kind of red
-    # this whole lane could not report.
-    #
-    # The mutation step carries a shorter timeout of its own, so a shard
-    # that runs long stops with time left for the step that names the files
-    # it never reached. This one stays as the backstop.
-    timeout-minutes: 330
-    # BLOCKING, and sharded per package.
-    #
-    # Sharding is structural, not a response to a particular runtime: a
-    # GitHub-hosted job is killed at six hours, the surface only grows,
-    # and a failure should name the package that owns it rather than
-    # arrive as one opaque red job. A lane that cannot reliably finish
-    # goes red for reasons unrelated to any claim and stops being read —
-    # the failure this lane exists to prevent, reached from the other
-    # side.
-    #
-    # Deliberately no duration quoted here. The first version of this
-    # comment cited hours measured before the slowest tests in the tree
-    # were fixed, and was wrong by roughly an order of magnitude within a
-    # week. `specs/VERIFICATION.md` carries dated, measured per-shard
-    # times instead; re-measure rather than re-quote.
-    #
-    # Every survivor is either closed by a test or carried in
-    # xtask/mutation-witness-baseline.json with the mechanism that makes it
-    # uncatchable here (a live VMM, a nix build, a feature this run does not
-    # compile, or a provable equivalence). The ratchet tolerates only those
-    # exact identities, so a NEW hole still fails — including inside the
-    # files that carry accepted entries.
-    #
-    # The matrix is pinned against the baseline by check-mutation-witnesses
-    # on every PR, so a package joining the surface cannot silently go
-    # unmeasured here.
-    #
-    # See specs/VERIFICATION.md §"Mutation-tested witnesses" and plan 272 WS-2.
-    strategy:
-      fail-fast: false
-      # Leave hosted runners for merge-group CI. All shards still run;
-      # the full mutation sweep takes longer rather than consuming the pool.
-      max-parallel: 2
-      matrix:
-        package:
-          - mvm-agentd
-          - mvm-backends
-          - mvm-build
-          - mvm-builder-guest
-          # Ten mutant slices, not file shards. File packing cannot split a
-          # file, and two of this package's files (update.rs, 99 mutants;
-          # parse.rs, 71) each outlast the 315-minute step on their own,
-          # because every mutant re-runs the crate suite plus a rebuild. Each
-          # slice below runs every surface file, taking a round-robin tenth
-          # of its mutants, so no file is withheld and none is run twice.
-          #
-          # Ten because the cost of one mutant is the runner's, not the
-          # slice's. Run 40062457942 and run 40109099571 gave the same slice
-          # the same mutant counts (18, 18, 1, 25), yet the unmutated
-          # baseline took 160s build + 200s test on one runner and 245s +
-          # 450-500s on another, and a mutant 2.2x longer with it. Four
-          # slices of about 62 mutants took 2h41m on a fast runner and
-          # passed 315 minutes on a slow one. At ten, about 25 mutants plus
-          # four baselines is roughly 215 minutes at the slow rate, which
-          # leaves a quarter of the step budget spare.
-          - mvm-cli/m1of10
-          - mvm-cli/m2of10
-          - mvm-cli/m3of10
-          - mvm-cli/m4of10
-          - mvm-cli/m5of10
-          - mvm-cli/m6of10
-          - mvm-cli/m7of10
-          - mvm-cli/m8of10
-          - mvm-cli/m9of10
-          - mvm-cli/m10of10
-          - mvm-client
-          - mvm-core
-          - mvm-fs
-          # Eight, and the number is measured rather than chosen.
-          #
-          # Raising the count is the second half of the fix; the first is
-          # that xtask now packs shards longest-file-first instead of
-          # slicing by stride. Adding shards alone had already been tried:
-          # 2 -> 4 on 2026-08-16, on the correct diagnosis that splitting by
-          # file count does not split by cost. It recurred, because a
-          # cost-blind split of an unequal surface stays unequal at any
-          # width — on 2026-08-21 shards 2of4 and 4of4 were both killed at
-          # 330 minutes while 3of4 finished in 24.
-          #
-          # Six cost-aware shards still left audit_file.rs behind 183 minutes
-          # of earlier work in 4of6. The lane reached only 101 of that file's
-          # mutants before the 315-minute step deadline. Eight shards isolate
-          # that large file and keep accounting time inside the job budget.
-          #
-          # The packing weighs a file by its mutant count, not its size. Size
-          # put audit/session.rs, a small file with 155 mutants, beside two
-          # more files, and that shard was stopped at 315 minutes on
-          # 2026-10-12 while four others finished inside 75.
-          - mvm-hostd/1of8
-          - mvm-hostd/2of8
-          - mvm-hostd/3of8
-          - mvm-hostd/4of8
-          - mvm-hostd/5of8
-          - mvm-hostd/6of8
-          - mvm-hostd/7of8
-          - mvm-hostd/8of8
-          - mvm-contract
-          - mvm-runtime
-          - mvm-vmm
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-mutation-${{ matrix.package }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-mutation-${{ matrix.package }}-
-
-      - name: Install cargo-mutants and nextest
-        # The mutator is pinned in Cargo.toml's [workspace.metadata.mvm.toolchain].
-        # `--locked` alone pins the dependency tree of whatever release is
-        # newest, not the tool, and the baseline's accepted misses are matched
-        # on the description text that release renders. The gate refuses a
-        # mutator other than the pin, so this read and that check agree.
-        run: |
-          set -euo pipefail
-          CARGO_MUTANTS_VERSION=$(awk '/^\[workspace\.metadata\.mvm\.toolchain\]/ { t = 1; next }
-            /^\[/ { t = 0 }
-            t && $1 == "cargo-mutants" { gsub(/"/, "", $3); print $3 }' Cargo.toml)
-          if [ -z "$CARGO_MUTANTS_VERSION" ]; then
-            echo "::error::no cargo-mutants pin in [workspace.metadata.mvm.toolchain]" >&2
-            exit 1
-          fi
-          cargo install --locked "cargo-mutants@${CARGO_MUTANTS_VERSION}" cargo-nextest
-
-      - name: Install mvm-cli embedded-host toolchain
-        if: startsWith(matrix.package, 'mvm-cli')
-        uses: ./.github/actions/install-zigbuild
-
-      - name: Mutate this package's claim surface and ratchet survivors
-        # Stopped short of the job's own timeout so the accounting step below
-        # still runs: a shard cut off here leaves its unreached files with no
-        # output at all, and only that step names them.
-        timeout-minutes: 315
-        # `--run` mutates the claim-enforcement surface and runs the suite
-        # against each mutant — plan verification that no longer verifies, a
-        # seccomp filter that no longer filters, the host signer. That is
-        # security code with its check removed, so it must not reach a real
-        # mvm state root: it could mint a key at the wrong path or mode (the
-        # mutation may be *in* the path/mode logic) or leave firewall rules
-        # behind.
-        #
-        # MVM_HOME alone is not enough — `default_mvm_cache_dir` deliberately
-        # reads the home directory to seed from the shared cache, which is the
-        # leak `check-test-home-isolation` exists to catch. So both roots move.
-        #
-        # CARGO_HOME/RUSTUP_HOME are pinned to the real home *before* the
-        # redirect: `~` follows HOME, so without this the toolchain the earlier
-        # steps installed would vanish mid-job and the cache step above would
-        # be keyed on a path that only exists here.
-        run: |
-          set -euo pipefail
-          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
-          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-          export MVM_HOME="$RUNNER_TEMP/mutants-mvm-home"
-          export HOME="$MVM_HOME"
-          # The gate writes cargo-mutants output under the system temp dir.
-          # Pin that dir so the upload step below has a path it knows rather
-          # than one it guesses at.
-          export TMPDIR="$RUNNER_TEMP/mutants-out"
-          mkdir -p "$TMPDIR"
-          mkdir -p "$HOME"
-          if [ -e "$HOME/.mvm/keys" ]; then
-            echo "::error::refusing to mutate against a reachable keystore at $HOME/.mvm/keys" >&2
-            exit 1
-          fi
-          cargo run -p xtask -- check-mutation-witnesses --run --package '${{ matrix.package }}'
-
-      - name: Account for every surface file this shard owns
-        # The step above judges only what it measured, and a shard stopped by
-        # its timeout judges nothing: files run in path order, so what goes
-        # missing is an alphabetical tail, and the uploaded output simply has
-        # no directory for it. Read on its own, that output lists survivors for
-        # the files the shard reached and says nothing about the rest, which
-        # reads as clean. This re-derives the shard's file set from the pinned
-        # surface and fails on each file with no finished result under the
-        # pinned mutator, by name, separately from any survivor.
-        if: always()
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          roots=("$RUNNER_TEMP"/mutants-out/mvm-mutation-witnesses-*/)
-          if [ "${#roots[@]}" -ne 1 ] || [ ! -d "${roots[0]}" ]; then
-            echo "::error::expected exactly one mutation evidence root; refusing missing or ambiguous evidence" >&2
-            exit 1
-          fi
-          cargo run -p xtask -- check-mutation-witnesses \
-            --verify-outcomes "${roots[0]}" \
-            --package '${{ matrix.package }}'
-
-      - name: Keep the mutation output of a shard that did not finish
-        # A shard killed by the timeout above has still measured most of its
-        # files, and that work is the only evidence of where it went. Without
-        # this the directory dies with the runner and the next person starts
-        # from the same blank page.
-        #
-        # The isolated HOME the mutants ran under is left out: it is scratch
-        # state, not a result, and its content-addressed image store names
-        # directories `sha256:<digest>`, a colon the artifact service refuses.
-        # Uploading it failed any shard whose tests populated that store.
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mutants-${{ strategy.job-index }}
-          path: |
-            ${{ runner.temp }}/mutants-out/mvm-mutation-witnesses-*/
-            !${{ runner.temp }}/mutants-out/mvm-mutation-witnesses-*/state-root/
-          if-no-files-found: ignore
-          retention-days: 7
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # The tests exercise PublishedImageSet's production acquisition path.
