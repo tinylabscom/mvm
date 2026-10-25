@@ -537,11 +537,22 @@ impl LocalBackend {
             registry_pack_image,
         };
 
-        // A fresh per-launch ledger: local launches are one-shot from this
-        // process, so replay protection spans this admission (the CLI uses
-        // the same per-invocation shape). Keys dir `None` → the host signer
-        // at the configured keys dir.
-        let ledger = InMemoryNonceLedger::new();
+        // A plan the host signs itself carries a fresh random nonce, so a
+        // per-launch ledger is enough. A plan someone else signed can be
+        // submitted again until it expires, so its nonce is recorded in the
+        // host's durable ledger, shared by every launch. A ledger that cannot
+        // be opened refuses the launch. Keys dir `None` → the host signer at
+        // the configured keys dir.
+        let ledger = if params.signed_plan.is_some() {
+            InMemoryNonceLedger::durable().map_err(|e| {
+                crate::local::backend_err(format!(
+                    "opening the plan replay ledger {}: {e}",
+                    mvm_core::config::plan_nonce_dir().display()
+                ))
+            })?
+        } else {
+            InMemoryNonceLedger::new()
+        };
         let clock = SystemClock;
         let emitter = build_audit_emitter().map(std::sync::Arc::new);
 

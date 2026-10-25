@@ -26,6 +26,8 @@
 
 pub mod bundle;
 pub mod content_id;
+#[cfg(unix)]
+pub mod nonce_ledger;
 pub mod signing;
 pub mod synthesis;
 #[cfg(any(test, feature = "test-support"))]
