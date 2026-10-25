@@ -53,7 +53,7 @@ tempfile.workspace = true
 aes-gcm.workspace = true
 aho-corasick.workspace = true
 hmac.workspace = true
-keyring.workspace = true
+keyring = { workspace = true, optional = true }
 secrecy.workspace = true
 zeroize.workspace = true
 rand.workspace = true
@@ -104,6 +104,9 @@ tss-esapi = { version = "7", optional = true }
 
 [features]
 default = []
+# OS-native key storage is host-only. Guest binaries retain the encrypted
+# file/env providers without carrying the keyring crate or its logging edge.
+os-keyring = ["dep:keyring"]
 # Read-only PROV-O/Turtle export of chain-signed audit logs. Kept off by
 # default so lean builder-VM binaries (e.g. mvm-host-vm-init) do not pay
 # for the serializer or its extra dependencies.

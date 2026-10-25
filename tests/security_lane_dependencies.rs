@@ -42,3 +42,44 @@ fn hostd_uses_contract_ir_without_the_authoring_sdk() {
         "mvm-hostd must import runtime IR from mvm-contract instead of pulling in the authoring SDK"
     );
 }
+
+#[test]
+fn guest_builder_excludes_the_host_keyring_feature() {
+    let core = workspace_manifest("crates/mvm-core/Cargo.toml");
+    assert_eq!(
+        core["features"]["os-keyring"][0].as_str(),
+        Some("dep:keyring"),
+        "mvm-core must keep the OS keyring behind its host-only feature"
+    );
+
+    let guest = workspace_manifest("crates/mvm-builder-guest/Cargo.toml");
+    let core_dependency = &guest["dependencies"]["mvm-core"];
+    let guest_features = core_dependency
+        .as_table()
+        .and_then(|dependency| dependency.get("features"))
+        .and_then(toml::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    assert!(
+        !guest_features
+            .iter()
+            .any(|feature| feature.as_str() == Some("os-keyring")),
+        "the guest builder must not restore the host OS-keyring dependency"
+    );
+
+    for host_manifest in [
+        "crates/mvm-client/Cargo.toml",
+        "crates/mvm-runtime/Cargo.toml",
+    ] {
+        let manifest = workspace_manifest(host_manifest);
+        let features = manifest["dependencies"]["mvm-core"]["features"]
+            .as_array()
+            .expect("host mvm-core dependency must declare features");
+        assert!(
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("os-keyring")),
+            "{host_manifest} must retain OS-native key storage"
+        );
+    }
+}

@@ -9,7 +9,7 @@
 //!   `/var/lib/mvm/keys/<tenant_id>.key`, mode 0600 / 0400. Node-
 //!   local key provisioning for fleets that pre-distribute keys via
 //!   config management.
-//! - [`KeyringProvider`] reads a hex-encoded key from the
+//! - `KeyringProvider` (with the `os-keyring` feature) reads a hex-encoded key from the
 //!   OS-native keystore (macOS Keychain, Linux Secret Service,
 //!   Windows Credential Manager). Lives at service=`"mvm"`,
 //!   user=`<tenant_id>`.
@@ -41,12 +41,14 @@ pub const DEFAULT_KEYS_DIR: &str = "/var/lib/mvm/keys";
 /// [`KeyringProvider`]. macOS Keychain, Linux Secret Service, and
 /// Windows Credential Manager all key entries by `(service, user)`;
 /// the user half is the tenant id.
+#[cfg(feature = "os-keyring")]
 pub const KEYRING_SERVICE: &str = "mvm";
 
 /// macOS Keychain item-target used for disambiguation when multiple
 /// generic-password items share `(service, user)`. Passed via
 /// `keyring::Entry::new_with_target` on macOS to keep mvm entries
 /// confined to one logical group.
+#[cfg(feature = "os-keyring")]
 pub const KEYRING_TARGET: &str = "mvm-tenant-keys";
 
 /// Resolves a tenant's data-encryption key.
@@ -159,8 +161,10 @@ impl KeyProvider for FileKeyProvider {
 ///
 /// Construct via [`KeyringProvider::default`]. Falls back to
 /// `Entry::new` on non-macOS where `new_with_target` is unnecessary.
+#[cfg(feature = "os-keyring")]
 pub struct KeyringProvider;
 
+#[cfg(feature = "os-keyring")]
 impl KeyringProvider {
     /// Open the keyring entry for a given tenant. Used by both
     /// `get_data_key` here and by the `mvmctl secret` CLI.
@@ -195,12 +199,14 @@ impl KeyringProvider {
     }
 }
 
+#[cfg(feature = "os-keyring")]
 impl Default for KeyringProvider {
     fn default() -> Self {
         Self
     }
 }
 
+#[cfg(feature = "os-keyring")]
 impl KeyProvider for KeyringProvider {
     fn get_data_key(&self, tenant_id: &str) -> Result<SecretBox<Vec<u8>>> {
         let entry = Self::entry(tenant_id)?;
@@ -251,7 +257,7 @@ impl KeyProvider for FallbackKeyProvider {
 /// Order is biased toward stronger sources first and falls through
 /// per tenant when a stronger backend has no key configured:
 ///
-/// 1. [`KeyringProvider`] — if an OS-native keystore entry can be
+/// 1. `KeyringProvider` (with the `os-keyring` feature) — if an OS-native keystore entry can be
 ///    constructed (macOS Keychain / Linux Secret Service /
 ///    Windows Cred Mgr).
 /// 2. [`FileKeyProvider`] — if [`DEFAULT_KEYS_DIR`] exists.
@@ -262,8 +268,11 @@ impl KeyProvider for FallbackKeyProvider {
 /// specific tenant key exists is the question [`has_key`] answers.
 pub fn default_provider() -> Box<dyn KeyProvider> {
     let mut providers: Vec<Box<dyn KeyProvider>> = Vec::new();
-    if KeyringProvider::backend_reachable() {
-        providers.push(Box::new(KeyringProvider));
+    #[cfg(feature = "os-keyring")]
+    {
+        if KeyringProvider::backend_reachable() {
+            providers.push(Box::new(KeyringProvider));
+        }
     }
     if FileKeyProvider::keys_dir_present(Path::new(DEFAULT_KEYS_DIR)) {
         providers.push(Box::new(FileKeyProvider::default()));
@@ -321,13 +330,15 @@ impl KeyLookupFailure {
                 _ => Self::Unavailable,
             });
         }
-        cause
-            .downcast_ref::<keyring::Error>()
-            .map(|keystore| match keystore {
+        #[cfg(feature = "os-keyring")]
+        if let Some(keystore) = cause.downcast_ref::<keyring::Error>() {
+            return Some(match keystore {
                 keyring::Error::NoEntry => Self::NotConfigured,
                 keyring::Error::BadEncoding(_) => Self::Invalid,
                 _ => Self::Unavailable,
-            })
+            });
+        }
+        None
     }
 }
 
@@ -583,6 +594,7 @@ mod tests {
     // ──────────────────────────────────────────────────────────────
 
     #[test]
+    #[cfg(feature = "os-keyring")]
     fn keyring_provider_rejects_unsafe_tenant_id_before_backend_call() {
         // Even if no backend is reachable, validate_shell_id should
         // fail first — the test never touches the keystore.
@@ -592,6 +604,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "os-keyring")]
     fn keyring_provider_entry_constructor_validates_tenant() {
         // The entry() constructor must reject shell-unsafe tenant
         // names *before* hitting the keyring backend, so CLI surfaces
@@ -716,15 +729,20 @@ mod tests {
             KeyLookupFailure::classify(&denied),
             KeyLookupFailure::Unavailable
         );
-        let locked = anyhow::Error::new(keyring::Error::NoStorageAccess("keychain locked".into()))
-            .context("reading keyring entry");
-        assert_eq!(
-            KeyLookupFailure::classify(&locked),
-            KeyLookupFailure::Unavailable
-        );
+        #[cfg(feature = "os-keyring")]
+        {
+            let locked =
+                anyhow::Error::new(keyring::Error::NoStorageAccess("keychain locked".into()))
+                    .context("reading keyring entry");
+            assert_eq!(
+                KeyLookupFailure::classify(&locked),
+                KeyLookupFailure::Unavailable
+            );
+        }
     }
 
     #[test]
+    #[cfg(feature = "os-keyring")]
     fn an_absent_keyring_entry_is_not_configured() {
         let absent = anyhow::Error::new(keyring::Error::NoEntry).context("reading keyring entry");
         assert_eq!(
