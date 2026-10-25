@@ -31,7 +31,9 @@ use std::path::{Path, PathBuf};
 use cucumber::World as _;
 use cucumber::gherkin::{Feature, Rule, Scenario};
 use mvm_conformance::sharding::ScenarioShard;
-use mvm_conformance::{RuntimeCaps, ScenarioGate, inherited_tags, scenario_gate_for_selection};
+use mvm_conformance::{
+    RuntimeCaps, ScenarioGate, gate_selected_scenario_with_runtime_candidate, inherited_tags,
+};
 use world::CliWorld;
 
 #[tokio::main]
@@ -296,9 +298,23 @@ fn should_run(
         rule.map_or(&[][..], |rule| &rule.tags),
         &scenario.tags,
     );
-    let gate = scenario_gate_for_selection(&tags, probe_caps(), only_tag.as_deref());
+    let gate = gate_selected_scenario_with_runtime_candidate(
+        &tags,
+        probe_caps(),
+        only_tag.as_deref(),
+        runtime_candidate_available(),
+    );
     record_gate(gate);
     matches!(gate, ScenarioGate::Run)
+}
+
+fn runtime_candidate_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        std::env::var_os("MVM_E2E_RUNTIME_CANDIDATE_DIR")
+            .map(PathBuf::from)
+            .is_some_and(|directory| directory.is_dir())
+    })
 }
 
 static SHARD_SELECTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

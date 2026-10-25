@@ -269,6 +269,17 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(security_checks::security_snapshot_encryption_key_check());
     checks.push(security_checks::security_snapshot_dirs_check());
     checks.push(security_checks::security_signing_check());
+    if workflow == Some(DoctorWorkflow::BundleRun) {
+        checks.push(Check {
+            name: "local build authority",
+            category: "security",
+            ok: true,
+            info: format!(
+                "{}; requires the signed local-build label and is refused under --prod",
+                mvm_core::plan::bundle::LOCAL_BUILD_NOTICE
+            ),
+        });
+    }
 
     // ── Active backend security posture ──────
     let security_posture = security::collect_security_posture();

@@ -697,6 +697,7 @@ pub(in crate::commands) fn run_secure_started(
     let admit_gpu = args.gpu;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
+    let admit_prod = args.prod;
     let admit_workload_dir = local_workload_dir(args.flake.as_deref(), args.manifest.as_deref());
     // A run of an installed bundle is bounded by the posture its publisher
     // signed. Read before boot, from the verified manifest; admission refuses
@@ -771,7 +772,13 @@ pub(in crate::commands) fn run_secure_started(
             keys_dir: None,
             audit_dir: None,
             policy_dir: None,
-            bundle_pin: bundle_archive.map(mvm_client::admission::BundlePin::boots),
+            bundle_pin: bundle_archive.map(|archive| {
+                if admit_prod {
+                    mvm_client::admission::BundlePin::boots_for_production(archive)
+                } else {
+                    mvm_client::admission::BundlePin::boots(archive)
+                }
+            }),
             bundle_posture: admit_bundle_posture,
             deps_volume: None,
             // The grants come from the launch config's own volume list, so the

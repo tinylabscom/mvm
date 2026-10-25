@@ -105,7 +105,10 @@ pub use declarations::{
     BundleSizeBudget, forbidden_capabilities, unbound_environment_secret_slots,
     unsupported_environment_requirements,
 };
-pub use lookup::{BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, TrustStore};
+pub use lookup::{
+    BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, LocalBundleTrustStore,
+    TrustStore,
+};
 pub use signer::ManifestSigner;
 pub(crate) use stream::HashingWriter;
 pub use stream::{
@@ -118,6 +121,8 @@ pub use verify_error::{BundleVerifyError, ensure_safe_path};
 pub const BUNDLE_ORIGIN_LABEL: &str = "mvm.origin";
 /// Value identifying a bundle as a host-local build.
 pub const LOCAL_BUILD_ORIGIN: &str = "local-build";
+/// User-facing description of local-build authority.
+pub const LOCAL_BUILD_NOTICE: &str = "local build, signed by this host's key; not release-verified";
 
 /// Trust class derived from both the signed manifest and consumer-owned keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3627,6 +3632,36 @@ mod tests {
             append_bytes(&mut tar, path, bytes).unwrap();
         }
         tar.into_inner().unwrap()
+    }
+
+    #[test]
+    fn manifest_scan_stops_at_the_first_complete_set_of_entries() {
+        // A later duplicate must never replace what the scan already settled on.
+        let archive = |entries: &[(&str, &[u8])]| {
+            let mut tar = tar::Builder::new(Vec::new());
+            for (path, bytes) in entries {
+                append_bytes(&mut tar, path, bytes).unwrap();
+            }
+            tar.into_inner().unwrap()
+        };
+
+        let signed = archive(&[
+            (MANIFEST_FILENAME, b"first"),
+            (SIGNATURE_FILENAME, b"sig"),
+            (MANIFEST_FILENAME, b"second"),
+        ]);
+        let (manifest, signature) = read_manifest_entries(Cursor::new(&signed)).unwrap();
+        assert_eq!(manifest, b"first");
+        assert_eq!(signature, b"sig");
+
+        let unsigned = archive(&[
+            (MANIFEST_FILENAME, b"first"),
+            (MANIFEST_FILENAME, b"second"),
+        ]);
+        assert_eq!(
+            read_manifest_entry(Cursor::new(&unsigned)).unwrap(),
+            b"first"
+        );
     }
 
     /// A sealed-prod posture that allows egress and volumes, verity-bound.

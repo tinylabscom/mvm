@@ -8,7 +8,7 @@
 use anyhow::Result;
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::BackendImageSupport;
-use mvm_core::plan::bundle::verify_bundle_file;
+use mvm_core::plan::bundle::BundleOrigin;
 use mvm_core::plan::{BundleManifest, FsTrustStore, check_embedded_image_set_for_backend};
 use std::path::PathBuf;
 
@@ -40,8 +40,12 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
         Some(path) => FsTrustStore::new(path),
         None => FsTrustStore::default_path()?,
     };
-    let verified = verify_bundle_file(&args.path, &trust)
-        .map_err(|error| anyhow::anyhow!("{}: {error}", args.path.display()))?;
+    let (verified, origin) = mvm_client::bundle_preview::verify_for_preview(&args.path, trust)?;
+    anyhow::ensure!(
+        origin != BundleOrigin::Untrusted,
+        "{}: signed origin is neither release-verified nor a local build signed by this host",
+        args.path.display()
+    );
     let host_arch = GuestArch::require_host(&verified.manifest.arch)
         .map_err(|error| anyhow::anyhow!("{}: not runnable here: {error}", args.path.display()))?;
 
@@ -76,15 +80,29 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
                 "posture": posture_preview(&verified.manifest),
                 "kernel_cmdline": verified.manifest.kernel_cmdline(),
                 "built_from": verified.manifest.build_provenance().map(|p| p.input_ref.as_str()),
-                "verified": true,
+                "origin": match origin {
+                    BundleOrigin::ReleaseVerified => "release-verified",
+                    BundleOrigin::LocalBuild => "local-build",
+                    BundleOrigin::Untrusted => "untrusted",
+                },
+                "verified": origin == BundleOrigin::ReleaseVerified,
+                "release_verified": origin == BundleOrigin::ReleaseVerified,
             }))?
         );
     } else {
         // This is the requested verification report, not opt-in UI chatter.
         // It must remain visible without --verbose and when stdout is piped.
+        if origin == BundleOrigin::LocalBuild {
+            println!("{}", mvm_core::plan::bundle::LOCAL_BUILD_NOTICE);
+        }
         println!(
-            "{}: verified, architecture compatible with {host_arch} ({} artifacts, {} embedded image set{}); launch readiness not checked{}",
+            "{}: {}architecture compatible with {host_arch} ({} artifacts, {} embedded image set{}); launch readiness not checked{}",
             args.path.display(),
+            if origin == BundleOrigin::ReleaseVerified {
+                "verified, "
+            } else {
+                ""
+            },
             verified.manifest.artifacts.len(),
             verified.embedded_image_sets.len(),
             if verified.embedded_image_sets.len() == 1 {

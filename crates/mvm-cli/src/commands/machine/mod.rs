@@ -449,9 +449,12 @@ impl MachineRunArgs {
                 "`machine run --prod` is supported only for transient runs; persistent machine state cannot preserve the production image policy"
             );
         }
-        if self.run.image.is_none() && self.run.runtime.is_none() {
+        let manifest_is_bundle = self.run.manifest.as_deref().is_some_and(|manifest| {
+            mvm_client::launch::manifest_ref::is_bundle_archive(std::path::Path::new(manifest))
+        });
+        if self.run.image.is_none() && self.run.runtime.is_none() && !manifest_is_bundle {
             bail!(
-                "`machine run --prod` is supported only with `--image` or `--runtime`; other sources cannot select or build a sealed image"
+                "`machine run --prod` is supported only with `--image`, `--runtime`, or a signed bundle artifact; other sources cannot select or build a sealed image"
             );
         }
         Ok(())

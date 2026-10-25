@@ -189,7 +189,7 @@ pub fn attach_universal_initramfs_if_cached(
         let artifact = resolve_cached_initramfs(&cache.join("initramfs"), version, arch)
             .context("source initramfs is not prepared; run `mvmctl bootstrap` first")?;
         anyhow::ensure!(
-            mvm_core::crypto::image_verify::sha256_file(&artifact.image_path)?
+            mvm_core::crypto::verified_digest::sha256_file_verified(&artifact.image_path)?
                 == checked.declaration(arch)?.initramfs_sha256,
             "prepared initramfs differs from the selected source runtime"
         );

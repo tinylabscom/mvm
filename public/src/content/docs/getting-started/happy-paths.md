@@ -155,6 +155,12 @@ and installs it into `~/.mvm/bundles/` the first time. `mvmctl bundle install`
 does the install on its own, for a host that should hold the bundle before
 anything runs it.
 
+For an archive just produced by `mvmctl build`, skip `bundle fetch` and run the
+local path directly. Its signed local-build label and this host's key are both
+required; the run reports that the archive is not release-verified, records its
+origin and digest in the signed plan, and refuses it under `--prod`. This does
+not enroll the host key, and `bundle install` still refuses local builds.
+
 `mvmctl machine check-artifact` verifies the same bundle without installing
 or booting it, and shows the posture it declares — the ceilings any launch of
 it has to stay under:

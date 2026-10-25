@@ -104,7 +104,14 @@ const BUDGETS: &[ClosureBudget] = &[
 /// node. Keeping the assembly in the host-only CLI preserves the split's
 /// reason: `tracing-subscriber` stays out of `mvm-core`, the sealed agent
 /// and the musl binaries.
-const MACOS_CLOSURE_BUDGET: usize = 373;
+///
+/// 351 (was 373): the Rekor and timestamp-authority HTTP clients are
+/// optional in the workspace's patched sigstore crates
+/// (`third_party/sigstore-patches.md`), and `mvm-core` no longer enables the
+/// `sigstore-verify` TLS feature that pulled `sigstore-tuf`. The `reqwest`,
+/// `hyper`, `tower` and TUF-fetch crates leave the closure; offline
+/// verification is unchanged. `sigstore-network` is the way back in.
+const MACOS_CLOSURE_BUDGET: usize = 351;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -291,7 +298,14 @@ const MACOS_CLOSURE_BUDGET: usize = 373;
 /// node. Keeping the assembly in the host-only CLI preserves the split's
 /// reason: `tracing-subscriber` stays out of `mvm-core`, the sealed agent
 /// and the musl binaries.
-pub(crate) const CLOSURE_BUDGET: usize = 376;
+///
+/// 354 (was 376): the Rekor and timestamp-authority HTTP clients are
+/// optional in the workspace's patched sigstore crates
+/// (`third_party/sigstore-patches.md`), and `mvm-core` no longer enables the
+/// `sigstore-verify` TLS feature that pulled `sigstore-tuf`. The `reqwest`,
+/// `hyper`, `tower` and TUF-fetch crates leave the closure; offline
+/// verification is unchanged. `sigstore-network` is the way back in.
+pub(crate) const CLOSURE_BUDGET: usize = 354;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

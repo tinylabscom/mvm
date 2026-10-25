@@ -137,6 +137,11 @@ impl LoadedBundle {
         }
     }
 
+    /// Whether acquisition read the archive directly from a local path.
+    pub fn is_local_path(&self) -> bool {
+        matches!(&self.archive, ArchiveFile::Local(_))
+    }
+
     #[cfg(test)]
     pub fn bytes(&self) -> Vec<u8> {
         std::fs::read(self.path()).expect("read loaded archive")
@@ -312,6 +317,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             prod: args.prod,
         },
     )?;
+    let manifest = inspect_bundle_manifest_file_for_refusal(loaded.path())
+        .context("inspecting bundle origin before fetch verification")?;
+    let host_key_id = HostBundleSigner::load()?.key_id();
+    anyhow::ensure!(
+        !is_registry_forbidden_local_build(&manifest, &host_key_id),
+        "refusing to fetch a local build: run its local `.mvmpkg` path directly instead"
+    );
     let trust = match args.trust_store {
         Some(p) => FsTrustStore::new(p),
         None => FsTrustStore::default_path()

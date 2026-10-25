@@ -8,6 +8,7 @@ Feature: Package an OCI image and verify the signed archive
   generated publisher key is enrolled explicitly; no ambient trust is reused.
   Archive boot is a separate workflow and is not claimed by this scenario.
 
+  @runtime_candidate
   Scenario: Build and verify an Alpine OCI package with explicit publisher trust
     Given an isolated mvm home
     And a scratch working directory

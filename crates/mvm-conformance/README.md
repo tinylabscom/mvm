@@ -26,6 +26,7 @@ scenario or reports a deliberate capability skip. Important tags include:
 | `@live` | Boots or reaches a real external/runtime resource; opt in explicitly |
 | `@ci_live` | Narrow live lifecycle the merge queue selects with `MVM_BDD_ONLY_TAG=ci_live` |
 | Firecracker capability tags | Require usable KVM and Firecracker |
+| `@runtime_candidate` | Creates portable artifacts with the exact signed candidate supplied to the release workflow |
 
 Each scenario receives isolated `MVM_HOME`, Cargo state, and process cleanup so
 parallel runs cannot reuse a developer's machines or credentials. Source

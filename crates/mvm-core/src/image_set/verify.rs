@@ -34,7 +34,7 @@ use super::{
     ReleaseProducer, check_against_lock, check_protocol_compatibility, require_complete,
     validate_structure,
 };
-use crate::crypto::image_verify::{sha256_file, verify_signed_payload_under_any_identity};
+use crate::crypto::image_verify::verify_signed_payload_under_any_identity;
 use crate::packs::{KeylessTrust, PackRevocationChecker, RevocationStatus, Sha256Hex};
 use crate::plan::bundle::{KeyId, key_id_from_identity};
 
@@ -507,7 +507,8 @@ fn artifact_digest(
     artifact: &MemberArtifact,
     path: &Path,
 ) -> Result<Sha256Hex, ImageSetError> {
-    let hex = sha256_file(path).map_err(|error| read_failure(member, artifact, path, &error))?;
+    let hex = crate::crypto::verified_digest::sha256_file_verified(path)
+        .map_err(|error| read_failure(member, artifact, path, &error))?;
     Sha256Hex::new(hex).map_err(|error| ImageSetError::ArtifactUnreadable {
         role: member.role,
         target: member.target,
