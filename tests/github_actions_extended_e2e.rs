@@ -99,11 +99,20 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "release publication gate is incomplete: {:?}",
         release_gate_problem(&workflow)
     );
+    // The documented surface gates promotion, not the signed prerelease.
+    let promote = job_block(&workflow, "promote-release");
+    assert!(
+        promote.contains("needs: [e2e-docs,")
+            && promote.contains("needs.e2e-docs.result == 'success'"),
+        "promote-release must wait for the documented surface"
+    );
+    assert!(
+        !job_block(&workflow, "release").contains("e2e-docs"),
+        "the signed prerelease must not wait for the documented surface"
+    );
 }
 
 const RELEASE_GATES: &[&str] = &[
-    "bdd",
-    "e2e-docs",
     "build",
     "archive-install-smoke",
     "guest-runtime",
