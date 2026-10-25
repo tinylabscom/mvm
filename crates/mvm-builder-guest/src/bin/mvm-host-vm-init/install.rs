@@ -50,7 +50,7 @@ use crate::install_spec::{GateLevel, InstallSpec, Language};
 
 /// Subdir under `<job_dir>` that holds the installed payload. Same
 /// name as the canonical sealed-volume layout
-/// (`mvm_compiler::deps_audit::FILE_CONTENT_DIR`) so the host
+/// (`mvm_core::deps_audit::FILE_CONTENT_DIR`) so the host
 /// can rename `<job_dir>` straight into a sealed volume without
 /// shuffling files. Mirrors that constant explicitly rather than
 /// re-exporting because `mvm-host-vm-init` doesn't depend on

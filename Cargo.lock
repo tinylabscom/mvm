@@ -3878,7 +3878,6 @@ dependencies = [
  "globset",
  "hex",
  "mvm-contract",
- "mvm-core",
  "serde",
  "serde_json",
  "sha2 0.11.0",

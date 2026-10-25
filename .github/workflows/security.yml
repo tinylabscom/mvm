@@ -662,7 +662,6 @@ jobs:
           - mvm-hostd/8of8
           - mvm-contract
           - mvm-runtime
-          - mvm-compiler
           - mvm-vmm
     steps:
       - uses: actions/checkout@v6
