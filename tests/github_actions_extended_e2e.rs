@@ -237,7 +237,7 @@ fn an_unusable_macos_host_falls_back_to_a_checked_evidence_record() {
     assert!(
         evidence.contains("inputs.macos_blocks_on_unusable_host"),
         "the evidence job must be gated on the same input the release caller \
-         sets, or Extended CI's nightly starts failing on evidence staleness"
+         sets, so callers cannot silently disagree about required macOS evidence"
     );
     assert!(
         evidence.contains("needs.e2e-docs-macos-host-check.outputs.supported != 'true'"),

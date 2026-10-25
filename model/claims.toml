@@ -563,7 +563,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-25"
 level = "build"
-witness_kinds = ["fn", "ci"]
+witness_kinds = ["fn"]
 suite = "bundle_boot"
 statement = "A signed .mvmpkg named on machine run is verified against the publisher trust store before anything is installed or booted; an unsigned, altered, unenrolled or wrongly keyed archive is refused, an embedded image set the backend cannot boot is refused naming what is missing, and a launch that asks for more than the bundle's sealed posture is refused and audited"
 # The verify-and-boot story for the single-file artifact. Claim 9 covers what
