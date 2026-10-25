@@ -57,7 +57,7 @@ pub fn build_sigv4_input(
         .find(|(k, _)| k.trim().eq_ignore_ascii_case("x-amz-date"))
         .map(|(_, v)| v.trim().to_string())
         .ok_or(SigV4BuildError::MissingAmzDate)?;
-    if amz_date.len() < 8 || !amz_date.contains('T') {
+    if !is_amz_date(&amz_date) {
         return Err(SigV4BuildError::BadAmzDate(amz_date));
     }
     let date_stamp = amz_date[..8].to_string();
@@ -89,6 +89,18 @@ pub fn build_sigv4_input(
         service: service.to_string(),
         signed_headers,
     })
+}
+
+/// Whether `value` is exactly `yyyymmddThhmmssZ` in ASCII digits. The header is
+/// guest-supplied, so the date stamp is sliced out of it only after this holds:
+/// a byte-index slice of an arbitrary string panics inside a multi-byte
+/// character.
+fn is_amz_date(value: &str) -> bool {
+    let b = value.as_bytes();
+    b.len() == 16
+        && b[8] == b'T'
+        && b[15] == b'Z'
+        && b[..8].iter().chain(&b[9..15]).all(u8::is_ascii_digit)
 }
 
 /// Canonical URI: the request path, or `/` when empty. (See the module-level
@@ -284,6 +296,41 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, SigV4BuildError::MissingAmzDate));
+    }
+
+    /// The header is guest-supplied: a value whose byte 8 falls inside a
+    /// multi-byte character used to panic the byte-index slice.
+    #[test]
+    fn a_malformed_amz_date_is_an_error_not_a_panic() {
+        for bad in [
+            "aaaaaaa\u{e9}T",
+            "2015083\u{e9}T123600Z",
+            "20150830T12360",
+            "20150830T123600",
+            "2015-08-30T12:36:00Z",
+            "20150830X123600Z",
+            "2015083aT123600Z",
+            "20150830T123600Zz",
+            "T",
+            "",
+        ] {
+            let err = build_sigv4_input(
+                "GET",
+                "https://h/p",
+                &[("x-amz-date".into(), bad.into())],
+                b"",
+                "us-east-1",
+                "service",
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    SigV4BuildError::BadAmzDate(_) | SigV4BuildError::MissingAmzDate
+                ),
+                "{bad:?} gave {err:?}"
+            );
+        }
     }
 
     #[test]
