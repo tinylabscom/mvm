@@ -22,3 +22,7 @@ Feature: Package an OCI image and verify the signed archive
     When I run mvmctl in the scratch directory with "machine check-artifact ./alpine.mvmpkg"
     Then the command exits with code 0
     And the output contains "local build, signed by this host's key; not release-verified"
+    When I run mvmctl in the scratch directory with "bundle fetch ./alpine.mvmpkg"
+    Then the command exits with code 1
+    And the error output contains "refusing to fetch a local build"
+    And the isolated mvm home has no installed bundle
