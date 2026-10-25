@@ -10,7 +10,7 @@ pub mod archive;
 mod data;
 pub mod decorator;
 pub mod deps;
-pub mod deps_audit;
+pub use mvm_core::deps_audit;
 pub mod environment;
 pub mod explain;
 pub mod flake;
