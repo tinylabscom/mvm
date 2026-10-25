@@ -52,6 +52,11 @@ on:
         required: false
         type: boolean
         default: false
+      benchmark_workers:
+        description: Compare 2 and 6 Cargo workers on Hetzner without installing tools or changing defaults
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -60,7 +65,7 @@ permissions:
 jobs:
   inventory:
     name: Read-only runner inventory
-    if: github.event_name == 'workflow_dispatch' && inputs.inventory_only
+    if: github.event_name == 'workflow_dispatch' && inputs.inventory_only && !inputs.benchmark_workers
     permissions: {}
     # Invalid selectors fail on a hosted runner, never silently skip.
     runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
@@ -116,9 +121,51 @@ jobs:
             printf '```\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+  benchmark:
+    name: Compare Cargo build workers
+    if: github.event_name == 'workflow_dispatch' && inputs.benchmark_workers
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    steps:
+      - name: Validate benchmark request
+        env:
+          RUNNER_KIND: ${{ inputs.runner_kind }}
+          INVENTORY_ONLY: ${{ inputs.inventory_only }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_KIND" == hetzner && "$INVENTORY_ONLY" != true ]] || {
+            echo "::error::benchmark_workers requires Hetzner and cannot be combined with inventory_only"
+            exit 1
+          }
+          [[ "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::benchmark requires an exact commit SHA"
+            exit 1
+          }
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+          clean: false
+          persist-credentials: false
+      - name: Measure isolated builds and tests
+        env:
+          BENCHMARK_COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: bash scripts/benchmark-cargo-workers.sh
+      - name: Clean benchmark state
+        if: always()
+        run: |
+          # Do not sweep the retained workspace cache: this job owns only its
+          # private benchmark tree, including any test child processes.
+          if [ -f nix/ops/hetzner/job-cleanup.sh ]; then
+            GITHUB_WORKSPACE="" bash nix/ops/hetzner/job-cleanup.sh \
+              "${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-1"
+          fi
+
   test:
     name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }})
-    if: github.event_name != 'workflow_dispatch' || !inputs.inventory_only
+    if: github.event_name != 'workflow_dispatch' || (!inputs.inventory_only && !inputs.benchmark_workers)
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
     # Archive workers on one persistent host share the build-time source path.

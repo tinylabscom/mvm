@@ -658,9 +658,52 @@ fn inventory_is_opt_in_and_leaves_reusable_and_default_dispatch_tests_unchanged(
     assert_read_only_inventory(inventory);
     let test = &found.iter().find(|(name, _)| name == "test").unwrap().1;
     assert!(
-        test.contains("if: github.event_name != 'workflow_dispatch' || !inputs.inventory_only")
+        test.contains("if: github.event_name != 'workflow_dispatch' || (!inputs.inventory_only && !inputs.benchmark_workers)")
     );
     assert_eq!(missing_cleanup(test), None);
+}
+
+#[test]
+fn worker_benchmark_is_explicit_bounded_and_preserves_shared_build_state() {
+    let text = fs::read_to_string(".github/workflows/workspace-shard.yml").unwrap();
+    let (call, dispatch) = text.split_once("  workflow_dispatch:").unwrap();
+    assert!(!call.contains("benchmark_workers"));
+    assert!(dispatch.contains("      benchmark_workers:\n"));
+    let found = jobs(&text);
+    let benchmark = &found
+        .iter()
+        .find(|(name, _)| name == "benchmark")
+        .unwrap()
+        .1;
+    for required in [
+        "if: github.event_name == 'workflow_dispatch' && inputs.benchmark_workers",
+        "timeout-minutes: 60",
+        "\"$RUNNER_KIND\" == hetzner && \"$INVENTORY_ONLY\" != true",
+        "\"$COMMIT_SHA\" =~ ^[0-9a-f]{40}$",
+        "clean: false",
+        "persist-credentials: false",
+        "BENCHMARK_COMMIT_SHA: ${{ inputs.commit_sha }}",
+        "bash scripts/benchmark-cargo-workers.sh",
+        "GITHUB_WORKSPACE=\"\" bash nix/ops/hetzner/job-cleanup.sh",
+    ] {
+        assert!(
+            benchmark.contains(required),
+            "missing benchmark guard: {required}"
+        );
+    }
+    assert_eq!(
+        benchmark.matches("uses:").count(),
+        1,
+        "only checkout is needed"
+    );
+    assert!(!benchmark.contains("secrets."));
+    assert_eq!(missing_cleanup(benchmark), None);
+    let inventory = &found
+        .iter()
+        .find(|(name, _)| name == "inventory")
+        .unwrap()
+        .1;
+    assert!(inventory.contains("&& !inputs.benchmark_workers"));
 }
 
 #[test]
