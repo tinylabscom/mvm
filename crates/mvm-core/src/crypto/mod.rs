@@ -3,6 +3,7 @@ pub mod attestation;
 pub mod checkpoint_object;
 pub mod command_gate;
 pub mod constant_time;
+pub mod digest_cache;
 pub mod ed25519_keypair;
 // Per-VM name-constrained egress CA for transparent https substitution.
 // Gated so the runtime-free default build skips `rcgen`.
