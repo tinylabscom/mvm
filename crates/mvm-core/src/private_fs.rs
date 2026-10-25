@@ -169,6 +169,49 @@ pub fn ensure_private_dir(dir: impl AsRef<Path>) -> io::Result<()> {
     Err(unsupported_platform_error(dir.as_ref()))
 }
 
+/// Create `dir` as a private directory the current user owns, or refuse.
+///
+/// [`ensure_private_dir`] accepts whatever is already at the path. That is
+/// right under the mvm home, where every ancestor is the user's own, and wrong
+/// in a shared parent such as `/tmp`: another account that created the name
+/// first would own the directory this process then binds sockets in or hands
+/// to a privileged helper. This creates a single missing component at
+/// [`PRIVATE_DIR_MODE`] and, whether it created it or found it, requires a real
+/// directory (not a symlink) owned by the current effective user. One the user
+/// owns but left wider than [`PRIVATE_DIR_MODE`] is tightened.
+#[cfg(unix)]
+pub fn create_owned_private_dir(dir: impl AsRef<Path>) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let dir = dir.as_ref();
+    match std::fs::DirBuilder::new()
+        .mode(PRIVATE_DIR_MODE)
+        .create(dir)
+    {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is not a plain directory", dir.display()),
+        ));
+    }
+    require_current_owner(&meta)
+        .map_err(|e| io::Error::new(e.kind(), format!("refusing {}: {e}", dir.display())))?;
+    if mode_bits(dir, &meta)? != PRIVATE_DIR_MODE {
+        set_mode(dir, PRIVATE_DIR_MODE)?;
+    }
+    Ok(())
+}
+
+/// Refuse directory creation on hosts without Unix permission bits.
+#[cfg(not(unix))]
+pub fn create_owned_private_dir(dir: impl AsRef<Path>) -> io::Result<()> {
+    Err(unsupported_platform_error(dir.as_ref()))
+}
+
 /// Sync a known managed directory and its finite namespace ancestry.
 ///
 /// The configured root is trusted; descendants must be at most eight normal
@@ -420,6 +463,63 @@ mod tests {
         assert!(ensure_private_dir(file.join("leaf")).is_err());
         assert_eq!(mode(&file), 0o644);
         assert_eq!(std::fs::read(file).unwrap(), b"synthetic");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod owned_dir_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn a_missing_directory_is_created_private() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("socks");
+        create_owned_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, PRIVATE_DIR_MODE);
+    }
+
+    #[test]
+    fn an_existing_directory_we_own_is_tightened() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("socks");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap();
+        create_owned_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, PRIVATE_DIR_MODE);
+    }
+
+    #[test]
+    fn a_symlink_planted_at_the_path_is_refused_not_followed() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let link = root.path().join("socks");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        let err = create_owned_private_dir(&link).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        // The target was neither chmodded nor adopted.
+        let mode = std::fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777;
+        assert_ne!(mode, 0);
+    }
+
+    #[test]
+    fn a_regular_file_at_the_path_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("socks");
+        std::fs::write(&path, b"x").unwrap();
+        let err = create_owned_private_dir(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_missing_parent_is_an_error_not_created() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("no/such/parent");
+        assert!(create_owned_private_dir(&dir).is_err());
+        assert!(!root.path().join("no").exists());
     }
 }
 

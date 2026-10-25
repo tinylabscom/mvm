@@ -90,8 +90,21 @@ pub(crate) fn spawn_scope_prefix(
 /// launch can fail if the service manager never creates the scope.
 const SCOPE_LAUNCHER_PID_FILE: &str = "scope-launcher.pid";
 
+/// Make the VM's socket directory ours before a root Firecracker binds in it.
+///
+/// A deep state directory moves the sockets to a short `/tmp` name another
+/// local user can compute. The launch script `rm`s a socket there and later
+/// `chown`s the one Firecracker binds, so a directory someone else created
+/// would let them redirect that `chown`; refuse a directory the invoking user
+/// does not own.
+fn secure_socket_dir(abs_dir: &str) -> Result<()> {
+    mvm_core::config::secure_fallback_socket_dir_at(std::path::Path::new(abs_dir))
+        .context("securing the Firecracker socket directory")
+}
+
 fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
     ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
     ui::info("Starting Firecracker...");
     // A process started here serves the socket its own command line names, so
     // any record that this dir's VMM came from the idle pool is now stale.
@@ -112,6 +125,7 @@ fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> R
 /// inside the scope `scope` names, without the progress lines a launch prints.
 pub(crate) fn start_idle_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
     ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
     let identity = std::path::Path::new(abs_dir).join(super::idle_pool::FC_IDENTITY_FILE);
     let output = mvm_vmm::host::shell::run_in_vm(&idle_firecracker_launch_script(
         abs_dir,
@@ -401,7 +415,7 @@ fn wait_for_api_socket(socket: &std::path::Path, timeout: std::time::Duration) -
 /// at the path is not the API socket appearing.
 fn is_unix_socket(path: &std::path::Path) -> bool {
     use std::os::unix::fs::FileTypeExt as _;
-    std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket())
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket())
 }
 
 /// Send an API PUT to a specific Firecracker socket.
@@ -460,7 +474,7 @@ fn secure_socket_for_caller_as(socket: &str, euid: u32) -> Result<()> {
 
     let quoted = shell_quote(socket);
     run_in_vm_visible(&format!(
-        "set -eu\nsudo chown -- \"$(id -u):$(id -g)\" {quoted}\nchmod 0600 {quoted}"
+        "set -eu\nsudo chown -h -- \"$(id -u):$(id -g)\" {quoted}\nchmod 0600 {quoted}"
     ))
 }
 
@@ -788,7 +802,7 @@ mod tests {
 
         let scripts = scripts.lock().unwrap();
         assert_eq!(scripts.len(), 1);
-        assert!(scripts[0].contains("sudo chown -- \"$(id -u):$(id -g)\""));
+        assert!(scripts[0].contains("sudo chown -h -- \"$(id -u):$(id -g)\""));
         assert!(scripts[0].contains("chmod 0600"));
         assert!(scripts[0].contains("'/tmp/vm with quote'\\''/runtime/v.sock'"));
         assert!(!scripts[0].contains("chmod 0666"));
