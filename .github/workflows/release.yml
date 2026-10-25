@@ -52,9 +52,9 @@ jobs:
       runtime_checksum_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_sha256 }}
       runtime_archive_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_bundle_sha256 }}
       runtime_checksum_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_bundle_sha256 }}
-      # Stated rather than inherited. A tag must not be cut without live macOS
-      # evidence, so a macOS host that cannot boot a guest fails this workflow
-      # here even though Extended CI tolerates it nightly.
+      # Stated rather than inherited: a macOS host that cannot boot a guest
+      # fails this workflow, so promotion never goes ahead without live macOS
+      # evidence.
       macos_blocks_on_unusable_host: true
       # A release tests what its users get, and nothing is pair-built through
       # mvm-images: the Linux layer (kernels, base and dev root filesystems,
