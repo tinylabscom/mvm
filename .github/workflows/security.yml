@@ -618,17 +618,32 @@ jobs:
           - mvm-backends
           - mvm-build
           - mvm-builder-guest
-          # Four mutant slices, not file shards. File packing cannot split a
+          # Ten mutant slices, not file shards. File packing cannot split a
           # file, and two of this package's files (update.rs, 99 mutants;
           # parse.rs, 71) each outlast the 315-minute step on their own,
-          # because every mutant re-runs the crate suite (about eight minutes
-          # of baseline plus a rebuild). Each slice below runs every surface
-          # file, taking a round-robin quarter of its mutants, so no file is
-          # withheld and none is run twice.
-          - mvm-cli/m1of4
-          - mvm-cli/m2of4
-          - mvm-cli/m3of4
-          - mvm-cli/m4of4
+          # because every mutant re-runs the crate suite plus a rebuild. Each
+          # slice below runs every surface file, taking a round-robin tenth
+          # of its mutants, so no file is withheld and none is run twice.
+          #
+          # Ten because the cost of one mutant is the runner's, not the
+          # slice's. Run 40062457942 and run 40109099571 gave the same slice
+          # the same mutant counts (18, 18, 1, 25), yet the unmutated
+          # baseline took 160s build + 200s test on one runner and 245s +
+          # 450-500s on another, and a mutant 2.2x longer with it. Four
+          # slices of about 62 mutants took 2h41m on a fast runner and
+          # passed 315 minutes on a slow one. At ten, about 25 mutants plus
+          # four baselines is roughly 215 minutes at the slow rate, which
+          # leaves a quarter of the step budget spare.
+          - mvm-cli/m1of10
+          - mvm-cli/m2of10
+          - mvm-cli/m3of10
+          - mvm-cli/m4of10
+          - mvm-cli/m5of10
+          - mvm-cli/m6of10
+          - mvm-cli/m7of10
+          - mvm-cli/m8of10
+          - mvm-cli/m9of10
+          - mvm-cli/m10of10
           - mvm-client
           - mvm-core
           - mvm-fs
