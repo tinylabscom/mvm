@@ -139,8 +139,7 @@ jobs:
       # this deployment is cross-origin isolated — and therefore that the
       # WebLinux demo has a SharedArrayBuffer — is the wire. Checked against
       # the deployment URL rather than the production domain: this step can
-      # only speak for what it just published. Whether users reach it is a DNS
-      # question, which "Site isolation watch" answers on its own schedule.
+      # only speak for what it just published.
       - name: Verify the deployment is cross-origin isolated
         env:
           DEPLOYMENT_URL: ${{ steps.deployment.outputs.deployment-url }}
