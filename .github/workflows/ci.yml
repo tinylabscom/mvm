@@ -6,16 +6,19 @@ on:
   # every workspace test target, and the sharded x86_64 workspace suite. Those
   # are the deterministic failures a PR has to expose before it is admitted,
   # because a batched merge group inherits every failure of the entries ahead
-  # of it. The merge queue then runs the full matrix — every fast-gate lane
-  # plus the slow ones (feature test suites, BDD, aarch64, release-profile and
-  # musl witnesses, eBPF, Linux coverage, Nix evaluation and the boot ceiling)
-  # — against the integrated commit, which is the only commit that merges.
+  # of it. The merge queue runs the same fast gate against the integrated
+  # commit, which is the only commit that merges. The slow lanes (feature test
+  # suites, BDD, aarch64, release-profile and musl witnesses, eBPF, Linux
+  # coverage, Nix evaluation and the boot ceiling) run after the merge, on
+  # every push to main, and a red result there is fixed forward.
   # Platform, live-VM, OCI ratification, security, and release artifact jobs
   # live in release/manual workflows. The Windows lane cross-compiles portable
   # crates; it does not run a Windows host.
   pull_request:
   merge_group:
     types: [checks_requested]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 # A pull request's ref is stable across pushes, so a new commit cancels the
@@ -57,8 +60,8 @@ jobs:
 
       # The queue is either a singleton or the one batched shape that
       # scripts/check-merge-queue-policy.sh names. Batching is safe only
-      # because every group runs the full matrix and the fast gate already
-      # caught the deterministic failures on each pull request.
+      # because the fast gate already caught the deterministic failures on
+      # each pull request and the queue re-runs that gate on the group.
       - name: Enforce merge queue policy
         env:
           GH_TOKEN: ${{ github.token }}
@@ -97,9 +100,9 @@ jobs:
             done
           }
 
-          if [ "$EVENT" = "workflow_dispatch" ]; then
+          if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "push" ]; then
             set_all
-            echo "manual dispatch — running every lane"
+            echo "$EVENT — running every lane"
             exit 0
           fi
 
@@ -403,12 +406,12 @@ jobs:
 
   # The fast-gate half of feature coverage. A feature-gated compile break is
   # the commonest deterministic failure, and the feature *test* lanes below
-  # are merge-queue only, so this lane makes every pull request type-check
+  # run after the merge, so this lane makes every pull request type-check
   # and lint the non-default feature combinations. It unifies them into three
   # resolutions instead of one per lane step: everything turned on at once,
   # the build with the release verifier absent, and mvm-sdk with no defaults.
   # Unification can hide an item gated for one feature and used under another;
-  # the per-feature test lanes still catch that in the queue.
+  # the per-feature test lanes still catch that on main.
   lint-feature-clippy:
     name: Lint feature combinations (clippy)
     needs: [scope]
@@ -749,7 +752,7 @@ jobs:
   lint-features:
     name: Lint feature coverage (${{ matrix.suite }})
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -876,7 +879,7 @@ jobs:
   lint-features-test-support:
     name: Lint feature coverage (test-support)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -972,7 +975,7 @@ jobs:
   lint-features-embed:
     name: Lint feature coverage (embed-host-bins)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -1113,13 +1116,13 @@ jobs:
   # is false nothing that compiles changed, so only those `@docs` features run;
   # every other scenario would re-prove behaviour the change cannot affect.
   #
-  # Merge queue only: at 20-30 minutes including the live PS-11 witness it is
+  # Post-merge only: at 20-30 minutes including the live PS-11 witness it is
   # the slowest Linux lane, and a scenario failure is an integration result
-  # the queue reports against the exact commit that would merge.
+  # main reports against the commit that merged.
   bdd-conformance:
     name: BDD conformance
     needs: [scope]
-    if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request'
+    if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     uses: ./.github/workflows/bdd.yml
     with:
       docs_only: ${{ needs.scope.outputs.code != 'true' }}
@@ -1144,9 +1147,9 @@ jobs:
           fi
 
       # Each lane belongs to one tier. Fast-gate lanes must match the scope on
-      # every event; full-matrix lanes must skip on a pull request and match
-      # the scope in the merge queue and on a manual dispatch. A lane that ran
-      # where it should have skipped is refused as firmly as one that skipped
+      # every event; full-matrix lanes must skip on a pull request and in the
+      # merge queue and match the scope on a push to main and a manual
+      # dispatch. A lane that ran where it should have skipped is refused as firmly as one that skipped
       # where it should have run: either means its `if:` drifted.
       - name: Require every validation lane to pass
         env:
@@ -1183,8 +1186,8 @@ jobs:
             exit 1
           fi
           case "$EVENT_NAME" in
-            pull_request) full_matrix=false ;;
-            merge_group|workflow_dispatch) full_matrix=true ;;
+            pull_request|merge_group) full_matrix=false ;;
+            push|workflow_dispatch) full_matrix=true ;;
             *) echo "Invalid event: $EVENT_NAME"; exit 1 ;;
           esac
           for scope in "code=$SCOPE_CODE" "docs=$SCOPE_DOCS" "nix=$SCOPE_NIX"; do
@@ -1241,7 +1244,7 @@ jobs:
           check "Build workspace tests" "$WORKSPACE_BUILD_RESULT" "$archive_required"
           check "Test workspace" "$WORKSPACE_RESULT" "$gate_required"
 
-          # Full matrix: merge queue and manual dispatch only.
+          # Full matrix: push to main and manual dispatch only.
           check "Lint feature coverage" "$FEATURES_RESULT" "$full_required"
           check "Lint feature coverage (test-support)" "$FEATURES_SUPPORT_RESULT" "$full_required"
           check "Lint feature coverage (embed-host-bins)" "$FEATURES_EMBED_RESULT" "$full_required"
@@ -1349,7 +1352,7 @@ jobs:
   test-workspace-extras:
     name: Test workspace (doctests + feature suites)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1411,7 +1414,7 @@ jobs:
   test-workspace-aarch64:
     name: Test workspace (aarch64)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 75
     steps:
@@ -1510,7 +1513,7 @@ jobs:
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1557,7 +1560,7 @@ jobs:
   test-musl-confinement:
     name: Confinement under the release libc (${{ matrix.target }})
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     # The Linux release ships static musl binaries; every other lane here builds
     # against the runner's glibc. The two libcs reach the kernel through
     # different syscalls for the same call — on x86_64 musl's open() issues the
@@ -1611,7 +1614,7 @@ jobs:
   test-linux:
     name: Test Linux and conformance
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1646,7 +1649,7 @@ jobs:
         run: bash scripts/ci-linux-coverage.sh
 
       - name: Require exact producer kernel Linux regressions
-        if: github.event_name == 'merge_group'
+        if: github.event_name == 'push'
         timeout-minutes: 30
         env:
           CARGO_BUILD_JOBS: "2"
@@ -1714,7 +1717,7 @@ jobs:
   test-ebpf-telemetry:
     name: Test eBPF telemetry load/attach
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -1796,7 +1799,7 @@ jobs:
     needs: [scope]
     if: >-
       needs.scope.outputs.code == 'true'
-      && github.event_name != 'pull_request'
+      && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -2193,7 +2196,7 @@ jobs:
     # flake, so prove its evaluation and lean-rootfs contracts in the merge
     # queue. Canonical image builds and reproducibility belong to mvm-images.
     needs: [scope]
-    if: needs.scope.outputs.nix == 'true' && github.event_name != 'pull_request'
+    if: needs.scope.outputs.nix == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     steps:
