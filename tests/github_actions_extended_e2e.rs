@@ -385,8 +385,8 @@ fn linux_documented_surface_requires_both_complete_inventory_shards() {
     assert!(
         linux.contains("shard: [\"0/2\", \"1/2\"]")
             && linux.contains("MVM_BDD_SHARD: ${{ matrix.shard }}")
-            && linux.contains("fail-fast: false"),
-        "both disjoint shards must be required CI jobs, even when one fails"
+            && linux.contains("fail-fast: true"),
+        "both disjoint shards remain required, and a failed shard cancels its sibling"
     );
     assert!(
         !script.contains("export MVM_BDD_ONLY_TAG="),
@@ -2063,11 +2063,27 @@ fn every_extended_ci_matrix_runs_one_leg_at_a_time() {
     assert!(matrices > 0, "the live BDD matrix must still be found");
 }
 
+#[test]
+fn long_live_matrices_cancel_siblings_after_a_failure() {
+    let extended = extended_ci();
+    for job in ["e2e-docs-linux", "e2e-docs-macos"] {
+        assert!(
+            job_block(&extended, job).contains("fail-fast: true"),
+            "{job} must cancel its other shard after a failure"
+        );
+    }
+
+    let full = ci_full();
+    assert!(
+        job_block(&full, "bdd-live-readme").contains("fail-fast: true"),
+        "the BDD live matrix must cancel queued witnesses after a failure"
+    );
+}
+
 /// Extended CI runs as a few serial tracks so it holds about five hosted
-/// runners rather than twenty-odd. Each chained job runs under `!cancelled()`,
-/// so a red lane does not skip the lanes queued behind it; only the no-KVM
-/// pipeline, whose stages consume each other's artifacts, keeps the implicit
-/// all-succeeded rule.
+/// runners rather than twenty-odd. A failed dependency must not start more
+/// work that cannot produce a valid witness; independent track heads still
+/// run to retain useful diagnostics.
 #[test]
 fn extended_ci_holds_one_hosted_runner_per_track() {
     let workflow = ci_full();
@@ -2089,15 +2105,14 @@ fn extended_ci_holds_one_hosted_runner_per_track() {
         "only the five track heads may start with the run"
     );
 
-    let artifact_chain = ["no-kvm-bootstrap", "no-kvm-build", "no-kvm-smoke"];
     for job in &jobs {
         let block = job_block(&workflow, job);
-        if heads.contains(job) || artifact_chain.contains(job) {
+        if heads.contains(job) {
             continue;
         }
         assert!(
-            block.contains("    if: ${{ !cancelled() }}\n"),
-            "{job} must run whatever its predecessor concluded, unless the run is cancelled"
+            !block.contains("    if: ${{ !cancelled() }}\n"),
+            "{job} must retain the default success gate so failed dependencies skip it"
         );
     }
 

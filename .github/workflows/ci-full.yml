@@ -89,17 +89,15 @@ env:
 # here: it holds up to ten runners for about ten minutes, with nothing else
 # from this workflow beside it.
 #
-# A chained job runs under `!cancelled()`, which is false only when the run
-# itself is cancelled, so it runs whatever its predecessor concluded; ordering
-# decides when a lane starts, never whether it does. Cancelling the run still
-# stops every track, which `always()` would not.
+# Dependent jobs use GitHub's default `success()` condition: a failed
+# prerequisite skips work that cannot produce a valid witness. Independent
+# tracks still run in parallel so one failure does not hide unrelated results.
 jobs:
 
 
   e2e:
     name: E2E Tests
     needs: libkrun-macos
-    if: ${{ !cancelled() }}
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     steps:
@@ -135,7 +133,6 @@ jobs:
         # a real image and /dev/kvm. Said plainly because the bare target name
         # reads like latency coverage and is not.
         run: cargo test --test smoke_run_json_receipt --test runtime_boot_bench
-
   # The one end-to-end warm claim, on a real Firecracker guest. Warm claims
   # broke silently twice — a reused vsock port reset the claimed child's
   # connection, and a claimed child's run was left out of the audit chain — and
@@ -227,7 +224,6 @@ jobs:
     # Last in its track: ci_live is the lane most likely to run to its
     # timeout, and nothing should wait behind that.
     needs: bdd-live-warm-claim
-    if: ${{ !cancelled() }}
     # A focused operator dispatch uses the dedicated Hetzner KVM runner. The
     # nightly/full matrix stays on GitHub-hosted runners so it cannot monopolize
     # the one self-hosted certification machine.
@@ -236,7 +232,7 @@ jobs:
     permissions:
       contents: read
     strategy:
-      fail-fast: false
+      fail-fast: true
       # One witness at a time keeps this track to one hosted runner; see the
       # runner budget above.
       max-parallel: 1
@@ -540,7 +536,6 @@ jobs:
       - no-kvm-smoke
       - bdd-live-readme
       - distro-packages-dry-run
-    if: ${{ !cancelled() }}
     permissions:
       contents: read
       id-token: write
@@ -556,7 +551,6 @@ jobs:
   crates-publish-dry-run:
     name: crates.io publish dry-run
     needs: workload-spawn-smoke-linux
-    if: ${{ !cancelled() }}
     permissions:
       contents: read
     uses: ./.github/workflows/publish-crates.yml
@@ -567,7 +561,6 @@ jobs:
   distro-packages-dry-run:
     name: Linux distro packages dry-run
     needs: crates-publish-dry-run
-    if: ${{ !cancelled() }}
     permissions:
       contents: read
     uses: ./.github/workflows/distro-packages.yml
@@ -634,7 +627,6 @@ jobs:
   libkrun-macos:
     name: libkrun (macOS Apple Silicon)
     needs: apple
-    if: ${{ !cancelled() }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -714,7 +706,6 @@ jobs:
   workload-spawn-smoke-linux:
     name: Workload spawn smoke (Plan 107 A2.4)
     needs: e2e
-    if: ${{ !cancelled() }}
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     steps:
