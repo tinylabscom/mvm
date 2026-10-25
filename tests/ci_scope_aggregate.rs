@@ -609,7 +609,7 @@ fn aggregate_does_not_depend_on_the_no_kvm_smoke() {
         .expect("Test aggregate job must remain delimited by test-workspace");
     assert!(
         !test_job.contains("no-kvm-smoke"),
-        "the Test aggregate must not depend on the no-KVM smoke; it lives in ci-full.yml"
+        "the Test aggregate must not depend on the no-KVM smoke"
     );
     assert!(
         !test_job.contains("NO_KVM_RESULT"),

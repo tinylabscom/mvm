@@ -586,10 +586,6 @@ mod tests {
         workflow("ci.yml")
     }
 
-    fn ci_full_workflow() -> String {
-        workflow("ci-full.yml")
-    }
-
     fn workflow(name: &str) -> String {
         std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -644,23 +640,6 @@ mod tests {
         "test-ebpf-telemetry",
         "boot-latency",
     ];
-
-    #[test]
-    fn elevated_warm_claim_does_not_inherit_another_users_session_bus() {
-        let workflow = ci_full_workflow();
-        let warm_claim = job_block(&workflow, "bdd-live-warm-claim");
-        let sudo = warm_claim
-            .find("sudo --preserve-env=")
-            .expect("warm claim must cross the privilege boundary");
-        let recipe = warm_claim
-            .find("bdd::live-warm-claim")
-            .expect("warm claim recipe must run");
-        let invocation = &warm_claim[sudo..recipe];
-        assert!(
-            invocation.contains("env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS"),
-            "root must not inherit the runner user's systemd/DBus session"
-        );
-    }
 
     #[test]
     fn working_directories_are_unquoted() {
@@ -1460,201 +1439,6 @@ mod tests {
     }
 
     #[test]
-    fn no_kvm_pipeline_prepares_a_bounded_bundle_then_boots_with_tcg() {
-        let workflow = ci_full_workflow();
-        let prepare = job_block(&workflow, "no-kvm-prepare");
-        let bootstrap = job_block(&workflow, "no-kvm-bootstrap");
-        let build = job_block(&workflow, "no-kvm-build");
-        let smoke = job_block(&workflow, "no-kvm-smoke");
-        let grant = concat!(
-            "      - name: Grant QEMU access to vhost-vsock\n",
-            "        run: |\n",
-            "          test -c /dev/vhost-vsock\n",
-            "          sudo chown \"$USER\" /dev/vhost-vsock\n",
-            "          sudo chmod 0600 /dev/vhost-vsock",
-        );
-        for (job, action) in [
-            (bootstrap, "Bootstrap source-matched launch artifacts"),
-            (smoke, "Install and boot the sealed bundle under QEMU TCG"),
-        ] {
-            assert!(
-                job.contains(grant),
-                "each hosted QEMU runner must grant its current user access to vhost-vsock"
-            );
-            assert!(
-                job.find(grant) < job.find(action),
-                "vhost-vsock access must be granted before QEMU starts"
-            );
-        }
-        let deny_kvm = "Deny KVM to force QEMU TCG";
-        assert!(
-            !build.contains("/dev/vhost-vsock")
-                && !build.contains("/dev/kvm")
-                && !build.contains("machine build --flake examples/exit_code"),
-            "bounded bundle preparation must not boot a builder VM"
-        );
-        assert!(
-            build.contains(r#"image_tag="$(./scripts/locked-image-tag.sh)""#)
-                && build.contains(r#"image boot update --tag "$image_tag" --force"#)
-                && bootstrap.contains("Download published builder VM")
-                && bootstrap.contains("--builder qemu __builder-vm-bootstrap -v")
-                && bootstrap.contains("MVM_KERNEL_SOURCE: auto")
-                && bootstrap.contains("--builder qemu bootstrap --production -v")
-                && bootstrap.contains("sudo chmod 0666 /dev/kvm")
-                && bootstrap.contains("sudo chmod a+r")
-                && bootstrap.contains("/boot/vmlinuz-$(uname -r)")
-                && bootstrap.contains("/boot/initrd.img-$(uname -r)")
-                && bootstrap.contains("kernel build --which workload --source compile -v")
-                && build.contains(".mvm-ci/cache/kernels/x86_64/workload/bzImage")
-                && build.contains("bzImage.sha256")
-                && build.contains("write /tmp/exit-code-entrypoint /etc/mvm/entrypoint")
-                && build.contains("veritysetup format")
-                && build.contains("dev export-template \"$slot_hash\""),
-            "bundle preparation must combine verified release rootfs bytes with source-matched launch artifacts and exporter"
-        );
-        // `/etc/mvm/entrypoint` is a marker, not a command line. The agent
-        // takes the marker file itself as the program only when it starts
-        // with `#!` and is mode 0555 root:root, and `debugfs write` creates
-        // 0644. The fixture originally wrote a command line at 0644, which
-        // satisfies neither, so the guest refused the entrypoint at boot and
-        // the lane exited 1 where it asserts 7 — every night, undetected,
-        // because the only thing checking was a guest three jobs downstream.
-        // This lane runs nightly; this assertion runs on every pull request.
-        // The mode itself is held to the agent's policy by
-        // `no_kvm_fixture_stamps_the_entrypoint_mode_the_guest_agent_requires`,
-        // which reads it from `EntrypointPolicy` rather than restating it: this
-        // assertion once pinned 0755 after the agent moved to 0555.
-        assert!(
-            build.contains("'#!/bin/sh'") && build.contains("sif /etc/mvm/entrypoint mode 0100555"),
-            "the exit-code fixture must bake a shebang marker at mode 0555 — \
-             the only shape the guest agent's sealed-marker policy accepts"
-        );
-        // The guest agent builds the dm-verity table at the data device's ext4
-        // block size, read from its superblock; it has no other source for it.
-        // The published default rootfs is a 1 KiB-block filesystem, so a hash
-        // tree formatted at a literal 4096 covers a quarter of the blocks the
-        // guest hashes, and activation refuses it as "hash device too small".
-        // The fixture has to format at the block size of the rootfs it edits.
-        assert!(
-            build.contains(r#"dumpe2fs -h "$revision_dir/rootfs.ext4""#)
-                && build.contains(r#"--data-block-size="$data_block_size""#)
-                && !build.contains("--data-block-size=4096"),
-            "the exit-code fixture must format verity at the rootfs's own ext4 \
-             block size, the size the guest agent pairs the hash device with"
-        );
-        // The published builder boots first; source compilation only starts
-        // after the mvm-images checkout and host boot inputs are in place.
-        let published_builder = bootstrap
-            .find("Download published builder VM")
-            .expect("the published builder must bootstrap first");
-        let source_bootstrap = bootstrap
-            .find("Bootstrap source-matched launch artifacts")
-            .expect("the source-matched bootstrap must run");
-        let images_checkout = bootstrap
-            .find("Check out mvm-images for the source workload kernel")
-            .expect("source compilation needs the mvm-images kernel recipe");
-        let source_kernel_build = bootstrap
-            .find("kernel build --which workload --source compile -v")
-            .expect("the source QEMU kernel must be built");
-        let restore_kvm = bootstrap
-            .find("sudo chmod 0666 /dev/kvm")
-            .expect("source artifact compilation must restore KVM acceleration");
-        let grant_boot_read = bootstrap
-            .find("sudo chmod a+r")
-            .expect("source artifact compilation must make the host boot inputs readable");
-        assert!(
-            published_builder < source_bootstrap
-                && source_bootstrap < images_checkout
-                && images_checkout < restore_kvm
-                && restore_kvm < grant_boot_read
-                && grant_boot_read < source_kernel_build,
-            "published bootstrap, the mvm-images checkout, KVM acceleration, and readable boot inputs must precede source kernel compilation"
-        );
-        let deny_kvm_position = smoke
-            .find(deny_kvm)
-            .expect("the hosted boot witness must deny KVM");
-        let bundle_boot_position = smoke
-            .find("Install and boot the sealed bundle under QEMU TCG")
-            .expect("the no-KVM job must install and boot the sealed bundle");
-        assert!(
-            deny_kvm_position < bundle_boot_position,
-            "KVM must be denied before the installed bundle boots"
-        );
-        let source_build = prepare
-            .find("Build source mvmctl and published-builder bootstrap helper")
-            .expect("the hosted no-KVM gate must build source-matched mvmctl");
-        let source_copy = prepare
-            .find("cp target/release/mvmctl /tmp/mvmctl-source-under-test")
-            .expect("the source-matched mvmctl must be preserved before helper compilation");
-        let workload = smoke
-            .find("/tmp/mvmctl-source-under-test machine run")
-            .expect("the live workload must run through the source-matched mvmctl");
-        assert!(prepare.contains("MVM_EMBED_NO_CACHE: 1"));
-        assert!(prepare.contains("timeout-minutes: 45"));
-        assert!(
-            prepare.contains("cargo build --release -p mvmctl --features user,embed-host-bins")
-        );
-        assert!(prepare.contains("cargo build --release -p mvm-hostd --bin mvm-network-endpoint"));
-        assert!(
-            prepare
-                .contains("cp target/release/mvm-network-endpoint ci-artifacts/no-kvm-binaries/")
-        );
-        assert!(prepare.contains(
-            "cargo build --release -p mvmctl --features \
-             user,release-artifact-bootstrap,release-channel"
-        ));
-        for live_job in [bootstrap, smoke] {
-            assert!(live_job.contains(
-                "install -m 0755 /tmp/no-kvm-binaries/mvm-network-endpoint \
-                 /tmp/mvm-network-endpoint"
-            ));
-        }
-        assert!(source_build < source_copy);
-        assert!(bootstrap.contains("needs: no-kvm-prepare"));
-        assert!(bootstrap.contains("timeout-minutes: 180"));
-        assert!(bootstrap.contains("MVM_BUILDER_VM_TIMEOUT_SECS: 7200"));
-        assert!(build.contains("needs: no-kvm-bootstrap"));
-        assert!(smoke.contains("needs: no-kvm-build"));
-        assert!(workload > smoke.find(grant).expect("smoke must grant vhost-vsock"));
-    }
-
-    #[test]
-    fn no_kvm_smoke_restores_the_source_guest_runtime_before_booting() {
-        let workflow = ci_full_workflow();
-        let bootstrap = job_block(&workflow, "no-kvm-bootstrap");
-        let smoke = job_block(&workflow, "no-kvm-smoke");
-        let pack = "tar -C \"$MVM_HOME/cache\" -cf /tmp/no-kvm-guest-runtime.tar guest-runtime";
-        let unpack = "tar -C \"$MVM_HOME/cache\" -xf /tmp/no-kvm-guest-runtime.tar";
-        assert!(
-            bootstrap.contains(pack)
-                && bootstrap.contains("name: no-kvm-guest-runtime")
-                && bootstrap.contains("path: /tmp/no-kvm-guest-runtime.tar"),
-            "transfer the fingerprint-indexed runtime cache with its executable modes intact"
-        );
-        assert!(
-            bootstrap.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build"),
-            "artifact acquisition defaults to published downloads even from a source checkout; \
-             without the explicit build arm the bootstrap packs no guest-runtime cache"
-        );
-        assert!(
-            smoke.contains("name: no-kvm-guest-runtime") && smoke.contains("path: /tmp"),
-            "download the runtime cache produced by this run, not a different source generation"
-        );
-        let restore = smoke.find(unpack).expect("restore the runtime cache");
-        let boot = smoke
-            .find("/tmp/mvmctl-source-under-test machine run")
-            .expect("boot the installed bundle");
-        assert!(
-            restore < boot,
-            "restore the runtime before source resolution"
-        );
-        assert!(
-            !smoke.contains("install-zigbuild"),
-            "the boot-only witness must reuse prepared artifacts, not cross-compile them"
-        );
-    }
-
-    #[test]
     fn dedicated_mcp_smoke_lane_stays_out_of_ci() {
         let workflow = ci_workflow();
         for removed in [
@@ -1859,7 +1643,6 @@ mod tests {
         for (name, wf) in [
             ("Security", "security.yml"),
             ("Pack signing smoke", "pack-signing-smoke.yml"),
-            ("Extended CI", "ci-full.yml"),
         ] {
             assert!(
                 watcher.contains(name),
@@ -1961,49 +1744,6 @@ mod tests {
             latency.contains("./scripts/locked-image-tag.sh")
                 && latency.contains("cosign verify-blob"),
             "boot-latency's base image stays the signed set images.lock pins"
-        );
-    }
-
-    #[test]
-    fn extended_ci_macos_builds_install_libkrun_from_a_trusted_tap() {
-        let extended = workflow("ci-full.yml");
-        for job in ["apple", "libkrun-macos"] {
-            let body = job_body(&extended, job).expect("extended CI job must exist");
-            assert!(
-                body.contains("uses: ./.github/actions/install-libkrun"),
-                "{job} must use the shared resilient libkrun installer"
-            );
-        }
-
-        let action = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join(".github/actions/install-libkrun/action.yml"),
-        )
-        .expect("shared libkrun installer must be readable");
-        for command in [
-            "brew tap slp/krun",
-            "brew trust slp/krun",
-            "brew install --build-from-source slp/krun/libkrunfw",
-            "brew install slp/krun/libkrun",
-            "for attempt in 1 2 3",
-        ] {
-            assert!(
-                action.contains(command),
-                "shared libkrun installer must contain `{command}`"
-            );
-        }
-
-        let apple = job_body(&extended, "apple").expect("Apple job must exist");
-        let embedded_toolchain = apple
-            .find("uses: ./.github/actions/install-zigbuild")
-            .expect("Apple workspace build must install the embedded-host toolchain");
-        let build = apple
-            .find("      - name: Build")
-            .expect("Apple workspace build step must exist");
-        assert!(
-            embedded_toolchain < build,
-            "Apple must install the embedded-host toolchain before building mvm-cli"
         );
     }
 
@@ -2128,17 +1868,6 @@ mod tests {
             unexpected.is_empty(),
             "new test-support source owners need an explicit targeted CI command: {unexpected:?}"
         );
-    }
-
-    #[test]
-    fn workload_spawn_smoke_selects_the_binary_owner_and_its_source_paths() {
-        let workflow = ci_full_workflow();
-        let job = job_block(&workflow, "workload-spawn-smoke-linux");
-        assert!(job.contains(
-            "cargo test -p mvm-builder-guest --bin mvm-host-vm-init live_firecracker_boot_smoke -- --nocapture"
-        ));
-        assert!(job.contains("- 'crates/mvm-builder-guest/**'"));
-        assert!(!job.contains("cargo test -p mvm-build "));
     }
 
     /// The bug this check was written for: `ci-full.yml` invoked
