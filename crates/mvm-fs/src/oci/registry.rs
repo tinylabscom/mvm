@@ -412,7 +412,9 @@ impl RegistryClient {
             } if credentials_apply => Some((username, password)),
             _ => None,
         };
-        let token = self.fetch_bearer_token(url, &challenge, basic).await?;
+        let token = self
+            .fetch_bearer_token(url, &parsed, &challenge, basic)
+            .await?;
         let token_for_retry = token.clone();
         self.remember_token(key, token);
         self.dispatch(
@@ -582,6 +584,7 @@ impl RegistryClient {
     async fn fetch_bearer_token(
         &self,
         original_url: &str,
+        registry: &mvm_http::Url,
         challenge: &BearerChallenge,
         basic: Option<(&String, &SecretString)>,
     ) -> Result<String, OciError> {
@@ -599,7 +602,18 @@ impl RegistryClient {
                 query.append_pair("scope", scope);
             }
         }
-        let mut request = self.http.get(token_url);
+        // The registry chose this URL and it may be on another host. Dial only
+        // addresses a blob redirect from this registry could dial, so a
+        // hostile registry cannot aim the request (or the Basic credentials)
+        // at an internal service, and a second lookup cannot rebind it there.
+        let addrs = permitted_addrs(
+            registry,
+            &token_url,
+            &mvm_http::SystemResolver,
+            "bearer token realm",
+        )
+        .await?;
+        let mut request = pinned_client(&token_url, addrs)?.get(token_url);
         if let Some((username, password)) = basic {
             request = request.basic_auth(username, Some(password.expose_secret().to_string()));
         }
@@ -703,15 +717,26 @@ async fn permitted_redirect_addrs(
     next: &mvm_http::Url,
     resolver: &dyn mvm_http::Resolve,
 ) -> Result<Vec<std::net::SocketAddr>, OciError> {
+    permitted_addrs(registry, next, resolver, "OCI blob redirect").await
+}
+
+/// The addresses a request the registry pointed the host at may dial: the rule
+/// [`permitted_redirect_addrs`] states, named for what is being fetched so the
+/// refusal says which request it was. The bearer-token realm is such a request:
+/// the registry chooses it, and it may be on another host, so it gets the same
+/// treatment as a blob redirect.
+async fn permitted_addrs(
+    registry: &mvm_http::Url,
+    next: &mvm_http::Url,
+    resolver: &dyn mvm_http::Resolve,
+    what: &str,
+) -> Result<Vec<std::net::SocketAddr>, OciError> {
     let target = resolve_url(next, resolver).await.map_err(|e| {
-        OciError::Registry(format!(
-            "resolve OCI blob redirect target {}: {e}",
-            display_url(next)
-        ))
+        OciError::Registry(format!("resolve {what} target {}: {e}", display_url(next)))
     })?;
     if target.is_empty() {
         return Err(OciError::Registry(format!(
-            "OCI blob redirect target {} resolved to no address",
+            "{what} target {} resolved to no address",
             display_url(next)
         )));
     }
@@ -722,7 +747,7 @@ async fn permitted_redirect_addrs(
             .is_ok_and(|addrs| addrs.iter().any(|addr| dns_answer_forbidden(addr.ip())));
         if !registry_internal {
             return Err(OciError::Registry(format!(
-                "OCI blob redirect from {} to {} was refused: the target is a loopback, \
+                "{what} from {} to {} was refused: the target is a loopback, \
                  link-local or private address",
                 display_url(registry),
                 display_url(next)
@@ -1217,6 +1242,75 @@ mod tests {
         )
         .await
         .expect("an internal registry's own storage");
+    }
+
+    #[tokio::test]
+    async fn a_public_registry_may_not_point_its_token_realm_at_internal_space() {
+        for realm in [
+            "https://169.254.169.254/latest/api/token",
+            "https://127.0.0.1:9/token",
+            "https://[fd00::1]/token",
+            "https://internal.example/token",
+        ] {
+            let addrs = permitted_addrs(
+                &url("https://registry.example/v2/"),
+                &url(realm),
+                &resolver(),
+                "bearer token realm",
+            )
+            .await;
+            let err = addrs.expect_err("an internal realm must be refused");
+            let message = err.to_string();
+            assert!(message.contains("bearer token realm"), "{realm}: {message}");
+            assert!(message.contains("private address"), "{realm}: {message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_public_token_realm_on_another_host_is_allowed() {
+        let addrs = permitted_addrs(
+            &url("https://registry.example/v2/"),
+            &url("https://storage.example/token"),
+            &resolver(),
+            "bearer token realm",
+        )
+        .await
+        .expect("a token service on another public host");
+        assert_eq!(addrs, vec![socket("93.184.216.35:443")]);
+    }
+
+    #[tokio::test]
+    async fn an_internal_registry_may_use_an_internal_token_realm() {
+        permitted_addrs(
+            &url("https://local-registry.example/v2/"),
+            &url("https://internal.example/token"),
+            &resolver(),
+            "bearer token realm",
+        )
+        .await
+        .expect("a local registry's own token service");
+    }
+
+    /// The call that actually sends the token request refuses before any
+    /// connection when the realm is in internal space.
+    #[tokio::test]
+    async fn fetching_a_token_never_reaches_an_internal_realm() {
+        let client = RegistryClient::new(ClientConfig::default(), RegistryAuthConfig::Anonymous);
+        let challenge = BearerChallenge {
+            realm: "https://127.0.0.1:9/token".into(),
+            service: Some("registry".into()),
+            scope: Some("repository:a:pull".into()),
+        };
+        let err = client
+            .fetch_bearer_token(
+                "https://registry.invalid/v2/a/manifests/latest",
+                &url("https://registry.invalid/v2/a/manifests/latest"),
+                &challenge,
+                None,
+            )
+            .await
+            .expect_err("an internal realm must not be dialled");
+        assert!(err.to_string().contains("bearer token realm"), "{err}");
     }
 
     #[test]
