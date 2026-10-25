@@ -13,6 +13,7 @@ pub mod build_env;
 pub mod canonical_linux;
 pub mod catalog;
 pub mod checkpoint;
+pub mod deps_audit;
 /// Content-addressed build-action cache records: a typed identity for one
 /// cached action's output artifacts, and a verify-on-read helper that
 /// recomputes each artifact's digest before a cache entry is trusted.

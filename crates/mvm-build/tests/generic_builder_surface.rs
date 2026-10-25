@@ -44,13 +44,7 @@ fn runtime_implementation_dependencies_are_unix_only() {
     let unix = manifest["target"]["cfg(unix)"]["dependencies"]
         .as_table()
         .unwrap();
-    for dependency in [
-        "mvm-vmm",
-        "mvm-agentd",
-        "mvm-compiler",
-        "mvm-net",
-        "libkrun-sys",
-    ] {
+    for dependency in ["mvm-vmm", "mvm-agentd", "mvm-net", "libkrun-sys"] {
         assert!(
             !portable.contains_key(dependency),
             "{dependency} must not enter portable builds"

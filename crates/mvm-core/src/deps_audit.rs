@@ -37,9 +37,10 @@
 //! behind an egress allowlist, generating the SBOM via
 //! `cyclonedx-py` / `pnpm sbom`, capturing the fetch log,
 //! running `pip-audit` / `pnpm audit`) lives in `mvm-build`.
-//! The audit primitives live in the compiler so the same types are
-//! consumed by the CLI (`mvmctl deps audit`, `mvmctl deps inspect`)
-//! and the supervisor's admission path with no schema drift.
+//! The audit primitives live here in `mvm-core`, below the CLI
+//! (`mvmctl deps audit`, `mvmctl deps inspect`), the compiler, and
+//! the supervisor's admission path, so all three consume the same
+//! types with no schema drift.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
