@@ -112,12 +112,10 @@ mvmctl doctor
 `doctor` reports the active backend. On an Apple Silicon Mac with macOS 26+,
 image builds and workloads auto-detect the native HVF path. An HVF failure is
 reported directly; mvm does not silently retry through libkrun. On macOS 13–25,
-the bundled libkrun tier is a preview and remains explicit:
-
-```bash
-mvmctl machine build --builder libkrun
-mvmctl machine run --manifest . --hypervisor libkrun
-```
+the bundled libkrun tier is a preview and remains explicit. Its build and run
+examples are withheld until they have end-to-end witnesses on a suitable
+existing host. [Issue #4714](https://github.com/tinylabscom/mvm/issues/4714)
+tracks those witnesses and restoration of the examples.
 
 ## First microVM
 
@@ -128,9 +126,8 @@ mvmctl machine build
 mvmctl machine run --manifest .
 ```
 
-Those commands use the macOS 26+ HVF default. On macOS 13–25, pass
-`--builder libkrun` to the build and `--hypervisor libkrun` to the run as shown
-above.
+Those commands use the macOS 26+ HVF default. They are not a validated
+build-and-run recipe for the macOS 13–25 libkrun preview tier.
 
 `mvmctl init` scaffolds the project. (Bare `mvmctl run` is the transient verb and needs a command, e.g. `mvmctl run --image alpine -- uname -a`; without one it exits with an error.) On the first `mvmctl machine build`, mvm bootstraps the builder VM if needed and runs `nix build` inside it; `mvmctl machine run` boots the resulting rootfs with the selected macOS runtime backend. Expected runtime cold boot is measured after the image is already built. The builder VM image is built in [mvm-images](https://github.com/tinylabscom/mvm-images): when developing from this source checkout with an mvm-images checkout selected (`MVM_IMAGES_DIR`, or a sibling `../mvm-images`), it is built from that checkout, and otherwise fetched from the signed image set `images.lock` pins. The cache is reused only when its recorded fingerprint matches the selected source, its recorded artifact digests still match the cached files, and its provenance summary matches the same source and artifact filename set; on a miss or any drift the image is rebuilt or refetched, validated in staging, and only then promoted into the live cache. Run with `--verbose` to see the safe cache reason code, for example `hit`, `fingerprint_mismatch`, `artifact_digest_mismatch`, or `provenance_mismatch`.
 
