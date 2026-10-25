@@ -25,6 +25,7 @@ use std::path::Path;
 
 type HmacSha256 = Hmac<Sha256>;
 
+#[cfg(unix)]
 const KEY_FILE: &str = "digest-cache.key";
 const KEY_LEN: usize = 32;
 const DOMAIN: &[u8] = b"mvm digest cache v1\0";
