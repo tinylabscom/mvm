@@ -906,6 +906,23 @@ pub(crate) mod runtime_binding;
 pub use runtime_binding::verify_checkpoint_runtime;
 pub(crate) use runtime_binding::{metadata_blob_sha256, verify_checkpoint_runtime_at};
 
+/// Record how long into a checkpoint capture a step finished. A standby's
+/// capture runs in a detached refill, so the same trace file the warm claim
+/// writes (`MVM_HVF_AGENT_DEBUG`) carries these.
+fn record_capture_phase(started: std::time::Instant, phase: &'static str) {
+    let elapsed_us = started.elapsed().as_micros();
+    tracing::debug!(
+        target: "mvm_runtime::checkpoint_capture",
+        phase,
+        elapsed_us,
+        "checkpoint capture phase"
+    );
+    mvm_vmm::agent_debug::line(
+        "checkpoint-capture",
+        format_args!("phase={phase} elapsed_us={elapsed_us}"),
+    );
+}
+
 fn capture_vm_full_inner(
     store: &CheckpointStore,
     params: CaptureVmFullParams,
@@ -913,6 +930,7 @@ fn capture_vm_full_inner(
     snapshot_store: Option<&FsSnapshotStore>,
     trusted_backend: Option<&dyn TrustedSnapshotBackend>,
 ) -> Result<CheckpointMeta> {
+    let capture_started = std::time::Instant::now();
     validate_step_lineage(store, params.parent.as_ref(), params.session.as_ref())?;
     // Keys and staging are admitted before the VM is paused or anything is
     // written, so a capture that cannot be protected never starts.
@@ -947,6 +965,7 @@ fn capture_vm_full_inner(
             .collect::<Result<Vec<(String, PathBuf)>>>()?;
 
         control.pause().context("pausing VM for vm_full capture")?;
+        record_capture_phase(capture_started, "paused");
         // From here, RESUME on every exit path so a failure never strands the guest.
         let captured = (|| {
             let actual = control
@@ -965,15 +984,18 @@ fn capture_vm_full_inner(
                 serde_json::to_vec(&actual)?,
             )
             .context("writing paused-runtime capture evidence")?;
+            record_capture_phase(capture_started, "evidence_written");
             run_capture_writer(
                 &mut guards.writer,
                 storage.staged.as_ref().expect("original capture guard"),
                 || control.save_memory(&memory),
             )
             .context("saving machine memory")?;
+            record_capture_phase(capture_started, "memory_saved");
             let live_rootfs = control.rootfs_path()?;
             crate::base::cow::clone_rootfs_for_instance(&live_rootfs, &rootfs_dst)
                 .context("cloning rootfs in the pause window")?;
+            record_capture_phase(capture_started, "rootfs_cloned");
             // The workspace is frozen with the machine: a clone taken after resume
             // could hold writes the captured memory never made.
             for (blob, image) in &workspace {
@@ -1011,18 +1033,24 @@ fn capture_vm_full_inner(
             }
             (Ok(()), Ok(())) => {}
         }
+        record_capture_phase(capture_started, "resumed");
 
         let domain = &params.key_domain;
+        let rootfs_blob = protection.store_chunked(
+            store,
+            domain,
+            &content_dir,
+            "rootfs.ext4",
+            &rootfs_dst,
+            true,
+        )?;
+        record_capture_phase(capture_started, "rootfs_stored");
+        let memory_blob =
+            protection.store_chunked(store, domain, &content_dir, "memory.bin", &memory, false)?;
+        record_capture_phase(capture_started, "memory_stored");
         let mut content = vec![
-            protection.store_chunked(
-                store,
-                domain,
-                &content_dir,
-                "rootfs.ext4",
-                &rootfs_dst,
-                true,
-            )?,
-            protection.store_chunked(store, domain, &content_dir, "memory.bin", &memory, false)?,
+            rootfs_blob,
+            memory_blob,
             ContentBlob {
                 name: runtime_binding::EVIDENCE_BLOB.into(),
                 sha256: sha256_file_hex(&content_dir.join(runtime_binding::EVIDENCE_BLOB))?,
@@ -1121,7 +1149,9 @@ fn capture_vm_full_inner(
 
         // A protected capture is sealed in full here, before any mirror sees the
         // content dir, so a mirror only ever copies opaque objects.
+        record_capture_phase(capture_started, "blobs_collected");
         let content = protection.finish(store, &content_dir, content)?;
+        record_capture_phase(capture_started, "protection_finished");
 
         let snapshot_id = if let Some(backend) = trusted_backend {
             if snapshot_store.is_some() {
@@ -1170,6 +1200,7 @@ fn capture_vm_full_inner(
                     snapshots
                         .create(&snapshot_id, &content_dir)
                         .with_context(|| format!("staging checkpoint snapshot {id}"))?;
+                    record_capture_phase(capture_started, "snapshot_staged");
                     let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
                         .context("load host identity for checkpoint snapshot manifest")?;
                     mvm_core::crypto::snapshot_sign::sign_manifest(
@@ -1178,6 +1209,7 @@ fn capture_vm_full_inner(
                         &identity.signing,
                     )
                     .with_context(|| format!("sign checkpoint snapshot manifest {id}"))?;
+                    record_capture_phase(capture_started, "snapshot_signed");
                     Ok::<_, anyhow::Error>(Some(id))
                 })
                 .transpose()?
@@ -1190,6 +1222,7 @@ fn capture_vm_full_inner(
         // are the checkpoint representation published below.
         protection::remove_source(&rootfs_dst)?;
         protection::remove_source(&memory)?;
+        record_capture_phase(capture_started, "sources_removed");
 
         let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
             .tag(params.tag)
@@ -1210,6 +1243,7 @@ fn capture_vm_full_inner(
             .take()
             .expect("original staging consumed once")
             .commit(&meta)?;
+        record_capture_phase(capture_started, "committed");
         Ok(meta)
     })();
     match attempt {

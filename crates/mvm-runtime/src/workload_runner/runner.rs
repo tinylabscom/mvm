@@ -1103,12 +1103,15 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 spec.id
             ))
         })?;
+        let started = Instant::now();
         let parent_config = factory_parent_config(launch, spec)?;
         let lifecycle = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&spec.id)
             .map_err(|e| StandbyError::SpawnFailed(format!("lock runtime lifecycle: {e:#}")))?;
+        warm_claim::record_standby_phase(started, "lease", "acquired");
         let parent_config = lifecycle.bind(&parent_config).map_err(|e| {
             StandbyError::SpawnFailed(format!("bind standby runtime artifacts: {e:#}"))
         })?;
+        warm_claim::record_standby_phase(started, "lease", "bound");
         let result = match (&self.driver as &dyn std::any::Any)
             .downcast_ref::<mvm_backends::driver::hvf::HvfDriver>()
         {
@@ -1151,6 +1154,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         parent_config: &VmStartConfig,
         launch: impl FnOnce(&StandbyParentSpawn<'_>) -> Result<StandbyHandle>,
     ) -> Result<StandbyHandle> {
+        let started = Instant::now();
         let state_dir = PathBuf::from(&spec.vm_state_dir);
 
         // Written before boot, exactly as `start` does for a workload, so a
@@ -1195,7 +1199,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             .into());
         }
         let boot = mvm_vmm::host::spec_map::with_identity_drive(boot, identity.as_deref());
+        warm_claim::record_standby_phase(started, "boot", "spec_ready");
         let mut handle = launch(&StandbyParentSpawn { spec, boot: &boot })?;
+        warm_claim::record_standby_phase(started, "boot", "parent_booted");
 
         // The universal initramfs waits in a fail-closed pre-activation state.
         // Capturing it there would make every restored child refuse PostRestore
@@ -1216,6 +1222,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 ))
             })?;
         }
+        warm_claim::record_standby_phase(started, "boot", "parent_activated");
 
         let control = self.driver.vm_full_control(&spec.id).ok_or_else(|| {
             StandbyError::SpawnFailed(format!(
@@ -1297,6 +1304,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             )
         };
 
+        warm_claim::record_standby_phase(started, "capture", "captured");
+
         // Saved-state backends release the source after capture because the
         // checkpoint is their claim resource. The HVF live-handoff backend
         // deliberately retains its paused supervisor: the checkpoint is an
@@ -1307,6 +1316,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             self.force_stop(&spec.id, "captured standby parent");
         }
 
+        warm_claim::record_standby_phase(started, "capture", "source_released");
         let meta = captured
             .map_err(|e| StandbyError::SpawnFailed(format!("capture standby parent: {e:#}")))?;
 
