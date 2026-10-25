@@ -1,11 +1,12 @@
 use ed25519_dalek::SigningKey;
 use mvm_contract::protocol::mailbox::{
-    AuthorizationDomainId, BootId, CapabilityId, CapabilityOperations, CausationId,
-    CiphertextPadding, ContentType, CorrelationId, DeliveryId, DeliveryOutcome,
-    EncryptionAlgorithm, EncryptionContext, ExecutionEpoch, MAX_MAILBOX_PAYLOAD_BYTES,
-    MailboxAddress, MailboxCapabilityGrant, MailboxEnvelopeHeader, MailboxId, MailboxMessageKind,
-    MailboxOperation, MailboxRoutingFrame, MessageId, OrderingScope, PrincipalId, ProtocolVersion,
-    ReplayNonce, ReplyRoute, RevocationId, SequenceNumber, SignatureAlgorithm, TenantId,
+    AuthorizationDomainId, AuthorizationDomainRouteLabel, BootId, CapabilityId,
+    CapabilityOperations, CausationId, CiphertextPadding, ContentType, CorrelationId, DeliveryId,
+    DeliveryOutcome, DestinationRouteToken, EncryptionAlgorithm, EncryptionContext, ExecutionEpoch,
+    MAX_MAILBOX_PAYLOAD_BYTES, MailboxAddress, MailboxCapabilityGrant, MailboxEnvelopeHeader,
+    MailboxId, MailboxMessageKind, MailboxOperation, MailboxRoutingFrame, MessageId, OrderingScope,
+    PrincipalId, ProtocolVersion, ReplayNonce, ReplyRoute, RevocationId, SequenceNumber,
+    SignatureAlgorithm, TenantId, TransportBindingId,
 };
 use mvm_core::crypto::aead::Key;
 use mvm_core::mailbox::{
@@ -80,14 +81,14 @@ fn header() -> MailboxEnvelopeHeader {
 fn routing() -> MailboxRoutingFrame {
     MailboxRoutingFrame {
         protocol_version: ProtocolVersion::V1,
-        authorization_domain_route_label: [15; 32],
-        destination_route_token: [16; 32],
+        authorization_domain_route_label: AuthorizationDomainRouteLabel::from_bytes([15; 32]),
+        destination_route_token: DestinationRouteToken::from_bytes([16; 32]),
         delivery_id: DeliveryId::from_bytes([17; 32]),
         ciphertext_len: 0,
         padding: CiphertextPadding::Exact,
         expires_at_unix_ms: 2_000,
         hop_limit: 8,
-        transport_binding_id: [18; 32],
+        transport_binding_id: TransportBindingId::from_bytes([18; 32]),
     }
 }
 

@@ -65,6 +65,7 @@ All notable changes to mvm are documented in this file.
 
 ### Added
 - **mailbox**: Define the canonical no-std signed/encrypted envelope, capability, replay, and destination-receipt contract (#4628)
+- **mailbox**: Add replaceable authenticated peer-overlay and bounded byte-transport interfaces with deterministic direct, relay, partition, reconnect, refusal, and shutdown conformance (#4632)
 
 ## [0.24.0] — 2026-10-12
 
