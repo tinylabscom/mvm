@@ -55,7 +55,7 @@ Feature: The documented flake build runs for real
   # The health boot is an entrypoint boot, which HVF refuses until verified
   # input custody and a held recovery lifetime exist there (#4655), so this
   # witness runs only on Firecracker.
-  @live @documented_pack_live @firecracker
+  @live @documented_pack_live @firecracker @runtime_candidate
   Scenario: the documented pack build health-boots and signs a frozen workload
     Given a local pack build fixture
     And the isolated mvm home is prepared for live launches

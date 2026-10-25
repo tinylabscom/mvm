@@ -32,6 +32,7 @@ pub(super) const BUNDLE_VERIFY_CLASS: &str = "bundle-verify";
 pub struct BundlePin<'a> {
     archive: &'a Path,
     lineage: BundleLineage<'a>,
+    production: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,12 +50,27 @@ impl<'a> BundlePin<'a> {
         Self {
             archive,
             lineage: BundleLineage::Boots,
+            production: false,
+        }
+    }
+
+    /// A production boot of this archive. Local-build authority is never
+    /// sufficient for this pin; admission requires release verification.
+    pub fn boots_for_production(archive: &'a Path) -> Self {
+        Self {
+            archive,
+            lineage: BundleLineage::Boots,
+            production: true,
         }
     }
 
     /// The archive this pin reads.
     pub fn archive(&self) -> &'a Path {
         self.archive
+    }
+
+    pub(super) fn is_production(&self) -> bool {
+        self.production
     }
 }
 
@@ -118,6 +134,7 @@ impl InheritedBundle {
             lineage: BundleLineage::Inherited {
                 bundle_sha256: &self.bundle_sha256,
             },
+            production: false,
         }
     }
 }

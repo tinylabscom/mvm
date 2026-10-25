@@ -8,7 +8,9 @@ use ed25519_dalek::SigningKey;
 use mvm_core::util::test_env::TestEnv;
 
 use super::admit_plan_tests::{pinning_params, write_rootfs};
-use super::policy::bundle_pin_tests::{make_bundle_for_pin, make_bundle_for_pin_with};
+use super::policy::bundle_pin_tests::{
+    make_bundle_for_pin, make_bundle_for_pin_with, make_local_bundle_for_pin,
+};
 use super::*;
 
 /// Enrol the publisher of `sk` in `<MVM_HOME>/trusted-publishers/`, the
@@ -65,6 +67,59 @@ fn a_bundle_without_an_image_set_admits_before_a_backend_is_chosen() {
         .expect("the signed plan carries the bundle pin");
     assert_eq!(pin.bundle_sha256, mvm_core::plan::bundle_sha256(&archive));
     assert_eq!(pin.key_id, key_id);
+}
+
+#[test]
+fn a_host_signed_local_build_is_audited_with_its_origin_and_digest() {
+    let home = tempfile::tempdir().expect("mvm home");
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let keys_dir = home.path().join("keys");
+    let host = mvm_hostd::audit::host_keypair::load_or_init_at(&keys_dir).expect("host signer");
+    let (archive, _) = make_local_bundle_for_pin(&host.signing);
+    let bundle_path = home.path().join("local.mvmpkg");
+    std::fs::write(&bundle_path, &archive).expect("write local bundle");
+    let rootfs = write_rootfs(home.path(), b"rootfs-bytes");
+    let audit_dir = home.path().join("audit");
+    let ledger = InMemoryNonceLedger::new();
+    let mut params = pinning_params(&rootfs, &ledger);
+    params.keys_dir = Some(&keys_dir);
+    params.audit_dir = Some(&audit_dir);
+    params.bundle_pin = Some(BundlePin::boots(&bundle_path));
+
+    let ctx = admit_plan_for_boot(params).expect("this host's local build admits in development");
+
+    assert_eq!(ctx.admitted.plan().audit_labels["origin"], "local-build");
+    assert_eq!(
+        ctx.admitted.plan().audit_labels["bundle_sha256"],
+        mvm_core::plan::bundle_sha256(&archive)
+    );
+    let chain = audit_chain(&audit_dir);
+    assert!(chain.contains("local-build"), "{chain}");
+}
+
+#[test]
+fn a_host_signed_local_build_is_refused_by_production_admission() {
+    let home = tempfile::tempdir().expect("mvm home");
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let keys_dir = home.path().join("keys");
+    let host = mvm_hostd::audit::host_keypair::load_or_init_at(&keys_dir).expect("host signer");
+    let (archive, _) = make_local_bundle_for_pin(&host.signing);
+    let bundle_path = home.path().join("local.mvmpkg");
+    std::fs::write(&bundle_path, archive).expect("write local bundle");
+    let rootfs = write_rootfs(home.path(), b"rootfs-bytes");
+    let ledger = InMemoryNonceLedger::new();
+    let mut params = pinning_params(&rootfs, &ledger);
+    params.keys_dir = Some(&keys_dir);
+    params.bundle_pin = Some(BundlePin::boots_for_production(&bundle_path));
+
+    let error = admit_plan_for_boot(params).expect_err("production admission rejects local builds");
+
+    assert!(
+        format!("{error:#}").contains("not release-verified"),
+        "{error:#}"
+    );
 }
 
 /// A bundle installed into the registry under the isolated `MVM_HOME`, the way

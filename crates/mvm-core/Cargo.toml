@@ -62,7 +62,7 @@ rand.workspace = true
 # — no rsa, no OIDC client, no async TUF fetch. The default mvm-core build stays
 # runtime-free because the stack is optional; enabling it does pull tokio (see
 # the `manifest-verify` feature below).
-sigstore-verify = { version = "0.11", default-features = false, features = ["rustls"], optional = true }
+sigstore-verify = { version = "0.11", default-features = false, optional = true }
 sigstore-trust-root = { version = "0.11", default-features = false, optional = true }
 sigstore-types = { version = "0.11", optional = true }
 # Only under the `schema` feature (protocol-schema codegen);
@@ -135,14 +135,19 @@ hostd-transport = ["dep:tokio", "tokio/io-util"]
 # Cosign-keyless manifest verification via the modular sigstore-verify stack.
 # Verification is synchronous and offline (embedded trust root + the bundle's
 # inline transparency-log inclusion proof) and never calls an async API. The
-# stack still links tokio: sigstore-rekor, sigstore-tsa and sigstore-tuf depend
-# on a reqwest/hyper client unconditionally. The runtime-free invariant is about
-# the default build, which leaves this feature off.
+# upstream rekor and tsa crates compile an HTTP client unconditionally; the
+# workspace patches them (third_party/sigstore-patches.md) so that client, and
+# the reqwest/hyper stack under it, is built only with `sigstore-network`.
 manifest-verify = [
     "dep:sigstore-verify",
     "dep:sigstore-trust-root",
     "dep:sigstore-types",
 ]
+# Opt back into the Sigstore network clients (Rekor, timestamp authority, TUF
+# trust-root fetch) for an embedder that fetches trust material online. No
+# shipped `mvmctl` surface enables it: verification there uses the embedded
+# trust root and the bundle's inline proofs.
+sigstore-network = ["manifest-verify", "sigstore-verify/rustls"]
 # TPM2 hardware attestation provider (`crypto::attestation::tpm2`). Linux only.
 attestation-tpm2 = ["dep:tss-esapi"]
 # Derive `schemars::JsonSchema` on the protocol types the
