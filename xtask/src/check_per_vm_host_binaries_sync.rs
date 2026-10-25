@@ -1,9 +1,9 @@
 //! `xtask check-per-vm-host-binaries-sync`
 //!
 //! CI lint — asserts the canonical `PER_VM_HOST_BINARIES` registry in
-//! `crates/mvm-cli/src/host_binaries/manifest.rs` and the two lists in
-//! `.github/workflows/release.yml` (the `cargo build --bin` step and the
-//! tarball's `REQUIRED_HOSTBINS`) name the same binaries.
+//! `crates/mvm-cli/src/host_binaries/manifest.rs`, the build commands in the
+//! release workflow and its release-tier scripts, and the tarball's
+//! `REQUIRED_HOSTBINS` list name the same binaries.
 //!
 //! Why this needs a gate rather than review: `resolve_subprocess_bin` finds
 //! these binaries next to the executable, falling back to `target/{release,
@@ -31,7 +31,10 @@ pub fn run(workspace: &Path) -> Result<()> {
     let src =
         std::fs::read_to_string(&release).with_context(|| format!("read {}", release.display()))?;
 
-    let built: BTreeSet<String> = bin_flags(&src);
+    let libkrun_builder = workspace.join("scripts/release/build-libkrun-tier.sh");
+    let libkrun_src = std::fs::read_to_string(&libkrun_builder)
+        .with_context(|| format!("read {}", libkrun_builder.display()))?;
+    let built: BTreeSet<String> = bin_flags(&format!("{src}\n{libkrun_src}"));
     let packaged: BTreeSet<String> = required_hostbins(&src);
 
     let mut problems = Vec::new();
@@ -44,7 +47,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     for (name, _scope) in &released {
         if !built.contains(name) {
             problems.push(format!(
-                "release.yml never builds `{name}` (no `--bin {name}`)"
+                "release build commands never build `{name}` (no `--bin {name}`)"
             ));
         }
         if !packaged.contains(name) {
@@ -67,8 +70,8 @@ pub fn run(workspace: &Path) -> Result<()> {
         bail!(
             "per-VM host binary lists have drifted:\n  {}\n\n\
              Fix: PER_VM_HOST_BINARIES in crates/mvm-cli/src/host_binaries/manifest.rs \
-             is the source of truth. Update .github/workflows/release.yml's \
-             `--bin` list and REQUIRED_HOSTBINS to match it.",
+             is the source of truth. Update the release build commands and \
+             .github/workflows/release.yml's REQUIRED_HOSTBINS to match it.",
             problems.join("\n  ")
         );
     }
@@ -80,8 +83,8 @@ pub fn run(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn included_in_standard_release(scope: &str) -> bool {
-    scope != "RequiresLibkrun"
+fn included_in_standard_release(_scope: &str) -> bool {
+    true
 }
 
 /// `(name, scope)` for every `PER_VM_HOST_BINARIES` entry.
@@ -206,10 +209,10 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
     }
 
     #[test]
-    fn standard_release_excludes_optional_libkrun_binaries() {
+    fn standard_release_includes_libkrun_binaries() {
         assert!(included_in_standard_release("Always"));
         assert!(included_in_standard_release("MacOsAarch64"));
-        assert!(!included_in_standard_release("RequiresLibkrun"));
+        assert!(included_in_standard_release("RequiresLibkrun"));
     }
 
     #[test]

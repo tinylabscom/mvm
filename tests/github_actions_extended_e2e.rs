@@ -1638,30 +1638,43 @@ fn root_manifest_keeps_libkrun_opt_in_on_macos() {
 }
 
 #[test]
-fn macos_release_build_is_libkrun_free() {
+fn macos_release_build_carries_isolated_libkrun_tier() {
     let workflow =
         fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
     let build = job_block(&workflow, "build");
+    let archive_smoke = job_block(&workflow, "archive-install-smoke");
 
     assert!(
-        !build.contains("uses: ./.github/actions/install-libkrun"),
-        "standard macOS release builds must not install libkrun"
+        build.contains("scripts/release/build-libkrun-tier.sh"),
+        "the macOS release must build the pinned libkrun tier"
     );
     assert!(
-        !build.contains("libkrun-sys"),
-        "released mvmctl binaries and helpers must not link optional libkrun FFI"
+        build.contains("gnu-sed") && build.contains("gnu-tar"),
+        "the native kernel build must select GNU-compatible archive and text tools"
     );
     assert!(
-        !build.contains("--bin mvm-libkrun-supervisor"),
-        "standard macOS release artifacts must not build the libkrun supervisor"
+        build.contains("mvm-hvf-supervisor mvm-libkrun-supervisor"),
+        "the macOS archive must package both native backend supervisors"
     );
     assert!(
-        !build.contains("mvm-hvf-supervisor mvm-libkrun-supervisor"),
-        "standard macOS release artifacts must not package the libkrun supervisor"
+        build.contains("lib/libkrunfw.dylib"),
+        "the archive must require libkrunfw's bare-name compatibility link"
+    );
+    assert!(
+        build.contains("SOURCE-OFFER.txt"),
+        "the libkrun release tier must ship corresponding-source directions"
+    );
+    assert!(
+        build.contains("libkrunfw-LGPL-2.1-only.txt"),
+        "the libkrun release tier must ship its license inventory"
+    );
+    assert!(
+        archive_smoke.contains("mvm-libkrun-supervisor\" --contract-version"),
+        "the archive-install lane must load and probe the packaged supervisor"
     );
     assert!(
         build.contains("--features \"${MVMCTL_RELEASE_FEATURES}\""),
-        "the release build must use the platform-neutral feature set directly"
+        "mvmctl itself must remain independent of the libkrun FFI"
     );
 }
 

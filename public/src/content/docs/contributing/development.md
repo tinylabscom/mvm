@@ -11,24 +11,29 @@ split, the fast feedback ladder, and what CI does and does not gate.
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
-- **macOS 26+ Apple Silicon or Linux** — macOS development uses native HVF; Linux uses native `/dev/kvm`. Intel Macs and older macOS releases are not supported local microVM hosts.
+- **macOS 26+ Apple Silicon or Linux** — standard source-checkout development
+  uses native HVF on macOS and native `/dev/kvm` on Linux. Downloaded releases
+  also carry an explicitly selected libkrun preview for macOS 13–25 Apple
+  Silicon; contributors rebuilding that tier need its integration toolchain.
 - **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just payload::toolchain` installs the pinned versions. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
 ### Do I need to install libkrun?
 
-No. Standard source builds, release artifacts, builder selection, and workload
-selection do not install, link, or auto-select libkrun:
+Downloaded releases need no separate libkrun installation. The Apple Silicon
+archive includes the signed compatibility tier for macOS 13–25, while standard
+source builds do not install, link, or auto-select it:
 
 | Host | libkrun (`slp/krun/*`) needed? |
 |---|---|
 | macOS 26+ Apple Silicon | **No** — auto-detect picks the native **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). |
-| macOS 13–25 Apple Silicon | Unsupported by the standard local runtime; update macOS or use a Linux KVM host. |
+| macOS 13–25 Apple Silicon | **No for a downloaded release** — its signed archive includes the preview tier; select it explicitly with `--hypervisor libkrun`. Source-checkout integration work still needs the development prerequisites below. |
 | Linux + `/dev/kvm` | **No** — auto-detect picks the **Firecracker** builder, so libkrun is not part of the default builder path on native Linux hosts. |
 
-The libkrun Cargo features remain only for explicit integration development and
-CI coverage. `mvmctl doctor` reports the resolved standard backend on the
-`builder backend` line (`<backend> — <source> — <availability>`).
+The libkrun Cargo features remain for explicit source-checkout integration
+development and CI coverage; end users do not compile them. `mvmctl doctor`
+reports the resolved standard backend on the `builder backend` line
+(`<backend> — <source> — <availability>`).
 
 The contributor-only `--source compile` kernel path still uses the explicit
 libkrun integration for its Stage 0 build. That path is not used by ordinary

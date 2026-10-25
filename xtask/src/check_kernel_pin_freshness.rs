@@ -5,12 +5,13 @@
 //! `KernelAdvisory` as JSON on stdout, and exit nonzero when a bump is
 //! recommended.
 //!
-//! The one kernel pin this repository still carries is libkrunfw's, the kernel
-//! the libkrun builder boots. The workload and builder-image kernels are built
+//! The kernel pins this repository still carries are the Nix libkrunfw build's
+//! and the macOS release tier's. Workload and builder-image kernels are built
 //! and pinned in mvm-images, which watches their freshness itself; this gate
-//! says so in its output rather than reporting a pin it no longer reads. The comparison logic is pure + unit-tested in mvm-core; this
-//! file does the reading/fetching and is offline-tolerant (a fetch failure
-//! yields no upstream data → `Unknown`, never a false "up to date").
+//! says so in its output rather than reporting pins it no longer reads. The
+//! comparison logic is pure + unit-tested in mvm-core; this file does the
+//! reading/fetching and is offline-tolerant (a fetch failure yields no upstream
+//! data → `Unknown`, never a false "up to date").
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,7 +26,7 @@ pub fn run(workspace: &Path, args: &[String]) -> Result<()> {
     let pins = read_local_pins(workspace);
     if pins.is_empty() {
         bail!(
-            "check-kernel-pin-freshness: found no kernel pins to assess (expected at least the libkrunfw pin in nix/packages/libkrunfw.nix)"
+            "check-kernel-pin-freshness: found no kernel pins to assess (expected the Nix and release libkrunfw pins)"
         );
     }
     let upstream = fetch_upstream_releases();
@@ -35,7 +36,7 @@ pub fn run(workspace: &Path, args: &[String]) -> Result<()> {
 
     if !quiet {
         eprintln!(
-            "check-kernel-pin-freshness: {} pin(s) (libkrunfw; image kernels are pinned in mvm-images); worst = {:?}; action_recommended = {}",
+            "check-kernel-pin-freshness: {} pin(s) (Nix and release libkrunfw; image kernels are pinned in mvm-images); worst = {:?}; action_recommended = {}",
             advisory.pins.len(),
             advisory.worst,
             advisory.action_recommended
@@ -48,8 +49,7 @@ pub fn run(workspace: &Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Read every kernel pin mvm carries: the libkrunfw tarball pin, a
-/// deterministic file read.
+/// Read every kernel pin mvm carries from deterministic repository files.
 fn read_local_pins(workspace: &Path) -> Vec<KernelPin> {
     let mut pins = Vec::new();
     let libkrunfw = workspace.join("nix/packages/libkrunfw.nix");
@@ -57,17 +57,25 @@ fn read_local_pins(workspace: &Path) -> Vec<KernelPin> {
         && let Some(version) = parse_libkrunfw_pin(&content)
     {
         pins.push(KernelPin {
-            name: "libkrunfw".into(),
+            name: "nix-libkrunfw".into(),
+            version,
+        });
+    }
+    let release_builder = workspace.join("scripts/release/build-libkrun-tier.sh");
+    if let Ok(content) = std::fs::read_to_string(&release_builder)
+        && let Some(version) = parse_libkrunfw_pin(&content)
+    {
+        pins.push(KernelPin {
+            name: "release-libkrunfw".into(),
             version,
         });
     }
     pins
 }
 
-/// Extract `6.12.91` from libkrunfw's pinned tarball URL
-/// (`…/linux-6.12.91.tar.xz`).
+/// Extract `6.12.91` from a libkrunfw tarball URL or release-builder pin.
 fn parse_libkrunfw_pin(content: &str) -> Option<String> {
-    let re = Regex::new(r"linux-(\d+\.\d+\.\d+)\.tar").ok()?;
+    let re = Regex::new(r"linux-(\d+\.\d+\.\d+)").ok()?;
     re.captures(content).map(|c| c[1].to_string())
 }
 
@@ -140,6 +148,12 @@ mod tests {
     #[test]
     fn libkrunfw_pin_none_when_absent() {
         assert_eq!(parse_libkrunfw_pin("no kernel url here"), None);
+    }
+
+    #[test]
+    fn parses_release_builder_kernel_version() {
+        let s = r#"kernel_version="linux-6.12.114""#;
+        assert_eq!(parse_libkrunfw_pin(s), Some("6.12.114".to_string()));
     }
 
     #[test]

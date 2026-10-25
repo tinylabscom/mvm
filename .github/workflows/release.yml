@@ -231,11 +231,12 @@ jobs:
             os: ubuntu-24.04
 
     runs-on: ${{ matrix.os }}
-    # Backstop: a cold macOS release plus host binaries took 43 min before the
-    # size check began on 2026-10-08. That check and man-page generation each
-    # compile xtask separately. Keep a bounded cap with room to package, so a
-    # healthy cold build is not canceled at the old 45-minute limit.
-    timeout-minutes: 75
+    # Backstop: the pre-libkrun cold macOS release plus host binaries took 43
+    # min before the size check began on 2026-10-08. The source-built libkrun
+    # tier adds a kernel, firmware and dylib build; the size check and man-page
+    # generation also compile xtask separately. Keep a bounded cap with enough
+    # room for a healthy cold build and packaging.
+    timeout-minutes: 135
 
     steps:
       - uses: actions/checkout@v6
@@ -302,7 +303,8 @@ jobs:
       # mvm-build features.
       #
       # Apple Silicon macOS additionally gets the native HVF supervisor. The
-      # optional libkrun integration is not part of standard release artifacts.
+      # libkrun supervisor and its dylibs are built from immutable upstream
+      # sources by the dedicated release-tier step below.
       - name: Build per-VM host binaries
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
@@ -314,6 +316,7 @@ jobs:
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-hvf-supervisor
           fi
+
           # Ships on every target — see the note above.
           if [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]]; then
             cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostd -p mvm-gpu \
@@ -347,6 +350,27 @@ jobs:
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib \
               --features mvm-client/release-channel
           fi
+
+      - name: Install libkrun build dependencies
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: brew install make llvm flex bison gnu-sed gnu-tar xz
+
+      - name: Build libkrun release tier
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+          MVM_GNU_MAKE: gmake
+        shell: bash
+        run: |
+          llvm_prefix="$(brew --prefix llvm)"
+          flex_prefix="$(brew --prefix flex)"
+          bison_prefix="$(brew --prefix bison)"
+          gnu_sed_prefix="$(brew --prefix gnu-sed)"
+          gnu_tar_prefix="$(brew --prefix gnu-tar)"
+          export PATH="${llvm_prefix}/bin:${flex_prefix}/bin:${bison_prefix}/bin:${gnu_sed_prefix}/libexec/gnubin:${gnu_tar_prefix}/libexec/gnubin:${PATH}"
+          scripts/release/build-libkrun-tier.sh \
+            "target/${BUILD_TARGET}/release/libkrun-tier" "${BUILD_TARGET}"
 
       # Attribution only: which packages the builds above compile more than once
       # and what differs (profile, features, target), so a long release is
@@ -453,10 +477,13 @@ jobs:
           # surface much later as a spawn failure on a user's machine.
           REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-gpu-endpoint"
           if [[ "${TARGET}" == *apple-darwin ]]; then
-            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor"
+            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
           fi
           for hostbin in ${REQUIRED_HOSTBINS}; do
             src="target/${BUILD_TARGET}/release/${hostbin}"
+            if [[ "${hostbin}" == mvm-libkrun-supervisor ]]; then
+              src="target/${BUILD_TARGET}/release/libkrun-tier/${hostbin}"
+            fi
             if [ ! -f "$src" ]; then
               echo "::error::${hostbin} was not built for ${TARGET}; mvmctl spawns it at run time and the adjacent-to-exe resolver has no fallback on a downloaded install" >&2
               exit 1
@@ -464,6 +491,25 @@ jobs:
             cp "$src" "staging/${ARCHIVE_NAME}/"
             echo "bundled ${hostbin}"
           done
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            LIBKRUN_TIER="target/${BUILD_TARGET}/release/libkrun-tier"
+            for required in lib/libkrun.1.dylib lib/libkrunfw.5.dylib \
+              lib/libkrunfw.dylib \
+              licenses/libkrun-APACHE-2.0.txt \
+              licenses/libkrunfw-LGPL-2.1-only.txt \
+              licenses/linux-GPL-2.0-only.txt \
+              sources/libkrunfw-macos-host.patch SOURCE-OFFER.txt SOURCE-PINS; do
+              if [[ ! -e "${LIBKRUN_TIER}/${required}" ]]; then
+                echo "::error::libkrun release tier is missing ${required}" >&2
+                exit 1
+              fi
+            done
+            cp -R "${LIBKRUN_TIER}/lib" "staging/${ARCHIVE_NAME}/"
+            cp -R "${LIBKRUN_TIER}/licenses" "staging/${ARCHIVE_NAME}/"
+            cp -R "${LIBKRUN_TIER}/sources" "staging/${ARCHIVE_NAME}/"
+            cp "${LIBKRUN_TIER}/SOURCE-OFFER.txt" \
+              "${LIBKRUN_TIER}/SOURCE-PINS" "staging/${ARCHIVE_NAME}/"
+          fi
           # The SDK host library, beside mvmctl: the SDKs' third lookup is
           # the platform file name next to the resolved mvmctl, and a
           # downloaded install has no other source. Fail closed like the
@@ -603,7 +649,9 @@ jobs:
             runner: ubuntu-24.04-arm
             library: libmvm_hostlib.so
           - target: aarch64-apple-darwin
-            runner: macos-latest
+            # Exercise the packaged compatibility tier on a supported pre-HVF
+            # host instead of the moving latest image.
+            runner: macos-15
             library: libmvm_hostlib.dylib
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
@@ -632,6 +680,14 @@ jobs:
             test "${installed}" = "mvmctl ${EXPECT_VERSION#v}"
           fi
           "${prefix}/bin/mvmctl" --help
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            payload="${prefix}/lib/mvmctl-${TARGET}"
+            answer="$("${payload}/mvm-libkrun-supervisor" --contract-version)"
+            [[ "${answer}" == "mvm-libkrun-supervisor contract-version="* ]] || {
+              echo "::error::packaged libkrun supervisor did not answer its contract probe" >&2
+              exit 1
+            }
+          fi
           python3 - "${prefix}/lib/mvmctl-${TARGET}/${LIBRARY}" <<'PY'
           import ctypes
           import json

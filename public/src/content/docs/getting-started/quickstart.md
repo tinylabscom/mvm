@@ -90,6 +90,10 @@ your platform:
 - **macOS 26+ Apple Silicon:** auto-selects the HVF builder backend
   (Hypervisor.framework, vsock-only, no Homebrew or libkrun dependency).
   HVF errors surface directly rather than activating a hidden fallback.
+- **macOS 13–25 Apple Silicon:** the signed release carries a libkrun preview
+  with no Homebrew dependency. It is not auto-selected; pass
+  `--hypervisor libkrun` for the workload. Packaged loading is verified, while
+  the real guest-launch witness remains open.
 
 mvm targets Apple Silicon on macOS and `/dev/kvm` on Linux. There is no Docker
 or container runtime path; a host without a supported microVM backend surfaces a

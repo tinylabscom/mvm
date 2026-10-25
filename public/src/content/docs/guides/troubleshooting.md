@@ -519,7 +519,11 @@ The standard macOS backend is native `hvf`. Its per-VM supervisor needs ad-hoc c
 
 - `com.apple.security.hypervisor` — required by the `mvm-hvf-supervisor` process that directly calls Hypervisor.framework.
 
-The release installer signs the supervisor during installation. The libkrun backend (macOS 13-25) is not yet shipped in the release archive; it is fully available from a source build (tracked in [mvm#4577](https://github.com/tinylabscom/mvm/issues/4577)).
+The release installer signs the supervisor during installation. On macOS
+13–25 the same signed Apple Silicon archive carries the libkrun supervisor and
+its relocatable dylibs; select it explicitly with `--hypervisor libkrun`. The
+packaged tier remains a preview until the real guest-launch witness tracked in
+[mvm#4577](https://github.com/tinylabscom/mvm/issues/4577) passes.
 
 What you'll see on the first run:
 
