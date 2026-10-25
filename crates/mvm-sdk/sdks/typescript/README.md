@@ -271,7 +271,7 @@ writeFileSync("pack.json", spec.toJson());
 ```
 
 `mvmctl pack lock pack.json --mvm-revision <commit>` freezes it, and
-`mvmctl pack build pack.json --out hello.mvmpkg` compiles, builds, health-boots
+`mvmctl build pack.json --out hello.mvmpkg` compiles, builds, health-boots
 and signs it. The bytes are the canonical bytes every language SDK writes for
 the same spec, and a mistake throws `PackSpecError` with
 the same `code` in every language.

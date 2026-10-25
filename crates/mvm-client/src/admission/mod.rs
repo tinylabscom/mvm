@@ -1,18 +1,21 @@
 //! Signed `ExecutionPlan` admission for a boot — synthesize, sign, verify,
-//! and audit-emit the plan right before a backend `start()`, plus the guest
-//! boot-config attachments (host-signer pubkey, security policy) that ride
-//! along with an admitted plan.
+//! and audit-emit the plan right before a backend `start()`.
 //!
 //! Every boot path admits through here: the CLI's transient runs, entrypoints,
 //! sessions, checkpoint forks and persistent starts, and the host library the
 //! SDKs load. It lives in the client rather than the CLI so that one request is
 //! admitted under one plan whoever makes it.
+//!
+//! The pieces a boot needs around admission itself sit in sibling modules and
+//! are re-exported here: the guest boot-config attachments (host-signer
+//! pubkey, security policy) in `boot_config`, the launch-outcome audit
+//! records in `outcome`, and the boot-time share/kernel enforcement gates in
+//! `enforce`.
 
 use anyhow::{Context, Result, bail};
 
 use mvm_core::plan::{StreamRetention, SynthesisInput, Variant};
 use mvm_core::policy::PolicyBundle;
-use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, InMemoryNonceLedger,
     SystemClock, admit_for_run,
@@ -24,7 +27,7 @@ use crate::admission::policy_resolver::{
     PolicyResolutionKind, ValidatedPolicy, validate_policy_refs,
 };
 use mvm_hostd::audit::emitter::AuditEmitter;
-use mvm_hostd::audit::host_keypair::{PUBLIC_FILENAME, load_or_init_at};
+use mvm_hostd::audit::host_keypair::load_or_init_at;
 
 use self::audit::{
     build_default_audit_emitter, build_policy_audit_emitter, emit_bundle_environment_refused,
@@ -35,12 +38,15 @@ use self::policy::generated_policy_bundle_for_network_policy;
 
 pub mod agent_verbs;
 mod audit;
+mod boot_config;
 mod bundle_binding;
 pub mod bundle_environment;
 pub mod bundle_posture;
 mod durability;
+mod enforce;
 pub mod entrypoint_resolve;
 pub mod instructions;
+mod outcome;
 mod pinned_bundle;
 pub mod policy;
 pub mod policy_resolver;
@@ -50,9 +56,20 @@ pub mod run_routes;
 pub mod run_secrets;
 pub mod secrets;
 
+pub use boot_config::{
+    SECURITY_POLICY_FILENAME, attach_guest_boot_config, attach_guest_boot_config_for_plan,
+    attach_guest_security_policy_config, attach_host_signer_pubkey_config_for_plan,
+    guest_profile_for_boot,
+};
 pub use bundle_binding::{BundlePin, InheritedBundle};
 pub use durability::admit_plan_for_boot_syncing_beside_boot;
+pub use enforce::{enforce_kernel, enforce_shares, enforce_shares_for_claim};
 pub use instructions::InstructionSources;
+pub use outcome::{BootPosture, StartMode, emit_failed, emit_launched, record_transient_outcome};
+// Directly exercised by `admit_plan_tests` alongside the fixture helpers it
+// shares with that family.
+#[cfg(test)]
+pub(crate) use outcome::emit_boot_posture;
 
 /// A content-bound asset. Operator-declared files and internally selected
 /// signed packs are recorded in the plan without sharing them with the guest.
@@ -66,8 +83,6 @@ pub enum AssetSpec {
     /// An internally selected signed pack; never accepted from `--asset`.
     RegistryPack(mvm_core::registry_pack::PackPin),
 }
-
-pub const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
 
 /// Add the tool-decision service binding when the plan declares tools.
 ///
@@ -1132,108 +1147,6 @@ fn resolve_image_sha256(
     }
 }
 
-pub fn guest_profile_for_boot(is_dev_mode: bool, rootfs_path: &std::path::Path) -> AgentProfile {
-    if is_dev_mode || !crate::admission::agent_verbs::image_is_sealed(rootfs_path) {
-        AgentProfile::Dev
-    } else {
-        AgentProfile::SealedProd
-    }
-}
-
-fn security_policy_for_profile(profile: AgentProfile) -> SecurityPolicy {
-    match profile {
-        AgentProfile::SealedProd => SecurityPolicy::default(),
-        AgentProfile::Dev => SecurityPolicy::dev_defaults(),
-        AgentProfile::Builder => SecurityPolicy {
-            profile: AgentProfile::Builder,
-            ..SecurityPolicy::default()
-        },
-    }
-}
-
-pub fn attach_guest_security_policy_config(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    profile: AgentProfile,
-) -> Result<()> {
-    let content = serde_json::to_string(&security_policy_for_profile(profile))
-        .context("serializing guest security policy for config drive")?;
-    start_config
-        .config_files
-        .retain(|f| f.name != SECURITY_POLICY_FILENAME);
-    start_config
-        .config_files
-        .push(mvm_core::vm_backend::VmFile {
-            name: SECURITY_POLICY_FILENAME.to_string(),
-            content,
-            mode: 0o444,
-        });
-    Ok(())
-}
-
-pub fn attach_guest_boot_config_for_plan(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    plan: &mvm_core::plan::ExecutionPlan,
-    host_signer_public_path: &std::path::Path,
-    profile: AgentProfile,
-) -> Result<()> {
-    attach_host_signer_pubkey_config_for_plan(start_config, plan, host_signer_public_path)?;
-    attach_guest_security_policy_config(start_config, profile)
-}
-
-pub fn attach_guest_boot_config(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    admission: &AdmissionContext,
-    profile: AgentProfile,
-) -> Result<()> {
-    attach_guest_boot_config_for_plan(
-        start_config,
-        admission.admitted.plan(),
-        &admission.host_signer_public_path,
-        profile,
-    )
-}
-
-pub fn attach_host_signer_pubkey_config_for_plan(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    plan: &mvm_core::plan::ExecutionPlan,
-    host_signer_public_path: &std::path::Path,
-) -> Result<()> {
-    if plan.agent_verbs.is_none() {
-        return Ok(());
-    }
-    let public_bytes = std::fs::read(host_signer_public_path).with_context(|| {
-        format!(
-            "reading host-signer public key for config drive at {}",
-            host_signer_public_path.display()
-        )
-    })?;
-    let public_array: [u8; 32] = public_bytes.as_slice().try_into().map_err(|_| {
-        anyhow::anyhow!(
-            "host-signer public key at {} must be 32 bytes, got {}",
-            host_signer_public_path.display(),
-            public_bytes.len()
-        )
-    })?;
-    ed25519_dalek::VerifyingKey::from_bytes(&public_array).with_context(|| {
-        format!(
-            "parsing host-signer public key at {}",
-            host_signer_public_path.display()
-        )
-    })?;
-    let content = format!("{}\n", hex::encode(public_bytes));
-    start_config
-        .config_files
-        .retain(|f| f.name != PUBLIC_FILENAME);
-    start_config
-        .config_files
-        .push(mvm_core::vm_backend::VmFile {
-            name: PUBLIC_FILENAME.to_string(),
-            content,
-            mode: 0o444,
-        });
-    Ok(())
-}
-
 /// Run the policy resolver against the admitted plan and return the
 /// validated bundle for audit configuration and bridge enforcement.
 ///
@@ -1255,438 +1168,6 @@ pub fn resolve_policy_for_admission(
             Ok(validated)
         }
         Err(rerr) => Err(anyhow::Error::new(rerr).context("resolving plan policy refs")),
-    }
-}
-
-/// Emit `plan.launched` against the supplied admission context. Tolerates
-/// emission failure with a `tracing::warn` so a flaky audit fs can't block a
-/// VM that already booted.
-///
-/// Also persists the admitted plan into the VM state dir so
-/// out-of-process lifecycle verbs (e.g. `mvmctl checkpoint create`) can
-/// rehydrate it and bind their audit events to the same plan_id.
-/// Plan persistence failure is non-fatal — the launch already
-/// succeeded; the cost is that lifecycle audit will be unbound on
-/// this VM until the next launch.
-pub fn emit_launched(ctx: &AdmissionContext, backend: &str, persist_plan: bool) {
-    if let Err(e) = ctx.emitter.emit_launched(ctx.admitted.plan(), backend) {
-        tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
-    }
-    if persist_plan
-        && let Err(e) = mvm_hostd::audit::plan_persist::write_plan(
-            &ctx.admitted.plan().workload.0,
-            ctx.admitted.plan(),
-        )
-    {
-        tracing::warn!(
-            error = %e,
-            "persisting admitted plan to ~/.mvm/vms/<vm>/plan.json failed (non-fatal)"
-        );
-    }
-}
-
-/// Record the resolved boot posture (which rootfs strategy the run-path tier
-/// gate actually selected) on the chain-signed admission log. Fires alongside
-/// `plan.launched`, reflecting the decision `run_inner` made — never a
-/// re-derivation — so a virtiofs-root dev boot and an Option-B block boot are
-/// distinguishable in the tamper-evident chain.
-fn emit_boot_posture(ctx: &AdmissionContext, strategy: mvm_build::run_image::RootStrategy) {
-    let label = match strategy {
-        mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
-    };
-    if let Err(e) = ctx.emitter.emit_boot_posture(ctx.admitted.plan(), label) {
-        tracing::warn!(error = %e, "audit emit_boot_posture failed (non-fatal)");
-    }
-}
-
-/// How a transient launch came to be running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartMode {
-    /// It claimed a prepared standby.
-    Warm,
-    /// It booted from nothing, for the reason the label names.
-    Cold { reason: &'static str },
-}
-
-/// What a transient launch reports back about how it booted, for the
-/// chain-signed log: the rootfs strategy, and whether it was warm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BootPosture {
-    pub root_strategy: mvm_build::run_image::RootStrategy,
-    /// `None` for a launch that never reached the claim-or-boot decision.
-    pub start: Option<StartMode>,
-}
-
-impl BootPosture {
-    /// A posture with no start mode yet, as the run path seeds it.
-    #[must_use]
-    pub fn block() -> Self {
-        Self {
-            root_strategy: mvm_build::run_image::RootStrategy::BlockExt4,
-            start: None,
-        }
-    }
-}
-
-fn emit_start_mode(ctx: &AdmissionContext, start: StartMode) {
-    let (mode, reason) = match start {
-        StartMode::Warm => ("warm", None),
-        StartMode::Cold { reason } => ("cold", Some(reason)),
-    };
-    if let Err(e) = ctx
-        .emitter
-        .emit_start_mode(ctx.admitted.plan(), mode, reason)
-    {
-        tracing::warn!(error = %e, "audit emit_start_mode failed (non-fatal)");
-    }
-}
-
-/// Tier A.1 admission enforcement: refuse to boot if any volume about to
-/// be attached isn't named in the verified `ExecutionPlan.shares`, so no
-/// host-fs grant reaches a guest unless the signed plan admitted it
-/// (claim 1 / claim 8).
-pub fn enforce_shares(
-    ctx: &AdmissionContext,
-    volumes: &[mvm_core::vm_backend::VmVolume],
-) -> Result<()> {
-    mvm_hostd::plan_admission::enforce_admitted_shares(volumes, ctx.admitted.plan())
-        .context("admission share check")
-}
-
-/// The claim-time sibling of [`enforce_shares`]: re-check every volume a warm
-/// claim will attach against the shares its signed plan admitted, immediately
-/// before the claim, exactly as a cold boot checks them before it attaches
-/// anything. The volume must be named by the plan, and a directory whose
-/// content digest the plan pinned must still hash to it. A launch with no
-/// volumes attaches nothing, so its plan is never decoded here.
-pub fn enforce_shares_for_claim(
-    volumes: &[mvm_core::vm_backend::VmVolume],
-    plan_json: &str,
-) -> Result<()> {
-    if volumes.is_empty() {
-        return Ok(());
-    }
-    let plan = mvm_core::plan::plan_from_admitted_json(plan_json)
-        .context("a warm claim attaching volumes needs its admitted plan")?;
-    mvm_hostd::plan_admission::enforce_admitted_shares(volumes, &plan)
-        .context("checking the volumes a warm claim attaches against its admitted shares")
-}
-
-/// Refuse to boot if the kernel about to be loaded is not the one the verified
-/// `ExecutionPlan` pinned.
-///
-/// The sibling of [`enforce_shares`], called at the same point for the same
-/// reason: `mvmctl` admits its plan and then starts the backend itself rather
-/// than going through `start_admitted`, so every gate that path runs has to be
-/// run here too or it does not run at all. The admitted-environment gate was
-/// the one nobody called.
-pub fn enforce_kernel(ctx: &AdmissionContext, kernel_path: Option<&std::path::Path>) -> Result<()> {
-    mvm_hostd::plan_admission::enforce_admitted_environment(kernel_path, ctx.admitted.plan())
-        .context("admission kernel check")
-}
-
-/// Close a transient run's audit narrative against the plan it booted under:
-/// `plan.launched`, the boot posture and the start mode when the run
-/// succeeded, `plan.failed` when it did not.
-///
-/// `admitted` is `None` only when the run failed before admission was reached —
-/// resolving the image, say. There is no plan to bind that failure to, so
-/// nothing is recorded. It is never `None` for a run that booted: admission is
-/// unconditional, and the admit closure fills this before the backend starts.
-///
-/// Both transient paths close the same way, so they share this rather than each
-/// carrying its own copy of the two branches.
-pub fn record_transient_outcome<T>(
-    admitted: Option<&AdmissionContext>,
-    backend: &str,
-    posture: BootPosture,
-    outcome: &Result<T>,
-) {
-    let Some(ctx) = admitted else { return };
-    match outcome {
-        Ok(_) => {
-            emit_launched(ctx, backend, false);
-            emit_boot_posture(ctx, posture.root_strategy);
-            if let Some(start) = posture.start {
-                emit_start_mode(ctx, start);
-            }
-        }
-        Err(e) => emit_failed(
-            ctx,
-            crate::launch::startup_budget::failure_class(e, "launch"),
-            e,
-        ),
-    }
-}
-
-/// Emit `plan.failed` against the supplied admission context. `class` is a short grep-friendly tag
-/// (e.g. `backend-start`, `snapshot-restore`); `err` becomes the
-/// rendered error chain.
-pub fn emit_failed(ctx: &AdmissionContext, class: &str, err: &anyhow::Error) {
-    let msg = format!("{err:#}");
-    if let Err(e) = ctx.emitter.emit_failed(ctx.admitted.plan(), class, &msg) {
-        tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
-    }
-    // A failed boot is the end of its session.
-    if let Err(e) = ctx.emitter.seal_session(
-        ctx.admitted.plan(),
-        mvm_hostd::audit::session::SealReason::Failed,
-    ) {
-        crate::launch::record_unsealed_end(
-            Some((&ctx.emitter, ctx.admitted.plan())),
-            crate::launch::UnsealedEnd::new(
-                &ctx.admitted.plan().workload.0,
-                crate::launch::UnsealedReason::SealFailed,
-            )
-            .error(format!("{e:#}")),
-        );
-    }
-}
-
-#[cfg(test)]
-mod host_signer_pubkey_config_tests {
-    use super::*;
-    use mvm_core::plan::{VerbId, test_support::PlanFixture};
-    use mvm_core::vm_backend::VmStartConfig;
-
-    #[test]
-    fn attaches_pubkey_when_plan_has_agent_verbs() {
-        let dir = tempfile::tempdir().unwrap();
-        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let pubkey = signer.verifying_key().to_bytes();
-        std::fs::write(&pubkey_path, pubkey).unwrap();
-        let mut plan = PlanFixture::new().build();
-        plan.agent_verbs = Some(vec![VerbId::new("ping").unwrap()]);
-        let mut start_config = VmStartConfig::default();
-
-        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
-
-        assert_eq!(start_config.config_files.len(), 1);
-        let file = &start_config.config_files[0];
-        assert_eq!(file.name, PUBLIC_FILENAME);
-        assert_eq!(file.content, format!("{}\n", hex::encode(pubkey)));
-        assert_eq!(file.mode, 0o444);
-    }
-
-    #[test]
-    fn replacing_pubkey_preserves_other_config_files_and_removes_duplicates() {
-        let dir = tempfile::tempdir().unwrap();
-        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
-        let pubkey = signer.verifying_key().to_bytes();
-        std::fs::write(&pubkey_path, pubkey).unwrap();
-        let mut plan = PlanFixture::new().build();
-        plan.agent_verbs = Some(vec![VerbId::new("ping").unwrap()]);
-        let mut start_config = VmStartConfig {
-            config_files: vec![
-                mvm_core::vm_backend::VmFile {
-                    name: "other-config".into(),
-                    content: "keep".into(),
-                    mode: 0o444,
-                },
-                mvm_core::vm_backend::VmFile {
-                    name: PUBLIC_FILENAME.into(),
-                    content: "stale".into(),
-                    mode: 0o444,
-                },
-            ],
-            ..VmStartConfig::default()
-        };
-
-        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
-
-        assert_eq!(
-            start_config
-                .config_files
-                .iter()
-                .filter(|file| file.name == PUBLIC_FILENAME)
-                .count(),
-            1
-        );
-        assert!(
-            start_config
-                .config_files
-                .iter()
-                .any(|file| file.name == "other-config" && file.content == "keep")
-        );
-    }
-
-    #[test]
-    fn skips_pubkey_when_plan_has_no_agent_verbs() {
-        let dir = tempfile::tempdir().unwrap();
-        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
-        let mut plan = PlanFixture::new().build();
-        plan.agent_verbs = None;
-        let mut start_config = VmStartConfig::default();
-
-        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
-
-        assert!(start_config.config_files.is_empty());
-    }
-
-    #[test]
-    fn attaches_sealed_security_policy_for_prod_boots() {
-        let mut start_config = VmStartConfig::default();
-
-        attach_guest_security_policy_config(&mut start_config, AgentProfile::SealedProd).unwrap();
-
-        let file = start_config
-            .config_files
-            .iter()
-            .find(|file| file.name == SECURITY_POLICY_FILENAME)
-            .expect("security policy file attached");
-        let policy: SecurityPolicy =
-            serde_json::from_str(&file.content).expect("parse security policy");
-        assert_eq!(policy.profile, AgentProfile::SealedProd);
-        assert!(policy.require_auth);
-        assert!(!policy.access.console);
-    }
-
-    /// The policy attach must replace a stale policy file, keep every
-    /// unrelated config file, and never duplicate the policy. The retain
-    /// predicate is the whole guarantee: inverted, every sibling config file
-    /// is dropped and the policy multiplies.
-    #[test]
-    fn attaching_the_security_policy_replaces_only_the_policy_file() {
-        let mut start_config = VmStartConfig::default();
-        start_config
-            .config_files
-            .push(mvm_core::vm_backend::VmFile {
-                name: "other-config".to_string(),
-                content: "keep".to_string(),
-                mode: 0o444,
-            });
-
-        attach_guest_security_policy_config(&mut start_config, AgentProfile::SealedProd).unwrap();
-        attach_guest_security_policy_config(&mut start_config, AgentProfile::SealedProd).unwrap();
-
-        assert_eq!(
-            start_config
-                .config_files
-                .iter()
-                .filter(|file| file.name == SECURITY_POLICY_FILENAME)
-                .count(),
-            1,
-            "a second attach replaces the stale policy instead of stacking another"
-        );
-        assert!(
-            start_config
-                .config_files
-                .iter()
-                .any(|file| file.name == "other-config" && file.content == "keep"),
-            "an unrelated config file must survive the policy attach"
-        );
-    }
-
-    #[test]
-    fn attaches_dev_security_policy_for_dev_boots() {
-        let mut start_config = VmStartConfig::default();
-
-        attach_guest_security_policy_config(&mut start_config, AgentProfile::Dev).unwrap();
-
-        let file = start_config
-            .config_files
-            .iter()
-            .find(|file| file.name == SECURITY_POLICY_FILENAME)
-            .expect("security policy file attached");
-        let policy: SecurityPolicy =
-            serde_json::from_str(&file.content).expect("parse security policy");
-        assert_eq!(policy.profile, AgentProfile::Dev);
-        assert!(!policy.require_auth);
-        assert!(policy.access.console);
-    }
-
-    #[test]
-    fn builder_security_policy_preserves_the_builder_profile() {
-        assert_eq!(
-            security_policy_for_profile(AgentProfile::Builder).profile,
-            AgentProfile::Builder
-        );
-    }
-
-    #[test]
-    fn guest_profile_requires_both_dev_override_and_sealed_image_checks() {
-        use mvm_build::builder_vm::GuestSidecar;
-
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        let mut sidecar = GuestSidecar::for_oci_run("test", false, false);
-        sidecar.accessible = false;
-        sidecar.sealed = true;
-        sidecar.write_to_dir(dir.path()).unwrap();
-
-        assert_eq!(
-            guest_profile_for_boot(false, &rootfs),
-            AgentProfile::SealedProd
-        );
-        assert_eq!(guest_profile_for_boot(true, &rootfs), AgentProfile::Dev);
-    }
-}
-
-#[cfg(test)]
-mod claim_shares_tests {
-    use super::*;
-    use mvm_core::plan::test_support::PlanFixture;
-    use mvm_core::vm_backend::VmVolume;
-
-    fn read_only_mount(guest: &str) -> VmVolume {
-        VmVolume {
-            host: "/workspace".into(),
-            guest: guest.into(),
-            materialized_image: Some(format!("/cache{guest}.ext4")),
-            read_only: true,
-            ..Default::default()
-        }
-    }
-
-    /// A volume the signed plan never admitted is refused before any parent is
-    /// touched, and so is a launch with volumes whose plan cannot be read.
-    #[test]
-    fn a_volume_the_plan_did_not_admit_is_refused_before_the_claim() {
-        let volumes = vec![read_only_mount("/data")];
-        let plan = PlanFixture::new().build();
-        let plan_json = serde_json::to_string(&plan).unwrap();
-        let err = enforce_shares_for_claim(&volumes, &plan_json).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not named in the signed"),
-            "{err:#}"
-        );
-        assert!(enforce_shares_for_claim(&volumes, "not a plan").is_err());
-        assert!(enforce_shares_for_claim(&[], "not a plan").is_ok());
-    }
-
-    /// The content digest a plan pinned for a mount is re-checked right before
-    /// the claim, as a cold boot re-checks it: an image whose bytes changed
-    /// after admission is refused, the unchanged one is attached.
-    #[test]
-    fn a_mount_whose_bytes_changed_after_admission_is_refused_before_the_claim() {
-        let dir = tempfile::tempdir().unwrap();
-        let image = dir.path().join("mount.ext4");
-        std::fs::write(&image, b"admitted bytes").unwrap();
-        let mut volume = read_only_mount("/data");
-        volume.materialized_image = Some(image.display().to_string());
-        let volumes = vec![volume.clone()];
-
-        let mut plan = PlanFixture::new().build();
-        plan.shares = vec![mvm_core::plan::HostShareGrant {
-            tag: "uvol0".into(),
-            host_path: volume.host.clone(),
-            guest_path: volume.guest.clone(),
-            kind: mvm_core::plan::ShareKind::DirShare,
-            read_only: true,
-            encrypted: false,
-            content_sha256: Some(mvm_core::crypto::image_verify::sha256_file(&image).unwrap()),
-        }];
-        let plan_json = serde_json::to_string(&plan).unwrap();
-        enforce_shares_for_claim(&volumes, &plan_json).expect("unchanged bytes are attached");
-
-        std::fs::write(&image, b"changed after admission").unwrap();
-        assert!(
-            enforce_shares_for_claim(&volumes, &plan_json).is_err(),
-            "bytes the plan never vouched for must not reach a claimed child"
-        );
     }
 }
 

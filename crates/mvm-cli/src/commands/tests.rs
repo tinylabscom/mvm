@@ -6618,7 +6618,7 @@ fn the_separator_tip_stays_off_other_commands_and_errors() {
     assert!(
         separator_tip(
             ErrorKind::UnknownArgument,
-            &words(&["bundle", "export", "x"])
+            &words(&["bundle", "fetch", "x"])
         )
         .is_none()
     );

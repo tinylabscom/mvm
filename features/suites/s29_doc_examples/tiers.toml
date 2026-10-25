@@ -23,8 +23,8 @@ reason = "downloads or builds a multi-hundred-megabyte artifact over the network
 
 [[command]]
 path = "build"
-tier = "parse"
-reason = "compiles a pack, manifest, or flake through the builder and signs a local archive; source detection, ambiguity refusal, export controls, and origin stamping have focused unit, CLI, and BDD coverage, while the live build witness runs in the builder environment"
+tier = "live"
+reason = "compiles every supported source through the builder or OCI materializer and signs a local archive; source detection, ambiguity refusal, export controls, and origin stamping have focused tests, while live pack and OCI scenarios exercise the expensive paths"
 
 [[command]]
 path = "dev compile"
@@ -41,11 +41,6 @@ reason = "cross-compiles every guest artifact for both guest architectures with 
 path = "dev kernel build"
 tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
-
-[[command]]
-path = "bundle build"
-tier = "live"
-reason = "acquires OCI and authenticated runtime assets, materializes a real rootfs, and signs the archive; the live bundle scenario verifies outputs and publisher trust"
 
 [[command]]
 path = "bundle fetch"
@@ -442,11 +437,6 @@ tier = "exec"
 [[command]]
 path = "ops metrics"
 tier = "exec"
-
-[[command]]
-path = "pack build"
-tier = "live"
-reason = "builds the frozen flake in the builder VM, health-boots its entrypoint, and signs the result; the live pack scenario installs the resulting archive in a fresh trusting home"
 
 [[command]]
 path = "pack download"

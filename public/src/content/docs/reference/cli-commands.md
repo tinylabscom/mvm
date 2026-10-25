@@ -221,7 +221,7 @@ refused before any output is written.
 | `mvmctl build app.py --from sdk`                                    | Compile one statically declared SDK app, build its generated flake, and export the result as a local archive                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `mvmctl build ghcr.io/acme/app:v1 --from image`                     | Materialize an OCI image for this host architecture and export it as a local archive; `--arch`, `--production`, and `--debug-out FILE.json` are image-only controls, and production requires a digest-pinned reference                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `mvmctl build PACK.json --health-timeout SECONDS`                   | Build and health-check a locked pack spec before signing; `--lock`, `--hypervisor`, and `--input-observation` are pack-only controls                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `mvmctl build SOURCE --label L --posture P --environment FILE.json` | Record archive metadata shared with `bundle export`; `--allow-egress`, `--allow-volumes`, and `--allow-unauthenticated` require `--posture`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `mvmctl build SOURCE --label L --posture P --environment FILE.json` | Record signed archive metadata for any source; `--allow-egress`, `--allow-volumes`, and `--allow-unauthenticated` require `--posture`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `mvmctl machine build <path>`                                       | Build the slot for a manifest directory. A `flake =` manifest builds through Nix in the builder VM; an `image =` manifest materializes the OCI reference through the same path `run --image` boots, then installs it as a slot revision                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `mvmctl kernel build`                                               | Build the custom microVM kernels into the local cache. `--which builder|workload|workload-k8s|rootless` (default `builder`) or `--all`; `--source compile|download|auto`. A compile builds from the selected `mvm-images` checkout's `kernel/` flake (`MVM_IMAGES_DIR`, else a sibling `../mvm-images`), otherwise from the in-repo flake. `workload-k8s` is defined only in-repo: it is refused against a configured checkout and built in-repo under a discovered one; `rootless` is defined only in `mvm-images`. Boot a built `workload-k8s` kernel on a dev-tier `machine run` with `MVM_WORKLOAD_KERNEL_VARIANT=workload-k8s`      |
 | `mvmctl machine build <path>`                                       | Build from Mvmfile.toml in the given directory                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -1468,20 +1468,28 @@ only after at least one embedded image set was actually checked for `--backend`.
 Consumers of the former unconditional boolean must handle the nullable field.
 Neither cache-file presence nor package-publisher declarations establish
 canonical Linux authority or current-policy admission.
-The older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
-to. Use `mvmctl machine run` for the manifest/flake path that already
-exposes named networks and policy bundles.
+The older `.mvm` format and its separate packaging verbs are gone; `mvmctl
+build` produces the `.mvmpkg` that `mvmctl run` consumes.
 
 #### Packaging an OCI image
 
-`bundle build` resolves an OCI image, materializes its filesystem, and signs a
-single architecture-specific `.mvmpkg` with the host signer:
+`mvmctl build` resolves an explicitly selected OCI image, materializes its
+filesystem, and signs a single architecture-specific `.mvmpkg` with the host
+signer:
 
 ```sh
-mvmctl bundle build --image docker.io/library/alpine:3.20 \
+mvmctl build docker.io/library/alpine:3.20 --from image \
   --out alpine.mvmpkg --debug-out alpine.bundle.json
+mvmctl machine check-artifact ./alpine.mvmpkg
+mvmctl run ./alpine.mvmpkg -- /bin/sh
+```
+
+The archive above is a host-local build, not a publisher release. Fetching it
+through the publisher-verification surface is deliberately refused with exit
+code 1; use `machine check-artifact` to inspect it and `run` to launch it locally:
+
+```sh
 mvmctl bundle fetch ./alpine.mvmpkg
-mvmctl machine run --manifest ./alpine.mvmpkg -- /bin/sh
 ```
 
 The package carries the workload kernel, rootfs, resolved entrypoint and libc
@@ -1580,7 +1588,7 @@ entry carry `origin=local-build` and the archive's `bundle_sha256`. Diagnostic a
 run output calls it `local build, signed by this host's key; not
 release-verified`; it is never described as verified, secure, or trusted.
 
-A bundle sealed with `bundle export --posture` bounds every launch of it. Before
+A bundle sealed with `mvmctl build --posture` bounds every launch of it. Before
 boot, the run reads the installed bundle's manifest and checks its signature
 against the trust store again, without re-hashing the artifacts. It then refuses
 a launch that asks for more than the posture allows:
@@ -1598,7 +1606,7 @@ install fails the signature check and refuses the boot.
 
 #### Environment descriptor
 
-`bundle export --environment FILE.json` seals a signed environment descriptor
+`mvmctl build --environment FILE.json` seals a signed environment descriptor
 as the bundle's `environment` member. The descriptor is typed JSON with its own
 `descriptor_version` (currently `1`); unknown fields, capabilities, or versions
 are refused rather than ignored:
@@ -1661,11 +1669,9 @@ recorded and shown by `bundle fetch`, not started as broker services. Passing
 not bypass their refusal. Bundles without an environment descriptor retain
 ordinary `--volume` behavior under the posture's ceiling.
 
-`.mvmpkg` is the one extension for a runnable artifact. Being runnable is a
-property of the command, not of the file: the same archive `bundle export`,
-`bundle build`, and `artifact pack` write is the one `bundle install`,
-`machine check-artifact`, and `machine run` read, and there is no second
-container format.
+`.mvmpkg` is the one extension for a runnable artifact. `mvmctl build` writes
+the same archive that `bundle install`, `machine check-artifact`, and `run`
+read; there is no second container format.
 
 A positional source is unambiguous because the guest command only ever follows
 `--`: `mvmctl machine run ./app.mvmpkg` names a bundle, and running a program
@@ -2161,8 +2167,6 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl pack verify ns/name[@version] [--json]`           | Recheck the exact pin, current publisher and revocation policy, and legacy payload or application bundle archive; report verification scope or fail closed, without fetching or installing |
 | `mvmctl pack lock SPEC.json --mvm-revision COMMIT [--out FILE \| --stdout]` | Resolve an authored `mvm.pack-spec/v1` document against its source tree and write the frozen `pack.lock.json` beside it: spec, source snapshot and lowered-workload digests, compiler version and the pinned mvm commit. A uv `pyproject.toml` + `uv.lock` at the source root is resolved here for the pack's target and its single `python3NN` runtime package: one sha256-pinned manylinux wheel per runtime dependency, recorded in the lowered workload. Non-registry sources, markers the target does not decide, an unsatisfied `requires-python` and packages without a compatible wheel are refused by name. The spec is read as data; no author code runs |
 | `mvmctl pack compile SPEC.json --out DIR [--lock FILE]` | Compile a pack spec into a flake artifact only when its lock still matches; a missing lock or any stale field (named in the error) is refused before anything is written. A pack with uv dependencies also gets `pack-build.json`, the resolved wheel set the flake fetches and installs at build time |
-| `mvmctl pack build SPEC.json --out FILE.mvmpkg --input-observation PATH` | Opt into bounded, unsigned frozen Nix graph diagnostics; publish the no-clobber JSON report only after successful build, health checking and export. Not an admission credential |
-| `mvmctl pack build SPEC.json --out FILE.mvmpkg [--lock FILE] [--health-timeout SECS] [--hypervisor H]` | Compile a locked pack spec, build it in the builder VM, boot its entrypoint as a health check, and seal it into a `.mvmpkg` signed by the host key. The archive carries a sealed-prod posture and a signed environment naming the entrypoint, target and sizing. A stale lock, a non-zero health exit, or any artifact that changes between the health boot and signing is refused, and nothing is signed. Python (`mvm.packs`) and TypeScript (`packs`) write the spec as data |
 | `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
 | `mvmctl pack pull ns/name[@version] [--json]`             | Authenticate, install, and pin a registry product. Application descriptors additionally bind an independently trusted bundle; application JSON reports `status: "installed"`, `installed: true`, descriptor `manifest_sha256`, `bundle_sha256`, and `key_id` only after the reference commit. Same trust policy and behavior as `mvmctl pull` |
 | `mvmctl pack registry ls`                                 | Compatibility spelling of `pack ls`                                                                                                                               |
@@ -2171,29 +2175,23 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl pack registry revocations update --document PATH --bundle PATH [--official]` | Verify and cache a signed revocation feed. Without `--official`, use the operator-configured release identity with at most 48-hour validity. With `--official`, require the dedicated `tinylabscom/mvm-packs` `registry-pack-revocations.yml` identity with at most 30-day validity. Both paths reject expired feeds and advance a rollback-resistant checkpoint. |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
 | `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. A schema-v2 application descriptor is authenticated under the same publisher policy, revocation feed and pins, then its archive is acquired within the signed size bound, independently bundle-verified, installed and pinned. Text output reads `installed ns/name@version (manifest DIGEST, bundle SHA256)`, and `--json` prints `reference`, `manifest_sha256`, `bundle_sha256`, `key_id`, `status: "installed"` and `installed: true`. `pack update` prints the same text line for an application. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`. The former identity is accepted only for the nine exact historical versioned manifest reference/byte-digest pairs listed in [pack authoring](/guides/pack-authoring/#decide-who-may-publish), and only before 2026-11-06 00:00 UTC; the exception is checked after real Sigstore verification identifies the signer. Explicit operator publisher policy is not constrained by that built-in digest exception or cutoff. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
-| `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
-| `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
-| `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
-| `mvmctl bundle export <t> --posture <p> --allow-egress` / `--allow-volumes` / `--allow-unauthenticated` | Open one ceiling of the declared posture. `--allow-unauthenticated` is refused for `sealed-prod`                                                                   |
-| `mvmctl bundle export <t> --environment <file.json>`      | Seal a signed environment descriptor (entrypoint, advisory resources, volumes, secret slot names, required capabilities, application services); capabilities must be permitted by `--posture` |
 | `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` from a path, an `https://` URL, or an `oci://` registry reference against the local trust store                                                |
 | `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) into `~/.mvm/bundles/<sha>/`, streaming each artifact through its hash check rather than loading the archive into memory                                                                  |
 | `mvmctl bundle push <file> <ref>`                         | Verify a `.mvmpkg` against the local trust store, publish it to an image registry, and print its `oci://…@sha256:` reference                                      |
 | `mvmctl bundle gc`                                        | Prune installed bundles — a specific `<SHA>` or `--all`                                                                                                           |
-| `mvmctl artifact pack`                                    | Alias of `mvmctl bundle export`; takes the same arguments                                                                                                         |
 | `mvmctl deps inspect`                                     | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM                                                                 |
 | `mvmctl deps audit`                                       | Re-verify a sealed dep volume against its recorded chain                                                                                                          |
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
 | `mvmctl pool warm [COUNT]`                                | Optional: pre-spawn standby microVMs so even the first run of an image claims a warm one                                                                          |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
-Archive output is create-only: `pack build --out`, `bundle export --out` and
-its `artifact pack` alias refuse an existing file, symlink or directory without
-overwriting it. Use a new destination for a rebuild. Archives are written to
-invocation-private staging on the destination filesystem; concurrent attempts
-at the same destination cannot both publish successfully.
+Archive output is create-only: `mvmctl build --out` refuses an existing file,
+symlink or directory without overwriting it. Use a new destination for a
+rebuild. Archives are written to invocation-private staging on the destination
+filesystem; concurrent attempts at the same destination cannot both publish
+successfully.
 
-`pack build` checks the staged archive's manifest, hash and frozen build identity
+The pack source path checks the staged archive's manifest, hash and frozen build identity
 before publishing it. Validation failures discard only that invocation's staging,
 never an archive found later at the requested output path. Cleanup errors are
 reported rather than silently ignored. An input-observation report describes the
@@ -2255,7 +2253,7 @@ compatibility, or launch admission. Legacy inspection output is unchanged.
 The canonical safe local descriptor reader is currently Unix-only; unsupported
 platforms fail closed rather than opening unchecked metadata.
 
-Locked `pack build` inputs never receive the contributor build's automatic
+Locked pack inputs to `mvmctl build` never receive the contributor build's automatic
 local-checkout `mvm` override: the compiled GitHub input remains the lock's pinned
 commit even when `mvmctl` was compiled from a local checkout. Each invocation owns
 its compile directory, checked builder-input snapshot and private template slot
@@ -2293,7 +2291,7 @@ Diagnostics name the retained paths. Remove them only after independently
 confirming the relevant VM has exited; this retention is not a health or cleanup
 receipt.
 
-`pack build --input-observation PATH` explicitly opts into bounded diagnostic
+`mvmctl build PACK.json --input-observation PATH` explicitly opts into bounded diagnostic
 evidence about the frozen Nix input graph. The builder captures raw flake
 metadata for the same `/work` reference and output attribute, resolves `mvm`
 through the root input edge, and consumes that captured graph with
@@ -2389,7 +2387,7 @@ archive) or `--flake` with an optional `--flake-profile`. An archive is
 verified and installed exactly as `machine run` does it. Standbys are keyed by
 the verified bundle or slot digest and the image digest, so a launch of a
 different artifact, or of the same rootfs under the host runtime, never claims
-one. A bundle that pins its own boot assets (`bundle build`) keeps its cold
+one. A bundle produced from an OCI image and pinning its own boot assets keeps its cold
 path: the guest runtime it pins predates the claim handshake. `pool warm`
 refuses that bundle before preparing a standby, rather than creating capacity
 that no launch can claim.

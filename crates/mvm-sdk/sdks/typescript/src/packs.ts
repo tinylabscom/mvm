@@ -17,7 +17,7 @@
  *
  * The builder only assembles and validates authored data. It never resolves a
  * package, reads the source tree, builds, boots or signs: `mvmctl pack lock`,
- * `mvmctl pack compile` and `mvmctl pack build` do that in the shared Rust
+ * `mvmctl pack compile` and `mvmctl build` do that in the shared Rust
  * path, reading the bytes this emits as data. Those bytes are the canonical
  * bytes every language SDK emits for the same spec, so a lock's `spec_sha256`
  * does not depend on which language wrote it.

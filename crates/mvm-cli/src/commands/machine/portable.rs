@@ -32,7 +32,7 @@ pub(in crate::commands) struct CheckArtifactArgs {
 pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result<()> {
     if !mvm_client::launch::manifest_ref::is_bundle_archive(&args.path) {
         anyhow::bail!(
-            "{} is not a .mvmpkg bundle; seal one with `mvmctl bundle export`",
+            "{} is not a .mvmpkg bundle; create one with `mvmctl build`",
             args.path.display()
         );
     }

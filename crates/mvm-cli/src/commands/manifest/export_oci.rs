@@ -68,7 +68,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         anyhow::bail!(
             "no OCI tarball at {} — this template wasn't built with the OCI output enabled. \
              Rebuild after wiring `dockerTools.streamLayeredImage` into the flake's mkGuest \
-             call, or use `mvmctl bundle export` for a signed .mvmpkg instead.",
+             call, or use `mvmctl build` for a signed .mvmpkg instead.",
             oci_src.display()
         );
     }

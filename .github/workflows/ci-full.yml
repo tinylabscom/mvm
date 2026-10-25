@@ -1200,7 +1200,7 @@ jobs:
           ln -s "artifacts/revisions/$revision_hash" "$MVM_HOME/templates/$slot_hash/current"
 
           mkdir -p ci-artifacts/no-kvm-bundle
-          /tmp/mvmctl-source-under-test bundle export "$slot_hash" \
+          /tmp/mvmctl-source-under-test dev export-template "$slot_hash" \
             --out ci-artifacts/no-kvm-bundle/exit-code-x86_64.mvmpkg \
             --label hosted-no-kvm-exit-code-7
           cp "$MVM_HOME/keys/host-signer.pub" \

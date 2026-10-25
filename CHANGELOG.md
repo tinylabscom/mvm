@@ -27,6 +27,7 @@ All notable changes to mvm are documented in this file.
 
 ### Changed
 - **cli**: Move contributor build and inspection subcommands from `mvmctl build` to `mvmctl dev` (#4584)
+- **cli**: Remove the legacy `pack build`, `bundle build`, `bundle export`, and `artifact pack` entry points in favor of `mvmctl build` (#4584)
 - **nix**: Bump the libkrunfw kernel to Linux 6.12.114
 
 ### Documentation

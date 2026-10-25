@@ -518,7 +518,7 @@ pub fn pack_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_cache_dir()).join("packs")
 }
 
-/// Work directory `mvmctl pack build` compiles one locked pack spec into,
+/// Work directory `mvmctl build` compiles one locked pack spec into,
 /// keyed by the lock's workload digest. The flake built from it records this
 /// path, so rebuilding the same lock reuses the same template slot.
 pub fn pack_build_dir(workload_sha256: &str) -> std::path::PathBuf {

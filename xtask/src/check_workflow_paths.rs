@@ -1530,7 +1530,7 @@ mod tests {
                 && build.contains("bzImage.sha256")
                 && build.contains("write /tmp/exit-code-entrypoint /etc/mvm/entrypoint")
                 && build.contains("veritysetup format")
-                && build.contains("bundle export \"$slot_hash\""),
+                && build.contains("dev export-template \"$slot_hash\""),
             "bundle preparation must combine verified release rootfs bytes with source-matched launch artifacts and exporter"
         );
         // `/etc/mvm/entrypoint` is a marker, not a command line. The agent

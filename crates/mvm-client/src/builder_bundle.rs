@@ -1,7 +1,7 @@
 //! Building a flake and sealing what it produced into a signed `.mvmpkg`.
 //!
 //! [`build_and_export_bundle`] is the library form of building an image and
-//! then running `mvmctl bundle export` on it: one flake build in a builder VM,
+//! then sealing it through `mvmctl build`: one flake build in a builder VM,
 //! then the same export, under the caller's signer.
 //!
 //! ## Which processes can build

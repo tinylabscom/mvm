@@ -1,9 +1,9 @@
-//! `mvmctl pack build` — turn a locked pack spec into a signed `.mvmpkg`.
+//! Pack-source implementation for the `mvmctl build` front door.
 //!
 //! One path, every step reusing what already exists: the frozen compile
 //! (`mvm_compiler::pack`), the flake build into a template slot (the builder
 //! VM), a health boot of the baked entrypoint under the admitted launch path,
-//! and the bundle export signed by the host key. Each artifact is digested
+//! and the archive signed by the host key. Each artifact is digested
 //! before the health boot and again before signing; anything that changed in
 //! between is refused, so what is signed is exactly what was checked.
 //!
@@ -58,18 +58,14 @@ pub(in crate::commands) struct BuildArgs {
     pub input_observation: Option<PathBuf>,
 }
 
-pub(super) fn run(args: BuildArgs) -> Result<()> {
-    run_inner(args, None)
-}
-
 pub(in crate::commands) fn run_for_front_door(
     args: BuildArgs,
     options: ExportOptions,
 ) -> Result<()> {
-    run_inner(args, Some(options))
+    run_inner(args, options)
 }
 
-fn run_inner(args: BuildArgs, options: Option<ExportOptions>) -> Result<()> {
+fn run_inner(args: BuildArgs, options: ExportOptions) -> Result<()> {
     let observation = args
         .input_observation
         .as_ref()
@@ -185,11 +181,8 @@ fn run_inner(args: BuildArgs, options: Option<ExportOptions>) -> Result<()> {
 
     // ---- 5. Seal and sign under the host key ----
     producer.build.verify_revision()?;
-    let mut export = pack_export(&args.out, &loaded.spec, &lock, image_argv)?;
-    if let Some(options) = options {
-        export = options.apply(export)?;
-        export.local_build = true;
-    }
+    let mut export = options.apply(pack_export(&args.out, &loaded.spec, &lock, image_argv)?)?;
+    export.local_build = true;
     export.portable_boot_assets = Some(std::sync::Arc::clone(&producer.boot));
     let mut staged = stage_template(slot, export)?;
     // The exporter re-read the slot's files; what it sealed must be what the
@@ -597,7 +590,9 @@ mod tests {
             report.to_str().unwrap(),
         ])
         .unwrap();
-        let error = run(parsed.args).unwrap_err().to_string();
+        let error = run_for_front_door(parsed.args, ExportOptions::default())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("destination already exists"), "{error}");
         assert_eq!(fs::read(&report).unwrap(), b"existing");
     }

@@ -281,7 +281,7 @@ pub enum LocalAuditKind {
     /// against the local trust store to an image registry. Detail:
     /// `bundle_sha256=<64hex>,key_id=<32hex>,reference=oci://<ref>@<digest>`.
     BundlePush,
-    /// `mvmctl pack build` — built a locked pack, passed its health boot, and
+    /// `mvmctl build` with a pack source — built a locked pack, passed its health boot, and
     /// sealed it into an archive signed by the host key. Detail:
     /// `pack=<ns/name@version>,workload_sha256=<64hex>,bundle_sha256=<64hex>,key_id=<id>`.
     PackBuild,
