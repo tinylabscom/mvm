@@ -145,28 +145,18 @@ pub fn attach_universal_initramfs_if_cached(
         return Ok(());
     }
     if let Some(proof) = &start_config.runtime_release_proof {
+        // Owned, because `start_config` is borrowed mutably below.
         let version = start_config
             .runtime_overlay_version
-            .as_deref()
+            .clone()
             .context("signed runtime selection has no overlay version")?;
         let arch = mvm_core::arch::GuestArch::host();
-        let verified =
-            mvm_build::guest_runtime::evidence::verify_runtime_release_proof(proof, version, arch)?;
+        let verified = mvm_build::guest_runtime::evidence::verify_runtime_release_proof(
+            proof, &version, arch,
+        )?;
         let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-        // Keep an initramfs already selected (a portable bundle's own copy) only
-        // when it is the exact one the signed archive declares; otherwise require
-        // the prepared one, never re-resolving a channel or assembling a missing
-        // piece during startup.
         let declared = verified.declaration(arch)?.initramfs_sha256.clone();
-        let selected =
-            select_release_initramfs(start_config.initrd_path.as_deref(), &declared, || {
-                resolve_cached_initramfs(&cache.join("initramfs"), version, arch)
-                    .map(|artifact| artifact.image_path)
-                    .context(
-                        "selected release initramfs is not prepared; run `mvmctl bootstrap` first",
-                    )
-            })?;
-        start_config.initrd_path = Some(selected);
+        attach_declared_release_initramfs(start_config, &declared, &cache, &version, arch)?;
         return Ok(());
     }
     anyhow::ensure!(
@@ -201,12 +191,40 @@ pub fn attach_universal_initramfs_if_cached(
     })
 }
 
+/// Point `start_config` at the initramfs a signed release declares.
+///
+/// Keep an initramfs already selected (a portable bundle's own copy) only when
+/// it is the exact one the signed archive declares; otherwise require the
+/// prepared one under `cache_root`, never re-resolving a channel or assembling
+/// a missing piece during startup. Split from [`attach_universal_initramfs_if_cached`]
+/// so the choice can be exercised with a declared digest: the proof that
+/// yields one is real Sigstore verification, which a unit test cannot mint.
+fn attach_declared_release_initramfs(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    declared_sha256: &str,
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<()> {
+    let selected =
+        select_release_initramfs(start_config.initrd_path.as_deref(), declared_sha256, || {
+            resolve_cached_initramfs(&cache_root.join("initramfs"), version, arch)
+                .map(|artifact| artifact.image_path)
+                .context("selected release initramfs is not prepared; run `mvmctl bootstrap` first")
+        })?;
+    start_config.initrd_path = Some(selected);
+    Ok(())
+}
+
 /// The initramfs a signed-release launch boots: the one already selected when
 /// its digest is the signed declaration's, else the prepared cached one, which
 /// must match it too. A selected file that is unreadable or differs is not
 /// trusted and not an error by itself; the cached copy is held to the same bar.
-/// The backend re-verifies the selected artifacts against the declaration
-/// before spawning, so this is a pre-check, not the custody point.
+///
+/// The digest check here is a pre-check. `RuntimeLifecycleLease::bind` is the
+/// custody point: it snapshots the selected artifacts and re-verifies them
+/// against the declaration before the backend spawns, so a file swapped after
+/// this returns is still caught.
 fn select_release_initramfs(
     selected: Option<&str>,
     declared_sha256: &str,
@@ -369,6 +387,10 @@ pub fn seed_warm_universal_initramfs(mvm_home: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use mvm_core::arch::GuestArch;
+    use mvm_core::util::test_env::TestEnv;
+    use mvm_core::vm_backend::VmStartConfig;
 
     #[test]
     fn release_initramfs_selection_keeps_only_a_digest_matching_selected_file() {
@@ -414,10 +436,121 @@ mod tests {
             select_release_initramfs(None, &signed, || anyhow::bail!("not prepared")).unwrap_err();
         assert!(err.to_string().contains("not prepared"));
     }
-    use super::*;
-    use mvm_core::arch::GuestArch;
-    use mvm_core::util::test_env::TestEnv;
-    use mvm_core::vm_backend::VmStartConfig;
+
+    /// What a launch sees when a bundle seals its own initramfs but the home's
+    /// cache holds one assembled from a different archive: the v0.24.1 macOS e2e
+    /// failure. The signed declaration names the bundle's copy.
+    fn bundle_and_stale_cached_initramfs(
+        home: &std::path::Path,
+    ) -> (std::path::PathBuf, String, std::path::PathBuf) {
+        seed_warm_universal_initramfs(home);
+        let version = env!("CARGO_PKG_VERSION");
+        let cached =
+            mvm_fs::initramfs::InitramfsResolver::new(home.join("cache/initramfs"), version)
+                .resolve(&GuestArch::host().to_string())
+                .expect("the seeded cache resolves")
+                .image_path;
+        let bundle = home.join("bundle-initrd");
+        std::fs::write(&bundle, b"initramfs sealed with the bundle").unwrap();
+        let declared = mvm_core::crypto::image_verify::sha256_file(&bundle).unwrap();
+        assert_ne!(
+            declared,
+            mvm_core::crypto::image_verify::sha256_file(&cached).unwrap(),
+            "the cached initramfs must differ from the bundle's for this to mean anything"
+        );
+        (bundle, declared, cached)
+    }
+
+    #[test]
+    fn a_bundle_initramfs_matching_the_signed_declaration_is_kept_over_a_stale_cached_one() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let (bundle, declared, _cached) = bundle_and_stale_cached_initramfs(home.path());
+        let mut config = VmStartConfig {
+            kernel_path: Some("/mock/kernel".into()),
+            initrd_path: Some(bundle.display().to_string()),
+            ..Default::default()
+        };
+        attach_declared_release_initramfs(
+            &mut config,
+            &declared,
+            &home.path().join("cache"),
+            env!("CARGO_PKG_VERSION"),
+            GuestArch::host(),
+        )
+        .expect("the bundle's initramfs is the declared one");
+        assert_eq!(config.initrd_path.as_deref(), bundle.to_str());
+    }
+
+    #[test]
+    fn a_bundle_initramfs_that_differs_from_the_signed_declaration_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let (bundle, declared, cached) = bundle_and_stale_cached_initramfs(home.path());
+        std::fs::write(&bundle, b"initramfs swapped after sealing").unwrap();
+        let mut config = VmStartConfig {
+            kernel_path: Some("/mock/kernel".into()),
+            initrd_path: Some(bundle.display().to_string()),
+            ..Default::default()
+        };
+        let error = attach_declared_release_initramfs(
+            &mut config,
+            &declared,
+            &home.path().join("cache"),
+            env!("CARGO_PKG_VERSION"),
+            GuestArch::host(),
+        )
+        .expect_err("a differing bundle initramfs must not boot");
+        assert!(
+            error
+                .to_string()
+                .contains("differs from the selected runtime archive"),
+            "{error:#}"
+        );
+        assert_eq!(
+            config.initrd_path.as_deref(),
+            bundle.to_str(),
+            "a refusal leaves the selection as it was"
+        );
+        // The stale cached copy is held to the same bar and is not a way around it.
+        assert_ne!(config.initrd_path.as_deref(), cached.to_str());
+    }
+
+    #[test]
+    fn no_bundle_initramfs_uses_the_prepared_one_only_when_it_matches_the_declaration() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let (_bundle, declared, cached) = bundle_and_stale_cached_initramfs(home.path());
+        let cached_digest = mvm_core::crypto::image_verify::sha256_file(&cached).unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let cache = home.path().join("cache");
+
+        let mut config = VmStartConfig::default();
+        let error = attach_declared_release_initramfs(
+            &mut config,
+            &declared,
+            &cache,
+            version,
+            GuestArch::host(),
+        )
+        .expect_err("a prepared initramfs for a different archive is refused");
+        assert!(error.to_string().contains("differs"), "{error:#}");
+        assert!(config.initrd_path.is_none());
+
+        let mut config = VmStartConfig::default();
+        attach_declared_release_initramfs(
+            &mut config,
+            &cached_digest,
+            &cache,
+            version,
+            GuestArch::host(),
+        )
+        .expect("the prepared initramfs is the declared one");
+        assert_eq!(config.initrd_path.as_deref(), cached.to_str());
+    }
 
     #[test]
     fn source_initramfs_must_match_the_original_overlay_archive_selection() {
