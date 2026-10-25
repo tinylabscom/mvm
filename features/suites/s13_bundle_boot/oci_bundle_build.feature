@@ -8,6 +8,7 @@ Feature: Package an OCI image and verify the signed archive
   generated host key remains local authority; no publisher trust is enrolled.
   Archive boot is a separate workflow and is not claimed by this scenario.
 
+  @runtime_candidate
   Scenario: Build and inspect an Alpine OCI package under local authority
     Given an isolated mvm home
     And a scratch working directory

@@ -7,7 +7,7 @@
 //! `--nocapture` to read the measurements:
 //!
 //! ```text
-//! cargo test -p mvm-core --test span_timing_overhead -- --nocapture
+//! cargo test -p mvm-cli --test span_timing_overhead -- --nocapture
 //! ```
 //!
 //! The assertions are deliberately loose. They exist to catch a pathological
@@ -17,8 +17,8 @@
 use std::thread;
 use std::time::Instant;
 
+use mvm_cli::observability::SpanTimingLayer;
 use mvm_core::observability::span_timing::SpanTimings;
-use mvm_observability::SpanTimingLayer;
 use tracing::dispatcher::{self, Dispatch};
 use tracing::instrument;
 use tracing_subscriber::EnvFilter;

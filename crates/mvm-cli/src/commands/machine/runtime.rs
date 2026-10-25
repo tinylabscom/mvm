@@ -257,7 +257,7 @@ fn run_persistent_post_start(
         denials.finish()?;
         let code = outcome?;
         if code != 0 {
-            mvm_observability::exit(code);
+            crate::observability::exit(code);
         }
         return Ok(());
     }
@@ -559,7 +559,7 @@ fn run_entrypoint_action(
     let exit_code = invoke::dispatch_attached(call)?;
     workspace_apply::offer_at_exit(&machine, exit_apply)?;
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }

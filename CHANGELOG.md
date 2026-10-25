@@ -63,6 +63,9 @@ All notable changes to mvm are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **mailbox**: Define the canonical no-std signed/encrypted envelope, capability, replay, and destination-receipt contract (#4628)
+
 ## [0.24.0] — 2026-10-12
 
 v0.23.0 was tagged but never published: its release run did not pass the live gates. v0.23.1 was prepared but never tagged. This is the first release since v0.22.0, so it also ships everything listed under 0.23.0 below.

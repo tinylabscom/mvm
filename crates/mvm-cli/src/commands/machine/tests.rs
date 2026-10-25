@@ -924,6 +924,21 @@ fn non_image_run_refuses_prod_before_source_work() {
             "argv {argv:?}: {err}"
         );
     }
+
+    // A signed bundle artifact is the one source the gate admits without
+    // `--image`/`--runtime`: its signature is verified when the manifest
+    // settles, and a host-local build is refused under --prod at that step.
+    let args = parse_run(&[
+        "run",
+        "--manifest",
+        "./app.mvmpkg",
+        "--prod",
+        "--",
+        "/bin/true",
+    ])
+    .expect("bundle production run parses");
+    args.refuse_unsupported_prod()
+        .expect("a signed bundle artifact may carry production policy");
 }
 
 #[test]

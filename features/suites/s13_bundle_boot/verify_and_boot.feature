@@ -109,7 +109,7 @@ Feature: s13_bundle_boot verify-and-boot
     And the error output contains "app.mvmpkg"
     And the isolated mvm home has no installed bundle
 
-  @live @bundle_boot_live
+  @live @bundle_boot_live @runtime_candidate
   Scenario: A signed OCI artifact boots as the positional source
     Given an isolated mvm home
     And the isolated mvm home is prepared for live launches

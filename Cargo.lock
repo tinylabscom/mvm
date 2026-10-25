@@ -1148,9 +1148,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -3804,13 +3804,13 @@ dependencies = [
  "mvm-hostd",
  "mvm-http",
  "mvm-mcp",
- "mvm-observability",
  "mvm-runtime",
  "mvm-sdk",
  "mvm-vmm",
  "nix",
  "notify",
  "notify-debouncer-mini",
+ "percent-encoding",
  "rand 0.10.2",
  "rustls",
  "secrecy",
@@ -3823,6 +3823,7 @@ dependencies = [
  "toml 0.8.23",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "which",
  "zeroize",
@@ -4225,20 +4226,6 @@ dependencies = [
  "mvm-contract",
  "mvm-core",
  "serde_json",
-]
-
-[[package]]
-name = "mvm-observability"
-version = "0.24.2"
-dependencies = [
- "mvm-core",
- "mvm-http",
- "percent-encoding",
- "rand 0.10.2",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -5951,8 +5938,6 @@ dependencies = [
 [[package]]
 name = "sigstore-rekor"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b97c5a866f849a9445ae657bef0caa2db053a82827e6dae3a2b3de9c15a6a1a"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -5988,8 +5973,6 @@ dependencies = [
 [[package]]
 name = "sigstore-tsa"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b58fe92d4d8cf4b7215b927b70bc1245b6e0d70d801febdfe0cd265ad97ebf8b"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -6519,9 +6502,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",

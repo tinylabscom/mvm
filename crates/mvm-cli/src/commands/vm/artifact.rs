@@ -233,7 +233,7 @@ fn run_model_validate(args: ModelValidateArgs) -> Result<()> {
         Ok(())
     } else {
         crate::ui::warn("validation failed");
-        mvm_observability::exit(1);
+        crate::observability::exit(1);
     }
 }
 

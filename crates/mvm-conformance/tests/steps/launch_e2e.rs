@@ -62,13 +62,11 @@ const GUEST_BOOT_FAILURES: &[(&str, &str)] = &[
 
 /// The residency the warm-launch scenarios run under.
 ///
-/// An unnamed launch claims a standby when one is ready and boots cold when
-/// none is; either way it leaves one behind for the next run. The warm
-/// scenarios prepare their standby explicitly and pin the residency so the
-/// claim they measure is the one they prepared for. A launch that means to
-/// boot cold is named, which also keeps it from leaving a standby behind.
+/// Ordinary documented scenarios run cold on every backend. A warm-claim
+/// capability opt-in only selects eligible scenarios; it must not change the
+/// residency of unrelated launches. Warm steps override this explicitly.
 const RESIDENCY_ENV: &str = mvm_core::residency::MVM_RESIDENCY_ENV;
-const DOCUMENTED_RESIDENCY: &str = "warm";
+const DOCUMENTED_RESIDENCY: &str = "cold";
 
 pub(crate) fn e2e_home() -> PathBuf {
     std::env::var_os(E2E_HOME_ENV)
@@ -139,6 +137,48 @@ fn shell_split(args: &str) -> Vec<String> {
     argv
 }
 
+/// When the running scenario began; set by the runner's `before` hook.
+static SCENARIO_START: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+pub(crate) fn mark_scenario_start() {
+    if let Ok(mut start) = SCENARIO_START.lock() {
+        *start = Some(Instant::now());
+    }
+}
+
+/// Seconds since `mark_scenario_start`, or 0 when no scenario is marked.
+pub(crate) fn secs_since_scenario_start() -> f64 {
+    SCENARIO_START
+        .lock()
+        .ok()
+        .and_then(|start| start.map(|at| at.elapsed().as_secs_f64()))
+        .unwrap_or(0.0)
+}
+
+/// Prints how far into the scenario a Background step finished.
+fn log_background_mark(step: &str) {
+    eprintln!(
+        "[bdd-timing] background_step={step} scenario_elapsed={:.1}s",
+        secs_since_scenario_start()
+    );
+}
+
+/// The greppable per-command line: the verb words up to `--` (at most five)
+/// and the command's wall time.
+fn timing_line(argv: &[String], wall: std::time::Duration) -> String {
+    let summary: Vec<&str> = argv
+        .iter()
+        .map(String::as_str)
+        .take_while(|arg| *arg != "--")
+        .take(5)
+        .collect();
+    format!(
+        "[bdd-timing] cmd={} wall={:.1}s",
+        summary.join(" "),
+        wall.as_secs_f64()
+    )
+}
+
 fn run_in_e2e_home(args: &str, extra_env: &[(&str, &str)]) -> LaunchRecord {
     run_argv_in_e2e_home(&shell_split(args), extra_env)
 }
@@ -183,6 +223,7 @@ fn run_argv_in_e2e_home(argv: &[String], extra_env: &[(&str, &str)]) -> LaunchRe
     let started = Instant::now();
     let output = command.output().expect("failed to spawn mvmctl");
     let wall = started.elapsed();
+    eprintln!("{}", timing_line(argv, wall));
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -212,16 +253,33 @@ fn artifact_warm_home(world: &mut CliWorld) {
     world.e2e_home = Some(home);
 }
 
+/// Images already pulled into the shared home by this run. The cache is the
+/// same for every scenario, so only the first needing an image pays for the
+/// pull; the explicit `image pull` scenario still exercises the verb itself.
+static PREPARED_IMAGES: mvm_conformance::prepared_once::PreparedOnce =
+    mvm_conformance::prepared_once::PreparedOnce::new();
+
 #[given(expr = "the documented launch images are prepared")]
 fn documented_launch_images_are_prepared(_world: &mut CliWorld) {
+    let home = e2e_home();
     for image in ["alpine", "rust", "python:3.12", "curlimages/curl:8.21.0"] {
-        let pull = run_in_e2e_home(&format!("image pull {image}"), &[]);
-        assert_eq!(
-            pull.exit_code, 0,
-            "failed to prepare the {image} image\nstdout:\n{}\nstderr:\n{}",
-            pull.stdout, pull.stderr
-        );
+        let key = format!("{}\0{image}", home.display());
+        let prepared = PREPARED_IMAGES.ensure(&key, || {
+            let pull = run_in_e2e_home(&format!("image pull {image}"), &[]);
+            if pull.exit_code == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "failed to prepare the {image} image\nstdout:\n{}\nstderr:\n{}",
+                    pull.stdout, pull.stderr
+                ))
+            }
+        });
+        if let Err(problem) = prepared {
+            panic!("{problem}");
+        }
     }
+    log_background_mark("images_prepared");
 }
 
 #[when(expr = "I prepare launch artifacts with {string}")]
@@ -269,6 +327,7 @@ fn warm_parent_is_ready(image: &str) {
         "failed to prepare the {image} warm parent\nstdout:\n{}\nstderr:\n{}",
         result.stdout, result.stderr
     );
+    log_background_mark("warm_parent_ready");
 }
 
 /// Wait for the standby an unnamed run leaves behind. The run starts the
@@ -650,6 +709,17 @@ fn dispatch_window_recorded(world: &mut CliWorld) {
 }
 
 mod tests {
+    #[test]
+    fn timing_line_stops_at_the_double_dash_and_reports_seconds() {
+        let argv: Vec<String> = ["machine", "run", "--image", "alpine", "--", "sh", "-c", "x"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            super::timing_line(&argv, std::time::Duration::from_millis(2500)),
+            "[bdd-timing] cmd=machine run --image alpine wall=2.5s"
+        );
+    }
+
     #[test]
     fn the_host_pty_ends_do_not_leak_into_spawned_children() {
         use nix::fcntl::{FcntlArg, FdFlag, fcntl};

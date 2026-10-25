@@ -466,6 +466,11 @@ fn every_kvm_pool_job_ends_with_the_always_run_cleanup() {
             if !can_run_on_kvm_pool(&body) {
                 continue;
             }
+            if workflow.name == "workspace-shard.yml" && job == "inventory" {
+                // This exception is command-allowlisted, not a general opt-out.
+                assert_read_only_inventory(&body);
+                continue;
+            }
             checked += 1;
             if let Some(why) = missing_cleanup(&body) {
                 violations.push(format!("{}: job `{job}`: {why}", workflow.name));
@@ -565,4 +570,194 @@ fn job_cleanup_accepts_a_private_base_under_runner_temp() {
     );
     assert!(base.is_dir(), "dry-run must leave the isolated base intact");
     std::fs::remove_dir_all(runner_temp).expect("remove test directory");
+}
+
+fn inventory_script(body: &str) -> String {
+    body.split_once("        run: |\n")
+        .expect("one inline inventory script")
+        .1
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.strip_prefix("          ").expect("script indentation"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Keep the cleanup exception limited to these reviewed read-only commands.
+fn assert_read_only_inventory(body: &str) {
+    for required in [
+        "if: github.event_name == 'workflow_dispatch' && inputs.inventory_only",
+        "permissions: {}",
+        "timeout-minutes: 5",
+        "shell: bash",
+        "RUNNER_KIND: ${{ inputs.runner_kind }}",
+    ] {
+        assert!(
+            body.contains(required),
+            "missing inventory guard: {required}"
+        );
+    }
+    assert_eq!(body.matches("      - ").count(), 1);
+    assert!(!body.contains("uses:"));
+    assert!(!body.contains("secrets."));
+    assert!(!body.contains("GITHUB_ENV"));
+    assert!(body.contains(&format!(
+        "runs-on: ${{{{ inputs.runner_kind == 'hetzner' && fromJSON('{KVM_POOL}') || 'ubuntu-24.04' }}}}"
+    )));
+    let allowed = [
+        "set -euo pipefail",
+        "if [[ \"$RUNNER_KIND\" != hetzner ]]; then",
+        "echo \"inventory_only requires runner_kind=hetzner\" | tee -a \"$GITHUB_STEP_SUMMARY\"",
+        "exit 1",
+        "fi",
+        "{",
+        "uname -m",
+        "LC_ALL=C lscpu | awk -F: '/^(Architecture|CPU\\(s\\)|Model name|Socket\\(s\\)|Core\\(s\\) per socket|Thread\\(s\\) per core):/ { print }'",
+        "nproc",
+        "free -h",
+        "df -h / \"$GITHUB_WORKSPACE\"",
+        "lsblk -o NAME,TYPE,SIZE",
+        "if command -v rustup >/dev/null 2>&1; then",
+        "rustup toolchain list",
+        "else",
+        "for tool in rustc cargo gcc clang cc zig cargo-zigbuild cargo-nextest ld.lld nix go python3 node; do",
+        "command -v \"$tool\" || printf '%s: not on PATH\\n' \"$tool\"",
+        "done",
+        "if [[ -e /dev/kvm ]]; then",
+        "ls -l /dev/kvm",
+        "if [[ -r /dev/kvm && -w /dev/kvm ]]; then",
+        "} | tee -a \"$GITHUB_STEP_SUMMARY\"",
+    ];
+    for line in inventory_script(body).lines().map(str::trim) {
+        // Literal single-quoted headings cannot execute or redirect anything.
+        let literal_printf = line
+            .strip_prefix("printf '")
+            .and_then(|text| text.strip_suffix('\''))
+            .is_some_and(|text| !text.contains('\''));
+        assert!(
+            line.starts_with('#') || literal_printf || allowed.contains(&line),
+            "inventory cleanup exception cannot run unreviewed command: {line}"
+        );
+    }
+}
+
+#[test]
+fn inventory_is_opt_in_and_leaves_reusable_and_default_dispatch_tests_unchanged() {
+    let text = fs::read_to_string(".github/workflows/workspace-shard.yml").unwrap();
+    let (call, dispatch) = text.split_once("  workflow_dispatch:").unwrap();
+    assert!(!call.contains("inventory_only"));
+    assert!(
+        dispatch.contains("        required: false\n        type: boolean\n        default: false")
+    );
+    let found = jobs(&text);
+    let inventory = &found
+        .iter()
+        .find(|(name, _)| name == "inventory")
+        .unwrap()
+        .1;
+    assert_read_only_inventory(inventory);
+    let test = &found.iter().find(|(name, _)| name == "test").unwrap().1;
+    assert!(
+        test.contains("if: github.event_name != 'workflow_dispatch' || !inputs.inventory_only")
+    );
+    assert_eq!(missing_cleanup(test), None);
+}
+
+#[test]
+#[should_panic(expected = "inventory cleanup exception cannot run unreviewed command")]
+fn inventory_cleanup_exception_refuses_stateful_commands() {
+    let text = fs::read_to_string(".github/workflows/workspace-shard.yml").unwrap();
+    let found = jobs(&text);
+    let body = &found
+        .iter()
+        .find(|(name, _)| name == "inventory")
+        .unwrap()
+        .1;
+    assert_read_only_inventory(&body.replace("            uname -m", "            cargo test"));
+}
+
+#[test]
+fn inventory_reports_to_stdout_and_summary_and_rejects_other_runners() {
+    let text = fs::read_to_string(".github/workflows/workspace-shard.yml").unwrap();
+    let found = jobs(&text);
+    let body = &found
+        .iter()
+        .find(|(name, _)| name == "inventory")
+        .unwrap()
+        .1;
+    assert_read_only_inventory(body);
+    // Mock Linux hardware tools: this test must not inventory the developer host.
+    // Compiler/tool shims deliberately fail if the script ever invokes them.
+    let mocks = r#"
+uname() { echo x86_64; }
+lscpu() { printf 'Model name: fixture CPU\nCPU(s): 8\n'; }
+nproc() { echo 8; }
+free() { echo 'Mem: 16Gi'; }
+df() { echo 'disk 100G'; }
+lsblk() { echo 'vda disk 100G'; }
+ls() { echo '/dev/kvm metadata'; }
+rustup() { [[ "$*" == 'toolchain list' ]] || return 99; echo stable-fixture; }
+rustc() { echo 'compiler shim invoked' >&2; return 99; }
+cargo() { echo 'cargo shim invoked' >&2; return 99; }
+command() {
+  if [[ "$*" == '-v rustup' && "$TEST_RUSTUP_PRESENT" == false ]]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+"#;
+    let summary = std::env::temp_dir().join(format!(
+        "mvm-inventory-summary-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    for (selector, rustup_present) in [
+        ("hetzner", true),
+        ("hetzner", false),
+        ("github", true),
+        ("invalid", true),
+        ("", true),
+    ] {
+        let result = std::process::Command::new("/bin/bash")
+            .args(["--noprofile", "--norc", "-c"])
+            .arg(format!("{mocks}\n{}", inventory_script(body)))
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("RUNNER_KIND", selector)
+            .env("TEST_RUSTUP_PRESENT", rustup_present.to_string())
+            .env("GITHUB_WORKSPACE", "/unused-mocked-workspace")
+            .env("GITHUB_STEP_SUMMARY", &summary)
+            .output()
+            .expect("run mocked inventory");
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        assert_eq!(stdout, fs::read_to_string(&summary).unwrap());
+        fs::remove_file(&summary).unwrap();
+        assert_eq!(result.status.success(), selector == "hetzner");
+        if selector == "hetzner" {
+            for expected in [
+                "x86_64",
+                "fixture CPU",
+                "8",
+                "16Gi",
+                "100G",
+                if rustup_present {
+                    "stable-fixture"
+                } else {
+                    "rustup not installed"
+                },
+                "/dev/kvm",
+            ] {
+                assert!(
+                    stdout.contains(expected),
+                    "missing inventory field: {expected}"
+                );
+            }
+        } else {
+            assert_eq!(stdout.trim(), "inventory_only requires runner_kind=hetzner");
+        }
+        assert!(result.stderr.is_empty(), "{:?}", result.stderr);
+    }
 }
