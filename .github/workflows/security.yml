@@ -6,9 +6,9 @@ name: Security
 # nightly, and manually requested security evidence; they are not PR checks
 # and do not block merge directly.
 #
-# Triggers: release-tag pushes (final pre-publish gate), a weekly cron,
+# Triggers: release-tag pushes (final pre-publish gate), a nightly cron,
 # and manual dispatch. There is no `pull_request` trigger here; day-to-day
-# PR checks live in ci.yml. The weekly cron catches advisory-DB additions
+# PR checks live in ci.yml. The nightly cron catches advisory-DB additions
 # even on quiet branches. `push: branches: [main]` was dropped in the
 # ecosystem-wide CI cost reduction — the nightly cron covers the
 # post-merge "did a new advisory land overnight" case at zero
@@ -22,7 +22,7 @@ on:
   push:
     tags: ["v*"]
   schedule:
-    - cron: "17 4 * * 1"
+    - cron: "17 4 * * *"
   workflow_dispatch:
 
 # There is no `pull_request` trigger here, so there is no check panel to keep
