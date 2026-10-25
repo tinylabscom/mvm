@@ -1,7 +1,13 @@
 # Claim witnesses that bite
 
-Backing: shipped-source
-Validation: check-mutation-witnesses
+Backing: historical
+Validation: linked issues, pull requests, and repository history
+
+This is a historical record of the mutation-lane repair, not a current
+validation contract. The mutation lane and `check-mutation-witnesses` were
+removed in #4719. The outcomes below describe that earlier work; they do not
+establish mutation assurance for the current tree. Current witness validation
+and its limits are documented in `specs/VERIFICATION.md`.
 
 **Issues:** [#3148](https://github.com/tinylabscom/mvm/issues/3148),
 [#3149](https://github.com/tinylabscom/mvm/issues/3149)
