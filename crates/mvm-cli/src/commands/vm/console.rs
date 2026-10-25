@@ -233,7 +233,7 @@ pub(in crate::commands) fn enforce_accessible_gate(name: &str, force: bool) -> R
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     let exit_code = run_for_exit(cli, args, cfg)?;
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }
@@ -375,7 +375,7 @@ fn emit_exec_event(event: &mvm_agentd::vsock::ExecEvent) {
 fn finish_exec_terminal(terminal: mvm_agentd::vsock::ExecEvent) -> Result<()> {
     let code = terminal_exit_code(terminal)?;
     if code != 0 {
-        mvm_observability::exit(code);
+        crate::observability::exit(code);
     }
     Ok(())
 }
@@ -422,7 +422,7 @@ pub(crate) fn console_pty_command(
 ) -> Result<()> {
     let exit_code = run_pty_command_for_exit(name, command, env)?;
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }

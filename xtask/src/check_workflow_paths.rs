@@ -1056,6 +1056,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workspace_archive_download_is_bounded_and_fails_closed() {
+        let worker = workflow("workspace-shard.yml");
+        let download = worker
+            .split_once("      - name: Download shared workspace test archive\n")
+            .expect("workspace shards must download their shared test archive")
+            .1
+            .split("\n      - ")
+            .next()
+            .expect("download step body");
+        assert!(
+            download.contains("\n        timeout-minutes: 5\n"),
+            "a stalled artifact transfer must not occupy a runner for the whole job"
+        );
+        assert!(download.contains("uses: actions/download-artifact@"));
+        assert!(download.contains("run-id: ${{ inputs.archive_run_id }}"));
+        assert!(
+            !download.contains("continue-on-error:"),
+            "a failed archive transfer must fail the shard, never skip its tests"
+        );
+    }
+
     /// The workspace suite is compiled by one job and run by the shards out of
     /// its archive. Pin the parts whose loss would shrink coverage without
     /// turning anything red: the archive's target selection, the shards'
@@ -2001,6 +2023,33 @@ mod tests {
         assert!(
             embedded_toolchain < build,
             "Apple must install the embedded-host toolchain before building mvm-cli"
+        );
+    }
+
+    #[test]
+    fn test_support_cache_warms_the_exact_primary_consumer_selection() {
+        let selection = |job: &str, command: &str| {
+            let joined = job.replace("\\\n", " ");
+            joined
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(command))
+                .expect("test-support primary command must exist")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let warm = workflow("cache-warm.yml");
+        let ci = ci_workflow();
+        assert_eq!(
+            selection(
+                job_block(&warm, "warm-test-support"),
+                "cargo test --no-run ",
+            ),
+            selection(
+                job_block(&ci, "lint-features-test-support"),
+                "cargo nextest run ",
+            ),
+            "the trusted cache must compile the same packages, features and targets as its consumer"
         );
     }
 

@@ -398,6 +398,156 @@ fn linux_documented_surface_requires_both_complete_inventory_shards() {
     );
 }
 
+#[test]
+fn macos_documented_surface_uses_isolated_sequential_shards() {
+    let workflow = extended_ci();
+    let macos = job_block(&workflow, "e2e-docs-macos");
+
+    assert!(
+        macos.contains("max-parallel: 1")
+            && macos.contains("shard: [\"0/2\", \"1/2\"]")
+            && macos.contains("MVM_BDD_SHARD: ${{ matrix.shard }}"),
+        "the macOS suite must run both disjoint shards sequentially"
+    );
+    assert!(
+        macos.contains("MVM_E2E_HOME: ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}"),
+        "each run attempt and shard must use an isolated E2E home"
+    );
+    assert!(
+        macos.contains("name: e2e-docs-macos-logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}"),
+        "each run attempt and shard must upload to a unique artifact name"
+    );
+    assert!(
+        macos.contains(".mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/vms/*/console.log"),
+        "uploaded VM logs must come from this shard's isolated home"
+    );
+    let diagnostics = macos
+        .split_once("- name: Dump VMM diagnostics on failure")
+        .expect("macOS failure diagnostics step")
+        .1;
+    assert!(
+        diagnostics.contains("for d in \"$MVM_E2E_HOME\"/vms/*/; do")
+            && !diagnostics.contains("$HOME"),
+        "failure diagnostics must inspect only this shard's isolated home"
+    );
+    assert!(
+        !macos.contains("MVM_BDD_WARM_CLAIM"),
+        "macOS must not claim warm-claim coverage without capability opt-in"
+    );
+}
+
+#[test]
+fn documented_launches_are_cold_and_warm_scenarios_override_explicitly() {
+    let workflow = extended_ci();
+    let linux = job_block(&workflow, "e2e-docs-linux");
+    let macos = job_block(&workflow, "e2e-docs-macos");
+    let budgets = fs::read_to_string("features/suites/s31_launch_e2e/launch_budget.feature")
+        .expect("read launch budget scenarios");
+    let launch_modes =
+        fs::read_to_string("features/suites/s31_launch_e2e/cli_launch_modes.feature")
+            .expect("read launch mode scenarios");
+    let launcher = fs::read_to_string("crates/mvm-conformance/tests/steps/launch_e2e.rs")
+        .expect("read documented launch steps");
+
+    assert!(
+        !linux.contains("MVM_BDD_WARM_CLAIM") && !macos.contains("MVM_BDD_WARM_CLAIM"),
+        "release-docs lanes must not advertise the privileged warm-claim capability"
+    );
+    assert!(
+        launcher.contains("const DOCUMENTED_RESIDENCY: &str = \"cold\";")
+            && !launcher.contains("default_documented_residency"),
+        "a capability opt-in must not make unrelated documented launches warm"
+    );
+    assert!(
+        budgets.contains("Scenario: a cold transient launch reports its dispatch window")
+            && budgets.contains("@live @perf_budget @warm_claim\n  Scenario: a warm-residency")
+            && budgets
+                .contains("@live @perf_budget @warm_claim\n  Scenario: repeated warm launches")
+            && budgets.contains("@live @perf_budget @warm_claim\n  Scenario: a second run"),
+        "keep cold-launch coverage and gate only the warm-claim benchmarks"
+    );
+    assert!(
+        !launch_modes.contains("And an Alpine warm parent is ready"),
+        "ordinary launch scenarios must not prepare an unconditional warm parent"
+    );
+    let second_run = budgets
+        .split("Scenario: a second run of an image claims the standby the first run left")
+        .nth(1)
+        .expect("keep the automatic standby scenario");
+    let launches: Vec<_> = second_run
+        .lines()
+        .filter(|line| line.trim_start().starts_with("When I launch"))
+        .collect();
+    assert_eq!(launches.len(), 2, "keep both automatic standby launches");
+    assert!(
+        launches
+            .iter()
+            .all(|line| line.ends_with("with env \"MVM_RESIDENCY\" set to \"warm\"")),
+        "both automatic standby launches must explicitly request warm residency"
+    );
+}
+
+#[test]
+fn only_native_invocation_positives_require_firecracker() {
+    fn tags_for<'a>(feature: &'a str, title: &str) -> std::collections::BTreeSet<&'a str> {
+        let lines: Vec<_> = feature.lines().collect();
+        let scenario = format!("Scenario: {title}");
+        let index = lines
+            .iter()
+            .position(|line| line.trim() == scenario)
+            .expect("keep the documented scenario");
+        let mut tags = std::collections::BTreeSet::new();
+        for line in lines[..index].iter().rev().map(|line| line.trim()) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if !line.starts_with('@') {
+                break;
+            }
+            tags.extend(line.split_whitespace());
+        }
+        tags
+    }
+
+    let feature =
+        fs::read_to_string("features/suites/s29_doc_examples/documented_build_live.feature")
+            .expect("read documented build scenarios");
+    assert!(
+        feature
+            .lines()
+            .take_while(|line| !line.trim_start().starts_with("Feature:"))
+            .filter(|line| line.trim_start().starts_with('@'))
+            .all(|line| !line.split_whitespace().any(|tag| tag == "@firecracker")),
+        "do not restrict the whole feature to Firecracker"
+    );
+    assert_eq!(
+        tags_for(&feature, "the documented flake build produces an image"),
+        std::collections::BTreeSet::from(["@live", "@release_gate_flake"]),
+        "ordinary image building must retain macOS positive coverage"
+    );
+    assert_eq!(
+        tags_for(
+            &feature,
+            "the documented entrypoint launch runs the compiled workload"
+        ),
+        std::collections::BTreeSet::from(["@live", "@release_gate_flake", "@firecracker"]),
+        "entrypoint invocation must retain its Firecracker positive"
+    );
+    assert_eq!(
+        tags_for(
+            &feature,
+            "the documented pack build health-boots and signs a frozen workload"
+        ),
+        std::collections::BTreeSet::from([
+            "@live",
+            "@documented_pack_live",
+            "@firecracker",
+            "@runtime_candidate",
+        ]),
+        "pack health must retain its Firecracker positive"
+    );
+}
+
 /// First `key value` occurrence in a job block, as a trimmed string.
 fn field_after(block: &str, key: &str) -> Option<String> {
     block
@@ -814,6 +964,35 @@ fn perf_budget_scenario_prepares_its_parent_immediately_before_launch() {
 
 fn ci_full() -> String {
     fs::read_to_string(".github/workflows/ci-full.yml").expect("read Extended CI workflow")
+}
+
+#[test]
+fn hosted_ubuntu_ci_uses_explicit_release_labels() {
+    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    // This is a text guard; historical alias mentions use full-line comments.
+    let moving_alias = ci
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .find(|line| line.contains("ubuntu-latest"));
+    assert!(
+        moving_alias.is_none(),
+        "hosted Ubuntu CI must use an explicit supported release: {moving_alias:?}"
+    );
+    for job in [
+        "lint-core",
+        "lint-feature-clippy",
+        "lint-policy",
+        "lint-features-test-support",
+        "lint-features-embed",
+        "lint-windows",
+    ] {
+        let body = job_block(&ci, job);
+        assert!(
+            body.lines()
+                .any(|line| line.trim() == "runs-on: ubuntu-24.04"),
+            "{job} must actually run on the pinned Ubuntu release"
+        );
+    }
 }
 
 #[test]
@@ -1830,6 +2009,39 @@ fn extended_ci_runs_one_at_a_time_across_every_ref() {
             "the concurrency group must not be keyed on {per_run_key}"
         );
     }
+}
+
+/// Long-running mutation shards share hosted runners with the merge queue.
+/// Bound their footprint without cancelling sibling evidence after a failure.
+#[test]
+fn security_mutation_witnesses_run_at_most_two_shards_at_a_time() {
+    let workflow =
+        fs::read_to_string(".github/workflows/security.yml").expect("read Security workflow");
+    let job = job_block(&workflow, "mutation-witnesses");
+    let strategy = job
+        .split_once("    strategy:\n")
+        .expect("mutation witnesses must have a strategy")
+        .1
+        .split_once("      matrix:\n")
+        .expect("mutation witnesses must retain their matrix")
+        .0;
+
+    assert!(
+        strategy.lines().any(|line| line == "      max-parallel: 2"),
+        "mutation witnesses must leave hosted runner capacity for the merge queue"
+    );
+    assert!(
+        strategy
+            .lines()
+            .any(|line| line == "      fail-fast: false"),
+        "a failed mutation shard must not cancel sibling security coverage"
+    );
+    assert!(
+        job.contains(
+            "cargo run -p xtask -- check-mutation-witnesses --run --package '${{ matrix.package }}'"
+        ),
+        "every selected package must still run the mutation witness gate"
+    );
 }
 
 /// Every matrix in Extended CI is bounded, so adding a leg cannot widen the

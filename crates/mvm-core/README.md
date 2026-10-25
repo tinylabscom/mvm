@@ -9,7 +9,7 @@ VMs or present user commands.
 
 Nearly every host-side crate depends on `mvm-core`, including `mvm-net`,
 `mvm-vmm`, `mvm-backends`, `mvm-runtime`, `mvm-build`, `mvm-agentd`,
-`mvm-hostd`, `mvm-client`, `mvm-sdk`, `mvm-cli`, `mvm-observability`, and the
+`mvm-hostd`, `mvm-client`, `mvm-sdk`, `mvm-cli`, and the
 root `mvmctl` facade. `xtask` also uses selected schemas for repository checks.
 
 `mvm-core` itself depends on the smaller `mvm-contract` protocol layer and on
@@ -32,7 +32,8 @@ rules that all higher layers must interpret identically. Examples include:
 
 Higher layers provide I/O and platform behavior. For example,
 `mvm-runtime` implements lifecycle operations, `mvm-hostd` enforces admitted
-plans, and `mvm-observability` installs the process-global tracing layer.
+plans, and `mvm-cli`'s observability module installs the process-global
+tracing layer.
 
 Modules used by only one workspace crate belong to that consumer rather than
 this foundation crate. The remaining modules have overlapping consumers and do

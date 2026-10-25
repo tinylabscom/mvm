@@ -923,7 +923,7 @@ pub(in crate::commands) fn run_secure_started(
             offer_review(&refused, &denials, review_source.as_ref());
         }
         if output.exit_code != 0 {
-            mvm_observability::exit(output.exit_code);
+            crate::observability::exit(output.exit_code);
         }
         return Ok(());
     }
@@ -1027,7 +1027,7 @@ fn run_run_args(
         .announce_exit(exit_code, &super::host_notices::Stderr);
     offer_review(&refused, audit.denials, audit.review_source);
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }

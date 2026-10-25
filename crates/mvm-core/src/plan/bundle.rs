@@ -3634,6 +3634,36 @@ mod tests {
         tar.into_inner().unwrap()
     }
 
+    #[test]
+    fn manifest_scan_stops_at_the_first_complete_set_of_entries() {
+        // A later duplicate must never replace what the scan already settled on.
+        let archive = |entries: &[(&str, &[u8])]| {
+            let mut tar = tar::Builder::new(Vec::new());
+            for (path, bytes) in entries {
+                append_bytes(&mut tar, path, bytes).unwrap();
+            }
+            tar.into_inner().unwrap()
+        };
+
+        let signed = archive(&[
+            (MANIFEST_FILENAME, b"first"),
+            (SIGNATURE_FILENAME, b"sig"),
+            (MANIFEST_FILENAME, b"second"),
+        ]);
+        let (manifest, signature) = read_manifest_entries(Cursor::new(&signed)).unwrap();
+        assert_eq!(manifest, b"first");
+        assert_eq!(signature, b"sig");
+
+        let unsigned = archive(&[
+            (MANIFEST_FILENAME, b"first"),
+            (MANIFEST_FILENAME, b"second"),
+        ]);
+        assert_eq!(
+            read_manifest_entry(Cursor::new(&unsigned)).unwrap(),
+            b"first"
+        );
+    }
+
     /// A sealed-prod posture that allows egress and volumes, verity-bound.
     fn open_sealed_posture() -> BundleSecurityPosture {
         BundleSecurityPosture {

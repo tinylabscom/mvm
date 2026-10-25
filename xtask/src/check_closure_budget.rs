@@ -97,7 +97,21 @@ const BUDGETS: &[ClosureBudget] = &[
 ///
 /// 374 (was 375): removing the unused direct `etherparse` dependency from
 /// `mvm-hostd` removes its final edge from the shipped graph.
-const MACOS_CLOSURE_BUDGET: usize = 374;
+///
+/// 373 (was 374): `mvm-observability` folds back into `mvm-cli`, its only
+/// consumer, as the `observability` module. Every dependency it carried was
+/// already in this closure, so the folded crate itself is the only removed
+/// node. Keeping the assembly in the host-only CLI preserves the split's
+/// reason: `tracing-subscriber` stays out of `mvm-core`, the sealed agent
+/// and the musl binaries.
+///
+/// 351 (was 373): the Rekor and timestamp-authority HTTP clients are
+/// optional in the workspace's patched sigstore crates
+/// (`third_party/sigstore-patches.md`), and `mvm-core` no longer enables the
+/// `sigstore-verify` TLS feature that pulled `sigstore-tuf`. The `reqwest`,
+/// `hyper`, `tower` and TUF-fetch crates leave the closure; offline
+/// verification is unchanged. `sigstore-network` is the way back in.
+const MACOS_CLOSURE_BUDGET: usize = 351;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -277,7 +291,21 @@ const MACOS_CLOSURE_BUDGET: usize = 374;
 ///
 /// 377 (was 378): removing the unused direct `etherparse` dependency from
 /// `mvm-hostd` removes its final edge from the shipped graph.
-pub(crate) const CLOSURE_BUDGET: usize = 377;
+///
+/// 376 (was 377): `mvm-observability` folds back into `mvm-cli`, its only
+/// consumer, as the `observability` module. Every dependency it carried was
+/// already in this closure, so the folded crate itself is the only removed
+/// node. Keeping the assembly in the host-only CLI preserves the split's
+/// reason: `tracing-subscriber` stays out of `mvm-core`, the sealed agent
+/// and the musl binaries.
+///
+/// 354 (was 376): the Rekor and timestamp-authority HTTP clients are
+/// optional in the workspace's patched sigstore crates
+/// (`third_party/sigstore-patches.md`), and `mvm-core` no longer enables the
+/// `sigstore-verify` TLS feature that pulled `sigstore-tuf`. The `reqwest`,
+/// `hyper`, `tower` and TUF-fetch crates leave the closure; offline
+/// verification is unchanged. `sigstore-network` is the way back in.
+pub(crate) const CLOSURE_BUDGET: usize = 354;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

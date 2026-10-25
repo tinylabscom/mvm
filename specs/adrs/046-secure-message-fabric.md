@@ -6,6 +6,9 @@ Validation: none — this is a proposed design; no code implements it and no tes
 **Status:** Proposed  
 **Date:** 2026-08-15  
 **Owner:** `mvm` maintainers  
+**Mailbox scope:** Superseded by ADR-057 for mailbox identity, envelope
+ownership, delivery, durability, storage, host-blindness, and the `mvmd`
+boundary. The non-mailbox lanes and their migration remain proposed here.
 **Implemented by:** `specs/plans/2026-08-18-secure-message-fabric.md`  
 **Distributed counterpart:** a separately numbered `mvmd` ADR and plan consume the contracts and deterministic state machine defined here.  
 **Supersedes:** ADR-035 for guest↔host transport, inter-workload routing,
@@ -17,8 +20,8 @@ roots, fan-out, and operator debugging.
 ADR-040, ADR-041, and ADR-042.  
 **Consumed by:** ADR-045 and its plan, which depend on this fabric and define
 no message types of their own.  
-**Reconciled by:** ADR-051, which names the shared workload actor model and
-records that this ADR's vocabulary is the one that wins.
+**Reconciled by:** ADR-051, then narrowed by ADR-057. ADR-057's
+`mvm_contract::protocol::mailbox` vocabulary is authoritative for mailboxes.
 
 ## Context
 

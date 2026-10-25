@@ -6,7 +6,7 @@ version = 1
 # --- Rust subscriber / global diagnostic-state initialization sites ---------
 
 [[subscriber_init]]
-file = "crates/mvm-observability/src/logging.rs"
+file = "crates/mvm-cli/src/observability/logging.rs"
 anchor = "tracing_subscriber::registry()"
 scope = "global"
 role = "host"
