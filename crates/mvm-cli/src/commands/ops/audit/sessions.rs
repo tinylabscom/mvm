@@ -313,7 +313,7 @@ pub(in crate::commands) fn audit_verify_session(
     }
     match report.verdict.exit_code() {
         0 => Ok(()),
-        code => mvm_observability::exit(code),
+        code => crate::observability::exit(code),
     }
 }
 

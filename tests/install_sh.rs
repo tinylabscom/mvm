@@ -1292,6 +1292,20 @@ fn install_sh_installs_every_host_binary_the_release_job_requires() {
 
     for hostbin in &hostbins {
         let beside_mvmctl = host.bin().join(hostbin);
+        if cfg!(target_os = "macos")
+            && hostbin == "mvm-libkrun-supervisor"
+            && !host_uses_libkrun_tier()
+        {
+            assert!(
+                !beside_mvmctl.exists(),
+                "the libkrun supervisor must stay off PATH outside its macOS tier"
+            );
+            assert!(
+                !host.current_target().join(hostbin).exists(),
+                "the libkrun supervisor must not be staged outside its macOS tier"
+            );
+            continue;
+        }
         assert!(
             beside_mvmctl.is_file(),
             "{hostbin} is required by release.yml for {target} but is not beside {}",
@@ -1866,7 +1880,9 @@ fn fake_sw_vers(host: &Host, version: &str) {
 #[cfg(target_os = "macos")]
 #[test]
 fn install_sh_keeps_libkrun_before_macos_26_and_omits_it_afterward() {
-    let release = Release::new("v9.9.9").with_libkrun_tier();
+    let release = Release::new("v9.9.9")
+        .with_hostbins(required_hostbins(host_target()))
+        .with_libkrun_tier();
     let (base, _stop) = serve_releases(&[&release]);
 
     for (version, expected) in [("25.9", true), ("26.0", false)] {

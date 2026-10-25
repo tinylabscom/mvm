@@ -42,6 +42,14 @@ on:
         description: Candidate checksum signature bundle byte pin
         type: string
         default: ""
+      allow_runtime_candidate_skip:
+        description: >-
+          Allow the unreleased main nightly to report portable-creation
+          scenarios as named skips when no signed runtime candidate is supplied.
+          Release workflows must leave this false.
+        type: boolean
+        required: false
+        default: false
       macos_blocks_on_unusable_host:
         description: >-
           Whether a macOS host that cannot run any workload backend has to be
@@ -186,6 +194,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MVM_E2E_RUNTIME_CANDIDATE_DIR: ${{ steps.candidate.outputs.directory }}
+          MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: ${{ inputs.allow_runtime_candidate_skip }}
           RUNTIME_ARCHIVE_SHA256: ${{ inputs.runtime_archive_sha256 }}
           RUNTIME_CHECKSUM_SHA256: ${{ inputs.runtime_checksum_sha256 }}
           RUNTIME_ARCHIVE_BUNDLE_SHA256: ${{ inputs.runtime_archive_bundle_sha256 }}
@@ -308,8 +317,15 @@ jobs:
     # before it can print a summary and proves nothing. A cold artifact home
     # on the runner spends its first stretch acquiring images.
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        shard: ["0/2", "1/2"]
     env:
       MVM_E2E_TIMEOUT_SECS: "7200"
+      MVM_BDD_SHARD: ${{ matrix.shard }}
+      MVM_E2E_HOME: ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
       # The documented surface includes signed release downloads. Build the
       # exact binary under test with their verifier enabled.
       MVM_E2E_FEATURES: user,release-artifact-bootstrap
@@ -325,10 +341,8 @@ jobs:
       # macOS 26+ default, and the fetched builder image is self-contained, so
       # source artifact jobs run inside it under HVF.
       MVM_BUILDER_BACKEND: hvf
-      # Every warm launch here is held to the 300 ms startup ceiling, which is
-      # a property of an optimized build. Unoptimized, plan admission alone
-      # took 268 ms of it on this runner. The Linux warm-claim witness builds
-      # the same profile for the same reason.
+      # Keep release-docs binaries optimized. Warm-claim coverage belongs to
+      # the separately privileged Linux lane, not these cold-launch scenarios.
       MVM_E2E_PROFILE: release-witness
     steps:
       - uses: actions/checkout@v6
@@ -395,12 +409,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MVM_E2E_RUNTIME_CANDIDATE_DIR: ${{ steps.candidate.outputs.directory }}
+          MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: ${{ inputs.allow_runtime_candidate_skip }}
           RUNTIME_ARCHIVE_SHA256: ${{ inputs.runtime_archive_sha256 }}
           RUNTIME_CHECKSUM_SHA256: ${{ inputs.runtime_checksum_sha256 }}
           RUNTIME_ARCHIVE_BUNDLE_SHA256: ${{ inputs.runtime_archive_bundle_sha256 }}
           RUNTIME_CHECKSUM_BUNDLE_SHA256: ${{ inputs.runtime_checksum_bundle_sha256 }}
           MVM_BDD_SNAPSHOT: "1"
           MVM_BDD_WALL_CLOCK: "1"
+          MVM_E2E_HOME: ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
         run: |
           set -o pipefail
           uv run --no-project --python 3.12 -- just e2e::docs 2>&1 | tee "$RUNNER_TEMP/e2e-docs.log"
@@ -411,18 +427,18 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-docs-macos-logs
+          name: e2e-docs-macos-logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
           path: |
             ${{ runner.temp }}/e2e-docs.log
-            ~/.mvm/vms/*/console.log
-            ~/.mvm/vms/*/supervisor.log
+            ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/vms/*/console.log
+            ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/vms/*/supervisor.log
           if-no-files-found: warn
           retention-days: 14
 
       - name: Dump VMM diagnostics on failure
         if: failure()
         run: |
-          for d in "$HOME"/.mvm/vms/*/; do
+          for d in "$MVM_E2E_HOME"/vms/*/; do
             echo "===== $d ====="
             ls -la "$d" || true
             # HVF flushes console.log only when the supervisor exits, so an

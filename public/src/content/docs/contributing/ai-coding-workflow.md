@@ -255,6 +255,16 @@ until the whole ladder is green.
 | 6 | `just check::gated` | Linux-gated `cfg(target_os = "linux")` files compile (macOS `--all-targets` silently skips them) | minutes |
 | 7 | `just ci` (`lint test tests::doc bdd::run`) | The local approximation of the full CI gate | longest |
 
+`just bdd::run` prints wall-clock seconds for `mvmctl-build`, `schema-emitters`
+(including xtask), `typescript-preparation`, and `conformance-compile-and-run`.
+The last phase includes Cargo's runner compilation and execution; it is not a
+test-only duration. On success or command failure, the recipe prints a timing
+table and exit status, naming the failing phase when applicable. In GitHub
+Actions it also appends that report to `GITHUB_STEP_SUMMARY`. Reporting does not
+replace the original command's exit status, and a failed command still stops
+the recipe immediately. These measurements retain the existing hermetic suite
+selection and do not enable live scenarios.
+
 Two notes from experience:
 
 - **Clippy is a gate, not a suggestion.** Never suppress with `#[allow(...)]`;

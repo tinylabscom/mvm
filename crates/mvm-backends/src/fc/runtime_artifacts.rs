@@ -102,7 +102,7 @@ fn observe_file(path: PathBuf) -> Result<RuntimeArtifact> {
         path.is_absolute(),
         "Firecracker runtime device path is not absolute"
     );
-    let sha256 = mvm_core::crypto::image_verify::sha256_file(&path)?;
+    let sha256 = mvm_core::crypto::verified_digest::sha256_file_verified(&path)?;
     Ok(RuntimeArtifact { path, sha256 })
 }
 

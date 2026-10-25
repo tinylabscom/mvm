@@ -8,9 +8,7 @@
 use anyhow::Result;
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::BackendImageSupport;
-use mvm_core::plan::bundle::{
-    BundleOrigin, LocalBundleTrustStore, bundle_origin, verify_bundle_file,
-};
+use mvm_core::plan::bundle::BundleOrigin;
 use mvm_core::plan::{BundleManifest, FsTrustStore, check_embedded_image_set_for_backend};
 use std::path::PathBuf;
 
@@ -42,7 +40,7 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
         Some(path) => FsTrustStore::new(path),
         None => FsTrustStore::default_path()?,
     };
-    let (verified, origin) = verify_for_preview(&args.path, trust)?;
+    let (verified, origin) = mvm_client::bundle_preview::verify_for_preview(&args.path, trust)?;
     anyhow::ensure!(
         origin != BundleOrigin::Untrusted,
         "{}: signed origin is neither release-verified nor a local build signed by this host",
@@ -130,33 +128,6 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
         }
     }
     Ok(())
-}
-
-fn verify_for_preview(
-    path: &std::path::Path,
-    release_trust: FsTrustStore,
-) -> Result<(mvm_core::plan::bundle::VerifiedBundleFile, BundleOrigin)> {
-    let Some(host_key) = mvm_client::bundle::existing_host_verifying_key()? else {
-        let verified = verify_bundle_file(path, &release_trust)
-            .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
-        let origin = if verified
-            .manifest
-            .labels
-            .get(mvm_core::plan::bundle::BUNDLE_ORIGIN_LABEL)
-            .is_some_and(|value| value == mvm_core::plan::bundle::LOCAL_BUILD_ORIGIN)
-        {
-            BundleOrigin::Untrusted
-        } else {
-            BundleOrigin::ReleaseVerified
-        };
-        return Ok((verified, origin));
-    };
-    let host_key_id = mvm_core::plan::bundle::key_id_from_pubkey(&host_key);
-    let trust = LocalBundleTrustStore::new(release_trust, host_key_id.clone(), host_key);
-    let verified = verify_bundle_file(path, &trust)
-        .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
-    let origin = bundle_origin(&verified.manifest, &host_key_id, trust.release());
-    Ok((verified, origin))
 }
 
 /// The ceilings a bundle places on any launch of it, as the JSON verdict
