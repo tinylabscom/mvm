@@ -1,6 +1,7 @@
 //! Pure utility helpers — formatters, retry policy, time, idle metrics.
 
 pub mod atomic_io;
+pub mod curl;
 pub mod glob;
 pub mod idle_metrics;
 pub mod retry;
