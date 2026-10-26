@@ -235,6 +235,10 @@ No task is complete without all of:
    scope, dependencies, and acceptance criteria. Link the PR to its issue and
    leave verification results in the PR. Do not create or update a shared
    sprint, refactor, delivery, or progress dashboard in `specs/`.
+   **Issues may ONLY be considered closed when no unchecked checkboxes remain.**
+   Verify completion before checking each item; never check or delete unfinished
+   items merely to permit closure. This applies to manual closure and PR
+   auto-closing keywords such as `Fixes` or `Closes`.
 6. **Update active technical documents only when their substance changes**:
    ADRs own durable decisions and contracts own stable interfaces. An
    exceptional new plan is an immutable design attachment linked to one issue,
