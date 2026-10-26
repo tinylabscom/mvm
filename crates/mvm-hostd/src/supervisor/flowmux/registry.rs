@@ -92,6 +92,10 @@ pub struct RegistryLimits {
     /// Concurrent in-flight ICMP echoes.
     pub max_icmp: usize,
     pub initial_credit: u32,
+    /// Most credit a single stream may accumulate. Grants past this are
+    /// clamped, so the window an admitted plan signed for is the window the
+    /// endpoint's flow-state memory is actually bounded by.
+    pub max_stream_credit: u32,
     /// How long a UDP association may sit idle before the host closes it.
     pub udp_idle_timeout: Duration,
     /// Maximum distinct peers a single UDP association may communicate with.
@@ -121,6 +125,7 @@ impl Default for RegistryLimits {
             max_http: 256,
             max_icmp: 64,
             initial_credit: 64 * 1024,
+            max_stream_credit: MAX_STREAM_CREDIT,
             udp_idle_timeout: Duration::from_secs(60),
             max_udp_peers: 16,
             tcp_connect_rate: 0,
@@ -134,7 +139,7 @@ impl Default for RegistryLimits {
 
 impl RegistryLimits {
     /// Apply the signed plan ceilings while retaining host-owned timing,
-    /// credit, peer, ICMP, and rate defaults.
+    /// initial credit, peer, ICMP, and rate defaults.
     #[must_use]
     pub fn from_network_limits(network: NetworkLimits) -> Self {
         let mut limits = Self::default();
@@ -146,6 +151,10 @@ impl RegistryLimits {
         limits.max_http = max_tcp_flows;
         limits.max_udp = usize_from_u32(network.max_udp_associations);
         limits.max_dns = usize_from_u32(network.max_dns_bindings);
+        limits.max_stream_credit = network.max_stream_credit_bytes;
+        // A stream may never start above the admitted window, or the window
+        // would not bound the credit a fresh stream holds.
+        limits.initial_credit = limits.initial_credit.min(network.max_stream_credit_bytes);
         limits
     }
 }
@@ -562,7 +571,7 @@ impl StreamRegistry {
         entry.guest_credit = entry
             .guest_credit
             .saturating_add(delta)
-            .min(MAX_STREAM_CREDIT);
+            .min(self.limits.max_stream_credit);
         Ok(())
     }
 
@@ -618,7 +627,7 @@ impl StreamRegistry {
         entry.host_credit = entry
             .host_credit
             .saturating_add(delta)
-            .min(MAX_STREAM_CREDIT);
+            .min(self.limits.max_stream_credit);
         Ok(())
     }
 
@@ -820,6 +829,31 @@ mod tests {
         reg.grant_host_credit(id, u32::MAX).unwrap();
         assert_eq!(reg.get(id).unwrap().guest_credit, MAX_STREAM_CREDIT);
         assert_eq!(reg.get(id).unwrap().host_credit, MAX_STREAM_CREDIT);
+    }
+
+    /// A plan that narrows the per-stream window narrows the clamp with it,
+    /// so the endpoint's flow-state memory follows the admitted limits rather
+    /// than the protocol maximum.
+    #[test]
+    fn credit_grants_are_capped_at_the_admitted_stream_window() {
+        let network = NetworkLimits::builder()
+            .max_stream_credit_bytes(1_000)
+            .build()
+            .unwrap();
+        let limits = RegistryLimits::from_network_limits(network);
+        assert_eq!(limits.max_stream_credit, 1_000);
+        assert_eq!(
+            limits.initial_credit, 1_000,
+            "a fresh stream must not start above the admitted window"
+        );
+
+        let budget = Arc::new(VmFlowBudget::new(network, limits.max_icmp));
+        let mut reg = StreamRegistry::with_budget(limits, budget);
+        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+        reg.grant_guest_credit(id, u32::MAX).unwrap();
+        reg.grant_host_credit(id, u32::MAX).unwrap();
+        assert_eq!(reg.get(id).unwrap().guest_credit, 1_000);
+        assert_eq!(reg.get(id).unwrap().host_credit, 1_000);
     }
 
     #[test]
