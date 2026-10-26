@@ -72,11 +72,6 @@ specs/notes.md
 # regenerable, never committed (header says "re-run `mvmctl compile`").
 /out/
 
-# cargo-mutants drops its per-run report tree here unless `--output` points
-# elsewhere. `xtask check-mutation-witnesses` always redirects it to a temp
-# dir; this guards a hand-run from leaving a report in the tree.
-mutants.out/
-
 # Python bytecode caches (SDK test runs)
 __pycache__/
 

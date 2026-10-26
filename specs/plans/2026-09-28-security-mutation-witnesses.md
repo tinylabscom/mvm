@@ -1,9 +1,15 @@
 # Security mutation witnesses
 
-Backing: shipped-source
-Validation: check-mutation-witnesses
+Backing: historical
+Validation: linked issues, pull requests, and repository history
 
-**Status: IN PROGRESS**
+This is a historical snapshot of the mutation-witness investigation. The
+mutation lane and `check-mutation-witnesses` were removed in #4719. The
+recorded results and unfinished checks below remain historical evidence, not
+current mutation assurance or an active execution checklist. Current witness
+validation and its limits are documented in `specs/VERIFICATION.md`.
+
+**Status at the time of this snapshot: IN PROGRESS**
 
 Issue: #3679. Related freshness alert: #3750.
 Worktree: `mvm-3679-security-witnesses`.

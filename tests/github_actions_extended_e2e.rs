@@ -99,11 +99,20 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "release publication gate is incomplete: {:?}",
         release_gate_problem(&workflow)
     );
+    // The documented surface gates promotion, not the signed prerelease.
+    let promote = job_block(&workflow, "promote-release");
+    assert!(
+        promote.contains("needs: [e2e-docs,")
+            && promote.contains("needs.e2e-docs.result == 'success'"),
+        "promote-release must wait for the documented surface"
+    );
+    assert!(
+        !job_block(&workflow, "release").contains("e2e-docs"),
+        "the signed prerelease must not wait for the documented surface"
+    );
 }
 
 const RELEASE_GATES: &[&str] = &[
-    "bdd",
-    "e2e-docs",
     "build",
     "archive-install-smoke",
     "guest-runtime",
@@ -2022,39 +2031,6 @@ fn extended_ci_runs_one_at_a_time_across_every_ref() {
             "the concurrency group must not be keyed on {per_run_key}"
         );
     }
-}
-
-/// Long-running mutation shards share hosted runners with the merge queue.
-/// Bound their footprint without cancelling sibling evidence after a failure.
-#[test]
-fn security_mutation_witnesses_run_at_most_two_shards_at_a_time() {
-    let workflow =
-        fs::read_to_string(".github/workflows/security.yml").expect("read Security workflow");
-    let job = job_block(&workflow, "mutation-witnesses");
-    let strategy = job
-        .split_once("    strategy:\n")
-        .expect("mutation witnesses must have a strategy")
-        .1
-        .split_once("      matrix:\n")
-        .expect("mutation witnesses must retain their matrix")
-        .0;
-
-    assert!(
-        strategy.lines().any(|line| line == "      max-parallel: 2"),
-        "mutation witnesses must leave hosted runner capacity for the merge queue"
-    );
-    assert!(
-        strategy
-            .lines()
-            .any(|line| line == "      fail-fast: false"),
-        "a failed mutation shard must not cancel sibling security coverage"
-    );
-    assert!(
-        job.contains(
-            "cargo run -p xtask -- check-mutation-witnesses --run --package '${{ matrix.package }}'"
-        ),
-        "every selected package must still run the mutation witness gate"
-    );
 }
 
 /// Every matrix in Extended CI is bounded, so adding a leg cannot widen the

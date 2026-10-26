@@ -22,10 +22,9 @@ merge_min=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.min_
 #   singleton  1 building, 1 per group, no wait. The shape the queue ran while
 #              merge groups reused the pull request's proof.
 #   batched    ALLGREEN, 3 building, 1-5 per group (minimum 1), 5-minute wait.
-#              Safe only because every merge group now runs the full matrix
-#              against its integrated commit, and every pull request passed
-#              the fast gate first; this file and that workflow change in the
-#              same commit.
+#              Safe only because every pull request passed the fast gate and
+#              every merge group re-runs that gate against its integrated
+#              commit; the slow lanes run after the merge, on a push to main.
 #
 # Both stay admitted so that switching the live ruleset and landing a workflow
 # change can happen in either order without failing every queue run.

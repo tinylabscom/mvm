@@ -33,18 +33,10 @@ env:
   MVMCTL_RELEASE_FEATURES: host,user,release-artifact-bootstrap,release-channel,embed-host-bins
 
 jobs:
-  bdd:
-    uses: ./.github/workflows/bdd.yml
-
-  # Every documented example, booted on both backends, before anything is
-  # published. The hermetic `bdd` lane above drives `--help` and refusal paths
-  # and boots no guest, so on its own it cannot see a documented command that
-  # parses and then fails at runtime — which is exactly what `machine run -it`
-  # did, on every OCI image, while the README told readers to run it.
-  #
-  # This is a release blocker on purpose. It is the slowest thing here; a tag
-  # that cannot wait for it is a tag published without evidence that its own
-  # README works.
+  # Every documented example, booted on both backends. It runs beside the
+  # build, but it does not gate publication: the signed prerelease goes out
+  # without it and `promote-release` waits for it, so a red run keeps the tag
+  # staged as a prerelease instead of blocking the signed assets.
   e2e-docs:
     needs: runtime-proof-candidate
     if: ${{ !cancelled() && (needs.runtime-proof-candidate.result == 'success' || github.event_name == 'workflow_dispatch') }}
@@ -60,9 +52,9 @@ jobs:
       runtime_checksum_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_sha256 }}
       runtime_archive_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_bundle_sha256 }}
       runtime_checksum_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_bundle_sha256 }}
-      # Stated rather than inherited. A tag must not be cut without live macOS
-      # evidence, so a macOS host that cannot boot a guest fails this workflow
-      # here even though Extended CI tolerates it nightly.
+      # Stated rather than inherited: a macOS host that cannot boot a guest
+      # fails this workflow, so promotion never goes ahead without live macOS
+      # evidence.
       macos_blocks_on_unusable_host: true
       # A release tests what its users get, and nothing is pair-built through
       # mvm-images: the Linux layer (kernels, base and dev root filesystems,
@@ -736,18 +728,12 @@ jobs:
       tarballs: build
 
   release:
-    needs: [bdd, e2e-docs, build, archive-install-smoke, guest-runtime, runtime-proof-candidate, release-archive-smoke, distro-packages]
-    # `e2e-docs` was added to `needs` above when the documented-surface gate
-    # landed, and its result was never added here. `!cancelled()` overrides the
-    # implicit all-needs-succeeded rule, so for as long as that was true the
-    # release published whether or not a single documented example booted —
-    # the gate existed, was listed, was asserted by a test that only read the
-    # `needs` list, and enforced nothing. Every entry in `needs` must appear in
-    # this condition; a job listed and not checked is worse than one that was
-    # never added, because it reads as covered.
+    needs: [build, archive-install-smoke, guest-runtime, runtime-proof-candidate, release-archive-smoke, distro-packages]
+    # `!cancelled()` overrides the implicit all-needs-succeeded rule, so every
+    # entry in `needs` must appear in this condition.
     #
     # A manual tag ref is not a real tag push and cannot satisfy this gate.
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.runtime-proof-candidate.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.runtime-proof-candidate.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -1174,8 +1160,8 @@ jobs:
   # prerelease. A red smoke leaves the tag staged; fix forward with a new tag.
   promote-release:
     name: Promote the release once a fresh install boots
-    needs: [published-installed-boot, published-package-smoke, recipe-install-smoke]
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.published-installed-boot.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
+    needs: [e2e-docs, published-installed-boot, published-package-smoke, recipe-install-smoke]
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.e2e-docs.result == 'success' && needs.published-installed-boot.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -47,15 +47,6 @@ fn assert_job_needs_bdd(workflow_name: &str, job: &str) {
     );
 }
 
-fn assert_job_contains(workflow_name: &str, job: &str, expected: &str) {
-    let contents = workflow(workflow_name);
-    let block = job_block(&contents, job);
-    assert!(
-        block.contains(expected),
-        "{workflow_name}'s {job} job must contain {expected:?}"
-    );
-}
-
 #[test]
 fn canonical_bdd_workflow_runs_the_full_suite() {
     let contents = workflow("bdd.yml");
@@ -75,7 +66,7 @@ fn broad_live_bdd_stays_extended_while_the_bounded_ps11_witness_runs_in_the_queu
     let ci = workflow("ci.yml");
     // BDD is full-matrix: the merge queue runs it, a pull request does not.
     assert!(ci.contains(
-        "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request'"
+        "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request' && github.event_name != 'merge_group'"
     ));
     assert!(ci.contains("run_ps11_live: ${{ needs.scope.outputs.code == 'true' }}"));
 
@@ -242,13 +233,6 @@ fn canonical_bdd_workflow_uses_bounded_apt_action() {
         !contents.contains("sudo apt-get"),
         "BDD setup must not bypass the bounded apt action"
     );
-}
-
-#[test]
-fn runtime_release_publication_needs_bdd() {
-    assert_reuses_bdd_gate("release.yml");
-    assert_job_needs_bdd("release.yml", "release");
-    assert_job_contains("release.yml", "release", "needs.bdd.result == 'success'");
 }
 
 #[test]

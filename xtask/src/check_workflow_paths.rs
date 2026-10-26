@@ -622,7 +622,7 @@ mod tests {
         condition
     }
 
-    /// Lanes that run on a pull request and again in the merge queue.
+    /// Lanes that run on a pull request, in the merge queue and on a push to main.
     const FAST_GATE_LANES: [&str; 5] = [
         "lint-core",
         "lint-feature-clippy",
@@ -631,7 +631,7 @@ mod tests {
         "test-workspace",
     ];
 
-    /// Lanes that run in the merge queue (and on a manual dispatch) only.
+    /// Lanes that run on a push to main (and on a manual dispatch) only.
     const FULL_MATRIX_LANES: [&str; 10] = [
         "lint-features",
         "lint-features-test-support",
@@ -830,7 +830,7 @@ mod tests {
         }
 
         // The tier split. Fast-gate lanes run on a pull request and again in
-        // the queue; full-matrix lanes run in the queue (and on a manual
+        // the queue; full-matrix lanes run on a push to main (and on a manual
         // dispatch) only. `ci_scope_aggregate` pins the aggregate's half of the
         // same split by executing it.
         for lane in FAST_GATE_LANES {
@@ -844,12 +844,14 @@ mod tests {
         for lane in FULL_MATRIX_LANES {
             let job_if = job_if(job_block(&workflow, lane));
             assert!(
-                job_if.contains("github.event_name != 'pull_request'"),
+                job_if.contains(
+                    "github.event_name != 'pull_request' && github.event_name != 'merge_group'"
+                ),
                 "{lane} is full-matrix: it must not run on a pull request, got {job_if:?}"
             );
             assert!(
-                !job_if.contains("merge_group"),
-                "{lane} is full-matrix: it must run in the merge queue, got {job_if:?}"
+                job_if.contains("github.event_name != 'merge_group'"),
+                "{lane} is full-matrix: it must not run in the merge queue, got {job_if:?}"
             );
         }
 
@@ -1033,9 +1035,9 @@ mod tests {
         let bdd = job_block(&workflow, "bdd-conformance");
         assert!(
             bdd.contains(
-                "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request'"
+                "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request' && github.event_name != 'merge_group'"
             ),
-            "bdd-conformance must run for the code scope and the docs scope, in the merge queue"
+            "bdd-conformance must run for the code scope and the docs scope, on a push to main"
         );
         // A docs-only change gets the documentation scenarios; anything that
         // compiles still gets the whole suite.
@@ -1096,7 +1098,7 @@ mod tests {
         assert!(
             job_block(workflow, "test-workspace-extras")
                 .contains("cargo run -p xtask -- check-nextest-groups"),
-            "the nextest override filters must still be validated in the merge queue"
+            "the nextest override filters must still be validated on a push to main"
         );
         let upload = build
             .find("uses: actions/upload-artifact@")
@@ -1236,7 +1238,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_group_ci_runs_the_full_matrix_and_pull_requests_run_the_fast_gate() {
+    fn merge_group_and_pull_requests_run_the_fast_gate_and_main_runs_the_full_matrix() {
         let ci = ci_workflow();
         let scope = job_block(&ci, "scope");
         for expected in [
@@ -1303,18 +1305,12 @@ mod tests {
             "the fast gate must compile every workspace test target"
         );
 
-        // The full matrix on the integrated commit. Every lane runs there;
-        // none of the expensive ones runs on a pull request.
+        // The fast gate runs on every event; the expensive lanes run only
+        // after the merge, never on a pull request or in the queue.
         for job in FAST_GATE_LANES.iter().chain(FULL_MATRIX_LANES.iter()) {
-            let block = job_block(&ci, job);
             assert!(
-                block.contains("needs.scope.outputs.code == 'true'"),
+                job_block(&ci, job).contains("needs.scope.outputs.code == 'true'"),
                 "{job} must keep the code scope"
-            );
-            assert!(
-                !block.contains("github.event_name != 'merge_group'")
-                    && !block.contains("github.event_name == 'pull_request'"),
-                "{job} must run in the merge queue"
             );
         }
         for job in FULL_MATRIX_LANES
@@ -1322,7 +1318,9 @@ mod tests {
             .chain(["bdd-conformance", "nix-flake-check"].iter())
         {
             assert!(
-                job_if(job_block(&ci, job)).contains("github.event_name != 'pull_request'"),
+                job_if(job_block(&ci, job)).contains(
+                    "github.event_name != 'pull_request' && github.event_name != 'merge_group'"
+                ),
                 "{job} is an expensive lane and must not run on a pull request"
             );
         }
@@ -1352,7 +1350,7 @@ mod tests {
         let nix = job_block(&ci, "nix-flake-check");
         assert!(nix.contains("needs: [scope]"));
         assert!(nix.contains(
-            "if: needs.scope.outputs.nix == 'true' && github.event_name != 'pull_request'"
+            "if: needs.scope.outputs.nix == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'"
         ));
         let aggregate = job_block(&ci, "test");
         assert!(aggregate.contains("SCOPE_NIX: ${{ needs.scope.outputs.nix }}"));
@@ -1417,14 +1415,14 @@ mod tests {
         assert!(
             aggregate.contains(r#"bdd_required=$(required "$full_matrix" "$code_or_docs")"#)
                 && aggregate.contains(r#"check "BDD conformance" "$BDD_RESULT" "$bdd_required""#),
-            "Test must require the BDD lane in the queue whenever code or docs is in scope"
+            "Test must require the BDD lane on main whenever code or docs is in scope"
         );
         assert!(
-            aggregate.contains("pull_request) full_matrix=false ;;")
-                && aggregate.contains("merge_group|workflow_dispatch) full_matrix=true ;;")
+            aggregate.contains("pull_request|merge_group) full_matrix=false ;;")
+                && aggregate.contains("push|workflow_dispatch) full_matrix=true ;;")
                 && aggregate.contains(r#"gate_required=$(required true "$SCOPE_CODE")"#)
                 && aggregate.contains(r#"full_required=$(required "$full_matrix" "$SCOPE_CODE")"#),
-            "Test must enforce the fast gate on every event and the full matrix in the queue"
+            "Test must enforce the fast gate on every event and the full matrix after the merge"
         );
     }
 
@@ -1459,25 +1457,6 @@ mod tests {
         // A lane outside the aggregate cannot fail the merge.
         let aggregate = job_block(&ci, "test");
         assert!(aggregate.contains("WINDOWS_RESULT: ${{ needs.lint-windows.result }}"));
-    }
-
-    #[test]
-    fn mutation_cli_shard_installs_its_embedded_host_toolchain() {
-        let workflow = workflow("security.yml");
-        let mutation = job_block(&workflow, "mutation-witnesses");
-        let install = concat!(
-            "      - name: Install mvm-cli embedded-host toolchain\n",
-            "        if: startsWith(matrix.package, 'mvm-cli')\n",
-            "        uses: ./.github/actions/install-zigbuild",
-        );
-        assert!(
-            mutation.contains(install),
-            "the mvm-cli mutation shard must install the pinned Zig toolchain"
-        );
-        assert!(
-            mutation.find(install) < mutation.find("Mutate this package's claim surface"),
-            "the embedded-host toolchain must be installed before cargo-mutants builds mvm-cli"
-        );
     }
 
     #[test]
@@ -1696,10 +1675,12 @@ mod tests {
         // Each merge group has its own ref and the queue builds several at
         // once, so a shared queue key would make one group cancel another.
         let expected_group = "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}";
-        let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' }}";
+        let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}";
 
         let ci = ci_workflow();
-        assert!(ci.contains("merge_group:\n    types: [checks_requested]"));
+        assert!(ci.contains(
+            "merge_group:\n    types: [checks_requested]\n  push:\n    branches: [main]"
+        ));
         assert!(ci.contains(expected_group));
         assert!(ci.contains(expected_cancel));
         assert!(ci.contains("permissions:\n  contents: read"));

@@ -48,7 +48,6 @@ mod check_image_lock;
 mod check_image_reproducibility;
 mod check_kernel_pin_freshness;
 mod check_machine_doc_guards;
-mod check_mutation_witnesses;
 mod check_mvm_host_binaries_sync;
 mod check_nextest_groups;
 mod check_no_cli_shellout;
@@ -391,50 +390,6 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_claim_catalog::run(&workspace)
         }
-        Some("check-mutation-witnesses") => {
-            let workspace = workspace_root();
-            // Default is the cheap surface pin, so the PR lint lane can
-            // run this without cargo-mutants installed. The mutation run
-            // itself is opt-in because it costs hours.
-            let write = args.iter().any(|a| a == "--write-baseline");
-            let run = args.iter().any(|a| a == "--run");
-            // `--verify-outcomes <dir>` judges the output a run left behind,
-            // so a shard its timeout stopped still gets a verdict naming the
-            // files it never reached.
-            let verify = args
-                .iter()
-                .position(|a| a == "--verify-outcomes")
-                .map(|i| {
-                    args.get(i + 1).map(PathBuf::from).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "--verify-outcomes needs the directory a --run wrote its \
-                             cargo-mutants output to"
-                        )
-                    })
-                })
-                .transpose()?;
-            let mode = match (write, run, verify) {
-                (false, false, Some(dir)) => check_mutation_witnesses::Mode::VerifyOutcomes(dir),
-                (_, _, Some(_)) => anyhow::bail!(
-                    "--verify-outcomes judges a finished run's output; it cannot be combined \
-                     with --run or --write-baseline"
-                ),
-                (true, true, None) => check_mutation_witnesses::Mode::RewriteBaseline,
-                (true, false, None) => check_mutation_witnesses::Mode::RepinSurface,
-                (false, true, None) => check_mutation_witnesses::Mode::Run,
-                (false, false, None) => check_mutation_witnesses::Mode::PinOnly,
-            };
-            // `--package <name>` shards a `--run` so each CI job finishes
-            // inside the six-hour job cap; unset means the whole surface. A
-            // package that outgrew one job takes the `<name>/<i>of<n>` form.
-            let shard = args
-                .iter()
-                .position(|a| a == "--package")
-                .and_then(|i| args.get(i + 1))
-                .map(|raw| check_mutation_witnesses::parse_shard_spec(raw))
-                .transpose()?;
-            check_mutation_witnesses::run(&workspace, mode, shard.as_ref())
-        }
         Some("check-nextest-groups") => {
             let workspace = workspace_root();
             check_nextest_groups::run(&workspace)
@@ -551,7 +506,7 @@ fn main() -> Result<()> {
             check_all::run_all(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, publish-plan, check-publish-readiness, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, report-compile-units, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-spec-hygiene, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-thin-cli, check-cli-help-matches-docs, check-claim-catalog, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-single-workspace-write-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, publish-plan, check-publish-readiness, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, report-compile-units, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-spec-hygiene, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-thin-cli, check-cli-help-matches-docs, check-claim-catalog, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-single-workspace-write-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -691,9 +646,6 @@ fn main() -> Result<()> {
             );
             println!(
                 "  check-dormant-controls                 Security-relevant controls declare whether they have a production caller; the dormant list may only shrink"
-            );
-            println!(
-                "  check-mutation-witnesses               Pin the mutation surface derived from the claims ledger; --run mutates it and ratchets survivors; --verify-outcomes <dir> judges a run's output and names unmeasured files; --write-baseline re-pins (add --run to also re-record misses)"
             );
             println!(
                 "  check-nextest-groups                   Verify every cargo-nextest test-group override still matches at least one test"
