@@ -31,6 +31,28 @@ fn just_module(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
+/// The macOS libkrunfw kernel build runs `make LLVM=1 LD=ld.lld`. Homebrew's
+/// `llvm` formula no longer ships `ld.lld`; it is the separate `lld` formula. The
+/// install step must name it and the build step must put its `bin` on PATH, or
+/// the Kconfig probe stops with "linker 'ld.lld' not found" (the v0.25.0 tag run).
+#[test]
+fn macos_libkrun_tier_installs_lld_and_puts_it_on_path() {
+    let workflow = release_workflow();
+    let install = workflow
+        .lines()
+        .find(|line| line.contains("brew install") && line.contains("llvm"))
+        .expect("the macOS libkrun dependency install step must exist");
+    assert!(
+        install.split_whitespace().any(|word| word == "lld"),
+        "the libkrunfw kernel build needs ld.lld, the separate `lld` formula: {install}"
+    );
+    assert!(
+        workflow.contains("lld_prefix=\"$(brew --prefix lld)\"")
+            && workflow.contains("${lld_prefix}/bin"),
+        "the libkrun tier build step must put the lld formula's bin on PATH"
+    );
+}
+
 /// Manual validation cannot issue tag-bound proof or create a release.
 ///
 /// Candidate proof requires the real tag-push identity and successful input
