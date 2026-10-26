@@ -1337,6 +1337,9 @@ jobs:
       - name: Build the workspace test archive
         env:
           ARCHIVE_RUN_ID: ${{ github.run_id }}
+          # The archive is downloaded by every hosted shard; line tables were
+          # most of what was left to shed (3.6 GB), and the tests do not read them.
+          CARGO_PROFILE_DEV_STRIP: debuginfo
         run: |
           set -euo pipefail
           # Some workspace tests clear /tmp on Linux; keep their own binaries safe.
