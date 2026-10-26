@@ -19,6 +19,13 @@ test("shared navigation makes the blog discoverable", () => {
   assert.match(header, /\{ label: "Blog", href: `\$\{b\}blog\/` \}/);
 });
 
+test("blog omits the browse posts section and keeps a clear return link", () => {
+  const index = readFileSync(join(publicRoot, "src/pages/blog/index.astro"), "utf8");
+  const article = readFileSync(join(publicRoot, "src/pages/blog/[...slug].astro"), "utf8");
+  assert.doesNotMatch(index, /blog-post-index|Browse posts/);
+  assert.match(article, /href="\/blog\/">← All posts<\/a>/);
+});
+
 test("use cases are discoverable and have complete workflow content", () => {
   const header = readFileSync(join(publicRoot, "src/overrides/Header.astro"), "utf8");
   assert.match(header, /\{ label: "Use cases", href: `\$\{b\}use-cases\/` \}/);
