@@ -547,17 +547,7 @@ pub(crate) use runtime_binding::{metadata_blob_sha256, verify_checkpoint_runtime
 /// capture runs in a detached refill, so the same trace file the warm claim
 /// writes (`MVM_HVF_AGENT_DEBUG`) carries these.
 fn record_capture_phase(started: std::time::Instant, phase: &'static str) {
-    let elapsed_us = started.elapsed().as_micros();
-    tracing::debug!(
-        target: "mvm_runtime::checkpoint_capture",
-        phase,
-        elapsed_us,
-        "checkpoint capture phase"
-    );
-    mvm_vmm::agent_debug::line(
-        "checkpoint-capture",
-        format_args!("phase={phase} elapsed_us={elapsed_us}"),
-    );
+    mvm_vmm::agent_debug::phase("checkpoint-capture", started, format_args!("phase={phase}"));
 }
 
 fn capture_vm_full_inner(
