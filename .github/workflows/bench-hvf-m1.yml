@@ -59,8 +59,11 @@ jobs:
           B="$PWD/target/release-witness/mvmctl"
           # A standby left by an earlier step is reaped when that step ends, so
           # prepare one here, in the step that measures it.
+          export MVM_HVF_AGENT_DEBUG="$RUNNER_TEMP/agent-debug.log"
           "$B" pool warm --image docker.io/library/alpine:3.20 || echo "pool warm exited $?"
           "$B" pool status || true
+          tail -40 "$MVM_HVF_AGENT_DEBUG" 2>/dev/null || echo "no agent trace written"
+          find "$MVM_HOME" -name 'console.log' -exec sh -c 'echo "--- $1"; tail -25 "$1"' _ {} \; 2>/dev/null | head -80
           for attempt in 1 2 3; do
             for _ in $(seq 1 90); do
               load="$(sysctl -n vm.loadavg | awk '{print $2}')"
@@ -87,6 +90,7 @@ jobs:
             ${{ runner.temp }}/warm-*.log
             ${{ runner.temp }}/warm-*.json
             ${{ runner.temp }}/bootstrap.log
+            ${{ runner.temp }}/agent-debug.log
       - name: Clean up this job's VMs and home
         if: always()
         run: |
