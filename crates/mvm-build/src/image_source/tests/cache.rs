@@ -1086,10 +1086,13 @@ fn a_tampered_member_with_a_forged_sidecar_is_evicted_sidecars_and_all() {
         format!("{} {} {mtime}\n", vouched.as_str(), meta.len()),
     )
     .unwrap();
+    // The digest cache does not serve this forgery: an unsealed sidecar vouches
+    // for nothing, so it hashes the bytes it is asked about. Eviction below does
+    // not depend on that; it re-hashes on its own.
     assert_eq!(
         mvm_core::crypto::image_verify::sha256_file_cached(&kernel).unwrap(),
-        vouched.as_str(),
-        "the forgery is one the digest cache itself would serve"
+        Sha256Hex::from_bytes(tampered).as_str(),
+        "an unsealed sidecar must not vouch for different bytes"
     );
 
     let reason = expect_evicted(fx.lookup(&key));
