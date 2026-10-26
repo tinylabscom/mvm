@@ -288,6 +288,7 @@ pub fn connect_to_port_once(uds_path: &str, port: u32, timeout_secs: u64) -> Res
 /// for definitive failures (connection refused, socket not found).
 pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let mut last_err = None;
+    let started = Instant::now();
 
     for attempt in 0..CONNECT_RETRIES {
         match connect_to_port_once(uds_path, port, timeout_secs) {
@@ -297,7 +298,11 @@ pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<U
                     return Err(e);
                 }
 
-                last_err = Some(e);
+                last_err = Some(e.context(format!(
+                    "vsock connect to port {port} failed on attempt {} of {CONNECT_RETRIES} after {:?}",
+                    attempt + 1,
+                    started.elapsed()
+                )));
 
                 if attempt + 1 < CONNECT_RETRIES {
                     std::thread::sleep(connect_retry_delay(attempt));
