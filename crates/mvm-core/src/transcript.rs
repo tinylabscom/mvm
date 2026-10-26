@@ -1908,6 +1908,46 @@ mod tests {
         assert!(serde_json::from_str::<PayloadEncoding>("\"unknown\"").is_err());
     }
 
+    /// The read window closes at the exact deadline on both export paths: one
+    /// second earlier the payload is delivered, at the deadline the refusal is
+    /// clean and leaves ciphertext and manifest untouched.
+    #[cfg(unix)]
+    #[test]
+    fn protected_export_is_readable_until_the_exact_deadline_then_refuses_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(dir.path()).unwrap();
+        let mut cfg = writer_config();
+        cfg.created_unix_secs = 100;
+        cfg.at_rest = Some(AtRestRetention::default());
+        let mut writer = TranscriptWriter::new(dir.path(), fixed_key(1), cfg).unwrap();
+        writer.push(Direction::Stdout, b"synthetic").unwrap();
+        let terminal = writer.finalize_at(200).unwrap();
+        let deadline = terminal.retention_deadline().unwrap().unwrap();
+        let payload_path = dir.path().join(&terminal.chunks[0].file);
+        let ciphertext = std::fs::read(&payload_path).unwrap();
+        let clock = export_test_clock::at(deadline - 1);
+        assert_eq!(
+            export(&terminal, dir.path(), &fixed_key(1)).unwrap(),
+            b"synthetic"
+        );
+        assert_eq!(
+            export_chunks(&terminal, dir.path(), &fixed_key(1)).unwrap()[0].plaintext,
+            b"synthetic"
+        );
+        export_test_clock::set(deadline);
+        assert_eq!(
+            export(&terminal, dir.path(), &fixed_key(1)),
+            Err(TranscriptError::PayloadExpired)
+        );
+        assert_eq!(
+            export_chunks(&terminal, dir.path(), &fixed_key(1)),
+            Err(TranscriptError::PayloadExpired)
+        );
+        drop(clock);
+        assert_eq!(std::fs::read(&payload_path).unwrap(), ciphertext);
+        verify_sealed_root(&terminal).unwrap();
+    }
+
     #[test]
     fn abandoned_recovery_does_not_restart_age() {
         let dir = tempfile::tempdir().unwrap();
