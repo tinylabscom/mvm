@@ -844,6 +844,21 @@ pub fn vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// Create the short `/tmp` socket directory a deep state directory falls back
+/// to, owned and private, or refuse. Does nothing when the sockets live in the
+/// state directory itself, which sits under the mvm home.
+///
+/// The fallback name is derived from the state-dir path, so another local user
+/// can compute it and create it first. Everything that creates or first uses
+/// the directory goes through here so a directory it does not own is refused.
+pub fn secure_fallback_socket_dir_at(state_dir: &std::path::Path) -> std::io::Result<()> {
+    let socket_dir = vm_socket_dir_at(state_dir);
+    if socket_dir == state_dir {
+        return Ok(());
+    }
+    crate::private_fs::create_owned_private_dir(&socket_dir)
+}
+
 /// Per-VM Unix-socket directory for a named VM.
 pub fn vm_socket_dir(name: &str) -> std::path::PathBuf {
     vm_socket_dir_at(&vm_state_dir(name))
@@ -2318,5 +2333,55 @@ mod tests {
         let by_name = transcript_capture_dir("acme", "capture-1");
         let by_root = transcript_capture_dir_at(&mvm_transcripts_dir(), "acme", "capture-1");
         assert_eq!(by_name, by_root);
+    }
+
+    /// A state dir deep enough that its sockets move to the `/tmp` fallback.
+    #[cfg(unix)]
+    fn deep_state_dir(root: &std::path::Path) -> std::path::PathBuf {
+        let mut dir = root.to_path_buf();
+        while dir.as_os_str().len() < 140 {
+            dir.push("deeply-nested-state-dir-component");
+        }
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn securing_the_socket_dir_is_a_noop_when_sockets_stay_in_the_state_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("vm");
+        assert_eq!(vm_socket_dir_at(&state), state);
+        secure_fallback_socket_dir_at(&state).unwrap();
+        assert!(!state.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fallback_socket_dir_is_created_private_and_a_planted_symlink_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let state = deep_state_dir(root.path());
+        let fallback = vm_socket_dir_at(&state);
+        assert_ne!(
+            fallback, state,
+            "state dir must be deep enough to fall back"
+        );
+        let _ = std::fs::remove_dir_all(&fallback);
+
+        secure_fallback_socket_dir_at(&state).unwrap();
+        let mode = std::fs::metadata(&fallback).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        secure_fallback_socket_dir_at(&state).unwrap();
+
+        std::fs::remove_dir(&fallback).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &fallback).unwrap();
+        let refused = secure_fallback_socket_dir_at(&state);
+        std::fs::remove_file(&fallback).unwrap();
+        assert!(
+            refused.is_err(),
+            "a symlink at the fallback path must be refused"
+        );
     }
 }

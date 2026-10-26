@@ -381,6 +381,12 @@ impl BuilderVsockEgressEndpoint {
 
 pub fn builder_vsock_socket_dir(state_dir: &Path) -> Result<PathBuf, BuilderVmError> {
     let socket_dir = mvm_core::config::vm_socket_dir_at(state_dir);
+    mvm_core::config::secure_fallback_socket_dir_at(state_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "securing builder vsock socket dir {}: {e}",
+            socket_dir.display()
+        ))
+    })?;
     std::fs::create_dir_all(&socket_dir).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "creating builder vsock socket dir {}: {e}",
