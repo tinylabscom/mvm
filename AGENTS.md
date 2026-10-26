@@ -376,6 +376,15 @@ commit message or the owning spec, and link the code from there.
 
 ## Reuse first; compose small, testable units
 
+**Write as little code as possible.** Prefer the fewest lines that correctly
+solve the task: reuse existing code, delete unnecessary code, and avoid
+speculative abstractions. Do not trade readability, safety, or required tests
+for a lower line count.
+
+**Use the `ponytail` skill and, for Rust work, `rust-skills`.** Load and follow
+them before implementing; if either required skill is unavailable, report that
+explicitly rather than silently skipping it.
+
 Never reimplement existing functionality. Before writing anything, search for
 an existing helper, type, trait impl, or crate that does the job — grep the
 workspace, check facade re-exports, read the module the work belongs in. If a
