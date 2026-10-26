@@ -18,7 +18,7 @@ const { Content } = await render(post);
 <BlogLayout title={post.data.title} description={post.data.description}>
   <article class="blog-article">
     <header class="blog-article-header">
-      <a class="blog-back-link" href="/blog/">Blog</a>
+      <a class="blog-back-link" href="/blog/">← All posts</a>
       <time datetime={post.data.date.toISOString()}>
         {post.data.date.toLocaleDateString("en-US", {
           month: "long",
