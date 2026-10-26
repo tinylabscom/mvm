@@ -23,6 +23,18 @@ source "$REPO/scripts/e2e-phase-timings.sh"
 # shellcheck source=scripts/sdk-hostlib.sh
 source "$REPO/scripts/sdk-hostlib.sh"
 
+# Diagnostic initialization precedes every build/bootstrap operation. A refusal
+# disables collection for this invocation, never overwriting or uploading an old
+# destination, and never replacing the suite's own failure/cleanup outcome.
+unset MVM_E2E_FAILURE_INITIALIZED
+if [[ "${1:-}" != "--clean-only" && -n "${MVM_E2E_FAILURE_MANIFEST:-}" ]]; then
+  if MVM_E2E_FAILURE_INITIALIZED="$(python3 "$REPO/scripts/e2e-failure-manifest.py")"; then
+    export MVM_E2E_FAILURE_INITIALIZED
+  else
+    unset MVM_E2E_FAILURE_MANIFEST MVM_E2E_FAILURE_INITIALIZED
+  fi
+fi
+
 # Prefer an explicit `MVM_E2E_HOME`, then `MVM_HOME`, then the real home.
 #
 # `scripts/dev-env.sh` gives each worktree its own `MVM_HOME` *and* its own

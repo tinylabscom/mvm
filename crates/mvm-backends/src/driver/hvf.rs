@@ -56,6 +56,32 @@ const SNAPSHOT_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// socket proves an immediate activation can actually dial the guest channel.
 const AGENT_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+fn startup_failure_record(
+    summary: mvm_vmm::host::hvf_supervisor::StartupSummary,
+    status: Option<std::process::ExitStatus>,
+) -> mvm_core::launch_trace::failure::Record {
+    use mvm_core::launch_trace::failure::{Phase, Record, Stage};
+    use mvm_vmm::host::hvf_supervisor::StartupStage as S;
+    let mut record = Record::new(Phase::HvfReadiness);
+    record.stage = match summary.stage {
+        S::Unknown => Stage::Unknown,
+        S::SignCheck => Stage::SignCheck,
+        S::SigningLock => Stage::SigningLock,
+        S::Signing => Stage::Signing,
+        S::Reexec => Stage::Reexec,
+        S::ConfigRead => Stage::ConfigRead,
+        S::ConfigParse => Stage::ConfigParse,
+        S::StatusPublish => Stage::StatusPublish,
+        S::StartupInputs => Stage::StartupInputs,
+        S::CapturePolicy => Stage::CapturePolicy,
+        S::CaptureSetup => Stage::CaptureSetup,
+        S::PidPublish => Stage::PidPublish,
+        S::PidPublished => Stage::PidPublished,
+    };
+    record.exit_code = status.and_then(|status| status.code());
+    record
+}
+
 /// The first-party VMM driver: pure VMM mechanics, no policy and no admission.
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge, not
@@ -620,6 +646,7 @@ fn boot_retaining_child(
                     .as_mut()
                     .map(StartupDiagnostics::snapshot)
                     .unwrap_or_default();
+                startup_failure_record(summary, status).emit();
                 anyhow::Error::new(error)
                     .context("pipe HVF supervisor config")
                     .context(summary.child_status(status))
@@ -635,6 +662,7 @@ fn boot_retaining_child(
                     .as_mut()
                     .map(StartupDiagnostics::snapshot)
                     .unwrap_or_default();
+                startup_failure_record(summary, Some(status)).emit();
                 bail!(
                     "HVF supervisor exited before readiness ({}); {}; retain runtime evidence",
                     summary.exited(status),
@@ -646,6 +674,7 @@ fn boot_retaining_child(
                     .as_mut()
                     .map(StartupDiagnostics::snapshot)
                     .unwrap_or_default();
+                startup_failure_record(summary, None).emit();
                 bail!(
                     "HVF supervisor readiness deadline; {}; {}; retain runtime evidence",
                     summary.child_status(None),
@@ -672,6 +701,7 @@ fn boot_retaining_child(
                 .as_mut()
                 .map(StartupDiagnostics::snapshot)
                 .unwrap_or_default();
+            startup_failure_record(summary, observed_exit).emit();
             return Err(error).context(format!(
                 "HVF supervisor failed readiness; {}; {}",
                 summary.child_status(observed_exit),
@@ -2942,6 +2972,23 @@ mod tests {
     #[test]
     fn startup_diagnostics_do_not_extend_the_pid_deadline() {
         assert_eq!(PID_FILE_TIMEOUT, std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn failure_record_keeps_the_stage_and_only_an_observed_exit() {
+        use mvm_vmm::host::hvf_supervisor::{StartupStage, StartupSummary};
+        use std::os::unix::process::ExitStatusExt;
+        let summary = StartupSummary {
+            stage: StartupStage::CaptureSetup,
+        };
+        let record =
+            startup_failure_record(summary, Some(std::process::ExitStatus::from_raw(17 << 8)));
+        assert_eq!(
+            record.stage,
+            mvm_core::launch_trace::failure::Stage::CaptureSetup
+        );
+        assert_eq!(record.exit_code, Some(17));
+        assert_eq!(startup_failure_record(summary, None).exit_code, None);
     }
 
     /// Same contract as every other driver: the bound rides on the spawn.

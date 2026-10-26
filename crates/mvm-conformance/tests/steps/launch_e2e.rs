@@ -28,6 +28,9 @@ use crate::world::{CliWorld, LaunchRecord};
 #[path = "../support/pty_capture.rs"]
 mod pty_capture;
 
+#[path = "../support/failure_diagnostics.rs"]
+pub(crate) mod failure_diagnostics;
+
 /// Env var naming the artifact-warm `MVM_HOME` these scenarios share.
 ///
 /// Unset means the operator's real home, which is the point when running this
@@ -141,6 +144,7 @@ fn shell_split(args: &str) -> Vec<String> {
 static SCENARIO_START: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
 
 pub(crate) fn mark_scenario_start() {
+    failure_diagnostics::begin_scenario();
     if let Ok(mut start) = SCENARIO_START.lock() {
         *start = Some(Instant::now());
     }
@@ -220,9 +224,14 @@ fn run_argv_in_e2e_home(argv: &[String], extra_env: &[(&str, &str)]) -> LaunchRe
     };
     command.env("PYTHONPATH", pythonpath);
 
+    if std::env::var_os(failure_diagnostics::DESTINATION_ENV).is_some() {
+        command.env(mvm_core::launch_trace::failure::ENABLE_ENV, "1");
+    }
     let started = Instant::now();
-    let output = command.output().expect("failed to spawn mvmctl");
+    let output = command.output();
     let wall = started.elapsed();
+    failure_diagnostics::observe(&output);
+    let output = output.expect("failed to spawn mvmctl");
     eprintln!("{}", timing_line(argv, wall));
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
