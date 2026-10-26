@@ -74,7 +74,14 @@ function Compile-Test {
     if ($Package -eq 'mvm-build') {
         $arguments += '--no-default-features'
     }
-    $arguments += @('--features', 'test-support') + $Selection
+    $features = 'test-support'
+    if ($Package -eq 'mvm-core') {
+        # The registry_pack_store witness lives behind the off-by-default
+        # host-state feature; this lane exists to run host-only modules on
+        # Windows, so it enables the feature explicitly.
+        $features = 'test-support,host-state'
+    }
+    $arguments += @('--features', $features) + $Selection
     $arguments += @('--no-run', '--message-format=json')
     $output = Invoke-Logged 'cargo' $arguments "$Label-compile.log"
     $executables = @(
