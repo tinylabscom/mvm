@@ -28,6 +28,7 @@ pub mod start_params;
 pub mod startup_budget;
 #[cfg(test)]
 mod tests;
+mod transient;
 mod unbooted;
 
 use unbooted::DefinitionOrigin;
@@ -60,40 +61,6 @@ use crate::volume::{
     AdmittedProfile, AttachmentRequest, LaunchLeaseRequest, LocalVolumeService, UnlockPolicy,
     VolumeService,
 };
-
-fn observe_then_cleanup<T>(
-    record: mvm_core::launch_trace::failure::Record,
-    observe: impl FnOnce(mvm_core::launch_trace::failure::Record) -> T,
-    cleanup: impl FnOnce(),
-) {
-    let _ = observe(record);
-    cleanup();
-}
-
-#[cfg(test)]
-mod failure_order_tests {
-    #[test]
-    fn typed_observation_precedes_cleanup_even_when_the_writer_refuses() {
-        use mvm_core::launch_trace::failure::{Phase, Record};
-        let events = std::cell::RefCell::new(Vec::new());
-        let retained_state = std::cell::Cell::new(true);
-        super::observe_then_cleanup(
-            Record::new(Phase::TransientCommand),
-            |record| {
-                assert!(retained_state.get());
-                assert_eq!(record.phase, Phase::TransientCommand);
-                events.borrow_mut().push("observe");
-                Err::<(), _>(std::io::ErrorKind::BrokenPipe)
-            },
-            || {
-                events.borrow_mut().push("cleanup");
-                retained_state.set(false);
-            },
-        );
-        assert_eq!(*events.borrow(), ["observe", "cleanup"]);
-        assert!(!retained_state.get());
-    }
-}
 
 /// The tenant every locally-launched machine is admitted and scoped under —
 /// mirrors the admission seam's fixed local tenant label.
@@ -937,42 +904,6 @@ impl LocalBackend {
                 )
             });
         self.discard_definition_on_failure(name, origin, recorded.map(|()| (spec, origin)))
-    }
-
-    /// The transient launch path: collision check, secret-ref validation +
-    /// recording, attachment registration, lease acquisition, admitted boot,
-    /// registration. Any failure after recording rolls the session-owned
-    /// state back (leases via RAII, secret refs + attachments explicitly).
-    #[tracing::instrument(skip_all)]
-    async fn launch_transient(&self, request: LaunchRequest) -> Result<LaunchOutcome> {
-        let name = request
-            .name
-            .clone()
-            .unwrap_or_else(generated_transient_name);
-        self.ensure_transient_name_free(&name)?;
-        self.validate_and_record_secret_refs(&name, &request.secret_refs)?;
-
-        use mvm_core::launch_trace::failure::{Phase, Record};
-        let mut phase = Phase::TransientBoot;
-        let result = match self.attach_lease_and_boot(&name, &request, true).await {
-            Ok(outcome) => {
-                phase = Phase::TransientCommand;
-                self.start_requested_command(outcome, &request)
-            }
-            Err(e) => Err(e),
-        };
-        match result {
-            Ok(outcome) => Ok(outcome),
-            Err(e) => {
-                observe_then_cleanup(Record::new(phase), Record::emit, || {
-                    // Idempotent rollback of everything this session recorded.
-                    if let Err(cleanup) = self.cleanup_transient(&name) {
-                        tracing::warn!(error = %cleanup, machine = %name, "transient cleanup after failed launch");
-                    }
-                });
-                Err(e)
-            }
-        }
     }
 
     /// Boot a persistent definition that was just created/reconciled from
