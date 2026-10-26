@@ -11,7 +11,7 @@ This plan was gated on two upstream crates shipping STABLE (non-RC) releases:
 - **ed25519-dalek 3.0** — required for the 0.11 digest/signature ecosystem
 
 ADR-002 forbids RC crypto in the shipped closure. Both gates cleared on
-2026-08-21 (aes-gcm 0.11.1) and 2026-08-?? (ed25519-dalek 3.0.0). This plan
+2026-08-21 (aes-gcm 0.11.1) and 2026-10-26 (ed25519-dalek 3.0.0). This plan
 documents the work done once both were confirmed stable.
 
 ## What was already done
