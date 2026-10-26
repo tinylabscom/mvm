@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list release
+
 # ── Release ──────────────────────────────────────────────────────────────
 # `main` is protected (enforce_admins + merge queue), so the version bump lands
 # through a PR — a direct `git push` to main is rejected. After the PR merges,

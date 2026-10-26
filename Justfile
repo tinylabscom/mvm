@@ -151,6 +151,6 @@ ci: lint test (tests::doc) (bdd::run)
 release-build:
     cargo build --release --features host,user,release-artifact-bootstrap,embed-host-bins
 
-# Build the documentation site (stages the /demo wasm assets first if missing)
+# Show documentation site subcommands; build explicitly with `just site::build`
 docs:
-    @just site::build
+    @just --list site

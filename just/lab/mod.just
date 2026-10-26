@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list lab
+
 # Creates a disposable Intel GCP Spot host, runs the command with nested KVM,
 # downloads its results, and deletes the host.
 
