@@ -45,10 +45,16 @@ thiserror.workspace = true
 # `manifest-verify` (sigstore) pulls the rest. With both off, the default
 # `mvm-core` build is runtime-free.
 tokio = { workspace = true, optional = true }
-toml.workspace = true
+# Host-only: the `domain::manifest` workload-file parser (`mvm.toml`) and the
+# `user_config` operator-config store. Optional so guest binaries never
+# resolve it; enabled by the `host-state` feature.
+toml = { workspace = true, optional = true }
 tracing.workspace = true
 uuid.workspace = true
-regex.workspace = true
+# Host-only: `config::fc_version`'s version normalizer (the PII redactor and
+# threat classifier under `host-state` are the other users). Optional so
+# guest binaries never resolve it.
+regex = { workspace = true, optional = true }
 tempfile.workspace = true
 
 # Folded in with the former mvm-security crate: the
@@ -121,15 +127,21 @@ os-keyring = ["dep:keyring"]
 # `pii`, `receipt`/`receipt_archive` (their signing API is did:key-shaped),
 # `stream_client` (its console redactor holds a `PiiRedactor`), the
 # `registry_pack*` family, `policy::toml_loader`, `image_set::train_lock`,
-# and the tar archive I/O half of `plan::bundle` (`stream` plus the
-# archive-reading entry points). Off by default so the guest binaries
+# `domain::manifest` (the `mvm.toml` workload file), `user_config` (the
+# operator `config.toml` store), `config::fc_version` (the host's
+# Firecracker toolchain pin), and the tar archive I/O half of
+# `plan::bundle` (`stream` plus the archive-reading entry points). Off by
+# default so the guest binaries
 # (mvm-agentd / mvm-builder-guest / mvm-setpriv) never resolve `bs58`,
-# `unicode-normalization`, `aho-corasick` or `tar`; host crates opt in.
+# `unicode-normalization`, `aho-corasick`, `tar`, `toml` or `regex`; host
+# crates opt in.
 host-state = [
     "dep:bs58",
     "dep:unicode-normalization",
     "dep:aho-corasick",
     "dep:tar",
+    "dep:toml",
+    "dep:regex",
 ]
 # Read-only PROV-O/Turtle export of chain-signed audit logs. Kept off by
 # default so lean builder-VM binaries (e.g. mvm-host-vm-init) do not pay
@@ -227,6 +239,11 @@ required-features = ["host-state"]
 [[test]]
 name = "mvmev_canonicalization_vectors"
 path = "tests/mvmev_canonicalization_vectors.rs"
+required-features = ["host-state"]
+
+[[test]]
+name = "manifest_fixtures"
+path = "tests/manifest_fixtures.rs"
 required-features = ["host-state"]
 
 [dev-dependencies]
