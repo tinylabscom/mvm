@@ -619,11 +619,13 @@ mod tests {
     }
 
     /// Lanes that run on a pull request, in the merge queue and on a push to main.
-    const FAST_GATE_LANES: [&str; 5] = [
-        "lint-core",
+    const FAST_GATE_LANES: [&str; 2] = ["lint-core", "test-workspace-build"];
+
+    /// Lanes that run on a pull request and a push to main, never in the queue.
+    const PR_GATE_LANES: [&str; 4] = [
         "lint-feature-clippy",
         "lint-windows",
-        "test-workspace-build",
+        "test-windows-identity",
         "test-workspace",
     ];
 
@@ -818,6 +820,15 @@ mod tests {
                 job_if.contains("needs.scope.outputs.code == 'true'")
                     && !job_if.contains("github.event_name"),
                 "{lane} is fast-gate: it must run for code on every event, got {job_if:?}"
+            );
+        }
+        for lane in PR_GATE_LANES {
+            let job_if = job_if(job_block(&workflow, lane));
+            assert!(
+                job_if.contains("needs.scope.outputs.code == 'true'")
+                    && job_if.contains("github.event_name != 'merge_group'")
+                    && !job_if.contains("'pull_request'"),
+                "{lane} runs on a pull request and a push but not in the queue, got {job_if:?}"
             );
         }
         for lane in FULL_MATRIX_LANES {
@@ -1286,7 +1297,11 @@ mod tests {
 
         // The fast gate runs on every event; the expensive lanes run only
         // after the merge, never on a pull request or in the queue.
-        for job in FAST_GATE_LANES.iter().chain(FULL_MATRIX_LANES.iter()) {
+        for job in FAST_GATE_LANES
+            .iter()
+            .chain(PR_GATE_LANES.iter())
+            .chain(FULL_MATRIX_LANES.iter())
+        {
             assert!(
                 job_block(&ci, job).contains("needs.scope.outputs.code == 'true'"),
                 "{job} must keep the code scope"
@@ -1320,9 +1335,10 @@ mod tests {
 
         let policy = job_block(&ci, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
-        assert!(
-            job_if(policy).is_empty(),
-            "policy invariants run on every event, the queue included"
+        assert_eq!(
+            job_if(policy),
+            "github.event_name != 'merge_group'",
+            "policy invariants run on a pull request and a push, not in the queue"
         );
         assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
 
@@ -1397,8 +1413,11 @@ mod tests {
             "Test must require the BDD lane on main whenever code or docs is in scope"
         );
         assert!(
-            aggregate.contains("pull_request|merge_group) full_matrix=false ;;")
-                && aggregate.contains("push|workflow_dispatch) full_matrix=true ;;")
+            aggregate.contains("pull_request) full_matrix=false; not_queue=true ;;")
+                && aggregate.contains("merge_group) full_matrix=false; not_queue=false ;;")
+                && aggregate
+                    .contains("push|workflow_dispatch) full_matrix=true; not_queue=true ;;")
+                && aggregate.contains(r#"pr_required=$(required "$not_queue" "$SCOPE_CODE")"#)
                 && aggregate.contains(r#"gate_required=$(required true "$SCOPE_CODE")"#)
                 && aggregate.contains(r#"full_required=$(required "$full_matrix" "$SCOPE_CODE")"#),
             "Test must enforce the fast gate on every event and the full matrix after the merge"

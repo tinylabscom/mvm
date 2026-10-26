@@ -51,6 +51,7 @@ expect_acceptance() {
 
 BATCHED='(.rules[] | select(.type == "merge_queue") | .parameters) |= (.grouping_strategy = "ALLGREEN" | .max_entries_to_build = 3 | .max_entries_to_merge = 5 | .min_entries_to_merge = 1 | .min_entries_to_merge_wait_minutes = 5)'
 expect_acceptance batched "$BATCHED"
+expect_acceptance batched-no-wait "$BATCHED"' | (.rules[] | select(.type == "merge_queue") | .parameters).min_entries_to_merge_wait_minutes = 0'
 
 expect_refusal excluded-main '.conditions.ref_name.exclude = ["refs/heads/main"]'
 expect_refusal excluded-by-glob '.conditions.ref_name.exclude = ["refs/heads/*"]'
@@ -64,7 +65,6 @@ expect_refusal batched-headgreen "$BATCHED"' | (.rules[] | select(.type == "merg
 expect_refusal batched-four-builds "$BATCHED"' | (.rules[] | select(.type == "merge_queue") | .parameters).max_entries_to_build = 4'
 expect_refusal batched-six-per-group "$BATCHED"' | (.rules[] | select(.type == "merge_queue") | .parameters).max_entries_to_merge = 6'
 expect_refusal batched-min-two "$BATCHED"' | (.rules[] | select(.type == "merge_queue") | .parameters).min_entries_to_merge = 2'
-expect_refusal batched-no-wait "$BATCHED"' | (.rules[] | select(.type == "merge_queue") | .parameters).min_entries_to_merge_wait_minutes = 0'
 expect_refusal batched-long-wait "$BATCHED"' | (.rules[] | select(.type == "merge_queue") | .parameters).min_entries_to_merge_wait_minutes = 10'
 expect_refusal batched-excluded-main "$BATCHED"' | .conditions.ref_name.exclude = ["refs/heads/main"]'
 expect_refusal duplicate-rule '.rules += [.rules[0]]'
