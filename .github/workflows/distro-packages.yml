@@ -11,7 +11,7 @@ name: Linux distro packages
 # guest-runtime job built; the release job then signs, attests and publishes
 # the packages with the tarballs. Anywhere else it packages a published release's
 # tarballs instead, so the packaging path is exercised without a release
-# build: on pull requests that change it, nightly from Extended CI, and on
+# build: on pull requests that change it and on
 # dispatch.
 
 on:

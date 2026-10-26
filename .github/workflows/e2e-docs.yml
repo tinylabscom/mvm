@@ -3,9 +3,8 @@ name: Documented surface e2e
 # Every documented example, executed against a real host on both backends mvm
 # ships: Firecracker on Linux/KVM and HVF on macOS.
 #
-# Reusable rather than inlined, because two callers need the *same* lane and had
-# been getting different ones. Extended CI runs it nightly. `release.yml` waits
-# on it before it will cut a tag — until then a release blocked only on the
+# Reusable rather than inlined so the release lane and a manual run get the
+# *same* lane. `release.yml` waits on it before it will cut a tag — until then a release blocked only on the
 # hermetic BDD gate, which drives `--help` and refusal paths and boots nothing.
 # That is how `machine run -it`, printed in the README, shipped for as long as
 # it did with a guest console that failed on every OCI image: no lane that could
@@ -56,9 +55,7 @@ on:
           backed by a committed evidence record before this workflow passes.
           `release.yml` leaves it true, so a tag still cannot be cut without
           live macOS evidence — either from a runner that booted a guest, or
-          from a recorded local run covering this exact tree. Extended CI
-          passes false so its nightly red means a regression rather than the
-          standing hardware gap.
+          from a recorded local run covering this exact tree.
         type: boolean
         required: false
         default: true

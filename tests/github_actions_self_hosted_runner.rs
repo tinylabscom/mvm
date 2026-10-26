@@ -523,22 +523,6 @@ fn a_matrix_runner_naming_the_pool_counts() {
 }
 
 #[test]
-fn extended_ci_places_live_temp_state_on_the_runner_disk() {
-    let workflow =
-        fs::read_to_string(".github/workflows/ci-full.yml").expect("read Extended CI workflow");
-    assert!(
-        workflow.contains("base=\"${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"),
-        "live OCI preparation must not use the small /tmp tmpfs"
-    );
-    assert!(
-        workflow.contains(
-            "job-cleanup.sh \"${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
-        ),
-        "the always-run cleanup must own the same disk-backed temp tree"
-    );
-}
-
-#[test]
 fn job_cleanup_accepts_a_private_base_under_runner_temp() {
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
