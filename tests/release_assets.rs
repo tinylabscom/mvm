@@ -406,7 +406,7 @@ fn linux_release_assets_keep_their_names_but_build_musl_payloads() {
 }
 
 fn ci_workflow() -> String {
-    let path = Path::new(".github/workflows/ci.yml");
+    let path = Path::new(".github/workflows/ci-main.yml");
     fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
@@ -1906,7 +1906,7 @@ fn image_contract_reader_agrees_with_the_checked_lock() {
 
 #[test]
 fn remote_image_contract_checks_follow_the_locked_version() {
-    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("ci workflow");
+    let ci = fs::read_to_string(".github/workflows/ci-main.yml").expect("ci workflow");
     let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
         .expect("WebLinux downloader");
     let pin_update =
@@ -1933,7 +1933,7 @@ fn remote_base_image_contract_checks_follow_the_cli_window() {
         supported.max()
     );
     for path in [
-        ".github/workflows/ci.yml",
+        ".github/workflows/ci-main.yml",
         ".github/workflows/update-image-pin.yml",
         "scripts/download-qemu-wasm-smoke-pack.sh",
     ] {
@@ -1948,7 +1948,7 @@ fn remote_base_image_contract_checks_follow_the_cli_window() {
 
 #[test]
 fn remote_image_consumers_resolve_the_publisher_from_the_single_lock() {
-    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("ci workflow");
+    let ci = fs::read_to_string(".github/workflows/ci-main.yml").expect("ci workflow");
     let workers = fs::read_to_string(".github/workflows/workers.yml").expect("workers workflow");
     let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
         .expect("WebLinux downloader");
@@ -2035,7 +2035,7 @@ fn pull_requests_compile_mvmctl_with_the_release_feature_set() {
         lane.contains("uses: ./.github/actions/install-zigbuild"),
         "`embed-host-bins` cross-compiles the host payload, which needs the pinned zig"
     );
-    let aggregate = job_block(&ci, "test");
+    let aggregate = job_block(&ci, "test-main");
     assert!(
         aggregate.contains("lint-features-embed"),
         "the lane must feed the required Test aggregate"

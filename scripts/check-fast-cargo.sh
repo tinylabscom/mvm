@@ -91,19 +91,19 @@ if grep -Fq 'rust-toolchain@nightly' .github/workflows/cache-warm.yml; then
   echo "check-fast-cargo: cache-warm.yml floats a nightly toolchain; pin ${toolchain}" >&2
   exit 1
 fi
-# ci.yml keeps exactly one, and only for as long as its cause exists. The eBPF
+# ci-main.yml keeps exactly one, and only for as long as its cause exists. The eBPF
 # lane's sub-build resolves its toolchain by the literal name `nightly` — from
 # `crates/mvm-hostd/ebpf/rust-toolchain.toml` and two `cargo +nightly`
 # invocations — so a dated pin there leaves `+nightly` on a rustup-auto-installed
 # toolchain with no `rust-src`, and `just check::ebpf` fails asking for it.
 # Tying the count to the `cargo +nightly` that forces it means removing the
 # hardcoding forces removing the exemption, rather than leaving a hole behind.
-floating_nightly="$(grep -Fc 'rust-toolchain@nightly' .github/workflows/ci.yml || true)"
+floating_nightly="$(grep -Fc 'rust-toolchain@nightly' .github/workflows/ci-main.yml || true)"
 if [[ "${floating_nightly}" -ne 1 ]]; then
-  echo "check-fast-cargo: ci.yml has ${floating_nightly} floating nightly installs; only the eBPF lane may float, and it must" >&2
+  echo "check-fast-cargo: ci-main.yml has ${floating_nightly} floating nightly installs; only the eBPF lane may float, and it must" >&2
   exit 1
 fi
-require_text .github/workflows/ci.yml 'cargo +nightly install --locked --version 0.10.4 bpf-linker'
+require_text .github/workflows/ci-main.yml 'cargo +nightly install --locked --version 0.10.4 bpf-linker'
 require_text crates/mvm-hostd/ebpf/rust-toolchain.toml 'channel = "nightly"'
 require_text .github/workflows/ci.yml "toolchain: ${toolchain}"
 require_recipe_text 'cargo build --bin mvmctl --features user'

@@ -586,6 +586,11 @@ mod tests {
         workflow("ci.yml")
     }
 
+    /// The slow lanes that run after the merge.
+    fn main_workflow() -> String {
+        workflow("ci-main.yml")
+    }
+
     fn workflow(name: &str) -> String {
         std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -627,20 +632,6 @@ mod tests {
         "lint-windows",
         "test-windows-identity",
         "test-workspace",
-    ];
-
-    /// Lanes that run on a push to main (and on a manual dispatch) only.
-    const FULL_MATRIX_LANES: [&str; 10] = [
-        "lint-features",
-        "lint-features-test-support",
-        "lint-features-embed",
-        "test-workspace-extras",
-        "test-workspace-aarch64",
-        "test-release-witness",
-        "test-musl-confinement",
-        "test-linux",
-        "test-ebpf-telemetry",
-        "boot-latency",
     ];
 
     #[test]
@@ -702,6 +693,7 @@ mod tests {
     #[test]
     fn pull_request_ci_runs_the_required_matrix_without_redundant_caches() {
         let workflow = ci_workflow();
+        let main = main_workflow();
         assert!(
             job_body(&workflow, "lint").is_none(),
             "the redundant Lint aggregate must not allocate a second control runner"
@@ -734,7 +726,7 @@ mod tests {
         // 35-minute `lint-features` it was the critical path for every
         // code-touching pull request, and nothing beside it shared a cargo
         // fingerprint to lose by moving it out.
-        let lint_features = job_block(&workflow, "lint-features-test-support");
+        let lint_features = job_block(&main, "lint-features-test-support");
         // One invocation covering the whole test-support subtree. Selecting a
         // package at a time made cargo resolve features once per package and
         // rebuild most of the same graph each time; the packages are listed
@@ -774,24 +766,24 @@ mod tests {
         assert!(test.contains("if: ${{ always() }}"));
         assert!(test.contains("runs-on: ubuntu-slim"));
         assert!(
-            test.contains("name: Require CI scope to pass")
-                && test.contains("CI scope did not pass: $SCOPE_RESULT"),
-            "the required test context must fail closed when classification fails"
-        );
-        assert!(
-            !test.contains("actions/checkout")
-                && !test.contains("cargo ")
-                && test.contains("name: Require every validation lane to pass"),
+            !test.contains("actions/checkout") && !test.contains("cargo "),
             "the aggregate must publish the required context without another full runner"
         );
         assert!(test.contains(
             "needs: [scope, runners, lint-core, lint-policy, lint-feature-clippy, \
-             lint-features, lint-features-test-support, lint-features-embed, lint-windows, \
-             test-windows-identity, test-workspace-build, test-workspace, test-workspace-extras, \
-             test-workspace-aarch64, test-linux, \
-             test-release-witness, test-musl-confinement, test-ebpf-telemetry, \
-             bdd-conformance, boot-latency, nix-flake-check]"
+             lint-windows, test-windows-identity, test-workspace-build, test-workspace]"
         ));
+        let test_main = job_block(&main, "test-main");
+        assert!(test_main.contains("name: Test (main)"));
+        assert!(
+            test_main.contains(
+                "needs: [lint-features, lint-features-test-support, lint-features-embed, \
+                 bdd-conformance, test-workspace-extras, test-workspace-aarch64, \
+                 test-release-witness, test-musl-confinement, test-linux, \
+                 test-ebpf-telemetry, boot-latency, nix-flake-check]"
+            ),
+            "every post-merge lane must feed the Test (main) aggregate"
+        );
         assert!(
             job_body(&workflow, "pr-regressions").is_none(),
             "focused regressions must not allocate a separate PR runner"
@@ -811,9 +803,8 @@ mod tests {
         }
 
         // The tier split. Fast-gate lanes run on a pull request and again in
-        // the queue; full-matrix lanes run on a push to main (and on a manual
-        // dispatch) only. `ci_scope_aggregate` pins the aggregate's half of the
-        // same split by executing it.
+        // the queue; PR-gate lanes run on a pull request and a push but not in
+        // the queue. The slow lanes live in ci-main.yml and never see either.
         for lane in FAST_GATE_LANES {
             let job_if = job_if(job_block(&workflow, lane));
             assert!(
@@ -831,56 +822,16 @@ mod tests {
                 "{lane} runs on a pull request and a push but not in the queue, got {job_if:?}"
             );
         }
-        for lane in FULL_MATRIX_LANES {
-            let job_if = job_if(job_block(&workflow, lane));
-            assert!(
-                job_if.contains(
-                    "github.event_name != 'pull_request' && github.event_name != 'merge_group'"
-                ),
-                "{lane} is full-matrix: it must not run on a pull request, got {job_if:?}"
-            );
-            assert!(
-                job_if.contains("github.event_name != 'merge_group'"),
-                "{lane} is full-matrix: it must not run in the merge queue, got {job_if:?}"
-            );
-        }
-
-        // Every lane the aggregate names must also be read back in the loop that
-        // compares results against the scope decision. A lane in `needs` but not
-        // in the loop is gated on nothing but its own scheduling.
-        // `bdd-conformance` joined the loop when it took the Gherkin suite, and
-        // the `code` scope, off the Linux lane.
-        for expected in [
-            "\"$WORKSPACE_BUILD_RESULT\"",
-            "\"$WORKSPACE_RESULT\"",
-            "\"$WORKSPACE_EXTRAS_RESULT\"",
-            "\"$WORKSPACE_AARCH64_RESULT\"",
-            "\"$FEATURE_CLIPPY_RESULT\"",
-            "\"$CORE_RESULT\"",
-            "\"$POLICY_RESULT\"",
-            "\"$FEATURES_RESULT\"",
-            "\"$FEATURES_SUPPORT_RESULT\"",
-            "\"$FEATURES_EMBED_RESULT\"",
-            "\"$WINDOWS_RESULT\"",
-            "\"$LINUX_RESULT\"",
-            "\"$RELEASE_WITNESS_RESULT\"",
-            "\"$MUSL_CONFINEMENT_RESULT\"",
-            "\"$EBPF_RESULT\"",
-            "\"$BDD_RESULT\"",
-            "\"$BOOT_RESULT\"",
-            "\"$NIX_RESULT\"",
-        ] {
-            assert!(
-                test.contains(expected),
-                "Test aggregate must compare {expected} against the scope decision"
-            );
-        }
+        assert!(
+            !main.contains("pull_request") && !main.contains("merge_group"),
+            "ci-main.yml is push and dispatch only"
+        );
 
         // The release-profile lane is the only one that runs with trapping
         // overflow and debug assertions off, i.e. the only one that witnesses
         // what actually ships. A lane that runs but is not in the aggregate's
         // `needs` is a lane that cannot fail the merge, so pin both halves.
-        let release_witness = job_block(&workflow, "test-release-witness");
+        let release_witness = job_block(&main, "test-release-witness");
         assert!(release_witness.contains("--cargo-profile release-witness"));
         for expected in [
             "-p mvm-fs",
@@ -898,7 +849,7 @@ mod tests {
         // which syscalls reach a confined role's seccomp filter. Only this
         // lane builds the endpoint the way the release does, so it must cover
         // both shipped musl targets and stay in the aggregate.
-        let musl = job_block(&workflow, "test-musl-confinement");
+        let musl = job_block(&main, "test-musl-confinement");
         for expected in [
             "target: x86_64-unknown-linux-musl",
             "target: aarch64-unknown-linux-musl",
@@ -916,8 +867,8 @@ mod tests {
 
         let test_workspace = job_block(&workflow, "test-workspace");
         assert!(!test_workspace.contains("uses: actions/cache@v5"));
-        assert_workspace_suite_compiles_once_and_runs_everything(&workflow);
-        assert_aarch64_suite_compiles_once_and_runs_everything(&workflow);
+        assert_workspace_suite_compiles_once_and_runs_everything(&workflow, &main);
+        assert_aarch64_suite_compiles_once_and_runs_everything(&main);
         for expected in [
             "permissions:",
             "actions: read",
@@ -972,7 +923,7 @@ mod tests {
             );
         }
         assert!(!workspace_worker.contains("actions: write"));
-        let test_linux = job_block(&workflow, "test-linux");
+        let test_linux = job_block(&main, "test-linux");
         assert!(test_linux.contains("bash scripts/ci-linux-coverage.sh"));
         assert!(!workspace_worker.contains("ci-linux-coverage.sh"));
 
@@ -1019,21 +970,11 @@ mod tests {
             bdd_workflow.contains("just bdd"),
             "bdd-conformance must still run the Gherkin suite"
         );
-        // ...and it has to be reachable on every code run the Linux lane
-        // covers, and on every change to the documentation its README and
-        // example features read. It is full-matrix: the queue runs it.
-        let bdd = job_block(&workflow, "bdd-conformance");
+        // ...and it has to run on every push to main, the Linux lane's tier.
+        let bdd = job_block(&main, "bdd-conformance");
         assert!(
-            bdd.contains(
-                "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request' && github.event_name != 'merge_group'"
-            ),
-            "bdd-conformance must run for the code scope and the docs scope, on a push to main"
-        );
-        // A docs-only change gets the documentation scenarios; anything that
-        // compiles still gets the whole suite.
-        assert!(
-            bdd.contains("docs_only: ${{ needs.scope.outputs.code != 'true' }}"),
-            "bdd-conformance must narrow to the documentation scenarios only when code is out of scope"
+            bdd.contains("uses: ./.github/workflows/bdd.yml"),
+            "bdd-conformance must call the Gherkin workflow"
         );
         for expected in [
             "docs_only:",
@@ -1075,7 +1016,7 @@ mod tests {
     /// turning anything red: the archive's target selection, the shards'
     /// dependency on it and their partition of all of it, and the suites that
     /// run exactly once.
-    fn assert_workspace_suite_compiles_once_and_runs_everything(workflow: &str) {
+    fn assert_workspace_suite_compiles_once_and_runs_everything(workflow: &str, main: &str) {
         let build = job_block(workflow, "test-workspace-build");
         assert!(
             build.contains("cargo nextest archive --workspace --all-targets"),
@@ -1086,7 +1027,7 @@ mod tests {
             "listing the suite once per filter cost eight minutes on the fast gate's critical path"
         );
         assert!(
-            job_block(workflow, "test-workspace-extras")
+            job_block(main, "test-workspace-extras")
                 .contains("cargo run -p xtask -- check-nextest-groups"),
             "the nextest override filters must still be validated on a push to main"
         );
@@ -1125,7 +1066,7 @@ mod tests {
             );
         }
 
-        let extras = job_block(workflow, "test-workspace-extras");
+        let extras = job_block(main, "test-workspace-extras");
         for expected in [
             "cargo nextest run -p xtask --features man",
             "cargo nextest run -p mvm-agentd --features addons",
@@ -1143,9 +1084,9 @@ mod tests {
             "cargo test --workspace --doc",
         ] {
             assert_eq!(
-                workflow.matches(once).count(),
+                workflow.matches(once).count() + main.matches(once).count(),
                 1,
-                "{once:?} must run exactly once in ci.yml"
+                "{once:?} must run exactly once in CI"
             );
         }
     }
@@ -1165,7 +1106,6 @@ mod tests {
         let job = job_block(workflow, "test-workspace-aarch64");
         for expected in [
             "name: Test workspace (aarch64)",
-            "needs: [scope]",
             "runs-on: ubuntu-24.04-arm",
             "run: cargo nextest run --workspace --exclude mvm-fs --all-targets\n",
             "MVM_GUEST_PRIVILEGED_TESTS=1",
@@ -1194,7 +1134,7 @@ mod tests {
 
     #[test]
     fn feature_coverage_tail_uses_existing_test_support_runner() {
-        let workflow = ci_workflow();
+        let workflow = main_workflow();
         let core = job_block(&workflow, "lint-features");
         let support = job_block(&workflow, "lint-features-test-support");
 
@@ -1230,6 +1170,7 @@ mod tests {
     #[test]
     fn merge_group_and_pull_requests_run_the_fast_gate_and_main_runs_the_full_matrix() {
         let ci = ci_workflow();
+        let main = main_workflow();
         let scope = job_block(&ci, "scope");
         for expected in [
             "name: Enforce merge queue policy",
@@ -1245,8 +1186,6 @@ mod tests {
             "could not diff $BASE..$HEAD — running every lane to stay safe",
             "invalid or missing ${name} scope",
             "code=true",
-            "docs=true",
-            "nix=true",
             "architecture=true",
             "just/",
             "third_party/",
@@ -1295,34 +1234,11 @@ mod tests {
             "the fast gate must compile every workspace test target"
         );
 
-        // The fast gate runs on every event; the expensive lanes run only
-        // after the merge, never on a pull request or in the queue.
-        for job in FAST_GATE_LANES
-            .iter()
-            .chain(PR_GATE_LANES.iter())
-            .chain(FULL_MATRIX_LANES.iter())
-        {
-            assert!(
-                job_block(&ci, job).contains("needs.scope.outputs.code == 'true'"),
-                "{job} must keep the code scope"
-            );
-        }
-        for job in FULL_MATRIX_LANES
-            .iter()
-            .chain(["bdd-conformance", "nix-flake-check"].iter())
-        {
-            assert!(
-                job_if(job_block(&ci, job)).contains(
-                    "github.event_name != 'pull_request' && github.event_name != 'merge_group'"
-                ),
-                "{job} is an expensive lane and must not run on a pull request"
-            );
-        }
         // `cargo install --locked` pins the installed crate's own dependencies
         // but not which version of that crate is installed, so an upstream
         // release retroactively changes this lane. Now that the lane gates the
         // merge, an unpinned install lets a publish elsewhere block the queue.
-        let ebpf = job_block(&ci, "test-ebpf-telemetry");
+        let ebpf = job_block(&main, "test-ebpf-telemetry");
         assert!(
             !ebpf.contains("uses: ./.github/actions/free-disk"),
             "the focused eBPF lane must not spend minutes deleting unrelated runner tools"
@@ -1342,26 +1258,15 @@ mod tests {
         );
         assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
 
-        let nix = job_block(&ci, "nix-flake-check");
-        assert!(nix.contains("needs: [scope]"));
-        assert!(nix.contains(
-            "if: needs.scope.outputs.nix == 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group'"
-        ));
-        let aggregate = job_block(&ci, "test");
-        assert!(aggregate.contains("SCOPE_NIX: ${{ needs.scope.outputs.nix }}"));
-        assert!(aggregate.contains(r#"nix_required=$(required "$full_matrix" "$SCOPE_NIX")"#));
-        assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
+        let nix = job_block(&main, "nix-flake-check");
         assert!(
             nix.contains("run: sh scripts/check-devshell-tiers.sh"),
             "the dev shell tier check must run in the Nix lane"
         );
         assert!(!nix.contains("Boot the mvm-images-built image"));
 
-        let guest = job_block(&ci, "guest-image-boot");
-        assert!(guest.contains("needs: [scope]"));
-        assert!(guest.contains(
-            "if: github.event_name == 'workflow_dispatch' && needs.scope.outputs.guest_image == 'true'"
-        ));
+        let guest = job_block(&main, "guest-image-boot");
+        assert!(guest.contains("if: github.event_name == 'workflow_dispatch'"));
         assert!(
             guest.contains("Boot the pinned base image with the tree's guest runtime"),
             "the guest-image witness must boot the pinned base set"
@@ -1403,25 +1308,6 @@ mod tests {
             !website.contains("merge_group:"),
             "the non-required Website workflow must not consume every merge-group runner slot"
         );
-
-        assert!(aggregate.contains("needs.scope.result"));
-        assert!(aggregate.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
-        assert!(aggregate.contains("SCOPE_DOCS: ${{ needs.scope.outputs.docs }}"));
-        assert!(
-            aggregate.contains(r#"bdd_required=$(required "$full_matrix" "$code_or_docs")"#)
-                && aggregate.contains(r#"check "BDD conformance" "$BDD_RESULT" "$bdd_required""#),
-            "Test must require the BDD lane on main whenever code or docs is in scope"
-        );
-        assert!(
-            aggregate.contains("pull_request) full_matrix=false; not_queue=true ;;")
-                && aggregate.contains("merge_group) full_matrix=false; not_queue=false ;;")
-                && aggregate
-                    .contains("push|workflow_dispatch) full_matrix=true; not_queue=true ;;")
-                && aggregate.contains(r#"pr_required=$(required "$not_queue" "$SCOPE_CODE")"#)
-                && aggregate.contains(r#"gate_required=$(required true "$SCOPE_CODE")"#)
-                && aggregate.contains(r#"full_required=$(required "$full_matrix" "$SCOPE_CODE")"#),
-            "Test must enforce the fast gate on every event and the full matrix after the merge"
-        );
     }
 
     #[test]
@@ -1453,8 +1339,7 @@ mod tests {
         assert!(lane.contains("--features provenance,client,hostd-transport"));
 
         // A lane outside the aggregate cannot fail the merge.
-        let aggregate = job_block(&ci, "test");
-        assert!(aggregate.contains("WINDOWS_RESULT: ${{ needs.lint-windows.result }}"));
+        assert!(job_block(&ci, "test").contains("lint-windows"));
     }
 
     #[test]
@@ -1489,7 +1374,7 @@ mod tests {
         assert!(ci.contains("permissions:\n  contents: read"));
         assert!(ci.contains("name: Test"), "required check name drifted");
         assert!(ci.contains("name: Invariant"));
-        assert!(ci.contains("name: Nix flake check (Linux eval)"));
+        assert!(main_workflow().contains("name: Nix flake check (Linux eval)"));
 
         assert!(
             !Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1752,8 +1637,8 @@ mod tests {
         let no_ssh = job_body(&security, "sealed-prod-no-ssh").expect("checked above");
         assert!(no_ssh.contains("mount -o ro,loop"));
 
-        let ci = workflow("ci.yml");
-        let latency = job_body(&ci, "boot-latency").expect("boot-latency must stay in ci.yml");
+        let ci = main_workflow();
+        let latency = job_body(&ci, "boot-latency").expect("boot-latency must stay in ci-main.yml");
         assert!(
             latency.contains("dev runtime-overlay build --source build --arch x86_64")
                 && !latency.contains("runtime-overlay-x86_64.tar.gz"),
@@ -1779,7 +1664,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let warm = workflow("cache-warm.yml");
-        let ci = ci_workflow();
+        let ci = main_workflow();
         assert_eq!(
             selection(
                 job_block(&warm, "warm-test-support"),
@@ -1818,7 +1703,7 @@ mod tests {
         assert!(warm.contains("key: test-support"));
         assert!(warm.contains("Warm test-support feature tests"));
 
-        let ci = ci_workflow();
+        let ci = main_workflow();
         let support = job_block(&ci, "lint-features-test-support");
         assert!(support.contains("key: test-support"));
         let support_cache = support
