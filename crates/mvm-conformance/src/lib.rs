@@ -172,9 +172,8 @@ pub const DESTRUCTIVE_LAB_ONLY_TAG: &str = "destructive_lab_only";
 pub const NO_LOCAL_IMAGES_CHECKOUT_TAG: &str = "no_local_images_checkout";
 
 /// Features that read the documentation corpus itself: the README contract
-/// and the documented-example suite. `just bdd::docs` selects exactly these
-/// with `MVM_BDD_ONLY_TAG=docs`, and that is what CI runs for a change
-/// confined to documentation. The tag goes on the `Feature:` line rather than
+/// and the documented-example suite. `MVM_BDD_ONLY_TAG=docs` selects exactly
+/// these. The tag goes on the `Feature:` line rather than
 /// on each scenario, so a scenario added to one of those files cannot fall out
 /// of the selection.
 pub const DOCS_TAG: &str = "docs";
