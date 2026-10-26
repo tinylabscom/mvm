@@ -28,6 +28,7 @@ pub mod start_params;
 pub mod startup_budget;
 #[cfg(test)]
 mod tests;
+mod transient;
 mod unbooted;
 
 use unbooted::DefinitionOrigin;
@@ -903,35 +904,6 @@ impl LocalBackend {
                 )
             });
         self.discard_definition_on_failure(name, origin, recorded.map(|()| (spec, origin)))
-    }
-
-    /// The transient launch path: collision check, secret-ref validation +
-    /// recording, attachment registration, lease acquisition, admitted boot,
-    /// registration. Any failure after recording rolls the session-owned
-    /// state back (leases via RAII, secret refs + attachments explicitly).
-    #[tracing::instrument(skip_all)]
-    async fn launch_transient(&self, request: LaunchRequest) -> Result<LaunchOutcome> {
-        let name = request
-            .name
-            .clone()
-            .unwrap_or_else(generated_transient_name);
-        self.ensure_transient_name_free(&name)?;
-        self.validate_and_record_secret_refs(&name, &request.secret_refs)?;
-
-        let result = match self.attach_lease_and_boot(&name, &request, true).await {
-            Ok(outcome) => self.start_requested_command(outcome, &request),
-            Err(e) => Err(e),
-        };
-        match result {
-            Ok(outcome) => Ok(outcome),
-            Err(e) => {
-                // Idempotent rollback of everything this session recorded.
-                if let Err(cleanup) = self.cleanup_transient(&name) {
-                    tracing::warn!(error = %cleanup, machine = %name, "transient cleanup after failed launch");
-                }
-                Err(e)
-            }
-        }
     }
 
     /// Boot a persistent definition that was just created/reconciled from

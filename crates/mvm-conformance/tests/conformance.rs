@@ -38,6 +38,7 @@ use world::CliWorld;
 
 #[tokio::main]
 async fn main() {
+    steps::launch_e2e::failure_diagnostics::initialize();
     // Cargo will not rebuild another package's binary for this test target,
     // so a stale `mvmctl` silently drives every CLI scenario. Left alone
     // that surfaces as a pile of unrelated assertion failures, which is
@@ -97,6 +98,7 @@ async fn main() {
     report_shard(shard);
     report_skips();
     let unexpected_skips = unexpected_skips();
+    steps::launch_e2e::failure_diagnostics::finalize();
 
     // `execution_has_failed` comes from the `Stats` trait, which the concrete
     // writer only exposes when the trait is in scope.

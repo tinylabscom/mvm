@@ -181,6 +181,117 @@ native-custody tests do not establish a full native launch or readiness latency.
 
 ## Private creation and replacement
 
+### Opt-in launch failure observations
+
+`MVM_FAILURE_DIAGNOSTICS=1` enables payload-free `MVM_FAILURE_V1 ` records on
+the existing child stderr channel. Each newline-terminated JSON record has
+exactly `phase`, `category`, `stage`, and `exit_code`. The first three fields
+are closed enums; `exit_code` is an integer or explicit `null` when not
+observed. No error text, builder detail, console payload, paths, names,
+arguments, environment values, identifiers, or digests enter this schema.
+
+Phases are `transient_boot`, `transient_command`, `builder_job`, and
+`hvf_readiness`. Categories are `unknown`, `internal`, `invalid_request`,
+`unsupported`, `version`, `fetch`, `nix_build`, `nix_eval`, `timeout`, and
+`output_contract`. Stages are `absent`, `unknown`, `sign_check`,
+`signing_lock`, `signing`, `reexec`, `config_read`, `config_parse`,
+`status_publish`, `startup_inputs`, `capture_policy`, `capture_setup`,
+`pid_publish`, and `pid_published`.
+
+The documented-launch conformance command runner opts in when
+`MVM_E2E_FAILURE_MANIFEST` names an operator-selected output file in an existing
+trusted parent directory. It scans at most the first 65536 stderr bytes,
+rejects malformed records, unknown fields/enums and records exceeding 512
+bytes, and retains at most 16 records per command, 128 commands, and 262144
+serialized manifest bytes. Saturating counters explicitly report rejected,
+oversize, dropped records, skipped bytes, and dropped commands. Unscanned
+bytes are not claimed to contain zero records.
+
+The manifest correlates commands using harness-local scenario and command
+ordinals, not source job names or identifiers. Each command reports success
+and exit (or `null` on spawn failure), plus `collected`, `absent`, or
+`unreadable` status. `absent` means no accepted record, not successful capture.
+The aggregate has `schema_version: 1` and a closed lifecycle `state`:
+`not_started`, `in_progress`, `complete`, `loss`, or `unreadable`. Before any
+suite build or bootstrap, the script creates a fresh `0600` destination using
+create-new semantics. An existing file or symlink is refused, never reused.
+The empty `not_started` record explicitly covers failure before the first
+scenario. A bounded no-follow read verifies the initializer's inode handoff
+and exact empty schema; file existence alone does not authorize collection.
+Direct conformance invocations also require a fresh destination.
+
+Snapshots remain `in_progress` until the runner explicitly finalizes after its
+scenario loop, before normal test-failure exits. Interruption or an earlier
+runner failure leaves a partial state. Finalization records `loss` for counted
+rejections, truncation or dropped observations, and `unreadable` for command
+capture or any prior persistence failure. Persistence failure is sticky even
+if later writes succeed. A failed write attempts one best-effort `unreadable`
+repair without replacing the original failure. Atomic replacement can rename
+before its parent-directory sync fails; if repair also fails, even terminal
+source bytes may remain. Source `complete` is only a reported collector-loop
+observation, never durable-finalization evidence or a passing suite.
+
+Initialization reports fixed `initialized`, `refused`, or `unreadable` status;
+the initializer returns 2 for refusal and 3 for I/O failure. On failure the
+script disables diagnostic collection without changing test or cleanup outcomes.
+The workflow passes the original suite initialization output as
+`MVM_E2E_FAILURE_AUTHORIZATION` to `scripts/e2e-failure-manifest.py --export`,
+in one always-run step before the existing upload. It must exactly match
+`MVM_E2E_FAILURE_MANIFEST`; file existence is never authorization. The exporter
+does not require the initializer's inode: legitimate Rust atomic replacements
+are expected. It opens the selected source with no-follow/nonblocking flags,
+requires a regular current-owner `0600` single-link file by `fstat`, and reads
+at most 262145 bytes, rejecting anything over 262144. UTF-8 decoding, duplicate
+key rejection and full closed-schema validation precede canonical
+reserialization. Unknown or missing fields, unknown enums, booleans where
+integers are required, non-integer numbers and out-of-range values are refused.
+All counters/ordinals are unsigned 32-bit; exits are signed 32-bit or explicit
+null, and command success is a boolean or explicit null. The same 128-command,
+16-record and 512-byte canonical-record limits apply.
+
+The separately exported schema retains these bounded observations but maps
+source `complete` to `observed` and `loss` to `observed_loss`; `not_started`,
+`in_progress`, and `unreadable` remain explicit. Every export has
+`finalization: "unverified"`. Neither a terminal state nor a command success
+field establishes suite success, authenticity, durable finalization, or complete
+coverage. Missing authorization or a missing source produces a fresh empty
+`absent` diagnostic; invalid/refused source data produces a fresh empty
+`unreadable` diagnostic. Neither exports raw source bytes or error details.
+No completion receipt or acknowledgment protocol is used.
+
+`MVM_E2E_FAILURE_EXPORT` names the exact run/attempt/shard-isolated snapshot in
+`RUNNER_TEMP`, created exclusively as a new `0600` file. Output is canonical
+sorted compact JSON, bounded to 262144 bytes including the additional export
+field. Only successful fresh snapshot writes publish the export step's path
+output; upload uses only that output for this diagnostic, never the mutable
+source and never a static fallback. Export failure does not alter suite or
+cleanup outcomes. Existing legacy suite/VM log uploads are unchanged: the
+combined artifact is **not** claimed to be payload-free or sanitized.
+
+Path outputs reject CR/LF and non-UTF-8 destinations. Python/Rust schema-parity
+regressions cover fields, integer types, all record enums, and limits. Existing
+parent directories must be trusted; same-user hostile mutation of those
+directories is outside this boundary. Exclusive snapshot creation refuses
+stale snapshots rather than reusing them.
+
+Collection and private atomic manifest replacement happen before returning
+to scenario cleanup. Non-regular destinations, including symlinks, are
+refused; failures report only the fixed `failure-manifest: unreadable` marker.
+The collector never traverses runtime state or exports raw artifacts.
+
+These records are unauthenticated observations: a child can spoof them.
+They never gate acceptance or prove custody, readiness, or protected capture.
+JSON, allowlisting, and private permissions do not establish confidentiality
+or permission to publish. Select only this manifest for a separately reviewed
+export; never upload stderr, runtime directories, or an entire home.
+
+Emission uses one best-effort blocking stderr write, without retrying or
+replacing the original error. A small record is **not** a nonblocking or
+latency guarantee. The existing `command.output()` stdout/stderr buffering
+remains unbounded and is **not fixed** by this collector. Lost/partial source
+writes cannot be counted reliably; absence is not completeness. Interactive
+PTY commands and other harness command paths are not covered.
+
 Managed payload files and key material must be created at `0600`; managed
 directories must be created at `0700`. Restriction must hold before publication
 and before sensitive bytes are written, not after a permissive creation window.

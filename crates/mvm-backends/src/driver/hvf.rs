@@ -40,10 +40,12 @@ use mvm_vmm::driver::traits::{
 };
 
 mod cold_channel;
+mod failure_diagnostics;
 mod standby;
 mod stop_state;
 use cold_channel::{BootInputFiles, boot_with_custody, failed_owned_boot, require_cold_config};
 pub use cold_channel::{ColdHvfBootFailure, ColdHvfOwner, RetainedHvfLaunch};
+use failure_diagnostics::startup_failure_record;
 #[cfg(test)]
 use standby::wait_for_standby_agent;
 
@@ -620,6 +622,7 @@ fn boot_retaining_child(
                     .as_mut()
                     .map(StartupDiagnostics::snapshot)
                     .unwrap_or_default();
+                startup_failure_record(summary, status).emit();
                 anyhow::Error::new(error)
                     .context("pipe HVF supervisor config")
                     .context(summary.child_status(status))
@@ -635,6 +638,7 @@ fn boot_retaining_child(
                     .as_mut()
                     .map(StartupDiagnostics::snapshot)
                     .unwrap_or_default();
+                startup_failure_record(summary, Some(status)).emit();
                 bail!(
                     "HVF supervisor exited before readiness ({}); {}; retain runtime evidence",
                     summary.exited(status),
@@ -646,6 +650,7 @@ fn boot_retaining_child(
                     .as_mut()
                     .map(StartupDiagnostics::snapshot)
                     .unwrap_or_default();
+                startup_failure_record(summary, None).emit();
                 bail!(
                     "HVF supervisor readiness deadline; {}; {}; retain runtime evidence",
                     summary.child_status(None),
@@ -672,6 +677,7 @@ fn boot_retaining_child(
                 .as_mut()
                 .map(StartupDiagnostics::snapshot)
                 .unwrap_or_default();
+            startup_failure_record(summary, observed_exit).emit();
             return Err(error).context(format!(
                 "HVF supervisor failed readiness; {}; {}",
                 summary.child_status(observed_exit),
