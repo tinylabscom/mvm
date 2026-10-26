@@ -605,7 +605,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "mvm-contract"
-version = "0.24.2"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.24.2"
+version = "0.25.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-macho-sign"
-version = "0.24.2"
+version = "0.25.0"
 dependencies = [
  "plist",
  "sha1",
