@@ -29,6 +29,13 @@ const LIBNVML_CANDIDATES: [&str; 2] = ["libnvidia-ml.so.1", "libnvidia-ml.so"];
 const CTX_BASE: u64 = 0x0000_00c0_0000_0000;
 const STREAM_BASE: u64 = 0x0000_0050_0000_0000;
 const EVENT_BASE: u64 = 0x0000_00e0_0000_0000;
+const MODULE_BASE: u64 = 0x0000_0060_0000_0000;
+const FUNCTION_BASE: u64 = 0x0000_0070_0000_0000;
+
+/// The most bytes one device-to-host copy may ask the endpoint to allocate. The
+/// length comes from the guest, and a reply larger than the wire's message cap
+/// could not be sent anyway.
+const MAX_DEVICE_COPY_BYTES: usize = 64 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Dynamic loading
@@ -347,6 +354,11 @@ pub struct NativeCudaBackend {
     next_completion: u64,
     streams: HashMap<u64, (u64, StreamPtr)>,
     next_stream: u64,
+    /// Module handle → (owning context, real CUmodule). The guest only ever
+    /// holds the minted handle, never the driver's pointer.
+    modules: OwnedHandles<ModulePtr>,
+    /// Function handle → (owning context, (module handle, real CUfunction)).
+    functions: OwnedHandles<(u64, FunctionPtr)>,
     events: HashMap<u64, (u64, EventPtr)>,
     next_event: u64,
     device_ordinal: Option<u32>,
@@ -380,6 +392,8 @@ pub fn probe() -> Option<NativeCudaBackend> {
         current: None,
         next_completion: 0,
         streams: HashMap::new(),
+        modules: OwnedHandles::new(MODULE_BASE, "module"),
+        functions: OwnedHandles::new(FUNCTION_BASE, "function"),
         next_stream: 0,
         events: HashMap::new(),
         next_event: 0,
@@ -593,6 +607,8 @@ impl GpuBackend for NativeCudaBackend {
         self.contexts.remove(&handle);
         self.streams.retain(|_, (owner, _)| *owner != handle);
         self.events.retain(|_, (owner, _)| *owner != handle);
+        self.modules.retain_not_owned_by(handle);
+        self.functions.retain_not_owned_by(handle);
         if self.current == Some(handle) {
             self.current = None;
         }
@@ -742,8 +758,7 @@ impl GpuBackend for NativeCudaBackend {
 
     fn memcpy_dtoh(&mut self, context: u64, src: u64, len: u64) -> Result<Vec<u8>, GpuError> {
         self.use_context(context)?;
-        let len = usize::try_from(len)
-            .map_err(|_| GpuError::new(wire::CUDA_ERROR_INVALID_VALUE, "copy length overflows"))?;
+        let len = device_copy_len(len)?;
         let mut out = vec![0_u8; len];
         // SAFETY: `out` is writable for `len` bytes; `src` names device
         // memory on the current context.
@@ -790,8 +805,7 @@ impl GpuBackend for NativeCudaBackend {
     ) -> Result<(Vec<u8>, u64), GpuError> {
         self.use_context(context)?;
         let stream_ptr = self.stream_ptr(context, stream)?;
-        let len = usize::try_from(len)
-            .map_err(|_| GpuError::new(wire::CUDA_ERROR_INVALID_VALUE, "copy length overflows"))?;
+        let len = device_copy_len(len)?;
         let mut out = vec![0_u8; len];
         // SAFETY: `out` remains live and writable through the synchronization
         // below; the stream belongs to the current context.
@@ -817,22 +831,36 @@ impl GpuBackend for NativeCudaBackend {
 
     fn module_load(&mut self, context: u64, image: &[u8]) -> Result<u64, GpuError> {
         self.use_context(context)?;
+        // The driver takes a bare pointer and no length, so hand it a copy that
+        // is a recognised format whose declared extents fit, with a trailing NUL.
+        let image = bounded_module_image(image)?;
         let mut module: ModulePtr = std::ptr::null_mut();
-        // SAFETY: `image` is readable (an empty image is refused before the
-        // wire even reaches here by the same check the driver makes);
-        // `module` is a valid out-pointer.
+        // SAFETY: `image` is a validated, NUL-terminated copy; `module` is a
+        // valid out-pointer.
         let code =
             unsafe { (self.cuda.module_load_data)(&mut module, image.as_ptr().cast::<c_void>()) };
         self.cuda.check(code, "cuModuleLoadData")?;
-        Ok(module as u64)
+        match self.modules.insert(context, module) {
+            Ok(handle) => Ok(handle),
+            Err(e) => {
+                // SAFETY: `module` was just loaded and has no handle.
+                let _ = unsafe { (self.cuda.module_unload)(module) };
+                Err(e)
+            }
+        }
     }
 
     fn module_unload(&mut self, context: u64, module: u64) -> Result<(), GpuError> {
         self.use_context(context)?;
-        // SAFETY: `module` names a loaded module on the current context;
-        // the driver reports invalid values.
-        let code = unsafe { (self.cuda.module_unload)(module as ModulePtr) };
-        self.cuda.check(code, "cuModuleUnload")
+        let ptr = self.modules.get(context, module)?;
+        // SAFETY: `ptr` was minted by cuModuleLoadData on this context and is
+        // still in the table.
+        let code = unsafe { (self.cuda.module_unload)(ptr) };
+        self.cuda.check(code, "cuModuleUnload")?;
+        self.modules.remove(module);
+        self.functions
+            .retain(|_, (_, (owning_module, _))| *owning_module != module);
+        Ok(())
     }
 
     fn module_get_function(
@@ -842,16 +870,16 @@ impl GpuBackend for NativeCudaBackend {
         name: &str,
     ) -> Result<u64, GpuError> {
         self.use_context(context)?;
+        let module_ptr = self.modules.get(context, module)?;
         let c_name = CString::new(name)
             .map_err(|_| GpuError::new(wire::CUDA_ERROR_INVALID_VALUE, "function name has NUL"))?;
         let mut function: FunctionPtr = std::ptr::null_mut();
         // SAFETY: `c_name` is NUL-terminated, `function` is a valid
-        // out-pointer, `module` names a loaded module.
-        let code = unsafe {
-            (self.cuda.module_get_function)(&mut function, module as ModulePtr, c_name.as_ptr())
-        };
+        // out-pointer, `module_ptr` is a module in this context's table.
+        let code =
+            unsafe { (self.cuda.module_get_function)(&mut function, module_ptr, c_name.as_ptr()) };
         self.cuda.check(code, "cuModuleGetFunction")?;
-        Ok(function as u64)
+        self.functions.insert(context, (module, function))
     }
 
     fn launch_kernel(
@@ -871,14 +899,15 @@ impl GpuBackend for NativeCudaBackend {
             .collect();
         let [gx, gy, gz] = config.grid;
         let [bx, by, bz] = config.block;
-        // SAFETY: a context is current; `function` names a function from a
-        // module loaded on it; each params entry points at a live buffer;
+        let (_, function_ptr) = self.functions.get(context, function)?;
+        // SAFETY: a context is current; `function_ptr` is a function from the
+        // table of this context; each params entry points at a live buffer;
         // the stream is null for the legacy default or a validated stream;
         // `extra` is NULL.
         let stream = self.stream_ptr(context, config.stream.unwrap_or(0))?;
         let code = unsafe {
             (self.cuda.launch_kernel)(
-                function as FunctionPtr,
+                function_ptr,
                 gx,
                 gy,
                 gz,
@@ -1040,9 +1069,333 @@ fn c_char_bytes(buf: &[c_char]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), buf.len()) }
 }
 
+/// A table of real driver pointers addressed by minted handles. The guest
+/// holds only the handle; a lookup also requires the context that created the
+/// entry, so a forged, stale or foreign handle is refused before any pointer
+/// reaches the driver.
+struct OwnedHandles<T> {
+    entries: HashMap<u64, (u64, T)>,
+    next: u64,
+    base: u64,
+    kind: &'static str,
+}
+
+impl<T: Copy> OwnedHandles<T> {
+    fn new(base: u64, kind: &'static str) -> Self {
+        Self {
+            entries: HashMap::new(),
+            next: 0,
+            base,
+            kind,
+        }
+    }
+
+    fn insert(&mut self, owner: u64, value: T) -> Result<u64, GpuError> {
+        let handle = NativeCudaBackend::mint_handle(self.base, &mut self.next, self.kind)?;
+        self.entries.insert(handle, (owner, value));
+        Ok(handle)
+    }
+
+    fn get(&self, owner: u64, handle: u64) -> Result<T, GpuError> {
+        self.entries
+            .get(&handle)
+            .filter(|(entry_owner, _)| *entry_owner == owner)
+            .map(|(_, value)| *value)
+            .ok_or_else(|| {
+                GpuError::new(
+                    wire::CUDA_ERROR_INVALID_HANDLE,
+                    format!("unknown {} handle 0x{handle:x}", self.kind),
+                )
+            })
+    }
+
+    fn remove(&mut self, handle: u64) {
+        self.entries.remove(&handle);
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&u64, &mut (u64, T)) -> bool) {
+        self.entries.retain(|handle, entry| keep(handle, entry));
+    }
+
+    fn retain_not_owned_by(&mut self, owner: u64) {
+        self.entries
+            .retain(|_, (entry_owner, _)| *entry_owner != owner);
+    }
+}
+
+/// A guest-chosen copy length, refused above [`MAX_DEVICE_COPY_BYTES`] before
+/// anything is allocated.
+fn device_copy_len(len: u64) -> Result<usize, GpuError> {
+    usize::try_from(len)
+        .ok()
+        .filter(|len| *len <= MAX_DEVICE_COPY_BYTES)
+        .ok_or_else(|| {
+            GpuError::new(
+                wire::CUDA_ERROR_INVALID_VALUE,
+                format!("copy length {len} exceeds the {MAX_DEVICE_COPY_BYTES}-byte limit"),
+            )
+        })
+}
+
+fn invalid_image(why: &str) -> GpuError {
+    GpuError::new(
+        wire::CUDA_ERROR_INVALID_VALUE,
+        format!("module image refused: {why}"),
+    )
+}
+
+fn le_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        bytes.get(at..at.checked_add(2)?)?.try_into().ok()?,
+    ))
+}
+
+fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+fn le_u64(bytes: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(
+        bytes.get(at..at.checked_add(8)?)?.try_into().ok()?,
+    ))
+}
+
+/// Whether `offset + size` lies inside a buffer of `len` bytes.
+fn extent_fits(offset: u64, size: u64, len: usize) -> bool {
+    offset
+        .checked_add(size)
+        .and_then(|end| usize::try_from(end).ok())
+        .is_some_and(|end| end <= len)
+}
+
+const FATBIN_MAGIC: u32 = 0xBA55_ED50;
+const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+const SHT_NOBITS: u32 = 8;
+
+/// The copy of a guest module image handed to `cuModuleLoadData`, which takes a
+/// pointer and no length. Only three shapes are accepted, so the driver never
+/// reads a structure the guest could point back into host memory:
+/// a fatbin whose declared size fits, a 64-bit little-endian ELF cubin whose
+/// program and section extents fit, or ASCII PTX text. Everything else,
+/// including the fatbin wrapper struct (which holds pointers), is refused.
+/// The copy ends in a NUL so a text image always terminates.
+fn bounded_module_image(image: &[u8]) -> Result<Vec<u8>, GpuError> {
+    if image.is_empty() {
+        return Err(invalid_image("empty"));
+    }
+    if le_u32(image, 0) == Some(FATBIN_MAGIC) {
+        let header = le_u16(image, 6).ok_or_else(|| invalid_image("truncated fatbin header"))?;
+        let fat = le_u64(image, 8).ok_or_else(|| invalid_image("truncated fatbin header"))?;
+        let total = u64::from(header)
+            .checked_add(fat)
+            .ok_or_else(|| invalid_image("fatbin size overflows"))?;
+        if !extent_fits(0, total, image.len()) {
+            return Err(invalid_image("fatbin declares more bytes than were sent"));
+        }
+    } else if image.starts_with(&ELF_MAGIC) {
+        check_elf_extents(image)?;
+    } else if image.iter().all(|b| *b != 0 && b.is_ascii()) {
+        // PTX text.
+    } else {
+        return Err(invalid_image("not a fatbin, a cubin or PTX text"));
+    }
+    let mut copy = Vec::with_capacity(image.len() + 1);
+    copy.extend_from_slice(image);
+    copy.push(0);
+    Ok(copy)
+}
+
+fn check_elf_extents(image: &[u8]) -> Result<(), GpuError> {
+    let bad = || invalid_image("truncated or inconsistent ELF headers");
+    if image.get(4) != Some(&2) || image.get(5) != Some(&1) {
+        return Err(invalid_image(
+            "only 64-bit little-endian ELF cubins are accepted",
+        ));
+    }
+    let phoff = le_u64(image, 0x20).ok_or_else(bad)?;
+    let shoff = le_u64(image, 0x28).ok_or_else(bad)?;
+    let phentsize = u64::from(le_u16(image, 0x36).ok_or_else(bad)?);
+    let phnum = u64::from(le_u16(image, 0x38).ok_or_else(bad)?);
+    let shentsize = u64::from(le_u16(image, 0x3a).ok_or_else(bad)?);
+    let shnum = u64::from(le_u16(image, 0x3c).ok_or_else(bad)?);
+    if phnum != 0 && phentsize < 56 || shnum != 0 && shentsize < 64 {
+        return Err(bad());
+    }
+    let table_bytes = |count: u64, entry: u64| count.checked_mul(entry).ok_or_else(bad);
+    if !extent_fits(phoff, table_bytes(phnum, phentsize)?, image.len())
+        || !extent_fits(shoff, table_bytes(shnum, shentsize)?, image.len())
+    {
+        return Err(bad());
+    }
+    for index in 0..phnum {
+        let at = usize::try_from(phoff + index * phentsize).map_err(|_| bad())?;
+        let offset = le_u64(image, at + 8).ok_or_else(bad)?;
+        let filesz = le_u64(image, at + 0x20).ok_or_else(bad)?;
+        if !extent_fits(offset, filesz, image.len()) {
+            return Err(invalid_image("a program header points outside the image"));
+        }
+    }
+    for index in 0..shnum {
+        let at = usize::try_from(shoff + index * shentsize).map_err(|_| bad())?;
+        if le_u32(image, at + 4).ok_or_else(bad)? == SHT_NOBITS {
+            continue;
+        }
+        let offset = le_u64(image, at + 0x18).ok_or_else(bad)?;
+        let size = le_u64(image, at + 0x20).ok_or_else(bad)?;
+        if !extent_fits(offset, size, image.len()) {
+            return Err(invalid_image("a section points outside the image"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_fatbin(header: u16, fat: u64, total_len: usize) -> Vec<u8> {
+        let mut image = vec![0_u8; total_len.max(16)];
+        image[..4].copy_from_slice(&FATBIN_MAGIC.to_le_bytes());
+        image[6..8].copy_from_slice(&header.to_le_bytes());
+        image[8..16].copy_from_slice(&fat.to_le_bytes());
+        image
+    }
+
+    fn fake_elf(
+        shoff: u64,
+        shnum: u16,
+        section_off: u64,
+        section_size: u64,
+        len: usize,
+    ) -> Vec<u8> {
+        let mut image = vec![0_u8; len];
+        image[..4].copy_from_slice(&ELF_MAGIC);
+        image[4] = 2;
+        image[5] = 1;
+        image[0x28..0x30].copy_from_slice(&shoff.to_le_bytes());
+        image[0x3a..0x3c].copy_from_slice(&64_u16.to_le_bytes());
+        image[0x3c..0x3e].copy_from_slice(&shnum.to_le_bytes());
+        let at = usize::try_from(shoff).unwrap();
+        // A table placed past the end has nothing to write into; the validator
+        // must refuse it from the header alone.
+        if shnum > 0 && at + 0x28 <= image.len() {
+            image[at + 4..at + 8].copy_from_slice(&1_u32.to_le_bytes());
+            image[at + 0x18..at + 0x20].copy_from_slice(&section_off.to_le_bytes());
+            image[at + 0x20..at + 0x28].copy_from_slice(&section_size.to_le_bytes());
+        }
+        image
+    }
+
+    #[test]
+    fn a_forged_or_foreign_handle_never_reaches_a_pointer() {
+        let mut table: OwnedHandles<usize> = OwnedHandles::new(MODULE_BASE, "module");
+        let real_pointer_value = 0x7f12_3456_7000_u64;
+        assert!(
+            table.get(1, real_pointer_value).is_err(),
+            "a raw address is not a handle"
+        );
+        let handle = table.insert(1, 0xdead_beef).unwrap();
+        assert_ne!(handle, 0xdead_beef, "the handle must not be the pointer");
+        assert_eq!(table.get(1, handle).unwrap(), 0xdead_beef);
+        assert_eq!(
+            table.get(2, handle).unwrap_err().code,
+            wire::CUDA_ERROR_INVALID_HANDLE,
+            "another context cannot use it"
+        );
+        table.remove(handle);
+        assert!(table.get(1, handle).is_err(), "a stale handle is refused");
+    }
+
+    #[test]
+    fn destroying_a_context_drops_only_its_handles() {
+        let mut table: OwnedHandles<usize> = OwnedHandles::new(FUNCTION_BASE, "function");
+        let mine = table.insert(1, 10).unwrap();
+        let theirs = table.insert(2, 20).unwrap();
+        table.retain_not_owned_by(1);
+        assert!(table.get(1, mine).is_err());
+        assert_eq!(table.get(2, theirs).unwrap(), 20);
+    }
+
+    #[test]
+    fn module_and_function_handles_do_not_alias_other_handle_spaces() {
+        let bases = [
+            CTX_BASE,
+            STREAM_BASE,
+            EVENT_BASE,
+            MODULE_BASE,
+            FUNCTION_BASE,
+        ];
+        for (i, a) in bases.iter().enumerate() {
+            for b in &bases[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn a_device_copy_length_is_capped_before_allocating() {
+        assert_eq!(device_copy_len(4096).unwrap(), 4096);
+        assert_eq!(
+            device_copy_len(MAX_DEVICE_COPY_BYTES as u64).unwrap(),
+            MAX_DEVICE_COPY_BYTES
+        );
+        assert!(device_copy_len(MAX_DEVICE_COPY_BYTES as u64 + 1).is_err());
+        assert!(device_copy_len(1 << 45).is_err());
+        assert!(device_copy_len(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn ptx_text_is_accepted_and_always_nul_terminated() {
+        let copy = bounded_module_image(b".version 7.0\n.target sm_80\n").unwrap();
+        assert_eq!(copy.last(), Some(&0));
+        assert_eq!(&copy[..copy.len() - 1], b".version 7.0\n.target sm_80\n");
+    }
+
+    #[test]
+    fn an_empty_image_and_unknown_binary_formats_are_refused() {
+        assert!(bounded_module_image(&[]).is_err());
+        // The fatbin *wrapper* struct (magic 0x466243b1) holds pointers.
+        let mut wrapper = vec![0_u8; 32];
+        wrapper[..4].copy_from_slice(&0x4662_43b1_u32.to_le_bytes());
+        assert!(bounded_module_image(&wrapper).is_err());
+        assert!(bounded_module_image(&[0x80, 0x81, 0x00]).is_err());
+        assert!(bounded_module_image(b"text with a \0 inside").is_err());
+    }
+
+    #[test]
+    fn a_fatbin_must_fit_in_the_bytes_that_were_sent() {
+        assert!(bounded_module_image(&fake_fatbin(16, 48, 64)).is_ok());
+        assert!(bounded_module_image(&fake_fatbin(16, 49, 64)).is_err());
+        assert!(bounded_module_image(&fake_fatbin(16, u64::MAX, 64)).is_err());
+        assert!(bounded_module_image(&fake_fatbin(16, 0, 16)).is_ok());
+        assert!(bounded_module_image(&[0x50, 0xed, 0x55, 0xba, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn an_elf_cubin_must_keep_its_tables_and_sections_inside_the_image() {
+        assert!(bounded_module_image(&fake_elf(64, 1, 128, 16, 256)).is_ok());
+        assert!(
+            bounded_module_image(&fake_elf(64, 1, 250, 16, 256)).is_err(),
+            "section past the end"
+        );
+        assert!(
+            bounded_module_image(&fake_elf(250, 1, 0, 0, 256)).is_err(),
+            "table past the end"
+        );
+        assert!(
+            bounded_module_image(&fake_elf(64, 1, u64::MAX - 4, 16, 256)).is_err(),
+            "offset overflow"
+        );
+        let mut thirty_two_bit = fake_elf(64, 0, 0, 0, 256);
+        thirty_two_bit[4] = 1;
+        assert!(bounded_module_image(&thirty_two_bit).is_err());
+        assert!(
+            bounded_module_image(&ELF_MAGIC).is_err(),
+            "truncated header"
+        );
+    }
 
     #[test]
     fn probe_absent_driver_is_none_not_a_crash() {
