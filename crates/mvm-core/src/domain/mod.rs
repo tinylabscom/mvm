@@ -2,6 +2,8 @@
 
 pub mod agent;
 pub mod instance;
+// The `mvm.toml` workload manifest is authored and read on the host.
+#[cfg(feature = "host-state")]
 pub mod manifest;
 pub mod node;
 pub mod pool;

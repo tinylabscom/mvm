@@ -133,6 +133,9 @@ pub mod workload_address;
 pub use workload_address::{
     WorkloadAddress, WorkloadAddressError, WorkloadAddressParseError, workload_address,
 };
+/// Persistent operator configuration (`~/.mvm/config/config.toml`).
+/// Host-state only: guest binaries never read operator config.
+#[cfg(feature = "host-state")]
 pub mod user_config;
 
 /// Test-only drift-lock proving `mvm_contract::ir::canonicalize` and
@@ -207,7 +210,9 @@ pub mod util;
 // continue to resolve.
 // ----------------------------------------------------------------------------
 
-pub use domain::{agent, instance, manifest, node, pool, session, template, tenant, volume};
+#[cfg(feature = "host-state")]
+pub use domain::manifest;
+pub use domain::{agent, instance, node, pool, session, template, tenant, volume};
 pub use platform::linux_env;
 pub use policy::{audit, network_policy, security};
 pub use protocol::{routing, signing, vm_backend};

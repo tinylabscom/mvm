@@ -57,6 +57,9 @@ pub fn default_boot_image_tag() -> &'static str {
 pub const ARCH: &str = std::env::consts::ARCH;
 
 /// Normalize Firecracker version strings to a canonical form (e.g., "Firecracker v1.14.1" -> "v1.14.1").
+///
+/// Host-state: the Firecracker toolchain is resolved on the host.
+#[cfg(feature = "host-state")]
 pub fn normalize_fc_version(raw: &str) -> String {
     // Capture the last semantic version (v?MAJOR.MINOR[.PATCH])
     let re = regex::Regex::new(r"(?:v)?\d+\.\d+(?:\.\d+)?").expect("valid regex");
@@ -82,6 +85,9 @@ pub fn normalize_fc_version(raw: &str) -> String {
 /// Get the effective Firecracker version.
 /// Priority: runtime env `MVM_FC_VERSION` > compile-time default.
 /// The CLI `--fc-version` flag sets `MVM_FC_VERSION` before calling this.
+///
+/// Host-state: only the host downloads or runs a Firecracker binary.
+#[cfg(feature = "host-state")]
 pub fn fc_version() -> String {
     let raw = std::env::var("MVM_FC_VERSION").unwrap_or_else(|_| FC_VERSION_DEFAULT.to_string());
     normalize_fc_version(&raw)
@@ -1637,6 +1643,7 @@ mod tests {
         env.remove("MVM_PRODUCTION");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn test_fc_version_default() {
         let mut env = TestEnv::new();
@@ -1647,30 +1654,35 @@ mod tests {
         assert!(v.contains('.'), "FC version should contain a dot");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn normalize_firecracker_banner() {
         let raw = "Firecracker v1.14.1";
         assert_eq!(normalize_fc_version(raw), "v1.14.1");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn normalize_with_leading_v() {
         let raw = "v1.14.1";
         assert_eq!(normalize_fc_version(raw), "v1.14.1");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn normalize_without_v() {
         let raw = "1.14.1";
         assert_eq!(normalize_fc_version(raw), "v1.14.1");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn normalize_minor_only() {
         let raw = "Firecracker v1.14";
         assert_eq!(normalize_fc_version(raw), "v1.14");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn normalize_garbage_falls_back() {
         let raw = "nonsense";

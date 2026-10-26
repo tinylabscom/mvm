@@ -11,11 +11,15 @@
 //! regression backstop that keeps it gone.
 //!
 //! The same scan runs over `mvm-builder-guest` and `mvm-setpriv`, the other
-//! two binaries shipped inside a guest, and additionally bans the crates the
-//! host-only `host-state` feature owns (`bs58`, `unicode-normalization`,
-//! `keyring`, `aho-corasick`, `tar`): a guest binary resolving one of those
-//! means it started depending on a host-state-gated `mvm-core` module, which
-//! is the boundary the feature exists to draw.
+//! two binaries shipped inside a guest, and additionally name-bans the crates
+//! only a `host-state`-gated `mvm-core` module can pull in (`bs58`,
+//! `unicode-normalization`, `keyring`, the `toml` parser stack, and the
+//! `regex` stack): a guest binary resolving one of those means it started
+//! depending on a host-state-gated `mvm-core` module, which is the boundary
+//! the feature exists to draw. `tar` and `aho-corasick` are owned by the
+//! feature too but reach guest binaries through legitimate independent edges,
+//! so they are policed by the `host-state` feature-edge check instead of a
+//! name ban.
 //!
 //! **Target matters.** `tokio`/`rtnetlink`/`netlink-packet-route` are
 //! `cfg(target_os = "linux")` deps (host-side mvmctl builds on macOS skip
@@ -65,10 +69,24 @@ const FORBIDDEN: &[&str] = &[
 /// guest closure. Name-banned outright: no guest binary has another
 /// legitimate edge to them. (`tar` and `aho-corasick` are *not* here —
 /// `mvm-builder-guest` declares its own `tar` edge for
-/// `builder_disk_transport`, and `regex`'s `perf-literal` pulls
-/// `aho-corasick`; those edges are policed by the feature check below, which
+/// `builder_disk_transport`, and a general-purpose matcher like
+/// `aho-corasick` is a legitimate direct guest edge should one appear;
+/// those edges are policed by the feature check below, which
 /// fires only when the `host-state` feature itself is enabled.)
-const HOST_STATE_OWNED: &[&str] = &["bs58", "unicode-normalization", "keyring"];
+const HOST_STATE_OWNED: &[&str] = &[
+    "bs58",
+    "unicode-normalization",
+    "keyring",
+    "toml",
+    "toml_edit",
+    "toml_datetime",
+    "toml_write",
+    "serde_spanned",
+    "winnow",
+    "regex",
+    "regex-automata",
+    "regex-syntax",
+];
 
 /// The guest's real build target. The async stack above is
 /// `cfg(target_os = "linux")`-gated, invisible to a default (host) tree
@@ -139,7 +157,8 @@ fn check_no_host_state_feature(workspace: &Path, package: &str) -> Result<()> {
              {GUEST_TARGET} enables mvm-core/host-state — a guest binary must not depend on \
              the host-state-gated mvm-core modules (did_key, workload_address, command_gate, \
              threat_classifier, keystore/secret_store, pii, receipt, stream_client, \
-             registry_pack*, toml_loader, train_lock, plan::bundle archive I/O). Drop the \
+             registry_pack*, toml_loader, train_lock, domain::manifest, user_config, \
+             config::fc_version, plan::bundle archive I/O). Drop the \
              reference; do not enable `host-state` for a guest crate."
         );
     }
@@ -203,7 +222,8 @@ fn check_one(workspace: &Path, package: &str) -> Result<()> {
              pulls host-state-owned dep(s) {} — a guest binary must not depend on the \
              `host-state`-gated mvm-core modules (did_key, workload_address, command_gate, \
              threat_classifier, keystore/secret_store, pii, registry_pack*, toml_loader, \
-             train_lock, plan::bundle::stream). Drop the reference; do not enable \
+             train_lock, domain::manifest, user_config, config::fc_version, \
+             plan::bundle::stream). Drop the reference; do not enable \
              `host-state` for a guest crate.",
             host_state_hits.join(", ")
         );
@@ -279,6 +299,27 @@ mod tests {
         assert_eq!(
             forbidden_hits(tree, HOST_STATE_OWNED),
             vec!["bs58", "unicode-normalization"]
+        );
+    }
+
+    #[test]
+    fn toml_and_regex_stacks_are_flagged() {
+        // The parser stacks only a host-state module can pull in; the leaves
+        // are banned too so a partial edge (a guest crate depending on
+        // `toml_edit` or `regex-syntax` directly) is caught just the same.
+        let tree = "mvm-agentd v0.25.0\ntoml v0.8.23\ntoml_edit v0.22.27\nserde_spanned v0.6.9\n\
+                    winnow v0.7.15\nregex v1.12.4\nregex-automata v0.4.14\nregex-syntax v0.8.11\n";
+        assert_eq!(
+            forbidden_hits(tree, HOST_STATE_OWNED),
+            vec![
+                "regex",
+                "regex-automata",
+                "regex-syntax",
+                "serde_spanned",
+                "toml",
+                "toml_edit",
+                "winnow"
+            ]
         );
     }
 
