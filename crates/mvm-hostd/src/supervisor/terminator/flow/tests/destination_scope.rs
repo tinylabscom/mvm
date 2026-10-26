@@ -189,6 +189,20 @@ struct Upstream {
 }
 
 fn upstream(issuer: &VmEgressCa) -> Upstream {
+    upstream_answering(issuer, |tls| {
+        let _ = tls.write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{\"ok\":true}",
+        );
+    })
+}
+
+/// [`upstream`], with `answer` writing the reply once the request is read.
+fn upstream_answering(
+    issuer: &VmEgressCa,
+    answer: impl FnOnce(&mut rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>)
+    + Send
+    + 'static,
+) -> Upstream {
     let config = Arc::new(
         crate::supervisor::terminator::tls::server_config_for_sni(issuer, BOUND_HOST)
             .expect("upstream server config"),
@@ -224,9 +238,7 @@ fn upstream(issuer: &VmEgressCa) -> Upstream {
                 }
             }
         }
-        let _ = tls.write_all(
-            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{\"ok\":true}",
-        );
+        answer(&mut tls);
         let _ = tls.flush();
         tls.conn.send_close_notify();
         let _ = tls.flush();
@@ -393,5 +405,69 @@ fn an_x_api_key_header_carrying_the_placeholder_is_substituted() {
             .iter()
             .any(|(_, value)| value.contains(&harness.placeholder)),
         "no placeholder residue reaches the destination"
+    );
+}
+
+/// The ceiling the forward leg holds a response to, matched here so a test can
+/// send one byte more than it allows.
+const FORWARD_CEILING: usize = 16 * 1024 * 1024;
+
+#[test]
+fn a_response_that_declares_more_than_the_ceiling_is_refused_whole() {
+    let issuer = VmEgressCa::mint(&[BOUND_HOST]).expect("upstream issuer");
+    let server = upstream_answering(&issuer, |tls| {
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
+            FORWARD_CEILING + 1
+        );
+        let _ = tls.write_all(head.as_bytes());
+        let _ = tls.write_all(&vec![b'x'; 64 * 1024]);
+    });
+    let vm = single_binding(verifying_forwarder(&server, &issuer));
+
+    let response = over_flow_to(
+        &vm,
+        BOUND_HOST,
+        &request_with_placeholder(&vm.placeholders[0], BOUND_HOST),
+    );
+
+    assert!(
+        status_line(&response).starts_with("HTTP/1.1 502"),
+        "{}",
+        String::from_utf8_lossy(&response[..response.len().min(200)])
+    );
+    assert!(response.len() < 64 * 1024, "{} bytes", response.len());
+}
+
+#[test]
+fn a_chunked_response_with_no_declared_length_stops_at_the_ceiling() {
+    let issuer = VmEgressCa::mint(&[BOUND_HOST]).expect("upstream issuer");
+    let server = upstream_answering(&issuer, |tls| {
+        let _ = tls.write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n");
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..(FORWARD_CEILING / chunk.len() + 8) {
+            let framed = [format!("{:x}\r\n", chunk.len()).as_bytes(), &chunk, b"\r\n"].concat();
+            if tls.write_all(&framed).is_err() {
+                return;
+            }
+        }
+        let _ = tls.write_all(b"0\r\n\r\n");
+    });
+    let vm = single_binding(verifying_forwarder(&server, &issuer));
+
+    let response = over_flow_to(
+        &vm,
+        BOUND_HOST,
+        &request_with_placeholder(&vm.placeholders[0], BOUND_HOST),
+    );
+
+    assert!(
+        response.len() < FORWARD_CEILING + 1024 * 1024,
+        "the guest was sent {} bytes",
+        response.len()
+    );
+    assert!(
+        !response.ends_with(b"0\r\n\r\n"),
+        "the body must not complete past the ceiling"
     );
 }
