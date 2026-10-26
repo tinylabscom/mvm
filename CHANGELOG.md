@@ -9,6 +9,7 @@ All notable changes to mvm are documented in this file.
 - **ci**: The merge queue runs only the fast gate; the heavy lanes run on push to main (#4720)
 - **ci**: Delete the miri, hvf-native, install-url-watch and site-isolation-watch workflows and the triggers that gated nothing (#4716)
 - **ci**: Delete the nightly mutation-witness lane (#4719)
+- **ci**: Remove Extended CI (`ci-full.yml`); its documented-surface coverage stays in the release workflow's e2e-docs, which now gates promotion (#4718)
 - **release**: Publish the signed prerelease before e2e-docs and gate promotion on it (#4721)
 
 ### Fixed
