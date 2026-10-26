@@ -446,6 +446,99 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
 
     #[test]
+    #[ignore = "requires genuine signed runtime, published Linux proofs, and an existing sealed workload"]
+    fn signed_release_exports_real_canonical_workload() {
+        let required = |name| PathBuf::from(std::env::var_os(name).expect(name));
+        struct Payload(PathBuf);
+        impl mvm_build::builder_boot::BootPayloadSource for Payload {
+            fn boot_payload(
+                &self,
+            ) -> std::result::Result<
+                mvm_build::builder_boot::BuilderBootPayload,
+                mvm_build::builder_boot::BootPayloadError,
+            > {
+                mvm_build::builder_boot::BuilderBootPayload::builder()
+                    .host_bin_dir(&self.0)
+                    .build()
+            }
+        }
+        let payload = Payload(required("MVM_TEST_SIGNED_HVF_PAYLOAD_DIR"));
+        mvm_build::builder_boot::BootPayloadSource::boot_payload(&payload).unwrap();
+        mvm_build::builder_boot::register_boot_payload_source(Box::new(payload));
+        let archive = required("MVM_TEST_SIGNED_RUNTIME_ARCHIVE");
+        let rootfs = required("MVM_TEST_CANONICAL_ROOTFS");
+        let output = required("MVM_TEST_CANONICAL_OUTPUT");
+        let environment = std::env::var_os("MVM_TEST_CANONICAL_ENVIRONMENT").map(|path| {
+            let descriptor: mvm_core::plan::EnvironmentDescriptor =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            descriptor.validate().unwrap();
+            let metadata: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(mvm_bundler::guest_sidecar_path(utf8(&rootfs).unwrap()).unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&descriptor.entrypoint.argv).unwrap(),
+                metadata["entrypointArgv"],
+                "signed environment must retain the built entrypoint"
+            );
+            assert!(descriptor.volumes.is_empty() && descriptor.services.is_empty());
+            descriptor
+        });
+        let proof = RuntimeReleaseProof {
+            checksum: archive.with_extension("gz.sha256"),
+            signature_bundle: archive.with_extension("gz.bundle"),
+            archive_sha256: sha256_file(&archive).unwrap(),
+            archive,
+            version: std::env::var("MVM_TEST_SIGNED_RUNTIME_VERSION")
+                .expect("MVM_TEST_SIGNED_RUNTIME_VERSION"),
+            arch: GuestArch::host(),
+        };
+        let assets = PreparedPortableBootAssets::from_set(
+            PublishedImageSet::acquire().unwrap(),
+            GuestArch::host(),
+            &proof,
+        )
+        .unwrap();
+        // Export the original sealed bytes in place. In particular, retain the
+        // raw signed root hash beside the rootfs; never reseal this image.
+        let directory = rootfs.parent().unwrap();
+        let verity = std::fs::read(directory.join("rootfs.verity")).unwrap();
+        let roothash = std::fs::read_to_string(directory.join("rootfs.roothash")).unwrap();
+        std::fs::create_dir(&output).expect("output must be a fresh directory");
+        mvm_core::config::create_private_dir(&output).unwrap();
+        let bundle = output.join("workload.mvmpkg");
+        let mut inputs = mvm_bundler::BundleExportInputs::new(
+            utf8(&assets.kernel).unwrap(),
+            utf8(&rootfs).unwrap(),
+            assets.runtime.arch.as_str(),
+            &bundle,
+        )
+        .initrd(utf8(&assets.initrd).unwrap())
+        .verity(&verity, roothash.trim())
+        .resources(2, 1024)
+        .label("signed-runtime-lifecycle-witness");
+        if let Some(environment) = environment {
+            let resources = environment.resources.as_ref().expect("declared resources");
+            let pack = environment.pack.as_ref().expect("package identity");
+            inputs = inputs
+                .resources(u32::from(resources.cpu_cores), resources.memory_mb)
+                .label(format!("{}@{}", pack.name, pack.version))
+                .posture(
+                    mvm_bundler::PostureInputs::new(mvm_core::security::AgentProfile::SealedProd)
+                        .allows_egress(true),
+                )
+                .environment(environment);
+        }
+        assets
+            .stage(&inputs, &crate::bundle::HostBundleSigner::load().unwrap())
+            .unwrap()
+            .publish()
+            .unwrap();
+        println!("canonical portable export: {}", bundle.display());
+    }
+
+    #[test]
     fn health_selection_refuses_mixed_runtime_without_modifying_config() {
         let directory = tempfile::tempdir().unwrap();
         let kernel = directory.path().join("kernel");

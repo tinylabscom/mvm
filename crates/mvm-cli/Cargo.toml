@@ -117,6 +117,10 @@ name = "wasm_run"
 required-features = ["wasm-backend"]
 
 [features]
+native-caller-identity = [
+    "mvm-hostd/native-caller-identity",
+    "mvm-client/native-caller-identity",
+]
 # Cross-compile the Linux host binaries (`mvm-host-vm-init`, `stage0-init`, …)
 # and `include_bytes!` them into `mvmctl` in every profile, failing the build if
 # the pinned zig + cargo-zigbuild toolchain is missing. Without it a release

@@ -565,7 +565,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
             verify_plan_bundle(pin, ctx.resolver, ctx.trust)
         }
         .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
-        bundle_environment::verify_environment(&verified, &verified_bundle.manifest)?;
+        bundle_environment::verify_environment(&verified, &verified_bundle.manifest, posture)?;
         if !verified_bundle.embedded_image_sets.is_empty() {
             let image = ctx.image.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -4446,6 +4446,87 @@ mod tests {
                 )
                 .expect_err("external plans cannot bypass signed requirements");
                 assert!(format!("{error:#}").contains(refused_field), "{error:#}");
+            }
+        }
+    }
+
+    #[test]
+    fn signed_environment_policy_refuses_missing_or_wider_actual_runtime() {
+        use mvm_core::network_policy::NetworkPolicy;
+        use mvm_core::plan::bundle::BundleMember;
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let environment = serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": format!("{arch}-linux"),
+            "entrypoint": { "argv": ["/usr/bin/agent"] },
+            "policy": { "allow_hosts": ["api.anthropic.com:443"] }
+        }))
+        .unwrap();
+        let (archive, pin) = make_test_bundle_with_members(
+            &sk,
+            b"kernel",
+            b"rootfs",
+            &arch,
+            vec![BundleMember::Environment(environment)],
+        );
+        let trust = MapTrust(HashMap::from([(
+            key_id_from_pubkey(&sk.verifying_key()),
+            sk.verifying_key(),
+        )]));
+        let resolver = FixedResolver(archive);
+        let ctx = BundleAdmissionContext {
+            resolver: &resolver,
+            trust: &trust,
+            image: None,
+        };
+        let input = input_with_pin("vm-policy", &pin);
+        let fleet = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let mut config = mvm_core::user_config::load(None);
+        config.trusted_plan_signers = vec![mvm_core::user_config::TrustedPlanSigner {
+            signer_id: "policy-fleet".into(),
+            ed25519_pubkey_hex: hex::encode(fleet.verifying_key().as_bytes()),
+        }];
+        mvm_core::user_config::save(&config, None).unwrap();
+        let signed = sign_plan(&synthesize_plan(&input).unwrap(), &fleet, "policy-fleet");
+        let wider = VmStartConfig {
+            network_policy: NetworkPolicy::unrestricted(),
+            ..Default::default()
+        };
+        for runtime in [None, Some(&wider)] {
+            let posture = RunPosture::without_backend(Variant::Dev).with_runtime(runtime);
+            let error = admit_for_run(
+                &input,
+                &SystemClock,
+                &InMemoryNonceLedger::new(),
+                Some(dir.path()),
+                Some(&ctx),
+                posture,
+            )
+            .expect_err("signed policy requires an actual bounded runtime");
+            assert!(
+                error.downcast_ref::<BundleEnvironmentRefused>().is_some(),
+                "{error:#}"
+            );
+            assert!(
+                format!("{error:#}").contains("actual launch network"),
+                "{error:#}"
+            );
+            let ledger = InMemoryNonceLedger::new();
+            for _ in 0..2 {
+                let error =
+                    admit_signed_plan_for_run(&signed, &SystemClock, &ledger, Some(&ctx), posture)
+                        .expect_err("external plans cannot bypass the runtime ceiling");
+                assert!(
+                    error.downcast_ref::<BundleEnvironmentRefused>().is_some(),
+                    "{error:#}"
+                );
+                assert!(
+                    !format!("{error:#}").contains("replay protection"),
+                    "{error:#}"
+                );
             }
         }
     }

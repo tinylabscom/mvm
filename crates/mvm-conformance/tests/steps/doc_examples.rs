@@ -429,6 +429,29 @@ fn execute_in(
 /// between a tier that reflects the CLI and one that reflects the fixture set.
 fn stage_fixture(name: &str, dir: &Path, home: &Path) {
     match name {
+        // `show` reads only public metadata. This fixture does not enroll or
+        // claim that a matching native credential exists.
+        "caller-public-pin-only" => {
+            let config_dir = mvm_core::config::mvm_config_dir_at(home);
+            mvm_core::private_fs::ensure_private_dir(&config_dir)
+                .expect("create private public-pin fixture directory");
+            let public_key = ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+                .verifying_key()
+                .to_bytes();
+            let record: mvm_client::caller_identity::Record =
+                serde_json::from_value(serde_json::json!({
+                    "version": 1,
+                    "installation": "9334301d-9322-4ab5-9232-73983aff8e28",
+                    "state": { "kind": "enrolled", "public_key": public_key }
+                }))
+                .expect("valid public caller identity fixture");
+            mvm_core::atomic_io::atomic_write_new(
+                &config_dir.join("caller-identity.json"),
+                &serde_json::to_vec(&record).expect("serialize public caller pin"),
+            )
+            .expect("write private public-pin record");
+            mvm_client::caller_identity::show_at(home).expect("validate public-only fixture");
+        }
         "app-layer" => {
             let root = dir.join("staged-root/bin");
             std::fs::create_dir_all(&root).expect("create staged application tree");

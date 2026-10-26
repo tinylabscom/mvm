@@ -81,6 +81,12 @@ const PINNED: &[(&str, usize, &str)] = &[
         1,
         "a test: Firecracker must keep *refusing* a share",
     ),
+    (
+        "crates/mvm-runtime/src/workload_runner/runner/cold_hvf_channel.rs",
+        1,
+        "a test: readonly entrypoint completion must refuse even a readonly host share; \
+         no device attachment or production share construction",
+    ),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

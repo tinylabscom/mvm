@@ -68,6 +68,12 @@ impl PreparedCanonicalLinux {
         self.declaration.artifacts[0].sha256.as_str()
     }
 
+    /// Original canonical signed declaration, for checking a held kernel file.
+    /// This is byte evidence, not native launch authority.
+    pub fn kernel_declaration(&self) -> &crate::image_set::MemberArtifact {
+        &self.declaration.artifacts[0]
+    }
+
     /// Bind this SAME in-process owner to one VM, not a path/hash claim.
     pub fn bind_to_config(
         self: &Arc<Self>,

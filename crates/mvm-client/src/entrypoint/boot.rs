@@ -127,8 +127,70 @@ impl OwnedClientBoot {
         })
     }
 
-    pub(crate) fn flush(&mut self) -> Result<()> {
-        self.with_original(|_, runtime| runtime.flush())
+    pub(crate) fn finalize_readonly_entrypoint(&mut self) -> Result<()> {
+        self.with_original(|_, runtime| runtime.finalize_readonly_entrypoint())
+    }
+
+    /// Dispatch only on the original activated native channel, never by name.
+    pub(crate) fn entrypoint(
+        &mut self,
+        stdin: super::dispatch::CallStdin,
+        timeout_secs: u64,
+        observer: &mut dyn super::dispatch::CallObserver,
+    ) -> Result<super::dispatch::CallOutcome> {
+        use super::dispatch::{
+            CallOutcome, CallTerminal, CaptureReport, DispatchStdin, RecordedDivergence,
+            authorize_stdin, route_event, workload_egress_env,
+        };
+        self.with_original(|resources, runtime| {
+            let name = &resources.config.name;
+            // Activation already authenticated this retained connection.
+            // A name-resolved readiness session would compete with it.
+            runtime
+                .validate_live()
+                .context("validate the original activated native channel")?;
+            let payload = match authorize_stdin(stdin, Some(&resources.admission.admitted))? {
+                DispatchStdin::OneShot(bytes) => bytes,
+                DispatchStdin::Streaming { .. } => {
+                    anyhow::bail!("owned native entrypoint requires one-shot stdin")
+                }
+                DispatchStdin::Prompt(_) => anyhow::bail!("entrypoint call cannot be a prompt"),
+            };
+            let request = mvm_agentd::vsock::GuestRequest::RunEntrypoint {
+                stdin: payload,
+                timeout_secs,
+                env: workload_egress_env(name),
+                stream_input: false,
+            };
+            // Audit the verb, not the payload or secret-bearing environment.
+            crate::guest::emit_vsock_rpc_audit(
+                name,
+                &mvm_agentd::vsock::GuestRequest::RunEntrypoint {
+                    stdin: Vec::new(),
+                    timeout_secs,
+                    env: Vec::new(),
+                    stream_input: false,
+                },
+            );
+            let mut capture = mvm_hostd::stream::EntrypointSink::for_vm(name);
+            let recorded = capture.is_recorded();
+            let mut divergence = RecordedDivergence::default();
+            observer.dispatching(name, false);
+            let terminal = runtime.entrypoint(&request, |event| {
+                route_event(event, &mut capture, &mut divergence, observer);
+            });
+            drop(capture);
+            observer.dispatched();
+            let outcome = CallOutcome {
+                terminal: CallTerminal::from_event(&terminal?),
+                capture: Some(CaptureReport {
+                    recorded,
+                    divergence,
+                }),
+            };
+            observer.call_finished(name, &outcome);
+            Ok(outcome)
+        })
     }
 
     pub(crate) fn complete(

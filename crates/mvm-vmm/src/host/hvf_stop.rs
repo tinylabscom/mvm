@@ -214,6 +214,10 @@ impl OwnedInstance {
             "owned HVF lifetime ended before bridge open"
         );
         let before = ConnectedInstance::connect_bound(self.instance.clone(), Some(child.id()))?;
+        // This was an observation, not a pending stop request. Release its
+        // serial control slot before taking the fresh post-connection probe.
+        // The original child and lifetime observer remain held by this owner.
+        drop(before);
         *retained = Some(mvm_agentd::vsock::connect_unix_before(
             path,
             Instant::now()
@@ -235,7 +239,7 @@ impl OwnedInstance {
             self.observer.wait_event(Instant::now())? == ProcessExitWait::TimedOut,
             "owned HVF lifetime ended during bridge open"
         );
-        drop((before, after));
+        drop(after);
         Ok(())
     }
 

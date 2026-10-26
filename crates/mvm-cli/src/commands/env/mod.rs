@@ -7,6 +7,7 @@
 pub(crate) mod artifact_verify;
 pub(super) mod bootstrap;
 pub(crate) mod builder_vm;
+pub(super) mod caller_identity;
 pub(super) mod cleanup;
 pub(super) mod completions;
 pub(super) mod doctor;

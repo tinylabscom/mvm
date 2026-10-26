@@ -11,6 +11,10 @@
 
 use std::time::Duration;
 
+/// Cold boot allowance for the initial guest listener and authenticated session.
+/// This is not the native stop/control budget and never permits reconnecting.
+pub const COLD_GUEST_AGENT_READY_BUDGET: Duration = Duration::from_secs(30);
+
 mod activation;
 mod api;
 mod connection;

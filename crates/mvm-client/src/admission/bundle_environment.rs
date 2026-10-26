@@ -42,11 +42,15 @@ pub struct EnvironmentRequest<'a> {
     pub entrypoint: &'a ResolvedEntrypoint,
     /// Every posture the launch is held to.
     pub postures: &'a [BundleSecurityPosture],
+    /// Concrete network selected for this launch.
+    pub network_policy: &'a mvm_core::network_policy::NetworkPolicy,
 }
 
 /// One way a launch does not meet its bundle's signed environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvironmentRefusal {
+    /// The launch exceeds its signed exact-destination ceiling.
+    NetworkBeyondPolicy,
     /// Required secret slots the launch binds no secret to.
     UnboundSecretSlots { names: Vec<String> },
     /// The image runs something other than the declared entrypoint.
@@ -65,6 +69,10 @@ pub enum EnvironmentRefusal {
 impl std::fmt::Display for EnvironmentRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NetworkBeyondPolicy => write!(
+                f,
+                "the launch network exceeds the bundle's signed environment policy"
+            ),
             Self::UnboundSecretSlots { names } => write!(
                 f,
                 "required secret slots {} have no binding; bind each with --secret",
@@ -101,6 +109,9 @@ pub fn environment_refusals(
     request: &EnvironmentRequest<'_>,
 ) -> Vec<EnvironmentRefusal> {
     let mut refused = Vec::new();
+    if !mvm_core::plan::environment_network_permitted(environment, request.network_policy) {
+        refused.push(EnvironmentRefusal::NetworkBeyondPolicy);
+    }
     let unsupported = mvm_core::plan::bundle::unsupported_environment_requirements(environment);
     if !unsupported.is_empty() {
         refused.push(EnvironmentRefusal::UnsupportedRequirements {
@@ -200,6 +211,25 @@ mod tests {
     }
 
     #[test]
+    fn launch_network_widening_is_an_environment_refusal() {
+        let mut environment = environment();
+        environment.policy = Some(mvm_core::plan::EnvironmentPolicy {
+            allow_hosts: vec!["api.anthropic.com:443".into()],
+        });
+        let refused = environment_refusals(
+            &environment,
+            &EnvironmentRequest {
+                secrets: &[binding("AGENT_TOKEN")],
+                entrypoint: &known(&["/usr/bin/agent"]),
+                postures: &[posture(true)],
+                network_policy: &mvm_core::network_policy::NetworkPolicy::unrestricted(),
+            },
+        );
+        assert_eq!(refused, vec![EnvironmentRefusal::NetworkBeyondPolicy]);
+        assert!(refusal_message(&refused).contains("signed environment policy"));
+    }
+
+    #[test]
     fn a_launch_meeting_the_environment_is_admitted() {
         let secrets = [binding("AGENT_TOKEN")];
         let entrypoint = known(&["/usr/bin/agent"]);
@@ -210,6 +240,7 @@ mod tests {
                 secrets: &secrets,
                 entrypoint: &entrypoint,
                 postures: &postures,
+                network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
             },
         );
         assert!(refused.is_empty(), "{refused:?}");
@@ -237,6 +268,7 @@ mod tests {
                     secrets: &[binding("AGENT_TOKEN")],
                     entrypoint: &entrypoint,
                     postures: &[posture(true)],
+                    network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
                 },
             );
             assert_eq!(
@@ -282,6 +314,7 @@ mod tests {
                     secrets: &[binding("AGENT_TOKEN")],
                     entrypoint: &known(&["/usr/bin/agent"]),
                     postures: &[posture(true)],
+                    network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
                 },
             );
             assert!(
@@ -304,6 +337,7 @@ mod tests {
                 secrets: &[],
                 entrypoint: &entrypoint,
                 postures: &postures,
+                network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
             },
         );
         assert_eq!(
@@ -325,6 +359,7 @@ mod tests {
                 secrets: &secrets,
                 entrypoint: &entrypoint,
                 postures: &[posture(true)],
+                network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
             },
         );
         assert!(matches!(
@@ -344,6 +379,7 @@ mod tests {
                     secrets: &secrets,
                     entrypoint: &entrypoint,
                     postures: &[],
+                    network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
                 },
             )
             .is_empty()
@@ -375,6 +411,7 @@ mod tests {
                     secrets: &[binding("AGENT_TOKEN")],
                     entrypoint: &entrypoint,
                     postures: &[],
+                    network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
                 },
             );
             assert!(
@@ -397,6 +434,7 @@ mod tests {
                 secrets: &secrets,
                 entrypoint: &entrypoint,
                 postures: &[posture(true), posture(false)],
+                network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
             },
         );
         assert_eq!(

@@ -124,7 +124,7 @@ for (const name of ["claude-code-mcp.md", "opencode-agent.md", "goose-agent.md"]
 }
 
 const agentPacks = [
-  { file: "claude-code-mcp.md", pack: "agent/claude", secrets: ["anthropic"], needs: ["runtime/python"] },
+  { file: "claude-code-mcp.md", pack: "agent/claude@1.0.1", secrets: ["anthropic"], needs: ["runtime/python"] },
   { file: "codex-agent.md", pack: "agent/codex", secrets: ["openai"], needs: ["runtime/node"] },
   { file: "pi-agent.md", pack: "agent/pi", secrets: ["anthropic"], needs: [] },
   { file: "opencode-agent.md", pack: "agent/opencode", secrets: ["anthropic", "openai"], needs: [] },
