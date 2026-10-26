@@ -27,6 +27,8 @@ jobs:
         run: |
           set -eu
           echo "MVM_HOME=$RUNNER_TEMP/mvm-bench-home" >> "$GITHUB_ENV"
+          # Keep the Mac awake for the job; a sleeping host drops the runner connection.
+          nohup caffeinate -i -t 9000 >/dev/null 2>&1 &
           sw_vers
           major="$(sw_vers -productVersion | cut -d. -f1)"
           [ "$major" -ge 26 ] || { echo "::error::HVF default needs macOS 26+, this host is $major"; exit 1; }
@@ -48,8 +50,8 @@ jobs:
           set -u
           mkdir -p "$MVM_HOME"
           B="$PWD/target/release-witness/mvmctl"
-          "$B" bootstrap > "$RUNNER_TEMP/bootstrap.log" 2>&1 || { tail -40 "$RUNNER_TEMP/bootstrap.log"; exit 1; }
-          "$B" machine run docker.io/library/alpine:3.20 -- /bin/true
+          nice -n 10 "$B" bootstrap > "$RUNNER_TEMP/bootstrap.log" 2>&1 || { tail -40 "$RUNNER_TEMP/bootstrap.log"; exit 1; }
+          nice -n 10 "$B" machine run docker.io/library/alpine:3.20 -- /bin/true
       - name: Warm-claim bench (waits for a quiet host before each attempt)
         run: |
           set -u
