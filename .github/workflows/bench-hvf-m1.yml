@@ -57,6 +57,10 @@ jobs:
         run: |
           set -u
           B="$PWD/target/release-witness/mvmctl"
+          # A standby left by an earlier step is reaped when that step ends, so
+          # prepare one here, in the step that measures it.
+          "$B" pool warm --image docker.io/library/alpine:3.20 || echo "pool warm exited $?"
+          "$B" pool status || true
           for attempt in 1 2 3; do
             for _ in $(seq 1 90); do
               load="$(sysctl -n vm.loadavg | awk '{print $2}')"
