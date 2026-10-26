@@ -33,8 +33,33 @@ where
 }
 
 /// Validate and install a host-delivered workload hostname.
+///
+/// A resumed guest already carries the hostname it was paused with, and the
+/// agent holds no `CAP_SYS_ADMIN` to set one, so naming the current hostname is
+/// a no-op rather than a `sethostname` the kernel would refuse.
 pub fn provision(hostname: &str) -> Result<(), String> {
-    provision_with(hostname, set_kernel_hostname)
+    provision_with(hostname, |name| {
+        set_unless_current(
+            name,
+            current_kernel_hostname().as_deref(),
+            set_kernel_hostname,
+        )
+    })
+}
+
+fn set_unless_current<F>(hostname: &str, current: Option<&str>, set: F) -> std::io::Result<()>
+where
+    F: FnOnce(&str) -> std::io::Result<()>,
+{
+    if current == Some(hostname) {
+        return Ok(());
+    }
+    set(hostname)
+}
+
+fn current_kernel_hostname() -> Option<String> {
+    let raw = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
+    Some(raw.trim_end().to_owned())
 }
 
 #[cfg(target_os = "linux")]
@@ -104,6 +129,24 @@ mod tests {
 
         assert!(!found);
         assert!(!called);
+    }
+
+    #[test]
+    fn naming_the_current_hostname_does_not_call_sethostname() {
+        let mut called = false;
+        set_unless_current("worker-1", Some("worker-1"), |_| {
+            called = true;
+            Ok(())
+        })
+        .expect("the current hostname is already in place");
+        assert!(!called);
+
+        set_unless_current("worker-2", Some("worker-1"), |_| {
+            called = true;
+            Ok(())
+        })
+        .expect("a different hostname is set");
+        assert!(called);
     }
 
     #[test]
