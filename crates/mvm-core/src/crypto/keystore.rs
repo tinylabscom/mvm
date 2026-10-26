@@ -23,35 +23,43 @@
 //! drop AND forbids accidental `Debug`/`Display` at compile time (you
 //! must explicitly call `.expose_secret()` to read the bytes).
 
+#[cfg(feature = "host-state")]
 use crate::private_fs::mode_bits;
+#[cfg(feature = "host-state")]
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+#[cfg(feature = "host-state")]
+use anyhow::Context;
+use anyhow::Result;
+#[cfg(feature = "host-state")]
 use secrecy::SecretBox;
 
 /// Required key size for AES-256-GCM: 256 bits / 32 bytes.
+#[cfg(feature = "host-state")]
 pub const KEY_SIZE: usize = 32;
 
 /// Default base directory for [`FileKeyProvider`] when no override
 /// is supplied. Per-tenant key files live at
 /// `<KEYS_DIR>/<tenant_id>.key` as raw 32 bytes.
+#[cfg(feature = "host-state")]
 pub const DEFAULT_KEYS_DIR: &str = "/var/lib/mvm/keys";
 
 /// Service name passed to the OS-native keystore by
 /// [`KeyringProvider`]. macOS Keychain, Linux Secret Service, and
 /// Windows Credential Manager all key entries by `(service, user)`;
 /// the user half is the tenant id.
-#[cfg(feature = "os-keyring")]
+#[cfg(all(feature = "host-state", feature = "os-keyring"))]
 pub const KEYRING_SERVICE: &str = "mvm";
 
 /// macOS Keychain item-target used for disambiguation when multiple
 /// generic-password items share `(service, user)`. Passed via
 /// `keyring::Entry::new_with_target` on macOS to keep mvm entries
 /// confined to one logical group.
-#[cfg(feature = "os-keyring")]
+#[cfg(all(feature = "host-state", feature = "os-keyring"))]
 pub const KEYRING_TARGET: &str = "mvm-tenant-keys";
 
 /// Resolves a tenant's data-encryption key.
+#[cfg(feature = "host-state")]
 pub trait KeyProvider: Send + Sync {
     /// Return the data encryption key for `tenant_id`. Returned bytes
     /// are wrapped in `SecretBox` so material is wiped on drop and
@@ -62,8 +70,10 @@ pub trait KeyProvider: Send + Sync {
 /// Reads keys from `MVM_TENANT_KEY_<TENANT_ID>` (hex-encoded, 64
 /// chars for 32 bytes). Hyphens in tenant IDs become underscores in
 /// the env var name and the ID is uppercased.
+#[cfg(feature = "host-state")]
 pub struct EnvKeyProvider;
 
+#[cfg(feature = "host-state")]
 impl EnvKeyProvider {
     /// The variable this provider reads `tenant_id`'s key from.
     #[must_use]
@@ -75,6 +85,7 @@ impl EnvKeyProvider {
     }
 }
 
+#[cfg(feature = "host-state")]
 impl KeyProvider for EnvKeyProvider {
     fn get_data_key(&self, tenant_id: &str) -> Result<SecretBox<Vec<u8>>> {
         validate_shell_id(tenant_id)
@@ -102,10 +113,12 @@ impl KeyProvider for EnvKeyProvider {
 /// Construct via [`FileKeyProvider::default`] (uses
 /// [`DEFAULT_KEYS_DIR`]) or [`FileKeyProvider::with_dir`] for tests
 /// / non-standard installs.
+#[cfg(feature = "host-state")]
 pub struct FileKeyProvider {
     keys_dir: PathBuf,
 }
 
+#[cfg(feature = "host-state")]
 impl FileKeyProvider {
     /// Override the keys directory. Tests use this with a tempdir.
     pub fn with_dir(keys_dir: impl Into<PathBuf>) -> Self {
@@ -122,12 +135,14 @@ impl FileKeyProvider {
     }
 }
 
+#[cfg(feature = "host-state")]
 impl Default for FileKeyProvider {
     fn default() -> Self {
         Self::with_dir(DEFAULT_KEYS_DIR)
     }
 }
 
+#[cfg(feature = "host-state")]
 impl KeyProvider for FileKeyProvider {
     fn get_data_key(&self, tenant_id: &str) -> Result<SecretBox<Vec<u8>>> {
         validate_shell_id(tenant_id)
@@ -161,10 +176,10 @@ impl KeyProvider for FileKeyProvider {
 ///
 /// Construct via [`KeyringProvider::default`]. Falls back to
 /// `Entry::new` on non-macOS where `new_with_target` is unnecessary.
-#[cfg(feature = "os-keyring")]
+#[cfg(all(feature = "host-state", feature = "os-keyring"))]
 pub struct KeyringProvider;
 
-#[cfg(feature = "os-keyring")]
+#[cfg(all(feature = "host-state", feature = "os-keyring"))]
 impl KeyringProvider {
     /// Open the keyring entry for a given tenant. Used by both
     /// `get_data_key` here and by the `mvmctl secret` CLI.
@@ -199,14 +214,14 @@ impl KeyringProvider {
     }
 }
 
-#[cfg(feature = "os-keyring")]
+#[cfg(all(feature = "host-state", feature = "os-keyring"))]
 impl Default for KeyringProvider {
     fn default() -> Self {
         Self
     }
 }
 
-#[cfg(feature = "os-keyring")]
+#[cfg(all(feature = "host-state", feature = "os-keyring"))]
 impl KeyProvider for KeyringProvider {
     fn get_data_key(&self, tenant_id: &str) -> Result<SecretBox<Vec<u8>>> {
         let entry = Self::entry(tenant_id)?;
@@ -226,16 +241,19 @@ impl KeyProvider for KeyringProvider {
 }
 
 /// Ordered fallback provider used by [`default_provider`].
+#[cfg(feature = "host-state")]
 struct FallbackKeyProvider {
     providers: Vec<Box<dyn KeyProvider>>,
 }
 
+#[cfg(feature = "host-state")]
 impl FallbackKeyProvider {
     fn new(providers: Vec<Box<dyn KeyProvider>>) -> Self {
         Self { providers }
     }
 }
 
+#[cfg(feature = "host-state")]
 impl KeyProvider for FallbackKeyProvider {
     fn get_data_key(&self, tenant_id: &str) -> Result<SecretBox<Vec<u8>>> {
         let mut errors = Vec::new();
@@ -266,6 +284,7 @@ impl KeyProvider for FallbackKeyProvider {
 /// The function never fails — it always returns a fallback provider,
 /// even if no key is actually configured for any tenant. Whether a
 /// specific tenant key exists is the question [`has_key`] answers.
+#[cfg(feature = "host-state")]
 pub fn default_provider() -> Box<dyn KeyProvider> {
     let mut providers: Vec<Box<dyn KeyProvider>> = Vec::new();
     #[cfg(feature = "os-keyring")]
@@ -284,6 +303,7 @@ pub fn default_provider() -> Box<dyn KeyProvider> {
 /// Returns true if [`default_provider`] can successfully resolve a
 /// key for `tenant_id`. Used by encryption-at-rest call sites to
 /// decide whether to switch on LUKS for a data volume.
+#[cfg(feature = "host-state")]
 pub fn has_key(tenant_id: &str) -> bool {
     default_provider().get_data_key(tenant_id).is_ok()
 }
@@ -294,6 +314,7 @@ pub fn has_key(tenant_id: &str) -> bool {
 /// from "this source could not be read" from "this source holds something
 /// that is not a key", and it must do so without echoing the provider's error
 /// text: a decode error can quote characters of the key it failed to decode.
+#[cfg(feature = "host-state")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyLookupFailure {
     /// The source holds no key for the tenant.
@@ -306,6 +327,7 @@ pub enum KeyLookupFailure {
     Invalid,
 }
 
+#[cfg(feature = "host-state")]
 impl KeyLookupFailure {
     /// Classify an error returned by a [`KeyProvider`] from the typed causes
     /// in its chain. Anything without a recognised I/O, environment, or
@@ -361,6 +383,7 @@ pub fn validate_shell_id(s: &str) -> Result<()> {
 }
 
 /// Hex-decode an even-length ASCII string into bytes.
+#[cfg(feature = "host-state")]
 fn hex_decode(hex: &str) -> Result<Vec<u8>> {
     if !hex.len().is_multiple_of(2) {
         anyhow::bail!("Hex string has odd length: {}", hex.len());
@@ -378,8 +401,10 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "host-state")]
     const VALID_KEY_HEX: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn hex_decode_valid() {
         assert_eq!(
@@ -389,21 +414,25 @@ mod tests {
         assert_eq!(hex_decode("00ff").unwrap(), vec![0x00, 0xff]);
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn hex_decode_empty_is_empty() {
         assert_eq!(hex_decode("").unwrap(), Vec::<u8>::new());
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn hex_decode_odd_length_rejected() {
         assert!(hex_decode("abc").is_err());
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn hex_decode_invalid_chars_rejected() {
         assert!(hex_decode("zzzz").is_err());
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn env_provider_missing_var() {
         let mut env = crate::util::test_env::TestEnv::new();
@@ -411,6 +440,7 @@ mod tests {
         assert!(EnvKeyProvider.get_data_key("acme").is_err());
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn env_provider_returns_secret_key_of_right_length() {
         use secrecy::ExposeSecret;
@@ -422,6 +452,7 @@ mod tests {
         assert_eq!(key.expose_secret().len(), KEY_SIZE);
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn env_provider_uppercases_and_swaps_hyphens_to_secret() {
         use secrecy::ExposeSecret;
@@ -431,6 +462,7 @@ mod tests {
         assert_eq!(key.expose_secret().len(), KEY_SIZE);
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn env_provider_rejects_wrong_length_key() {
         let mut env = crate::util::test_env::TestEnv::new();
@@ -439,6 +471,7 @@ mod tests {
         assert!(err.to_string().contains("must be 32 bytes"), "got: {err}");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn env_provider_rejects_invalid_tenant_id() {
         // Path traversal / shell-injection candidates must be rejected
@@ -484,6 +517,7 @@ mod tests {
     // FileKeyProvider
     // ──────────────────────────────────────────────────────────────
 
+    #[cfg(feature = "host-state")]
     fn write_key_file(dir: &Path, tenant: &str, bytes: &[u8], mode: u32) -> PathBuf {
         #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
@@ -499,6 +533,7 @@ mod tests {
         path
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn file_key_provider_reads_0600_key() {
         use secrecy::ExposeSecret;
@@ -511,6 +546,7 @@ mod tests {
         assert_eq!(key.expose_secret().as_slice(), &key_bytes);
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     #[cfg(unix)]
     fn file_key_provider_reads_0400_key() {
@@ -524,6 +560,7 @@ mod tests {
         assert_eq!(key.expose_secret().as_slice(), &key_bytes);
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     #[cfg(unix)]
     fn file_key_provider_rejects_world_readable() {
@@ -541,6 +578,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn file_key_provider_rejects_wrong_length() {
         let tmp = tempfile::tempdir().unwrap();
@@ -554,6 +592,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn file_key_provider_missing_file_errors_clearly() {
         let tmp = tempfile::tempdir().unwrap();
@@ -564,6 +603,7 @@ mod tests {
         assert!(s.contains("stat key file") || s.contains("nobody"));
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn file_key_provider_rejects_unsafe_tenant_id() {
         let tmp = tempfile::tempdir().unwrap();
@@ -574,6 +614,7 @@ mod tests {
         assert!(provider.get_data_key("foo;rm").is_err());
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn file_key_provider_keys_dir_present_returns_false_for_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -593,8 +634,8 @@ mod tests {
     // backend-reachable probe's structure.
     // ──────────────────────────────────────────────────────────────
 
+    #[cfg(all(feature = "host-state", feature = "os-keyring"))]
     #[test]
-    #[cfg(feature = "os-keyring")]
     fn keyring_provider_rejects_unsafe_tenant_id_before_backend_call() {
         // Even if no backend is reachable, validate_shell_id should
         // fail first — the test never touches the keystore.
@@ -603,8 +644,8 @@ mod tests {
         assert!(provider.get_data_key("foo;rm").is_err());
     }
 
+    #[cfg(all(feature = "host-state", feature = "os-keyring"))]
     #[test]
-    #[cfg(feature = "os-keyring")]
     fn keyring_provider_entry_constructor_validates_tenant() {
         // The entry() constructor must reject shell-unsafe tenant
         // names *before* hitting the keyring backend, so CLI surfaces
@@ -618,6 +659,7 @@ mod tests {
     // default_provider + has_key
     // ──────────────────────────────────────────────────────────────
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn default_provider_returns_some_provider_always() {
         // Either a keyring or file or env provider — never panics.
@@ -626,6 +668,7 @@ mod tests {
         let _provider = default_provider();
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn default_provider_falls_back_to_env_key_for_tenant() {
         use secrecy::ExposeSecret;
@@ -638,6 +681,7 @@ mod tests {
         assert_eq!(key.expose_secret().len(), KEY_SIZE);
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn has_key_returns_false_for_unconfigured_tenant() {
         // Pick a tenant id no test ever writes a key for. Cleanup
@@ -655,6 +699,7 @@ mod tests {
     // KeyLookupFailure
     // ──────────────────────────────────────────────────────────────
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn an_unset_env_key_is_not_configured() {
         let mut env = crate::util::test_env::TestEnv::new();
@@ -668,6 +713,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn a_malformed_env_key_is_invalid() {
         let mut env = crate::util::test_env::TestEnv::new();
@@ -688,6 +734,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn a_missing_key_file_is_not_configured() {
         let tmp = tempfile::tempdir().unwrap();
@@ -700,6 +747,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn a_key_file_with_an_unsafe_mode_or_length_is_invalid() {
         let tmp = tempfile::tempdir().unwrap();
@@ -721,6 +769,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn an_unreadable_source_is_unavailable() {
         let denied = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
@@ -741,8 +790,8 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "host-state", feature = "os-keyring"))]
     #[test]
-    #[cfg(feature = "os-keyring")]
     fn an_absent_keyring_entry_is_not_configured() {
         let absent = anyhow::Error::new(keyring::Error::NoEntry).context("reading keyring entry");
         assert_eq!(

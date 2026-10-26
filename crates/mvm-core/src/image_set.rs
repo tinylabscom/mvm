@@ -28,6 +28,9 @@ mod error;
 mod identity;
 mod local;
 mod lock;
+// The compiled-in image-train lock pins what this binary may boot; the pin
+// is read by host downloaders and the canonical-kernel path, never in-guest.
+#[cfg(feature = "host-state")]
 mod train_lock;
 mod trust_tier;
 mod validate;
@@ -46,7 +49,9 @@ pub use local::{
     verify_local_image_set,
 };
 pub use lock::{IMAGE_LOCK_SCHEMA_VERSION, ImageLock, SigningIdentity};
+#[cfg(feature = "host-state")]
 pub(crate) use train_lock::image_train_lock_sha256;
+#[cfg(feature = "host-state")]
 pub use train_lock::{
     BootImagePin, IMAGE_TRAIN_LOCK_SCHEMA_VERSION, ImageTrainLock, ImageTrainLockError,
     LegacyImageTrain, PinnedArtifact, Stage0KernelPin, image_train_lock,

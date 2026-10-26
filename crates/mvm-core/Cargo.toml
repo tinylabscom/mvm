@@ -13,9 +13,12 @@ authors.workspace = true
 mvm-contract = { workspace = true, default-features = false, features = ["protocol", "volume"] }
 anyhow.workspace = true
 base64.workspace = true
-bs58.workspace = true
+# Host-only: the `did_key` module's did:key codec. Optional so guest binaries
+# never resolve it; enabled by the `host-state` feature.
+bs58 = { workspace = true, optional = true }
 serde_jcs = "0.1"
-unicode-normalization = "0.1"
+# Host-only: `workload_address` normalization. Optional; `host-state` pulls it.
+unicode-normalization = { version = "0.1", optional = true }
 chrono.workspace = true
 # The no_std + alloc foundation crate. `plan::validity` re-exports its
 # `FreshnessClaims`; `plan::{types,verb,verb_trust}` are module aliases
@@ -32,7 +35,10 @@ hex.workspace = true
 sha2.workspace = true
 # Folded in with mvm-plan: `plan::bundle` reads/writes
 # tar bundle archives. Sync — adds no async/runtime dep to mvm-core.
-tar.workspace = true
+# Optional: only the host-side bundle seal/verify/install surface
+# (`plan::bundle::stream` and the archive-reading functions in
+# `plan::bundle`) parses or writes tar; enabled by `host-state`.
+tar = { workspace = true, optional = true }
 thiserror.workspace = true
 # Optional: the only default-build async surface left is
 # `protocol`'s hostd IPC transport, gated behind `hostd-transport`.
@@ -51,7 +57,9 @@ tempfile.workspace = true
 # (aho-corasick). All sync. `rand` is promoted from dev-only because
 # key_rotation / secret_store generate keys at runtime.
 aes-gcm.workspace = true
-aho-corasick.workspace = true
+# Host-only: secret-token scanning in `crypto::command_gate` /
+# `crypto::threat_classifier`. Optional; `host-state` pulls it.
+aho-corasick = { workspace = true, optional = true }
 hmac.workspace = true
 keyring = { workspace = true, optional = true }
 secrecy.workspace = true
@@ -107,6 +115,22 @@ default = []
 # OS-native key storage is host-only. Guest binaries retain the encrypted
 # file/env providers without carrying the keyring crate or its logging edge.
 os-keyring = ["dep:keyring"]
+# Host-only state and identity surface: `did_key`, `workload_address`,
+# `crypto::{command_gate, threat_classifier, secret_store}` (and all of
+# `crypto::keystore` except the pure `validate_shell_id` validator),
+# `pii`, `receipt`/`receipt_archive` (their signing API is did:key-shaped),
+# `stream_client` (its console redactor holds a `PiiRedactor`), the
+# `registry_pack*` family, `policy::toml_loader`, `image_set::train_lock`,
+# and the tar archive I/O half of `plan::bundle` (`stream` plus the
+# archive-reading entry points). Off by default so the guest binaries
+# (mvm-agentd / mvm-builder-guest / mvm-setpriv) never resolve `bs58`,
+# `unicode-normalization`, `aho-corasick` or `tar`; host crates opt in.
+host-state = [
+    "dep:bs58",
+    "dep:unicode-normalization",
+    "dep:aho-corasick",
+    "dep:tar",
+]
 # Read-only PROV-O/Turtle export of chain-signed audit logs. Kept off by
 # default so lean builder-VM binaries (e.g. mvm-host-vm-init) do not pay
 # for the serializer or its extra dependencies.
@@ -181,6 +205,29 @@ required-features = ["manifest-verify"]
 [[example]]
 name = "verify-pack-revocation-list"
 required-features = ["manifest-verify"]
+
+# Application-descriptor fixture generator; it drives the registry-pack
+# application surface, which lives behind `host-state`.
+[[example]]
+name = "application-inspection-fixture"
+required-features = ["host-state"]
+
+# Integration tests that exercise host-state-gated modules (bundle archive
+# I/O, registry packs, receipts) only build where the feature is on.
+[[test]]
+name = "bundle_streaming_memory"
+path = "tests/bundle_streaming_memory.rs"
+required-features = ["host-state"]
+
+[[test]]
+name = "embedded_image_set_cache"
+path = "tests/embedded_image_set_cache.rs"
+required-features = ["host-state"]
+
+[[test]]
+name = "mvmev_canonicalization_vectors"
+path = "tests/mvmev_canonicalization_vectors.rs"
+required-features = ["host-state"]
 
 [dev-dependencies]
 # Test-only: the mandatory-deny range test parses CIDRs to cross-check the

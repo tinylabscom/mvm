@@ -21,7 +21,7 @@ required-features = ["bdd"]
 bdd = []
 
 [dependencies]
-mvm-core = { workspace = true, features = ["test-support"] }
+mvm-core = { workspace = true, features = ["host-state", "test-support"] }
 serde.workspace = true
 toml.workspace = true
 

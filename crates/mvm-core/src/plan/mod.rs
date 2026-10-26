@@ -45,10 +45,13 @@ pub use bundle::{
     BundleSecurityPosture, BundleVerifyError, EnvironmentCapability, EnvironmentDescriptor,
     FsBundleResolver, FsTrustStore, InstalledBundle, KeyId, ManifestSigner, PlanArtifact,
     PlanBundleError, TrustStore, VerifiedBundle, VerifiedEmbeddedImageSet, VerityInfo,
-    bundle_sha256, check_embedded_image_set_for_backend, read_and_verify_bundle, sha256_hex,
-    signature_from_base64, signature_to_base64, verify_plan_bundle, write_bundle,
+    bundle_sha256, check_embedded_image_set_for_backend, sha256_hex, signature_from_base64,
+    signature_to_base64,
 };
 pub use bundle::{EnvironmentPolicy, environment_network_permitted};
+// Bundle archive seal/verify/admission is host-state (tar archive I/O).
+#[cfg(feature = "host-state")]
+pub use bundle::{read_and_verify_bundle, verify_plan_bundle, write_bundle};
 pub use content_id::{PlanIdMismatch, compute_plan_id, verify_plan_id};
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 pub use mvm_contract::plan::output_grant::{OutputGrant, OutputGrantError};

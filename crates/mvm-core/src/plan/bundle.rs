@@ -64,12 +64,18 @@
 //! buy little and add a transitive dep. A future `.mvmpkg.gz`
 //! wrapper can layer on if size becomes a real concern.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(feature = "host-state")]
+use std::collections::BTreeSet;
+#[cfg(feature = "host-state")]
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
+#[cfg(feature = "host-state")]
+use ed25519_dalek::{Signature, Verifier};
+#[cfg(feature = "host-state")]
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -110,11 +116,18 @@ pub use lookup::{
     TrustStore,
 };
 pub use signer::ManifestSigner;
+// The streaming archive I/O half of the bundle surface (seal/verify/install)
+// is host-state; the captured-canonical-inputs type stays because
+// `canonical_linux::PreparedCanonicalLinux` holds one and is named by
+// `vm_backend::VmStartConfig` in every build.
+#[cfg(feature = "host-state")]
 pub(crate) use stream::HashingWriter;
+#[cfg(feature = "host-state")]
 pub use stream::{
-    BundlePayload, CapturedCanonicalLinuxInputs, MAX_IMAGE_SET_MANIFEST_BYTES, VerifiedBundleFile,
-    capture_canonical_linux_inputs, verify_bundle_file, write_bundle_to,
+    BundlePayload, VerifiedBundleFile, capture_canonical_linux_inputs, verify_bundle_file,
+    write_bundle_to,
 };
+pub use stream::{CapturedCanonicalLinuxInputs, MAX_IMAGE_SET_MANIFEST_BYTES};
 pub use verify_error::{BundleVerifyError, ensure_safe_path};
 
 /// Signed manifest label written by the local build front door.
@@ -276,6 +289,7 @@ impl InstalledBundle {
 /// reject an archive before network publication or registry installation;
 /// successful admission still requires the normal signature and artifact
 /// verification path.
+#[cfg(feature = "host-state")]
 pub fn inspect_bundle_manifest_for_refusal(
     archive: impl Read,
 ) -> Result<BundleManifest, BundleVerifyError> {
@@ -286,6 +300,7 @@ pub fn inspect_bundle_manifest_for_refusal(
 }
 
 /// File-backed form of [`inspect_bundle_manifest_for_refusal`].
+#[cfg(feature = "host-state")]
 pub fn inspect_bundle_manifest_file_for_refusal(
     path: &Path,
 ) -> Result<BundleManifest, BundleVerifyError> {
@@ -379,6 +394,7 @@ impl BundleRegistry {
     /// The bytes are spooled to a temporary file and installed through
     /// [`install_file`](Self::install_file), so an archive in memory and one
     /// on disk go through the same streaming verification.
+    #[cfg(feature = "host-state")]
     pub fn install(
         &self,
         archive_bytes: &[u8],
@@ -410,6 +426,7 @@ impl BundleRegistry {
     /// the caller's audit log should reflect the *attempt*, not
     /// the success — the next install of the same sha will refuse
     /// (or overwrite with `force`) cleanly either way.
+    #[cfg(feature = "host-state")]
     pub fn remove(&self, bundle_sha256: &str) -> anyhow::Result<bool> {
         match std::fs::symlink_metadata(&self.root) {
             Ok(_) => {}
@@ -496,6 +513,7 @@ impl BundleRegistry {
     /// hashed when the bundle was installed; this is the cheap read a launch
     /// makes to learn what the bundle declares, and it refuses a manifest
     /// whose posture was edited on disk after install.
+    #[cfg(feature = "host-state")]
     pub fn verified_manifest(
         &self,
         bundle_sha256: &str,
@@ -546,6 +564,7 @@ impl BundleRegistry {
 /// Read `manifest.json` and `manifest.sig` out of an archive, stopping as soon
 /// as both are found. A bundle writes them first, so a multi-GiB archive is
 /// read only as far as its first two entries.
+#[cfg(feature = "host-state")]
 fn read_manifest_entries(archive: impl Read) -> Result<(Vec<u8>, Vec<u8>), BundleVerifyError> {
     let (manifest, signature) = read_manifest_entries_inner(archive, true)?;
     let missing = |name: &str| BundleVerifyError::ManifestParse(format!("{name} missing"));
@@ -557,10 +576,12 @@ fn read_manifest_entries(archive: impl Read) -> Result<(Vec<u8>, Vec<u8>), Bundl
 
 /// Read only the manifest for denial-only classification. A missing signature
 /// is left to the mandatory verification path, which reports that failure.
+#[cfg(feature = "host-state")]
 fn read_manifest_entry(archive: impl Read) -> Result<Vec<u8>, BundleVerifyError> {
     read_manifest_entries_inner(archive, false).map(|(manifest, _)| manifest)
 }
 
+#[cfg(feature = "host-state")]
 fn read_manifest_entries_inner(
     archive: impl Read,
     require_signature: bool,
@@ -598,12 +619,14 @@ fn read_manifest_entries_inner(
 
 /// The verified bundle an embedded image-set cache is filled from: its
 /// manifest, the image sets it embeds, and where their bytes can be read.
+#[cfg(feature = "host-state")]
 struct ImageSetSource<'a> {
     manifest: &'a BundleManifest,
     embedded: &'a [VerifiedEmbeddedImageSet],
     artifacts: &'a dyn stream::ArtifactSource,
 }
 
+#[cfg(feature = "host-state")]
 impl ImageSetSource<'_> {
     fn manifest_declaration(
         &self,
@@ -615,6 +638,7 @@ impl ImageSetSource<'_> {
     }
 }
 
+#[cfg(feature = "host-state")]
 fn install_embedded_image_set_cache(
     source: &ImageSetSource<'_>,
     cache_root: &Path,
@@ -667,6 +691,7 @@ fn install_embedded_image_set_cache(
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn write_embedded_image_set_cache(
     source: &ImageSetSource<'_>,
     embedded: &VerifiedEmbeddedImageSet,
@@ -694,6 +719,7 @@ fn write_embedded_image_set_cache(
 
 /// Re-hash an existing cache entry against the digests the verified bundle
 /// declares. Streams each file; nothing is held whole.
+#[cfg(feature = "host-state")]
 fn verify_cached_embedded_image_set(
     source: &ImageSetSource<'_>,
     embedded: &VerifiedEmbeddedImageSet,
@@ -754,6 +780,7 @@ fn verify_cached_embedded_image_set(
 ///   same bytes.
 /// - **Pin-key_id mismatch**: the archive declares a different
 ///   publisher than the plan pinned. Forged-publisher case.
+#[cfg(feature = "host-state")]
 pub fn verify_plan_bundle(
     pin: &PlanArtifact,
     resolver: &dyn BundleResolver,
@@ -774,6 +801,7 @@ pub fn verify_plan_bundle(
 
 /// The canonical lane additionally requires the SAME in-process owner and
 /// actual launch selection. There is no path/hash/JSON fallback.
+#[cfg(feature = "host-state")]
 pub fn verify_canonical_plan_bundle(
     pin: &PlanArtifact,
     resolver: &dyn BundleResolver,
@@ -793,6 +821,7 @@ pub fn verify_canonical_plan_bundle(
 
 /// The canonical owner must have been prepared from this very bundle, and the
 /// bundle must declare the canonical proof the owner was prepared from.
+#[cfg(feature = "host-state")]
 fn owner_binds_canonical_bundle(
     manifest: &BundleManifest,
     owner_pin: &PlanArtifact,
@@ -810,6 +839,7 @@ fn owner_binds_canonical_bundle(
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn verify_plan_bundle_checked(
     pin: &PlanArtifact,
     resolver: &dyn BundleResolver,
@@ -901,6 +931,7 @@ pub enum PlanBundleError {
 /// Used by [`verify_plan_bundle`] to compare against the plan's
 /// pin. Errors carry the reason as a string so the calling code
 /// can surface it without owning the underlying io::Error.
+#[cfg(feature = "host-state")]
 fn extract_manifest_signature(archive: &[u8]) -> Result<[u8; 64], String> {
     let mut tar = tar::Archive::new(std::io::Cursor::new(archive));
     for entry in tar.entries().map_err(|e| e.to_string())? {
@@ -938,6 +969,7 @@ fn extract_manifest_signature(archive: &[u8]) -> Result<[u8; 64], String> {
 /// responsible for writing them out. In-memory representation
 /// matches the on-disk archive byte-for-byte. [`write_bundle_to`] is the same
 /// writer streaming into any `Write`, from files as well as bytes.
+#[cfg(feature = "host-state")]
 pub fn write_bundle(
     manifest: &BundleManifest,
     signer: &dyn ManifestSigner,
@@ -1110,6 +1142,7 @@ pub fn check_embedded_image_set_for_backend(
 /// for the size and hash pass, which suits bytes that are already in
 /// memory. An archive on disk goes through [`verify_bundle_file`] or
 /// [`BundleRegistry::install_file`], which stream it instead.
+#[cfg(feature = "host-state")]
 pub fn read_and_verify_bundle(
     archive_bytes: &[u8],
     trust_store: &dyn TrustStore,
@@ -1181,6 +1214,7 @@ pub fn read_and_verify_bundle(
 /// it: the schema sniff, the key lookup, the signature, the full parse, and
 /// the declaration checks. Everything [`read_and_verify_bundle`] establishes
 /// about the manifest, without looking at a single artifact byte.
+#[cfg(feature = "host-state")]
 fn check_schema_cap(manifest_bytes: &[u8], supported: u32) -> Result<(), BundleVerifyError> {
     #[derive(Deserialize)]
     struct SchemaProbe {
@@ -1198,6 +1232,7 @@ fn check_schema_cap(manifest_bytes: &[u8], supported: u32) -> Result<(), BundleV
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn verify_signed_manifest(
     manifest_bytes: &[u8],
     sig_bytes: &[u8],
@@ -1273,6 +1308,7 @@ fn verify_signed_manifest(
 /// Bind each embedded image-set declaration to the already verified bundle
 /// artifacts. The image-set module owns structure, completeness and backend
 /// compatibility; this adapter owns only the cross-manifest name/hash binding.
+#[cfg(feature = "host-state")]
 fn verify_embedded_image_sets(
     bundle: &BundleManifest,
     artifacts: &dyn stream::ArtifactSource,
@@ -1310,6 +1346,7 @@ fn verify_embedded_image_sets(
         .collect()
 }
 
+#[cfg(feature = "host-state")]
 fn verify_boot_assets(
     bundle: &BundleManifest,
     artifacts: &dyn stream::ArtifactSource,
@@ -1355,12 +1392,14 @@ fn verify_boot_assets(
 }
 
 #[derive(Clone, Copy)]
+#[cfg(feature = "host-state")]
 enum ImageSetSelection {
     Full,
     LegacyRuntime(GuestArch),
     CliKernel(GuestArch),
 }
 
+#[cfg(feature = "host-state")]
 fn verify_embedded_image_set(
     bundle: &BundleManifest,
     artifacts: &dyn stream::ArtifactSource,
@@ -1462,7 +1501,7 @@ pub fn bundle_sha256(archive_bytes: &[u8]) -> String {
     sha256_hex(archive_bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-state"))]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};

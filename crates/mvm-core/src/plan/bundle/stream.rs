@@ -8,21 +8,26 @@
 //! Only the embedded image-set manifests, which verification has to parse,
 //! are read whole, and they are capped at [`MAX_IMAGE_SET_MANIFEST_BYTES`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(feature = "host-state")]
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+#[cfg(feature = "host-state")]
 use ed25519_dalek::{Signature, Verifier};
 use sha2::{Digest, Sha256};
 
+use super::{BundleArtifact, BundleManifest, BundleVerifyError};
+#[cfg(feature = "host-state")]
 use super::{
-    BundleArtifact, BundleInstallError, BundleManifest, BundleMember, BundleRegistry,
-    BundleSizeBudget, BundleVerifyError, ImageSetSource, InstalledBundle, KeyId, MANIFEST_FILENAME,
-    ManifestSigner, SIGNATURE_FILENAME, TrustStore, VerifiedEmbeddedImageSet,
-    canonical_manifest_bytes, declarations, ensure_safe_path, install_embedded_image_set_cache,
-    key_id_from_pubkey, read_manifest_entries, verify_embedded_image_sets, verify_signed_manifest,
+    BundleInstallError, BundleMember, BundleRegistry, BundleSizeBudget, ImageSetSource,
+    InstalledBundle, KeyId, MANIFEST_FILENAME, ManifestSigner, SIGNATURE_FILENAME, TrustStore,
+    VerifiedEmbeddedImageSet, canonical_manifest_bytes, declarations, ensure_safe_path,
+    install_embedded_image_set_cache, key_id_from_pubkey, read_manifest_entries,
+    verify_embedded_image_sets, verify_signed_manifest,
 };
 
 /// Largest embedded image-set manifest verification will read. The manifest
@@ -30,6 +35,7 @@ use super::{
 pub const MAX_IMAGE_SET_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Keep cooperating bundle removal excluded through a caller's reference commit.
+#[cfg(feature = "host-state")]
 pub(crate) struct BundleInstallLease {
     pub(crate) bundle: InstalledBundle,
     _lease: File,
@@ -38,6 +44,7 @@ pub(crate) struct BundleInstallLease {
 /// Where verified artifact bytes can be read back from, by archive-relative
 /// path: memory for a bundle verified from bytes, a staging directory for one
 /// verified from a file.
+#[cfg(feature = "host-state")]
 pub(super) trait ArtifactSource {
     fn reader(&self, bundle_path: &str) -> io::Result<Box<dyn Read + '_>>;
 
@@ -70,8 +77,10 @@ pub(super) trait ArtifactSource {
 }
 
 /// Artifacts held in memory, keyed by archive-relative path.
+#[cfg(feature = "host-state")]
 pub(super) struct InMemoryArtifacts<'a>(pub &'a BTreeMap<String, Vec<u8>>);
 
+#[cfg(feature = "host-state")]
 impl ArtifactSource for InMemoryArtifacts<'_> {
     fn reader(&self, bundle_path: &str) -> io::Result<Box<dyn Read + '_>> {
         self.0
@@ -82,8 +91,10 @@ impl ArtifactSource for InMemoryArtifacts<'_> {
 }
 
 /// Artifacts extracted under a directory at their archive-relative paths.
+#[cfg(feature = "host-state")]
 pub(super) struct StagedArtifacts<'a>(pub &'a Path);
 
+#[cfg(feature = "host-state")]
 impl ArtifactSource for StagedArtifacts<'_> {
     fn reader(&self, bundle_path: &str) -> io::Result<Box<dyn Read + '_>> {
         Ok(Box::new(File::open(self.0.join(bundle_path))?))
@@ -148,6 +159,7 @@ pub(super) fn check_artifact_digest(
 }
 
 /// Where [`stream_artifacts`] sends each declared artifact.
+#[cfg(feature = "host-state")]
 enum Destination<'a> {
     /// Hash and discard.
     Discard,
@@ -164,6 +176,7 @@ enum Destination<'a> {
 /// Entries the manifest does not declare are skipped, as the in-memory
 /// verifier skips them; a declared artifact that appears twice or never is
 /// refused.
+#[cfg(feature = "host-state")]
 fn stream_artifacts<'p>(
     archive: impl Read,
     manifest: &BundleManifest,
@@ -256,6 +269,7 @@ fn stream_artifacts<'p>(
 }
 
 /// The archive paths of every embedded image-set manifest a bundle declares.
+#[cfg(feature = "host-state")]
 fn image_set_manifest_paths(manifest: &BundleManifest) -> BTreeSet<String> {
     manifest
         .members
@@ -280,6 +294,7 @@ fn image_set_manifest_paths(manifest: &BundleManifest) -> BTreeSet<String> {
 /// A bundle archive on disk that passed every check
 /// [`super::read_and_verify_bundle`] makes, verified without loading it.
 #[derive(Debug)]
+#[cfg(feature = "host-state")]
 pub struct VerifiedBundleFile {
     pub manifest: BundleManifest,
     pub key_id: KeyId,
@@ -290,6 +305,7 @@ pub struct VerifiedBundleFile {
     manifest_signature: [u8; 64],
 }
 
+#[cfg(feature = "host-state")]
 impl VerifiedBundleFile {
     /// Internal bounded selection over an independently positioned owned file.
     /// The application facade supplies only its identity-safe retained snapshot.
@@ -468,6 +484,7 @@ impl CapturedCanonicalLinuxInputs {
 ///
 /// The caller must still apply the canonical Linux lock/signature/revocation
 /// verifier and bind the selected kernel to an admitted native operation.
+#[cfg(feature = "host-state")]
 pub fn capture_canonical_linux_inputs(
     archive: &Path,
     pin: &super::PlanArtifact,
@@ -628,12 +645,14 @@ pub fn capture_canonical_linux_inputs(
     })
 }
 
+#[cfg(feature = "host-state")]
 fn open_archive(path: &Path) -> Result<File, BundleVerifyError> {
     File::open(path).map_err(|e| {
         BundleVerifyError::ManifestParse(format!("opening bundle archive {}: {e}", path.display()))
     })
 }
 
+#[cfg(feature = "host-state")]
 fn archive_sha256(path: &Path) -> Result<String, BundleVerifyError> {
     crate::crypto::image_verify::sha256_reader(open_archive(path)?).map_err(|e| {
         BundleVerifyError::ManifestParse(format!("hashing bundle archive {}: {e}", path.display()))
@@ -641,6 +660,7 @@ fn archive_sha256(path: &Path) -> Result<String, BundleVerifyError> {
 }
 
 /// Verify the manifest at the head of the archive at `path`.
+#[cfg(feature = "host-state")]
 fn verify_head(
     path: &Path,
     trust_store: &dyn TrustStore,
@@ -654,6 +674,7 @@ fn verify_head(
 /// verifies bytes — signature, declarations, every artifact's size and
 /// digest, embedded image sets — reading each artifact once through a fixed
 /// buffer.
+#[cfg(feature = "host-state")]
 pub fn verify_bundle_file(
     path: &Path,
     trust_store: &dyn TrustStore,
@@ -682,6 +703,7 @@ pub fn verify_bundle_file(
     })
 }
 
+#[cfg(feature = "host-state")]
 impl BundleRegistry {
     /// Install the `.mvmpkg` at `archive`, streaming.
     ///
@@ -918,6 +940,7 @@ impl BundleRegistry {
     }
 }
 
+#[cfg(feature = "host-state")]
 fn sync_staging(staging: &Path, manifest: &BundleManifest) -> Result<(), String> {
     let sync = || -> io::Result<()> {
         for name in [MANIFEST_FILENAME, SIGNATURE_FILENAME] {
@@ -942,6 +965,7 @@ fn sync_staging(staging: &Path, manifest: &BundleManifest) -> Result<(), String>
     sync().map_err(|error| format!("syncing bundle staging: {error}"))
 }
 
+#[cfg(feature = "host-state")]
 fn publish_install_with(
     staging: &Path,
     destination: &Path,
@@ -961,6 +985,7 @@ fn publish_install_with(
     }
 }
 
+#[cfg(feature = "host-state")]
 fn exchange_directories(source: &Path, destination: &Path) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -980,6 +1005,7 @@ fn exchange_directories(source: &Path, destination: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(feature = "host-state")]
 enum StageError {
     Verify(BundleVerifyError),
     Io(String),
@@ -987,6 +1013,7 @@ enum StageError {
 
 /// Extract and verify every artifact into `staging`, write the manifest and
 /// signature beside them, and verify the embedded image sets.
+#[cfg(feature = "host-state")]
 fn stage(
     archive: &Path,
     manifest: &BundleManifest,
@@ -1020,6 +1047,7 @@ fn stage(
 
 /// The bytes of one artifact being sealed into a bundle.
 #[derive(Debug, Clone)]
+#[cfg(feature = "host-state")]
 pub enum BundlePayload {
     /// Bytes already in memory.
     Bytes(Vec<u8>),
@@ -1027,6 +1055,7 @@ pub enum BundlePayload {
     File(PathBuf),
 }
 
+#[cfg(feature = "host-state")]
 impl BundlePayload {
     fn len(&self) -> io::Result<u64> {
         match self {
@@ -1044,12 +1073,14 @@ impl BundlePayload {
 }
 
 /// A reader that hashes and counts what is read through it.
+#[cfg(feature = "host-state")]
 struct HashingReader<R> {
     inner: R,
     hasher: Sha256,
     read: u64,
 }
 
+#[cfg(feature = "host-state")]
 impl<R: Read> Read for HashingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
@@ -1068,6 +1099,7 @@ impl<R: Read> Read for HashingReader<R> {
 /// file that changed between hashing and sealing fails the write rather than
 /// producing a bundle that installs nowhere. A caller writing to a file
 /// should write to a temporary path and rename it on success.
+#[cfg(feature = "host-state")]
 pub fn write_bundle_to(
     manifest: &BundleManifest,
     signer: &dyn ManifestSigner,
@@ -1179,6 +1211,7 @@ pub fn write_bundle_to(
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn append_entry<W: Write>(
     tar: &mut tar::Builder<W>,
     path: &str,
@@ -1193,7 +1226,7 @@ fn append_entry<W: Write>(
         .with_context(|| format!("write tar entry {path:?}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-state"))]
 mod tests {
     use super::*;
     use crate::plan::bundle::{
