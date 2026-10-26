@@ -51,6 +51,7 @@ jobs:
           mkdir -p "$MVM_HOME"
           B="$PWD/target/release-witness/mvmctl"
           nice -n 10 "$B" bootstrap > "$RUNNER_TEMP/bootstrap.log" 2>&1 || { tail -40 "$RUNNER_TEMP/bootstrap.log"; exit 1; }
+          "$B" image pull docker.io/library/alpine:3.20
           nice -n 10 "$B" machine run docker.io/library/alpine:3.20 -- /bin/true
       - name: Warm-claim bench (waits for a quiet host before each attempt)
         run: |
