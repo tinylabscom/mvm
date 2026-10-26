@@ -111,7 +111,7 @@ fn has_chain(dir: &std::path::Path, tenant: &str) -> Result<bool> {
 /// The tenant's chain lines, verified. Refuses a chain that does not verify:
 /// a listing is presented as fact, so it may only be drawn from a chain that
 /// is.
-fn verified_lines(tenant: &str) -> Result<Option<Vec<String>>> {
+pub(super) fn verified_lines(tenant: &str) -> Result<Option<Vec<String>>> {
     let dir = default_audit_dir()?;
     if !has_chain(&dir, tenant)? {
         return Ok(None);

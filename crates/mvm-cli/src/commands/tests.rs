@@ -2919,6 +2919,45 @@ fn test_audit_tail_chain_flag_parses() {
 }
 
 #[test]
+fn test_audit_usage_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "usage"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action: AuditAction::Usage { tenant, vm, json },
+        }) => {
+            assert_eq!(tenant, "local");
+            assert!(vm.is_none());
+            assert!(!json);
+        }
+        _ => panic!("Expected Audit::Usage"),
+    }
+}
+
+#[test]
+fn test_audit_usage_flags_parse() {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "trust", "audit", "usage", "--tenant", "acme", "--vm", "build-1", "--json",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action: AuditAction::Usage { tenant, vm, json },
+        }) => {
+            assert_eq!(tenant, "acme");
+            assert_eq!(vm.as_deref(), Some("build-1"));
+            assert!(json);
+        }
+        _ => panic!("Expected Audit::Usage with flags"),
+    }
+}
+
+#[test]
 fn test_audit_verify_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "verify"]).unwrap();
     let Commands::Trust(tg) = cli.command else {

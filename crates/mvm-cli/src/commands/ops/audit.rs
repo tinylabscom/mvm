@@ -3,6 +3,7 @@
 mod inspect;
 mod prune;
 mod sessions;
+mod usage;
 #[cfg(test)]
 pub(in crate::commands) use sessions::{SessionsArgs, ShowArgs, VerifyArgs};
 
@@ -233,6 +234,27 @@ pub(in crate::commands) enum AuditAction {
         #[command(subcommand)]
         action: DecisionsAction,
     },
+    /// Aggregate AI egress usage from the tenant's chain-signed log.
+    ///
+    /// Reads the verified chain and rolls the `host.ai.usage` entries up
+    /// to one row per destination (provider, host, path, model): request
+    /// count, summed provider-reported token counts, and the number of
+    /// requests that carried no counts. A token column shows `-` (null in
+    /// JSON) when none of a destination's entries reported that count —
+    /// unknown is never shown as zero.
+    Usage {
+        /// Tenant whose chain to read. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Only aggregate entries attributed to this VM (the `vm_name`
+        /// label). Entries recorded without VM attribution are excluded
+        /// when this is set.
+        #[arg(long)]
+        vm: Option<String>,
+        /// Emit the aggregate as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+    },
     /// Opt-in forensic network transcript capture: arm / disarm / list /
     /// export. Off by default; separate from the metadata-only flow audit.
     Transcript {
@@ -434,6 +456,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             ReceiptsAction::Verify { archive, json } => audit_receipts_verify(&archive, json),
         },
         AuditAction::Transcript { action } => super::transcript::run(action),
+        AuditAction::Usage { tenant, vm, json } => usage::audit_usage(&tenant, vm.as_deref(), json),
         AuditAction::Decisions { action } => match action {
             DecisionsAction::List { tenant, json } => decisions_list(&tenant, json),
             DecisionsAction::Show {
