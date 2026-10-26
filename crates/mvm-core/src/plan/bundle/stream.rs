@@ -26,9 +26,67 @@ use super::{
     BundleInstallError, BundleMember, BundleRegistry, BundleSizeBudget, ImageSetSource,
     InstalledBundle, KeyId, MANIFEST_FILENAME, ManifestSigner, SIGNATURE_FILENAME, TrustStore,
     VerifiedEmbeddedImageSet, canonical_manifest_bytes, declarations, ensure_safe_path,
-    install_embedded_image_set_cache, key_id_from_pubkey, read_manifest_entries,
-    verify_embedded_image_sets, verify_signed_manifest,
+    install_embedded_image_set_cache, key_id_from_pubkey, verify_embedded_image_sets,
+    verify_signed_manifest,
 };
+
+/// Read `manifest.json` and `manifest.sig` out of an archive, stopping as soon
+/// as both are found. A bundle writes them first, so a multi-GiB archive is
+/// read only as far as its first two entries.
+#[cfg(feature = "host-state")]
+pub(super) fn read_manifest_entries(
+    archive: impl Read,
+) -> Result<(Vec<u8>, Vec<u8>), BundleVerifyError> {
+    let (manifest, signature) = read_manifest_entries_inner(archive, true)?;
+    let missing = |name: &str| BundleVerifyError::ManifestParse(format!("{name} missing"));
+    Ok((
+        manifest,
+        signature.ok_or_else(|| missing(SIGNATURE_FILENAME))?,
+    ))
+}
+
+/// Read only the manifest for denial-only classification. A missing signature
+/// is left to the mandatory verification path, which reports that failure.
+#[cfg(feature = "host-state")]
+pub(super) fn read_manifest_entry(archive: impl Read) -> Result<Vec<u8>, BundleVerifyError> {
+    read_manifest_entries_inner(archive, false).map(|(manifest, _)| manifest)
+}
+
+#[cfg(feature = "host-state")]
+fn read_manifest_entries_inner(
+    archive: impl Read,
+    require_signature: bool,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), BundleVerifyError> {
+    let tar_error = |e: std::io::Error| BundleVerifyError::ManifestParse(format!("tar read: {e}"));
+    let mut manifest = None;
+    let mut signature = None;
+    let mut budget = declarations::BundleSizeBudget::default();
+    for entry in tar::Archive::new(archive).entries().map_err(tar_error)? {
+        let mut entry = entry.map_err(tar_error)?;
+        let path = entry
+            .path()
+            .map_err(tar_error)?
+            .to_string_lossy()
+            .into_owned();
+        let slot = match path.as_str() {
+            MANIFEST_FILENAME => &mut manifest,
+            SIGNATURE_FILENAME => &mut signature,
+            _ => continue,
+        };
+        budget.admit(&path, entry.size())?;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(tar_error)?;
+        *slot = Some(bytes);
+        if manifest.is_some() && (signature.is_some() || !require_signature) {
+            break;
+        }
+    }
+    let missing = |name: &str| BundleVerifyError::ManifestParse(format!("{name} missing"));
+    Ok((
+        manifest.ok_or_else(|| missing(MANIFEST_FILENAME))?,
+        signature,
+    ))
+}
 
 /// Largest embedded image-set manifest verification will read. The manifest
 /// is JSON naming a handful of artifacts; anything near this size is not one.
