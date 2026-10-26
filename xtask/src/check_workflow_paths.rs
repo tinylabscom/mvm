@@ -1106,7 +1106,6 @@ mod tests {
         let job = job_block(workflow, "test-workspace-aarch64");
         for expected in [
             "name: Test workspace (aarch64)",
-            "needs: [scope]",
             "runs-on: ubuntu-24.04-arm",
             "run: cargo nextest run --workspace --exclude mvm-fs --all-targets\n",
             "MVM_GUEST_PRIVILEGED_TESTS=1",
