@@ -4,6 +4,9 @@ All notable changes to mvm are documented in this file.
 
 ## [0.25.0] — 2026-10-25
 
+### Added
+- **cli**: Launch signed Claude applications with an embedded exact-destination environment policy, defaulting to the baked entrypoint with bounded one-shot stdin (#4726)
+
 ### Changed
 - **ci**: Pin Linux CI and release jobs to ubuntu-24.04 (#4638, #4662)
 - **ci**: The merge queue runs only the fast gate; the heavy lanes run on push to main (#4720)
