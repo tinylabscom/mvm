@@ -22,6 +22,7 @@ fn caller_identity_show_and_status_do_not_create_state() {
         let home = temp.path().join("absent");
         let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
             .env("MVM_HOME", &home)
+            .env("HOME", temp.path())
             .args(["env", "caller-identity", action])
             .output()
             .expect("read missing caller identity");

@@ -104,6 +104,7 @@ ed25519-dalek = { workspace = true }
 # Non-fatal diagnostics on the pause path (fc.paused marker best-effort write).
 # Already in the mvmctl closure via mvm-runtime, so this adds no crates.
 tracing = { workspace = true }
+uuid = { workspace = true }
 # `tracing-bridge` only: payload bytes are hash-chained and must reach an
 # event unaltered, and `tracing` has no byte-typed field to carry them in.
 base64 = { workspace = true, optional = true }

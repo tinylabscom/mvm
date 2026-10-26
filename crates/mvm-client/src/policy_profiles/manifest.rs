@@ -12,6 +12,10 @@
 //! `mvmctl policy resolve` writes and `--plan FILE` reads back. Reading it
 //! back re-validates it, and a document that carries an execution plan or a
 //! signature is refused: admission synthesizes and signs the plan itself.
+//!
+//! Unlike an authored resource-only or deny-only profile, a resolved manifest
+//! specifies the complete effective network, including when it is empty.
+//! Application launch therefore never fills its network from signed defaults.
 
 use std::path::Path;
 
@@ -101,6 +105,27 @@ impl ResolvedManifest {
             resolved_from: resolved.layers.iter().map(|l| l.label.clone()).collect(),
             policy: resolved.policy.clone(),
         }
+    }
+
+    /// Revalidate this complete policy and retain its explicit network selection.
+    ///
+    /// A resolved manifest is equivalent to its effective flags, not an authored
+    /// partial layer. Even an empty network must not inherit application defaults.
+    /// Explicit launch flags still compose through the ordinary policy fold.
+    ///
+    /// # Errors
+    ///
+    /// A policy that revalidation refuses.
+    pub fn into_resolved(
+        self,
+        label: &str,
+        file: Option<&Path>,
+    ) -> Result<super::merge::ResolvedPolicy, PolicyError> {
+        let mut resolved = super::resolve::revalidate(label, file, self.policy)?;
+        resolved
+            .provenance
+            .insert("network.selection".into(), label.into());
+        Ok(resolved)
     }
 }
 

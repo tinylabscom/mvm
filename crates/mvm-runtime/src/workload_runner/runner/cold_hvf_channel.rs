@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn frozen_physical_selectors_extend_without_overriding_claims() {
         let hash = "a".repeat(64);
-        let original = "console=hvc0 mvm.hostname=image-selector-unit mvm.require_grant=1";
+        let original = "console=hvc0 mvm.hostname=image-selector-unit audit=1";
         let mut cmdline = original.to_owned();
         project_frozen_image_selectors(&mut cmdline, &hash).unwrap();
         assert!(cmdline.starts_with(original));

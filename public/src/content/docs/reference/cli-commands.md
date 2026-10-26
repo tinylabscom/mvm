@@ -815,6 +815,12 @@ inherit additional signed destinations and cannot exceed the signed
 `policy.allow_hosts` ceiling; the host independently enforces actual network
 policy. Older descriptors without `policy` keep their existing network behavior.
 
+A partial authored `--policy` can inherit signed network defaults when it
+selects no destinations. A resolved `--plan` instead preserves its complete
+effective network, including an empty network: application defaults never add
+destinations back after resolution removed them. Explicit launch flags still
+pass through the ordinary policy fold and the signed ceiling.
+
 Required secret slots select exactly one existing provider-bound host binding
 whose conventional guest variable matches the slot. Selections from `--policy`,
 `--plan` or `--secret` satisfy slots before automatic selection; missing or

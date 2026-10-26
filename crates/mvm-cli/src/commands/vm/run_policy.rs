@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use mvm_client::policy_profiles::{
     LaunchFlags, Platform, PolicyRef, PolicySelection, PolicyStore, ProjectPolicy,
-    ResolvedManifest, fold, resolve,
+    ResolvedManifest, ResolvedPolicy, fold, resolve,
 };
 
 use super::exec::RunArgs;
@@ -113,9 +113,7 @@ pub(in crate::commands) fn select_pack_image(args: &mut RunArgs) -> Result<()> {
 /// The authored policy a launch runs under, if it names one.
 struct Selected {
     label: String,
-    policy: mvm_client::policy_profiles::PolicyBody,
-    notes: Vec<String>,
-    backend_conditioned: bool,
+    resolved: ResolvedPolicy,
 }
 
 fn select(args: &RunArgs) -> Result<Option<Selected>> {
@@ -123,9 +121,7 @@ fn select(args: &RunArgs) -> Result<Option<Selected>> {
         let manifest = ResolvedManifest::read(path)?;
         return Ok(Some(Selected {
             label: format!("resolved manifest {}", path.display()),
-            policy: manifest.policy,
-            notes: Vec::new(),
-            backend_conditioned: false,
+            resolved: manifest.into_resolved("resolved manifest", Some(path))?,
         }));
     }
     let project = super::run_routes::project_manifest(args)?
@@ -141,12 +137,7 @@ fn select(args: &RunArgs) -> Result<Option<Selected>> {
         "policy".to_string()
     };
     let resolved = resolve(&PolicyStore::from_config(), &selection, run_platform(args))?;
-    Ok(Some(Selected {
-        label,
-        policy: resolved.policy,
-        notes: resolved.notes,
-        backend_conditioned: resolved.backend_conditioned,
-    }))
+    Ok(Some(Selected { label, resolved }))
 }
 
 /// This host, and the backend the run asks for or the host would pick.
@@ -249,26 +240,25 @@ pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
     }
     let mut selected = selected.unwrap_or_else(|| Selected {
         label: "signed application environment".into(),
-        policy: Default::default(),
-        notes: Vec::new(),
-        backend_conditioned: false,
+        resolved: ResolvedPolicy::empty(),
     });
-    for note in &selected.notes {
+    for note in &selected.resolved.notes {
         ui::warn(&format!("policy: {note}"));
     }
     let flags = launch_flags(args)?;
     let folded = if let Some(environment) = environment {
         let (policy, folded) = mvm_client::policy_profiles::environment::fold_environment_policy(
             &environment,
-            Some(&selected.policy),
+            Some(&selected.resolved),
             &flags,
             args.network_preset,
         )
         .with_context(|| format!("applying {}", selected.label))?;
-        selected.policy = policy;
+        selected.resolved.policy = policy;
         folded
     } else {
-        fold(&selected.policy, &flags).with_context(|| format!("applying {}", selected.label))?
+        fold(&selected.resolved.policy, &flags)
+            .with_context(|| format!("applying {}", selected.label))?
     };
     args.allow_host = folded.allow_host;
     args.policy_routes = folded.routes;
@@ -278,10 +268,11 @@ pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
     args.mounts = folded.mounts;
     args.allow_env = folded.allow_env;
     args.policy_backend = selected
+        .resolved
         .backend_conditioned
         .then_some(run_platform(args).backend)
         .flatten();
-    args.applied_policy = Some(selected.policy);
+    args.applied_policy = Some(selected.resolved.policy);
     tracing::info!(policy = %selected.label, "running under an authored policy");
     Ok(())
 }
@@ -362,6 +353,43 @@ mod tests {
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
         (env, home)
+    }
+
+    #[test]
+    fn policy_and_plan_selection_keep_distinct_empty_network_provenance() {
+        let (_env, home) = isolated();
+        for (profile, selected_network) in [
+            (
+                "[overrides.network]\nallow = [\"a.test:443\"]\ndeny = [\"a.test:443\"]\n",
+                true,
+            ),
+            ("[overrides.network]\ndeny = [\"a.test:443\"]\n", false),
+            ("[overrides.resources]\nmax_cpus = 2\n", false),
+        ] {
+            let path = home.path().join("operator.toml");
+            std::fs::write(&path, profile).unwrap();
+            let args = RunArgs {
+                policy: vec![path.display().to_string()],
+                ..Default::default()
+            };
+            let selected = select(&args).unwrap().unwrap();
+            assert_eq!(selected.resolved.network_selected(), selected_network);
+            assert!(selected.resolved.policy.network.allow.is_empty());
+            let plan = home.path().join("resolved.json");
+            std::fs::write(
+                &plan,
+                serde_json::to_vec(&ResolvedManifest::from_resolved(&selected.resolved)).unwrap(),
+            )
+            .unwrap();
+            let args = RunArgs {
+                plan: Some(plan),
+                ..Default::default()
+            };
+            let selected = select(&args).unwrap().unwrap();
+            assert!(selected.resolved.network_selected());
+            assert!(selected.resolved.policy.network.allow.is_empty());
+            assert_ne!(selected.resolved.policy.network.block, Some(true));
+        }
     }
 
     #[test]

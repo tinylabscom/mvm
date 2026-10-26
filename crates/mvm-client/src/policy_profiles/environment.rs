@@ -2,7 +2,7 @@
 
 use mvm_core::plan::EnvironmentDescriptor;
 
-use super::merge::{Layer, merge_layers};
+use super::merge::{Layer, ResolvedPolicy, merge_layers};
 use super::{FoldedLaunch, LaunchFlags, LayerOrigin, PolicyBody, PolicyError, fold};
 
 /// Fold signed network defaults without widening an explicit operator selection.
@@ -12,13 +12,15 @@ use super::{FoldedLaunch, LaunchFlags, LayerOrigin, PolicyBody, PolicyError, fol
 /// Invalid policy, launch flags, or actual destinations outside the signed ceiling.
 pub fn fold_environment_policy(
     environment: &EnvironmentDescriptor,
-    operator: Option<&PolicyBody>,
+    operator: Option<&ResolvedPolicy>,
     flags: &LaunchFlags,
     preset: Option<mvm_core::network_policy::NetworkPreset>,
 ) -> Result<(PolicyBody, FoldedLaunch), PolicyError> {
     let error = |message: String| PolicyError::new("signed application environment", message);
     let Some(ceiling) = &environment.policy else {
-        let policy = operator.cloned().unwrap_or_default();
+        let policy = operator
+            .map(|resolved| resolved.policy.clone())
+            .unwrap_or_default();
         let folded = fold(&policy, flags)?;
         return Ok((policy, folded));
     };
@@ -27,10 +29,10 @@ pub fn fold_environment_policy(
         network_preset: flags.network_preset || preset.is_some(),
         ..flags.clone()
     };
-    let mut policy = operator.cloned().unwrap_or_default();
-    let network_selected = !policy.network.allow.is_empty()
-        || !policy.network.routes.is_empty()
-        || policy.network.block == Some(true)
+    let mut policy = operator
+        .map(|resolved| resolved.policy.clone())
+        .unwrap_or_default();
+    let network_selected = operator.is_some_and(ResolvedPolicy::network_selected)
         || !flags.allow_host.is_empty()
         || !flags.allow_endpoint.is_empty()
         || flags.net
@@ -88,6 +90,25 @@ pub fn fold_environment_policy(
 mod tests {
     use super::*;
 
+    fn fold_environment_policy(
+        environment: &EnvironmentDescriptor,
+        operator: Option<&PolicyBody>,
+        flags: &LaunchFlags,
+        preset: Option<mvm_core::network_policy::NetworkPreset>,
+    ) -> Result<(PolicyBody, FoldedLaunch), PolicyError> {
+        let resolved = operator
+            .map(|body| {
+                merge_layers(&[Layer {
+                    label: "test operator".into(),
+                    file: None,
+                    origin: LayerOrigin::User,
+                    body: body.clone(),
+                }])
+            })
+            .transpose()?;
+        super::fold_environment_policy(environment, resolved.as_ref(), flags, preset)
+    }
+
     fn environment(policy: bool) -> EnvironmentDescriptor {
         let mut value = serde_json::json!({
             "descriptor_version": 1,
@@ -114,6 +135,129 @@ mod tests {
         };
         let (_, narrowed) = fold_environment_policy(&env, None, &flags, None).unwrap();
         assert_eq!(narrowed.allow_host, ["api.anthropic.com:443"]);
+    }
+
+    #[test]
+    fn resolved_policy_selection_survives_denies_removing_all_hosts_or_routes() {
+        use super::super::{Platform, PolicySelection, PolicyStore, resolve};
+
+        let dir = tempfile::tempdir().unwrap();
+        for authored in [
+            "[overrides.network]\nallow = [\"api.anthropic.com:443\"]\ndeny = [\"api.anthropic.com:443\"]\n",
+            "[overrides.network]\ndeny = [\"api.anthropic.com:443\"]\n\
+             [[overrides.network.routes]]\nid = \"api\"\nhost = \"api.anthropic.com\"\nport = 443\n",
+        ] {
+            let path = dir.path().join("selected.toml");
+            std::fs::write(&path, authored).unwrap();
+            let selection = PolicySelection::for_launch(&[path.display().to_string()], None)
+                .unwrap()
+                .unwrap();
+            let resolved = resolve(
+                &PolicyStore::at(dir.path()),
+                &selection,
+                Platform::default(),
+            )
+            .unwrap();
+            assert!(resolved.policy.network.allow.is_empty());
+            assert!(resolved.policy.network.routes.is_empty());
+            assert!(resolved.network_selected());
+            let (_, folded) = super::fold_environment_policy(
+                &environment(true),
+                Some(&resolved),
+                &LaunchFlags::default(),
+                None,
+            )
+            .unwrap();
+            assert!(
+                folded.allow_host.is_empty(),
+                "signed defaults must not reappear"
+            );
+            assert!(folded.routes.is_empty());
+            let flags = LaunchFlags {
+                allow_host: vec!["example.com:443".into()],
+                ..Default::default()
+            };
+            let (_, explicit) =
+                super::fold_environment_policy(&environment(true), Some(&resolved), &flags, None)
+                    .unwrap();
+            assert_eq!(explicit.allow_host, ["example.com:443"]);
+            let flags = LaunchFlags {
+                allow_host: vec!["api.anthropic.com:443".into()],
+                ..Default::default()
+            };
+            assert!(
+                super::fold_environment_policy(&environment(true), Some(&resolved), &flags, None)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_denies_normalize_both_hosts_and_patterns_without_losing_ports() {
+        let mut env = environment(true);
+        env.policy.as_mut().unwrap().allow_hosts =
+            vec!["[2001:db8::1]:443".into(), "[2001:db8::1]:8443".into()];
+        for deny in [
+            "[2001:db8::1]:443",
+            "[2001:0db8:0000:0000:0000:0000:0000:0001]:443",
+        ] {
+            let mut policy = PolicyBody::default();
+            policy.network.deny = vec![deny.into()];
+            let (_, folded) =
+                fold_environment_policy(&env, Some(&policy), &LaunchFlags::default(), None)
+                    .unwrap();
+            assert_eq!(folded.allow_host, ["2001:db8::1:8443"]);
+            for host in [
+                "[2001:db8::1]:443",
+                "[2001:0db8:0000:0000:0000:0000:0000:0001]:443",
+            ] {
+                let flags = LaunchFlags {
+                    allow_host: vec![host.into()],
+                    ..Default::default()
+                };
+                let error = fold_environment_policy(&env, Some(&policy), &flags, None)
+                    .expect_err("equivalent IPv6 spelling must remain denied");
+                assert!(error.to_string().contains("denied"));
+            }
+            let flags = LaunchFlags {
+                allow_host: vec!["2001:db8::1:8443".into()],
+                ..Default::default()
+            };
+            let (_, explicit) = fold_environment_policy(&env, Some(&policy), &flags, None).unwrap();
+            assert_eq!(explicit.allow_host, ["2001:db8::1:8443"]);
+        }
+    }
+
+    #[test]
+    fn old_schema_resolved_manifests_never_inherit_signed_network_defaults() {
+        use super::super::ResolvedManifest;
+
+        for json in [
+            r#"{"policy":{"network":{"allow":[],"deny":["api.anthropic.com:443"]}}}"#,
+            r#"{"policy":{"resources":{"max_cpus":2}}}"#,
+            r#"{"policy":{}}"#,
+        ] {
+            let manifest = ResolvedManifest::from_json(json.as_bytes(), "old plan", None).unwrap();
+            let resolved = manifest.into_resolved("old plan", None).unwrap();
+            assert!(resolved.network_selected());
+            assert_ne!(resolved.policy.network.block, Some(true));
+            let (_, folded) = super::fold_environment_policy(
+                &environment(true),
+                Some(&resolved),
+                &LaunchFlags::default(),
+                None,
+            )
+            .unwrap();
+            assert!(folded.allow_host.is_empty());
+            let flags = LaunchFlags {
+                allow_host: vec!["example.com:443".into()],
+                ..Default::default()
+            };
+            let (_, folded) =
+                super::fold_environment_policy(&environment(true), Some(&resolved), &flags, None)
+                    .unwrap();
+            assert_eq!(folded.allow_host, ["example.com:443"]);
+        }
     }
 
     #[test]

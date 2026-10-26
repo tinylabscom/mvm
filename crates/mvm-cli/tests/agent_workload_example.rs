@@ -79,8 +79,10 @@ fn agent_workload_is_a_guest_image_with_a_per_call_entrypoint() {
     let flake = read(&example_file("flake.nix"));
 
     assert!(flake.contains("mkGuest"));
-    assert!(flake.contains("entrypoint.command = [ \"${entrypoint}\" ];"));
+    assert!(flake.contains("entrypoint.command = [ \"/etc/mvm/entrypoint\" ];"));
     assert!(flake.contains("extraFiles.\"/etc/mvm/entrypoint\""));
+    assert!(flake.contains("tools = [ \"WebFetch\" ];"));
+    assert!(flake.contains("--allowedTools WebFetch --max-turns 3 --max-budget-usd 0.50"));
     assert!(flake.contains("exec ${agent}/bin/mvm-agent"));
     assert!(!flake.contains("bootCommand"));
     assert!(flake.contains("ANTHROPIC_API_KEY"));

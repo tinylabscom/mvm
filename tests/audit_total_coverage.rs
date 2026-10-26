@@ -90,9 +90,20 @@ const STORAGE_SUB: &[(&str, AuditPosture)] = &[
 
 const SANDBOX_SUB: &[(&str, AuditPosture)] = &[("gc", AuditPosture::Emits("SandboxGc"))];
 
+const CALLER_IDENTITY_SUB: &[(&str, AuditPosture)] = &[
+    // Explicit credential bootstrap runs before ordinary startup creates signing
+    // or audit state; it reserves and records only the native caller identity.
+    ("enroll", AuditPosture::InteractiveOrControl),
+    ("show", AuditPosture::ReadOnly),
+];
+
 // Plan 178 (D5) — environment/install lifecycle grouped under `env <sub>`.
 const ENV_SUB: &[(&str, AuditPosture)] = &[
     ("bootstrap", AuditPosture::InteractiveOrControl),
+    (
+        "caller-identity",
+        AuditPosture::DelegatesToSub(CALLER_IDENTITY_SUB),
+    ),
     ("cleanup", AuditPosture::Emits("SlotPrune")),
     // Written once the uninstall has removed the install and a state directory
     // remains to hold the entry. A successful `--purge`, a run with no state
