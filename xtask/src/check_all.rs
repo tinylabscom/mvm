@@ -172,6 +172,10 @@ pub const GATES: &[Gate] = &[
         crate::check_per_vm_host_binaries_sync::run,
     ),
     (
+        "check-compile-report-sync",
+        crate::check_compile_report_sync::run,
+    ),
+    (
         "check-core-runtime-free",
         crate::check_core_runtime_free::run,
     ),

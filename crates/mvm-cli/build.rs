@@ -203,6 +203,7 @@ fn write_unembedded_table(workspace_root: &Path, out_dir: &Path, warning: Option
     println!("cargo:rerun-if-changed=build_support.rs");
     println!("cargo:rerun-if-changed=build_embed_cache.rs");
     println!("cargo:rerun-if-changed=src/host_binaries/payload_build.rs");
+    println!("cargo:rerun-if-changed=src/host_binaries/payload_build_plan.rs");
     println!("cargo:rerun-if-changed=../mvm-build/src/workspace_graph.rs");
     println!("cargo:rerun-if-changed=../mvm-builder-guest/src/host_payload_manifest.rs");
     println!("cargo:rerun-if-changed=../mvm-build/src/embed_toolchain.rs");
