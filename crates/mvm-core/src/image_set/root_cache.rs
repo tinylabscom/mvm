@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-use super::{ImageSetVerification, VerifiedImageSetRoot, verify_image_set_root};
+use super::{ConsumerProtocols, ImageSetVerification, VerifiedImageSetRoot, verify_image_set_root};
 use crate::image_set::{HostProtocolSupport, ImageLock, ImageSetRequirement};
 use crate::packs::PackRevocationChecker;
 use crate::util::atomic_io::{FileLock, atomic_write_durable, atomic_write_new, is_already_exists};
@@ -181,6 +181,42 @@ pub fn read_cached_image_set_root_proof(
     host: &HostProtocolSupport,
     revocations: Option<&dyn PackRevocationChecker>,
 ) -> Result<RetainedImageSetRootProof> {
+    read_cached_root_proof(cache, lock, ConsumerProtocols::AllImages(host), revocations)
+}
+
+/// Read a workload-only root with the same checks as
+/// [`read_cached_workload_image_set_root_proof`]. Member selection and byte
+/// verification remain the caller's obligation.
+pub fn read_cached_workload_image_set_root(
+    cache: &Path,
+    lock: &ImageLock,
+    host: &HostProtocolSupport,
+    revocations: Option<&dyn PackRevocationChecker>,
+) -> Result<VerifiedImageSetRoot> {
+    Ok(read_cached_workload_image_set_root_proof(cache, lock, host, revocations)?.root)
+}
+
+/// Reverify the complete signed root for a workload-only consumer.
+///
+/// Preserves all trust, lock, completeness and supplied revocation checks, but
+/// does not require builder cache or payload support. Callers must select and
+/// verify consumed members for their backend and architecture; this proof does
+/// not authorize builder execution.
+pub fn read_cached_workload_image_set_root_proof(
+    cache: &Path,
+    lock: &ImageLock,
+    host: &HostProtocolSupport,
+    revocations: Option<&dyn PackRevocationChecker>,
+) -> Result<RetainedImageSetRootProof> {
+    read_cached_root_proof(cache, lock, ConsumerProtocols::Workload(host), revocations)
+}
+
+fn read_cached_root_proof(
+    cache: &Path,
+    lock: &ImageLock,
+    protocols: ConsumerProtocols<'_>,
+    revocations: Option<&dyn PackRevocationChecker>,
+) -> Result<RetainedImageSetRootProof> {
     let path = proof_path(cache, lock);
     let proof = read_proof(&path).with_context(|| {
         format!(
@@ -195,8 +231,11 @@ pub fn read_cached_image_set_root_proof(
         lock,
         cache,
     )
-    .require(&requirement)
-    .with_host_protocols(host);
+    .require(&requirement);
+    request = match protocols {
+        ConsumerProtocols::AllImages(host) => request.with_host_protocols(host),
+        ConsumerProtocols::Workload(host) => request.with_workload_protocols(host),
+    };
     if let Some(revocations) = revocations {
         request = request.with_revocations(revocations);
     }
@@ -356,6 +395,72 @@ mod tests {
         assert_eq!(retained.root(), &root);
         assert_eq!(retained.manifest_bytes(), manifest);
         assert_eq!(retained.signature_bundle(), bundle);
+        let workload_host = HostProtocolSupport {
+            builder_boot_abi: BuilderBootAbiRange::LEGACY_ONLY,
+            ..host
+        };
+        assert!(matches!(
+            verify_image_set_root(&request.with_host_protocols(&workload_host)),
+            Err(crate::image_set::ImageSetError::BuilderBootAbiUnsupported { .. })
+        ));
+        let workload_request = request.with_workload_protocols(&workload_host);
+        let workload_root = verify_image_set_root(&workload_request).unwrap();
+        let support =
+            crate::image_set::BackendImageSupport::for_backend(crate::vm_backend::BackendKind::Hvf)
+                .unwrap();
+        crate::image_set::select_workload_image(
+            workload_root.manifest(),
+            crate::image_set::WorkloadImageProfile::DefaultTenant,
+            crate::arch::GuestArch::Aarch64,
+            &support,
+        )
+        .unwrap();
+        assert!(
+            crate::image_set::select_workload_image(
+                workload_root.manifest(),
+                crate::image_set::WorkloadImageProfile::DefaultTenant,
+                crate::arch::GuestArch::X86_64,
+                &support,
+            )
+            .is_err()
+        );
+        let wrong_base_host = HostProtocolSupport {
+            base_image_contract: crate::image_set::BaseImageContractRange::new(
+                crate::image_set::BaseImageContract::new(99),
+                crate::image_set::BaseImageContract::new(99),
+            )
+            .unwrap(),
+            ..workload_host
+        };
+        assert!(verify_image_set_root(&request.with_workload_protocols(&wrong_base_host)).is_err());
+        let workload_cached =
+            read_cached_workload_image_set_root_proof(cache.path(), &lock, &workload_host, None)
+                .unwrap();
+        assert_eq!(workload_cached.root(), &root);
+        assert_eq!(
+            read_cached_workload_image_set_root(cache.path(), &lock, &workload_host, None).unwrap(),
+            root
+        );
+        assert!(
+            read_cached_workload_image_set_root_proof(cache.path(), &lock, &wrong_base_host, None)
+                .is_err()
+        );
+        assert!(
+            read_cached_image_set_root_proof(cache.path(), &lock, &workload_host, None,).is_err()
+        );
+        let unrelated_cache_host = HostProtocolSupport {
+            builder_cache_contract: 999,
+            ..workload_host
+        };
+        assert!(
+            read_cached_workload_image_set_root_proof(
+                cache.path(),
+                &lock,
+                &unrelated_cache_host,
+                None,
+            )
+            .is_ok()
+        );
         struct Revoked;
         impl PackRevocationChecker for Revoked {
             fn status(
@@ -371,6 +476,16 @@ mod tests {
         assert!(
             read_cached_image_set_root_proof(cache.path(), &lock, &host, Some(&Revoked)).is_err()
         );
+        assert!(
+            read_cached_workload_image_set_root_proof(
+                cache.path(),
+                &lock,
+                &workload_host,
+                Some(&Revoked),
+            )
+            .is_err()
+        );
+        assert!(verify_image_set_root(&workload_request.with_revocations(&Revoked)).is_err());
         cache_image_set_root(cache.path(), &request).expect("an authentic collision re-verifies");
 
         let path = proof_path(cache.path(), &lock);
@@ -381,6 +496,10 @@ mod tests {
         std::fs::write(&path, &poison).unwrap();
         assert!(read_cached_image_set_root(cache.path(), &lock, &host, None).is_err());
         assert!(read_cached_image_set_root_proof(cache.path(), &lock, &host, None).is_err());
+        assert!(
+            read_cached_workload_image_set_root_proof(cache.path(), &lock, &workload_host, None,)
+                .is_err()
+        );
         // An already captured proof owns the exact authenticated originals,
         // not a path to the subsequently poisoned cache entry.
         assert_eq!(retained.manifest_bytes(), manifest);
@@ -409,9 +528,27 @@ mod tests {
         wrong_signer.signing_identity.workflow =
             WorkflowPath::new(".github/workflows/wrong.yml").unwrap();
         assert!(read_cached_image_set_root(cache.path(), &wrong_signer, &host, None).is_err());
+        assert!(
+            read_cached_workload_image_set_root_proof(
+                cache.path(),
+                &wrong_signer,
+                &workload_host,
+                None,
+            )
+            .is_err()
+        );
         let mut moved_lock = lock.clone();
         moved_lock.manifest_sha256 = Sha256Hex::from_bytes(b"another accepted root");
         assert!(read_cached_image_set_root(cache.path(), &moved_lock, &host, None).is_err());
+        assert!(
+            read_cached_workload_image_set_root_proof(
+                cache.path(),
+                &moved_lock,
+                &workload_host,
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[cfg(feature = "host-state")]

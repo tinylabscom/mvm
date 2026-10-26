@@ -39,7 +39,7 @@ pub struct PreparedPortableBootAssets {
 
 impl PreparedPortableBootAssets {
     pub fn acquire(arch: GuestArch) -> Result<Self> {
-        let image_set = PublishedImageSet::acquire()?;
+        let image_set = PublishedImageSet::acquire_workload()?;
         let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
         let runtime = mvm_build::guest_runtime::resolve_or_download_guest_runtime_quartet(
             &cache,
@@ -449,22 +449,6 @@ mod tests {
     #[ignore = "requires genuine signed runtime, published Linux proofs, and an existing sealed workload"]
     fn signed_release_exports_real_canonical_workload() {
         let required = |name| PathBuf::from(std::env::var_os(name).expect(name));
-        struct Payload(PathBuf);
-        impl mvm_build::builder_boot::BootPayloadSource for Payload {
-            fn boot_payload(
-                &self,
-            ) -> std::result::Result<
-                mvm_build::builder_boot::BuilderBootPayload,
-                mvm_build::builder_boot::BootPayloadError,
-            > {
-                mvm_build::builder_boot::BuilderBootPayload::builder()
-                    .host_bin_dir(&self.0)
-                    .build()
-            }
-        }
-        let payload = Payload(required("MVM_TEST_SIGNED_HVF_PAYLOAD_DIR"));
-        mvm_build::builder_boot::BootPayloadSource::boot_payload(&payload).unwrap();
-        mvm_build::builder_boot::register_boot_payload_source(Box::new(payload));
         let archive = required("MVM_TEST_SIGNED_RUNTIME_ARCHIVE");
         let rootfs = required("MVM_TEST_CANONICAL_ROOTFS");
         let output = required("MVM_TEST_CANONICAL_OUTPUT");
@@ -495,7 +479,7 @@ mod tests {
             arch: GuestArch::host(),
         };
         let assets = PreparedPortableBootAssets::from_set(
-            PublishedImageSet::acquire().unwrap(),
+            PublishedImageSet::acquire_workload().unwrap(),
             GuestArch::host(),
             &proof,
         )

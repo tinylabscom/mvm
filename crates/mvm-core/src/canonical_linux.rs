@@ -229,7 +229,7 @@ impl PreparedCanonicalLinux {
             &image_train_lock().image_set,
             &self.view_path,
         )
-        .with_host_protocols(host);
+        .with_workload_protocols(host);
         // The policy wrapper owns an authenticated, fresh store load. The
         // canonical verifier checks the actual private view under that policy.
         mvm_core::image_set::verify_image_set_artifacts(
@@ -340,7 +340,7 @@ fn prepare_with_clock(
         &image_train_lock().image_set,
         view.path(),
     )
-    .with_host_protocols(host);
+    .with_workload_protocols(host);
     verify_image_set_artifacts_under_revocations(
         request,
         std::slice::from_ref(&artifact.name),
@@ -426,7 +426,7 @@ fn select_from_root(
         Path::new(""),
     )
     .require(&requirement)
-    .with_host_protocols(host)
+    .with_workload_protocols(host)
     .with_revocations(policy);
     let root = verify_image_set_root(&request)?;
     let support = BackendImageSupport::for_backend(backend).context("backend cannot boot Linux")?;
@@ -487,7 +487,7 @@ mod tests {
         HostProtocolSupport {
             base_image_contract: crate::image_set::BaseImageContractRange::SUPPORTED,
             builder_cache_contract: image_train_lock().compatibility.builder_cache_contract,
-            builder_boot_abi: crate::image_set::BuilderBootAbiRange::WITH_PAYLOAD,
+            builder_boot_abi: crate::image_set::BuilderBootAbiRange::LEGACY_ONLY,
         }
     }
     fn prepare_with_clock(
