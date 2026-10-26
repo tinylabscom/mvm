@@ -67,10 +67,19 @@ fn aggregate_script() -> String {
     step_script("Require every validation lane to pass", "NIX_RESULT")
 }
 
-/// Fast-gate lanes: they run on a pull request and again in the queue, and
-/// follow the `code` scope on both.
+/// Fast-gate lanes: they run on a pull request and a push, and follow the
+/// `code` scope. `CORE_RESULT` is the only one that also runs in the queue.
 const GATE_LANES: [&str; 5] = [
     "CORE_RESULT",
+    "FEATURE_CLIPPY_RESULT",
+    "WINDOWS_RESULT",
+    "WINDOWS_IDENTITY_RESULT",
+    "WORKSPACE_RESULT",
+];
+
+/// The fast-gate lanes the queue skips: they passed on the PR head and run
+/// again on push.
+const PR_ONLY_LANES: [&str; 4] = [
     "FEATURE_CLIPPY_RESULT",
     "WINDOWS_RESULT",
     "WINDOWS_IDENTITY_RESULT",
@@ -187,12 +196,17 @@ impl Verdict {
         }
     }
 
-    /// The same code change at the head of a merge group: the fast gate only.
+    /// The same code change at the head of a merge group: Lint core and the
+    /// archive build only.
     fn queue_in_scope() -> Self {
-        Self {
+        let queue = Self {
             event_name: "merge_group",
+            policy: "skipped",
             ..Self::pr_in_scope()
-        }
+        };
+        PR_ONLY_LANES
+            .into_iter()
+            .fold(queue, |verdict, lane| verdict.with(lane, "skipped"))
     }
 
     fn with(mut self, lane: &'static str, result: &'static str) -> Self {
@@ -305,6 +319,44 @@ fn every_full_matrix_lane_is_refused_on_a_pull_request_and_in_the_queue() {
     ] {
         assert!(!verdict.accepts(), "{what} must not run on a pull request");
     }
+}
+
+/// The queue re-runs only what a conflict with main can break. A pull-request
+/// lane that runs there puts the slow tests back in front of every merge, and
+/// the compile and core lint must still run.
+#[test]
+fn the_queue_runs_only_lint_core_and_the_archive_build() {
+    assert!(Verdict::queue_in_scope().accepts());
+    for lane in PR_ONLY_LANES {
+        assert!(
+            !Verdict::queue_in_scope().with(lane, "success").accepts(),
+            "{lane} must not run in the merge queue"
+        );
+    }
+    assert!(
+        !Verdict::queue_in_scope()
+            .with("POLICY_RESULT", "success")
+            .accepts()
+            && !Verdict {
+                policy: "success",
+                ..Verdict::queue_in_scope()
+            }
+            .accepts(),
+        "the policy lane must not run in the merge queue"
+    );
+    assert!(
+        !Verdict::queue_in_scope()
+            .with("CORE_RESULT", "skipped")
+            .accepts()
+    );
+    assert!(
+        !Verdict {
+            archive: "skipped",
+            ..Verdict::queue_in_scope()
+        }
+        .accepts(),
+        "the queue must compile every test target"
+    );
 }
 
 /// A push to main is the full matrix. Any lane that skipped there left a

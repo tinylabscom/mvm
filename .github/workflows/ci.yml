@@ -1,13 +1,15 @@
 name: CI
 
 on:
-  # Two tiers. A pull request runs the fast gate: formatting, clippy over the
+  # Three tiers. A pull request runs the fast gate: formatting, clippy over the
   # core build and the feature combinations, the policy gates, a compile of
   # every workspace test target, and the sharded x86_64 workspace suite. Those
   # are the deterministic failures a PR has to expose before it is admitted,
   # because a batched merge group inherits every failure of the entries ahead
-  # of it. The merge queue runs the same fast gate against the integrated
-  # commit, which is the only commit that merges. The slow lanes (feature test
+  # of it. The merge queue re-runs only what a semantic conflict with the
+  # latest main can break: formatting and clippy (Lint core) and the compile
+  # of every workspace test target (Build workspace tests). The rest of the
+  # fast gate already passed on the PR head and runs again on push. The slow lanes (feature test
   # suites, BDD, aarch64, release-profile and musl witnesses, eBPF, Linux
   # coverage, Nix evaluation and the boot ceiling) run after the merge, on
   # every push to main, and a red result there is fixed forward.
@@ -274,7 +276,9 @@ jobs:
           set -uo pipefail
           workspace=github
           labels='["self-hosted","Linux","X64","mvm","hetzner","kvm"]'
-          if [ "$EVENT" = pull_request ] && [ "$HEAD_REPO" != "$REPO" ]; then
+          if [ "$EVENT" = merge_group ]; then
+            reason="the queue compiles the test archive, which only the hosted path builds"
+          elif [ "$EVENT" = pull_request ] && [ "$HEAD_REPO" != "$REPO" ]; then
             reason="pull request from a fork ($HEAD_REPO) never runs on a self-hosted runner"
           elif [ "$WORKSPACE_ROUTING" != true ]; then
             reason="self-hosted routing is off (repository variable RUNNER_PICKER_WORKSPACE is not true)"
@@ -417,7 +421,7 @@ jobs:
   lint-feature-clippy:
     name: Lint feature combinations (clippy)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -484,6 +488,7 @@ jobs:
     # gate without another runner or workflow.
     name: Invariant
     needs: [scope]
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -1046,7 +1051,7 @@ jobs:
   lint-windows:
     name: Windows compile check (portable crates)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -1078,7 +1083,7 @@ jobs:
   test-windows-identity:
     name: Windows repository identity runtime
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
@@ -1148,8 +1153,8 @@ jobs:
             exit 1
           fi
 
-      # Each lane belongs to one tier. Fast-gate lanes must match the scope on
-      # every event; full-matrix lanes must skip on a pull request and in the
+      # Each lane belongs to one tier. Queue-gate lanes must match the scope on
+      # every event; pull-request-gate lanes skip in the queue; full-matrix lanes must skip on a pull request and in the
       # merge queue and match the scope on a push to main and a manual
       # dispatch. A lane that ran where it should have skipped is refused as firmly as one that skipped
       # where it should have run: either means its `if:` drifted.
@@ -1188,8 +1193,9 @@ jobs:
             exit 1
           fi
           case "$EVENT_NAME" in
-            pull_request|merge_group) full_matrix=false ;;
-            push|workflow_dispatch) full_matrix=true ;;
+            pull_request) full_matrix=false; not_queue=true ;;
+            merge_group) full_matrix=false; not_queue=false ;;
+            push|workflow_dispatch) full_matrix=true; not_queue=true ;;
             *) echo "Invalid event: $EVENT_NAME"; exit 1 ;;
           esac
           for scope in "code=$SCOPE_CODE" "docs=$SCOPE_DOCS" "nix=$SCOPE_NIX"; do
@@ -1221,6 +1227,8 @@ jobs:
           code_or_docs=false
           if [ "$SCOPE_CODE" = true ] || [ "$SCOPE_DOCS" = true ]; then code_or_docs=true; fi
           gate_required=$(required true "$SCOPE_CODE")
+          # Lanes the queue skips: they ran on the PR head and run again on push.
+          pr_required=$(required "$not_queue" "$SCOPE_CODE")
           full_required=$(required "$full_matrix" "$SCOPE_CODE")
           archive_required=$(required "$archive_build" "$SCOPE_CODE")
           bdd_required=$(required "$full_matrix" "$code_or_docs")
@@ -1234,17 +1242,20 @@ jobs:
             fi
           }
 
-          # The policy lane is unscoped: every change passes it on every event.
-          check "Invariant" "$POLICY_RESULT" success
+          # The policy lane is unscoped: every change passes it, except in the
+          # queue, which re-runs only the lanes a conflict with main can break.
+          if [ "$not_queue" = true ]; then policy_required=success; else policy_required=skipped; fi
+          check "Invariant" "$POLICY_RESULT" "$policy_required"
 
-          # Fast gate: the same lanes on a pull request and in the queue.
+          # Queue gate: runs on every event, the queue included.
           check "Lint core" "$CORE_RESULT" "$gate_required"
-          check "Lint feature combinations" "$FEATURE_CLIPPY_RESULT" "$gate_required"
-          check "Windows compile check" "$WINDOWS_RESULT" "$gate_required"
-          check "Windows repository identity runtime" "$WINDOWS_IDENTITY_RESULT" "$gate_required"
           # The hosted suite runs from an archive; the self-hosted one does not.
           check "Build workspace tests" "$WORKSPACE_BUILD_RESULT" "$archive_required"
-          check "Test workspace" "$WORKSPACE_RESULT" "$gate_required"
+          # Pull-request gate: a pull request and a push, never the queue.
+          check "Lint feature combinations" "$FEATURE_CLIPPY_RESULT" "$pr_required"
+          check "Windows compile check" "$WINDOWS_RESULT" "$pr_required"
+          check "Windows repository identity runtime" "$WINDOWS_IDENTITY_RESULT" "$pr_required"
+          check "Test workspace" "$WORKSPACE_RESULT" "$pr_required"
 
           # Full matrix: push to main and manual dispatch only.
           check "Lint feature coverage" "$FEATURES_RESULT" "$full_required"
@@ -1271,6 +1282,7 @@ jobs:
     if: >-
       !cancelled()
       && needs.scope.outputs.code == 'true'
+      && github.event_name != 'merge_group'
       && (needs.test-workspace-build.result == 'success'
           || (needs.test-workspace-build.result == 'skipped' && needs.runners.outputs.workspace == 'hetzner'))
     permissions:
