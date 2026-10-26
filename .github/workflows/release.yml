@@ -366,9 +366,12 @@ jobs:
 
       # Attribution only: which packages the builds above compile more than once
       # and what differs (profile, features, target), so a long release is
-      # explainable. The cargo arguments mirror the two build steps above and
-      # must change with them; a mismatch only skews this report. It asks Cargo
-      # for unit graphs and compiles nothing, and it never fails the release.
+      # explainable. The cargo arguments mirror the two build steps above —
+      # `xtask check-compile-report-sync` fails CI when they drift — and the
+      # report adds the payload builds mvm-cli's build script runs (one nested
+      # cargo zigbuild per embedded binary) from the shared payload build plan.
+      # It asks Cargo for unit graphs and compiles nothing, and it never fails
+      # the release.
       - name: Report compilation units
         continue-on-error: true
         env:
@@ -383,7 +386,7 @@ jobs:
           done
           cargo run --package xtask -- report-compile-units \
             --build "mvmctl (release-min)=build --profile release-min --target ${BUILD_TARGET} --features ${MVMCTL_RELEASE_FEATURES}" \
-            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu" \
+            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-gpu-endpoint" \
             --build "mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel" \
             "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
 

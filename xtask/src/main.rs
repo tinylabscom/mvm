@@ -23,6 +23,7 @@ mod check_claim_witness_freshness;
 mod check_cli_help_matches_docs;
 mod check_cli_runtime_surface;
 mod check_closure_budget;
+mod check_compile_report_sync;
 mod check_conformance;
 mod check_content_address_determinism;
 mod check_core_module_ownership;
@@ -463,6 +464,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_per_vm_host_binaries_sync::run(&workspace)
         }
+        Some("check-compile-report-sync") => {
+            let workspace = workspace_root();
+            check_compile_report_sync::run(&workspace)
+        }
         Some("check-telemetry-inventory") => check_telemetry_inventory::run(&workspace_root()),
         Some("check-workflow-paths") => {
             let workspace = workspace_root();
@@ -506,7 +511,7 @@ fn main() -> Result<()> {
             check_all::run_all(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, publish-plan, check-publish-readiness, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, report-compile-units, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-spec-hygiene, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-thin-cli, check-cli-help-matches-docs, check-claim-catalog, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-single-workspace-write-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, publish-plan, check-publish-readiness, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, report-compile-units, check-compile-report-sync, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-spec-hygiene, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-thin-cli, check-cli-help-matches-docs, check-claim-catalog, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-single-workspace-write-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -582,7 +587,10 @@ fn main() -> Result<()> {
                 "  check-binary-size --path P --budget-bytes N  Plan 200: assert a built release binary stays within a byte budget"
             );
             eprintln!(
-                "  report-compile-units --build L=ARGS [--asset P]  Print compilation units per cargo build and why packages compile twice"
+                "  report-compile-units --build L=ARGS [--asset P]  Print compilation units per cargo build (payload builds included) and why packages compile twice"
+            );
+            eprintln!(
+                "  check-compile-report-sync               assert release.yml's compile report mirrors its build steps"
             );
             eprintln!(
                 "  check-guest-agent-runtime-free          Plan 124 A: assert mvm-guest's Linux closure pulls no tokio/async-trait/rtnetlink"
@@ -738,15 +746,15 @@ fn main() -> Result<()> {
 
 /// Resolve the workspace root from the xtask manifest dir. xtask's
 /// `CARGO_MANIFEST_DIR` resolves to `<workspace>/xtask/`, so the
-/// workspace root is the parent directory.
+/// workspace root is the parent directory. The compile-time value, not the
+/// runtime variable: under `cargo run`/`cargo test` the two are the same, and
+/// a directly invoked binary has no runtime variable to read — the checks are
+/// bound to the tree the binary was built from either way.
 fn workspace_root() -> PathBuf {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
-    manifest
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or(manifest)
+        .map(|parent| parent.to_path_buf())
+        .expect("xtask lives one level below the workspace root")
 }
 
 #[cfg(feature = "man")]

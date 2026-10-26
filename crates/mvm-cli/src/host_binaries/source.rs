@@ -396,8 +396,11 @@ pub fn allow_payload_from_source() {
 fn compiled_checkout() -> Option<PathBuf> {
     let root =
         embed_toolchain::workspace_root_from_manifest_dir(Path::new(env!("CARGO_MANIFEST_DIR")));
-    (root.join(payload_build::MANIFEST_PATH).is_file() && root.join("Cargo.lock").is_file())
-        .then_some(root)
+    (root
+        .join(payload_build::payload_build_plan::MANIFEST_PATH)
+        .is_file()
+        && root.join("Cargo.lock").is_file())
+    .then_some(root)
 }
 
 /// This process's payload source.
