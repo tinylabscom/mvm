@@ -157,7 +157,6 @@ fn releases_still_block_on_a_macos_host_that_cannot_boot_a_guest() {
         "release.yml must block on an unusable macOS host, or a tag is cut with \
          no evidence the documented examples boot on macOS"
     );
-
 }
 
 /// The two callers must disagree, and the default must be the safe one.
