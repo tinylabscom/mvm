@@ -1,0 +1,89 @@
+# Branch-only measurement: the HVF warm-claim bench on the self-hosted Apple
+# Silicon runner. Never merged; the branch is deleted once the numbers are posted.
+name: HVF warm bench (branch only)
+
+on:
+  push:
+    branches: [bench/hvf-m1-warm]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-hvf-m1
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: [self-hosted, macOS, ARM64, m1]
+    timeout-minutes: 150
+    env:
+      MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
+      MVM_KERNEL_SOURCE: download
+      MVM_BOOT_IMAGE: fetch
+      MVM_BUILDER_BACKEND: hvf
+    steps:
+      - name: Host, and wait for it to be quiet
+        run: |
+          set -eu
+          echo "MVM_HOME=$RUNNER_TEMP/mvm-bench-home" >> "$GITHUB_ENV"
+          sw_vers
+          major="$(sw_vers -productVersion | cut -d. -f1)"
+          [ "$major" -ge 26 ] || { echo "::error::HVF default needs macOS 26+, this host is $major"; exit 1; }
+          for _ in $(seq 1 60); do
+            load="$(sysctl -n vm.loadavg | awk '{print $2}')"
+            [ "${load%%.*}" -lt 8 ] && break
+            echo "load1=$load, waiting"; sleep 20
+          done
+          echo "load1 at start: $load"
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: ./.github/actions/install-zigbuild
+      - name: Build
+        run: |
+          cargo build --profile release-witness --bin mvmctl --features user
+          cargo build --profile release-witness -p mvm-hostd --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-hvf-supervisor
+      - name: Prepare a throwaway home and warm the image
+        run: |
+          set -u
+          mkdir -p "$MVM_HOME"
+          B="$PWD/target/release-witness/mvmctl"
+          "$B" bootstrap > "$RUNNER_TEMP/bootstrap.log" 2>&1 || { tail -40 "$RUNNER_TEMP/bootstrap.log"; exit 1; }
+          "$B" machine run docker.io/library/alpine:3.20 -- /bin/true
+      - name: Warm-claim bench (waits for a quiet host before each attempt)
+        run: |
+          set -u
+          B="$PWD/target/release-witness/mvmctl"
+          for attempt in 1 2 3; do
+            for _ in $(seq 1 90); do
+              load="$(sysctl -n vm.loadavg | awk '{print $2}')"
+              [ "${load%%.*}" -lt 8 ] && break
+              sleep 20
+            done
+            echo "=== attempt $attempt load1 at start=$load"
+            set +e
+            "$B" bench --lane warm-claim --runs 20 --warmup 2 --out "$RUNNER_TEMP/warm-$attempt.json" \
+              -- run docker.io/library/alpine:3.20 -- /bin/true 2>&1 | tee "$RUNNER_TEMP/warm-$attempt.log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            echo "attempt $attempt exit=$rc load1 at end=$(sysctl -n vm.loadavg | awk '{print $2}')"
+            [ "$rc" -eq 0 ] && break
+            grep -q "must be under 300" "$RUNNER_TEMP/warm-$attempt.log" || break
+          done
+          # The numbers are the product: a published-budget miss does not fail the job.
+          grep -aE "Samples|Boot dispatch maximum|p50|p95|p99|Teardown" "$RUNNER_TEMP"/warm-*.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hvf-warm-bench
+          path: |
+            ${{ runner.temp }}/warm-*.log
+            ${{ runner.temp }}/warm-*.json
+            ${{ runner.temp }}/bootstrap.log
+      - name: Clean up this job's VMs and home
+        if: always()
+        run: |
+          # Only processes holding files under this job's own home.
+          for pid in $(lsof -t +D "$MVM_HOME" 2>/dev/null | sort -u); do kill "$pid" 2>/dev/null || true; done
+          sleep 2
+          rm -rf "$MVM_HOME"
