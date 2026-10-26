@@ -2,7 +2,35 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.26.0] — 2026-10-26
+
+Supersedes 0.25.0, which was tagged but never published.
+
+### Added
+- **cli**: `mvmctl trust audit usage` rolls the verified audit chain's chain-signed AI egress metering up per destination (#4753)
+- **hostd**: `secret.forward_outcome` audit entries record whether the forward leg went direct or through the upstream proxy (#4750)
+
+### Changed
+- **core**: Gate `toml` and `regex` behind `host-state`, shrinking the guest closure from 100 to 87 crates (#4742, #4713)
+- **image**: Workload and builder image compatibility are checked separately, so a workload launch no longer has to satisfy the builder boot ABI (#4754)
+- **contract**: Network flow ceilings share one source of truth and the per-stream credit window is admitted by the signed plan (#4748)
+- **ci**: Minimal merge-queue gate, push-only matrix, smaller test archive (#4720, #4732, #4736, #4738)
+
+### Fixed
+- **release**: The macOS libkrunfw kernel build installs `lld` (#4752)
+- **release**: The libkrunfw basename is staged as a regular file instead of a symlink the archive inspector refuses (#4758)
+- **ci**: Pack signing smoke builds the application fixture with the `host-state` feature (#4751)
+- **fc**: The Firecracker short socket directory is created private and checked for owner and mode before a privileged helper uses it (#4745)
+- **gpu**: Module and function handles given to the guest are opaque, per-session and validated on use (#4746)
+- **plan**: Spent nonces of externally signed plans are remembered across launches, so the same plan cannot be replayed (#4747)
+- **agentd**: Resume no longer fails with EPERM when the guest already has the requested hostname (#4739)
+
+### Security
+- **deps**: Drop wasmtime's compilation cache feature, removing the zstd stack and RUSTSEC-2026-0391, RUSTSEC-2026-0398 and RUSTSEC-2026-0403 (#4757)
+
 ## [0.25.0] — 2026-10-25
+
+Tagged v0.25.0; its release run failed before publication (macOS libkrun tier build), so no release was published. Superseded by 0.26.0.
 
 ### Added
 - **cli**: Launch signed Claude applications with an embedded exact-destination environment policy, defaulting to the baked entrypoint with bounded one-shot stdin (#4726)
