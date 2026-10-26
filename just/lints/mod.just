@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list lints
+
 # ── Model / Conformance gates ────────────────────────────────────────────
 # R1: the model is the single source.
 

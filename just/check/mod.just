@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list check
+
 # `--all-targets` is narrower than it sounds: it skips any target behind
 # `required-features`, and on macOS it cannot compile `cfg(target_os = "linux")`
 # files at all. `gated` covers both.

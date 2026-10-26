@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list tests
+
 # Usage: just tests::crate CRATE
 #   CRATE: crate name to test
 

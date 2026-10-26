@@ -474,6 +474,16 @@ Only the host-side `mvmctl` process exports. Nothing is exported from inside a
 microVM, and the per-VM supervisors and host daemons do not export yet. A trace
 is an analysis aid; the chain-signed audit log remains the record of what ran.
 
+## Discovering development commands
+
+Run `just` to list the top-level recipes and command modules. Invoking a
+module without a subcommand lists its available recipes and descriptions;
+it does not build, install, test, or publish anything.
+
+`just docs` lists the documentation site's subcommands. Choose
+`just site::dev` to start the preview server or `just site::build` to build
+the site. Use the same explicit `module::recipe` form for other modules.
+
 ## Linting and Formatting
 
 ```bash
