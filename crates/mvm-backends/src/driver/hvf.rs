@@ -897,7 +897,10 @@ impl VmmDriver for HvfDriver {
             signature: String::new(),
         };
         request.signature = hex::encode(identity.signing.sign(&request.message()).to_bytes());
-        request_live_handoff(&parent_dir.join("hvf-handoff.sock"), &request)?;
+        request_live_handoff(
+            &mvm_core::config::vm_hvf_handoff_socket_at(&parent_dir),
+            &request,
+        )?;
 
         link_child_state(child_dir, &parent_dir)
             .map_err(|e| StandbyError::ClaimFailed(format!("link live HVF child state: {e}")))?;

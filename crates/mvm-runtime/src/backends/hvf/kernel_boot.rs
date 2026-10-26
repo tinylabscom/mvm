@@ -1791,14 +1791,16 @@ unsafe fn run(
                     builder_control_sockets.iter().map(|(port, _)| *port),
                 );
             }
-            if v.set_handoff_control(
+            if let Err(error) = v.set_handoff_control(
                 handoff_socket.as_deref(),
                 handoff_root.as_deref(),
                 handoff_verify_key.as_deref(),
                 stop,
-            )
-            .is_err()
-            {
+            ) {
+                mvm_vmm::agent_debug::line(
+                    "handoff",
+                    format_args!("control setup failed: {error}"),
+                );
                 return Err(HvfError::SnapshotState("handoff control setup failed"));
             }
             if let Some(sender) = handoff_accepted {
