@@ -71,6 +71,26 @@ pub enum ForwardOutcome {
     Canceled,
 }
 
+/// Whether a forward leg dialed its destination directly or through the
+/// operator's upstream proxy. Recorded beside the outcome so a proxied
+/// connection never reads as a direct one in the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardPath {
+    Direct,
+    Proxy,
+}
+
+impl ForwardPath {
+    /// The fixed label recorded in the chain.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Proxy => "proxy",
+        }
+    }
+}
+
 impl ForwardOutcome {
     /// The fixed label recorded in the chain.
     #[must_use]
@@ -93,6 +113,7 @@ pub async fn emit_secret_forward_outcome(
     recorder: &Recorder,
     destination: &str,
     outcome: ForwardOutcome,
+    path: ForwardPath,
 ) -> Result<(), RecorderError> {
     recorder
         .record_unbound(
@@ -101,6 +122,7 @@ pub async fn emit_secret_forward_outcome(
             [
                 ("destination".to_string(), destination.to_string()),
                 ("outcome".to_string(), outcome.label().to_string()),
+                ("via".to_string(), path.label().to_string()),
             ],
         )
         .await

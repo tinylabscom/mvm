@@ -125,6 +125,9 @@ pub struct SubstitutionService {
     reflection: reflection::ReflectionGuard,
     /// OAuth response-token capture rules by secret name.
     oauth_capture_by_secret: std::collections::BTreeMap<String, OAuthCaptureRule>,
+    /// The upstream proxy the forward leg was built with, kept only so the
+    /// audit entry can say whether a destination went through it.
+    proxy: Option<Arc<mvm_http::ProxyConfig>>,
 }
 
 #[derive(Debug, Clone)]

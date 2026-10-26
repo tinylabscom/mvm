@@ -5,9 +5,9 @@ use super::SubstitutionService;
 use super::prepare::{PreparedFlow, SubstitutedSecret, destination_host};
 use crate::supervisor::redactor::RedactionHits;
 use crate::supervisor::secret_audit::{
-    ForwardOutcome, emit_rewrite_proof, emit_secret_flow_refused, emit_secret_forward_outcome,
-    emit_secret_placeholder_dropped, emit_secret_redacted, emit_secret_reflection_scrubbed,
-    emit_secret_substituted,
+    ForwardOutcome, ForwardPath, emit_rewrite_proof, emit_secret_flow_refused,
+    emit_secret_forward_outcome, emit_secret_placeholder_dropped, emit_secret_redacted,
+    emit_secret_reflection_scrubbed, emit_secret_substituted,
 };
 
 /// The sorted, de-duplicated category list a `secret.redacted` entry carries.
@@ -85,8 +85,25 @@ impl SubstitutionService {
         let (Some(recorder), Some(dest)) = (&self.recorder, flow.destination.as_deref()) else {
             return;
         };
-        if let Err(e) = emit_secret_forward_outcome(recorder, dest, outcome).await {
+        let path = self.forward_path(dest);
+        if let Err(e) = emit_secret_forward_outcome(recorder, dest, outcome, path).await {
             tracing::warn!(error = %e, "secret.forward_outcome audit emit failed");
+        }
+    }
+
+    /// `Proxy` when the configured upstream proxy would carry `destination`
+    /// for either scheme. The scheme is not known here, so a host proxied for
+    /// only one of them is reported as proxied: the label may over-report, and
+    /// never lets a proxied leg read as direct.
+    fn forward_path(&self, destination: &str) -> ForwardPath {
+        match &self.proxy {
+            Some(proxy)
+                if proxy.select(destination, true).is_some()
+                    || proxy.select(destination, false).is_some() =>
+            {
+                ForwardPath::Proxy
+            }
+            _ => ForwardPath::Direct,
         }
     }
 
@@ -478,6 +495,68 @@ mod server_tests {
         assert!(logged[outcome..].contains("response_failed"), "{logged}");
         assert!(!logged.contains("connection reset"), "{logged}");
         assert!(!logged.contains("sk-live-zzz"), "{logged}");
+    }
+
+    /// Drive one substituted request that fails mid-body and return the chain
+    /// text from the `secret.forward_outcome` entry on.
+    async fn forward_outcome_entry(proxy: Option<mvm_http::ProxyConfig>) -> String {
+        let dir = tempdir().unwrap();
+        let (mut service, ph, chain) = recorded_service_with(
+            dir.path(),
+            gate_admitting(&[("api.openai.com", 443)]),
+            Arc::new(MidBodyFailure),
+        );
+        Arc::get_mut(&mut service).expect("sole owner").proxy = proxy.map(Arc::new);
+        let mut response = service
+            .process_stream(
+                WireRequest {
+                    method: "POST".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                    body_b64: String::new(),
+                },
+                &Default::default(),
+            )
+            .await
+            .expect("the response head arrived");
+        while response.body.recv().await.is_some() {}
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        let at = logged
+            .find("secret.forward_outcome")
+            .expect("outcome entry");
+        logged[at..].to_string()
+    }
+
+    #[tokio::test]
+    async fn a_direct_forward_is_recorded_as_direct() {
+        let entry = forward_outcome_entry(None).await;
+        assert!(entry.contains("direct"), "{entry}");
+        assert!(!entry.contains("proxy"), "{entry}");
+    }
+
+    #[tokio::test]
+    async fn a_forward_through_the_upstream_proxy_is_recorded_as_proxied() {
+        let proxy = mvm_http::ProxyConfig::from_lookup(|key| {
+            (key == "HTTPS_PROXY").then(|| "http://proxy.corp:3128".to_string())
+        })
+        .expect("proxy environment parses")
+        .expect("a proxy is configured");
+        let entry = forward_outcome_entry(Some(proxy)).await;
+        assert!(entry.contains("proxy"), "{entry}");
+        assert!(!entry.contains("direct"), "{entry}");
+    }
+
+    #[tokio::test]
+    async fn a_destination_in_no_proxy_is_recorded_as_direct() {
+        let proxy = mvm_http::ProxyConfig::from_lookup(|key| match key {
+            "HTTPS_PROXY" => Some("http://proxy.corp:3128".to_string()),
+            "NO_PROXY" => Some("openai.com".to_string()),
+            _ => None,
+        })
+        .expect("proxy environment parses")
+        .expect("a proxy is configured");
+        let entry = forward_outcome_entry(Some(proxy)).await;
+        assert!(entry.contains("direct"), "{entry}");
     }
 
     /// A placeholder in the body is refused before anything is forwarded,
