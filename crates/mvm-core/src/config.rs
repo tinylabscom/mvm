@@ -2230,6 +2230,29 @@ mod tests {
         );
     }
 
+    /// A claimed child's socket namespace may already exist at the umask's
+    /// mode when the claim reaches it; the parent refuses to bind there until
+    /// it is private.
+    #[test]
+    fn securing_a_deep_state_dirs_socket_namespace_tightens_one_left_wide() {
+        let state_dir = std::path::PathBuf::from("/tmp").join(format!(
+            "{}-{}",
+            "x".repeat(70),
+            std::process::id()
+        ));
+        let socket_dir = vm_socket_dir_at(&state_dir);
+        assert_ne!(socket_dir, state_dir, "fixture must fall back");
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        crate::private_fs::set_mode(&socket_dir, 0o755).unwrap();
+
+        let secured = secure_fallback_socket_dir_at(&state_dir);
+        let meta = std::fs::symlink_metadata(&socket_dir).unwrap();
+        let mode = crate::private_fs::mode_bits(&socket_dir, &meta).unwrap();
+        std::fs::remove_dir(&socket_dir).unwrap();
+        secured.unwrap();
+        assert_eq!(mode, 0o700);
+    }
+
     #[test]
     fn only_a_private_owned_tmp_namespace_is_a_fallback_socket_dir() {
         let tmp = tempfile::Builder::new()

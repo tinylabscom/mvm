@@ -873,6 +873,12 @@ impl VmmDriver for HvfDriver {
             )));
         }
 
+        // The parent binds the child's control socket in this directory and
+        // refuses one that is not private; a deep state dir keeps it in the
+        // short `/tmp` namespace, which nothing else has made private yet.
+        mvm_core::config::secure_fallback_socket_dir_at(child_dir).map_err(|e| {
+            StandbyError::ClaimFailed(format!("prepare HVF child socket directory: {e}"))
+        })?;
         let parent_dir = vm_state_dir(parent_name);
         let parent_pid_path = parent_dir.join(PID_FILE_NAME);
         let parent_pid = hvf_backend::read_pid(&parent_pid_path).ok_or_else(|| {
