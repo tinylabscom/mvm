@@ -90,7 +90,7 @@ MCP protocol version `2025-11-25`. The server echoes that version and
 `2025-06-18`, answers an `initialize` naming any other version with
 `2025-11-25`, and also serves the stateless `2026-07-28` form.
 
-## The signed policy pack
+## The signed agent pack
 
 The immutable `agent/claude@1.0.1` is a signed policy profile for a
 Claude Code workload running in a microVM. It is separate from the MCP setup
