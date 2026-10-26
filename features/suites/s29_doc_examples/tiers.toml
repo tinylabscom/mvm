@@ -124,6 +124,16 @@ path = "env cleanup"
 tier = "exec"
 
 [[command]]
+path = "env caller-identity enroll"
+tier = "parse"
+reason = "creates a native credential and requires explicit operator enrollment; hermetic documentation checks must not mutate the host credential store"
+
+[[command]]
+path = "env caller-identity show"
+tier = "exec"
+fixture = "caller-public-pin-only"
+
+[[command]]
 path = "env verify-release"
 tier = "exec"
 fixture = "release-signature"
