@@ -213,9 +213,9 @@ jobs:
 
       - name: Download shared workspace test archive
         if: inputs.archive_run_id != ''
-        # A healthy transfer takes under a minute; bound the action's retries
-        # so a stalled blob download cannot hold a runner for the whole job.
-        timeout-minutes: 5
+        # Bound the action's retries so a stalled blob download cannot hold a
+        # runner for the whole job; slow runners moved the 3.6 GB archive in over 5 min.
+        timeout-minutes: 10
         uses: actions/download-artifact@v8
         with:
           name: workspace-tests

@@ -1059,7 +1059,7 @@ mod tests {
             .next()
             .expect("download step body");
         assert!(
-            download.contains("\n        timeout-minutes: 5\n"),
+            download.contains("\n        timeout-minutes: 10\n"),
             "a stalled artifact transfer must not occupy a runner for the whole job"
         );
         assert!(download.contains("uses: actions/download-artifact@"));
