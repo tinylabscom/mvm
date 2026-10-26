@@ -284,7 +284,7 @@ pub trait VmmDriver: Send + Sync {
         signal_post_restore(
             child_vm_name,
             &identity.signal(),
-            crate::post_restore::POST_RESTORE_READY_TIMEOUT,
+            crate::post_restore::POST_RESTORE_CLAIM_READY_TIMEOUT,
         )
     }
 
