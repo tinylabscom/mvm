@@ -590,6 +590,9 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("publish-root", AuditPosture::ReadOnly),
     ("prove", AuditPosture::ReadOnly),
     ("verify-inclusion", AuditPosture::ReadOnly),
+    // Aggregates the chain's `host.ai.usage` entries into a per-destination
+    // metering view; a read over the verified chain, writes nothing.
+    ("usage", AuditPosture::ReadOnly),
     // The only verb under `audit` that writes to the chain rather than reading
     // it: a prune appends a signed `chain.pruned` record before deleting the
     // segments it names. Emitting is the whole point — a deletion with no entry
