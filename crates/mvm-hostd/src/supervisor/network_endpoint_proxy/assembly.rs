@@ -139,7 +139,16 @@ impl SubstitutionService {
             approval_required: std::collections::BTreeSet::new(),
             reflection: super::reflection::ReflectionGuard::default(),
             oauth_capture_by_secret: std::collections::BTreeMap::new(),
+            proxy: None,
         }
+    }
+
+    /// Record which upstream proxy, if any, the forward leg uses, so each
+    /// forward outcome names the path it took.
+    #[must_use]
+    pub fn with_proxy_config(mut self, proxy: Option<mvm_http::ProxyConfig>) -> Self {
+        self.proxy = proxy.map(Arc::new);
+        self
     }
 
     /// Hold a request carrying any of `names`' placeholders for an approval.
@@ -326,7 +335,7 @@ impl SubstitutionService {
         let admitted = Arc::new(super::pinned_dns::AdmittedAddresses::default());
         let forwarder: Arc<dyn Forwarder> = Arc::new(
             HardenedForwarder::new(forward_timeout_secs)?
-                .with_proxy(proxy)
+                .with_proxy(proxy.clone())
                 .with_gate_resolver(Arc::clone(&admitted), Arc::clone(&egress_gate)),
         );
         let approval_required = secrets_requiring_approval(plan_secrets);
@@ -335,7 +344,8 @@ impl SubstitutionService {
             .with_admitted_addresses(admitted)
             .with_approval_required(approval_required)
             .with_tenant(tenant)
-            .with_instance_id(instance_id);
+            .with_instance_id(instance_id)
+            .with_proxy_config(proxy);
         service.oauth_capture_by_secret = oauth_capture_by_secret;
         service = service.with_redaction_policy(redaction);
         service = service.with_reversible_replacement_policy(reversible_replacement);
