@@ -277,7 +277,7 @@ jobs:
           done
           MVM_HOME="$PWD/smoke/application/consumer-home" \
             cargo run --release -p mvm-core --example application-inspection-fixture \
-            --features manifest-verify -- \
+            --features manifest-verify,host-state -- \
             --out-dir "$PWD/smoke/application" --identity "${IDENTITY}"
           cosign sign-blob \
             --yes \
