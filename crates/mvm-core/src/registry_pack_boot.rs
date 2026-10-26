@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use crate::arch::GuestArch;
 use crate::image_set::{
     ArtifactFormat, BackendImageSupport, HostProtocolSupport, ImageSetManifest, MemberArtifact,
-    WorkloadImageProfile, image_set_root_proof_cache, image_train_lock, read_cached_image_set_root,
-    select_workload_image,
+    WorkloadImageProfile, image_set_root_proof_cache, image_train_lock,
+    read_cached_workload_image_set_root, select_workload_image,
 };
 use crate::image_set_revocation::{ImageSetRevocationStore, VerifiedImageSetRevocations};
 use crate::kernel_format::KernelFormat;
@@ -292,7 +292,7 @@ impl BuiltPackBootContract {
         };
         let accepted = &image_train_lock().image_set;
         image.validate_pin(pin.reference(), accepted)?;
-        let root = read_cached_image_set_root(
+        let root = read_cached_workload_image_set_root(
             &image_set_root_proof_cache(),
             accepted,
             host,

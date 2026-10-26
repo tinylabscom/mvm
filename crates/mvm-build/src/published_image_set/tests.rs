@@ -8,15 +8,109 @@ const ARCH: GuestArch = GuestArch::Aarch64;
 const MEMBER: &str = "stage0-vmlinux-aarch64";
 
 #[test]
+fn workload_acquisition_does_not_require_or_authorize_builder_support() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let mut source = with_member(b"stage0").serve_from(served.path());
+    let path = served.path().join("image-set.json");
+    let mut manifest: ImageSetManifest =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest.compatibility.builder_cache_contract += 1;
+    source.train.compatibility = manifest.compatibility.clone();
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    source.train.image_set.manifest_sha256 = Sha256Hex::from_bytes(&bytes);
+    std::fs::write(&path, bytes).unwrap();
+    let full_source = ImageSetSource::new(source.train.clone(), source.base_url.clone())
+        .with_download(source.download);
+    assert!(PublishedImageSet::acquire_from(full_source).is_err());
+    let set = PublishedImageSet::acquire_workload_from(source).unwrap();
+    let destination = served.path().join("stage0");
+    set.fetch_member_artifact(
+        ImageSetRole::Stage0BootstrapKernel,
+        ARCH,
+        MEMBER,
+        &destination,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(destination).unwrap(), b"stage0");
+    let builder = set
+        .manifest()
+        .members
+        .iter()
+        .find(|member| member.role == ImageSetRole::BuilderVm)
+        .unwrap();
+    let artifact = &builder.artifacts[0];
+    assert!(
+        set.artifact(builder.role, builder.target, artifact.name.as_str())
+            .is_err()
+    );
+    assert!(
+        set.fetch_artifact(artifact, &served.path().join("builder"))
+            .is_err()
+    );
+}
+
+#[test]
+fn workload_acquisition_preserves_pin_completeness_and_base_contract_checks() {
+    let _env = unsigned_env();
+    for failure in ["pin", "complete", "base"] {
+        let served = tempfile::tempdir().unwrap();
+        let fixture = match failure {
+            "complete" => ImageSetFixture::complete().without_member(
+                ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant),
+                MemberTarget::Arch(ARCH),
+            ),
+            "base" => ImageSetFixture::complete()
+                .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::new(99))),
+            _ => ImageSetFixture::complete(),
+        };
+        let source = fixture.serve_from(served.path());
+        if failure == "pin" {
+            let path = served.path().join("image-set.json");
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes.push(b'\n');
+            std::fs::write(path, bytes).unwrap();
+        }
+        assert!(
+            PublishedImageSet::acquire_workload_from(source).is_err(),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn workload_acquisition_preserves_member_digest_checks() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let source = with_member(b"stage0").serve_from(served.path());
+    std::fs::write(served.path().join(MEMBER), b"tamper").unwrap();
+    let set = PublishedImageSet::acquire_workload_from(source).unwrap();
+    assert!(matches!(
+        set.fetch_member_artifact(
+            ImageSetRole::Stage0BootstrapKernel,
+            ARCH,
+            MEMBER,
+            &served.path().join("download"),
+        ),
+        Err(ImageSetMemberError::DigestMismatch { .. })
+    ));
+}
+
+#[test]
 fn portable_publisher_proof_requires_current_feed_even_for_fixture_acquisition() {
     let mut env = unsigned_env();
     let home = tempfile::tempdir().unwrap();
     env.isolate_mvm_home(home.path());
     let served = tempfile::tempdir().unwrap();
-    let fixture = ImageSetFixture::complete();
-    let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
-    let error = set.retained_publisher_proof().unwrap_err();
-    assert!(format!("{error:#}").contains("current signed image-set revocations required"));
+    for acquire in [
+        PublishedImageSet::acquire_from,
+        PublishedImageSet::acquire_workload_from,
+    ] {
+        let fixture = ImageSetFixture::complete();
+        let set = acquire(fixture.serve_from(served.path())).unwrap();
+        let error = set.retained_publisher_proof().unwrap_err();
+        assert!(format!("{error:#}").contains("current signed image-set revocations required"));
+    }
     assert!(!mvm_core::image_set::image_set_root_proof_cache().exists());
 }
 
@@ -126,25 +220,29 @@ fn new_base_markers_are_checked_after_authentication_for_each_profile_and_arch()
                         "contract-root.ext4",
                         root,
                     );
-                let set =
-                    PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
-                let out = tempfile::tempdir().unwrap();
-                let destination = out.path().join("root.ext4");
-                let result = set.fetch_member_artifact(
-                    ImageSetRole::WorkloadRootfs(profile),
-                    arch,
-                    "contract-root.ext4",
-                    &destination,
-                );
-                if marker == Some(b"1\n".as_slice()) {
-                    result.unwrap();
-                    assert!(destination.exists());
-                } else {
-                    assert!(matches!(
-                        result,
-                        Err(ImageSetMemberError::BaseImageContract { .. })
-                    ));
-                    assert!(!destination.exists());
+                for acquire in [
+                    PublishedImageSet::acquire_from,
+                    PublishedImageSet::acquire_workload_from,
+                ] {
+                    let set = acquire(fixture.serve_from(served.path())).unwrap();
+                    let out = tempfile::tempdir().unwrap();
+                    let destination = out.path().join("root.ext4");
+                    let result = set.fetch_member_artifact(
+                        ImageSetRole::WorkloadRootfs(profile),
+                        arch,
+                        "contract-root.ext4",
+                        &destination,
+                    );
+                    if marker == Some(b"1\n".as_slice()) {
+                        result.unwrap();
+                        assert!(destination.exists());
+                    } else {
+                        assert!(matches!(
+                            result,
+                            Err(ImageSetMemberError::BaseImageContract { .. })
+                        ));
+                        assert!(!destination.exists());
+                    }
                 }
             }
         }
@@ -907,14 +1005,19 @@ fn acquire_refuses_a_root_without_a_signature() {
     env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
     let served = tempfile::tempdir().unwrap();
 
-    let err = PublishedImageSet::acquire_from(with_member(b"o").serve_from(served.path()))
-        .err()
-        .expect("an unsigned root must be refused even when its digest is pinned");
-    let rendered = format!("{err:#}");
-    assert!(
-        rendered.contains("publisher identity"),
-        "the refusal must be the signature rung: {rendered}"
-    );
+    for acquire in [
+        PublishedImageSet::acquire_from,
+        PublishedImageSet::acquire_workload_from,
+    ] {
+        let err = acquire(with_member(b"o").serve_from(served.path()))
+            .err()
+            .expect("an unsigned root must be refused even when its digest is pinned");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("publisher identity"),
+            "the refusal must be the signature rung: {rendered}"
+        );
+    }
 }
 
 /// The two hatches are independent: waiving digest checks must not waive the

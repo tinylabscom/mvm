@@ -129,6 +129,8 @@ pub enum ImageSetMemberError {
     },
     #[error("base-image contract refused for {name}: {reason}")]
     BaseImageContract { name: String, reason: String },
+    #[error("workload acquisition does not authorize builder selection")]
+    WorkloadOnly,
     #[error("io error on {path}: {source}")]
     Io {
         path: String,
@@ -147,6 +149,7 @@ pub struct PublishedImageSet {
     release_tag: ReleaseTag,
     base_url: String,
     download: Download,
+    workload_only: bool,
 }
 
 /// Original publisher and applied-feed evidence from one export preparation.
@@ -175,6 +178,21 @@ impl PublishedImageSet {
 
     /// Acquire and verify the root object `source` pins.
     pub fn acquire_from(source: ImageSetSource) -> Result<Self> {
+        Self::acquire_scoped(source, false)
+    }
+
+    /// Acquire the pinned Linux set for workloads without requiring builder payload support.
+    /// This does not grant authority to select builder artifacts.
+    pub fn acquire_workload() -> Result<Self> {
+        Self::acquire_workload_from(ImageSetSource::locked())
+    }
+
+    /// Acquire a workload-compatible root through the same authenticated acquisition pipeline.
+    pub fn acquire_workload_from(source: ImageSetSource) -> Result<Self> {
+        Self::acquire_scoped(source, true)
+    }
+
+    fn acquire_scoped(source: ImageSetSource, workload_only: bool) -> Result<Self> {
         let ImageSetSource {
             train,
             base_url,
@@ -182,8 +200,12 @@ impl PublishedImageSet {
         } = source;
         let lock = &train.image_set;
         let host = crate::stage0_kernel::current_image_set_protocol_support();
-        mvm_core::image_set::check_declared_protocol_compatibility(&train.compatibility, &host)
-            .context("refuse an image lock incompatible with this host before acquisition")?;
+        if workload_only {
+            mvm_core::image_set::check_workload_protocol_compatibility(&train.compatibility, &host)
+        } else {
+            mvm_core::image_set::check_declared_protocol_compatibility(&train.compatibility, &host)
+        }
+        .context("refuse an image lock incompatible with this host before acquisition")?;
         let staged = tempfile::NamedTempFile::new().context("create image-set manifest staging")?;
         let manifest_url = format!("{base_url}/{}", lock.manifest_asset);
         download(&manifest_url, staged.path())
@@ -216,8 +238,15 @@ impl PublishedImageSet {
         check_against_lock(&manifest, &actual, lock).context("match signed image set to lock")?;
         require_complete(&manifest, &ImageSetRequirement::current_train())
             .context("refuse a partial image-set release")?;
-        check_protocol_compatibility(&manifest, &host)
-            .context("refuse an image set incompatible with this host")?;
+        if workload_only {
+            mvm_core::image_set::check_workload_protocol_compatibility(
+                &manifest.compatibility,
+                &host,
+            )
+        } else {
+            check_protocol_compatibility(&manifest, &host)
+        }
+        .context("refuse an image set incompatible with this host")?;
         if !manifest.compatibility.same_contract(&train.compatibility) {
             bail!(
                 "images.lock compatibility does not match the signed image-set manifest; run the pin-update workflow"
@@ -229,8 +258,12 @@ impl PublishedImageSet {
             let proof_cache = mvm_core::image_set::image_set_root_proof_cache();
             let request =
                 mvm_core::image_set::ImageSetVerification::new(&bytes, &bundle, lock, &proof_cache)
-                    .require(&requirement)
-                    .with_host_protocols(&host);
+                    .require(&requirement);
+            let request = if workload_only {
+                request.with_workload_protocols(&host)
+            } else {
+                request.with_host_protocols(&host)
+            };
             mvm_core::image_set::cache_image_set_root(&proof_cache, &request)
                 .context("retain authenticated image-set root for offline admission")?;
         }
@@ -242,6 +275,7 @@ impl PublishedImageSet {
             release_tag: lock.release_tag.clone(),
             base_url,
             download,
+            workload_only,
         })
     }
 
@@ -272,7 +306,12 @@ impl PublishedImageSet {
         let revocations = mvm_core::image_set_revocation::ImageSetRevocationStore::in_mvm_home()
             .capture_applied_proof(chrono::Utc::now())
             .context("current signed image-set revocations required for portable kernel proof")?;
-        let proof = mvm_core::image_set::read_cached_image_set_root_proof(
+        let read_proof = if self.workload_only {
+            mvm_core::image_set::read_cached_workload_image_set_root_proof
+        } else {
+            mvm_core::image_set::read_cached_image_set_root_proof
+        };
+        let proof = read_proof(
             &mvm_core::image_set::image_set_root_proof_cache(),
             &mvm_core::image_set::image_train_lock().image_set,
             &crate::stage0_kernel::current_image_set_protocol_support(),
@@ -465,6 +504,9 @@ impl PublishedImageSet {
         target: MemberTarget,
         name: &str,
     ) -> Result<&MemberArtifact, ImageSetMemberError> {
+        if self.workload_only && role == ImageSetRole::BuilderVm {
+            return Err(ImageSetMemberError::WorkloadOnly);
+        }
         let member = self
             .manifest
             .members
@@ -509,6 +551,17 @@ impl PublishedImageSet {
         artifact: &MemberArtifact,
         dest: &Path,
     ) -> Result<(), ImageSetMemberError> {
+        if self.workload_only
+            && self.manifest.members.iter().any(|member| {
+                member.role == ImageSetRole::BuilderVm
+                    && member
+                        .artifacts
+                        .iter()
+                        .any(|candidate| candidate.name == artifact.name)
+            })
+        {
+            return Err(ImageSetMemberError::WorkloadOnly);
+        }
         let url = format!("{}/{}", self.base_url, artifact.name);
         (self.download)(&url, dest).map_err(|error| ImageSetMemberError::Download {
             url: url.clone(),
@@ -569,8 +622,8 @@ pub fn verify_cached_default_workload(
         return Ok(());
     }
     let host = crate::stage0_kernel::current_image_set_protocol_support();
-    mvm_core::image_set::check_declared_protocol_compatibility(&train.compatibility, &host)?;
-    let root = mvm_core::image_set::read_cached_image_set_root(
+    mvm_core::image_set::check_workload_protocol_compatibility(&train.compatibility, &host)?;
+    let root = mvm_core::image_set::read_cached_workload_image_set_root(
         &mvm_core::image_set::image_set_root_proof_cache(),
         &train.image_set,
         &host,

@@ -60,13 +60,14 @@ pub use trust_tier::ImageTrustTier;
 pub use validate::{
     BackendImageSupport, HostProtocolSupport, ImageSetRequirement, RequiredMember,
     WorkloadImageSelection, check_against_lock, check_declared_protocol_compatibility,
-    check_protocol_compatibility, require_complete, select_member, select_workload_image,
-    validate_structure,
+    check_protocol_compatibility, check_workload_protocol_compatibility, require_complete,
+    select_member, select_workload_image, validate_structure,
 };
 pub use verify::{
     ImageSetVerification, RetainedImageSetRootProof, VerifiedArtifact, VerifiedImageSet,
     VerifiedImageSetRoot, VerifiedSelectedArtifacts, cache_image_set_root,
     image_set_root_proof_cache, read_cached_image_set_root, read_cached_image_set_root_proof,
+    read_cached_workload_image_set_root, read_cached_workload_image_set_root_proof,
     verify_image_set, verify_image_set_artifacts, verify_image_set_root,
 };
 

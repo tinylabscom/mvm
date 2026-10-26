@@ -16,9 +16,10 @@ The ignored Rust selector is
 `portable_boot_assets::tests::signed_release_exports_real_canonical_workload`.
 The operator supplies:
 
-- `MVM_TEST_SIGNED_HVF_PAYLOAD_DIR`: independently prepared host boot helpers.
 - `MVM_TEST_SIGNED_RUNTIME_ARCHIVE`: genuine release runtime archive, with
   adjacent `.tar.gz.sha256` and `.tar.gz.bundle` evidence.
+- `MVM_TEST_SIGNED_RUNTIME_VERSION`: the genuine runtime release version,
+  matching the exporting binary's version.
 - `MVM_TEST_CANONICAL_ROOTFS`: existing sealed `rootfs.ext4`, beside its
   original `mvm-meta.json`, `rootfs.verity`, and raw signed `rootfs.roothash`.
 - `MVM_TEST_CANONICAL_OUTPUT`: a fresh, nonexistent output directory.
@@ -26,7 +27,9 @@ The operator supplies:
 
 The witness validates the descriptor against the built entrypoint, authenticates
 the published Linux and release runtime closure, and exports the existing image
-without resealing it. Current bundler `.verity(...)` retains the original raw
+without resealing it. Linux acquisition is workload-only; it neither requires
+unrelated builder boot helpers nor authorizes a builder boot.
+Current bundler `.verity(...)` retains the original raw
 signed root-hash member automatically. `.local_build()` stamps the signed local
 origin; no legacy local-build module or trust bypass is used.
 

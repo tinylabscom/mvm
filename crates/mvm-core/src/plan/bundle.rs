@@ -97,8 +97,9 @@ pub use mvm_contract::plan::environment::{
 use crate::arch::GuestArch;
 use crate::image_set::{
     BackendImageSupport, HostProtocolSupport, ImageSetError, ImageSetManifest, ImageSetRequirement,
-    ImageSetRole, RetiredGuestRuntimeRole, WorkloadImageProfile, check_protocol_compatibility,
-    require_complete, select_member, select_workload_image, validate_structure,
+    ImageSetRole, RetiredGuestRuntimeRole, WorkloadImageProfile,
+    check_workload_protocol_compatibility, require_complete, select_member, select_workload_image,
+    validate_structure,
 };
 use crate::packs::Sha256Hex;
 
@@ -1029,7 +1030,7 @@ pub fn check_boot_assets_for_backend(
     backend: &BackendImageSupport,
     host_protocols: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
-    check_protocol_compatibility(&boot.image_set.manifest, host_protocols)?;
+    check_workload_protocol_compatibility(&boot.image_set.manifest.compatibility, host_protocols)?;
     if boot.cli_runtime.is_some() {
         select_member(
             &boot.image_set.manifest,
@@ -1065,7 +1066,7 @@ pub fn check_embedded_image_set_for_backend(
     backend: &BackendImageSupport,
     host_protocols: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
-    check_protocol_compatibility(&embedded.manifest, host_protocols)?;
+    check_workload_protocol_compatibility(&embedded.manifest.compatibility, host_protocols)?;
     select_workload_image(
         &embedded.manifest,
         WorkloadImageProfile::DefaultTenant,
