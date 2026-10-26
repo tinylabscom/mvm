@@ -414,6 +414,7 @@ mod tests {
         assert!(read_cached_image_set_root(cache.path(), &moved_lock, &host, None).is_err());
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn public_cache_boundaries_refuse_unsigned_or_wrong_root_proofs() {
         let dir = tempfile::tempdir().unwrap();
@@ -443,7 +444,7 @@ mod tests {
         assert!(error.chain().any(|e| e.to_string().contains("digest")));
     }
 
-    #[cfg(feature = "manifest-verify")]
+    #[cfg(all(feature = "manifest-verify", feature = "host-state"))]
     #[test]
     fn application_resigning_cannot_authorize_replaced_kernel_and_linux_json() {
         use crate::image_set::{ImageSetManifest, ImageSetRole, WorkloadImageProfile};

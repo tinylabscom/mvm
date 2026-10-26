@@ -7,12 +7,16 @@
 //! refuses to seal such a manifest, and [`super::read_and_verify_bundle`]
 //! refuses to accept one.
 
+#[cfg(feature = "host-state")]
 use mvm_contract::plan::bundle::{
-    ArtifactRole, BundleManifest, BundleMember, BundleSecurityPosture,
-    ENVIRONMENT_MEMBER_MIN_SCHEMA, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES,
+    ArtifactRole, BundleManifest, BundleMember, ENVIRONMENT_MEMBER_MIN_SCHEMA,
     MAX_KERNEL_CMDLINE_BYTES,
 };
+use mvm_contract::plan::bundle::{
+    BundleSecurityPosture, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES,
+};
 use mvm_contract::plan::environment::{EnvironmentCapability, EnvironmentDescriptor};
+#[cfg(feature = "host-state")]
 use mvm_contract::plan::types::BuildProvenance;
 use mvm_contract::policy::security::AgentProfile;
 
@@ -54,6 +58,7 @@ impl BundleSizeBudget {
 
 /// Every check on a manifest's declarations: the size caps over its declared
 /// artifacts, then each declaration member.
+#[cfg(feature = "host-state")]
 pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), BundleVerifyError> {
     let mut budget = BundleSizeBudget::default();
     for artifact in &manifest.artifacts {
@@ -134,6 +139,7 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn declaration_class(member: &BundleMember) -> Option<&'static str> {
     match member {
         BundleMember::EmbeddedImageSet { .. } => None,
@@ -147,6 +153,7 @@ fn declaration_class(member: &BundleMember) -> Option<&'static str> {
     }
 }
 
+#[cfg(feature = "host-state")]
 fn validate_canonical_linux_proof(
     proof: &mvm_contract::plan::bundle::CanonicalLinuxProof,
     manifest: &BundleManifest,
@@ -211,6 +218,7 @@ fn validate_canonical_linux_proof(
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn validate_cli_runtime(
     runtime: &mvm_contract::plan::bundle::EmbeddedCliBootAssets,
     manifest: &BundleManifest,
@@ -282,6 +290,7 @@ fn validate_cli_runtime(
 
 /// Two postures in one bundle would leave the launcher to pick one, and
 /// whichever it picked the other was signed for nothing.
+#[cfg(feature = "host-state")]
 fn refuse_repeated_declarations(members: &[BundleMember]) -> Result<(), BundleVerifyError> {
     let mut seen: Vec<&'static str> = Vec::new();
     for class in members.iter().filter_map(declaration_class) {
@@ -293,6 +302,7 @@ fn refuse_repeated_declarations(members: &[BundleMember]) -> Result<(), BundleVe
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn validate_cmdline(cmdline: &str) -> Result<(), BundleVerifyError> {
     let malformed = |reason: String| Err(BundleVerifyError::MalformedCmdline { reason });
     if cmdline.trim().is_empty() {
@@ -312,6 +322,7 @@ fn validate_cmdline(cmdline: &str) -> Result<(), BundleVerifyError> {
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn validate_posture(
     posture: &BundleSecurityPosture,
     has_verity_binding: bool,
@@ -345,6 +356,7 @@ fn validate_posture(
 /// signed posture permits. A descriptor that requires any capability without a
 /// posture to measure it against is refused: there is nothing to say the
 /// publisher permitted it.
+#[cfg(feature = "host-state")]
 fn validate_environment(
     environment: &EnvironmentDescriptor,
     manifest: &BundleManifest,
@@ -485,6 +497,7 @@ fn posture_permits(posture: &BundleSecurityPosture, capability: EnvironmentCapab
 /// bundle carries must match it. Digests for outputs a bundle has no role for
 /// (`mvm_init`, `snapshot_base`) describe the build, not the archive, and are
 /// carried as recorded.
+#[cfg(feature = "host-state")]
 fn validate_provenance(
     provenance: &BuildProvenance,
     manifest: &BundleManifest,
@@ -523,7 +536,7 @@ fn validate_provenance(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-state"))]
 mod tests {
     use super::*;
     use mvm_contract::plan::bundle::{BUNDLE_SCHEMA_VERSION, BundleArtifact, KeyId, VerityInfo};

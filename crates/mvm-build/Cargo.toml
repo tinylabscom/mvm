@@ -36,7 +36,7 @@ mvm-contract.workspace = true
 # The builder-VM guest binaries and the contract shared with the host that
 # boots them; every module they own is re-exported from this crate.
 mvm-builder-guest.workspace = true
-mvm-core.workspace = true
+mvm-core = { workspace = true, features = ["host-state"] }
 mvm-http.workspace = true
 mvm-fs.workspace = true
 # Reads a builder image's boot ABI marker off the ext4 image on the host.

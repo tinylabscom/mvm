@@ -36,6 +36,9 @@ pub const FC_CI_ASSETS_VERSION: &str = "v1.15";
 /// The build-time override `MVM_BOOT_IMAGE_TAG` stays so a build can point at
 /// an unpublished tag without editing the lock; the lock is what every unset
 /// build gets.
+///
+/// Host-state: the train lock it reads is a host-side boot pin.
+#[cfg(feature = "host-state")]
 pub fn default_boot_image_tag() -> &'static str {
     match option_env!("MVM_BOOT_IMAGE_TAG") {
         Some(tag) => tag,

@@ -1339,6 +1339,7 @@ mod tests {
     ///
     /// [`OciDigest`]: crate::packs::OciDigest
     /// [`WorkloadAddress`]: crate::workload_address::WorkloadAddress
+    #[cfg(feature = "host-state")]
     #[test]
     fn checkpoint_digest_shape_overlaps_oci_digest_but_types_never_convert() {
         let m = digest_fixture_meta(vec![blob("rootfs.ext4", "aa")]);

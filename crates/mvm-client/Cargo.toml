@@ -58,7 +58,7 @@ manifest-verify = ["mvm-core/manifest-verify"]
 schema = ["dep:schemars", "mvm-contract/schema"]
 
 [dependencies]
-mvm-core = { workspace = true, features = ["client", "os-keyring"] }
+mvm-core = { workspace = true, features = ["client", "host-state", "os-keyring"] }
 # Persistent machine spec engine (`machine::persist::{load,overwrite,apply_patch,…}`)
 # + the VmBackend implementations. mvm-runtime does NOT depend on this crate, so
 # this edge is acyclic.

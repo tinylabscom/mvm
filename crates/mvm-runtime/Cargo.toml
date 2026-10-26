@@ -23,7 +23,7 @@ mvm-backends = { workspace = true }
 # `egress-ca`: `network_endpoint_spawn::build_egress_tls_delivery`
 # mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
 # guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
-mvm-core = { workspace = true, features = ["egress-ca", "os-keyring"] }
+mvm-core = { workspace = true, features = ["egress-ca", "host-state", "os-keyring"] }
 # The L3 policy core: the address allocator and the gateway's admitted
 # configuration shape. Acyclic HIGH->LOW — mvm-net deps only mvm-core and
 # mvm-contract.

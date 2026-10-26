@@ -16,7 +16,7 @@ authors.workspace = true
 substrate_server_category = "per-VM provider plumbing (backend-local vsock listeners)"
 
 [dependencies]
-mvm-core = { workspace = true }
+mvm-core = { workspace = true, features = ["host-state"] }
 # `CpuGrant` — the admitted CPU bound a driver hands to `mvm_core::spawn_scope`
 # when it spawns its per-VM process.
 mvm-contract = { workspace = true }
