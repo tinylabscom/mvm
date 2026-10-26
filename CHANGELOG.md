@@ -8,6 +8,7 @@ All notable changes to mvm are documented in this file.
 - **cli**: Launch signed Claude applications with an embedded exact-destination environment policy, defaulting to the baked entrypoint with bounded one-shot stdin (#4726)
 
 ### Changed
+- **core**: Gate host-only `mvm-core` modules behind the off-by-default `host-state` feature (#4728)
 - **ci**: Pin Linux CI and release jobs to ubuntu-24.04 (#4638, #4662)
 - **ci**: The merge queue runs only the fast gate; the heavy lanes run on push to main (#4720)
 - **ci**: Delete the miri, hvf-native, install-url-watch and site-isolation-watch workflows and the triggers that gated nothing (#4716)
@@ -16,6 +17,8 @@ All notable changes to mvm are documented in this file.
 - **release**: Publish the signed prerelease before e2e-docs and gate promotion on it (#4721)
 
 ### Fixed
+- **vmm**: Bound what a guest can make the vsock device allocate: oversize transmit chains are dropped and queued control replies are capped (#4735)
+- **hostd**: The UDP relay forwards inbound datagrams only from peers the guest has sent to, with the peer set bounded (#4737)
 - **bdd**: Gate the macOS HVF entrypoint scenarios to Firecracker (#4658, #4660, tracker #4655)
 - **bundle**: Keep the signed initramfs when its digest matches the release declaration (#4665)
 
