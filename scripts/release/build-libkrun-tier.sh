@@ -120,7 +120,6 @@ cargo build --release --target "$build_target" -p mvm-hostd \
 cp "target/$build_target/release/mvm-libkrun-supervisor" "$output_dir/"
 cp "$prefix/lib/libkrun.$libkrun_version.dylib" "$output_dir/lib/libkrun.1.dylib"
 cp "$prefix/lib/libkrunfw.$libkrunfw_abi.dylib" "$output_dir/lib/"
-ln -s "libkrunfw.$libkrunfw_abi.dylib" "$output_dir/lib/libkrunfw.dylib"
 
 supervisor="$output_dir/mvm-libkrun-supervisor"
 libkrun="$output_dir/lib/libkrun.1.dylib"
@@ -153,6 +152,10 @@ rewrite_dependency "$libkrun"
 install_name_tool -add_rpath '@executable_path/lib' "$supervisor"
 install_name_tool -add_rpath '@loader_path' "$libkrun"
 
+# Keep the basename libkrun opens, but materialize it after loader fixups.
+# Separate regular files survive strict archive inspection and independent signing.
+cp "$libkrunfw" "$output_dir/lib/libkrunfw.dylib"
+
 cp "$libkrun_src/LICENSE" "$output_dir/licenses/libkrun-APACHE-2.0.txt"
 cp "$libkrunfw_src/LICENSE-LGPL-2.1-only" \
   "$output_dir/licenses/libkrunfw-LGPL-2.1-only.txt"
@@ -176,7 +179,7 @@ this mvm release's source tree. The licence texts shipped beside this notice
 govern the corresponding components.
 EOF
 
-for binary in "$supervisor" "$libkrun" "$libkrunfw"; do
+for binary in "$supervisor" "$libkrun" "$libkrunfw" "$output_dir/lib/libkrunfw.dylib"; do
   dependencies="$(otool -L "$binary")"
   load_commands="$(otool -l "$binary")"
   if grep -E '/opt/homebrew|/usr/local|mvm-libkrun-tier' \
