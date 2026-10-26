@@ -144,6 +144,75 @@ fn authenticated_boundary_preserves_manifest_and_resumes_exactly() {
     );
 }
 
+/// The three lifecycle operations stay independent: an expired read signs
+/// nothing and removes nothing, a not-due reconciliation signs nothing and
+/// impairs no valid read, and authorized cleanup removes only the payload
+/// while the verification metadata keeps verifying.
+#[test]
+fn read_expiry_scheduling_and_cleanup_are_separate_operations() {
+    let f = Fixture::new(true);
+    let dir = f.root.path().join("capture");
+    let manifest_bytes = std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap();
+    let no_retirement = || {
+        !authenticated_retirement(
+            f.emitter.audit_dir(),
+            &f.emitter.verifying_key(),
+            &f.manifest,
+        )
+        .unwrap()
+    };
+    // The fixture's deadline is far in the past, so the real read path
+    // refuses it as expired before any decryption key is consulted.
+    let key = mvm_core::crypto::aead::Key::random();
+    assert!(matches!(
+        mvm_core::transcript::export(&f.manifest, &dir, &key),
+        Err(mvm_core::transcript::TranscriptError::PayloadExpired)
+    ));
+    assert!(f.payload().exists());
+    assert_eq!(
+        std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap(),
+        manifest_bytes
+    );
+    assert!(
+        no_retirement(),
+        "a read must never sign retirement evidence"
+    );
+    // A reconciliation pass before the deadline is a no-op that leaves the
+    // still-valid read window intact.
+    assert_eq!(
+        reconcile_capture(f.context(), 604_999).unwrap(),
+        RetirementOutcome::NotDue
+    );
+    assert!(f.payload().exists());
+    assert!(f.manifest.check_readable_at(604_999).is_ok());
+    assert!(no_retirement());
+    // Authorized cleanup at the deadline removes only the payload.
+    assert_eq!(
+        reconcile_capture(f.context(), 605_000).unwrap(),
+        RetirementOutcome::Retired {
+            removed_segments: 1
+        }
+    );
+    assert!(!f.payload().exists());
+    let kept: TranscriptManifest =
+        serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap()).unwrap();
+    assert_eq!(kept, f.manifest);
+    mvm_core::transcript::verify_sealed_root(&kept).unwrap();
+    assert!(
+        authenticated_retirement(
+            f.emitter.audit_dir(),
+            &f.emitter.verifying_key(),
+            &f.manifest
+        )
+        .unwrap()
+    );
+    // Payload removal never reopens the read window.
+    assert!(matches!(
+        mvm_core::transcript::export(&f.manifest, &dir, &key),
+        Err(mvm_core::transcript::TranscriptError::PayloadExpired)
+    ));
+}
+
 #[test]
 fn authenticated_opening_is_exact_and_preserves_historical_recovery_attribution() {
     use mvm_core::transcript::evidence::{
