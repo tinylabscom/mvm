@@ -124,15 +124,7 @@ fn open_refill_log(path: &Path) -> Result<std::fs::File> {
 /// the launch that scheduled it. The helper is detached, so the trace file the
 /// warm claim writes (`MVM_HVF_AGENT_DEBUG`) carries these.
 fn refill_phase(started: std::time::Instant, phase: &'static str) {
-    let elapsed_us = started.elapsed().as_micros();
-    let unix_us = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_micros());
-    tracing::debug!(target: "mvm_cli::pool_refill", phase, elapsed_us, "standby refill phase");
-    mvm_vmm::agent_debug::line(
-        "pool-refill",
-        format_args!("phase={phase} elapsed_us={elapsed_us} unix_us={unix_us}"),
-    );
+    mvm_vmm::agent_debug::phase("pool-refill", started, format_args!("phase={phase}"));
 }
 
 /// `mvmctl pool refill`: prepare the standby a run asked for, within budget,

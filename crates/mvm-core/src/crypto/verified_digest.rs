@@ -98,6 +98,9 @@ mod imp {
     /// under and the digest of that read.
     type Registry = HashMap<(u64, u64), (Identity, String)>;
 
+    /// Bounds a long-lived process, which sees a new inode per launch.
+    const MAX_ENTRIES: usize = 4096;
+
     static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
     fn identity_of(meta: &Metadata) -> Option<Identity> {
@@ -113,7 +116,12 @@ mod imp {
     }
 
     /// Whether the newest of mtime and ctime is at least `window` older than now.
+    /// A ctime on a whole second means a filesystem too coarse for `window` to
+    /// outlast its tick (the cost of a false positive is one more read).
     fn settled(identity: &Identity, window: Duration) -> bool {
+        if identity.ctime.1 == 0 {
+            return false;
+        }
         let stamp = |(secs, nanos): (i64, i64)| {
             Duration::new(
                 u64::try_from(secs).unwrap_or(u64::MAX),
@@ -136,8 +144,16 @@ mod imp {
 
     fn insert(identity: Identity, digest: &str) {
         if let Ok(mut registry) = REGISTRY.lock() {
-            registry.insert((identity.dev, identity.ino), (identity, digest.to_owned()));
+            remember(&mut registry, identity, digest);
         }
+    }
+
+    fn remember(registry: &mut Registry, identity: Identity, digest: &str) {
+        // Entries only save a re-read, so dropping them all is always safe.
+        if registry.len() >= MAX_ENTRIES {
+            registry.clear();
+        }
+        registry.insert((identity.dev, identity.ino), (identity, digest.to_owned()));
     }
 
     /// The shared decision. `read` digests the file; `identity_now` re-reads its
@@ -202,6 +218,38 @@ mod imp {
             },
             || file.metadata().ok().and_then(|meta| identity_of(&meta)),
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn identity(ino: u64, ctime_nanos: i64) -> Identity {
+            Identity {
+                dev: u64::MAX,
+                ino,
+                size: 0,
+                mtime: (1, 1),
+                ctime: (1, ctime_nanos),
+                mode: 0o400,
+                uid: 0,
+            }
+        }
+
+        #[test]
+        fn a_whole_second_ctime_is_never_settled() {
+            assert!(!settled(&identity(0, 0), Duration::ZERO));
+            assert!(settled(&identity(0, 5), Duration::ZERO));
+        }
+
+        #[test]
+        fn the_registry_is_bounded() {
+            let mut registry = Registry::new();
+            for ino in 0..(MAX_ENTRIES as u64 * 2) {
+                remember(&mut registry, identity(ino, 5), "d");
+            }
+            assert!(registry.len() <= MAX_ENTRIES);
+        }
     }
 }
 

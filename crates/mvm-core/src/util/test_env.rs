@@ -16,16 +16,26 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 pub struct TestEnv {
     _guard: MutexGuard<'static, ()>,
     saved: Vec<(OsString, Option<OsString>)>,
+    /// Dropped after `Drop` has put the real environment back.
+    _home: tempfile::TempDir,
 }
 
 impl TestEnv {
+    /// Takes the lock and points `MVM_HOME` and `HOME` at a fresh temp dir, so a
+    /// test that never mentions a home still cannot touch the developer's keys,
+    /// audit chain or caches. Call [`TestEnv::isolate_mvm_home`] or [`TestEnv::set`]
+    /// to use a directory of the test's own.
     pub fn new() -> Self {
-        Self {
+        let mut env = Self {
             _guard: ENV_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             saved: Vec::new(),
-        }
+            _home: tempfile::tempdir().expect("temp home for a test"),
+        };
+        let home = env._home.path().to_owned();
+        env.isolate_mvm_home(home);
+        env
     }
 
     pub fn set<K, V>(&mut self, key: K, value: V)
@@ -157,23 +167,23 @@ mod tests {
         // the final restore check would then compare against that thread's
         // value rather than the value this thread will actually restore.
         let mut env = TestEnv::new();
+        // `new` already isolates, so these are the guard's own temp home.
         let before_home = std::env::var_os("HOME");
         let before_mvm_home = std::env::var_os("MVM_HOME");
+        assert_eq!(before_home, before_mvm_home);
+        assert_ne!(before_home.as_deref(), Some(root.as_ref()));
 
-        {
-            env.isolate_mvm_home(root);
-            assert_eq!(std::env::var("MVM_HOME").as_deref(), Ok(root));
-            // The whole point: HOME moves too, so the MVM_HOME-ignoring
-            // default-cache resolvers cannot reach the real one.
-            assert_eq!(std::env::var("HOME").as_deref(), Ok(root));
-        }
+        env.isolate_mvm_home(root);
+        assert_eq!(std::env::var("MVM_HOME").as_deref(), Ok(root));
+        // The whole point: HOME moves too, so the MVM_HOME-ignoring
+        // default-cache resolvers cannot reach the real one.
+        assert_eq!(std::env::var("HOME").as_deref(), Ok(root));
 
+        // Both roots go back to what the guard set on entry, not to root.
         drop(env);
-        // Re-acquire the guard for the restore assertions too: without it a
-        // concurrent mutation could land between the drop and the read.
         let _guard = TestEnv::new();
-        assert_eq!(std::env::var_os("MVM_HOME"), before_mvm_home);
-        assert_eq!(std::env::var_os("HOME"), before_home);
+        assert_ne!(std::env::var("MVM_HOME").as_deref(), Ok(root));
+        assert_ne!(std::env::var("HOME").as_deref(), Ok(root));
     }
 
     #[test]

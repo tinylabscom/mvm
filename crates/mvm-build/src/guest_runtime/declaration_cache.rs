@@ -69,6 +69,7 @@ pub(super) fn store(
     if mvm_core::private_fs::ensure_private_dir(&dir).is_err() {
         return;
     }
+    prune_stale(&dir, &path(cache_root, &id));
     // Write beside the entry and rename, so a reader sees all of it or none.
     let Ok(mut staged) = tempfile::NamedTempFile::new_in(&dir) else {
         return;
@@ -77,6 +78,18 @@ pub(super) fn store(
         return;
     }
     let _ = staged.persist(path(cache_root, &id));
+}
+
+/// Entries are named for one `mvmctl` build, so a rebuilt binary leaves its
+/// predecessor's behind. A week old is no build in use.
+fn prune_stale(dir: &Path, keep: &Path) {
+    const STALE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let age = entry.metadata().and_then(|m| m.modified()).ok();
+        if entry.path() != keep && age.and_then(|t| t.elapsed().ok()) > Some(STALE) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn path(cache_root: &Path, id: &str) -> PathBuf {
@@ -112,19 +125,16 @@ fn message(id: &str, declaration: &RuntimeAssembly) -> Option<Vec<u8>> {
     Some(message)
 }
 
-/// The host signing key, only if it already exists and is private. The key is
-/// never created here: a host that has not signed a plan yet simply does not
-/// cache.
+/// The host signing key, only if both halves already exist, are private and
+/// agree. The key is never created here: a host that has not signed a plan yet
+/// simply does not cache.
 fn host_key() -> Option<SigningKey> {
-    let path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
-    let metadata = std::fs::symlink_metadata(&path).ok()?;
-    if !metadata.file_type().is_file()
-        || mvm_core::private_fs::mode_bits(&path, &metadata).ok()? & 0o077 != 0
-    {
-        return None;
-    }
-    let seed: [u8; 32] = std::fs::read(&path).ok()?.try_into().ok()?;
-    Some(SigningKey::from_bytes(&seed))
+    let keys = mvm_core::config::mvm_keys_dir();
+    let loaded = mvm_core::crypto::ed25519_keypair::load_existing(
+        &keys.join("host-signer.ed25519"),
+        &keys.join("host-signer.pub"),
+    );
+    Some(loaded.ok()?.0)
 }
 
 #[cfg(test)]
@@ -160,6 +170,15 @@ mod tests {
         let path = keys.join("host-signer.ed25519");
         std::fs::write(&path, [seed; 32]).unwrap();
         mvm_core::private_fs::set_mode(&path, 0o600).unwrap();
+        let public = keys.join("host-signer.pub");
+        std::fs::write(
+            &public,
+            SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .to_bytes(),
+        )
+        .unwrap();
+        mvm_core::private_fs::set_mode(&public, 0o644).unwrap();
     }
 
     #[test]
@@ -240,5 +259,53 @@ mod tests {
             load(cache.path(), &"e".repeat(64), GuestArch::Aarch64),
             None
         );
+    }
+
+    #[test]
+    fn a_secret_that_does_not_match_the_public_key_is_not_used() {
+        let (_env, _home) = isolated_home();
+        with_host_key(7);
+        let public = mvm_core::config::mvm_keys_dir().join("host-signer.pub");
+        std::fs::write(
+            &public,
+            SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes(),
+        )
+        .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        store(
+            cache.path(),
+            &"e".repeat(64),
+            GuestArch::Aarch64,
+            &declaration(),
+        );
+        assert!(!cache.path().join(DIR).exists());
+    }
+
+    #[test]
+    fn a_week_old_entry_of_another_build_is_pruned_and_a_fresh_one_kept() {
+        let (_env, _home) = isolated_home();
+        with_host_key(7);
+        let cache = tempfile::tempdir().unwrap();
+        let dir = cache.path().join(DIR);
+        mvm_core::private_fs::ensure_private_dir(&dir).unwrap();
+        let old = dir.join("old.json");
+        let fresh = dir.join("fresh.json");
+        std::fs::write(&old, b"{}").unwrap();
+        std::fs::write(&fresh, b"{}").unwrap();
+        let eight_days = std::time::Duration::from_secs(8 * 24 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - eight_days)
+            .unwrap();
+        store(
+            cache.path(),
+            &"e".repeat(64),
+            GuestArch::Aarch64,
+            &declaration(),
+        );
+        assert!(!old.exists());
+        assert!(fresh.exists());
     }
 }

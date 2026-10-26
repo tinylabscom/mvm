@@ -27,17 +27,10 @@ pub(super) fn record_phase(
 /// phases. A refill runs as a detached process, so the same trace file the claim
 /// writes (`MVM_HVF_AGENT_DEBUG`) carries these.
 pub(super) fn record_standby_phase(started: Instant, scope: &'static str, phase: &'static str) {
-    let elapsed_us = started.elapsed().as_micros();
-    tracing::debug!(
-        target: "mvm_runtime::standby_spawn",
-        scope,
-        phase,
-        elapsed_us,
-        "standby spawn phase"
-    );
-    mvm_vmm::agent_debug::line(
+    mvm_vmm::agent_debug::phase(
         "standby-spawn",
-        format_args!("scope={scope} phase={phase} elapsed_us={elapsed_us}"),
+        started,
+        format_args!("scope={scope} phase={phase}"),
     );
 }
 
