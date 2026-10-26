@@ -422,6 +422,42 @@ fn an_unpublished_guest_runtime_is_adopted_from_beside_mvmctl() {
     }
 }
 
+/// A launch refuses a runtime with no release signature, which is all a dry run
+/// can stage. The smoke must not report that refusal as a failure of the
+/// archive, and must not claim a boot it never made.
+#[test]
+fn an_unsigned_guest_runtime_is_checked_but_not_booted() {
+    let smoke = Smoke::new();
+    let output = run_with_guest_runtime(&smoke, &runtime_adopting_mvmctl());
+
+    assert!(output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    assert!(transcript.contains("PASS (boots skipped)"), "{transcript}");
+    assert!(!transcript.contains("its first microVM"), "{transcript}");
+}
+
+/// The signed candidate a tag run stages is booted as before.
+#[test]
+fn a_signed_guest_runtime_is_booted() {
+    let smoke = Smoke::new();
+    let archive = release_archive(smoke.dir.path(), &[("mvmctl", &runtime_adopting_mvmctl())]);
+    let runtime = smoke.dir.path().join("mvm-guest-bins-v1.2.3.tar.gz");
+    for suffix in ["", ".sha256", ".bundle", ".sha256.bundle"] {
+        std::fs::write(format!("{}{suffix}", runtime.display()), b"x").unwrap();
+    }
+
+    let output = smoke.run_archive_with(
+        &archive,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", runtime.to_str().unwrap())],
+    );
+
+    assert!(output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    assert!(!transcript.contains("boots skipped"), "{transcript}");
+    assert!(transcript.contains("PASS: mvmctl 1.2.3"), "{transcript}");
+}
+
 /// A launch authenticates the runtime its pieces came from, so the checksum and
 /// both signature bundles must be staged with the archive; the bare archive is
 /// refused at the first boot.

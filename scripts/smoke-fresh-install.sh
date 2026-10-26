@@ -392,6 +392,35 @@ keep_vm_logs() {
   done
 }
 
+check_doctor_names_runtime() {
+  section "guest runtime the boots used (mvmctl doctor)"
+  if bounded "$DOCTOR_BUDGET" "$ROOT/doctor.out" "$ROOT/doctor.err" mvmctl doctor; then
+    doctor_status=0
+  else
+    doctor_status=$?
+  fi
+  [ "$doctor_status" -ne 124 ] || fail "mvmctl doctor did not finish within ${DOCTOR_BUDGET}s"
+  runtime_line="$(grep -F "release archive $runtime_name" "$ROOT/doctor.out" "$ROOT/doctor.err" | head -n 1 || true)"
+  log "${runtime_line:-(no doctor line names release archive $runtime_name)}"
+  [ -n "$runtime_line" ] \
+    || fail "mvmctl doctor does not name the release guest runtime $runtime_name as the archive the launch pieces came from"
+  case "$runtime_line" in
+    *"image set"*) fail "mvmctl doctor reports a launch piece from the image set instead of $runtime_name: $runtime_line" ;;
+  esac
+}
+
+# A launch authenticates the runtime its pieces came from against the release
+# signature, so a runtime staged without its bundle (a dry run signs none) is
+# adopted and assembled by bootstrap but can never be booted. Say so and stop
+# after the checks that still apply, rather than failing on a refusal that
+# is the designed behaviour.
+if [ -n "$GUEST_RUNTIME" ] && [ ! -f "$GUEST_RUNTIME.bundle" ]; then
+  check_doctor_names_runtime
+  verdict "PASS (boots skipped): $INSTALLED installed and bootstrap assembled its launch pieces from the unsigned guest runtime $runtime_name; an unsigned runtime cannot be booted, so no microVM was started"
+  printf '[smoke] transcript: %s\n' "$TRANSCRIPT" >&2
+  exit 0
+fi
+
 # Boot a microVM and require it to print a token on stdout: $1 names the step
 # in the transcript and in its failure, $2 is its budget, $3 the token, $4 the
 # stem of its output files under the throwaway root, and the rest is the
@@ -530,20 +559,7 @@ boot_pass egress
 # guest runtime adopted, that is the pieces assembled from it and nothing from
 # the image set, and doctor reads which archive each piece names.
 if [ -n "$GUEST_RUNTIME" ]; then
-  section "guest runtime the boots used (mvmctl doctor)"
-  if bounded "$DOCTOR_BUDGET" "$ROOT/doctor.out" "$ROOT/doctor.err" mvmctl doctor; then
-    doctor_status=0
-  else
-    doctor_status=$?
-  fi
-  [ "$doctor_status" -ne 124 ] || fail "mvmctl doctor did not finish within ${DOCTOR_BUDGET}s"
-  runtime_line="$(grep -F "release archive $runtime_name" "$ROOT/doctor.out" "$ROOT/doctor.err" | head -n 1 || true)"
-  log "${runtime_line:-(no doctor line names release archive $runtime_name)}"
-  [ -n "$runtime_line" ] \
-    || fail "mvmctl doctor does not name the release guest runtime $runtime_name as the archive the launch pieces came from"
-  case "$runtime_line" in
-    *"image set"*) fail "mvmctl doctor reports a launch piece from the image set instead of $runtime_name: $runtime_line" ;;
-  esac
+  check_doctor_names_runtime
 fi
 
 section "timings"
