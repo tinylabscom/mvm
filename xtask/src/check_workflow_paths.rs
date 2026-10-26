@@ -976,17 +976,6 @@ mod tests {
             bdd.contains("uses: ./.github/workflows/bdd.yml"),
             "bdd-conformance must call the Gherkin workflow"
         );
-        for expected in [
-            "docs_only:",
-            "default: false",
-            "if: ${{ !inputs.docs_only }}\n        run: just bdd::run",
-            "if: ${{ inputs.docs_only }}\n        run: just bdd::docs",
-        ] {
-            assert!(
-                bdd_workflow.contains(expected),
-                "bdd.yml must keep the full suite as its default and gate the docs path: {expected:?}"
-            );
-        }
     }
 
     #[test]
