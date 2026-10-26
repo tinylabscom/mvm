@@ -26,8 +26,8 @@ merge_min=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.min_
 #              or last). Safe only because every pull request passed the fast
 #              gate on its head; the queue re-runs only the compile and lint
 #              lanes (Lint core, Build workspace tests) against the integrated
-#              commit, and the rest of the gate runs after the merge, on a
-#              push to main.
+#              commit; the rest of ci.yml and the slow lanes in ci-main.yml
+#              run after the merge, on a push to main.
 #
 # Both stay admitted so that switching the live ruleset and landing a workflow
 # change can happen in either order without failing every queue run.

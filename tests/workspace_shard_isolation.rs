@@ -17,7 +17,7 @@ fn dedicated_linux_runners_use_their_cpus_without_changing_shared_host_limits() 
 
 #[test]
 fn feature_suites_have_two_complete_nonoverlapping_partitions() {
-    let ci = fs::read_to_string(".github/workflows/ci.yml").unwrap();
+    let ci = fs::read_to_string(".github/workflows/ci-main.yml").unwrap();
     let features = ci
         .split("  lint-features:\n")
         .nth(1)
@@ -58,7 +58,7 @@ fn feature_suites_have_two_complete_nonoverlapping_partitions() {
 #[test]
 fn workspace_workers_do_not_recompile_for_queue_owned_extras() {
     let worker = fs::read_to_string(".github/workflows/workspace-shard.yml").unwrap();
-    let ci = fs::read_to_string(".github/workflows/ci.yml").unwrap();
+    let ci = fs::read_to_string(".github/workflows/ci-main.yml").unwrap();
     let extras = ci
         .split("  test-workspace-extras:\n")
         .nth(1)
@@ -81,7 +81,7 @@ fn workspace_workers_do_not_recompile_for_queue_owned_extras() {
 
 #[test]
 fn arm_suite_builds_only_after_its_final_environment_is_set() {
-    let ci = fs::read_to_string(".github/workflows/ci.yml").unwrap();
+    let ci = fs::read_to_string(".github/workflows/ci-main.yml").unwrap();
     let arm = ci
         .split("  test-workspace-aarch64:\n")
         .nth(1)

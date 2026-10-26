@@ -891,7 +891,11 @@ fn perf_budget_scenario_prepares_its_parent_immediately_before_launch() {
 
 #[test]
 fn hosted_ubuntu_ci_uses_explicit_release_labels() {
-    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    let ci = ["ci.yml", "ci-main.yml"]
+        .map(|name| {
+            fs::read_to_string(format!(".github/workflows/{name}")).expect("read CI workflow")
+        })
+        .join("\n");
     // This is a text guard; historical alias mentions use full-line comments.
     let moving_alias = ci
         .lines()
@@ -920,7 +924,11 @@ fn hosted_ubuntu_ci_uses_explicit_release_labels() {
 
 #[test]
 fn guest_binary_producer_lanes_install_the_cross_toolchain_before_tests() {
-    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    let ci = ["ci.yml", "ci-main.yml"]
+        .map(|name| {
+            fs::read_to_string(format!(".github/workflows/{name}")).expect("read CI workflow")
+        })
+        .join("\n");
     for job in ["test-workspace-build", "test-workspace-aarch64"] {
         let body = job_block(&ci, job);
         let install = body

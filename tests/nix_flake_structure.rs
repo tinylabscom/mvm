@@ -1491,7 +1491,7 @@ fn nix_flake_uses_the_builder_workspace_override_for_build_backed_checks() {
 
 #[test]
 fn ci_builds_the_guest_rootfs_package_budget() {
-    let path = repo_dir().join(".github/workflows/ci.yml");
+    let path = repo_dir().join(".github/workflows/ci-main.yml");
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
 

@@ -141,6 +141,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     for (label, path) in [
         ("Cargo.toml", workspace.join("Cargo.toml")),
         ("ci.yml", workflows.join("ci.yml")),
+        ("ci-main.yml", workflows.join("ci-main.yml")),
     ] {
         validate_retired_builder_feature_references(label, &std::fs::read_to_string(path)?)?;
     }
