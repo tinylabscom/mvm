@@ -346,7 +346,7 @@ jobs:
       - name: Install libkrun build dependencies
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
         shell: bash
-        run: brew install make llvm flex bison gnu-sed gnu-tar xz
+        run: brew install make llvm lld flex bison gnu-sed gnu-tar xz
 
       - name: Build libkrun release tier
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
@@ -356,11 +356,12 @@ jobs:
         shell: bash
         run: |
           llvm_prefix="$(brew --prefix llvm)"
+          lld_prefix="$(brew --prefix lld)"
           flex_prefix="$(brew --prefix flex)"
           bison_prefix="$(brew --prefix bison)"
           gnu_sed_prefix="$(brew --prefix gnu-sed)"
           gnu_tar_prefix="$(brew --prefix gnu-tar)"
-          export PATH="${llvm_prefix}/bin:${flex_prefix}/bin:${bison_prefix}/bin:${gnu_sed_prefix}/libexec/gnubin:${gnu_tar_prefix}/libexec/gnubin:${PATH}"
+          export PATH="${llvm_prefix}/bin:${lld_prefix}/bin:${flex_prefix}/bin:${bison_prefix}/bin:${gnu_sed_prefix}/libexec/gnubin:${gnu_tar_prefix}/libexec/gnubin:${PATH}"
           scripts/release/build-libkrun-tier.sh \
             "target/${BUILD_TARGET}/release/libkrun-tier" "${BUILD_TARGET}"
 
