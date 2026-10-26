@@ -30,3 +30,6 @@ Messages are length-limited before allocation or dispatch.
 Run `cargo test -p mvm-gpu` for dispatch, backend, and endpoint tests.
 Run `cargo clippy -p mvm-gpu --all-targets -- -D warnings` for lint checks.
 Native-driver tests require compatible host libraries and hardware.
+
+The opt-in [native NVIDIA witness](NATIVE-WITNESS.md) documents the C shim
+probe, bounded runner, CPU-only checks, and required hardware evidence.
