@@ -1164,6 +1164,13 @@ pub fn mvm_audit_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("audit")
 }
 
+/// Where the host remembers the nonces of externally signed plans it has
+/// admitted: `<mvm_home>/plan-nonces`. Private to the user, like the audit chain
+/// it protects the admission of.
+pub fn plan_nonce_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("plan-nonces")
+}
+
 /// Published Merkle transparency-log root for a tenant's audit chain:
 /// `<mvm_home>/audit/<tenant>.root.json`. Sibling to the `<tenant>.jsonl`
 /// chain the root is computed over; the host writes it and an external
