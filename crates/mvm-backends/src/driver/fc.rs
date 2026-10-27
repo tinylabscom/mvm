@@ -976,6 +976,7 @@ impl VmmDriver for FcDriver {
         &self,
         req: &ChildForkRequest<'_>,
     ) -> std::result::Result<(), StandbyError> {
+        let started = std::time::Instant::now();
         if !req.child_dir.is_dir() {
             return Err(StandbyError::ClaimFailed(format!(
                 "resume preloaded child '{}': state dir {} is missing",
@@ -997,10 +998,12 @@ impl VmmDriver for FcDriver {
                 req.child_vm_name
             ))
         })?;
+        mvm_vmm::agent_debug::phase("fc-resume", started, "phase=channels_armed");
         let devices = crate::fc::host::fork_devices_for(req.child_vm_name, req.child_dir)
             .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))?;
         let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"))
             .forking_onto(devices);
+        mvm_vmm::agent_debug::phase("fc-resume", started, "phase=devices_built");
         crate::fc::host::resume_preloaded_fork_child(
             &io,
             req.child_dir,
