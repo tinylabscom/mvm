@@ -375,6 +375,12 @@ pub struct CliWorld {
     pub snapshot_source_bytes: Option<Vec<u8>>,
     /// Path of the most recently materialized instance.
     pub snapshot_instance_path: Option<PathBuf>,
+    /// Source directory tree for the chained-manifest (v2) scenario.
+    pub snapshot_tree_path: Option<PathBuf>,
+    /// The chain-stored child snapshot's id and the path it was cloned into.
+    pub snapshot_child_id: Option<SnapshotId>,
+    /// Where the chain scenario's mutated child tree lives.
+    pub snapshot_child_path: Option<PathBuf>,
     /// Root tempdir backing the warm-claim scenario's checkpoint + snapshot
     /// stores and standby pool. Kept alive for the scenario's duration.
     pub warm_claim_store_root: Option<tempfile::TempDir>,

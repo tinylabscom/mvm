@@ -40,7 +40,7 @@ on read, so warm-pool state is addressed by content rather than mutable names.
 | `initramfs` | Initramfs construction and inspection |
 | `overlay` | Runtime overlay selection and integrity checks |
 | `clone` | Reflink/copy-on-write cloning |
-| `hash` / `snapshot_store` | Content identity and durable snapshots |
+| `hash` / `manifest` / `snapshot_store` | Content identity and durable snapshots; `manifest` is the chunked v2 form that lets a CoW-chain child reuse its parent's chunk digests where the kernel proves the bytes unchanged |
 | `extension_image` / `sdk_sidecar` | Auxiliary guest image assembly |
 | `trusted_snapshot` | Platform-backed trusted snapshot support |
 
@@ -49,7 +49,8 @@ on read, so warm-pool state is addressed by content rather than mutable names.
 Registry and archive input is untrusted. Paths are normalized before writes,
 digests are checked before content is trusted, allocations are capped, and
 special files or traversal attempts are rejected. The crate denies unsafe code
-except for small reviewed platform calls in the cloning implementation.
+except for small reviewed platform calls in the cloning and extent-map
+implementations.
 
 ## Developing
 

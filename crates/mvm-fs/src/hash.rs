@@ -8,7 +8,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use tracing::instrument;
@@ -44,27 +44,52 @@ pub fn hash_source(source: &Path) -> io::Result<String> {
 /// bytes (see [`os_str_bytes`]) rather than through a lossy UTF-8
 /// conversion, so distinct non-UTF-8 filenames never collide.
 fn hash_dir(root: &Path) -> io::Result<String> {
-    let mut entries: Vec<(Vec<u8>, &'static str, Vec<u8>)> = Vec::new();
-    walk_relative(root, &[], &mut entries)?;
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut entries = walk_tree(root)?;
+    entries.sort_by(|a, b| a.rel.cmp(&b.rel));
 
     let mut hasher = Sha256::new();
-    for (relpath, kind, payload) in &entries {
-        hasher.update(relpath);
+    for entry in &entries {
+        let (kind, payload): (&'static str, Vec<u8>) = match &entry.kind {
+            WalkEntryKind::Dir => ("d", Vec::new()),
+            WalkEntryKind::File(abs) => ("f", compute_file_sha256(abs)?.into_bytes()),
+            WalkEntryKind::Symlink(target) => ("l", target.clone()),
+        };
+        hasher.update(&entry.rel);
         hasher.update(b"\0");
         hasher.update(kind.as_bytes());
         hasher.update(b"\0");
-        hasher.update(payload);
+        hasher.update(&payload);
         hasher.update(b"\n");
     }
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn walk_relative(
-    abs_dir: &Path,
-    rel_prefix: &[u8],
-    out: &mut Vec<(Vec<u8>, &'static str, Vec<u8>)>,
-) -> io::Result<()> {
+/// One entry of a directory walk: the `/`-joined relative path as raw bytes
+/// plus whatever the walk could learn without reading file contents.
+pub(crate) struct WalkEntry {
+    pub(crate) rel: Vec<u8>,
+    pub(crate) kind: WalkEntryKind,
+}
+
+pub(crate) enum WalkEntryKind {
+    Dir,
+    /// The absolute path, for whoever hashes the contents.
+    File(PathBuf),
+    /// The symlink target as raw bytes.
+    Symlink(Vec<u8>),
+}
+
+/// Recursively collect every entry under `root` in readdir order (callers
+/// sort). File contents are not read. Other inode types (fifo/socket/device)
+/// have no stable content to hash and are skipped, mirroring
+/// `clone::reflink_or_copy_dir`.
+pub(crate) fn walk_tree(root: &Path) -> io::Result<Vec<WalkEntry>> {
+    let mut out = Vec::new();
+    walk_relative(root, &[], &mut out)?;
+    Ok(out)
+}
+
+fn walk_relative(abs_dir: &Path, rel_prefix: &[u8], out: &mut Vec<WalkEntry>) -> io::Result<()> {
     for entry in fs::read_dir(abs_dir)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -72,17 +97,23 @@ fn walk_relative(
         let rel_bytes = join_relative(rel_prefix, &entry.file_name());
 
         if file_type.is_dir() {
-            out.push((rel_bytes.clone(), "d", Vec::new()));
+            out.push(WalkEntry {
+                rel: rel_bytes.clone(),
+                kind: WalkEntryKind::Dir,
+            });
             walk_relative(&abs_path, &rel_bytes, out)?;
         } else if file_type.is_file() {
-            let digest = compute_file_sha256(&abs_path)?;
-            out.push((rel_bytes, "f", digest.into_bytes()));
+            out.push(WalkEntry {
+                rel: rel_bytes,
+                kind: WalkEntryKind::File(abs_path),
+            });
         } else if file_type.is_symlink() {
             let target = fs::read_link(&abs_path)?;
-            out.push((rel_bytes, "l", os_str_bytes(target.as_os_str())));
+            out.push(WalkEntry {
+                rel: rel_bytes,
+                kind: WalkEntryKind::Symlink(os_str_bytes(target.as_os_str())),
+            });
         }
-        // Other inode types (fifo/socket/device) have no stable content to
-        // hash and are skipped, mirroring `clone::reflink_or_copy_dir`.
     }
     Ok(())
 }
@@ -112,6 +143,19 @@ fn os_str_bytes(s: &OsStr) -> Vec<u8> {
 #[cfg(not(unix))]
 fn os_str_bytes(s: &OsStr) -> Vec<u8> {
     s.to_string_lossy().into_owned().into_bytes()
+}
+
+/// The inverse of [`os_str_bytes`], for resolving a walked relative path
+/// back to a filesystem path (e.g. the base tree's copy of an entry).
+#[cfg(unix)]
+pub(crate) fn os_str_from_bytes(bytes: &[u8]) -> &OsStr {
+    use std::os::unix::ffi::OsStrExt;
+    OsStr::from_bytes(bytes)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn os_str_from_bytes(bytes: &[u8]) -> std::borrow::Cow<'_, OsStr> {
+    std::borrow::Cow::Owned(String::from_utf8_lossy(bytes).into_owned().into())
 }
 
 #[cfg(test)]
