@@ -314,7 +314,7 @@ mod linux {
         });
         // SAFETY: `buf` is a valid, exclusively owned, correctly sized fiemap
         // buffer that outlives the ioctl; the fd is open for the call.
-        let rc = unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP, &mut *buf) };
+        let rc = unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut *buf) };
         if rc != 0 {
             let error = io::Error::last_os_error();
             return match error.raw_os_error() {
