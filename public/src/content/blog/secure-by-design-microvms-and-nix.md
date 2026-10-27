@@ -2,6 +2,7 @@
 title: "Secure by design: microVMs, Nix, and strong sandbox boundaries"
 description: A high-level security design for running untrusted code with microVM isolation, reproducible builds, admission, policy, and audit evidence.
 date: 2026-06-01
+shareHook: "Sooner or later, your infrastructure runs code you didn't write. Build the boundary first: microVMs, Nix, and isolation by design."
 tags:
   - security
   - microVMs
