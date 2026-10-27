@@ -286,7 +286,7 @@ impl FlowMuxSession {
         };
 
         let terminated = match terminator::flow::TerminatedFlow::builder()
-            .service(service)
+            .service(Arc::clone(&service))
             .runtime(runtime)
             .leaves(Arc::clone(&self.leaves))
             .authority(&flow.host, flow.port)
@@ -333,21 +333,28 @@ impl FlowMuxSession {
         self.send_opened(stream_id)?;
         self.spawn_tcp_relay(stream_id, FlowSocket::from(endpoint_side))?;
         self.track_bound_stream(stream_id, flow);
-        self.emit_audit(
-            EventCategory::Host,
-            "host.flow.allowed",
-            BTreeMap::from([
-                ("stream_id".to_string(), stream_id.to_string()),
-                ("class".to_string(), "tcp".to_string()),
-                ("route".to_string(), flow.route_label()),
-                ("target".to_string(), flow.target.clone()),
-                ("resolved_ips".to_string(), flow.resolved_ips()),
-                (
-                    "termination".to_string(),
-                    termination_label(mode).to_string(),
-                ),
-            ]),
-        );
+        let mut labels = BTreeMap::from([
+            ("stream_id".to_string(), stream_id.to_string()),
+            ("class".to_string(), "tcp".to_string()),
+            ("route".to_string(), flow.route_label()),
+            ("target".to_string(), flow.target.clone()),
+            ("resolved_ips".to_string(), flow.resolved_ips()),
+            (
+                "termination".to_string(),
+                termination_label(mode).to_string(),
+            ),
+        ]);
+        // The forward leg behind a terminated flow speaks the scheme the
+        // terminator re-originates under, so the proxy read here is the exact
+        // one the leg will make per request. An endpoint with no upstream
+        // proxy records no label, keeping the entry's bytes what they were
+        // before the label existed.
+        if let Some(path) =
+            service.forward_path_for(&flow.host, Some(matches!(mode, TerminationMode::Tls)))
+        {
+            labels.insert("via".to_string(), path.label().to_string());
+        }
+        self.emit_audit(EventCategory::Host, "host.flow.allowed", labels);
         Ok(())
     }
 
@@ -916,6 +923,155 @@ mod tests {
 
         drop(guest);
         host.join().unwrap().unwrap();
+    }
+
+    /// Open one terminated flow on an endpoint whose substitution service
+    /// carries `proxy`, and return the verified chain text.
+    ///
+    /// The open alone is enough: the proxy attribution is written with the
+    /// `host.flow.allowed` entry at open, before any request arrives.
+    fn terminated_flow_chain(proxy: Option<mvm_http::ProxyConfig>) -> String {
+        const NAME: &str = "api.terminated.test";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (recorder, audit_key) = recorder_at(&audit_path);
+        let (service, _secrets) = substitution_binding(NAME, true);
+        let service = Arc::new(
+            Arc::try_unwrap(service)
+                .ok()
+                .expect("the test holds the only service reference")
+                .with_proxy_config(proxy),
+        );
+        let gate = gate_pinning_name(NAME, local_test_ip(), 443);
+        let (mut guest, mut guest_session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, gate)
+                    .with_substitution(Some(service))
+                    .with_recorder(Some(recorder))
+            });
+
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            format!("{NAME}:443").as_bytes(),
+        );
+        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(
+            opcode,
+            Opcode::Opened,
+            "a terminated flow opens: {}",
+            String::from_utf8_lossy(&payload)
+        );
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+        crate::supervisor::audit_file::verify_audit_chain(&audit_path, &audit_key)
+            .expect("audit chain verifies");
+        std::fs::read_to_string(&audit_path).expect("read audit chain")
+    }
+
+    /// A terminated flow whose forward leg goes through the configured
+    /// upstream proxy says so on its flow entry, next to the real destination.
+    #[test]
+    fn a_terminated_flow_through_the_upstream_proxy_is_audited_as_proxied() {
+        let proxy = mvm_http::ProxyConfig::from_lookup(|key| {
+            (key == "HTTPS_PROXY").then(|| "http://proxy.corp:3128".to_string())
+        })
+        .expect("proxy environment parses");
+        let chain = terminated_flow_chain(proxy);
+        assert!(chain.contains("host.flow.allowed"), "{chain}");
+        assert!(chain.contains("api.terminated.test:443"), "{chain}");
+        assert!(chain.contains(r#""via":"proxy""#), "{chain}");
+    }
+
+    /// A destination the proxy's `NO_PROXY` list excepts is recorded as a
+    /// bypass, distinguishable from both a proxied leg and an unproxied host.
+    #[test]
+    fn a_terminated_flow_bypassed_by_no_proxy_is_audited_as_a_bypass() {
+        let proxy = mvm_http::ProxyConfig::from_lookup(|key| match key {
+            "HTTPS_PROXY" => Some("http://proxy.corp:3128".to_string()),
+            "NO_PROXY" => Some("terminated.test".to_string()),
+            _ => None,
+        })
+        .expect("proxy environment parses");
+        let chain = terminated_flow_chain(proxy);
+        assert!(chain.contains(r#""via":"no_proxy""#), "{chain}");
+        assert!(!chain.contains(r#""via":"proxy""#), "{chain}");
+    }
+
+    /// A proxy configured only for plaintext carries no TLS flow: the
+    /// terminated leg dials directly and the entry says `direct`.
+    #[test]
+    fn a_terminated_flow_whose_scheme_the_proxy_does_not_cover_is_audited_as_direct() {
+        let proxy = mvm_http::ProxyConfig {
+            https: None,
+            http: Some(mvm_http::Proxy::parse("http://plain.corp:8080").expect("proxy parses")),
+            no_proxy: mvm_http::NoProxy::default(),
+        };
+        let chain = terminated_flow_chain(Some(proxy));
+        assert!(chain.contains(r#""via":"direct""#), "{chain}");
+    }
+
+    /// An endpoint with no upstream proxy records no label at all, so its
+    /// entries keep the bytes they had before the label existed.
+    #[test]
+    fn a_terminated_flow_on_an_unproxied_endpoint_carries_no_proxy_label() {
+        let chain = terminated_flow_chain(None);
+        assert!(chain.contains("host.flow.allowed"), "{chain}");
+        assert!(
+            !chain.contains(r#""via""#),
+            "no proxy decision, no label: {chain}"
+        );
+    }
+
+    /// An opaque flow has no forward leg: it is a raw TCP relay the upstream
+    /// proxy never carries, so its entry records no proxy label even on an
+    /// endpoint that has one.
+    #[test]
+    fn an_opaque_flow_on_a_proxied_endpoint_carries_no_proxy_label() {
+        let addr = tcp_echo_server();
+        let (service, _dir) = substitution_binding("bound.example", true);
+        let service = Arc::new(
+            Arc::try_unwrap(service)
+                .ok()
+                .expect("the test holds the only service reference")
+                .with_proxy_config(
+                    mvm_http::ProxyConfig::from_lookup(|key| {
+                        (key == "HTTPS_PROXY").then(|| "http://proxy.corp:3128".to_string())
+                    })
+                    .expect("proxy environment parses"),
+                ),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (recorder, audit_key) = recorder_at(&audit_path);
+        let gate = gate_allowing_addr(addr.ip(), addr.port(), None);
+        let (mut guest, mut guest_session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, gate)
+                    .with_substitution(Some(service))
+                    .with_recorder(Some(recorder))
+            });
+
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
+        );
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::Opened);
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+        crate::supervisor::audit_file::verify_audit_chain(&audit_path, &audit_key)
+            .expect("audit chain verifies");
+        let chain = std::fs::read_to_string(&audit_path).expect("read audit chain");
+        assert!(chain.contains("host.flow.allowed"), "{chain}");
+        assert!(!chain.contains(r#""via""#), "{chain}");
     }
 
     /// The terminated-flow ceiling and the leaf cache belong to the VM, not to
