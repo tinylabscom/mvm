@@ -276,6 +276,23 @@ mod linux {
         extents: [FiemapExtent; EXTENTS_PER_QUERY],
     }
 
+    // Layout contract with <linux/fiemap.h> (fixed-width fields at natural
+    // alignment; identical on the 64-bit Linux targets this compiles for):
+    // fiemap_extent is 3 u64 + 2 reserved u64 + 4 u32 = 56 bytes, fiemap is
+    // 2 u64 + 4 u32 = 32, both 8-aligned, and the query buffer packs the
+    // header immediately before its extent array. A field edit that drifts
+    // from the kernel header fails the build here instead of misreading
+    // extents at runtime.
+    const _: () = {
+        use std::mem::{align_of, size_of};
+        assert!(size_of::<FiemapExtent>() == 56);
+        assert!(align_of::<FiemapExtent>() == 8);
+        assert!(size_of::<Fiemap>() == 32);
+        assert!(align_of::<Fiemap>() == 8);
+        assert!(size_of::<FiemapBuf>() == 32 + 64 * 56);
+        assert!(align_of::<FiemapBuf>() == 8);
+    };
+
     fn query(file: &File, start: u64) -> io::Result<(Vec<Extent>, bool)> {
         let mut buf = Box::new(FiemapBuf {
             header: Fiemap {

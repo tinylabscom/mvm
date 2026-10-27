@@ -4,7 +4,7 @@
 //! every file on every call: a CoW-chain child that differs from its parent
 //! by a few blocks pays its parent's full bill. A v2 manifest instead records
 //! one digest per fixed-size file chunk, so a child derived from a parent
-//! ([`Manifest::compute_with_base`]) reuses the parent's chunk digests
+//! ([`Manifest::compute_from_base`]) reuses the parent's chunk digests
 //! wherever the child's bytes are *proven* unchanged:
 //!
 //! * a chunk the kernel reports as CoW-shared with the same logical range of
@@ -127,7 +127,7 @@ impl Manifest {
     /// The result is always the manifest a plain [`Manifest::compute`] of
     /// `source` would produce: reuse only ever substitutes a digest where
     /// the bytes are provably the ones that digest was computed from.
-    pub fn compute_with_base(
+    pub fn compute_from_base(
         source: &Path,
         base: &Manifest,
         base_content: &Path,
@@ -652,7 +652,7 @@ mod tests {
 
         let child = tmp.path().join("child");
         copy_tree(&parent, &child);
-        let (derived, stats) = Manifest::compute_with_base(&child, &base, &parent).unwrap();
+        let (derived, stats) = Manifest::compute_from_base(&child, &base, &parent).unwrap();
 
         assert_eq!(
             derived.root_digest(),
@@ -694,7 +694,7 @@ mod tests {
             blob.write_all(&[0x42; 512]).unwrap();
         }
 
-        let (derived, stats) = Manifest::compute_with_base(&child, &base, &parent).unwrap();
+        let (derived, stats) = Manifest::compute_from_base(&child, &base, &parent).unwrap();
         assert_eq!(
             derived.root_digest(),
             Manifest::compute(&child).unwrap().root_digest()
@@ -716,7 +716,7 @@ mod tests {
         copy_tree(&parent, &child);
         fs::remove_dir_all(&parent).unwrap();
 
-        let (derived, stats) = Manifest::compute_with_base(&child, &base, &parent).unwrap();
+        let (derived, stats) = Manifest::compute_from_base(&child, &base, &parent).unwrap();
         assert_eq!(
             derived.root_digest(),
             Manifest::compute(&child).unwrap().root_digest(),
@@ -732,7 +732,7 @@ mod tests {
         fs::write(&file, vec![0x5A_u8; 3 * 1024 * 1024 + 17]).unwrap();
 
         let manifest = Manifest::compute(&file).unwrap();
-        let (derived, _) = Manifest::compute_with_base(&file, &manifest, &file).unwrap();
+        let (derived, _) = Manifest::compute_from_base(&file, &manifest, &file).unwrap();
         assert_eq!(derived.root_digest(), manifest.root_digest());
         assert_ne!(
             manifest.root_digest(),
@@ -869,7 +869,7 @@ mod tests {
         {
             return;
         }
-        let (derived, stats) = Manifest::compute_with_base(&child, &base, &parent).unwrap();
+        let (derived, stats) = Manifest::compute_from_base(&child, &base, &parent).unwrap();
         assert_eq!(
             derived.root_digest(),
             Manifest::compute(&child).unwrap().root_digest()
@@ -888,7 +888,7 @@ mod tests {
             blob.seek(SeekFrom::Start(2048)).unwrap();
             blob.write_all(&[0x42; 512]).unwrap();
         }
-        let (derived, stats) = Manifest::compute_with_base(&child, &base, &parent).unwrap();
+        let (derived, stats) = Manifest::compute_from_base(&child, &base, &parent).unwrap();
         assert_eq!(
             derived.root_digest(),
             Manifest::compute(&child).unwrap().root_digest(),

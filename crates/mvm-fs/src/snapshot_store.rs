@@ -414,7 +414,7 @@ impl FsSnapshotStore {
                 } else {
                     parent_dir.join(CONTENT_DIR)
                 };
-                Manifest::compute_with_base(source, &base, &base_content)?.0
+                Manifest::compute_from_base(source, &base, &base_content)?.0
             }
             None => Manifest::compute(source)?,
         };

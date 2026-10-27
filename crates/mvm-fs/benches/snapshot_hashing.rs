@@ -162,7 +162,7 @@ fn bench_chain_depth(c: &mut Criterion) {
         mvm_fs::clone::reflink_or_copy_dir(&current, &child).unwrap();
         mutate_clone(&child, depth);
         let (derived, stats) =
-            mvm_fs::manifest::Manifest::compute_with_base(&child, &current_manifest, &current)
+            mvm_fs::manifest::Manifest::compute_from_base(&child, &current_manifest, &current)
                 .unwrap();
         assert_eq!(
             derived.root_digest(),
@@ -171,7 +171,7 @@ fn bench_chain_depth(c: &mut Criterion) {
                 .root_digest(),
             "derived and full ids must agree at every depth"
         );
-        println!(
+        eprintln!(
             "chain depth {depth}: chunks={} reused={} zero={} hashed={}",
             stats.chunks, stats.chunks_reused, stats.chunks_zero, stats.chunks_hashed
         );
@@ -187,7 +187,7 @@ fn bench_chain_depth(c: &mut Criterion) {
                 BenchmarkId::new("v2_manifest_delta", format!("depth{depth}")),
                 |b| {
                     b.iter(|| {
-                        mvm_fs::manifest::Manifest::compute_with_base(
+                        mvm_fs::manifest::Manifest::compute_from_base(
                             &child_path,
                             &base_manifest,
                             &base_tree,
