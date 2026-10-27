@@ -116,6 +116,32 @@ pub enum AgentProfile {
     Builder,
 }
 
+impl AgentProfile {
+    /// The name this profile has on the wire and on the guest kernel command
+    /// line: the same kebab-case string serde writes.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SealedProd => "sealed-prod",
+            Self::Dev => "dev",
+            Self::Builder => "builder",
+        }
+    }
+}
+
+impl core::str::FromStr for AgentProfile {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        [Self::SealedProd, Self::Dev, Self::Builder]
+            .into_iter()
+            .find(|profile| profile.as_str() == s)
+            .ok_or_else(|| {
+                alloc::format!("unknown agent profile {s:?} (expected: sealed-prod, dev, builder)")
+            })
+    }
+}
+
 // ============================================================================
 // Security policy
 // ============================================================================
@@ -536,6 +562,22 @@ mod tests {
         assert_eq!(policy.rate_limits.frames_per_minute, 3000);
         assert_eq!(policy.session.max_lifetime_secs, 0);
         assert_eq!(policy.session.max_tasks, 0);
+    }
+
+    #[test]
+    fn an_agent_profile_names_itself_as_serde_does_and_parses_back() {
+        for profile in [
+            AgentProfile::SealedProd,
+            AgentProfile::Dev,
+            AgentProfile::Builder,
+        ] {
+            let wire = serde_json::to_string(&profile).unwrap();
+            assert_eq!(wire, alloc::format!("\"{}\"", profile.as_str()));
+            assert_eq!(profile.as_str().parse::<AgentProfile>(), Ok(profile));
+        }
+        for bad in ["", "Dev", "sealed_prod", "prod", "dev "] {
+            assert!(bad.parse::<AgentProfile>().is_err(), "{bad:?}");
+        }
     }
 
     #[test]

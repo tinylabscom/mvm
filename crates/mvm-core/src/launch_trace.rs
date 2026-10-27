@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+pub mod failure;
+
 /// Sidecar filename inside the VM state directory.
 pub const LAUNCH_TRACE_FILE: &str = "launch-trace.json";
 

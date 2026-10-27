@@ -185,6 +185,7 @@ pub mod workload_identity;
 /// Process control RPC handler. Requests are admitted only after the guest
 /// agent's runtime profile and signed verb grant checks succeed.
 pub mod process_rpc;
+pub mod profile;
 
 /// Streaming exec core — runs `sh -c <cmd>` and emits `ExecEvent` chunks
 /// via a closure. The guest agent admits calls at runtime.
