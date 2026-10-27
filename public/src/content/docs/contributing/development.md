@@ -599,6 +599,13 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 | `publish-crates.yml` | Dispatched by `release.yml` on a tag | Publishes the public crates (`mvm-contract`) to crates.io; every other crate is `publish = false` |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
 
+The SDK publishing workflows retain the raw `npm-dist` tarballs and
+`pypi-dist-*` wheels for 30 days, including dry runs. Download them from the
+same workflow run when reviewing package contents, license notices, and native
+library provenance; smoke reports alone are not package-content evidence.
+Missing distribution files fail the artifact upload. This retention window
+does not replace published release assets or a permanent evidence archive.
+
 ### Static documentation gate
 
 `Docs static` runs on pull requests and merge groups touching `README.md`,
