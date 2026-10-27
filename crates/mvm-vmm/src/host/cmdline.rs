@@ -23,8 +23,8 @@ use mvm_core::vm_backend::VmStartConfig;
 use crate::host::boot_config::booted_with_universal_initramfs;
 use crate::host::boot_config::non_verity_overlay_ext4;
 use crate::host::egress_bridge::{
-    host_signer_pub_cmdline_token, require_grant_cmdline_token, seccomp_cmdline_token,
-    telemetry_cmdline_token, verb_grant_cmdline_token,
+    host_signer_pub_cmdline_token, profile_cmdline_token, require_grant_cmdline_token,
+    seccomp_cmdline_token, telemetry_cmdline_token, verb_grant_cmdline_token,
 };
 
 /// Bytes the guest kernel reserves for its command line (`COMMAND_LINE_SIZE`,
@@ -161,6 +161,7 @@ fn workload_cmdline_for_hostname(
         host_signer_pub_cmdline_token(&config.name),
         telemetry_cmdline_token(&config.name),
         seccomp_cmdline_token(config),
+        profile_cmdline_token(config),
     ]
     .into_iter()
     .flatten()

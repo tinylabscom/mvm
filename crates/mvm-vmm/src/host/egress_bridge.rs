@@ -42,6 +42,31 @@ pub fn seccomp_cmdline_token(config: &mvm_core::vm_backend::VmStartConfig) -> Op
     ))
 }
 
+/// The cmdline key carrying the agent profile the guest must run under.
+pub const PROFILE_CMDLINE_KEY: &str = "mvm.profile";
+
+/// The config-drive file the host writes the guest security policy to. Matches
+/// `mvm_client::admission::SECURITY_POLICY_FILENAME`, which this crate cannot
+/// depend on.
+const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
+
+/// `mvm.profile=<sealed-prod|dev|builder>`, taken from the security policy the
+/// host is attaching to this boot.
+///
+/// The universal initramfs mounts no config drive, so without this the guest
+/// agent never sees that policy and falls back to the dev profile. `None` when
+/// the launch attaches no policy, as for a standby parent, or when the policy
+/// does not parse. An older agent ignores the key, so it is safe to send to
+/// any guest.
+pub fn profile_cmdline_token(config: &mvm_core::vm_backend::VmStartConfig) -> Option<String> {
+    let file = config
+        .config_files
+        .iter()
+        .find(|file| file.name == SECURITY_POLICY_FILENAME)?;
+    let policy: mvm_core::security::SecurityPolicy = serde_json::from_str(&file.content).ok()?;
+    Some(format!("{PROFILE_CMDLINE_KEY}={}", policy.profile.as_str()))
+}
+
 /// The `mvm.require_grant=1` token when a verb-grant sidecar exists.
 pub fn require_grant_cmdline_token(vm_name: &str) -> Option<String> {
     let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
@@ -88,6 +113,39 @@ pub fn host_signer_pub_cmdline_token(vm_name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    fn config_with_policy(content: &str) -> mvm_core::vm_backend::VmStartConfig {
+        mvm_core::vm_backend::VmStartConfig {
+            config_files: vec![mvm_core::vm_backend::VmFile {
+                name: "security-policy.json".to_string(),
+                content: content.to_string(),
+                mode: 0o444,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_profile_token_names_the_profile_of_the_attached_policy() {
+        use mvm_core::security::SecurityPolicy;
+        let sealed = serde_json::to_string(&SecurityPolicy::default()).unwrap();
+        let dev = serde_json::to_string(&SecurityPolicy::dev_defaults()).unwrap();
+        assert_eq!(
+            profile_cmdline_token(&config_with_policy(&sealed)).as_deref(),
+            Some("mvm.profile=sealed-prod")
+        );
+        assert_eq!(
+            profile_cmdline_token(&config_with_policy(&dev)).as_deref(),
+            Some("mvm.profile=dev")
+        );
+    }
+
+    #[test]
+    fn no_policy_or_an_unreadable_one_names_no_profile() {
+        let none = mvm_core::vm_backend::VmStartConfig::default();
+        assert_eq!(profile_cmdline_token(&none), None);
+        assert_eq!(profile_cmdline_token(&config_with_policy("not json")), None);
+    }
+
     use super::*;
 
     /// Authority tokens stay sidecar-gated: no grant, no verbs.

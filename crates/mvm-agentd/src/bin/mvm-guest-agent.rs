@@ -950,6 +950,18 @@ fn serve_until_activated(listener: &AgentListener, server: &GuestServer) -> bool
     }
 }
 
+/// The profile the host named on the kernel command line. A command line that
+/// cannot be read names none, and the policy file still applies.
+fn read_cmdline_profile() -> Result<Option<mvm_core::security::AgentProfile>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(cmdline) = std::fs::read_to_string("/proc/cmdline") {
+            return mvm_agentd::profile::profile_from_cmdline(&cmdline);
+        }
+    }
+    Ok(None)
+}
+
 fn main() {
     // The reseed helper is this binary started with one argument; it must not
     // parse agent configuration or touch any agent state.
@@ -969,18 +981,24 @@ fn main() {
 
     let cfg = parse_config();
 
-    // Resolve the active vsock profile from the baked image config.
-    // The policy file lives on a dm-verity rootfs for sealed-prod
-    // images, so its `profile` field can't be widened at runtime —
-    // flipping it would break the
-    // verity hash and the kernel panics in `mvm-verity-init` before
-    // userspace. Absence of `/etc/mvm/security.json` is treated as an
-    // unprovisioned dev image (`SecurityPolicy::dev_defaults`).
-    let active_profile = mvm_agentd::builder_agent::load_security_policy()
-        .ok()
-        .flatten()
-        .map(|p| p.profile)
-        .unwrap_or_else(|| mvm_core::security::SecurityPolicy::dev_defaults().profile);
+    // Resolve the active vsock profile. Two host-controlled sources can name
+    // it: the `mvm.profile=` token on the kernel command line, and the
+    // security policy file on the config drive (or a dm-verity rootfs for
+    // sealed-prod images, where it cannot be widened at runtime). The
+    // universal initramfs has no config drive, so there the command line is
+    // the only source. The more restrictive one wins and an unreadable source
+    // fails closed; see `mvm_agentd::profile::resolve`. With neither, the
+    // image is unprovisioned and runs the dev profile.
+    let profile_from_cmdline = read_cmdline_profile();
+    if let Err(error) = &profile_from_cmdline {
+        eprintln!("mvm-guest-agent: {error}; running the sealed-prod profile");
+    }
+    let profile_from_policy = mvm_agentd::builder_agent::load_security_policy()
+        .map(|policy| policy.map(|policy| policy.profile));
+    if let Err(error) = &profile_from_policy {
+        eprintln!("mvm-guest-agent: {error:#}; running the sealed-prod profile");
+    }
+    let active_profile = mvm_agentd::profile::resolve(profile_from_cmdline, profile_from_policy);
 
     // PID-1 initramfs setup: mount early filesystems and install the
     // SIGCHLD reaper before the control plane comes up.  On non-PID-1
