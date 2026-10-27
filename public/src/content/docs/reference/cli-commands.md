@@ -2024,7 +2024,10 @@ mvmctl run --launch-plan ./launch.json                # launch-plan entrypoint
 
 `--launch-plan` accepts either of two JSON shapes — the shape is
 auto-detected. Only the entrypoint is consumed (image selection
-still comes from `--manifest` or the bundled default in v1). Both
+still comes from `--manifest` or the bundled default in v1). A launch
+plan never names or fetches artifacts: its `image` and `source` fields
+are ignored, and any artifact a workload needs arrives through signed
+bundle admission or a pack, so a plan runs with no pack at all. Both
 shapes were historically produced by the `mvmforge` toolchain
 ([migration guide](/guides/mvmforge-migration/)); `mvmctl dev compile`
 is the canonical producer today.
