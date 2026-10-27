@@ -170,6 +170,32 @@ impl RetainedPublisherProof {
     }
 }
 
+/// The applied revocation list, when one is usable now.
+///
+/// Acquiring a set enforces a list that is already applied, so a set the
+/// publisher has revoked is refused here rather than only at the later boot
+/// paths that require a list. It does not require one: a host with none applied
+/// yet (a first run) acquires as before, and a list that has lapsed or cannot
+/// be read is reported and not enforced, because refusing every launch over an
+/// expired list would turn a freshness lapse into an outage. `Missing` is the
+/// ordinary state of a new host and is not worth a warning.
+fn usable_revocations(
+    loaded: Result<
+        mvm_core::image_set_revocation::VerifiedImageSetRevocations,
+        mvm_core::image_set_revocation::ImageSetRevocationStoreError,
+    >,
+) -> Option<mvm_core::image_set_revocation::VerifiedImageSetRevocations> {
+    use mvm_core::image_set_revocation::ImageSetRevocationStoreError::Missing;
+    match loaded {
+        Ok(revocations) => Some(revocations),
+        Err(Missing) => None,
+        Err(error) => {
+            tracing::warn!(%error, "image-set revocations are not being enforced");
+            None
+        }
+    }
+}
+
 impl PublishedImageSet {
     /// Acquire and verify the root object pinned by this build.
     pub fn acquire() -> Result<Self> {
@@ -263,6 +289,12 @@ impl PublishedImageSet {
                 request.with_workload_protocols(&host)
             } else {
                 request.with_host_protocols(&host)
+            };
+            let applied =
+                usable_revocations(mvm_core::image_set_revocation::load_image_set_revocations());
+            let request = match &applied {
+                Some(revocations) => request.with_revocations(revocations),
+                None => request,
             };
             mvm_core::image_set::cache_image_set_root(&proof_cache, &request)
                 .context("retain authenticated image-set root for offline admission")?;
