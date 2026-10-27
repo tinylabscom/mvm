@@ -2,6 +2,7 @@
 title: "PHP2Shell can own the process. It still doesn't get a network card."
 description: "What CVE-2026-109618 and CVE-2026-109619 can—and cannot—do inside an MVM microVM, why controlled vsock ingress is still ingress, and why containment does not make the PHP patch optional."
 date: 2026-10-21T12:00:00-07:00
+shareHook: "PHP2Shell can own the process. Does that mean it gets the network too? Where microVM containment helps, and why patching still matters."
 tags:
   - security
   - php2shell
