@@ -213,7 +213,9 @@ jobs:
         with:
           name: npm-dist
           path: crates/mvm-sdk/sdks/typescript/packed/*.tgz
-          retention-days: 1
+          # Keep the actual package bytes available for release evidence review.
+          retention-days: 30
+          if-no-files-found: error
 
   smoke:
     name: ${{ matrix.platform }}

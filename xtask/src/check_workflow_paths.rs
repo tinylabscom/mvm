@@ -591,6 +591,41 @@ mod tests {
         workflow("ci-main.yml")
     }
 
+    #[test]
+    fn sdk_distribution_evidence_survives_the_release_review_window() {
+        for (file, job, step, artifact) in [
+            (
+                "publish-npm.yml",
+                "build",
+                "Upload packed artifacts",
+                "npm-dist",
+            ),
+            (
+                "publish-pypi.yml",
+                "build",
+                "Upload built artifacts",
+                "pypi-dist-${{ matrix.platform }}",
+            ),
+        ] {
+            let source = workflow(file);
+            let upload = job_block(&source, job)
+                .split(&format!("      - name: {step}\n"))
+                .nth(1)
+                .expect("distribution upload step must exist")
+                .split("\n      - ")
+                .next()
+                .unwrap();
+            for required in [
+                "uses: actions/upload-artifact@",
+                &format!("name: {artifact}"),
+                "retention-days: 30",
+                "if-no-files-found: error",
+            ] {
+                assert!(upload.contains(required), "{file}: missing {required}");
+            }
+        }
+    }
+
     fn workflow(name: &str) -> String {
         std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
