@@ -573,7 +573,7 @@ fn main() -> anyhow::Result<()> {
             // SAFETY: preflight established the distinct inherited diagnostics
             // pipe; its sole ownership is transferred by the actual launcher.
             diagnostics = unsafe { StartupReporter::inherited() };
-            mvm_vmm::host::codesign::ensure_signed().map_err(anyhow::Error::msg)?;
+            mvm_vmm::host::codesign::try_ensure_signed().map_err(anyhow::Error::msg)?;
             files
         }
         StartupMode::Legacy => {
