@@ -26,6 +26,7 @@ export const collections = {
       title: z.string(),
       description: z.string(),
       date: z.coerce.date(),
+      shareHook: z.string().trim().min(1).max(240),
       tags: z.array(z.string()).default([]),
       heroImage: z.string(),
       heroAlt: z.string(),

@@ -170,7 +170,7 @@ pub struct FlowMuxIdentity {
 /// Config the backend hands the `mvm-network-endpoint` subprocess on
 /// stdin at spawn. Carries the workload's secret bindings (NOT values — the
 /// endpoint resolves values itself from the host store) plus where to listen.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointConfig {
     /// Tenant the workload belongs to — the store lookup key.
@@ -290,6 +290,24 @@ pub struct EndpointConfig {
     /// `egress_mode` is `FlowMux`; ignored for `Wire` and `Raw`.
     #[serde(default)]
     pub flowmux_identity: Option<FlowMuxIdentity>,
+}
+
+impl std::fmt::Debug for EndpointConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let proxy = mvm_core::user_config::HostEgressProxyConfig {
+            https: self.proxy_https.clone(),
+            http: self.proxy_http.clone(),
+            no_proxy: self.no_proxy.clone(),
+        };
+        f.debug_struct("EndpointConfig")
+            .field("tenant_id", &self.tenant_id)
+            .field("instance_id", &self.instance_id)
+            .field("transport", &self.transport)
+            .field("egress_mode", &self.egress_mode)
+            .field("forward_timeout_secs", &self.forward_timeout_secs)
+            .field("proxy", &proxy)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Parse an [`EndpointConfig`] from the JSON the backend writes on stdin.
@@ -1693,26 +1711,12 @@ impl EndpointConfig {
     /// directly, so silently ignoring a typo would turn a fixable
     /// misconfiguration into an unexplained total egress failure.
     pub fn resolve_proxy(&self) -> Result<Option<mvm_http::ProxyConfig>, mvm_http::ProxyError> {
-        if self.proxy_https.is_none() && self.proxy_http.is_none() {
-            return Ok(None);
-        }
-        let parse = |s: &Option<String>| -> Result<Option<mvm_http::Proxy>, mvm_http::ProxyError> {
-            s.as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(mvm_http::Proxy::parse)
-                .transpose()
-        };
-        let cfg = mvm_http::ProxyConfig {
-            https: parse(&self.proxy_https)?,
-            http: parse(&self.proxy_http)?,
-            no_proxy: self
-                .no_proxy
-                .as_deref()
-                .map(mvm_http::NoProxy::parse)
-                .unwrap_or_default(),
-        };
-        Ok((!cfg.is_empty()).then_some(cfg))
+        mvm_http::ProxyConfig::from_lookup(|key| match key {
+            "https_proxy" => self.proxy_https.clone(),
+            "http_proxy" => self.proxy_http.clone(),
+            "no_proxy" => self.no_proxy.clone(),
+            _ => None,
+        })
     }
 }
 
@@ -1764,6 +1768,20 @@ mod proxy_config_tests {
     fn a_malformed_proxy_is_an_error_not_a_silent_direct_dial() {
         let cfg = cfg_with(Some("ftp://nope"), None, None);
         assert!(cfg.resolve_proxy().is_err());
+    }
+
+    #[test]
+    fn proxy_debug_is_safe_but_wire_keeps_credentials() {
+        let raw = "http://username-token:password-token@proxy.corp:3128";
+        let cfg = cfg_with(Some(raw), Some(raw), None);
+        let debug = format!("{cfg:?} {:?}", cfg.resolve_proxy().unwrap());
+        for token in ["username-token", "password-token"] {
+            assert!(!debug.contains(token));
+            assert!(serde_json::to_string(&cfg).unwrap().contains(token));
+        }
+        assert!(debug.contains("EndpointConfig"));
+        assert!(debug.contains("proxy.corp"));
+        assert!(format!("{cfg:?}").contains("forward_timeout_secs"));
     }
 }
 

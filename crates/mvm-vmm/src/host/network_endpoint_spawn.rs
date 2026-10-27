@@ -759,8 +759,8 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self
     }
 
-    /// Set `egress_proxy`. Takes a value or an `Option`; unset means `None`,
-    /// which is the endpoint's "dial direct".
+    /// Override host config and ambient proxy variables. `None` inherits host
+    /// settings; `Some(Default::default())` explicitly selects direct.
     #[must_use]
     pub fn egress_proxy(mut self, egress_proxy: impl Into<Option<EgressProxySpawnConfig>>) -> Self {
         self.egress_proxy = egress_proxy.into();
@@ -820,42 +820,8 @@ impl<'a> Default for SubstitutionSpawnParamsBuilder<'a> {
     }
 }
 
-/// The upstream proxy, as strings the endpoint parses.
-///
-/// Strings rather than a parsed type because this only carries a value from
-/// host configuration to the endpoint's stdin; the endpoint is where a bad
-/// value has to be reported, since it is the process that would otherwise fail
-/// to reach anything.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EgressProxySpawnConfig {
-    pub https: Option<String>,
-    pub http: Option<String>,
-    pub no_proxy: Option<String>,
-}
-
-impl EgressProxySpawnConfig {
-    /// Read the conventional proxy environment of the host process.
-    ///
-    /// Returns `None` when nothing is configured, so the common case emits no
-    /// keys at all and the endpoint's defaults keep meaning "dial direct".
-    #[must_use]
-    pub fn from_host_env() -> Option<Self> {
-        let pick = |names: &[&str]| -> Option<String> {
-            names
-                .iter()
-                .find_map(|n| std::env::var(n).ok())
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
-        let all = pick(&["all_proxy", "ALL_PROXY"]);
-        let cfg = Self {
-            https: pick(&["https_proxy", "HTTPS_PROXY"]).or_else(|| all.clone()),
-            http: pick(&["http_proxy", "HTTP_PROXY"]).or(all),
-            no_proxy: pick(&["no_proxy", "NO_PROXY"]),
-        };
-        (cfg.https.is_some() || cfg.http.is_some()).then_some(cfg)
-    }
-}
+mod proxy;
+pub use proxy::EgressProxySpawnConfig;
 
 /// The endpoint config a spawn with (or without) a FlowMux identity emits.
 ///
@@ -1017,9 +983,13 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result<()> {
     use std::io::Write;
     // One resolution point for every backend. A caller that supplied a proxy
-    // explicitly keeps it; everyone else inherits the host's environment.
+    // explicitly keeps it; everyone else resolves host config before ambient
+    // variables. Refuse invalid settings before touching sockets or children.
     if params.egress_proxy.is_none() {
-        params.egress_proxy = EgressProxySpawnConfig::from_host_env();
+        params.egress_proxy = EgressProxySpawnConfig::from_host_config()?;
+    }
+    if let Some(proxy) = &params.egress_proxy {
+        proxy.resolve()?;
     }
     let session_marker = params.state_dir.join(SUBST_SESSION_FILE);
     let session_ready_socket = session_ready_socket_path(params.state_dir);
@@ -1887,106 +1857,6 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// Clear every proxy name this reads, so a contributor whose own shell
-    /// exports one does not get a different answer from CI.
-    fn proxy_env() -> mvm_core::util::test_env::TestEnv {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        for k in [
-            "https_proxy",
-            "HTTPS_PROXY",
-            "http_proxy",
-            "HTTP_PROXY",
-            "all_proxy",
-            "ALL_PROXY",
-            "no_proxy",
-            "NO_PROXY",
-        ] {
-            env.remove(k);
-        }
-        env
-    }
-
-    /// Nothing configured is the common case, and it has to stay
-    /// distinguishable from "configured with empty values" — the endpoint's
-    /// default for absent keys is "dial direct", so a `Some` of all-`None`
-    /// would emit keys that say nothing and mean something.
-    #[test]
-    fn an_unconfigured_host_carries_no_proxy_config() {
-        let _env = proxy_env();
-        assert_eq!(EgressProxySpawnConfig::from_host_env(), None);
-    }
-
-    /// The value has to survive the trip. A `Some` whose fields are all `None`
-    /// looks configured and forwards nothing.
-    #[test]
-    fn a_configured_https_proxy_reaches_the_endpoint_config() {
-        let mut env = proxy_env();
-        env.set("https_proxy", "http://proxy.internal:3128");
-
-        let cfg = EgressProxySpawnConfig::from_host_env()
-            .expect("a host with https_proxy set is proxy-configured");
-        assert_eq!(cfg.https.as_deref(), Some("http://proxy.internal:3128"));
-        assert_eq!(cfg.http, None);
-    }
-
-    /// Either leg alone is a configured host. Requiring both would silently
-    /// dial direct on a host that set only one, which is the shape most
-    /// http-only and https-only environments actually have.
-    #[test]
-    fn either_proxy_leg_alone_configures_egress() {
-        let mut env = proxy_env();
-        env.set("http_proxy", "http://only-http:3128");
-        let cfg = EgressProxySpawnConfig::from_host_env()
-            .expect("http_proxy alone must configure egress");
-        assert_eq!(cfg.http.as_deref(), Some("http://only-http:3128"));
-        assert_eq!(cfg.https, None);
-        drop(env);
-
-        let mut env = proxy_env();
-        env.set("HTTPS_PROXY", "http://only-https:3128");
-        let cfg = EgressProxySpawnConfig::from_host_env()
-            .expect("HTTPS_PROXY alone must configure egress");
-        assert_eq!(cfg.https.as_deref(), Some("http://only-https:3128"));
-        assert_eq!(cfg.http, None);
-    }
-
-    /// An exported-but-empty proxy var is how a shell spells "unset". Taking
-    /// it literally hands the endpoint an empty upstream and every request
-    /// fails to reach anything.
-    #[test]
-    fn an_empty_or_whitespace_proxy_var_reads_as_unset() {
-        let mut env = proxy_env();
-        env.set("https_proxy", "");
-        env.set("http_proxy", "   ");
-        assert_eq!(
-            EgressProxySpawnConfig::from_host_env(),
-            None,
-            "an empty proxy value must not count as configured"
-        );
-    }
-
-    /// `no_proxy` is an exception list, not a proxy. On its own it configures
-    /// nothing, or every unproxied host would start emitting proxy keys.
-    #[test]
-    fn no_proxy_alone_does_not_configure_a_proxy() {
-        let mut env = proxy_env();
-        env.set("no_proxy", "localhost,127.0.0.1");
-        assert_eq!(EgressProxySpawnConfig::from_host_env(), None);
-    }
-
-    /// all_proxy is the fallback for both legs, and must not override a
-    /// specific one.
-    #[test]
-    fn all_proxy_fills_both_legs_but_yields_to_a_specific_one() {
-        let mut env = proxy_env();
-        env.set("all_proxy", "socks5://fallback:1080");
-        env.set("https_proxy", "http://specific:3128");
-
-        let cfg = EgressProxySpawnConfig::from_host_env().expect("configured");
-        assert_eq!(cfg.https.as_deref(), Some("http://specific:3128"));
-        assert_eq!(cfg.http.as_deref(), Some("socks5://fallback:1080"));
-    }
-
     #[test]
     fn a_silent_endpoint_is_reported_as_silent_not_quoted_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -2528,7 +2398,9 @@ mod tests {
             transport: EndpointTransport::Uds {
                 path: dir.join("vsock-5253.sock"),
             },
-            egress_proxy: None,
+            // Isolate sidecar rollback from host-config readability: this test
+            // intentionally makes MVM_HOME unreadable as a directory.
+            egress_proxy: Some(EgressProxySpawnConfig::default()),
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,

@@ -170,7 +170,17 @@ pub(super) fn network_backend_check(plat: Platform) -> Check {
 /// unexplained total egress failure — which is exactly what it would look like
 /// on a host whose only route out is the proxy.
 pub(super) fn egress_proxy_check() -> Check {
-    match mvm_http::ProxyConfig::from_env() {
+    use mvm_vmm::host::network_endpoint_spawn::EgressProxySpawnConfig;
+    let resolved = EgressProxySpawnConfig::from_host_config().and_then(|cfg| {
+        cfg.map(|cfg| cfg.resolve())
+            .transpose()
+            .map(Option::flatten)
+    });
+    egress_proxy_posture(resolved)
+}
+
+fn egress_proxy_posture(resolved: anyhow::Result<Option<mvm_http::ProxyConfig>>) -> Check {
+    match resolved {
         Ok(None) => Check {
             name: "egress proxy",
             category: "platform",
@@ -181,13 +191,13 @@ pub(super) fn egress_proxy_check() -> Check {
             name: "egress proxy",
             category: "platform",
             ok: true,
-            info: format!("{} (from environment)", cfg.summary()),
+            info: format!("{} (resolved host config / environment)", cfg.summary()),
         },
         Err(e) => Check {
             name: "egress proxy",
             category: "platform",
             ok: false,
-            info: format!("proxy environment is unusable: {e}"),
+            info: format!("host proxy configuration is unusable: {e}"),
         },
     }
 }
@@ -366,6 +376,67 @@ fn parse_disk_space(cmd: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn egress_proxy_doctor_reads_the_host_override_not_ambient() {
+        use mvm_core::user_config::{HostEgressProxyConfig, MvmConfig, save};
+        let mut env = TestEnv::new();
+        env.set("https_proxy", "http://ambient.corp:3128");
+        env.set("NO_PROXY", "*");
+        let mut cfg = MvmConfig {
+            egress_proxy: Some(HostEgressProxyConfig {
+                https: Some("socks5h://explicit.corp:1080".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        save(&cfg, None).unwrap();
+        let check = egress_proxy_check();
+        assert!(check.ok);
+        assert!(check.info.contains("explicit.corp:1080"));
+        assert!(!check.info.contains("ambient.corp"));
+        assert!(!check.info.contains("no_proxy=set"));
+
+        cfg.egress_proxy = Some(HostEgressProxyConfig::default());
+        save(&cfg, None).unwrap();
+        assert!(egress_proxy_check().info.contains("directly"));
+
+        std::fs::write(mvm_core::user_config::config_path(), "[egress_proxy").unwrap();
+        assert!(!egress_proxy_check().ok);
+    }
+
+    #[test]
+    fn egress_proxy_doctor_reports_resolved_and_disabled_posture() {
+        use mvm_vmm::host::network_endpoint_spawn::EgressProxySpawnConfig;
+        let sensitive = format!("private-{}", std::process::id());
+        let proxy = EgressProxySpawnConfig {
+            https: Some(format!("http://{sensitive}:{sensitive}@proxy.corp:3128")),
+            http: Some("socks5h://proxy.corp:1080".into()),
+            no_proxy: Some("internal.example".into()),
+        };
+        let check = egress_proxy_posture(proxy.resolve());
+        assert!(check.ok);
+        assert!(check.info.contains("https=http://proxy.corp:3128"));
+        assert!(check.info.contains("http=socks5://proxy.corp:1080"));
+        assert!(!check.info.contains(&sensitive));
+        let direct = egress_proxy_posture(EgressProxySpawnConfig::default().resolve());
+        assert!(direct.ok);
+        assert!(direct.info.contains("directly"));
+    }
+
+    #[test]
+    fn egress_proxy_doctor_refuses_malformed_without_echoing_credentials() {
+        use mvm_vmm::host::network_endpoint_spawn::EgressProxySpawnConfig;
+        let sensitive = format!("private-{}", std::process::id());
+        let proxy = EgressProxySpawnConfig {
+            https: Some(format!("ftp://{sensitive}:{sensitive}@proxy.corp")),
+            ..Default::default()
+        };
+        let check = egress_proxy_posture(proxy.resolve());
+        assert!(!check.ok);
+        assert!(!check.info.contains(&sensitive));
+        assert!(check.info.contains("unusable"));
+    }
 
     #[test]
     fn platform_description_covers_all_variants() {

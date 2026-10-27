@@ -209,7 +209,10 @@ pub fn spawn_network_endpoint_owned(
     let env_path = mvm_core::config::vm_substitution_env_path(params.vm_name);
     refuse_existing_evidence(&params, &env_path)?;
     if params.egress_proxy.is_none() {
-        params.egress_proxy = EgressProxySpawnConfig::from_host_env();
+        params.egress_proxy = EgressProxySpawnConfig::from_host_config()?;
+    }
+    if let Some(proxy) = &params.egress_proxy {
+        proxy.resolve()?;
     }
     params.session_marker = Some(params.state_dir.join(SUBST_SESSION_FILE));
     let config = Zeroizing::new(serde_json::to_vec(&build_endpoint_config_json(&params))?);

@@ -33,7 +33,7 @@ pub(super) fn managed_install() -> Result<ManagedInstall> {
     let exe = std::env::current_exe().context("failed to determine the current executable")?;
     if let Some(package) = crate::install_layout::package_install_of(&exe) {
         bail!(
-            "this mvmctl belongs to a system package (marker: {}); the package manager \
+            "this install belongs to a system package (marker: {}); the package manager \
              owns its backend components",
             package.marker.display()
         );
