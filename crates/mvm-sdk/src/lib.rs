@@ -99,7 +99,8 @@ pub mod deploy;
 
 /// Rust authoring for `mvm.pack-spec/v1`: a fluent builder over the contract's
 /// closed PackSpec that emits the same canonical JSON as every other language
-/// SDK. Resolution, locking and compilation stay in the shared Rust path.
+/// SDK. Resolution, locking and compilation are owned by the shared Rust
+/// compiler and re-exported from this module with the `compiler` feature.
 pub mod pack;
 
 /// Runtime record-mode core — recording shape + lowering. The host
