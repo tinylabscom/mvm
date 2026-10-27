@@ -49,7 +49,7 @@ jobs:
           for file in \
             crates/mvm-sdk/sdks/python/mvm/_hostabi/host_abi.py \
             crates/mvm-sdk/sdks/typescript/src/hostabi/host_abi.ts; do
-            grep -q CheckpointMeta "$file"
+            grep -q CheckpointListReply "$file"
           done
           git diff --stat
           git diff --name-only
