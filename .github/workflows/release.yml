@@ -537,6 +537,16 @@ jobs:
           if [ -d man ] && ls man/*.1 2>/dev/null; then
             cp -r man "staging/${ARCHIVE_NAME}/"
           fi
+          # The backend component table install.sh reads to decide what to
+          # stage, generated from BACKEND_COMPONENT_TABLE so the archive and
+          # the table cannot drift. Fail closed like the host binaries above.
+          cargo run --package xtask --features man -- emit-backend-components-tsv \
+            > "staging/${ARCHIVE_NAME}/components.tsv"
+          if [ ! -s "staging/${ARCHIVE_NAME}/components.tsv" ]; then
+            echo "::error::components.tsv was not generated for ${ARCHIVE_NAME}; install.sh reads it to select backend components" >&2
+            exit 1
+          fi
+          echo "bundled components.tsv"
 
       - name: Mandatory ad-hoc producer signing
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}

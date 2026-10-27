@@ -252,6 +252,7 @@ impl Commands {
             Commands::Run(_) => "run",
             Commands::SdkNoVm(_) => "__sdk-no-vm",
             Commands::Doctor(_) => "doctor",
+            Commands::Backend(_) => "backend",
             Commands::Dashboard(_) => "dashboard",
             Commands::Prepare(_) => "prepare",
             Commands::Build(_) => "build",

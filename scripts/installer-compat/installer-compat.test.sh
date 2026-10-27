@@ -237,7 +237,7 @@ expect_eq "archive-facts: a release missing every profile reports none" \
 
 expect_fails "archive-facts: an archive for another target is refused" "has no mvmctl-other-target/mvmctl" \
   sh $DIR/archive-facts.sh "$work/srv/tinylabscom/mvm/releases/download/v1.0.0/mvmctl-$target.tar.gz" other-target install.sh
-expect_fails "archive-facts: an installer with no EXCLUDED_PAYLOADS is refused" "defines no EXCLUDED_PAYLOADS" \
+expect_fails "archive-facts: an installer with no legacy exclusion list is refused" "defines no LEGACY_LIBKRUN_TIER_PAYLOADS" \
   sh $DIR/archive-facts.sh "$work/srv/tinylabscom/mvm/releases/download/v1.0.0/mvmctl-$target.tar.gz" "$target" "$work/installer-default"
 
 # --- doc-commands.sh ----------------------------------------------------------

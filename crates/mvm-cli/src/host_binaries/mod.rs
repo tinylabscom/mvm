@@ -14,6 +14,7 @@
 //! `mvm_build::embed_toolchain`, low enough that the builder-VM bootstrap can
 //! ask whether a build is even possible before starting one.
 
+pub mod backend_components;
 pub mod embedded;
 pub mod extract;
 pub mod manifest;

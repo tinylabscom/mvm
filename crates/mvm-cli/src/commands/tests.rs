@@ -6003,6 +6003,10 @@ fn internal_helper_commands_short_circuit_before_startup_side_effects() {
     assert!(exits_early(&["mvmctl", "env", "uninstall"]));
     assert!(exits_early(&["mvmctl", "env", "uninstall", "--quiesce"]));
     assert!(!exits_early(&["mvmctl", "env", "cleanup"]));
+    // install.sh probes the just-extracted mvmctl before any state exists.
+    assert!(exits_early(&["mvmctl", "backend", "detect", "--plain"]));
+    assert!(!exits_early(&["mvmctl", "backend", "list"]));
+    assert!(!exits_early(&["mvmctl", "backend", "add", "libkrun"]));
     assert!(!exits_early(&[
         "mvmctl",
         "machine",
@@ -6038,6 +6042,7 @@ fn top_level_help_shows_user_facing_groups_and_hides_internal_tooling() {
         "template",
         "init",
         "doctor",
+        "backend",
         "bootstrap",
         "explain",
         "why",

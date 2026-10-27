@@ -42,6 +42,15 @@ curl -fsSL https://runmvm.com/install.sh | sh
 curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.18.3 sh
 ```
 
+### Choose a backend
+
+The installer stages the backend the host supports and prints what it chose —
+firecracker with `/dev/kvm`, the dev/test qemu tier without. Scripted installs
+can name it instead (`sh -s -- --backend firecracker` or
+`MVM_INSTALL_BACKEND=firecracker`); an unknown or unsupported name is refused
+with the valid ones listed. `mvmctl backend list` reports every backend's
+support on this host afterwards.
+
 ### From source
 
 ```bash

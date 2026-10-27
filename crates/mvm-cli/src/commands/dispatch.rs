@@ -28,6 +28,7 @@ impl TopLevelCommand for Commands {
             Commands::Completions(a) => completions::run(a),
             Commands::SdkNoVm(a) => vm::sdk_no_vm::run(&a),
             Commands::Doctor(a) => env::doctor::run(cli, a, cfg),
+            Commands::Backend(a) => backend::run(cli, a, cfg),
             Commands::Dashboard(a) => dashboard::run(a),
             Commands::Prepare(a) => vm::prepare::run(a),
             Commands::Build(a) => build::front_door::run(cli, a, cfg),
@@ -77,9 +78,15 @@ impl TopLevelCommand for Commands {
         // state while checking untrusted bytes.
         // Caller identity reads must stay side-effect free, and enrollment
         // creates only its explicit reservation and native credential.
+        // `backend detect` is install.sh's probe of a just-extracted mvmctl:
+        // it must answer without creating any state.
         matches!(
             self,
             Commands::QemuVsockBridge(_)
+                | Commands::Backend(backend::Args {
+                    action: backend::BackendCmd::Detect(_),
+                    ..
+                })
                 | Commands::Dev(build::group::Args {
                     action: build::group::BuildCmd::GuestBins(build::guest_bins::Args {
                         check_release_archive: Some(_),
@@ -102,6 +109,10 @@ impl TopLevelCommand for Commands {
         }
         match self {
             Commands::QemuVsockBridge(a) => Some(qemu_bridge::run(a)),
+            Commands::Backend(backend::Args {
+                action: backend::BackendCmd::Detect(args),
+                ..
+            }) => Some(backend::run_detect_early(args)),
             Commands::Dev(build::group::Args {
                 action:
                     build::group::BuildCmd::GuestBins(build::guest_bins::Args {
