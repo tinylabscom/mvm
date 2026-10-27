@@ -697,7 +697,7 @@ impl VirtioVsock {
             )
         })?;
         let parent = std::fs::canonicalize(parent)?;
-        if !parent.starts_with(&root) {
+        if !parent.starts_with(&root) && !mvm_core::config::is_owned_fallback_socket_dir(&parent) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "handoff socket is outside the trusted VM root",
@@ -3058,6 +3058,51 @@ mod tests {
             stop,
             device,
         })
+    }
+
+    /// A deep state dir moves the parent's sockets to the short `/tmp`
+    /// namespace; the handoff socket must be bindable there, but nowhere else
+    /// outside the trusted root.
+    #[test]
+    fn handoff_control_binds_in_the_fallback_socket_dir_and_nowhere_else_outside_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        let key = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let bind_in = |dir: &Path| {
+            virtio_dev().set_handoff_control(
+                Some(&dir.join("hvf-handoff.sock")),
+                Some(root.path()),
+                Some(&key),
+                stop,
+            )
+        };
+        let fallback = tempfile::Builder::new()
+            .prefix("mvm-sock-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        mvm_core::private_fs::set_mode(fallback.path(), 0o700).unwrap();
+        if let Err(error) = bind_in(fallback.path()) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "unexpected failure binding in the fallback dir: {error}"
+            );
+            assert!(
+                !error.to_string().contains("outside the trusted VM root"),
+                "the fallback dir must be accepted: {error}"
+            );
+            return; // sandbox forbids binding unix sockets here
+        }
+        let stray = tempfile::Builder::new()
+            .prefix("vsk")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let error = bind_in(stray.path()).expect_err("outside the root and not a fallback dir");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     struct ProtectedProbe {

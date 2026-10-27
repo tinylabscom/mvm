@@ -1084,6 +1084,35 @@ pub fn vm_hvf_agent_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf
     vm_socket_dir_at(state_dir).join(hvf_agent_socket_filename())
 }
 
+/// The fixed control socket a warm HVF parent listens on to accept one live
+/// handoff: `<socket-dir>/hvf-handoff.sock`. It sits beside the agent socket
+/// and shares its path budget: a state dir too deep for a Unix-domain path
+/// moves both to the short `/tmp` namespace, and a socket left in the state dir
+/// there cannot be bound at all.
+pub fn vm_hvf_handoff_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join("hvf-handoff.sock")
+}
+
+/// Whether `dir` is a short-socket fallback directory ([`vm_socket_dir_at`])
+/// this user owns and keeps private: a direct `mvm-sock-*` child of `/tmp`.
+pub fn is_owned_fallback_socket_dir(dir: &std::path::Path) -> bool {
+    let (Ok(dir), Ok(tmp)) = (std::fs::canonicalize(dir), std::fs::canonicalize("/tmp")) else {
+        return false;
+    };
+    let named = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("mvm-sock-"));
+    if !named || dir.parent() != Some(tmp.as_path()) {
+        return false;
+    }
+    std::fs::symlink_metadata(&dir).is_ok_and(|meta| {
+        meta.is_dir()
+            && crate::private_fs::require_current_owner(&meta).is_ok()
+            && crate::private_fs::mode_bits(&dir, &meta).is_ok_and(|mode| mode & 0o077 == 0)
+    })
+}
+
 /// The hvf VMM's host→guest agent-RPC socket for a VM by name:
 /// `<socket-dir>/hvf-agent.sock`. See [`vm_hvf_agent_socket_at`].
 pub fn vm_hvf_agent_socket(name: &str) -> std::path::PathBuf {
@@ -2180,6 +2209,74 @@ mod tests {
         );
 
         env.remove("MVM_HOME");
+    }
+
+    /// The handoff socket must follow the agent socket into the short
+    /// namespace: left in a deep state dir it overflows `sun_path` and the
+    /// warm parent dies right after its agent bridge binds.
+    #[test]
+    fn the_handoff_socket_fits_wherever_the_agent_socket_does() {
+        let mut env = TestEnv::new();
+        let root = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", root.path().join("d".repeat(120)));
+        let state_dir = vm_state_dir("standby-0123456789ab");
+
+        let handoff = vm_hvf_handoff_socket_at(&state_dir);
+        assert!(!fits_unix_socket_path(&state_dir.join("hvf-handoff.sock")));
+        assert!(fits_unix_socket_path(&handoff), "{}", handoff.display());
+        assert_eq!(
+            handoff.parent(),
+            vm_hvf_agent_socket_at(&state_dir).parent()
+        );
+    }
+
+    /// A claimed child's socket namespace may already exist at the umask's
+    /// mode when the claim reaches it; the parent refuses to bind there until
+    /// it is private.
+    #[test]
+    fn securing_a_deep_state_dirs_socket_namespace_tightens_one_left_wide() {
+        let state_dir = std::path::PathBuf::from("/tmp").join(format!(
+            "{}-{}",
+            "x".repeat(70),
+            std::process::id()
+        ));
+        let socket_dir = vm_socket_dir_at(&state_dir);
+        assert_ne!(socket_dir, state_dir, "fixture must fall back");
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        crate::private_fs::set_mode(&socket_dir, 0o755).unwrap();
+
+        let secured = secure_fallback_socket_dir_at(&state_dir);
+        let meta = std::fs::symlink_metadata(&socket_dir).unwrap();
+        let mode = crate::private_fs::mode_bits(&socket_dir, &meta).unwrap();
+        std::fs::remove_dir(&socket_dir).unwrap();
+        secured.unwrap();
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn only_a_private_owned_tmp_namespace_is_a_fallback_socket_dir() {
+        let tmp = tempfile::Builder::new()
+            .prefix("mvm-sock-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        crate::private_fs::set_mode(tmp.path(), 0o700).unwrap();
+        assert!(is_owned_fallback_socket_dir(tmp.path()), "0700 and owned");
+        let other = tempfile::Builder::new()
+            .prefix("zzz-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        assert!(!is_owned_fallback_socket_dir(other.path()), "wrong name");
+        let nested = tmp.path().join("mvm-sock-inner");
+        std::fs::create_dir(&nested).unwrap();
+        assert!(
+            !is_owned_fallback_socket_dir(&nested),
+            "not a child of /tmp"
+        );
+        crate::private_fs::set_mode(tmp.path(), 0o755).unwrap();
+        assert!(
+            !is_owned_fallback_socket_dir(tmp.path()),
+            "group/other access"
+        );
     }
 
     #[test]

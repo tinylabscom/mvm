@@ -52,7 +52,11 @@ impl CaptureRoute {
                                         break;
                                     }
                                 }
-                                Err(_) => {
+                                Err(error) => {
+                                    mvm_vmm::agent_debug::line(
+                                        "handoff",
+                                        format_args!("capture transfer failed: {error:#}"),
+                                    );
                                     stop.store(true, Ordering::Release);
                                     let _ = request.sealed.try_send(false);
                                     break;
