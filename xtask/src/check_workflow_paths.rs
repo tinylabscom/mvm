@@ -1426,6 +1426,27 @@ mod tests {
     }
 
     #[test]
+    fn short_output_stress_runs_on_native_aarch64_with_prepared_workspace() {
+        let workflow = main_workflow();
+        let job = job_block(&workflow, "test-workspace-aarch64");
+        assert!(job.contains("runs-on: ubuntu-24.04-arm\n"));
+        let preparation = job
+            .find("run: cargo nextest run --workspace --exclude mvm-fs --all-targets\n")
+            .expect("the workspace suite prepares the native test artifacts");
+        let stress = job
+            .find("run: cargo nextest run --stress-count 200 -E 'test(run_job_matches_streaming_for_short_output)'\n")
+            .expect("the exact short-output stress witness must run");
+        let restore = job
+            .find("- name: Restore HOME")
+            .expect("restore runner HOME");
+        assert!(preparation < stress && stress < restore);
+        let step = &job[job[..stress].rfind("- name:").expect("stress step")..restore];
+        assert!(step.contains("working-directory: crates/mvm-builder-guest\n"));
+        assert!(!step.contains("if:"));
+        assert!(!step.contains("continue-on-error:"));
+    }
+
+    #[test]
     fn feature_coverage_tail_uses_existing_test_support_runner() {
         let workflow = main_workflow();
         let core = job_block(&workflow, "lint-features");
