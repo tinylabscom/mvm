@@ -4153,6 +4153,7 @@ dependencies = [
  "bytes",
  "http",
  "httparse",
+ "rcgen",
  "reqwest",
  "rustls",
  "rustls-pki-types",
