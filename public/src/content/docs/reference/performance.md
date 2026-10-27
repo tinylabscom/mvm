@@ -33,9 +33,22 @@ percentiles and maximum, and is not part of the gated window: it reads the whole
 archive, so it scales with the archive's size the way the acquisition lanes
 scale with a disk.
 
+The `warm_claim_*` lanes each measure a claimed standby for one warmable launch
+shape, held to the same budgets and per-sample ceiling as `warm_claim`. Where
+the launch sample carries shape evidence, the lane requires it: the flake and
+manifest lanes require the claimed child's rootfs to live in the template-slot
+store (what both sources resolve to), the bundle lane requires the archive's
+trust-store verification, and the mount lane requires a mount-cache hit — a
+claim that materialized a mount image measured a cold mount cache and is
+refused. The egress lane's sample records the claim but not the launch's
+policy, so its shape is the measured launch's `--allow-host`, the same way
+`warm_claim`'s shape is its `--image`. A launch that finds no standby of its
+shape boots cold, and every warm lane refuses the sample rather than report it
+as a claim.
+
 <!-- generated:launch-budgets:begin -->
 
-A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 7. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, and the warm-claim lane every measured claim to be strictly under 300 ms, even below the publication sample floor. Every prepared and warm sample must also reach the guest strictly under 300 ms from the moment the command was invoked (`startup=` on the phase-timing line), because the dispatch window starts after admission. `mvmctl` holds each warm launch to that ceiling itself: one that has not reached the guest strictly under 300 ms after invocation is refused before its workload is sent.
+A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 7. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, and the warm-claim lanes every measured claim to be strictly under 300 ms, even below the publication sample floor. Every prepared and warm sample must also reach the guest strictly under 300 ms from the moment the command was invoked (`startup=` on the phase-timing line), because the dispatch window starts after admission. `mvmctl` holds each warm launch to that ceiling itself: one that has not reached the guest strictly under 300 ms after invocation is refused before its workload is sent.
 
 | Lane | What it measures | p50 | p95 | p99 | Every boot |
 | --- | --- | --- | --- | --- | --- |
@@ -45,6 +58,11 @@ A lane result is publishable only when it carries at least 20 measured samples t
 | `mount_miss` | Directory fingerprint plus first mount-image materialization. | — | — | — | — |
 | `artifact_miss` | Image acquisition, unpack, verification, and preparation. | — | — | — | — |
 | `warm_claim` | A claimed warm standby — a comparison point, never folded into a cold number. | 30 ms | — | 50 ms | < 300 ms |
+| `warm_claim_flake` | A claimed warm standby for a --flake launch; the child boots the built slot's rootfs. | 30 ms | — | 50 ms | < 300 ms |
+| `warm_claim_manifest` | A claimed warm standby for a --manifest launch; the child boots the built slot's rootfs. | 30 ms | — | 50 ms | < 300 ms |
+| `warm_claim_bundle` | A claimed warm standby for a signed .mvmpkg that pins no boot assets: trust-store verification on every run, then the claim. | 30 ms | — | 50 ms | < 300 ms |
+| `warm_claim_egress` | A claimed warm standby whose parent booted the egress client; the measured launch names the hosts it may reach. | 30 ms | — | 50 ms | < 300 ms |
+| `warm_claim_mount` | A claimed warm standby whose read-only --mount images are attached to the child from the mount-image cache. | 30 ms | — | 50 ms | < 300 ms |
 
 <!-- generated:launch-budgets:end -->
 
@@ -119,7 +137,8 @@ mvmctl bench --lane prepared-cold --runs 20 --warmup 2
 
 `--lane` defaults to `prepared-cold` and accepts `prepared-cold`,
 `prepared-cold-mount-hit`, `prepared-cold-artifact`, `mount-miss`,
-`artifact-miss`, and `warm-claim`.
+`artifact-miss`, `warm-claim`, `warm-claim-flake`, `warm-claim-manifest`,
+`warm-claim-bundle`, `warm-claim-egress`, and `warm-claim-mount`.
 `--runs` defaults to 20 and `--warmup` to 2 — below 20 measured samples the
 report is not publication-grade. `--json` prints the report instead of a human
 summary, `--out <PATH>` redirects where it is written, and a debug build refuses
@@ -139,6 +158,18 @@ host. Name one:
 ```sh
 mvmctl bundle install ./app.mvmpkg
 mvmctl bench --lane prepared-cold-artifact -- run ./app.mvmpkg -- /bin/true
+```
+
+The warm shape lanes likewise have no baseline — no flake, manifest, archive,
+mount source, or allowed host exists on every host — so name the launch after
+`--`, and warm a standby from the same shape first (a `pool warm` with the same
+source, or a prior warm-residency run of it). A launch that finds no standby of
+its shape boots cold, and the lane refuses the sample rather than report a cold
+boot as a claim:
+
+```sh
+mvmctl pool warm --flake ./flake.nix
+mvmctl bench --lane warm-claim-flake -- run --flake ./flake.nix -- /bin/true
 ```
 
 The same measurement substrate is also driven by a live, `#[ignore]`d test for

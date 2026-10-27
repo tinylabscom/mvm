@@ -153,7 +153,9 @@ impl ColdLaunchBench {
             }
             if Instant::now() >= deadline {
                 bail!(
-                    "no idle standby appeared within {}s; a warm-claim sample needs one",
+                    "no idle standby appeared within {}s; a warm-claim sample needs one warmed \
+                     from the same launch shape, e.g. by `pool warm` or a prior warm-residency \
+                     run of the measured launch",
                     STANDBY_SETTLE_TIMEOUT.as_secs()
                 );
             }
@@ -162,7 +164,7 @@ impl ColdLaunchBench {
     }
 
     fn launch_once(&self, staging: &Path, kind: &str, index: u32) -> Result<MeasuredLaunch> {
-        if self.lane == LaunchLane::WarmClaim {
+        if self.lane.is_warm_claim() {
             self.await_idle_standby()?;
         }
         let sample_path = staging.join(format!("{kind}-{index}.json"));
@@ -720,6 +722,124 @@ tmpfs /tmp tmpfs rw 0 0
         let lane_sample =
             cold_launch_sample(LaunchLane::WarmClaim, 1, &sample, 175.0, None).unwrap();
         assert_eq!(lane_sample.warm_first_command_memory, Some(measurement));
+    }
+
+    /// A stand-in `mvmctl` that answers `pool status --json` with one idle
+    /// standby and writes `body` as every launch's sample. Proves a warm lane
+    /// waits for the pool before every launch without a hypervisor.
+    #[cfg(unix)]
+    fn fake_warm_mvmctl(dir: &Path, body: &str, calls: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let script = format!(
+            "#!/bin/sh\nset -e\necho \"$1 $2\" >> {}\nif [ \"$1\" = pool ]; then printf '%s' '{{\"idle\":1}}'; exit 0; fi\nprintf '%s' '{body}' > \"$MVM_LAUNCH_SAMPLE_JSON\"\n",
+            calls.display()
+        );
+        let path = dir.join("mvmctl");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_warm_shape_lane_awaits_an_idle_standby_and_gates_on_shape_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sample = sample_for(148.0);
+        sample.launch_mode = LaunchMode::Warm;
+        sample.work.warm_claim = true;
+        // The flake-lane shape evidence: the claimed child boots the built
+        // slot's rootfs, which lives in the template store.
+        sample.artifacts.rootfs = Some(format!(
+            "{}/{}/artifacts/revisions/{}/rootfs.ext4",
+            mvm_core::template::templates_base_dir(),
+            "b".repeat(64),
+            "c".repeat(64)
+        ));
+        let ready = ProcessMemorySnapshot {
+            resident_bytes: 100,
+            minor_faults: Some(3),
+            major_faults: Some(1),
+        };
+        let after = ProcessMemorySnapshot {
+            resident_bytes: 120,
+            minor_faults: Some(8),
+            major_faults: Some(1),
+        };
+        sample.warm_first_command_memory = Some(WarmFirstCommandMemory {
+            pid: 42,
+            ready,
+            after_first_command: after,
+            delta: ProcessMemoryDelta::between(ready, after),
+        });
+        let body = serde_json::to_string(&sample).unwrap();
+        let calls = tmp.path().join("calls");
+        let mvmctl = fake_warm_mvmctl(tmp.path(), &body, &calls);
+
+        let report = ColdLaunchBench::builder(&mvmctl, LaunchLane::WarmClaimFlake)
+            .runs(2)
+            .warmup(1)
+            .build()
+            .unwrap()
+            .run()
+            .unwrap();
+
+        assert_eq!(report.lane, LaunchLane::WarmClaimFlake);
+        assert_eq!(report.raw.len(), 2);
+        // Every launch, warm-up included, first asked the pool for an idle
+        // standby — a claim measured before the refill settles is a cold boot
+        // the lane would refuse.
+        let log = std::fs::read_to_string(&calls).unwrap();
+        assert_eq!(
+            log.lines().filter(|line| *line == "pool status").count(),
+            3,
+            "{log}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_warm_shape_lane_refuses_a_claim_of_the_wrong_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sample = sample_for(148.0);
+        sample.launch_mode = LaunchMode::Warm;
+        sample.work.warm_claim = true;
+        // A registry image rootfs: a real warm claim, but not of a template
+        // slot, so it is not this lane's measurement.
+        sample.artifacts.rootfs = Some(
+            mvm_core::config::oci_cache_dir()
+                .join("sha256/ab/rootfs.ext4")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let ready = ProcessMemorySnapshot {
+            resident_bytes: 100,
+            minor_faults: Some(3),
+            major_faults: Some(1),
+        };
+        let after = ProcessMemorySnapshot {
+            resident_bytes: 120,
+            minor_faults: Some(8),
+            major_faults: Some(1),
+        };
+        sample.warm_first_command_memory = Some(WarmFirstCommandMemory {
+            pid: 42,
+            ready,
+            after_first_command: after,
+            delta: ProcessMemoryDelta::between(ready, after),
+        });
+        let body = serde_json::to_string(&sample).unwrap();
+        let mvmctl = fake_warm_mvmctl(tmp.path(), &body, &tmp.path().join("calls"));
+
+        let err = ColdLaunchBench::builder(&mvmctl, LaunchLane::WarmClaimManifest)
+            .runs(1)
+            .warmup(0)
+            .build()
+            .unwrap()
+            .run()
+            .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("template_slot_rootfs"), "{rendered}");
     }
 
     /// A stand-in `mvmctl` that writes the sample its argument names. It
