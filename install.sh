@@ -71,8 +71,8 @@ KEEP="${MVM_INSTALL_KEEP:-3}"
 # ends up with. Both are computed from the archive's components.tsv after
 # extraction (select_backend_components); archives predating that file fall
 # back to the rule they were published with: the libkrun compatibility tier
-# stages on macOS 13-25 and drops out on 26+. The installer-compat lane reads
-# the legacy list by name.
+# stages on macOS hosts older than 26 and drops out on 26+ and on Linux. The
+# installer-compat lane reads the legacy list by name.
 PRUNE_PAYLOADS=""
 SELECTED_BACKEND=""
 LEGACY_LIBKRUN_TIER_PAYLOADS="mvm-libkrun-supervisor lib licenses sources SOURCE-OFFER.txt SOURCE-PINS"
@@ -908,7 +908,11 @@ stage_guest_runtime() {
 # reimplements the macOS-version tier logic.
 
 # Host facts for the row match: the macOS major version on Darwin (empty
-# elsewhere), and 1/0 for a usable /dev/kvm.
+# elsewhere), and 1/0 for a present /dev/kvm. The KVM probe is existence, the
+# predicate the extracted mvmctl's own platform detection applies, so the
+# viable set the shell computes always holds the backend its
+# `backend detect --plain` answers; whether the device opens for this user is
+# the runtime's question, not the installer's.
 MACOS_MAJOR=""
 HAS_KVM=0
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -916,7 +920,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
   case "$MACOS_MAJOR" in
     ''|*[!0-9]*) die "could not determine the macOS major version" ;;
   esac
-elif [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+elif [ -e /dev/kvm ]; then
   HAS_KVM=1
 fi
 
@@ -1161,8 +1165,12 @@ else
   if [ -n "$BACKEND_REQUESTED" ]; then
     die "--backend / MVM_INSTALL_BACKEND need a release carrying components.tsv; $VERSION predates backend selection"
   fi
-  if [ "$(uname -s)" = "Darwin" ] && [ "$MACOS_MAJOR" -ge 26 ]; then
-    PRUNE_PAYLOADS="$LEGACY_LIBKRUN_TIER_PAYLOADS"
+  # The rule the pre-table releases were published with: the libkrun
+  # compatibility tier stages only on macOS hosts older than 26; macOS 26+
+  # and every Linux host leave it out.
+  PRUNE_PAYLOADS="$LEGACY_LIBKRUN_TIER_PAYLOADS"
+  if [ "$(uname -s)" = "Darwin" ] && [ "$MACOS_MAJOR" -lt 26 ]; then
+    PRUNE_PAYLOADS=""
   fi
 fi
 stage_guest_runtime
