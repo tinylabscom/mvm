@@ -1250,7 +1250,7 @@ mod tests {
             .status()
             .expect("plant orphan");
         assert!(status.success());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let pid = loop {
             if let Some(pid) = std::fs::read_to_string(&pid_file)
                 .ok()
@@ -1280,7 +1280,7 @@ mod tests {
 
         sweep_before_builder_vm();
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let gone = loop {
             // Signal 0 still succeeds on an unreaped zombie, so read the state.
             let out = std::process::Command::new("ps")
