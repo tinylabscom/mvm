@@ -248,6 +248,61 @@ fn function_description_remains_available_through_the_sdk_facade() {
 }
 
 #[test]
+fn pack_locking_and_compilation_remain_available_through_the_sdk_facade() {
+    let source = tempfile::tempdir().expect("source tree");
+    std::fs::write(source.path().join("hello.txt"), "hi\n").expect("source file");
+    let spec = mvm_sdk::pack::pack("acme/hello", "1.0.0")
+        .target(mvm_sdk::pack::PackTarget::Aarch64Linux)
+        .source(".")
+        .package("busybox")
+        .entrypoint(["cat", "/app/hello.txt"])
+        .resources(1, 128)
+        .build()
+        .expect("spec builds");
+    let revision =
+        mvm_sdk::compile::PinnedMvmRevision::parse("4e65b221744885e536ec91a3f2948cdc508dcb49")
+            .expect("immutable revision");
+    let input = mvm_sdk::pack::PackInput {
+        spec: &spec,
+        spec_dir: source.path(),
+        revision: &revision,
+    };
+
+    let sdk_lock = mvm_sdk::pack::lock_pack(&input).expect("SDK facade lock");
+    let compiler_lock = mvm_compiler::pack::lock_pack(&input).expect("compiler lock");
+    assert_eq!(sdk_lock, compiler_lock);
+    assert_eq!(mvm_sdk::pack::LOCK_FILE, mvm_compiler::pack::LOCK_FILE);
+
+    let outputs = tempfile::tempdir().expect("output root");
+    let sdk_out = outputs.path().join("sdk");
+    let compiler_out = outputs.path().join("compiler");
+    mvm_sdk::pack::compile_frozen(&input, &sdk_lock, &sdk_out).expect("SDK facade compile");
+    mvm_compiler::pack::compile_frozen(&input, &compiler_lock, &compiler_out)
+        .expect("compiler compile");
+    for path in ["flake.nix", "launch.json", "workload.json", "src/hello.txt"] {
+        assert_eq!(
+            std::fs::read(sdk_out.join(path)).expect("SDK artifact"),
+            std::fs::read(compiler_out.join(path)).expect("compiler artifact"),
+            "{path}"
+        );
+    }
+
+    std::fs::write(source.path().join("hello.txt"), "changed\n").expect("source edit");
+    let sdk_error: mvm_sdk::pack::PackError =
+        mvm_sdk::pack::compile_frozen(&input, &sdk_lock, &outputs.path().join("sdk-stale"))
+            .expect_err("SDK facade refuses a stale lock");
+    let compiler_error =
+        mvm_compiler::pack::compile_frozen(&input, &compiler_lock, &outputs.path().join("stale"))
+            .expect_err("compiler refuses a stale lock");
+    assert!(matches!(
+        sdk_error,
+        mvm_compiler::pack::PackError::StaleLock { .. }
+    ));
+    assert_eq!(sdk_error.to_string(), compiler_error.to_string());
+    assert!(!outputs.path().join("sdk-stale").exists());
+}
+
+#[test]
 fn source_planning_remains_available_through_the_sdk_facade() {
     let source = tempfile::tempdir().expect("source");
     let sdk_out = tempfile::tempdir().expect("SDK output");

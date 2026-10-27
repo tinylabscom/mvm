@@ -1,9 +1,10 @@
 //! Pack-source implementation for the `mvmctl build` front door.
 //!
 //! One path, every step reusing what already exists: the frozen compile
-//! (`mvm_compiler::pack`), the flake build into a template slot (the builder
-//! VM), a health boot of the baked entrypoint under the admitted launch path,
-//! and the archive signed by the host key. Each artifact is digested
+//! (`mvm_sdk::pack`, re-exported from `mvm_compiler::pack`), the flake build
+//! into a template slot (the builder VM), a health boot of the baked
+//! entrypoint under the admitted launch path, and the archive signed by the
+//! host key. Each artifact is digested
 //! before the health boot and again before signing; anything that changed in
 //! between is refused, so what is signed is exactly what was checked.
 //!
@@ -16,7 +17,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use mvm_build::pipeline::frozen::{FrozenInputs, tree_digest};
-use mvm_compiler::pack::compile_frozen;
 use mvm_contract::pack_lock::PackLock;
 use mvm_contract::pack_spec::{PackSpec, PackTarget};
 use mvm_core::arch::GuestArch;
@@ -27,6 +27,7 @@ use mvm_core::plan::bundle::{
 };
 use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::security::AgentProfile;
+use mvm_sdk::pack::compile_frozen;
 
 use super::author::{LoadedSpec, locked_revision, read_lock};
 use crate::commands::bundle::export::{ExportOptions, TemplateExport, stage_template};

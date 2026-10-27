@@ -2,10 +2,11 @@
 //!
 //! A thin fluent builder over [`mvm_contract::pack_spec`]: it assembles the
 //! same closed [`PackSpec`] the Python, TypeScript and Kotlin builders emit,
-//! and validates it with the contract's own validator. It neither resolves,
-//! locks, compiles nor signs anything; the shared Rust path
-//! (`mvm_compiler::pack`) does that for every language from the canonical
-//! JSON this produces.
+//! and validates it with the contract's own validator. Resolution, locking
+//! and compilation are not implemented here: with the `compiler` feature the
+//! shared Rust path (`mvm_compiler::pack`) is re-exported below, so a Rust
+//! program authors, locks and compiles through this one module. Signing stays
+//! out of the SDK.
 //!
 //! ```
 //! use mvm_sdk::pack::{Package, PackTarget, pack};
@@ -31,6 +32,17 @@ pub use mvm_contract::pack_spec::{
     CopyOperation, DependencyFiles, PackIdentity, PackResources, PackSource, PackSpec,
     PackSpecError, PackSpecSchema, PackTarget, PackageRequest, PackageScope,
 };
+
+/// Locked pack compilation, re-exported from the shared compiler.
+///
+/// `lock_pack` records what a spec resolves to against its current source
+/// tree; `compile_frozen` renders only what a still-current lock describes.
+/// Both, the `PackInput` they take and the `PackError` they fail with, are
+/// owned by `mvm-compiler`; the SDK holds no second implementation.
+///
+/// Requires the `compiler` feature.
+#[cfg(feature = "compiler")]
+pub use mvm_compiler::pack::{LOCK_FILE, PackError, PackInput, compile_frozen, lock_pack};
 
 /// Start a pack named `namespace/name` at a SemVer 2.0 `version`.
 pub fn pack(name: impl Into<String>, version: impl Into<String>) -> PackBuilder {
