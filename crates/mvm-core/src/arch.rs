@@ -11,6 +11,7 @@ use std::str::FromStr;
 // rendering reproducible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestArch {
     X86_64,
     Aarch64,

@@ -45,6 +45,7 @@ pub use mvm_contract::protocol::vm_backend::{
 /// to bypass verification, and the archive cannot supply its own trust store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LegacyBundleRuntimeProof {
     pub archive: std::path::PathBuf,
     pub pin: crate::plan::PlanArtifact,
@@ -53,6 +54,7 @@ pub struct LegacyBundleRuntimeProof {
 /// Untrusted original schema-4 archive and schema-2 runtime selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LegacyPortableRuntimeProof {
     pub archive: std::path::PathBuf,
     pub pin: crate::plan::PlanArtifact,

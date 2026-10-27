@@ -13,6 +13,7 @@
 //! runtime; the unit tests below hold the two lists to each other.
 
 use mvm_agentd::vsock::{FsStat, ProcInfo};
+use mvm_core::checkpoint::CheckpointMeta;
 use mvm_core::client::dto::{MachineFilter, MachineState, PauseOutcome, ResumeOutcome};
 use serde::Serialize;
 
@@ -202,6 +203,14 @@ fn manifest_info() -> SchemaAndDefs {
 
 /// Every method the ABI answers, in dotted-name order within each family.
 pub const REGISTRY: &[MethodDef] = &[
+    MethodDef {
+        name: crate::checkpoint::LIST,
+        key: "checkpoint_list",
+        summary: "Lists complete local checkpoint metadata in deterministic ID order.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<crate::checkpoint::ListRequest>,
+        reply: array_of::<CheckpointMeta>,
+    },
     MethodDef {
         name: crate::attestation::EXPORT,
         key: "attestation_export",
@@ -731,6 +740,7 @@ mod tests {
             .chain(crate::manifest::METHODS.iter())
             .chain(crate::attestation::METHODS.iter())
             .chain(crate::image_admin::METHODS.iter())
+            .chain(crate::checkpoint::METHODS.iter())
             .chain(crate::entrypoint::METHODS.iter())
             .chain(crate::stream::METHODS.iter())
             .chain(crate::stream::LOG_METHODS.iter())

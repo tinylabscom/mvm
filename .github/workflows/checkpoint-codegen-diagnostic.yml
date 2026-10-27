@@ -1,0 +1,67 @@
+name: Checkpoint SDK codegen diagnostic
+
+on:
+  push:
+    branches: [feat/checkpoint-list-sdk-parity]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checkpoint-codegen-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: lld ripgrep shellcheck
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: 0.12.5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: ./.github/actions/rust-cache
+      - name: Generate canonical SDK bindings
+        run: cargo run -p xtask -- gen-stubs
+      - name: Verify generated bindings
+        run: |
+          cargo run -p xtask -- check-stubs
+          for file in \
+            crates/mvm-sdk/sdks/python/mvm/_hostabi/methods.py \
+            crates/mvm-sdk/sdks/typescript/src/hostabi/methods.ts; do
+            grep -q CHECKPOINT_LIST "$file"
+          done
+          for file in \
+            crates/mvm-sdk/sdks/python/mvm/_hostabi/host_abi.py \
+            crates/mvm-sdk/sdks/typescript/src/hostabi/host_abi.ts; do
+            grep -q CheckpointMeta "$file"
+          done
+          git diff --stat
+          git diff --name-only
+      - name: Upload generated bindings
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: checkpoint-sdk-generated
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            schema/host-abi-v0.json
+            schema/host-abi-methods-v0.json
+            crates/mvm-sdk/sdks/python/mvm/_hostabi/host_abi.py
+            crates/mvm-sdk/sdks/python/mvm/_hostabi/methods.py
+            crates/mvm-sdk/sdks/typescript/src/hostabi/host_abi.ts
+            crates/mvm-sdk/sdks/typescript/src/hostabi/methods.ts

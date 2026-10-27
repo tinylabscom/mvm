@@ -33,6 +33,7 @@ pub use display::{
 /// `egress` is deny-all, an absent `cpu` is uncapped.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Grants {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuGrant>,
@@ -60,6 +61,7 @@ pub struct Grants {
 /// wall-clock CPU, fuel is a count of executed instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "unit", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum CpuGrant {
     /// Thousandths of one host core. 1500 = 1.5 cores. Integer because the
     /// value lands in a signed, content-addressed payload and float
@@ -78,6 +80,7 @@ pub enum CpuGrant {
 /// intent. `NonZeroU32` makes that unrepresentable here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WallClockGrant {
     Unbounded,
     Secs { secs: NonZeroU32 },
@@ -88,6 +91,7 @@ pub enum WallClockGrant {
 /// distinction never opens anything.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EgressGrant {
     pub allow: Vec<HostPort>,
 }

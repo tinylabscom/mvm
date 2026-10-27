@@ -1828,6 +1828,16 @@ silently selecting a weaker tier.
 
 Checkpoint blobs are stored under the configured checkpoint store (`MVM_HOME` / `~/.mvm` via the core path helpers). The audit chain records `checkpoint.created`, `checkpoint.restored`, and `checkpoint.forked` entries with content hashes; restore and fork refuse tampered checkpoint content before booting.
 
+`machine checkpoint ls` delegates catalog reads to the client. `--json` returns
+complete checkpoint metadata in ID order, matching `checkpoint.list` in hostlib
+ABI 1.10 and `mvm.checkpoint.list()` in Python and TypeScript. Legacy omitted
+fields remain omitted. A missing store is empty; staging, non-directory entries,
+and directories without `meta.json` are ignored. Invalid metadata or IDs,
+metadata/directory ID mismatches, symlinked metadata, non-regular metadata files,
+and metadata exceeding 16 MiB refuse the entire listing. Catalog reads use held
+directory handles and do not open checkpoint content, verify lineage, or grant
+permission to restore.
+
 The rootfs and memory image are stored as 1 MiB chunks shared, by hard link, with every other checkpoint of the same tenant that holds the same bytes; each blob's recorded hash is the digest of its chunk index. A checkpoint from a pre-release that stored those images as whole files is refused by restore and fork, with a message naming it. Remove it with `mvmctl machine checkpoint rm <checkpoint>` and capture the machine again; there is no migration.
 
 ## Durable Agent Sessions
