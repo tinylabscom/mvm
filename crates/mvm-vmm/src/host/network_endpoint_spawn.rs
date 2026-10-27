@@ -923,8 +923,8 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self
     }
 
-    /// Set `egress_proxy`. Takes a value or an `Option`; unset means `None`,
-    /// which is the endpoint's "dial direct".
+    /// Override host config and ambient proxy variables. `None` inherits host
+    /// settings; `Some(Default::default())` explicitly selects direct.
     #[must_use]
     pub fn egress_proxy(mut self, egress_proxy: impl Into<Option<EgressProxySpawnConfig>>) -> Self {
         self.egress_proxy = egress_proxy.into();
@@ -986,18 +986,60 @@ impl<'a> Default for SubstitutionSpawnParamsBuilder<'a> {
 
 /// The upstream proxy, as strings the endpoint parses.
 ///
-/// Strings rather than a parsed type because this only carries a value from
-/// host configuration to the endpoint's stdin; the endpoint is where a bad
-/// value has to be reported, since it is the process that would otherwise fail
-/// to reach anything.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Strings carry host settings to the endpoint's stdin without exposing them
+/// in argv or environment. Both the launcher and endpoint validate them with
+/// the forward client's parser.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct EgressProxySpawnConfig {
     pub https: Option<String>,
     pub http: Option<String>,
     pub no_proxy: Option<String>,
 }
 
+impl std::fmt::Debug for EgressProxySpawnConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EgressProxySpawnConfig { <redacted> }")
+    }
+}
+
 impl EgressProxySpawnConfig {
+    /// Resolve the operator's host config before considering ambient variables.
+    /// A present, even empty, table is a complete override.
+    pub fn from_host_config() -> Result<Option<Self>> {
+        let config = mvm_core::user_config::load_strict(None)?;
+        let proxy = Self::from_config_and_env(config.egress_proxy, Self::from_host_env);
+        if let Some(proxy) = &proxy {
+            proxy.resolve()?;
+        }
+        Ok(proxy)
+    }
+
+    fn from_config_and_env(
+        config: Option<mvm_core::user_config::HostEgressProxyConfig>,
+        ambient: impl FnOnce() -> Option<Self>,
+    ) -> Option<Self> {
+        match config {
+            Some(config) => Some(Self {
+                https: config.https,
+                http: config.http,
+                no_proxy: config.no_proxy,
+            }),
+            None => ambient(),
+        }
+    }
+
+    /// Validate using the same parser as the endpoint. Errors never contain
+    /// input URLs, including malformed userinfo.
+    pub fn resolve(&self) -> Result<Option<mvm_http::ProxyConfig>> {
+        mvm_http::ProxyConfig::from_lookup(|key| match key {
+            "https_proxy" => self.https.clone(),
+            "http_proxy" => self.http.clone(),
+            "no_proxy" => self.no_proxy.clone(),
+            _ => None,
+        })
+        .map_err(Into::into)
+    }
+
     /// Read the conventional proxy environment of the host process.
     ///
     /// Returns `None` when nothing is configured, so the common case emits no
@@ -1018,6 +1060,163 @@ impl EgressProxySpawnConfig {
             no_proxy: pick(&["no_proxy", "NO_PROXY"]),
         };
         (cfg.https.is_some() || cfg.http.is_some()).then_some(cfg)
+    }
+}
+
+#[cfg(test)]
+mod host_proxy_override_tests {
+    use super::*;
+    use mvm_core::user_config::HostEgressProxyConfig;
+
+    #[test]
+    fn host_config_file_overrides_ambient_and_fails_closed() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        for key in [
+            "https_proxy",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "HTTP_PROXY",
+            "no_proxy",
+            "all_proxy",
+        ] {
+            env.remove(key);
+        }
+        env.set("ALL_PROXY", "http://ambient.corp:3128");
+        env.set("NO_PROXY", "*");
+        let dir = PathBuf::from(mvm_core::config::mvm_config_dir());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let ambient = EgressProxySpawnConfig::from_host_config().unwrap().unwrap();
+        assert_eq!(ambient.https.as_deref(), Some("http://ambient.corp:3128"));
+        assert_eq!(ambient.no_proxy.as_deref(), Some("*"));
+        assert!(!path.exists(), "resolution must not create operator config");
+
+        std::fs::write(
+            &path,
+            "[egress_proxy]\nhttps = 'socks5h://explicit.corp:1080'\nno_proxy = 'internal.example'",
+        )
+        .unwrap();
+        let explicit = EgressProxySpawnConfig::from_host_config().unwrap().unwrap();
+        let resolved = explicit.resolve().unwrap().unwrap();
+        assert!(resolved.select("api.example", true).is_some());
+        assert!(resolved.select("internal.example", true).is_none());
+        assert!(resolved.select("api.example", false).is_none());
+
+        std::fs::write(&path, "[egress_proxy]").unwrap();
+        assert!(
+            EgressProxySpawnConfig::from_host_config()
+                .unwrap()
+                .unwrap()
+                .resolve()
+                .unwrap()
+                .is_none()
+        );
+        for text in [
+            "[egress_proxy]\nhttps = 'ftp://proxy.corp'",
+            "[egress_proxy]\nhttps = 42",
+            "[egress_proxy",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert!(EgressProxySpawnConfig::from_host_config().is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_proxy_and_no_proxy_replace_ambient_without_reading_it() {
+        let proxy = EgressProxySpawnConfig::from_config_and_env(
+            Some(HostEgressProxyConfig {
+                https: Some("http://explicit.corp:3128".into()),
+                http: Some("socks5h://explicit.corp:1080".into()),
+                no_proxy: Some("internal.example".into()),
+            }),
+            || panic!("explicit config must not read ambient values"),
+        )
+        .unwrap();
+        let resolved = proxy.resolve().unwrap().unwrap();
+        assert_eq!(
+            resolved.select("api.example", true).unwrap().host,
+            "explicit.corp"
+        );
+        assert_eq!(resolved.select("api.example", false).unwrap().port, 1080);
+        assert!(resolved.select("api.internal.example", true).is_none());
+    }
+
+    #[test]
+    fn missing_table_inherits_ambient() {
+        let ambient = EgressProxySpawnConfig {
+            https: Some("http://ambient.corp:3128".into()),
+            http: None,
+            no_proxy: Some("*".into()),
+        };
+        let result = EgressProxySpawnConfig::from_config_and_env(None, || Some(ambient.clone()));
+        assert_eq!(result, Some(ambient));
+    }
+
+    #[test]
+    fn empty_table_and_empty_scheme_values_disable_ambient() {
+        for config in [
+            HostEgressProxyConfig::default(),
+            HostEgressProxyConfig {
+                https: Some("  ".into()),
+                http: Some("".into()),
+                no_proxy: None,
+            },
+        ] {
+            let proxy = EgressProxySpawnConfig::from_config_and_env(Some(config), || {
+                panic!("disabled config must not inherit ambient ALL_PROXY")
+            })
+            .unwrap();
+            assert!(proxy.resolve().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn omitted_scheme_and_no_proxy_do_not_inherit_ambient() {
+        let proxy = EgressProxySpawnConfig::from_config_and_env(
+            Some(HostEgressProxyConfig {
+                https: Some("http://explicit.corp:3128".into()),
+                ..Default::default()
+            }),
+            || panic!("partial table is still a complete override"),
+        )
+        .unwrap();
+        let resolved = proxy.resolve().unwrap().unwrap();
+        assert!(resolved.select("api.example", false).is_none());
+        assert!(resolved.select("api.example", true).is_some());
+    }
+
+    #[test]
+    fn malformed_override_refuses_instead_of_inheriting_or_dialling_direct() {
+        for url in ["not a url", "ftp://proxy.corp", "http://"] {
+            let proxy = EgressProxySpawnConfig::from_config_and_env(
+                Some(HostEgressProxyConfig {
+                    https: Some(url.into()),
+                    ..Default::default()
+                }),
+                || panic!("malformed override must not fall back to ambient"),
+            )
+            .unwrap();
+            assert!(proxy.resolve().is_err());
+        }
+    }
+
+    #[test]
+    fn diagnostics_redact_valid_and_malformed_credentials() {
+        let sensitive = format!("private-{}", std::process::id());
+        for scheme in ["http", "socks5h", "unsupported"] {
+            let proxy = EgressProxySpawnConfig {
+                https: Some(format!(
+                    "{scheme}://{sensitive}:{sensitive}@proxy.corp:3128"
+                )),
+                ..Default::default()
+            };
+            assert!(!format!("{proxy:?}").contains(&sensitive));
+            match proxy.resolve() {
+                Ok(Some(cfg)) => assert!(!cfg.summary().contains(&sensitive)),
+                Err(err) => assert!(!format!("{err:?}").contains(&sensitive)),
+                Ok(None) => panic!("nonempty proxy must not resolve to direct"),
+            }
+        }
     }
 }
 
@@ -1181,9 +1380,13 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result<()> {
     use std::io::Write;
     // One resolution point for every backend. A caller that supplied a proxy
-    // explicitly keeps it; everyone else inherits the host's environment.
+    // explicitly keeps it; everyone else resolves host config before ambient
+    // variables. Refuse invalid settings before touching sockets or children.
     if params.egress_proxy.is_none() {
-        params.egress_proxy = EgressProxySpawnConfig::from_host_env();
+        params.egress_proxy = EgressProxySpawnConfig::from_host_config()?;
+    }
+    if let Some(proxy) = &params.egress_proxy {
+        proxy.resolve()?;
     }
     let session_marker = params.state_dir.join(SUBST_SESSION_FILE);
     let session_ready_socket = session_ready_socket_path(params.state_dir);
@@ -2706,7 +2909,9 @@ mod tests {
             transport: EndpointTransport::Uds {
                 path: dir.join("vsock-5253.sock"),
             },
-            egress_proxy: None,
+            // Isolate sidecar rollback from host-config readability: this test
+            // intentionally makes MVM_HOME unreadable as a directory.
+            egress_proxy: Some(EgressProxySpawnConfig::default()),
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,

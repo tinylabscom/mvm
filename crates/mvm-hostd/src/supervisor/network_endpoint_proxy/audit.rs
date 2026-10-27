@@ -965,6 +965,47 @@ mod server_tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_denied_destination_stays_denied_with_proxy_and_no_proxy_configured() {
+        for no_proxy in ["", "*", "api.openai.com"] {
+            let dir = tempdir().unwrap();
+            let forwarder = Arc::new(MockForwarder {
+                seen: Mutex::new(None),
+            });
+            let (mut service, ph, chain) = recorded_service_with(
+                dir.path(),
+                gate_admitting(&[("other.example", 443)]),
+                forwarder.clone(),
+            );
+            let proxy = mvm_http::ProxyConfig::from_lookup(|key| match key {
+                "https_proxy" => Some("http://proxy.corp:3128".into()),
+                "no_proxy" => Some(no_proxy.into()),
+                _ => None,
+            })
+            .unwrap()
+            .unwrap();
+            Arc::get_mut(&mut service).expect("sole owner").proxy = Some(Arc::new(proxy));
+            let response = service
+                .process(WireRequest {
+                    method: "GET".into(),
+                    url: "https://api.openai.com/v1/models".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                    body_b64: String::new(),
+                })
+                .await;
+            assert!(
+                matches!(&response, WireResponse::Refused { message } if message.contains("claim-10")),
+                "{response:?}"
+            );
+            assert!(forwarder.seen.lock().unwrap().is_none());
+            let logged = std::fs::read_to_string(&chain).unwrap();
+            assert!(logged.contains("policy_denied"));
+            assert!(!logged.contains("secret.forward_outcome"));
+            let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+            crate::supervisor::audit_file::verify_audit_chain(&chain, &key).unwrap();
+        }
+    }
+
     /// A URL naming no `host:port` is refused as malformed, and recorded as
     /// such rather than silently.
     #[tokio::test]
