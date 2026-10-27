@@ -1065,6 +1065,117 @@ mod tests {
     }
 
     #[test]
+    fn oci_deploy_record_binds_exact_bytes_and_ignores_the_mutable_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A digest-pinned OCI source: the reference carries a mutable tag,
+        // while the digest is what the pull verifies before materialization.
+        let mut workload = sample_workload();
+        workload.apps[0].source = Source::OciImage {
+            reference: "registry.example/library/app:latest".into(),
+            digest: format!("sha256:{}", "1".repeat(64)),
+        };
+
+        // Stand-in for the bytes the digest-verified pull, unpack, and
+        // runtime injection sealed as rootfs.ext4.
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"oci materialized rootfs").unwrap();
+        let archive = tmp.path().join("image.tar.gz");
+        std::fs::write(&archive, b"oci deploy archive").unwrap();
+        let bundle = DeployBundle {
+            archive_path: archive,
+            workload_id: "hello".into(),
+            schema_version: "0.1".into(),
+            boot_artifact: digest_boot_artifact(&rootfs).unwrap(),
+        };
+        let record = build_deploy_record(&workload, &bundle, None, None).unwrap();
+
+        // The attested identity names the exact materialized bytes; the
+        // archive envelope is a different subject.
+        assert_eq!(record.boot_artifact, digest_boot_artifact(&rootfs).unwrap());
+        assert_ne!(record.image.blake3, record.boot_artifact.blake3);
+
+        let record_path = tmp.path().join("deploy.json");
+        write_deploy_record(&record, &record_path).unwrap();
+        let loaded = read_deploy_record(&record_path).unwrap();
+        verify_boot_artifact(&rootfs, &loaded.boot_artifact).unwrap();
+
+        // The tag contributes nothing to identity: the same bytes under a
+        // re-pointed tag produce the identical attestation.
+        let mut retagged = sample_workload();
+        retagged.apps[0].source = Source::OciImage {
+            reference: "registry.example/library/app:previous".into(),
+            digest: format!("sha256:{}", "1".repeat(64)),
+        };
+        let retagged_record = build_deploy_record(&retagged, &bundle, None, None).unwrap();
+        assert_eq!(retagged_record.boot_artifact, record.boot_artifact);
+
+        // Tag drift: the registry re-pointed the tag at different content and
+        // the next materialization serves different bytes; the recorded
+        // attestation fails closed.
+        std::fs::write(&rootfs, b"oci rootfs from a re-pointed tag").unwrap();
+        let error = verify_boot_artifact(&rootfs, &loaded.boot_artifact).unwrap_err();
+        assert!(matches!(error, DeployError::BootArtifact { .. }));
+
+        // An identity no verified materialization produced fails closed:
+        // fabricated digests never match a rehash, and malformed digests are
+        // refused when the record loads.
+        let fabricated = BootArtifactIdentity {
+            kind: "rootfs.ext4".into(),
+            blake3: "0".repeat(64),
+            sha256: "0".repeat(64),
+            size_bytes: 23,
+        };
+        let error = verify_boot_artifact(&rootfs, &fabricated).unwrap_err();
+        assert!(matches!(error, DeployError::BootArtifact { .. }));
+
+        let mut unattested = serde_json::to_value(&record).unwrap();
+        unattested["boot_artifact"]["blake3"] = serde_json::json!("zz".repeat(32));
+        std::fs::write(&record_path, serde_json::to_vec(&unattested).unwrap()).unwrap();
+        let error = read_deploy_record(&record_path).unwrap_err();
+        assert!(matches!(error, DeployError::BootArtifact { .. }));
+    }
+
+    #[test]
+    fn flake_deploy_record_binds_exact_bytes_and_refuses_stale_or_wrong_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A flake-sourced workload: the boot artifact is what evaluating the
+        // derivation sealed as rootfs.ext4.
+        let mut workload = sample_workload();
+        workload.apps[0].source = Source::NixDerivation {
+            expr: "{ pkgs }: pkgs.hello".into(),
+        };
+
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"flake evaluation rootfs v1").unwrap();
+        let archive = tmp.path().join("image.tar.gz");
+        std::fs::write(&archive, b"flake deploy archive").unwrap();
+        let bundle = DeployBundle {
+            archive_path: archive.clone(),
+            workload_id: "hello".into(),
+            schema_version: "0.1".into(),
+            boot_artifact: digest_boot_artifact(&rootfs).unwrap(),
+        };
+        let record = build_deploy_record(&workload, &bundle, None, None).unwrap();
+        let record_path = tmp.path().join("deploy.json");
+        write_deploy_record(&record, &record_path).unwrap();
+        let loaded = read_deploy_record(&record_path).unwrap();
+        verify_boot_artifact(&rootfs, &loaded.boot_artifact).unwrap();
+
+        // Stale record: a re-evaluation sealed different rootfs bytes, so the
+        // previous attestation fails closed.
+        std::fs::write(&rootfs, b"flake evaluation rootfs v2").unwrap();
+        let error = verify_boot_artifact(&rootfs, &loaded.boot_artifact).unwrap_err();
+        assert!(matches!(error, DeployError::BootArtifact { .. }));
+
+        // Wrong artifact: the archive envelope is not the boot subject; an
+        // identity computed over the envelope fails closed against the
+        // selected rootfs.
+        let envelope_identity = digest_boot_artifact(&archive).unwrap();
+        let error = verify_boot_artifact(&rootfs, &envelope_identity).unwrap_err();
+        assert!(matches!(error, DeployError::BootArtifact { .. }));
+    }
+
+    #[test]
     fn deploy_record_refuses_tampered_dependency_volume() {
         let tmp = tempfile::tempdir().unwrap();
         let volume = tmp.path().join("volume");
