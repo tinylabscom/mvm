@@ -270,23 +270,24 @@ jobs:
   fuzz:
     name: Fuzz — parsers (vsock + OCI)
     runs-on: ubuntu-latest
-    # Under the six-hour platform cap, so a lane that outgrows its budget
-    # is stopped as this job rather than killed as the runner mid-target.
-    timeout-minutes: 300
+    # Seventeen targets at 60 s plus a sanitizer build each (~3 min) is about
+    # 65 minutes; 90 leaves headroom and stops an overrun as this job.
+    timeout-minutes: 90
     env:
       # Per-target fuzzing seconds. Literals at job scope rather than inside
       # the script below because `xtask check-workflow-paths` reads them: it
       # multiplies them by the number of targets in this job and refuses a
       # budget that cannot finish inside `timeout-minutes`.
       #
-      # 1800 was chosen when this lane had four targets. It has seventeen,
-      # and seventeen half-hours do not fit in six. Every nightly run was
-      # stopped partway down the list — most recently after eleven targets —
-      # so the last six targets had never
-      # executed on a cron run at all. The job's conclusion was `cancelled`,
-      # which the lane watcher did not count, so nothing said so.
-      FUZZ_SECS_SCHEDULE: 720
-      FUZZ_SECS_DISPATCH: 300
+      # The sanitizer build, not the fuzzing, is most of each target's cost,
+      # so shortening the fuzz time barely changes coverage per target but
+      # keeps every target executing on every nightly. At 720 s the lane ran
+      # about 3.7 hours, and a hosted runner held that long was lost
+      # ("lost communication with the server"), which cancels the run; a
+      # cancelled run is not counted by the claim-witness freshness watcher,
+      # so the lane never produced a usable scheduled result.
+      FUZZ_SECS_SCHEDULE: 60
+      FUZZ_SECS_DISPATCH: 60
     steps:
       - uses: actions/checkout@v6
 
