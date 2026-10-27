@@ -36,6 +36,7 @@ jobs:
           node-version: 22
       - uses: ./.github/actions/rust-cache
       - name: Generate canonical SDK bindings
+        id: codegen
         run: cargo run -p xtask -- gen-stubs
       - name: Verify generated bindings
         run: |
@@ -53,6 +54,7 @@ jobs:
           git diff --stat
           git diff --name-only
       - name: Upload generated bindings
+        if: ${{ always() && steps.codegen.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-sdk-generated
