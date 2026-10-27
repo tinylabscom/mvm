@@ -93,6 +93,8 @@ pub const CRNG_RESEED_HELPER_GID: u32 = 988;
 mod capability_sets;
 #[cfg(all(target_os = "linux", test))]
 mod high_capability_tests;
+#[cfg(all(target_os = "linux", test))]
+mod workload_spawn_capability_tests;
 #[cfg(target_os = "linux")]
 use capability_sets::{raise_ambient_capabilities, set_capabilities};
 mod cgroup2;
@@ -792,20 +794,28 @@ pub fn harden_init_process() -> std::io::Result<()> {
     drop_capability_bounding_set_to(RESTORE_AGENT_CAPABILITIES)
 }
 
-/// Empty the bounding set for a workload process, immediately before exec.
+/// Strip a workload process of every capability, immediately before exec.
 ///
-/// The agent keeps `CAP_KILL` and `CAP_SYS_TIME`; a workload has no use for
-/// either, so the last thing done on its behalf is to remove them. `NoNewPrivs`
-/// already makes file capabilities and setuid bits inert on exec, so this is
-/// defense in depth rather than the load-bearing control — but it is what lets
-/// the posture be stated as an empty set rather than as "inert in practice".
+/// The agent keeps `CAP_KILL` and `CAP_SYS_TIME`, holding both as ambient
+/// capabilities so they survive its own exec. A child forked from it inherits
+/// them, and `NoNewPrivs` does not remove them: it only makes setuid bits and
+/// file capabilities inert. A workload has no use for either, so the last thing
+/// done on its behalf is to remove them.
 ///
-/// Runs inside `pre_exec`, so it must stay async-signal-safe: two `prctl`
-/// calls and no allocation.
+/// The bounding set is emptied where that is possible, but it cannot be relied
+/// on: the drop needs `CAP_SETPCAP`, which the agent deliberately does not
+/// hold, so it is skipped, and a bounding set only limits what an exec can
+/// gain, never what the process already has. The load-bearing step is
+/// [`clear_process_capabilities`], which empties the effective, permitted and
+/// inheritable sets and with them the ambient set.
+///
+/// Runs inside `pre_exec`, so it must stay async-signal-safe: `prctl` and
+/// `capset` calls and no allocation.
 #[cfg(target_os = "linux")]
 pub fn drop_workload_capability_bounding_set() -> std::io::Result<()> {
     set_no_new_privileges()?;
-    narrow_bounding_set_where_enforceable(0)
+    narrow_bounding_set_where_enforceable(0)?;
+    clear_process_capabilities()
 }
 
 /// Narrow the bounding set to `keep`, skipping the drop when this caller could
