@@ -10,7 +10,11 @@ test("every blog post renders sharing controls with its own hook and canonical U
     const html = await readFile(new URL(`../dist/blog/${slug}/index.html`, import.meta.url), "utf8");
     for (const platform of ["X", "LinkedIn", "Facebook", "Reddit"]) {
       assert.ok(html.includes(`aria-label="Share on ${platform}"`), `${file}: ${platform}`);
+      const button = html.match(new RegExp(`<button[^>]*aria-label="Share on ${platform}"[^>]*>(.*?)</button>`, "s"))?.[1];
+      assert.ok(button?.includes("<svg"), `${file}: ${platform} uses an icon`);
+      assert.ok(!button.replace(/<svg[\s\S]*?<\/svg>/g, "").trim(), `${file}: ${platform} has no visible text label`);
     }
+    assert.ok(html.includes('class="blog-subtitle-row"'), `${file}: subtitle and sharing share a row`);
     assert.ok(html.includes(`https://runmvm.com/blog/${slug}`), `${file}: production URL`);
     const propsAttribute = html.match(/component-export="default"[^>]*props="([^"]*?&quot;hook&quot;[^"]*)"/)?.[1];
     assert.ok(propsAttribute, `${file}: sharing island receives the required hook`);
