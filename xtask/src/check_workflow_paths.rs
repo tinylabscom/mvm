@@ -634,6 +634,275 @@ mod tests {
         "test-workspace",
     ];
 
+    fn step_run(job: &str, name: &str) -> String {
+        job.split(&format!("      - name: {name}\n"))
+            .nth(1)
+            .expect("named step must exist")
+            .split("        run: |\n")
+            .nth(1)
+            .expect("step must have a literal run block")
+            .lines()
+            .take_while(|line| line.is_empty() || line.starts_with("          "))
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn docs_scope_matches_the_documented_example_corpus_roots() {
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../crates/mvm-conformance/src/doc_examples.rs"),
+        )
+        .unwrap();
+        let parsed = syn::parse_file(&source).unwrap();
+        let roots = |name: &str| {
+            let item = parsed
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Const(item) if item.ident == name => Some(item),
+                    _ => None,
+                })
+                .expect("documentation corpus constant must exist");
+            let syn::Expr::Array(array) = item.expr.as_ref() else {
+                panic!("documentation corpus must be an explicit array");
+            };
+            array
+                .elems
+                .iter()
+                .map(|element| {
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(value),
+                        ..
+                    }) = element
+                    else {
+                        panic!("documentation root must be a string");
+                    };
+                    value.value()
+                })
+                .collect::<Vec<_>>()
+        };
+        let patterns = roots("DOCUMENTATION_FILES")
+            .iter()
+            .map(|root| format!("{}$", regex::escape(root)))
+            .chain(
+                roots("DOCUMENTATION_TREES")
+                    .iter()
+                    .map(|root| format!("{root}/")),
+            )
+            .collect::<Vec<_>>()
+            .join("|");
+        let ci = ci_workflow();
+        assert!(
+            job_block(&ci, "scope").contains(&format!("grep -zE '^({patterns})'")),
+            "the docs classifier must match documentation_files() roots"
+        );
+    }
+
+    #[test]
+    fn docs_static_is_required_without_reintroducing_queue_bdd() {
+        let ci = ci_workflow();
+        let lane = job_block(&ci, "docs-static");
+        assert!(lane.contains("needs: [scope]"));
+        assert_eq!(job_if(lane), "needs.scope.outputs.docs == 'true'");
+        for setup in [
+            "actions/checkout@v6",
+            "dtolnay/rust-toolchain@1.97.1",
+            "uses: ./.github/actions/rust-cache",
+        ] {
+            assert!(lane.contains(setup));
+        }
+        assert_eq!(
+            step_run(lane, "Check static documentation surfaces"),
+            "cargo run -p xtask -- check-cli-help-matches-docs\n\
+             cargo run -p xtask -- check-doc-links\n\
+             cargo run -p xtask -- check-doc-claims"
+        );
+        for heavy in ["--features", "bdd", "artifact", "cargo build", "sdk build"] {
+            assert!(!lane.contains(heavy), "docs static must not add {heavy}");
+        }
+        let scope = job_block(&ci, "scope");
+        for wiring in [
+            "docs: ${{ steps.validate.outputs.docs }}",
+            "DOCS: ${{ steps.decide.outputs.docs }}",
+            "validate docs \"$DOCS\"",
+            "for output in code architecture docs; do",
+        ] {
+            assert!(scope.contains(wiring));
+        }
+        let aggregate = job_block(&ci, "test");
+        assert!(aggregate.contains("needs: [scope, runners, docs-static,"));
+        assert!(aggregate.contains("if: ${{ always() }}"));
+        assert!(aggregate.contains(
+            "BAD: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}"
+        ));
+        assert!(aggregate.contains("DOCS: ${{ needs.scope.outputs.docs }}"));
+        assert!(aggregate.contains("DOCS_RESULT: ${{ needs.docs-static.result }}"));
+        assert!(job_body(&ci, "bdd-conformance").is_none());
+        assert!(!ci.contains("uses: ./.github/workflows/bdd.yml"));
+        let main = main_workflow();
+        assert_eq!(job_if(job_block(&main, "bdd-conformance")), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docs_scope_validation_rejects_missing_and_invalid_outputs() {
+        use std::process::Command;
+        let ci = ci_workflow();
+        let script = step_run(job_block(&ci, "scope"), "Validate classification");
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        for docs in ["true", "false", "", "invalid"] {
+            let result = Command::new("bash")
+                .args(["-c", &script])
+                .env("CODE", "false")
+                .env("ARCHITECTURE", "false")
+                .env("DOCS", docs)
+                .env("GITHUB_OUTPUT", temp.path())
+                .output()
+                .unwrap();
+            assert_eq!(result.status.success(), matches!(docs, "true" | "false"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aggregate_requires_valid_docs_scope_and_required_lane_success() {
+        use std::process::Command;
+        let ci = ci_workflow();
+        let script = step_run(
+            job_block(&ci, "test"),
+            "Require every validation lane to pass",
+        );
+        for docs in ["true", "false", "", "invalid"] {
+            for scope in ["success", "skipped", "failure", "cancelled"] {
+                for lane in ["success", "skipped", "failure", "cancelled", "", "invalid"] {
+                    for other in ["success", "skipped", "failure", "cancelled"] {
+                        let bad = [scope, lane, other]
+                            .iter()
+                            .any(|result| matches!(*result, "failure" | "cancelled"));
+                        let verdict = Command::new("bash")
+                            .args([
+                                "--noprofile",
+                                "--norc",
+                                "-e",
+                                "-o",
+                                "pipefail",
+                                "-c",
+                                &script,
+                            ])
+                            .env("BAD", bad.to_string())
+                            .env("DOCS", docs)
+                            .env("DOCS_RESULT", lane)
+                            .output()
+                            .unwrap();
+                        let expected = !bad
+                            && match docs {
+                                "true" => lane == "success",
+                                "false" => matches!(lane, "success" | "skipped"),
+                                _ => false,
+                            };
+                        assert_eq!(
+                            verdict.status.success(),
+                            expected,
+                            "docs={docs:?}, scope={scope}, lane={lane}, other={other}: {verdict:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Execute the workflow's shell, stubbing only git's external inputs. This
+    // covers NUL-delimited paths and failure fallbacks without a real checkout.
+    #[cfg(unix)]
+    #[test]
+    fn docs_classifier_executes_paths_and_fail_closed_events() {
+        use std::process::Command;
+        let ci = ci_workflow();
+        let script = step_run(job_block(&ci, "scope"), "Classify changed paths");
+        let temp = tempfile::tempdir().unwrap();
+        let changed = temp.path().join("changed");
+        let output = temp.path().join("output");
+        let cases = [
+            ("README.md", true, true),
+            ("AGENTS.md", true, true),
+            ("public/src/content/docs/guides/new.mdx", true, false),
+            (
+                "public/src/content/docs/new file\nwith newline.md",
+                true,
+                false,
+            ),
+            ("crates/mvm-sdk/sdks/python/README.md", true, true),
+            ("examples/new/config.toml", true, true),
+            ("public/src/content/docs-extra/page.md", false, false),
+            ("README.md.bak", false, false),
+            ("docs/README.md", false, false),
+            ("public/src/pages/index.astro", false, false),
+            ("crates/mvm-core/src/lib.rs", false, true),
+        ];
+        for event in ["pull_request", "merge_group", "push", "workflow_dispatch"] {
+            for failure in ["", "fetch", "merge-base", "diff", "base-ref"] {
+                for (path, docs, code) in cases {
+                    std::fs::write(&changed, format!("{path}\0")).unwrap();
+                    std::fs::write(&output, "").unwrap();
+                    let result = Command::new("bash")
+                        .arg("-c")
+                        .arg(format!(
+                            r#"git() {{
+  if [ "$1" = "$FAILURE" ]; then return 1; fi
+  case "$1" in
+    fetch) ;;
+    merge-base) printf 'base\n' ;;
+    diff) cat "$CHANGED" ;;
+    *) return 2 ;;
+  esac
+}}
+{script}"#
+                        ))
+                        .env("EVENT", event)
+                        .env("FAILURE", failure)
+                        .env(
+                            "MG_BASE_REF",
+                            if failure == "base-ref" {
+                                "invalid"
+                            } else {
+                                "refs/heads/main"
+                            },
+                        )
+                        .env("MG_HEAD", "head")
+                        .env("PR_BASE", "base")
+                        .env("PR_HEAD", "head")
+                        .env("CHANGED", &changed)
+                        .env("GITHUB_OUTPUT", &output)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        result.status.success(),
+                        "{event}/{failure}/{path}: {result:?}"
+                    );
+                    let outputs = std::fs::read_to_string(&output).unwrap();
+                    let all = matches!(event, "push" | "workflow_dispatch")
+                        || matches!(failure, "merge-base" | "diff")
+                        || (event == "merge_group" && matches!(failure, "fetch" | "base-ref"));
+                    assert!(
+                        outputs.contains(&format!("docs={}", all || docs)),
+                        "{event}/{failure}/{path}: {outputs}"
+                    );
+                    assert!(
+                        outputs.contains(&format!("code={}", all || code)),
+                        "{event}/{failure}/{path}: {outputs}"
+                    );
+                    if all {
+                        assert!(outputs.contains("architecture=true"));
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn working_directories_are_unquoted() {
         let src = "    working-directory: crates/mvm-agentd\n  working-directory: \"crates/x\"\n";
@@ -770,7 +1039,7 @@ mod tests {
             "the aggregate must publish the required context without another full runner"
         );
         assert!(test.contains(
-            "needs: [scope, runners, lint-core, lint-policy, lint-feature-clippy, \
+            "needs: [scope, runners, docs-static, lint-core, lint-policy, lint-feature-clippy, \
              lint-windows, test-windows-identity, test-workspace-build, test-workspace]"
         ));
         let test_main = job_block(&main, "test-main");
