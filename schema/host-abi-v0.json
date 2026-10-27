@@ -18,6 +18,31 @@
       ],
       "type": "object"
     },
+    "AgentSessionId": {
+      "description": "Stable public agent-session identifier.",
+      "type": "string"
+    },
+    "ApplicationTerminalGrant": {
+      "additionalProperties": false,
+      "description": "The one program a terminal may run, admitted by the signed plan.",
+      "properties": {
+        "argv": {
+          "description": "The exact argv. `argv[0]` is an absolute path, so the guest resolves nothing on the caller's behalf.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "argv"
+      ],
+      "type": "object"
+    },
+    "ApprovalHead": {
+      "description": "The approval-ledger head a [`SessionBinding`] was admitted under.\n\nShares the `sha256:<64-hex>` wire shape with [`CheckpointDigest`] — both are heads of a hash chain — but an approval-ledger head is deliberately not a `CheckpointDigest`. `CheckpointDigest`'s own doc explains why the shape is shared with no conversion: so the boundary between unrelated hash-chain heads is a type-system property, not a string check. Without this newtype, `approval_head: CheckpointDigest` would let an approval head be assigned wherever a checkpoint content-address is expected (or the reverse) with the compiler saying nothing — and because `SessionBinding` sits inside `CheckpointMeta`'s digest input, whichever encoding shipped first would freeze into every sealed record's `meta_digest`.",
+      "type": "string"
+    },
     "AttestationBodyData": {
       "additionalProperties": false,
       "properties": {
@@ -304,6 +329,223 @@
         }
       ]
     },
+    "CheckpointClass": {
+      "description": "The capture mechanism behind a checkpoint. Only `FsQuick` is currently implemented; `VmFull` is reserved so the memory-state path can slot into the same model without a new surface.",
+      "oneOf": [
+        {
+          "description": "Copy-on-write clone of a quiesced rootfs (filesystem state only).",
+          "enum": [
+            "fs_quick"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Full machine memory state via the supervisor save/restore path.",
+          "enum": [
+            "vm_full"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "CheckpointDigest": {
+      "description": "Content-address of a [`CheckpointMeta`]: `sha256(serde_json(load-bearing fields))` rendered `sha256:<64 lowercase hex>`. A child hash-links to its parent by this digest, so editing an ancestor's sealed record is detectable from any descendant — the recomputed ancestor digest no longer matches the child's link.\n\nThis is a content-address, not a signature and not an exact-byte blob digest. It shares the `sha256:<64-hex>` wire shape with several unrelated ids (OCI manifest/layer digests, blob shas, workload addresses) precisely so the boundary between them is a type-system property, not a string check: there is no `From`/`Into`/`Deref` to or from any of them (nor to [`CheckpointId`]), so handing one where another is expected does not compile.",
+      "type": "string"
+    },
+    "CheckpointId": {
+      "description": "Stable identifier for a checkpoint (also its on-disk directory name under `config::checkpoints_dir()`).",
+      "type": "string"
+    },
+    "CheckpointKeyDomain": {
+      "description": "Isolation boundary for checkpoint chunk deduplication.\n\nThe wire form is either `host` or `tenant:<name>`. The field is sealed into [`CheckpointMeta::meta_digest`], so changing the domain after capture makes lineage verification fail. Storage code hashes this value before using it as a directory name; tenant-controlled text never becomes a path component.",
+      "type": "string"
+    },
+    "CheckpointListReply": {
+      "items": {
+        "additionalProperties": false,
+        "description": "On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).\n\n`parent` hash-links to the parent checkpoint's `meta_digest` (its content-address), not to a mutable name — so a descendant can detect any post-seal edit of an ancestor. `meta_digest` is the content-address of this record's load-bearing fields, derived in [`CheckpointMetaBuilder::build`] and never set by callers.\n\n`audit_ref` is a non-load-bearing back-pointer backfilled after the chain-signed entry is emitted; it and `meta_digest` are excluded from the digest so the backfill does not perturb the content-address.",
+        "properties": {
+          "audit_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "class": {
+            "$ref": "#/definitions/CheckpointClass"
+          },
+          "content": {
+            "items": {
+              "$ref": "#/definitions/ContentBlob"
+            },
+            "type": "array"
+          },
+          "created_unix": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "grants": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/Grants"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The permission set the captured VM was admitted under. Load-bearing so a restore can bound a child against it: the digest covers this field, the signed chain covers the digest, and a record edited to widen what the parent held stops verifying before it can justify a wider child."
+          },
+          "id": {
+            "$ref": "#/definitions/CheckpointId"
+          },
+          "key_domain": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/CheckpointKeyDomain"
+              }
+            ],
+            "description": "Deduplication boundary for chunk objects. Host is omitted on the wire so pre-chunk whole-file records retain their original digest shape."
+          },
+          "machine_input_cursor": {
+            "description": "Last fully committed machine-exec input at the instant this checkpoint was captured. Replay uses this exact cursor instead of a wall clock, so two operations in one second cannot be reordered or executed twice.",
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "meta_digest": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/CheckpointDigest"
+              }
+            ],
+            "description": "Content-address of the load-bearing fields above. Required with no serde default: a record that carries no content-address cannot be lineage-verified, so a pre-lineage meta.json must fail closed rather than load as an unverifiable record."
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/CheckpointDigest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "protection": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/CheckpointProtection"
+              }
+            ],
+            "description": "How the content is stored at rest. Omitted on the wire when unprotected, so a record sealed before the field existed keeps its digest and still reads as unprotected."
+          },
+          "runtime_launch_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/RuntimeLaunchBinding"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exact runtime generation captured with the machine. This untrusted DTO is authenticated by the audit-chain binding of `meta_digest`, not by the content-address alone; restore also re-verifies its release."
+          },
+          "runtime_overlay_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/SessionBinding"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest."
+          },
+          "snapshot_id": {
+            "description": "Content-addressed snapshot-store entry containing this checkpoint's immutable bytes. It is part of the load-bearing digest so a claim cannot redirect materialization to an unrelated staged snapshot.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supervisor_config_digest": {
+            "type": "string"
+          },
+          "tag": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vm_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "class",
+          "content",
+          "created_unix",
+          "id",
+          "meta_digest",
+          "supervisor_config_digest",
+          "vm_name"
+        ],
+        "title": "CheckpointMeta",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "CheckpointListRequest": {
+      "additionalProperties": false,
+      "description": "Listing has no filters; reject unknown fields rather than silently ignoring them.",
+      "title": "ListRequest",
+      "type": "object"
+    },
+    "CheckpointProtection": {
+      "description": "How a checkpoint's content is stored at rest.\n\nPart of the load-bearing digest, so a sealed record cannot be relabelled unprotected (or the reverse) without failing lineage verification. A record that predates the field carries none on the wire and reads back as [`CheckpointProtection::Unprotected`]: legacy content is never reclassified as protected, and is never opened through the sealed path.",
+      "oneOf": [
+        {
+          "description": "Plaintext chunk objects and whole files: the legacy layout, written only when a store was explicitly opened without key custody.",
+          "enum": [
+            "unprotected"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Every content blob is a sealed index naming sealed chunk objects, in the authenticated checkpoint-object envelope, under the record's key domain.",
+          "enum": [
+            "sealed_v1"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ContentBlob": {
+      "additionalProperties": false,
+      "description": "One named artifact inside a checkpoint's `content/` dir, with its hash.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "sha256"
+      ],
+      "type": "object"
+    },
     "CopyDirection": {
       "description": "Which way `guest.cp` moves the file.",
       "oneOf": [
@@ -322,6 +564,159 @@
           "type": "string"
         }
       ]
+    },
+    "CpuGrant": {
+      "description": "CPU bound. The two variants are different units, not different precisions, and no conversion between them is offered: a share is a fraction of host wall-clock CPU, fuel is a count of executed instructions.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Thousandths of one host core. 1500 = 1.5 cores. Integer because the value lands in a signed, content-addressed payload and float canonicalization is not stable across serializers.",
+          "properties": {
+            "millicores": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "unit": {
+              "enum": [
+                "share"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "millicores",
+            "unit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A deterministic executed-instruction budget. Reproducible across hosts in a way no share-based bound is.",
+          "properties": {
+            "instructions": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "unit": {
+              "enum": [
+                "fuel"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "instructions",
+            "unit"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DisplayClipboardGrant": {
+      "additionalProperties": false,
+      "description": "Host-to-guest paste authority.",
+      "properties": {
+        "max_paste_bytes": {
+          "description": "Largest paste, in UTF-8 bytes. Admission refuses a value above [`MAX_CLIPBOARD_PASTE_BYTES`].",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_paste_bytes"
+      ],
+      "type": "object"
+    },
+    "DisplayInputGrant": {
+      "additionalProperties": false,
+      "description": "Authority to send display input events to a workload.",
+      "properties": {
+        "attended": {
+          "description": "A human attends this run. Required before a sealed workload accepts display input, and reported by `doctor` and `machine ls`.",
+          "type": "boolean"
+        },
+        "clipboard": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DisplayClipboardGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Host-to-guest paste. Absent means no paste event is accepted."
+        },
+        "human_credential": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HumanCredentialGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A human will enter a credential through the display during this run."
+        }
+      },
+      "type": "object"
+    },
+    "DriveGrant": {
+      "additionalProperties": false,
+      "description": "The bounded authority to drive one plan-selected program and its workspace.",
+      "properties": {
+        "max_bytes_in": {
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "max_bytes_out": {
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "program_id": {
+          "type": "string"
+        },
+        "ttl": {
+          "description": "Lifetime of one opened drive session, in seconds.",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "workspace_roots": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "max_bytes_in",
+        "max_bytes_out",
+        "program_id",
+        "ttl",
+        "workspace_roots"
+      ],
+      "type": "object"
+    },
+    "EgressGrant": {
+      "additionalProperties": false,
+      "description": "Outbound destinations. An empty `allow` is \"no egress\" and is distinct from an absent `EgressGrant`, which is also deny-all — both are closed, so the distinction never opens anything.",
+      "properties": {
+        "allow": {
+          "items": {
+            "$ref": "#/definitions/HostPort"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "allow"
+      ],
+      "type": "object"
     },
     "EgressTarget": {
       "additionalProperties": false,
@@ -487,6 +882,82 @@
         "dir",
         "symlink",
         "other"
+      ],
+      "type": "string"
+    },
+    "Grants": {
+      "additionalProperties": false,
+      "description": "A workload's permission set. Every field is optional: absent means \"unspecified\", which each dimension resolves differently — an absent `egress` is deny-all, an absent `cpu` is uncapped.",
+      "properties": {
+        "application_terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApplicationTerminalGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The one application a development terminal may attach to. Absent means the console keeps its ordinary development behaviour. Present, every terminal must run exactly this argv as the workload user; it never opens the console on a sealed image."
+        },
+        "cpu": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CpuGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display_input": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DisplayInputGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Host-to-guest display input. Viewing is the separate `host.display.view.v1` service token; this grants the input direction only. Absent means no input path exists."
+        },
+        "drive": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DriveGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "egress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EgressGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wall_clock": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WallClockGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GuestArch": {
+      "enum": [
+        "x86_64",
+        "aarch64"
       ],
       "type": "string"
     },
@@ -1162,6 +1633,41 @@
       ],
       "type": "object"
     },
+    "HostPort": {
+      "description": "A host:port pair for network allowlist rules.",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "host",
+        "port"
+      ],
+      "type": "object"
+    },
+    "HumanCredentialGrant": {
+      "additionalProperties": false,
+      "description": "The signed statement that a human credential will be typed into the guest.\n\nThe credential itself never appears anywhere in the plan or the audit chain. What the plan records is where the resulting session may be used.",
+      "properties": {
+        "destinations": {
+          "description": "The only destinations this run may reach. Never empty: a credential with nowhere to be used needs no display input.",
+          "items": {
+            "$ref": "#/definitions/HostPort"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "destinations"
+      ],
+      "type": "object"
+    },
     "ImageRevocationsStatusReply": {
       "additionalProperties": false,
       "properties": {
@@ -1359,6 +1865,48 @@
           "type": "string"
         }
       ]
+    },
+    "LegacyBundleRuntimeProof": {
+      "additionalProperties": false,
+      "description": "Untrusted inputs for a legacy image's baked runtime. The runtime boundary re-verifies the pin against the host's enrolled publishers and binds the selected rootfs and initrd to signed artifact roles. This is not authority to bypass verification, and the archive cannot supply its own trust store.",
+      "properties": {
+        "archive": {
+          "type": "string"
+        },
+        "pin": {
+          "$ref": "#/definitions/PlanArtifact"
+        }
+      },
+      "required": [
+        "archive",
+        "pin"
+      ],
+      "type": "object"
+    },
+    "LegacyPortableRuntimeProof": {
+      "additionalProperties": false,
+      "description": "Untrusted original schema-4 archive and schema-2 runtime selection.",
+      "properties": {
+        "arch": {
+          "$ref": "#/definitions/GuestArch"
+        },
+        "archive": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "type": "string"
+        },
+        "pin": {
+          "$ref": "#/definitions/PlanArtifact"
+        }
+      },
+      "required": [
+        "arch",
+        "archive",
+        "manifest_sha256",
+        "pin"
+      ],
+      "type": "object"
     },
     "MachineCreateReply": {
       "additionalProperties": false,
@@ -3160,6 +3708,30 @@
       "title": "VerifyRequest",
       "type": "object"
     },
+    "PlanArtifact": {
+      "additionalProperties": false,
+      "description": "Pin from an `ExecutionPlan` to a specific signed bundle. Captures the three quantities the supervisor needs to re-verify on admit:\n\n1. **`bundle_sha256`** — SHA-256 of the entire archive bytes. The plan's pin is \"I authorise launching this exact byte string.\" 2. **`manifest_sig_base64`** — the publisher's signature over the bundle's manifest. Held in the plan so the verifier can refuse the launch without trusting whatever copy of the manifest the archive on disk contains. 3. **`key_id`** — the publisher's key_id. Lets admission reject plans whose pinning publisher isn't in the local trust store *before* opening the archive.\n\n`serde(deny_unknown_fields)` keeps the wire format strict — a future field added in v2 fails closed in older builds.",
+      "properties": {
+        "bundle_sha256": {
+          "description": "Lowercase-hex SHA-256 of the entire `.mvmpkg` archive.",
+          "type": "string"
+        },
+        "key_id": {
+          "description": "Publisher key_id the bundle was signed under.",
+          "type": "string"
+        },
+        "manifest_sig_base64": {
+          "description": "Base64-encoded 64-byte Ed25519 signature over the bundle's `manifest.json` bytes. Use [`signature_from_base64`] to decode.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bundle_sha256",
+        "key_id",
+        "manifest_sig_base64"
+      ],
+      "type": "object"
+    },
     "PortMapping": {
       "additionalProperties": false,
       "description": "A host:guest port forwarding on a machine — plain listing data that mirrors a backend's port mapping so a machine record can carry its forwards without exposing a runtime type.",
@@ -3332,6 +3904,241 @@
           "type": "string"
         }
       ]
+    },
+    "RuntimeBindingProvenance": {
+      "description": "Deserialized provenance remains a request for the corresponding verifier, never a verification result.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "release"
+              ],
+              "type": "string"
+            },
+            "proof": {
+              "$ref": "#/definitions/RuntimeReleaseProof"
+            }
+          },
+          "required": [
+            "kind",
+            "proof"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "arch": {
+              "$ref": "#/definitions/GuestArch"
+            },
+            "archive_sha256": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "source"
+              ],
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "arch",
+            "archive_sha256",
+            "kind",
+            "version"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuntimeLaunchBinding": {
+      "description": "Untrusted record of the artifacts selected for a launch. A checkpoint must authenticate this record and reverify its release and artifact bytes before using it; reading a metadata file does not create runtime authority.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "initramfs_path": {
+              "type": "string"
+            },
+            "overlay_path": {
+              "type": "string"
+            },
+            "overlay_roothash": {
+              "type": "string"
+            },
+            "overlay_verity_path": {
+              "type": "string"
+            },
+            "provenance": {
+              "$ref": "#/definitions/RuntimeBindingProvenance"
+            },
+            "runtime": {
+              "enum": [
+                "cli_assembly"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "initramfs_path",
+            "overlay_path",
+            "overlay_roothash",
+            "overlay_verity_path",
+            "provenance",
+            "runtime"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "initramfs_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proof": {
+              "$ref": "#/definitions/LegacyBundleRuntimeProof"
+            },
+            "rootfs_path": {
+              "type": "string"
+            },
+            "runtime": {
+              "enum": [
+                "legacy_bundle"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "proof",
+            "rootfs_path",
+            "runtime"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "initramfs_path": {
+              "type": "string"
+            },
+            "kernel_path": {
+              "type": "string"
+            },
+            "overlay_path": {
+              "type": "string"
+            },
+            "overlay_roothash": {
+              "type": "string"
+            },
+            "overlay_verity_path": {
+              "type": "string"
+            },
+            "proof": {
+              "$ref": "#/definitions/LegacyPortableRuntimeProof"
+            },
+            "rootfs_path": {
+              "type": "string"
+            },
+            "runtime": {
+              "enum": [
+                "legacy_portable"
+              ],
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "initramfs_path",
+            "kernel_path",
+            "overlay_path",
+            "overlay_roothash",
+            "overlay_verity_path",
+            "proof",
+            "rootfs_path",
+            "runtime",
+            "version"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuntimeReleaseProof": {
+      "additionalProperties": false,
+      "properties": {
+        "arch": {
+          "$ref": "#/definitions/GuestArch"
+        },
+        "archive": {
+          "type": "string"
+        },
+        "archive_sha256": {
+          "type": "string"
+        },
+        "checksum": {
+          "type": "string"
+        },
+        "signature_bundle": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arch",
+        "archive",
+        "archive_sha256",
+        "checksum",
+        "signature_bundle",
+        "version"
+      ],
+      "type": "object"
+    },
+    "SessionBinding": {
+      "additionalProperties": false,
+      "description": "The durable agent session a checkpoint is a resume point for.\n\n`generation` fences a resume: reopening a parked session increments it, so a frame addressed to an earlier generation is refused rather than delivered into a successor. `journal_cursor` is the session-journal position the capture is consistent with, and `approval_head` names the approval-ledger state the capture was admitted under — a resume bounds its fresh grants against that head rather than against whatever the ledger holds later. `replay_input_digest`, when present, commits the encrypted input artifact executed immediately before this step was captured.",
+      "properties": {
+        "approval_head": {
+          "$ref": "#/definitions/ApprovalHead"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "journal_cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "replay_input_digest": {
+          "description": "Content-address of the encrypted input committed at this step. Optional for older and non-step session checkpoints; replay accepts only a step carrying this binding.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "$ref": "#/definitions/AgentSessionId"
+        }
+      },
+      "required": [
+        "approval_head",
+        "generation",
+        "journal_cursor",
+        "session_id"
+      ],
+      "type": "object"
     },
     "SessionCallReply": {
       "description": "The reply to `entrypoint.call` and `session.call`.",
@@ -3737,6 +4544,47 @@
           "type": "object"
         }
       ]
+    },
+    "WallClockGrant": {
+      "description": "Wall-clock bound.\n\n`Unbounded` is a named variant rather than a sentinel value. The legacy `TimeoutSpec::exec_secs` encodes unbounded as `0`, so a user writing `0` to mean \"no time allowed\" would get \"no limit\" — the exact inversion of their intent. `NonZeroU32` makes that unrepresentable here.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "unbounded"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "secs"
+              ],
+              "type": "string"
+            },
+            "secs": {
+              "format": "uint32",
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "secs"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "properties": {
@@ -3806,6 +4654,23 @@
         "reply"
       ],
       "title": "BackendCapabilities",
+      "type": "object"
+    },
+    "checkpoint_list": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointListReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointListRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointList",
       "type": "object"
     },
     "entrypoint_call": {
@@ -4609,6 +5474,7 @@
     }
   },
   "required": [
+    "checkpoint_list",
     "attestation_export",
     "attestation_verify",
     "attestation_status",
