@@ -68,11 +68,11 @@ pub fn sign_targets(targets: &[SignTarget]) -> Vec<SignReport> {
     }
 }
 
-/// Check the loaded supervisor identity, not just its current on-disk path.
+/// Fallibly check the loaded supervisor identity, not just its current on-disk path.
 ///
 /// The installer/preparer must sign before launch; this never mutates or
 /// re-executes the running helper. No-op off macOS.
-pub fn ensure_signed() -> Result<(), String> {
+pub fn try_ensure_signed() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         macos::ensure_signed()
@@ -81,6 +81,14 @@ pub fn ensure_signed() -> Result<(), String> {
     {
         Ok(())
     }
+}
+
+/// Preserve the historical non-fallible entry point.
+///
+/// Startup paths that must reject an unready supervisor use
+/// [`try_ensure_signed`] and propagate its error.
+pub fn ensure_signed() {
+    let _ = try_ensure_signed();
 }
 
 #[cfg(target_os = "macos")]
@@ -112,12 +120,18 @@ mod tests {
         assert!(json.contains("invalid Mach-O"));
     }
 
+    #[test]
+    fn signer_entrypoints_keep_compatibility_and_fallibility_distinct() {
+        let _: fn() = ensure_signed;
+        let _: fn() -> std::result::Result<(), String> = try_ensure_signed;
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn signing_is_noop_off_macos() {
         let path = PathBuf::from("/not/an/executable");
         assert_eq!(entitlements_present(&path), None);
         assert!(sign_binaries(&[path]).is_empty());
-        assert!(ensure_signed().is_ok());
+        assert!(try_ensure_signed().is_ok());
     }
 }
