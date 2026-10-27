@@ -65,3 +65,7 @@ workspace = true
 [[bench]]
 name = "in_memory_build"
 harness = false
+
+[[bench]]
+name = "snapshot_hashing"
+harness = false

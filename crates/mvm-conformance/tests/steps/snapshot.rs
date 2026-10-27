@@ -158,3 +158,117 @@ fn restoring_identical_artifact_dedups(world: &mut CliWorld) {
         "reusing an existing snapshot must bump its refcount, not duplicate storage"
     );
 }
+
+// -- chained chunk manifests (v2): a child derives from its parent's manifest --
+
+#[given(expr = "a v2 content-addressed warm snapshot built from a template tree")]
+fn build_v2_warm_snapshot(world: &mut CliWorld) {
+    let tmp = tempfile::tempdir().expect("create snapshot scenario tempdir");
+    let store = FsSnapshotStore::new(tmp.path().join("store")).expect("open snapshot store");
+
+    // A small directory tree with a sparse blob, shaped like a paused VM's
+    // content dir: a config file plus a mostly-zero memory image.
+    let tree = tmp.path().join("template-tree");
+    fs::create_dir_all(tree.join("sub")).expect("create tree dirs");
+    fs::write(tree.join("sub").join("config"), b"parent-config").expect("write config");
+    let mut blob = vec![0xAA_u8; 4096];
+    blob.extend(std::iter::repeat_n(0u8, 1024 * 1024));
+    blob.extend(vec![0xBB_u8; 4096]);
+    fs::write(tree.join("mem.bin"), &blob).expect("write blob");
+
+    let id = store
+        .create_content_addressed_v2(&tree)
+        .expect("store v2 warm snapshot");
+
+    world.snapshot_tree_path = Some(tree);
+    world.snapshot_id = Some(id);
+    world.snapshot_store = Some(store);
+    world.snapshot_tmp = Some(tmp);
+}
+
+#[when(
+    expr = "a child cloned from the snapshot is mutated by a few blocks and stored from the parent's manifest"
+)]
+fn mutate_and_store_child(world: &mut CliWorld) {
+    let tmp = world
+        .snapshot_tmp
+        .as_ref()
+        .expect("a v2 warm snapshot must be built first");
+    let store = world
+        .snapshot_store
+        .as_ref()
+        .expect("a v2 warm snapshot must be built first");
+    let parent = world
+        .snapshot_id
+        .as_ref()
+        .expect("a v2 warm snapshot must be built first");
+
+    let child = tmp.path().join("child-tree");
+    store
+        .materialize(parent, &child)
+        .expect("clone the snapshot into a child tree");
+
+    // The warm-chain delta: one rewritten small file and one in-place block
+    // write inside the large blob.
+    fs::write(child.join("sub").join("config"), b"child-config").expect("mutate config");
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut blob = std::fs::OpenOptions::new()
+            .write(true)
+            .open(child.join("mem.bin"))
+            .expect("open child blob");
+        blob.seek(SeekFrom::Start(512 * 1024)).expect("seek");
+        blob.write_all(&[0x42; 4096]).expect("write delta block");
+    }
+
+    let child_id = store
+        .create_child_content_addressed_v2(parent, &child)
+        .expect("store the child from the parent's manifest");
+    world.snapshot_child_id = Some(child_id);
+    world.snapshot_child_path = Some(child);
+}
+
+#[then(expr = "the child's content id equals a from-scratch manifest hash of its bytes")]
+fn child_id_matches_from_scratch_hash(world: &mut CliWorld) {
+    let child_path = world
+        .snapshot_child_path
+        .as_ref()
+        .expect("the child must be stored first");
+    let child_id = world
+        .snapshot_child_id
+        .as_ref()
+        .expect("the child must be stored first");
+    let full = mvm_fs::manifest::Manifest::compute(child_path).expect("hash child from scratch");
+    assert_eq!(
+        child_id.id(),
+        full.root_digest(),
+        "the chain-derived id must equal the id a full re-hash computes"
+    );
+}
+
+#[then(expr = "the parent snapshot still verifies against its stored bytes")]
+fn parent_still_verifies(world: &mut CliWorld) {
+    let tmp = world
+        .snapshot_tmp
+        .as_ref()
+        .expect("a v2 warm snapshot must be built first");
+    let store = world
+        .snapshot_store
+        .as_ref()
+        .expect("a v2 warm snapshot must be built first");
+    let parent = world
+        .snapshot_id
+        .as_ref()
+        .expect("a v2 warm snapshot must be built first");
+
+    let recheck = tmp.path().join("parent-recheck");
+    store
+        .materialize(parent, &recheck)
+        .expect("re-materialize the parent");
+    let full = mvm_fs::manifest::Manifest::compute(&recheck).expect("re-hash the parent");
+    assert_eq!(
+        full.root_digest(),
+        parent.id(),
+        "storing a child must not perturb the parent's content address"
+    );
+}
