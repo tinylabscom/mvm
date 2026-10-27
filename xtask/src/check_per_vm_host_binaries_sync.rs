@@ -3,7 +3,11 @@
 //! CI lint — asserts the canonical `PER_VM_HOST_BINARIES` registry in
 //! `crates/mvm-cli/src/host_binaries/manifest.rs`, the build commands in the
 //! release workflow and its release-tier scripts, and the tarball's
-//! `REQUIRED_HOSTBINS` list name the same binaries.
+//! `REQUIRED_HOSTBINS` list name the same binaries; that the per-backend
+//! component table in `crates/mvm-cli/src/host_binaries/backend_components.rs`
+//! names only registered per-VM binaries as its `Binary` components and keeps
+//! its data files in the release staging step; and that the workflow stages
+//! the `components.tsv` the table generates for `install.sh`.
 //!
 //! Why this needs a gate rather than review: `resolve_subprocess_bin` finds
 //! these binaries next to the executable, falling back to `target/{release,
@@ -66,6 +70,11 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
     }
 
+    // The component table grows the same surface: its Binary components are
+    // per-VM host binaries, its data files ship in the release staging step,
+    // and the generated components.tsv must be staged for install.sh to read.
+    problems.extend(component_table_problems(workspace, &src, &known));
+
     if !problems.is_empty() {
         bail!(
             "per-VM host binary lists have drifted:\n  {}\n\n\
@@ -85,6 +94,66 @@ pub fn run(workspace: &Path) -> Result<()> {
 
 fn included_in_standard_release(_scope: &str) -> bool {
     true
+}
+
+/// `(path, is_binary)` for every `ComponentFile` entry in the backend
+/// component table.
+fn parse_component_files(root: &Path) -> Result<Vec<(String, bool)>> {
+    let path = root.join("crates/mvm-cli/src/host_binaries/backend_components.rs");
+    let src = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let mut out = Vec::new();
+    let mut pending_path: Option<String> = None;
+    for line in src.lines() {
+        if let Some(value) = extract_quoted_after(line, "path:") {
+            pending_path = Some(value);
+        }
+        if let Some(rest) = line.trim().strip_prefix("kind: ComponentKind::")
+            && let Some(path) = pending_path.take()
+        {
+            out.push((path, rest.starts_with("Binary")));
+        }
+    }
+    if out.is_empty() {
+        bail!(
+            "no ComponentFile entries parsed out of {} — the table moved or was reshaped, \
+             and this gate is now vacuous",
+            path.display()
+        );
+    }
+    Ok(out)
+}
+
+/// Drift between the component table and the release workflow.
+fn component_table_problems(
+    workspace: &Path,
+    release_yml: &str,
+    registry: &BTreeSet<&str>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let components = match parse_component_files(workspace) {
+        Ok(components) => components,
+        Err(problem) => return vec![format!("{problem:#}")],
+    };
+    for (path, is_binary) in &components {
+        if *is_binary && !registry.contains(path.as_str()) {
+            problems.push(format!(
+                "component table names `{path}` as a Binary component, but it is not in PER_VM_HOST_BINARIES"
+            ));
+        }
+        if !is_binary && !release_yml.contains(path.as_str()) {
+            problems.push(format!(
+                "release.yml never stages component-table entry `{path}`"
+            ));
+        }
+    }
+    if !release_yml.contains("components.tsv") {
+        problems.push(
+            "release.yml never stages components.tsv — install.sh reads the generated \
+             component table from the archive"
+                .to_string(),
+        );
+    }
+    problems
 }
 
 /// `(name, scope)` for every `PER_VM_HOST_BINARIES` entry.
@@ -209,10 +278,37 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
     }
 
     #[test]
-    fn standard_release_includes_libkrun_binaries() {
+    fn standard_release_includes_every_scope() {
         assert!(included_in_standard_release("Always"));
         assert!(included_in_standard_release("MacOsAarch64"));
-        assert!(included_in_standard_release("RequiresLibkrun"));
+    }
+
+    #[test]
+    fn component_file_parser_reads_paths_and_kinds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let module = dir.path().join("crates/mvm-cli/src/host_binaries");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            module.join("backend_components.rs"),
+            r#"
+    ComponentFile {
+        path: "mvm-libkrun-supervisor",
+        kind: ComponentKind::Binary,
+    },
+    ComponentFile {
+        path: "lib",
+        kind: ComponentKind::Directory,
+    },
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_component_files(dir.path()).unwrap(),
+            vec![
+                ("mvm-libkrun-supervisor".to_string(), true),
+                ("lib".to_string(), false),
+            ]
+        );
     }
 
     #[test]

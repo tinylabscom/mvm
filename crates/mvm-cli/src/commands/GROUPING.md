@@ -31,6 +31,11 @@ deferred to Task 7 — see plan.)
 local-first deploy store (`<mvm_home>/deployments/<ir-hash>/deploy.json`).
 Sits beside `deploy` (the write path) the way `deps` sits beside build.
 
+**`backend/`** (additive) — `backend list` · `add` · `remove` · `detect`:
+the per-backend host-component sets from the release archive's component
+table. Install-lifecycle verbs beside `env`; `detect` is install.sh's
+read-only probe.
+
 
 **`dev`** — contributor-only `dev compile` · `dev validate` · `dev kernel` ·
 `dev runtime-overlay` · `dev sdk-sidecar` · `dev address` · `dev image-set` ·

@@ -8,6 +8,7 @@ use crate::ui;
 use mvm_core::config::fc_version;
 use mvm_core::platform;
 
+mod backends;
 mod builder;
 mod daemons;
 mod guest_runtime;
@@ -229,6 +230,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(platform_checks::network_backend_check(plat));
     checks.push(platform_checks::egress_proxy_check());
     checks.push(platform_checks::ts_runner_check());
+    checks.extend(backends::backend_component_checks());
     checks.push(builder::stage0_status_check());
     checks.push(builder::builder_store_check());
     checks.push(builder::builder_egress_check());

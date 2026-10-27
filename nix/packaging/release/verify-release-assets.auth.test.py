@@ -88,8 +88,9 @@ sys.exit(0 if blob.is_file() and bundle.read_text() == "synthetic-valid" else 1)
         names = ["mvmctl", "mvm-network-endpoint"]
         if "apple" in target:
             names.append("mvm-hvf-supervisor")
-        self.tar(f"mvmctl-{target}.tar.gz",
-                 [(f"mvmctl-{target}/{name}", script, 0o755) for name in names] + list(extra))
+        members = [(f"mvmctl-{target}/{name}", script, 0o755) for name in names]
+        members.append((f"mvmctl-{target}/components.tsv", b"# component table fixture\n", 0o644))
+        self.tar(f"mvmctl-{target}.tar.gz", members + list(extra))
         self.sign(f"mvmctl-{target}.tar.gz")
 
     def sign(self, name):

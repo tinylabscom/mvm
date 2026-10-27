@@ -143,11 +143,24 @@ fn required_hostbins(target: &str) -> Vec<String> {
 
 /// A shell stub `mvmctl` that reports `version` and records its argv to
 /// `$MVM_TEST_INVOCATION_LOG` (default /dev/null) so a test can assert which
-/// commands install.sh ran.
+/// commands install.sh ran. Its `backend detect --plain` answers
+/// `$MVM_TEST_BACKEND_DETECT` — the caller sets it to the host's real
+/// install-time default so fixture and assertions read one source.
 fn stub_mvmctl(version: &str) -> String {
     format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${{MVM_TEST_INVOCATION_LOG:-/dev/null}}\"\ncase \"$*\" in\n  'env verify-release --help') echo 'Usage: mvmctl env verify-release --tag <TAG> <ARCHIVE>'; exit 0 ;;\n  'env verify-release '*) exit 0 ;;\nesac\necho 'mvmctl {version}'\n"
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${{MVM_TEST_INVOCATION_LOG:-/dev/null}}\"\ncase \"$*\" in\n  'env verify-release --help') echo 'Usage: mvmctl env verify-release --tag <TAG> <ARCHIVE>'; exit 0 ;;\n  'env verify-release '*) exit 0 ;;\n  'backend detect --plain') printf '%s\\n' \"$MVM_TEST_BACKEND_DETECT\"; exit 0 ;;\nesac\necho 'mvmctl {version}'\n"
     )
+}
+
+/// The backend the table-backed installer auto-selects on this host, computed
+/// by the real component table so tests never carry a second answer.
+fn host_install_default() -> String {
+    let host = mvm_cli::host_binaries::backend_components::live_host()
+        .expect("the test host has a release target");
+    mvm_cli::host_binaries::backend_components::detect_install_default_for(&host)
+        .expect("the test host has an install default")
+        .as_str()
+        .to_owned()
 }
 
 fn stub_cosign() -> Vec<u8> {
@@ -215,6 +228,12 @@ struct Release {
     hostbin_bytes: Vec<(String, Vec<u8>)>,
     /// Whether the archive carries the macOS 13–25 libkrun runtime payload.
     libkrun_tier: bool,
+    /// Write the libkrun payload with different bytes than the honest build —
+    /// the fixture for "the archive digest covers every lib/ entry".
+    tamper_libkrun_payload: bool,
+    /// The generated backend component table (`components.tsv`), plus any
+    /// extra rows a test appends. `None` builds a pre-selection archive.
+    components_tsv: Option<String>,
     /// The guest runtime archive the release publishes, if any.
     guest_runtime: Option<GuestRuntimeAsset>,
 }
@@ -240,6 +259,8 @@ impl Release {
             publish_bundle: true,
             hostbin_bytes: Vec::new(),
             libkrun_tier: false,
+            tamper_libkrun_payload: false,
+            components_tsv: None,
             guest_runtime: None,
         }
     }
@@ -340,6 +361,36 @@ impl Release {
         self
     }
 
+    /// Ship the libkrun tier with payload bytes that differ from the honest
+    /// build — the fixture for "the archive digest covers every lib/ entry".
+    #[cfg(target_os = "macos")]
+    fn with_tampered_libkrun_payload(mut self) -> Self {
+        self.libkrun_tier = true;
+        self.tamper_libkrun_payload = true;
+        self
+    }
+
+    /// Ship the component table the release workflow generates from
+    /// `BACKEND_COMPONENT_TABLE` — rendered by the same function, so this
+    /// fixture cannot drift from the table install.sh is tested against.
+    fn with_components_tsv(mut self) -> Self {
+        self.components_tsv =
+            Some(mvm_cli::host_binaries::backend_components::render_components_tsv());
+        self
+    }
+
+    /// Append rows to the generated components.tsv — a synthetic
+    /// viable-on-this-host row lets picker tests run on any host tier.
+    fn with_components_tsv_rows(mut self, rows: &[&str]) -> Self {
+        let mut tsv = self.components_tsv.unwrap_or_default();
+        for row in rows {
+            tsv.push_str(row);
+            tsv.push('\n');
+        }
+        self.components_tsv = Some(tsv);
+        self
+    }
+
     fn archive_name() -> String {
         format!("mvmctl-{}.tar.gz", host_target())
     }
@@ -433,6 +484,11 @@ impl Release {
             append(format!("{dir}/{hostbin}"), body.as_bytes(), 0o755);
         }
         if self.libkrun_tier {
+            let payload: &[u8] = if self.tamper_libkrun_payload {
+                b"tampered libkrun release payload\n"
+            } else {
+                b"libkrun release payload\n"
+            };
             for path in [
                 "lib/libkrun.1.dylib",
                 "lib/libkrunfw.5.dylib",
@@ -442,8 +498,11 @@ impl Release {
                 "SOURCE-OFFER.txt",
                 "SOURCE-PINS",
             ] {
-                append(format!("{dir}/{path}"), b"libkrun release payload\n", 0o644);
+                append(format!("{dir}/{path}"), payload, 0o644);
             }
+        }
+        if let Some(tsv) = &self.components_tsv {
+            append(format!("{dir}/components.tsv"), tsv.as_bytes(), 0o644);
         }
         let tar_bytes = tar.into_inner().unwrap();
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
@@ -657,7 +716,13 @@ impl Host {
                 "MVM_COSIGN_DOWNLOAD_URL",
                 format!("{base}/sigstore/cosign/releases/download"),
             )
-            .env("MVM_TRUSTED_COSIGN_SHA256", sha256_hex(&stub_cosign()));
+            .env("MVM_TRUSTED_COSIGN_SHA256", sha256_hex(&stub_cosign()))
+            // The stub mvmctl's answer to `backend detect --plain`; the real
+            // host default, so table-backed fixtures behave like the table.
+            .env("MVM_TEST_BACKEND_DETECT", host_install_default())
+            // Deterministic "no terminal" for the backend picker; picker tests
+            // override it with an answer file.
+            .env("MVM_INSTALL_TTY", "");
         command
     }
 
@@ -769,6 +834,10 @@ fn test_tool_path() -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 #[test]
@@ -1916,6 +1985,351 @@ fn install_sh_keeps_libkrun_before_macos_26_and_omits_it_afterward() {
             );
         }
     }
+}
+
+// ── Table-driven backend selection (components.tsv) ─────────────────────
+//
+// Releases carrying `components.tsv` stage the backend the table and the
+// just-extracted `mvmctl backend detect --plain` select, and nothing else.
+// The stub mvmctl answers detect with `MVM_TEST_BACKEND_DETECT` (the real
+// host default by default); `fake_sw_vers` pins the macOS window cases on
+// any macOS host.
+
+/// A release shaped like one the workflow publishes today: the host binaries,
+/// the libkrun tier payload on macOS, and the generated component table.
+fn table_release(version: &str) -> Release {
+    let release = Release::new(version)
+        .with_hostbins(required_hostbins(host_target()))
+        .with_components_tsv();
+    #[cfg(target_os = "macos")]
+    let release = release.with_libkrun_tier();
+    release
+}
+
+#[cfg(target_os = "macos")]
+fn table_install(host: &Host, base: &str, version: &str, macos: &str, detect: &str) -> Output {
+    let (path, _log) = fake_codesign(host);
+    fake_sw_vers(host, macos);
+    host.installer(base, version)
+        .env_remove("MVM_SKIP_CODESIGN")
+        .env("PATH", path)
+        .env("MVM_TEST_BACKEND_DETECT", detect)
+        .output()
+        .unwrap()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_table_stages_only_the_selected_backend() {
+    let release = table_release("v9.9.9");
+    let (base, _stop) = serve_releases(&[&release]);
+
+    // macOS 13–25 selects libkrun: its component set is staged, and the hvf
+    // supervisor — the other native backend's only file — is not.
+    let host = Host::new();
+    let output = table_install(&host, &base, "v9.9.9", "25.9", "libkrun");
+    assert!(output.status.success(), "{}", stderr(&output));
+    for payload in [
+        "mvm-libkrun-supervisor",
+        "lib/libkrun.1.dylib",
+        "licenses/libkrun-APACHE-2.0.txt",
+        "SOURCE-OFFER.txt",
+        "SOURCE-PINS",
+    ] {
+        assert!(
+            host.current_target().join(payload).exists(),
+            "the libkrun tier must stage {payload} on macOS 13–25"
+        );
+    }
+    assert!(
+        !host.current_target().join("mvm-hvf-supervisor").exists(),
+        "the hvf supervisor is the unselected backend's file on macOS 13–25"
+    );
+    assert!(
+        !host.bin().join("mvm-hvf-supervisor").exists(),
+        "and it must stay off PATH"
+    );
+    assert!(
+        stdout(&output).contains("Installed backend: libkrun (macOS 25, Apple Silicon)"),
+        "the printed line names the choice: {}",
+        stdout(&output)
+    );
+
+    // macOS 26+ selects hvf and stages no libkrun file.
+    let host = Host::new();
+    let output = table_install(&host, &base, "v9.9.9", "26.0", "hvf");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(host.current_target().join("mvm-hvf-supervisor").is_file());
+    for payload in [
+        "mvm-libkrun-supervisor",
+        "lib",
+        "licenses",
+        "sources",
+        "SOURCE-OFFER.txt",
+        "SOURCE-PINS",
+    ] {
+        assert!(
+            !host.current_target().join(payload).exists(),
+            "macOS 26+ must not stage {payload}"
+        );
+    }
+    assert!(
+        stdout(&output).contains("Installed backend: hvf (macOS 26, Apple Silicon)"),
+        "the printed line names the choice: {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn install_sh_table_prints_the_detected_backend_without_a_prompt() {
+    let release = table_release("v9.9.9");
+    let (base, _stop) = serve_releases(&[&release]);
+
+    let host = Host::new();
+    let output = host.install(&base, "v9.9.9");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains(&format!("Installed backend: {}", host_install_default())),
+        "the printed line names the detected backend: {stdout}"
+    );
+    // stdin is /dev/null and MVM_INSTALL_TTY is pinned empty: no prompt.
+    assert!(
+        !stdout.contains("More than one backend"),
+        "no terminal means no picker: {stdout}"
+    );
+}
+
+#[test]
+fn install_sh_backend_flag_refuses_a_backend_wrong_for_the_host() {
+    let release = table_release("v9.9.9");
+    let (base, _stop) = serve_releases(&[&release]);
+
+    // A backend whose window never contains this host.
+    let (bogus, valid) = if cfg!(target_os = "macos") {
+        ("firecracker", host_install_default())
+    } else {
+        ("hvf", "qemu".to_owned())
+    };
+    let host = Host::new();
+    let output = host
+        .installer(&base, "v9.9.9")
+        .arg("--backend")
+        .arg(bogus)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "--backend {bogus} must be refused on this host"
+    );
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains(&format!("backend '{bogus}' is not supported on this host")),
+        "the refusal names the rejected backend: {stderr}"
+    );
+    assert!(
+        stderr.contains(&valid),
+        "the refusal lists the valid names: {stderr}"
+    );
+    assert!(!host.bin().join("mvmctl").exists(), "no partial install");
+
+    // The same refusal reads MVM_INSTALL_BACKEND.
+    let host = Host::new();
+    let output = host
+        .installer(&base, "v9.9.9")
+        .env("MVM_INSTALL_BACKEND", bogus)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "MVM_INSTALL_BACKEND={bogus} must refuse"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_backend_flag_stages_the_requested_tier() {
+    let release = table_release("v9.9.9");
+    let (base, _stop) = serve_releases(&[&release]);
+
+    // On macOS 26, asking for the auto tier by name stages the same set.
+    let host = Host::new();
+    let output = host
+        .installer(&base, "v9.9.9")
+        .arg("--backend=hvf")
+        .env("MVM_TEST_BACKEND_DETECT", "hvf")
+        .output()
+        .unwrap();
+    // No fake sw_vers: the host's real macOS decides the window. hvf is
+    // valid exactly when this host is on the 26+ tier.
+    if host_uses_libkrun_tier() {
+        assert!(
+            !output.status.success(),
+            "hvf is outside its window on macOS 13–25"
+        );
+        assert!(stderr(&output).contains("libkrun"), "{}", stderr(&output));
+    } else {
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(host.current_target().join("mvm-hvf-supervisor").is_file());
+        assert!(
+            !host
+                .current_target()
+                .join("mvm-libkrun-supervisor")
+                .exists()
+        );
+    }
+}
+
+/// A synthetic viable row for this host's target, so the picker has a real
+/// second choice on any host tier. `testalt` owns no files.
+fn testalt_row() -> String {
+    format!("testalt\t{}\t-\t-\tno\tno\tyes\t-", host_target())
+}
+
+#[test]
+fn install_sh_picker_offers_every_viable_backend_and_takes_the_answer() {
+    let release = table_release("v9.9.9").with_components_tsv_rows(&[&testalt_row()]);
+    let (base, _stop) = serve_releases(&[&release]);
+
+    let host = Host::new();
+    let answer = host.root.join("picker-answer");
+    std::fs::write(&answer, "testalt\n").unwrap();
+    let output = host
+        .installer(&base, "v9.9.9")
+        .env("MVM_INSTALL_TTY", &answer)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    let default = host_install_default();
+    assert!(
+        stdout.contains("More than one backend can serve this host"),
+        "two viable backends and a terminal means the picker: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{default} (default)")),
+        "the auto choice is marked: {stdout}"
+    );
+    assert!(
+        stdout.contains("testalt"),
+        "the viable rows are listed: {stdout}"
+    );
+    assert!(
+        stdout.contains("Installed backend: testalt"),
+        "the answer wins: {stdout}"
+    );
+}
+
+#[test]
+fn install_sh_picker_falls_back_to_auto_on_no_answer() {
+    let release = table_release("v9.9.9").with_components_tsv_rows(&[&testalt_row()]);
+    let (base, _stop) = serve_releases(&[&release]);
+
+    // An immediately-EOF answer source reads as Enter: the auto choice.
+    let host = Host::new();
+    let answer = host.root.join("picker-answer");
+    std::fs::write(&answer, "").unwrap();
+    let output = host
+        .installer(&base, "v9.9.9")
+        .env("MVM_INSTALL_TTY", &answer)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains(&format!("Installed backend: {}", host_install_default())),
+        "no answer takes the default: {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn install_sh_refuses_backend_selection_for_a_pre_table_release() {
+    let release = Release::new("v9.9.9");
+    let (base, _stop) = serve_releases(&[&release]);
+
+    let host = Host::new();
+    let output = host
+        .installer(&base, "v9.9.9")
+        .arg("--backend")
+        .arg("qemu")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("predates backend selection"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_upgrade_removes_the_files_the_table_no_longer_owns() {
+    let legacy = Release::new("v1.0.0")
+        .with_hostbins(required_hostbins(host_target()))
+        .with_libkrun_tier();
+    let current = table_release("v2.0.0");
+    let (base, _stop) = serve_releases(&[&legacy, &current]);
+
+    // v1 predates components.tsv, so on this pinned macOS 13–25 host it
+    // stages both native supervisors — the rule it was published with.
+    let host = Host::new();
+    let output = table_install(&host, &base, "v1.0.0", "25.9", "libkrun");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(host.bin().join("mvm-hvf-supervisor").exists());
+
+    // The table-driven upgrade selects libkrun on the same host: the hvf
+    // supervisor is not the selected backend's file, so the new release drops
+    // it and its PATH entry goes with it. The kept v1 release is untouched.
+    let output = table_install(&host, &base, "v2.0.0", "25.9", "libkrun");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        !host.bin().join("mvm-hvf-supervisor").exists(),
+        "the dropped backend leaves PATH"
+    );
+    assert!(
+        !host.current_target().join("mvm-hvf-supervisor").exists(),
+        "and the new release directory"
+    );
+    assert!(
+        host.lib()
+            .join("1-v1.0.0")
+            .join("mvm-hvf-supervisor")
+            .exists(),
+        "the preserved release keeps its own set"
+    );
+    assert!(host.bin().join("mvm-libkrun-supervisor").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_refuses_a_tampered_libkrun_payload_by_the_archive_digest() {
+    let good = table_release("v9.9.9");
+    // Same release, different lib/ bytes: the manifest records the untampered
+    // digest, so the tampered archive must die at the checksum before staging.
+    let tampered = Release::new("v9.9.9")
+        .with_hostbins(required_hostbins(host_target()))
+        .with_components_tsv()
+        .with_tampered_libkrun_payload();
+    let mut routes: std::collections::HashMap<String, Vec<u8>> =
+        good.routes().into_iter().collect();
+    let archive = Release::archive_name();
+    let base_path = format!("/tinylabscom/mvm/releases/download/v9.9.9/{archive}");
+    routes.insert(base_path, tampered.tarball());
+    let (base, _stop) = serve(routes.into_iter().collect());
+
+    let host = Host::new();
+    let output = host.install(&base, "v9.9.9");
+    assert!(
+        !output.status.success(),
+        "a tampered payload must not install"
+    );
+    assert!(
+        stderr(&output).contains("checksum mismatch"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!host.bin().join("mvmctl").exists());
 }
 
 #[cfg(target_os = "macos")]

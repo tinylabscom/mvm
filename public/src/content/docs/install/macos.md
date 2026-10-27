@@ -36,6 +36,23 @@ curl -fsSL https://runmvm.com/install.sh | sh
 curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.16.1 sh
 ```
 
+### Choose a backend
+
+The installer stages the backend the host supports and prints what it chose —
+libkrun on macOS 13–25, HVF on macOS 26+ — and never asks a question it cannot
+answer. Scripted installs can name the tier instead, and an unknown or
+unsupported name is refused with the valid ones listed:
+
+```bash
+curl -fsSL https://runmvm.com/install.sh | sh -s -- --backend libkrun
+# or: MVM_INSTALL_BACKEND=libkrun
+```
+
+After install, `mvmctl backend list` shows every backend with this host's
+support and install state, `mvmctl backend add <name>` fetches another
+backend's signed component set from the same release, and `mvmctl backend
+remove <name>` takes one out (state, caches and VMs stay).
+
 ### From source
 
 To run from the checkout, one build is enough:

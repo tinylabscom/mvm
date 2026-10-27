@@ -37,6 +37,8 @@
 #   MVM_INSTALL_DIR        directory for the commands on PATH; default: ~/.local/bin
 #   MVM_INSTALL_LIB_DIR    versioned release directories; default: <MVM_INSTALL_DIR>/../lib/mvm
 #   MVM_INSTALL_KEEP       complete releases to keep, current included; default: 3
+#   MVM_INSTALL_BACKEND    backend to stage (e.g. libkrun); default: auto-detect,
+#                          same as --backend
 #   MVM_TRUSTED_ARCHIVE_SHA256 optional independent archive hash for a fresh install
 #   MVM_TRUSTED_COSIGN_SHA256 trusted bootstrap-cosign hash override (rotation only)
 #   MVM_SKIP_HASH_VERIFY   set to 1 to skip the release-manifest checksum (emergency only)
@@ -45,6 +47,8 @@
 #   MVM_UPDATE_API_URL     override https://api.github.com (tests)
 #   MVM_UPDATE_DOWNLOAD_URL override https://github.com (tests)
 #   MVM_COSIGN_DOWNLOAD_URL override the pinned cosign release base (tests)
+#   MVM_INSTALL_TTY        answer file to read the backend picker's reply from
+#                          instead of /dev/tty; empty means no terminal (tests)
 set -eu
 
 REPO="tinylabscom/mvm"
@@ -63,18 +67,15 @@ INSTALL_DIR="${MVM_INSTALL_DIR:-$HOME/.local/bin}"
 LIB_DIR="${MVM_INSTALL_LIB_DIR:-$(dirname "$INSTALL_DIR")/lib/mvm}"
 KEEP="${MVM_INSTALL_KEEP:-3}"
 
-# The Apple Silicon archive carries both native backends. macOS 13–25 needs
-# libkrun; macOS 26 and newer uses HVF and leaves that compatibility tier out.
-EXCLUDED_PAYLOADS="mvm-libkrun-supervisor lib licenses sources SOURCE-OFFER.txt SOURCE-PINS"
-if [ "$(uname -s)" = "Darwin" ]; then
-  macos_major="$(sw_vers -productVersion | awk -F. '{print $1}')"
-  case "$macos_major" in
-    ''|*[!0-9]*) die "could not determine the macOS major version" ;;
-  esac
-  if [ "$macos_major" -lt 26 ]; then
-    EXCLUDED_PAYLOADS=""
-  fi
-fi
+# What staging drops from the extracted archive, and the backend this host
+# ends up with. Both are computed from the archive's components.tsv after
+# extraction (select_backend_components); archives predating that file fall
+# back to the rule they were published with: the libkrun compatibility tier
+# stages on macOS hosts older than 26 and drops out on 26+ and on Linux. The
+# installer-compat lane reads the legacy list by name.
+PRUNE_PAYLOADS=""
+SELECTED_BACKEND=""
+LEGACY_LIBKRUN_TIER_PAYLOADS="mvm-libkrun-supervisor lib licenses sources SOURCE-OFFER.txt SOURCE-PINS"
 
 # Markers naming what this installer created. uninstall.sh and
 # `mvmctl env update` read the same names.
@@ -88,6 +89,22 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
 need curl
 need tar
+
+# Options: --backend <name> stages that backend's components instead of the
+# auto-detected tier (scripted installs; MVM_INSTALL_BACKEND is equivalent).
+BACKEND_REQUESTED="${MVM_INSTALL_BACKEND:-}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --backend)
+      shift
+      BACKEND_REQUESTED="${1:-}"
+      [ -n "$BACKEND_REQUESTED" ] || die "missing value for --backend"
+      ;;
+    --backend=*) BACKEND_REQUESTED="${1#--backend=}" ;;
+    *) die "unknown argument: $1 (usage: install.sh [--backend <name>])" ;;
+  esac
+  shift
+done
 
 case "$KEEP" in
   ''|*[!0-9]*) die "MVM_INSTALL_KEEP must be a whole number, got: $KEEP" ;;
@@ -624,7 +641,7 @@ stage_release() {
   claim_release_dir "$VERSION"
   STAGE="$CLAIMED"
   $SUDO cp -R "$SRC/." "$STAGE/" || die "could not copy the release into $STAGE"
-  for payload in $EXCLUDED_PAYLOADS; do
+  for payload in $PRUNE_PAYLOADS; do
     $SUDO rm -rf "${STAGE:?}/$payload"
   done
   [ -x "$STAGE/mvmctl" ] || die "release is missing an executable mvmctl"
@@ -635,7 +652,7 @@ stage_release() {
 # the older installer's.
 check_link_conflicts() {
   for name in $(release_entries "$SRC"); do
-    if is_listed "$name" "$EXCLUDED_PAYLOADS"; then
+    if is_listed "$name" "$PRUNE_PAYLOADS"; then
       continue
     fi
     link="$INSTALL_DIR/$name"
@@ -876,6 +893,181 @@ stage_guest_runtime() {
     || die "could not stage $runtime beside mvmctl"
 }
 
+# --- Backend component selection ---------------------------------------------
+#
+# The archive's components.tsv is the generated form of mvmctl's per-backend
+# component table; the shell reads it, it never carries a copy of the data.
+# One row per backend and host window, tab-separated:
+#
+#   backend  target  macos_min  macos_max_exclusive  needs_kvm
+#   install_default  selectable  files
+#
+# `-` marks an empty field; files is a space-separated `kind:path` list with
+# kind one of bin/dir/file. The install-time default itself comes from the
+# just-extracted mvmctl (`backend detect --plain`), so the shell never
+# reimplements the macOS-version tier logic.
+
+# Host facts for the row match: the macOS major version on Darwin (empty
+# elsewhere), and 1/0 for a present /dev/kvm. The KVM probe is existence, the
+# predicate the extracted mvmctl's own platform detection applies, so the
+# viable set the shell computes always holds the backend its
+# `backend detect --plain` answers; whether the device opens for this user is
+# the runtime's question, not the installer's.
+MACOS_MAJOR=""
+HAS_KVM=0
+if [ "$(uname -s)" = "Darwin" ]; then
+  MACOS_MAJOR="$(sw_vers -productVersion | awk -F. '{print $1}')"
+  case "$MACOS_MAJOR" in
+    ''|*[!0-9]*) die "could not determine the macOS major version" ;;
+  esac
+elif [ -e /dev/kvm ]; then
+  HAS_KVM=1
+fi
+
+# The selectable rows matching this host, one `backend<TAB>files` pair per
+# line. A row matches on the archive target, the macOS window and the KVM
+# requirement; nothing here re-derives what the table already decided.
+viable_backend_rows() {
+  awk -F'\t' -v target="$1" -v macos="${MACOS_MAJOR:--1}" -v kvm="$HAS_KVM" '
+    /^#/ || NF == 0 { next }
+    $2 != target { next }
+    $3 != "-" && (macos + 0 < $3 + 0) { next }
+    $4 != "-" && !(macos >= 0 && macos + 0 < $4 + 0) { next }
+    $5 == "yes" && kvm != 1 { next }
+    $7 != "yes" { next }
+    { print $1 "\t" $8 }
+  ' "$2"
+}
+
+# Every archive path owned by a backend other than $1 on this host's target —
+# the set staging drops. Only the selected backend's components are placed; a
+# user who never picks a backend never receives its files.
+prune_payloads_from_table() {
+  awk -F'\t' -v target="$TARGET" -v keep="$1" '
+    /^#/ || NF == 0 { next }
+    $2 != target { next }
+    $1 == keep { next }
+    $8 == "-" { next }
+    {
+      n = split($8, entries, " ")
+      for (i = 1; i <= n; i++) {
+        sub(/^[^:]*:/, "", entries[i])
+        print entries[i]
+      }
+    }
+  ' "$SRC/components.tsv"
+}
+
+# Offer the viable backends on a terminal and answer into PICKED. The prompt
+# marks the auto choice; Enter — or a fixed 30-second timeout — takes it.
+# Replies come from /dev/tty so `curl | sh` can still ask when a terminal
+# exists; MVM_INSTALL_TTY overrides the reply source for tests, and an empty
+# one is "no terminal". Returns 1 when there is no terminal to ask.
+pick_backend() {
+  picker_auto="$1"
+  picker_names="$2"
+  picker_tty="${MVM_INSTALL_TTY:-/dev/tty}"
+  [ -n "$picker_tty" ] || return 1
+  ( : < "$picker_tty" ) 2>/dev/null || return 1
+  say "More than one backend can serve this host:"
+  picker_i=1
+  for picker_name in $picker_names; do
+    picker_mark=""
+    if [ "$picker_name" = "$picker_auto" ]; then
+      picker_mark=" (default)"
+    fi
+    say "  $picker_i) $picker_name$picker_mark"
+    picker_i=$((picker_i + 1))
+  done
+  say "Choose a backend [${picker_auto}, 30s timeout]:"
+  # A user's reply is a time condition, so the wait is a timer: a background
+  # reader owns the blocking read and a bounded loop gives it 30 seconds. The
+  # reader records completion with a sentinel file — a finished subshell still
+  # answers `kill -0` until it is reaped, so liveness cannot be the signal.
+  picker_answer="$TMP/picker-answer"
+  : > "$picker_answer"
+  rm -f "$picker_answer.done"
+  ( IFS= read -r picker_line < "$picker_tty" || true; printf '%s' "${picker_line:-}" > "$picker_answer"; : > "$picker_answer.done" ) 2>/dev/null &
+  picker_reader=$!
+  picker_waited=0
+  while [ "$picker_waited" -lt 30 ] && [ ! -e "$picker_answer.done" ]; do
+    sleep 1
+    picker_waited=$((picker_waited + 1))
+  done
+  kill "$picker_reader" 2>/dev/null || true
+  wait "$picker_reader" 2>/dev/null || true
+  PICKED="$(cat "$picker_answer" 2>/dev/null || true)"
+  if [ -z "$PICKED" ]; then
+    PICKED="$picker_auto"
+    return 0
+  fi
+  picker_i=1
+  for picker_name in $picker_names; do
+    if [ "$PICKED" = "$picker_i" ] || [ "$PICKED" = "$picker_name" ]; then
+      PICKED="$picker_name"
+      return 0
+    fi
+    picker_i=$((picker_i + 1))
+  done
+  warn "unrecognised choice '$PICKED' — installing the default ($picker_auto)"
+  PICKED="$picker_auto"
+}
+
+# Decide the backend this install stages and the payloads it drops, from the
+# archive's components.tsv: an explicit --backend / MVM_INSTALL_BACKEND wins
+# and is validated against this host's viable set; otherwise a terminal with
+# a real choice gets the picker; everything else takes the auto-detected
+# default the extracted mvmctl computes. Sets SELECTED_BACKEND and
+# PRUNE_PAYLOADS.
+select_backend_components() {
+  VIABLE_ROWS="$(viable_backend_rows "$TARGET" "$SRC/components.tsv")"
+  VIABLE_NAMES="$(printf '%s\n' "$VIABLE_ROWS" | awk -F'\t' 'NF { print $1 }' | awk '!seen[$0]++' | tr '\n' ' ')"
+  VIABLE_NAMES="${VIABLE_NAMES% }"
+  if [ -n "$BACKEND_REQUESTED" ]; then
+    if ! is_listed "$BACKEND_REQUESTED" "$VIABLE_NAMES"; then
+      if [ -n "$VIABLE_NAMES" ]; then
+        die "backend '$BACKEND_REQUESTED' is not supported on this host. Valid here: $(echo $VIABLE_NAMES | sed 's/ /, /g') (or omit --backend to auto-detect)"
+      fi
+      die "backend '$BACKEND_REQUESTED' is not supported on this host, and no backend is: see https://runmvm.com/reference/platform-support/"
+    fi
+    SELECTED_BACKEND="$BACKEND_REQUESTED"
+  else
+    detected="$("$SRC/mvmctl" backend detect --plain 2>"$TMP/backend-detect.err" || true)"
+    if [ -z "$detected" ]; then
+      cat "$TMP/backend-detect.err" >&2 || true
+      die "no backend supports this host; refusing a partial install"
+    fi
+    if ! is_listed "$detected" "$VIABLE_NAMES"; then
+      die "mvmctl backend detect answered '$detected', which components.tsv does not offer on this host"
+    fi
+    set -- $VIABLE_NAMES
+    if [ "$#" -ge 2 ] && pick_backend "$detected" "$VIABLE_NAMES"; then
+      SELECTED_BACKEND="$PICKED"
+    else
+      SELECTED_BACKEND="$detected"
+    fi
+  fi
+  PRUNE_PAYLOADS="$(prune_payloads_from_table "$SELECTED_BACKEND" | tr '\n' ' ')"
+  PRUNE_PAYLOADS="${PRUNE_PAYLOADS% }"
+}
+
+# The one-line summary every table-driven install ends with: what was chosen,
+# and how to add another backend later.
+say_selected_backend() {
+  [ -n "$SELECTED_BACKEND" ] || return 0
+  case "$TARGET" in
+    aarch64-apple-darwin) host_detail="macOS $MACOS_MAJOR, Apple Silicon" ;;
+    *)
+      if [ "$HAS_KVM" = "1" ]; then
+        host_detail="Linux, KVM"
+      else
+        host_detail="Linux, no KVM"
+      fi
+      ;;
+  esac
+  say "Installed backend: $SELECTED_BACKEND ($host_detail). Add another with \`mvmctl backend add <name>\`."
+}
+
 TARGET="$(detect_target)"
 ARCHIVE="mvmctl-${TARGET}.tar.gz"
 
@@ -964,6 +1156,23 @@ verify_release_signature "$ARCHIVE"
 tar xzf "$TMP/$ARCHIVE" -C "$TMP"
 SRC="$TMP/mvmctl-${TARGET}"
 [ -f "$SRC/mvmctl" ] || die "archive missing mvmctl-${TARGET}/mvmctl"
+
+# Stage what this host needs: the archive's component table decides. Archives
+# predating components.tsv keep the rule they were published with.
+if [ -f "$SRC/components.tsv" ]; then
+  select_backend_components
+else
+  if [ -n "$BACKEND_REQUESTED" ]; then
+    die "--backend / MVM_INSTALL_BACKEND need a release carrying components.tsv; $VERSION predates backend selection"
+  fi
+  # The rule the pre-table releases were published with: the libkrun
+  # compatibility tier stages only on macOS hosts older than 26; macOS 26+
+  # and every Linux host leave it out.
+  PRUNE_PAYLOADS="$LEGACY_LIBKRUN_TIER_PAYLOADS"
+  if [ "$(uname -s)" = "Darwin" ] && [ "$MACOS_MAJOR" -lt 26 ]; then
+    PRUNE_PAYLOADS=""
+  fi
+fi
 stage_guest_runtime
 
 prepare_dirs
@@ -999,6 +1208,7 @@ prune_releases
 for name in $(release_entries "$STAGE"); do
   say "Installed: $INSTALL_DIR/$name"
 done
+say_selected_backend
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) say "Add to PATH:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;

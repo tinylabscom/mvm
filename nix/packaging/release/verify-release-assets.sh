@@ -276,6 +276,10 @@ for target in $TARGETS; do
           [ -x "$package_dir/$bin_name" ] \
             || fail "[$target] required packaged binary missing or not executable: $bin_name"
         done
+        # install.sh reads the generated backend component table from the
+        # archive; a tarball without it cannot select backend components.
+        [ -f "$package_dir/components.tsv" ] \
+          || fail "[$target] archive missing components.tsv"
       else
         fail "[$target] archive missing top-level directory mvmctl-${target}"
       fi

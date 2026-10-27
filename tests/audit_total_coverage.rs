@@ -97,6 +97,17 @@ const CALLER_IDENTITY_SUB: &[(&str, AuditPosture)] = &[
     ("show", AuditPosture::ReadOnly),
 ];
 
+// `mvmctl backend <sub>` — per-backend host component sets. `list` and
+// `detect` only read the component table and the host; `detect` runs before
+// startup as install.sh's probe. `add`/`remove` rewrite files in the
+// install.sh release directory and record that host change.
+const BACKEND_SUB: &[(&str, AuditPosture)] = &[
+    ("list", AuditPosture::ReadOnly),
+    ("add", AuditPosture::Emits("ConfigChange")),
+    ("remove", AuditPosture::Emits("ConfigChange")),
+    ("detect", AuditPosture::ReadOnly),
+];
+
 // Plan 178 (D5) — environment/install lifecycle grouped under `env <sub>`.
 const ENV_SUB: &[(&str, AuditPosture)] = &[
     ("bootstrap", AuditPosture::InteractiveOrControl),
@@ -663,6 +674,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // and `init`.
     ("bootstrap", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
+    ("backend", AuditPosture::DelegatesToSub(BACKEND_SUB)),
     // `bench` emits nothing itself: it spawns `mvmctl run` once per sample,
     // and each of those launches carries its own `cmd.run` envelope and its
     // own signed-plan admission. Auditing the harness on top would double-count

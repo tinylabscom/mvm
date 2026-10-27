@@ -1,4 +1,5 @@
 mod agent_session;
+mod backend;
 mod bench;
 mod bootstrap;
 mod build;
@@ -157,6 +158,9 @@ pub(in crate::commands) enum Commands {
     /// System diagnostics and dependency checks
     #[command(display_order = 5)]
     Doctor(env::doctor::Args),
+    /// Inspect and manage per-backend host component sets
+    #[command(display_order = 5)]
+    Backend(backend::Args),
     /// Check the local mvm-studio dashboard install (dev surface; hidden until
     /// the server handshake is frozen upstream)
     #[command(display_order = 20, hide = true)]

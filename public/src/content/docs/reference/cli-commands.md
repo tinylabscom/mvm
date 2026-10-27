@@ -31,7 +31,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `ops <sub>`                | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`                | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
 | `trust <sub>`              | `add`/`list`/`remove` (publishers), `instructions`, `attest`, `receipt`, `audit`                                                                                        |
-| Other top-level            | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`, `deploy`, `deployments`, `policy`                         |
+| Other top-level            | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`, `deploy`, `deployments`, `policy`, `backend`             |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
@@ -139,6 +139,10 @@ startup.
 | `mvmctl env update --force`                       | Force reinstall even if already up to date                                                                                                                                                                                                                    |
 | `mvmctl env update --skip-verify`                 | Skip the archive's own signature check; the signed checksum manifest is still verified and still binds the archive                                                                                                                                            |
 | `mvmctl env verify-release <ARCHIVE> --tag <TAG>` | Verify a downloaded release archive against its Sigstore bundle (`<ARCHIVE>.bundle`, or `--bundle`) under that release's workflow identity, offline. `install.sh` uses it when an `mvmctl` is already installed                                               |
+| `mvmctl backend list`                             | Every backend with this host's support window, install state, and the install-time default, from the component table the release archive carries as `components.tsv`                                                                                     |
+| `mvmctl backend add <name>`                       | Fetch this install's own release archive, verify its checksum and signature, and place the backend's component files from it. Refuses a backend outside this host's support window and lists the valid names; idempotent                                  |
+| `mvmctl backend remove <name>`                    | Remove the backend's component files from the release directory and its PATH links. Leaves state directories, caches, audit logs and any VM created with the backend. Refuses to remove the install-time default while no other viable backend can take over |
+| `mvmctl backend detect [--plain]`                 | Print the backend `install.sh` selects on this host. This is the install-time answer, which accounts for the host OS version (libkrun on macOS 13–25), not the runtime auto-detect ladder; `--plain` prints just the name, and `install.sh` reads that     |
 
 ### Offline selected runtime verification
 
