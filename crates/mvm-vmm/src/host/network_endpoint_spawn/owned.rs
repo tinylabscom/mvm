@@ -9,6 +9,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, ExitStatus};
 use std::time::Instant;
+use zeroize::Zeroizing;
 
 const HANDSHAKE_LIMIT: usize = 1024 * 1024;
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);

@@ -19,7 +19,6 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
-use mvm_core::atomic_io::write_private;
 
 mod egress_tls;
 pub use egress_tls::{
