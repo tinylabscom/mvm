@@ -592,12 +592,44 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| `ci.yml` | Push to main/feat/*, PRs | check, fmt, clippy, test (macOS + Linux), audit |
-| `ci.yml` (merge queue) | Merge group | Only `Lint core` and `Build workspace tests` (formatting, clippy and a compile of every test target against latest main); everything else passed on the PR head and runs again on push to main |
+| `ci.yml` | PRs, push to main, manual dispatch | Scoped fast gate: formatting, clippy, policy checks, workspace test compilation and sharded tests, Windows portability checks, and static documentation checks; required verdict is `Test` |
+| `ci.yml` (merge queue) | Merge group | `Lint core` and `Build workspace tests` for code changes (formatting, clippy and a compile of every test target against latest main), plus `Docs static` for documentation changes; other validation lanes passed on the PR head and run again on push to main |
 | `ci-main.yml` | Push to main, manual dispatch | The slow lanes (feature suites, BDD, aarch64, release-profile and musl witnesses, eBPF, Linux coverage, Nix evaluation, boot ceiling), gated by `Test (main)`; a pull request and the merge queue never list them |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
 | `publish-crates.yml` | Dispatched by `release.yml` on a tag | Publishes the public crates (`mvm-contract`) to crates.io; every other crate is `publish = false` |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
+
+### Static documentation gate
+
+`Docs static` runs on pull requests and merge groups touching `README.md`,
+`AGENTS.md`, `public/src/content/docs/`, `crates/mvm-sdk/sdks/`, or `examples/`.
+It also runs on pushes to main and manual dispatches. A failed or cancelled
+lane fails the required `Test` aggregate. The docs scope does not enable the
+compiler/test matrix; the existing code scope applies independently, including
+to root README/instruction files, SDK sources, examples, and selected pages
+read by Rust tests.
+
+The lane runs three existing source-only checks:
+
+```bash
+cargo run -p xtask -- check-cli-help-matches-docs
+cargo run -p xtask -- check-doc-links
+cargo run -p xtask -- check-doc-claims
+```
+
+This is a static smoke gate, not execution of the documentation corpus.
+The CLI check compares top-level command declarations with the CLI reference,
+not every flag or example. The link check resolves repository and internal-site
+links in the published docs, not external URLs. The claims check scans the
+published docs and root README for its configured overclaim phrases. Selecting
+the full corpus as a trigger does not extend those checks to every file in it.
+The lane builds xtask, not the CLI or language SDKs, and does not parse or run
+every documented configuration or command.
+
+Authoritative executable documented-example coverage remains the
+`bdd-conformance` lane in `ci-main.yml`, unscoped on every push to main and
+manual dispatch. BDD stays postmerge: failures there require a fix-forward;
+passing `Docs static` does not prove the examples execute successfully.
 
 ### Website deployment
 

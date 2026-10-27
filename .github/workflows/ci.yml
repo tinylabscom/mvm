@@ -5,8 +5,9 @@ on:
   # and the feature combinations, the policy gates, a compile of every
   # workspace test target, and the sharded x86_64 workspace suite. The merge
   # queue re-runs only what a semantic conflict with the latest main can
-  # break: formatting and clippy (Lint core) and the compile of every
-  # workspace test target (Build workspace tests). The slow lanes live in
+  # break: formatting and clippy (Lint core), the compile of every
+  # workspace test target (Build workspace tests), and docs-scoped static
+  # checks (Docs static). The slow lanes live in
   # ci-main.yml and run after the merge. The Windows lane cross-compiles
   # portable crates; it does not run a Windows host. Platform, live-VM, OCI
   # ratification, security, and release artifact jobs live in release/manual
@@ -49,6 +50,7 @@ jobs:
     outputs:
       code: ${{ steps.validate.outputs.code }}
       architecture: ${{ steps.validate.outputs.architecture }}
+      docs: ${{ steps.validate.outputs.docs }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -91,7 +93,7 @@ jobs:
           set -euo pipefail
 
           set_all() {
-            for output in code architecture; do
+            for output in code architecture docs; do
               echo "${output}=true" >> "$GITHUB_OUTPUT"
             done
           }
@@ -175,6 +177,14 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # Keep the corpus aligned with documentation_files(); the static
+          # checks inspect only their supported surfaces within these roots.
+          if grep -zE '^(README\.md$|AGENTS\.md$|public/src/content/docs/|crates/mvm-sdk/sdks/|examples/)' "$CHANGED_FILE" >/dev/null; then
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs=false" >> "$GITHUB_OUTPUT"
+          fi
+
           if grep -zE '^(crates/|src/|tests/|Cargo\.|\.cargo/|rust-toolchain|scripts/check-no-orchestration-server\.sh$|\.github/workflows/(ci|architecture)\.yml$)' "$CHANGED_FILE" >/dev/null; then
             echo "architecture=true" >> "$GITHUB_OUTPUT"
           else
@@ -186,6 +196,7 @@ jobs:
         env:
           CODE: ${{ steps.decide.outputs.code }}
           ARCHITECTURE: ${{ steps.decide.outputs.architecture }}
+          DOCS: ${{ steps.decide.outputs.docs }}
         run: |
           set -euo pipefail
           validate() {
@@ -197,6 +208,7 @@ jobs:
           }
           validate code "$CODE"
           validate architecture "$ARCHITECTURE"
+          validate docs "$DOCS"
 
   # Decide, before the heavy lanes start, whether the x86_64 workspace suite
   # runs on the idle self-hosted KVM box or on hosted runners. Checkout cleans
@@ -258,6 +270,30 @@ jobs:
           printf '### Runner picker\n\n| lane | runner | why |\n|---|---|---|\n| x86_64 workspace suite | %s | %s |\n' \
             "$workspace" "$reason" >> "$GITHUB_STEP_SUMMARY"
           exit 0
+
+  docs-static:
+    name: Docs static
+    needs: [scope]
+    if: needs.scope.outputs.docs == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: lld
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: Check static documentation surfaces
+        run: |
+          cargo run -p xtask -- check-cli-help-matches-docs
+          cargo run -p xtask -- check-doc-links
+          cargo run -p xtask -- check-doc-claims
 
   lint-core:
     name: Lint core (fmt + clippy)
@@ -787,7 +823,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, runners, lint-core, lint-policy, lint-feature-clippy, lint-windows, test-windows-identity, test-workspace-build, test-workspace]
+    needs: [scope, runners, docs-static, lint-core, lint-policy, lint-feature-clippy, lint-windows, test-windows-identity, test-workspace-build, test-workspace]
     # Every admission check runs in an upstream lane; this aggregate only
     # inspects their results, so it needs no checkout or full hosted image.
     # A failed scope or picker skips its dependents, so it fails here too.
@@ -797,7 +833,16 @@ jobs:
       - name: Require every validation lane to pass
         env:
           BAD: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-        run: test "$BAD" = false
+          DOCS: ${{ needs.scope.outputs.docs }}
+          DOCS_RESULT: ${{ needs.docs-static.result }}
+        run: |
+          set -euo pipefail
+          test "$BAD" = false
+          case "$DOCS" in
+            true) test "$DOCS_RESULT" = success ;;
+            false) test "$DOCS_RESULT" = success || test "$DOCS_RESULT" = skipped ;;
+            *) exit 1 ;;
+          esac
 
   # Hosted: two shards run the archive `test-workspace-build` compiled. Self-
   # hosted: one shard builds and runs the whole suite on the box. Checkout
