@@ -329,6 +329,7 @@ impl ImageSetFixture {
             std::fs::write(dir.join(name), bytes).unwrap();
         }
         ImageSetSource::new(train, format!("file://{}", dir.display()))
+            .with_download(copy_fixture_file)
     }
 
     fn position(&self, role: ImageSetRole, target: MemberTarget) -> Option<usize> {
@@ -336,6 +337,44 @@ impl ImageSetFixture {
             .members
             .iter()
             .position(|member| member.role == role && member.target == target)
+    }
+}
+
+/// Exercise acquisition and integrity checks without spawning a transport
+/// process for each local fixture file. Network delivery has separate tests.
+fn copy_fixture_file(url: &str, destination: &Path) -> anyhow::Result<()> {
+    let source = url
+        .strip_prefix("file://")
+        .ok_or_else(|| anyhow::anyhow!("image-set fixtures only support file:// sources"))?;
+    std::fs::copy(source, destination)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::copy_fixture_file;
+
+    #[test]
+    fn copies_exact_bytes_to_an_existing_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let destination = dir.path().join("staging");
+        std::fs::write(&source, b"fixture bytes").unwrap();
+        std::fs::write(&destination, b"old longer staging contents").unwrap();
+        copy_fixture_file(&format!("file://{}", source.display()), &destination).unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"fixture bytes");
+    }
+
+    #[test]
+    fn missing_files_fail_and_network_urls_are_never_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("staging");
+        let missing = format!("file://{}", dir.path().join("missing").display());
+        assert!(copy_fixture_file(&missing, &destination).is_err());
+        let error =
+            copy_fixture_file("https://example.invalid/artifact", &destination).unwrap_err();
+        assert!(error.to_string().contains("only support file://"));
+        assert!(!destination.exists());
     }
 }
 
