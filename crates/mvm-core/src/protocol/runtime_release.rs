@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeReleaseProof {
     pub archive: PathBuf,
     pub checksum: PathBuf,
@@ -21,6 +22,7 @@ pub struct RuntimeReleaseProof {
 /// using it; reading a metadata file does not create runtime authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "runtime", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RuntimeLaunchBinding {
     CliAssembly(CliRuntimeLaunchBinding),
     LegacyBundle {
@@ -42,6 +44,7 @@ pub enum RuntimeLaunchBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CliRuntimeLaunchBinding {
     pub provenance: RuntimeBindingProvenance,
     pub overlay_path: PathBuf,
@@ -54,6 +57,7 @@ pub struct CliRuntimeLaunchBinding {
 /// never a verification result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RuntimeBindingProvenance {
     Release {
         proof: RuntimeReleaseProof,

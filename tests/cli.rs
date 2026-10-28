@@ -455,6 +455,45 @@ fn machine_create_readme_form_persists_the_named_spec() {
     assert_eq!(spec["memory"], "512M");
 }
 
+#[test]
+fn checkpoint_ls_json_preserves_complete_and_legacy_catalog_metadata() {
+    let home = tempfile::tempdir().expect("isolated checkpoint home");
+    let list = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .env("MVM_HOME", home.path())
+            .env("HOME", home.path())
+            .env("MVM_NO_AUTO_DEV", "1")
+            .args(["machine", "checkpoint", "ls", "--json"])
+            .output()
+            .expect("run documented checkpoint ls command");
+        assert!(
+            output.status.success(),
+            "checkpoint ls --json failed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("checkpoint ls --json emits only catalog JSON")
+    };
+    assert_eq!(list(), serde_json::json!([]), "missing catalog is empty");
+
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/checkpoint/catalog.json"))
+            .expect("shared checkpoint catalog fixture");
+    for record in fixture.as_array().expect("catalog records").iter().rev() {
+        let directory = home
+            .path()
+            .join("checkpoints")
+            .join(record["id"].as_str().expect("checkpoint id"));
+        std::fs::create_dir_all(&directory).expect("checkpoint directory");
+        std::fs::write(
+            directory.join("meta.json"),
+            serde_json::to_vec(record).expect("serialize fixture metadata"),
+        )
+        .expect("write fixture metadata");
+    }
+    assert_eq!(list(), fixture);
+}
+
 /// `deployments ls` inventories the local-first deploy store
 /// (`<mvm_home>/deployments/<ir-hash>/deploy.json`) without contacting a
 /// control plane, and `--workload` filters to one workload.

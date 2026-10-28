@@ -163,7 +163,7 @@ from mvm._runtime.runtime import (
 from mvm import audit, host, kv
 
 # Host-side built-manifest inspection; the host library loads only on use.
-from mvm import manifest
+from mvm import checkpoint, manifest
 
 # Host-side pack authoring is pure data construction, with no build at import.
 from mvm import packs
@@ -179,6 +179,7 @@ __all__ = [
     "host",
     "kv",
     "manifest",
+    "checkpoint",
     "packs",
     "DEFAULT_TTL_SECONDS",
     "MVM_HOSTLIB_PATH_ENV",

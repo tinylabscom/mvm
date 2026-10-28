@@ -842,6 +842,7 @@ MVM_BDD_GUEST_BIN_DIR="$MVM_BDD_GUEST_BIN_DIR" \
 MVM_BDD_STRICT_SKIPS=1 \
 MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \
+MVM_HOME="$E2E_HOME" \
   python3 scripts/run-bounded-command.py \
     --timeout "$E2E_TIMEOUT_SECS" \
     --grace 5 \

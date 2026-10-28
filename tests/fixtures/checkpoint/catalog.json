@@ -1,0 +1,52 @@
+[
+  {
+    "id": "a",
+    "class": "vm_full",
+    "vm_name": "vm",
+    "tag": "release",
+    "parent": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_unix": 42,
+    "content": [{"name": "rootfs.ext4", "sha256": "ab"}],
+    "key_domain": "tenant:one",
+    "protection": "sealed_v1",
+    "supervisor_config_digest": "config",
+    "runtime_overlay_version": "1.2.3",
+    "runtime_launch_binding": {
+      "runtime": "cli_assembly",
+      "provenance": {
+        "kind": "source",
+        "version": "1.2.3",
+        "arch": "aarch64",
+        "archive_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "overlay_path": "/overlay",
+      "overlay_verity_path": "/verity",
+      "initramfs_path": "/initrd",
+      "overlay_roothash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "snapshot_id": "snapshot",
+    "grants": {"cpu": {"unit": "share", "millicores": 1000}},
+    "session": {
+      "session_id": "session",
+      "generation": 2,
+      "journal_cursor": 3,
+      "approval_head": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "replay_input_digest": "input"
+    },
+    "machine_input_cursor": 7,
+    "meta_digest": "sha256:cda144f3c275dad655ef6319bb3067a902bf01cdd881fcce99d540b236438bdf",
+    "audit_ref": "audit"
+  },
+  {
+    "id": "legacy",
+    "class": "fs_quick",
+    "vm_name": "vm",
+    "tag": null,
+    "parent": null,
+    "created_unix": 0,
+    "content": [],
+    "supervisor_config_digest": "",
+    "meta_digest": "sha256:0efd3345d4e30a091e36ecd44492bb0c6d8b8e39697eede6b3c79e99d02e59b5",
+    "audit_ref": null
+  }
+]
