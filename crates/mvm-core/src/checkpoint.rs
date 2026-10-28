@@ -7,14 +7,55 @@ use sha2::{Digest, Sha256};
 /// Stable identifier for a checkpoint (also its on-disk directory name under
 /// `config::checkpoints_dir()`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CheckpointId(String);
 
 impl CheckpointId {
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
+
+    /// Validate one non-staging checkpoint directory name before resolving it.
+    pub fn try_from_path_component(value: &str) -> Result<Self, CheckpointIdError> {
+        if value.is_empty()
+            || value.starts_with('.')
+            || value.contains('/')
+            || value.contains('\\')
+            || value.contains("..")
+            || value.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(CheckpointIdError);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid checkpoint ID path component")]
+pub struct CheckpointIdError;
+
+#[cfg(test)]
+mod path_component_tests {
+    use super::CheckpointId;
+
+    #[test]
+    fn checked_ids_are_non_staging_path_components_without_changing_legacy_serde() {
+        for invalid in [
+            "", ".", "..", ".stage", "a/b", "a\\b", "bad..id", "a\0b", "a\nb", "a\u{7f}b",
+        ] {
+            assert!(
+                CheckpointId::try_from_path_component(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        let id = CheckpointId::try_from_path_component("cp-10").expect("valid ID");
+        assert_eq!(serde_json::to_string(&id).expect("ID JSON"), "\"cp-10\"");
+        let legacy: CheckpointId = serde_json::from_str("\".stage\"").expect("legacy wire shape");
+        assert_eq!(legacy.as_str(), ".stage");
     }
 }
 
@@ -37,6 +78,7 @@ impl std::fmt::Display for CheckpointId {
 /// there is no `From`/`Into`/`Deref` to or from any of them (nor to
 /// [`CheckpointId`]), so handing one where another is expected does not compile.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct CheckpointDigest(String);
 
@@ -113,6 +155,7 @@ pub enum CheckpointDigestParseError {
 /// implemented; `VmFull` is reserved so the memory-state path can slot into the
 /// same model without a new surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointClass {
     /// Copy-on-write clone of a quiesced rootfs (filesystem state only).
@@ -123,6 +166,7 @@ pub enum CheckpointClass {
 
 /// One named artifact inside a checkpoint's `content/` dir, with its hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ContentBlob {
     pub name: String,
@@ -136,6 +180,7 @@ pub struct ContentBlob {
 /// lineage verification fail. Storage code hashes this value before using it
 /// as a directory name; tenant-controlled text never becomes a path component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct CheckpointKeyDomain(String);
 
@@ -209,6 +254,7 @@ pub enum CheckpointKeyDomainParseError {
 /// [`CheckpointProtection::Unprotected`]: legacy content is never reclassified
 /// as protected, and is never opened through the sealed path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointProtection {
     /// Plaintext chunk objects and whole files: the legacy layout, written
@@ -323,6 +369,7 @@ pub struct DeviceAnchors {
 /// sits inside `CheckpointMeta`'s digest input, whichever encoding shipped
 /// first would freeze into every sealed record's `meta_digest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct ApprovalHead(String);
 
@@ -408,6 +455,7 @@ pub enum ApprovalHeadParseError {
 /// `replay_input_digest`, when present, commits the encrypted input artifact
 /// executed immediately before this step was captured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SessionBinding {
     pub session_id: mvm_contract::protocol::agent_session::AgentSessionId,
@@ -418,6 +466,7 @@ pub struct SessionBinding {
     /// for older and non-step session checkpoints; replay accepts only a step
     /// carrying this binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub replay_input_digest: Option<String>,
 }
 
@@ -433,12 +482,23 @@ pub struct SessionBinding {
 /// chain-signed entry is emitted; it and `meta_digest` are excluded from the
 /// digest so the backfill does not perturb the content-address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointMeta {
     pub id: CheckpointId,
     pub class: CheckpointClass,
     pub vm_name: String,
+    // The output schema keeps always-emitted nullable fields required, while
+    // fields omitted on None below remain optional and non-null when present.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "Option::<String>::json_schema")
+    )]
     pub tag: Option<String>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "Option::<CheckpointDigest>::json_schema")
+    )]
     pub parent: Option<CheckpointDigest>,
     pub created_unix: u64,
     pub content: Vec<ContentBlob>,
@@ -453,39 +513,52 @@ pub struct CheckpointMeta {
     pub protection: CheckpointProtection,
     pub supervisor_config_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub runtime_overlay_version: Option<String>,
     /// Exact runtime generation captured with the machine. This untrusted DTO
     /// is authenticated by the audit-chain binding of `meta_digest`, not by
     /// the content-address alone; restore also re-verifies its release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "crate::protocol::runtime_release::RuntimeLaunchBinding")
+    )]
     pub runtime_launch_binding: Option<crate::protocol::runtime_release::RuntimeLaunchBinding>,
     /// Content-addressed snapshot-store entry containing this checkpoint's
     /// immutable bytes. It is part of the load-bearing digest so a claim
     /// cannot redirect materialization to an unrelated staged snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub snapshot_id: Option<String>,
     /// The permission set the captured VM was admitted under. Load-bearing so a
     /// restore can bound a child against it: the digest covers this field, the
     /// signed chain covers the digest, and a record edited to widen what the
     /// parent held stops verifying before it can justify a wider child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "mvm_contract::grants::Grants"))]
     pub grants: Option<mvm_contract::grants::Grants>,
     /// The durable agent session this checkpoint is a resume point for, when
     /// it has one. Load-bearing so a resume cannot be redirected to a
     /// different session or replayed at an earlier journal position: the
     /// digest covers this field and the signed chain covers the digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "SessionBinding"))]
     pub session: Option<SessionBinding>,
     /// Last fully committed machine-exec input at the instant this checkpoint
     /// was captured. Replay uses this exact cursor instead of a wall clock, so
     /// two operations in one second cannot be reordered or executed twice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "u64"))]
     pub machine_input_cursor: Option<u64>,
     /// Content-address of the load-bearing fields above. Required with no serde
     /// default: a record that carries no content-address cannot be
     /// lineage-verified, so a pre-lineage meta.json must fail closed rather than
     /// load as an unverifiable record.
     pub meta_digest: CheckpointDigest,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "Option::<String>::json_schema")
+    )]
     pub audit_ref: Option<String>,
 }
 

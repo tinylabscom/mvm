@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 9;
+export const ABI_MINOR = 10;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -50,6 +50,12 @@ export const MANIFEST_LIST = "manifest.list";
  * is refused.
  */
 export const MANIFEST_VERIFY = "manifest.verify";
+
+/**
+ * List complete checkpoint metadata in ID order without
+ * authenticating its contents.
+ */
+export const CHECKPOINT_LIST = "checkpoint.list";
 
 /** Reports what the backend can do. */
 export const BACKEND_CAPABILITIES = "backend.capabilities";
@@ -207,6 +213,7 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "manifest.info": { key: "manifest_info", classification: "prod_safe", summary: "Inspect a built manifest slot and its optional snapshot." },
   "manifest.list": { key: "manifest_list", classification: "prod_safe", summary: "List built manifest slots with orphan and tag-intersection filters." },
   "manifest.verify": { key: "manifest_verify", classification: "prod_safe", summary: "Verify built manifest artifact checksums; signature verification is refused." },
+  "checkpoint.list": { key: "checkpoint_list", classification: "prod_safe", summary: "List complete checkpoint metadata in ID order without authenticating its contents." },
   "backend.capabilities": { key: "backend_capabilities", classification: "prod_safe", summary: "Reports what the backend can do." },
   "entrypoint.call": { key: "entrypoint_call", classification: "prod_safe", summary: "Calls a workload's entrypoint in a transient microVM, admitted under a signed plan." },
   "machine.create": { key: "machine_create", classification: "prod_safe", summary: "Persists a machine definition without booting it." },

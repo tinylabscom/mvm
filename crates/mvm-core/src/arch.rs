@@ -10,6 +10,7 @@ use std::str::FromStr;
 // pins are one, and a deterministic key order is what makes the file's
 // rendering reproducible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum GuestArch {
     X86_64,

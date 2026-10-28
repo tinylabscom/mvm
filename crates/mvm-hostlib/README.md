@@ -31,7 +31,7 @@ void     mvm_hostlib_free(MvmHostlibBuf buf);
    `MVM_HOSTLIB_ABI_NOT_NEGOTIATED`: a binding and library that disagree about
    the buffer layout would otherwise read and free memory neither described.
 2. It calls a dotted method with a JSON request. Request types refuse unknown
-   fields. The ABI is 1.9.
+   fields. The ABI is 1.10.
 3. It gets back a status and a JSON buffer, and releases the buffer with
    `mvm_hostlib_free`. Statuses 1 to 7 mirror `MvmError`, and the error body
    carries the same `code` and `retryable` every other programmatic surface
@@ -45,6 +45,28 @@ operation's status. Older bindings may expose status 12 as a generic failure
 without typed details, but do not retry it. New bindings validate and expose
 immutable typed recovery details. Those values are metadata, not ownership,
 callbacks, or a recovery operation.
+
+### Checkpoint catalog
+
+ABI 1.10 adds `checkpoint.list`, also exposed by Python's
+`mvm.checkpoint.list()` and TypeScript's `checkpoint.list()`. Its request is
+exactly an empty JSON object; arrays, scalars, unknown fields and trailing
+JSON are refused. The reply is the same complete metadata array as
+`mvmctl machine checkpoint ls --json`, sorted lexicographically by checkpoint
+ID. A missing catalog returns an empty array.
+
+Listing and direct metadata reads use held directory/file handles on supported
+Unix hosts. The configured root's ancestors are trusted; the root itself,
+checkpoint directories and metadata are not traversed through symlinks.
+Nonregular metadata and records larger than 4 MiB are refused, and the embedded
+ID is bound to its directory name. Hidden staging entries,
+non-directories and directories with no metadata are not checkpoints.
+Unsupported platforms refuse rather than reopen untrusted paths.
+
+The schema preserves always-present nullable fields (`tag`, `parent` and
+`audit_ref`) and omitted optional fields, including complete runtime, grant,
+and session data. These are untrusted catalog records: listing neither
+authenticates their digest/audit bindings nor grants runtime or key authority.
 
 ### Caller-owned contexts
 

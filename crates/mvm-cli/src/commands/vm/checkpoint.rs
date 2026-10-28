@@ -33,6 +33,8 @@ use admitted::admitted_capture_for;
 mod admitted;
 mod fork_vm_full;
 mod lineage;
+#[cfg(all(test, unix))]
+mod list_tests;
 mod prompt_step;
 pub(in crate::commands) use prompt_step::VmFullStepCheckpointer;
 mod revert;
@@ -537,11 +539,12 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
 }
 
 fn ls(json: bool) -> Result<()> {
-    let metas = CheckpointStore::open().list()?;
+    let checkpoints = mvm_client::checkpoint::Checkpoints::open();
     if json {
-        crate::json_out::emit_json(&metas)?;
+        println!("{}", checkpoint_list_json(&checkpoints)?);
         return Ok(());
     }
+    let metas = checkpoints.list()?;
     if metas.is_empty() {
         ui::info("(no checkpoints)");
         return Ok(());
@@ -577,6 +580,10 @@ fn ls(json: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn checkpoint_list_json(checkpoints: &mvm_client::checkpoint::Checkpoints) -> Result<String> {
+    crate::json_out::to_json_string(&checkpoints.list()?)
 }
 
 /// Compact display form of a checkpoint content-address (`sha256:` + first 12
@@ -671,7 +678,15 @@ fn session_pinning_checkpoint(
 fn rm(id: &str, json: bool) -> Result<()> {
     let id = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
-    if let Ok(meta) = store.read_meta(&id) {
+    let present = match std::fs::symlink_metadata(store.dir_for(&id)) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("inspecting checkpoint before removal"),
+    };
+    if present {
+        let meta = store
+            .read_meta(&id)
+            .context("reading checkpoint before removal")?;
         if let Some(session_id) = session_pinning_checkpoint(&meta.meta_digest)? {
             bail!(
                 "cannot remove checkpoint '{}': it is the resume point for agent session '{}'; \
@@ -690,8 +705,8 @@ fn rm(id: &str, json: bool) -> Result<()> {
                 if descendants.len() == 1 { "it" } else { "them" }
             );
         }
+        store.remove(&id)?;
     }
-    store.remove(&id)?;
     if json {
         crate::json_out::emit_json(&CheckpointRemoveJson {
             schema_version: 1,

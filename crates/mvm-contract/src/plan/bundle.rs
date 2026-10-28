@@ -100,6 +100,7 @@ pub const BUNDLE_LAYER_MEDIA_TYPE: &str = "application/vnd.mvm.bundle.v1.tar";
 /// `mvm_core::plan::bundle::key_id_from_pubkey`/`key_id_from_identity` —
 /// those need `sha2`/`hex`, which live in `mvm-core`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct KeyId(pub String);
 
@@ -445,6 +446,7 @@ impl BundleManifest {
 /// `serde(deny_unknown_fields)` keeps the wire format strict — a
 /// future field added in v2 fails closed in older builds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PlanArtifact {
     /// Lowercase-hex SHA-256 of the entire `.mvmpkg` archive.

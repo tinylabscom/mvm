@@ -182,6 +182,8 @@ export type { BrowserSandboxOptions } from "./_helpers.js";
 // Host-side built-manifest inspection; the host library loads only on use.
 export * as manifest from "./manifest.js";
 export * as attestation from "./attestation.js";
+export * as checkpoint from "./checkpoint.js";
+export type { CheckpointListReply } from "./checkpoint.js";
 export * as imageRevocations from "./image_revocations.js";
 
 // PackSpec authoring: data only, no host library, no build.

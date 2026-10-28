@@ -66,6 +66,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 mod approval;
 pub mod attestation;
+pub mod checkpoint;
 pub mod dispatch;
 mod embedder;
 pub mod entrypoint;
@@ -99,7 +100,8 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// `manifest.list`, `manifest.info`, and `manifest.verify`.
 /// 8 added host-local attestation/revocation data and nonretryable recovery details.
 /// 9 added caller-owned invocation contexts with independent negotiation.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 9;
+/// 10 added complete checkpoint catalog listing through `checkpoint.list`.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 10;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -309,6 +311,9 @@ fn handle(negotiated: bool, method: &[u8], request: &[u8], services: &dyn Servic
     }
     if manifest::is_known(method) {
         return manifest::dispatch(method, request);
+    }
+    if checkpoint::is_known(method) {
+        return checkpoint::dispatch(method, request);
     }
     if guest::is_known(method) {
         return match services.guest() {
@@ -573,6 +578,32 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_listing_negotiates_without_constructing_machine_services() {
+        let home = tempfile::tempdir().expect("home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let method = checkpoint::LIST.as_bytes();
+        assert_eq!(
+            handle(false, method, b"{}", &Untouched).status,
+            MVM_HOSTLIB_ABI_NOT_NEGOTIATED
+        );
+        assert_eq!(
+            handle(true, method, b"[]", &Untouched).status,
+            MVM_HOSTLIB_INVALID_INPUT
+        );
+        let outcome = handle(true, method, b"{}", &Untouched);
+        #[cfg(unix)]
+        {
+            assert_eq!(outcome.status, status::MVM_HOSTLIB_OK);
+            assert_eq!(outcome.body, b"[]");
+        }
+        #[cfg(not(unix))]
+        assert_eq!(outcome.status, status::MVM_HOSTLIB_BACKEND);
+        assert!(compatible(1, 9, 1, MVM_HOSTLIB_ABI_MINOR));
+        assert!(!compatible(1, MVM_HOSTLIB_ABI_MINOR, 1, 9));
+    }
+
+    #[test]
     fn host_local_routes_require_negotiation_without_constructing_services() {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
@@ -623,12 +654,13 @@ mod tests {
 
     #[test]
     fn recovery_status_and_c_buffer_do_not_depend_on_last_negotiated_minor() {
-        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 9));
+        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 10));
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 7), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 8), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 9), 1);
-        assert_eq!(mvm_hostlib_abi_is_compatible(1, 10), 0);
-        for minor in [7, 8, 9, 7] {
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 10), 1);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 11), 0);
+        for minor in [7, 8, 9, 10, 7] {
             assert_eq!(mvm_hostlib_abi_is_compatible(1, minor), 1);
             let outcome = Outcome::from(mvm_core::client::MvmError::RecoveryRequired {
                 machine_id: "machine".into(),

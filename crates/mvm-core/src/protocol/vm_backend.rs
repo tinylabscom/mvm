@@ -44,6 +44,7 @@ pub use mvm_contract::protocol::vm_backend::{
 /// selected rootfs and initrd to signed artifact roles. This is not authority
 /// to bypass verification, and the archive cannot supply its own trust store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LegacyBundleRuntimeProof {
     pub archive: std::path::PathBuf,
@@ -52,6 +53,7 @@ pub struct LegacyBundleRuntimeProof {
 
 /// Untrusted original schema-4 archive and schema-2 runtime selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LegacyPortableRuntimeProof {
     pub archive: std::path::PathBuf,

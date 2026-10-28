@@ -1,6 +1,6 @@
 {
   "abi_major": 1,
-  "abi_minor": 9,
+  "abi_minor": 10,
   "methods": [
     {
       "classification": "prod_safe",
@@ -49,6 +49,12 @@
       "key": "manifest_verify",
       "name": "manifest.verify",
       "summary": "Verify built manifest artifact checksums; signature verification is refused."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "checkpoint_list",
+      "name": "checkpoint.list",
+      "summary": "List complete checkpoint metadata in ID order without authenticating its contents."
     },
     {
       "classification": "prod_safe",

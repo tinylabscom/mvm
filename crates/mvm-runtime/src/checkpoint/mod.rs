@@ -11,6 +11,8 @@ use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
 use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 
 mod capture_custody;
+#[cfg(unix)]
+mod catalog;
 mod chunks;
 mod custody;
 mod diff;
@@ -69,6 +71,8 @@ use verify::{
 };
 
 pub use mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB as SUPERVISOR_CONFIG_FILE_NAME;
+
+const MAX_META_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Filesystem-backed registry over `config::checkpoints_dir()` (or any root,
 /// for tests). Layout: `<root>/<id>/meta.json` + `<root>/<id>/content/`, plus
@@ -133,6 +137,10 @@ impl CheckpointStore {
     /// a torn one — a torn record would make every [`Self::list`] fail.
     pub fn write_meta(&self, meta: &CheckpointMeta) -> Result<()> {
         let json = serde_json::to_vec_pretty(meta).context("serializing checkpoint meta")?;
+        anyhow::ensure!(
+            u64::try_from(json.len())? <= MAX_META_BYTES,
+            "checkpoint metadata exceeds 4 MiB"
+        );
         let path = self.meta_path(&meta.id);
         mvm_core::atomic_io::atomic_write_durable(&path, &json)
             .with_context(|| format!("writing {}", path.display()))?;
@@ -141,32 +149,32 @@ impl CheckpointStore {
         mvm_core::atomic_io::sync_dir(&self.root)
     }
 
+    /// Read one bounded regular metadata file through held directory handles.
+    /// Unsupported platforms refuse rather than fall back to path-based reads.
     pub fn read_meta(&self, id: &CheckpointId) -> Result<CheckpointMeta> {
-        let path = self.meta_path(id);
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+        #[cfg(unix)]
+        {
+            catalog::read(&self.root, id)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = id;
+            anyhow::bail!("secure checkpoint catalog reads are unsupported on this platform")
+        }
     }
 
+    /// List complete, untrusted metadata in ID order without following catalog
+    /// symlinks. Records are bounded regular files opened through held directory
+    /// handles; listing does not authenticate their digest or audit bindings.
     pub fn list(&self) -> Result<Vec<CheckpointMeta>> {
-        let mut out = Vec::new();
-        let entries = match std::fs::read_dir(&self.root) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(e).context("reading checkpoints dir"),
-        };
-        for entry in entries {
-            let entry = entry?;
-            // A dot-named directory is the staging area, never a checkpoint.
-            if !entry.file_type()?.is_dir() || entry.file_name().to_string_lossy().starts_with('.')
-            {
-                continue;
-            }
-            let id = CheckpointId::new(entry.file_name().to_string_lossy().into_owned());
-            if self.meta_path(&id).exists() {
-                out.push(self.read_meta(&id)?);
-            }
+        #[cfg(unix)]
+        {
+            catalog::list(&self.root)
         }
-        Ok(out)
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!("secure checkpoint catalog reads are unsupported on this platform")
+        }
     }
 
     pub fn by_tag(&self, tag: &str) -> Result<Vec<CheckpointMeta>> {

@@ -267,6 +267,14 @@ pub const REGISTRY: &[MethodDef] = &[
         reply: schema_of::<mvm_client::manifest::VerifiedSlot>,
     },
     MethodDef {
+        name: crate::checkpoint::LIST,
+        key: "checkpoint_list",
+        summary: "List complete checkpoint metadata in ID order without authenticating its contents.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<DispatchEmpty>,
+        reply: array_of::<mvm_core::checkpoint::CheckpointMeta>,
+    },
+    MethodDef {
         name: BACKEND_CAPABILITIES,
         key: "backend_capabilities",
         summary: "Reports what the backend can do.",
@@ -717,6 +725,58 @@ pub fn method_manifest() -> serde_json::Value {
 mod tests {
     use super::*;
 
+    #[test]
+    fn checkpoint_list_schema_distinguishes_nullable_from_omitted_output_fields() {
+        let document = schema_document().expect("complete host ABI schema");
+        let definitions = &document["definitions"];
+        let reply = &definitions["CheckpointListReply"];
+        assert_eq!(reply["type"], "array");
+        let metadata = &reply["items"];
+        assert_eq!(metadata["type"], "object");
+        let required = metadata["required"].as_array().expect("required fields");
+        let nullable = |schema: &serde_json::Value| {
+            schema["type"]
+                .as_array()
+                .is_some_and(|types| types.iter().any(|kind| kind == "null"))
+                || schema["anyOf"]
+                    .as_array()
+                    .is_some_and(|types| types.iter().any(|kind| kind["type"] == "null"))
+        };
+        for field in ["tag", "parent", "audit_ref"] {
+            assert!(required.iter().any(|name| name == field), "{field}");
+            assert!(nullable(&metadata["properties"][field]), "{field}");
+        }
+        for field in [
+            "key_domain",
+            "protection",
+            "runtime_overlay_version",
+            "runtime_launch_binding",
+            "snapshot_id",
+            "grants",
+            "session",
+            "machine_input_cursor",
+        ] {
+            assert!(!required.iter().any(|name| name == field), "{field}");
+            assert!(!nullable(&metadata["properties"][field]), "{field}");
+        }
+        let legacy = definitions["RuntimeLaunchBinding"]["oneOf"]
+            .as_array()
+            .expect("runtime variants")
+            .iter()
+            .find(|variant| {
+                variant["properties"]["runtime"]["enum"] == serde_json::json!(["legacy_bundle"])
+            })
+            .expect("legacy bundle variant");
+        assert!(
+            legacy["required"]
+                .as_array()
+                .expect("required legacy fields")
+                .iter()
+                .any(|field| field == "initramfs_path")
+        );
+        assert!(nullable(&legacy["properties"]["initramfs_path"]));
+    }
+
     /// The registry and the runtime dispatch tables must name exactly the
     /// same methods; a method added to one and not the other is a binding
     /// that advertises what the library refuses, or the reverse.
@@ -729,6 +789,7 @@ mod tests {
             .chain(crate::guest::METHODS.iter())
             .chain(crate::launch::METHODS.iter())
             .chain(crate::manifest::METHODS.iter())
+            .chain(crate::checkpoint::METHODS.iter())
             .chain(crate::attestation::METHODS.iter())
             .chain(crate::image_admin::METHODS.iter())
             .chain(crate::entrypoint::METHODS.iter())

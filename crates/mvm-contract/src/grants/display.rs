@@ -44,9 +44,11 @@ pub struct DisplayInputGrant {
     pub attended: bool,
     /// Host-to-guest paste. Absent means no paste event is accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "DisplayClipboardGrant"))]
     pub clipboard: Option<DisplayClipboardGrant>,
     /// A human will enter a credential through the display during this run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "HumanCredentialGrant"))]
     pub human_credential: Option<HumanCredentialGrant>,
 }
 

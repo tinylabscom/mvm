@@ -37,19 +37,16 @@ impl Checkpoints {
     /// Read one checkpoint, preserving the command-facing not-found context.
     pub fn read(&self, id: &CheckpointId) -> Result<CheckpointMeta> {
         let id = validated_id(id.as_str())?;
-        let meta = self
-            .store
+        self.store
             .read_meta(&id)
-            .with_context(|| format!("no checkpoint {:?} found", id.as_str()))?;
-        let stored_id = validated_id(meta.id.as_str()).context("checkpoint metadata id")?;
-        if stored_id.as_str() != id.as_str() {
-            bail!(
-                "checkpoint metadata id {:?} does not match requested id {:?}",
-                stored_id.as_str(),
-                id.as_str()
-            );
-        }
-        Ok(meta)
+            .with_context(|| format!("no checkpoint {:?} found", id.as_str()))
+    }
+
+    /// Return complete catalog records in checkpoint-ID order.
+    ///
+    /// Reading metadata does not authenticate its audit or runtime bindings.
+    pub fn list(&self) -> Result<Vec<CheckpointMeta>> {
+        self.store.list()
     }
 
     /// Resolve the frozen image for `volume` in `id`.
@@ -124,20 +121,8 @@ impl WorkspaceImage {
 
 /// Validate a checkpoint identifier before it becomes an on-disk directory.
 pub fn validated_id(raw: &str) -> Result<CheckpointId> {
-    if raw.is_empty() {
-        bail!("invalid checkpoint id: empty");
-    }
-    let bad = raw.contains('/')
-        || raw.contains('\\')
-        || raw.contains("..")
-        || raw.bytes().any(|byte| byte == 0 || byte.is_ascii_control());
-    if bad {
-        bail!(
-            "invalid checkpoint id {raw:?}: must not contain '/', '\\', '..', \
-             NUL, or control characters"
-        );
-    }
-    Ok(CheckpointId::new(raw.to_string()))
+    CheckpointId::try_from_path_component(raw)
+        .with_context(|| format!("invalid checkpoint id {raw:?}"))
 }
 
 impl Default for Checkpoints {
@@ -149,6 +134,58 @@ impl Default for Checkpoints {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn listing_preserves_full_and_legacy_metadata_without_projection() {
+        let root = tempfile::tempdir().expect("catalog");
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mvm-core/tests/fixtures/checkpoint-list.json"
+        )))
+        .expect("shared fixture");
+        for record in fixture.as_array().expect("records").iter().rev() {
+            let directory = root.path().join(record["id"].as_str().expect("id"));
+            std::fs::create_dir(&directory).expect("checkpoint");
+            std::fs::write(
+                directory.join("meta.json"),
+                serde_json::to_vec(record).expect("metadata"),
+            )
+            .expect("write metadata");
+        }
+        let service = Checkpoints::at(root.path());
+        let records = service.list().expect("list");
+        assert_eq!(serde_json::to_value(&records).expect("wire reply"), fixture);
+        for record in &records {
+            assert_eq!(service.read(&record.id).expect("read"), *record);
+            assert_eq!(record.meta_digest, record.compute_meta_digest());
+        }
+        assert!(
+            Checkpoints::at(root.path().join("missing"))
+                .list()
+                .expect("missing catalog")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn catalog_ids_use_the_shared_non_staging_path_rule() {
+        for id in [
+            "", ".", ".stage", "..", "a/b", "a\\b", "a..b", "a\0b", "a\nb",
+        ] {
+            assert!(validated_id(id).is_err(), "accepted {id:?}");
+        }
+        assert_eq!(validated_id("cp-10").expect("ID").as_str(), "cp-10");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn catalog_operations_refuse_without_secure_platform_primitives() {
+        let root = tempfile::tempdir().expect("catalog");
+        let service = Checkpoints::at(root.path());
+        assert!(service.list().is_err());
+        assert!(service.read(&CheckpointId::new("alpha")).is_err());
+    }
 
     #[test]
     fn absent_checkpoint_is_reported_at_the_facade_boundary() {

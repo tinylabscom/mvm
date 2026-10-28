@@ -276,6 +276,35 @@ and signs it. The bytes are the canonical bytes every language SDK writes for
 the same spec, and a mistake throws `PackSpecError` with
 the same `code` in every language.
 
+## Checkpoint inventory
+
+```typescript
+import { checkpoint, type CheckpointListReply } from "@runmvm/mvm";
+
+const records: CheckpointListReply = checkpoint.list();
+for (const record of records) {
+  console.log(record.id, record.class, record.meta_digest);
+}
+```
+
+`checkpoint.list()` takes no arguments and sends exactly `{}` to
+`checkpoint.list` in the host library (host ABI 1.10 or compatible newer). It returns an
+array of complete canonical checkpoint metadata records, sorted
+lexicographically by ID by the host. An empty inventory returns `[]`.
+
+The reply type comes directly from the generated host ABI contract, including
+runtime launch bindings and their release/source or legacy proofs, grants,
+session bindings, snapshot IDs, machine input cursors, and audit references.
+`tag`, `parent`, and `audit_ref` are always present and may be `null`; optional
+fields remain absent when omitted by the host. In particular, omitted
+`key_domain` and `protection` retain their canonical host/unprotected defaults
+without inserting keys or changing digest semantics. `parent` refers to the
+parent's metadata digest, not its checkpoint ID.
+
+Listing does not verify content, authenticate metadata, or authorize restore.
+The SDK does not recompute digests or interpret proof paths as authority.
+Host-library errors propagate through the existing typed exceptions.
+
 ## Local SDK development
 
 When changing the TypeScript SDK in this repo:

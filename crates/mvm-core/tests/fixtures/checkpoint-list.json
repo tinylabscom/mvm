@@ -1,0 +1,78 @@
+[
+  {
+    "id": "alpha",
+    "class": "vm_full",
+    "vm_name": "fixture-vm",
+    "tag": "release",
+    "parent": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_unix": 42,
+    "content": [
+      {
+        "name": "rootfs.ext4",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "name": "workspace.ext4",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "key_domain": "tenant:fixture",
+    "protection": "sealed_v1",
+    "supervisor_config_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "runtime_overlay_version": "fixture-v1",
+    "runtime_launch_binding": {
+      "runtime": "cli_assembly",
+      "provenance": {
+        "kind": "source",
+        "version": "fixture-v1",
+        "arch": "aarch64",
+        "archive_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "overlay_path": "/fixture/overlay.erofs",
+      "overlay_verity_path": "/fixture/overlay.verity",
+      "initramfs_path": "/fixture/initramfs",
+      "overlay_roothash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "snapshot_id": "snapshot-fixture",
+    "grants": {
+      "cpu": {
+        "unit": "share",
+        "millicores": 1000
+      },
+      "wall_clock": {
+        "kind": "secs",
+        "secs": 60
+      },
+      "egress": {
+        "allow": [
+          {
+            "host": "example.invalid",
+            "port": 443
+          }
+        ]
+      }
+    },
+    "session": {
+      "session_id": "fixture-session",
+      "generation": 1,
+      "journal_cursor": 2,
+      "approval_head": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "replay_input_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "machine_input_cursor": 3,
+    "meta_digest": "sha256:1532b277726f6d84c583da4b7622b9856ab4303b94a1254e08e42893cedb91ea",
+    "audit_ref": "audit-entry-1"
+  },
+  {
+    "id": "zeta",
+    "class": "fs_quick",
+    "vm_name": "legacy-vm",
+    "tag": null,
+    "parent": null,
+    "created_unix": 0,
+    "content": [],
+    "supervisor_config_digest": "",
+    "meta_digest": "sha256:161aacb0a156b378686123813390af54a3f91020fcb36a05979b0620f9544d95",
+    "audit_ref": null
+  }
+]
