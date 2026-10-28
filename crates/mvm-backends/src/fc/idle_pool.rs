@@ -354,8 +354,8 @@ fn infer_origin_dir(root: &Path, claimed_name: &str) -> PathBuf {
     root.join(origin_name)
 }
 
-/// Idle entries of `shape` whose process is running and whose socket exists,
-/// oldest first.
+/// Idle entries of `shape` whose process is running and whose private socket
+/// has been handed to the caller, oldest first.
 fn ready_entries(root: &Path, shape: IdleShape) -> Vec<PathBuf> {
     let mut entries: Vec<(std::time::SystemTime, PathBuf)> = idle_entries(root)
         .into_iter()
@@ -391,10 +391,18 @@ fn entry_shape(dir: &Path) -> Option<IdleShape> {
 }
 
 fn is_ready(dir: &Path) -> bool {
-    use std::os::unix::fs::FileTypeExt as _;
-    let socket_up =
-        std::fs::symlink_metadata(dir.join(API_SOCKET)).is_ok_and(|m| m.file_type().is_socket());
-    socket_up && confirmed_firecracker(dir, &dir.join(API_SOCKET)).is_some()
+    socket_is_private_to(&dir.join(API_SOCKET), effective_uid())
+        && confirmed_firecracker(dir, &dir.join(API_SOCKET)).is_some()
+}
+
+fn socket_is_private_to(socket: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
+
+    // Refill binds as root before handing off ownership; a claim must not move
+    // the socket out from under that handoff while it is still inaccessible.
+    std::fs::symlink_metadata(socket).is_ok_and(|m| {
+        m.file_type().is_socket() && m.uid() == uid && m.permissions().mode() & 0o777 == 0o600
+    })
 }
 
 fn read_pid(path: &Path) -> Option<u32> {
@@ -800,6 +808,49 @@ mod tests {
             ready_entries(root.path(), shape(512)).is_empty(),
             "dead pid"
         );
+    }
+
+    #[test]
+    fn an_idle_socket_is_unclaimable_until_private_to_the_caller() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join(API_SOCKET);
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let uid = std::fs::symlink_metadata(&socket).unwrap().uid();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(
+            !socket_is_private_to(&socket, uid.checked_add(1).unwrap()),
+            "a bound socket owned by the launcher is not ready for another user"
+        );
+        for mode in [0o000, 0o400, 0o640, 0o660, 0o666] {
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                !socket_is_private_to(&socket, uid),
+                "ownership alone does not complete the private handoff: {mode:o}"
+            );
+        }
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(socket_is_private_to(&socket, uid));
+    }
+
+    #[test]
+    fn idle_socket_readiness_refuses_missing_files_and_symlinks() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join(API_SOCKET);
+        assert!(!socket_is_private_to(&socket, effective_uid()));
+        std::fs::write(&socket, b"not a socket").unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!socket_is_private_to(&socket, effective_uid()));
+        std::fs::remove_file(&socket).unwrap();
+        let target = dir.path().join("target.socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, &socket).unwrap();
+        assert!(!socket_is_private_to(&socket, effective_uid()));
     }
 
     #[test]
