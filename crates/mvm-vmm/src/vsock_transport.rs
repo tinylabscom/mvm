@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn dev_console_transport_connects_via_hvf_agent_sock() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
         let agent = dir.path().join("hvf-agent.sock");
         let Some(_listener) = bind_unix_listener(&agent) else {
             return;
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn dev_console_transport_connects_via_console_data_sock() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
         let vsock_dir = dir.path().join("vsock");
         std::fs::create_dir_all(&vsock_dir).unwrap();
         let port = *mvm_agentd::vsock::dev_console_data_ports()
