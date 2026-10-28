@@ -4779,6 +4779,32 @@ fn run_transient_with_launch_plan_no_argv() {
 }
 
 #[test]
+fn run_transient_launch_plan_keeps_manifest_image_selection() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "run",
+        "--manifest",
+        "minimal",
+        "--launch-plan",
+        "./launch.json",
+        "--env",
+        "PORT=9090",
+    ])
+    .expect("a launch plan directs the command, not the image");
+    let Commands::Run(exec::RunVerbArgs {
+        machine: machine::MachineRunArgs { run, .. },
+        ..
+    }) = cli.command
+    else {
+        panic!("Expected Run command");
+    };
+    assert_eq!(run.manifest.as_deref(), Some("minimal"));
+    assert_eq!(run.launch_plan.as_deref(), Some("./launch.json"));
+    assert_eq!(run.env, ["PORT=9090"]);
+    assert!(run.argv.is_empty());
+}
+
+#[test]
 fn run_transient_launch_plan_conflicts_with_argv() {
     let cli = Cli::try_parse_from([
         "mvmctl",

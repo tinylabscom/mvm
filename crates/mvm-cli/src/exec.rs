@@ -2058,9 +2058,11 @@ mod tests {
 
     #[test]
     fn build_guest_wrapper_launch_plan_emits_cd_and_env() {
-        let mut env = BTreeMap::new();
-        env.insert("PORT".to_string(), "8080".to_string());
-        env.insert("LOG".to_string(), "info".to_string());
+        let entrypoint = load_launch_plan(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/launch-plan/workload.json"),
+        )
+        .unwrap();
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
@@ -2073,13 +2075,7 @@ mod tests {
             dir_shares: Vec::new(),
             disk_volumes: Vec::new(),
             env: vec![("CLI_OVER".to_string(), "wins".to_string())],
-            target: ExecTarget::LaunchPlan {
-                entrypoint: LaunchEntrypoint {
-                    command: vec!["python".into(), "main.py".into()],
-                    working_dir: Some("/app".into()),
-                    env,
-                },
-            },
+            target: ExecTarget::LaunchPlan { entrypoint },
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
