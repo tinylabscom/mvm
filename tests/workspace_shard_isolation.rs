@@ -116,6 +116,9 @@ fn workspace_shards_keep_mutable_state_per_worker_run() {
     );
     assert!(worker.contains("mkdir -m 700 -- \"$base\""));
     assert!(worker.contains("mkdir -m 700 -- \"$base/home\" \"$base/mvm\" \"$base/tmp\""));
+    assert!(worker.contains("runner_home=\"${HOME:-}\""));
+    assert!(worker.contains("getent passwd \"$(id -u)\""));
+    assert!(worker.contains("cannot determine the runner home directory"));
     assert!(worker.contains("CARGO_HOME=%s\\nRUSTUP_HOME=%s\\n"));
     assert!(worker.contains("\"$base/home\" \"$base/mvm\" \"$base/tmp\""));
     assert!(worker.contains(">> \"$GITHUB_ENV\""));
