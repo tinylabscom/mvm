@@ -103,7 +103,12 @@ if [[ "${floating_nightly}" -ne 1 ]]; then
   echo "check-fast-cargo: ci-main.yml has ${floating_nightly} floating nightly installs; only the eBPF lane may float, and it must" >&2
   exit 1
 fi
-require_text .github/workflows/ci-main.yml 'cargo +nightly install --locked --version 0.10.4 bpf-linker'
+require_text .github/workflows/ci-main.yml 'cargo +nightly install --locked --version 0.11.1'
+# The LLVM the linker is built against has to be named, not inherited from the
+# crate's default: the linker links that LLVM's shared library, so a silent
+# default change moves the ABI under the lane. This is the same pin
+# `check_workflow_paths` asserts from the other side.
+require_text .github/workflows/ci-main.yml '--no-default-features --features llvm-23 bpf-linker'
 require_text crates/mvm-hostd/ebpf/rust-toolchain.toml 'channel = "nightly"'
 require_text .github/workflows/ci.yml "toolchain: ${toolchain}"
 require_recipe_text 'cargo build --bin mvmctl --features user'

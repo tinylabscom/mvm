@@ -135,9 +135,9 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     let dir = mvm_core::config::host_agent_dir(tenant);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create host-agent dir {}", dir.display()))?;
-    mvm_core::config::secure_host_agent_socket_dir(tenant)
-        .context("prepare owner-private host-agent socket directory")?;
     warm_claim_debug("daemon_dir_ready");
+    mvm_core::config::secure_host_agent_socket_dir(tenant)
+        .with_context(|| format!("secure host-agent socket dir for tenant {tenant}"))?;
     let control_socket = mvm_core::config::host_agent_control_socket(tenant);
 
     // Serialise spawn decisions per tenant.
@@ -170,6 +170,7 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
         return Ok(control_socket);
     }
 
+    let registration_journal_path = registration_journal_for_spawn(&dir, &control_socket)?;
     // Stale socket from a dead daemon would block the rebind.
     let _ = std::fs::remove_file(&control_socket);
     warm_claim_debug("resolve_daemon_binary");
@@ -182,7 +183,7 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     let cfg = serde_json::json!({
         "tenant_id": tenant,
         "control_socket": control_socket,
-        "registration_journal_path": dir.join("registrations.json"),
+        "registration_journal_path": registration_journal_path,
         "host_signer_public_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_PUB),
         "signer_helper_uds_path": mvm_core::config::host_agent_signer_helper_socket(tenant),
         "software_chain_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY),
@@ -196,6 +197,28 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     warm_claim_debug("daemon_pid_written");
     Ok(control_socket)
     // lock_file drops here → flock released.
+}
+
+fn registration_journal_for_spawn(state_dir: &Path, control_socket: &Path) -> Result<PathBuf> {
+    let persistent = state_dir.join("registrations.json");
+    let legacy = control_socket
+        .parent()
+        .context("host-agent control socket must have a parent")?
+        .join("registrations.json");
+    if legacy != persistent {
+        match std::fs::symlink_metadata(&legacy) {
+            Ok(_) => bail!(
+                "legacy socket-local registration journal at {} requires explicit recovery before host-agent restart; evidence retained",
+                legacy.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect legacy journal {}", legacy.display()));
+            }
+        }
+    }
+    Ok(persistent)
 }
 
 /// Register a VM with the daemon: it binds the VM's `BROKER_PORT` socket and
@@ -674,6 +697,49 @@ mod tests {
 
     fn key() -> [u8; 32] {
         [11u8; 32]
+    }
+
+    #[test]
+    fn registration_journal_selection_preserves_state_and_refuses_ambiguous_upgrade() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("persistent");
+        let sockets = root.path().join("sockets");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&sockets).unwrap();
+        let persistent = state.join("registrations.json");
+        assert_eq!(
+            registration_journal_for_spawn(&state, &state.join("control.sock")).unwrap(),
+            persistent
+        );
+        let control = sockets.join("control.sock");
+        assert_eq!(
+            registration_journal_for_spawn(&state, &control).unwrap(),
+            persistent
+        );
+
+        let legacy = sockets.join("registrations.json");
+        std::fs::write(&legacy, b"legacy recovery evidence").unwrap();
+        for existing_persistent in [false, true] {
+            if existing_persistent {
+                std::fs::write(&persistent, b"persistent recovery evidence").unwrap();
+            }
+            let error = registration_journal_for_spawn(&state, &control).unwrap_err();
+            assert!(error.to_string().contains("requires explicit recovery"));
+            assert_eq!(std::fs::read(&legacy).unwrap(), b"legacy recovery evidence");
+            if existing_persistent {
+                assert_eq!(
+                    std::fs::read(&persistent).unwrap(),
+                    b"persistent recovery evidence"
+                );
+            }
+        }
+        std::fs::remove_file(&legacy).unwrap();
+        std::os::unix::fs::symlink(root.path().join("missing"), &legacy).unwrap();
+        assert!(registration_journal_for_spawn(&state, &control).is_err());
+        assert!(
+            legacy.is_symlink(),
+            "must not remove legacy recovery evidence"
+        );
     }
 
     #[test]
