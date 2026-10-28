@@ -2083,6 +2083,7 @@ mvmctl run --manifest minimal -- /bin/true            # named template
 mvmctl run --mount .:/work:ro -- ls /work            # snapshot current dir into an image, RO
 mvmctl run -e DEBUG=1 -- env | grep DEBUG             # env var injection
 mvmctl run --launch-plan ./launch.json                # launch-plan entrypoint
+mvmctl run --manifest minimal --launch-plan ./launch.json --env PORT=9090
 ```
 
 ### Launch-plan shape
@@ -2091,8 +2092,8 @@ mvmctl run --launch-plan ./launch.json                # launch-plan entrypoint
 auto-detected. Only the entrypoint is consumed (image selection
 still comes from `--manifest` or the bundled default in v1). A launch
 plan never names or fetches artifacts: its `image` and `source` fields
-are ignored, and any artifact a workload needs arrives through signed
-bundle admission or a pack, so a plan runs with no pack at all. Both
+are ignored. It does not require a pack; any additional artifacts must
+use the existing image, signed-bundle admission, or pack paths. Both
 shapes were historically produced by the `mvmforge` toolchain
 ([migration guide](/guides/mvmforge-migration/)); `mvmctl dev compile`
 is the canonical producer today.
@@ -2101,14 +2102,18 @@ is the canonical producer today.
 
 ```json
 {
-  "artifact_format_version": "1.0",
+  "artifact_format_version": "1.1",
+  "ir_schema_version": "0.1",
   "workload_id": "hello",
   "entrypoint": {
+    "kind": "command",
     "command": ["python", "main.py"],
     "working_dir": "/app",
-    "env": { "PORT": "8080" }
+    "env": { "PORT": { "kind": "literal", "value": "8080" } }
   },
-  "env": { "LOG_LEVEL": "info" }
+  "env": { "LOG_LEVEL": { "kind": "literal", "value": "info" } },
+  "addons": [],
+  "mesh": { "enabled": false, "expected_peers": [] }
 }
 ```
 
@@ -2116,19 +2121,45 @@ is the canonical producer today.
 
 ```json
 {
+  "schema_version": "0.1",
   "apps": [
     {
       "name": "hello",
-      "entrypoint": {
+      "entrypoints": [{
+        "kind": "command",
         "command": ["python", "main.py"],
         "working_dir": "/app",
-        "env": { "PORT": "8080" }
-      },
-      "env": { "LOG_LEVEL": "info" }
+        "env": { "PORT": { "kind": "literal", "value": "8080" } }
+      }],
+      "env": { "LOG_LEVEL": { "kind": "literal", "value": "info" } }
     }
   ]
 }
 ```
+
+These examples show the consumed execution fields, not complete build inputs.
+Legacy singular `apps[].entrypoint` and string-valued env maps are still
+accepted. Do not supply both `entrypoint` and `entrypoints` on an app.
+Exactly one command entrypoint is supported; tagged commands default
+`working_dir` to `/app` when omitted. Legacy untagged commands retain their
+existing behavior (no directory change when omitted).
+
+Supported explicit versions are artifact `1.0`/`1.1` and IR versions
+accepted by the canonical compiler's version validator (currently `0.0`–`0.2`).
+Unversioned legacy documents remain accepted. Function entrypoints,
+`secret_ref` env values, nonempty addon lists, and enabled/nonempty mesh
+requirements are rejected rather than silently ignored. Unknown metadata
+within supported versions is tolerated.
+
+The source/image declarations describe build inputs, not built kernel/rootfs
+paths. `--launch-plan` does not build or resolve those inputs; select an
+already-built image separately.
+
+Use `--manifest` and `--launch-plan` together to make both choices explicit:
+the manifest identifies the image to boot, and the launch plan directs its
+command, directory, and literal environment. The selected image must already
+contain the executable and files the launch plan names. CLI `--env` can override
+plan values without editing the plan; the example above overrides `PORT`.
 
 Multi-app IR manifests are rejected — that's an orchestration concern
 that belongs in `mvmd`, not in `mvmctl run`. Env precedence (lowest →
