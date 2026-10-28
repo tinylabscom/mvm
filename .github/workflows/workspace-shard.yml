@@ -187,7 +187,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[1-9]$ ]]
-          base="${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
+          base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
           mkdir -m 700 -- "$base"
           mkdir -m 700 -- "$base/home" "$base/mvm" "$base/tmp"
           runner_home="${HOME:-}"
@@ -290,4 +290,4 @@ jobs:
           if [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]]; then
             export ARCHIVE_ROOT="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           fi
-          bash nix/ops/hetzner/job-cleanup.sh "${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
+          bash nix/ops/hetzner/job-cleanup.sh "/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"

@@ -110,7 +110,7 @@ fn workspace_shards_keep_mutable_state_per_worker_run() {
 
     assert!(
         worker.contains(
-            "base=\"${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
+            "base=\"/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
         ),
         "the persistent runner must not reuse another job's mutable state"
     );
@@ -125,7 +125,7 @@ fn workspace_shards_keep_mutable_state_per_worker_run() {
     assert!(worker.contains("if: always()"));
     assert!(
         worker.contains(
-            "bash nix/ops/hetzner/job-cleanup.sh \"${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
+            "bash nix/ops/hetzner/job-cleanup.sh \"/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
         ),
         "the always-run last step must hand the same base to the cleanup script"
     );
