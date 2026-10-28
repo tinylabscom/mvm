@@ -1700,6 +1700,26 @@ mod tests {
                 && ebpf.contains("bpf-linker"),
             "eBPF lane must install a pinned bpf-linker version"
         );
+        // bpf-linker 0.11.0 dropped the rustc-LLVM proxy, so from 0.11.0 on
+        // the linker is built against a named LLVM and links that LLVM's
+        // shared library. The `--features` flag and the apt suite that
+        // provides it have to name the same LLVM: a linker built against
+        // 22.x cannot link a 23.x library, and the failure is a link error
+        // far from the cause. Asserting the pairing here makes a deliberate
+        // LLVM bump a one-line change instead of a broken lane.
+        assert!(
+            ebpf.contains("--no-default-features --features llvm-23")
+                && ebpf.contains("llvm-toolchain-noble-23"),
+            "eBPF lane must pin one LLVM version for both the bpf-linker feature and the apt suite"
+        );
+        // The nightly is floating on purpose, so the LLVM it bundles moves on
+        // rustc's schedule. The lane checks the two against each other; that
+        // check is what keeps a floating nightly safe to combine with a
+        // pinned LLVM, so it must not be dropped.
+        assert!(
+            ebpf.contains("rustc +nightly --version --verbose") && ebpf.contains("23.1.*"),
+            "eBPF lane must check the nightly's LLVM against the pinned one"
+        );
 
         let policy = job_block(&ci, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
