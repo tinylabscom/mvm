@@ -198,7 +198,9 @@ async fn wait_for_helper_uds(child: &mut Child, uds_path: &Path) -> Result<()> {
         if let Some(status) = child.try_wait().context("poll mvm-signer-helper status")? {
             anyhow::bail!("mvm-signer-helper exited before readiness: {status}");
         }
-        if uds_path.exists() {
+        // A crashed helper leaves its socket path behind; only a successful
+        // connection proves the replacement is ready for registration replay.
+        if tokio::net::UnixStream::connect(uds_path).await.is_ok() {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
