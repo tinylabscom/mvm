@@ -40,7 +40,7 @@ use super::sys::*;
 use super::vcpu::esr_ec;
 use super::{BootFault, default_bootargs};
 use crate::vmm::device::Pl011;
-use crate::vmm::device_state::{SnapshotDeviceState, capture_device_states};
+use crate::vmm::device_state::SnapshotDeviceState;
 use crate::vmm::fdt;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
@@ -1139,52 +1139,21 @@ fn run_primary<B: run::DeviceBus>(
                     "a parked state per CPU beyond the boot CPU"
                 );
 
-                // The cheap, state-dependent captures come first: a device can
-                // refuse while host I/O is still draining, and a refusal must
-                // not cost a half-gigabyte RAM write per retry. RAM then goes
-                // whole, and the frame is renamed into place: the host takes
-                // the frame's appearance as the signal that both files are
-                // complete, so neither may be visible half-written.
-                //
-                // A refusal is not fatal. It is recorded for the host and the
-                // request stays, so the next turn of the hold tries again; an
+                // A refusal is not fatal: it is recorded for the host and the
+                // request stays, so the next turn of the hold tries again. An
                 // error out of this hook would end the run loop and take the
                 // guest with it.
-                let outcome = (|| -> Result<(), String> {
-                    let device_bytes = capture_device_states(devices)
-                        .map_err(|error| format!("device state: {error}"))?;
-                    let gic_bytes = super::snapshot::capture_gic_device_state()
-                        .map_err(|error| format!("GIC state: {error:?}"))?;
-                    // Boot CPU first, then the rest in CPU order — the order a
-                    // restore hands them back out in.
-                    let mut vcpu_states = Vec::with_capacity(vcpus as usize);
-                    vcpu_states.push(
-                        vcpu.capture_state()
-                            .map_err(|error| format!("boot CPU state: {error:?}"))?,
-                    );
-                    vcpu_states.extend(secondary_states);
-                    let artifact_digests = runtime_observer
-                        .map(|observer| observer.snapshot_payload())
-                        .transpose()
-                        .map_err(|error| format!("runtime evidence: {error}"))?
-                        .unwrap_or_default();
-                    let ram_layout = super::snapshot::write_ram_image(guest_ram, ram_path)
-                        .map_err(|error| format!("RAM image: {error}"))?;
-                    let frame = super::snapshot::encode_hvf_snapshot_frame(
-                        HVF_SNAPSHOT_BACKEND_KIND,
-                        0,
-                        ram_layout,
-                        &device_bytes,
-                        &gic_bytes,
-                        &vcpu_states,
-                        &artifact_digests,
-                    )
-                    .map_err(|error| format!("frame encode: {error:?}"))?;
-                    mvm_core::util::atomic_io::atomic_write(frame_path, &frame)
-                        .map_err(|error| format!("frame write: {error}"))?;
-                    std::fs::remove_file(request_path)
-                        .map_err(|error| format!("request cleanup: {error}"))
-                })();
+                let outcome = super::snapshot_capture::SnapshotAttempt {
+                    vcpu,
+                    devices,
+                    secondary_states,
+                    runtime_observer,
+                    guest_ram,
+                    request: request_path,
+                    ram: ram_path,
+                    frame: frame_path,
+                }
+                .publish();
                 mvm_vmm::host::snapshot_publish::settle_attempt(
                     request_path,
                     &mut last_refusal,
