@@ -239,6 +239,7 @@ pub fn start_machine_spec(
     params: MachineStartParams<'_>,
 ) -> Result<MachineStart> {
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
+    super::discard_stopped_runtime_state(params.hypervisor, &spec.name)?;
     validate_registry_pack_source(spec)?;
     let network_policy = persisted_network_policy(spec)?;
     let (memory_mib, mem_initial_mib) =
@@ -509,6 +510,20 @@ mod tests {
             gpu: false,
             gpu_device: None,
         }
+    }
+
+    #[test]
+    fn a_stopped_machines_leftover_runtime_state_is_cleared_before_it_starts_again() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let state = mvm_core::config::vm_state_dir("restarted");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("hvf-instance.json"), "{}").unwrap();
+
+        super::super::discard_stopped_runtime_state("firecracker", "restarted").unwrap();
+
+        assert!(!state.exists());
     }
 
     #[test]

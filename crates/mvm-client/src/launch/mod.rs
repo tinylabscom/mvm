@@ -1458,6 +1458,19 @@ fn remove_vm_runtime_dirs(name: &str) -> Result<()> {
         .map_err(|e| crate::local::backend_err(format!("removing runtime state of {name:?}: {e}")))
 }
 
+/// Clear a stopped machine's runtime dirs before it starts again, as
+/// [`LocalBackend`]'s own boot does. A launch that finds a stopped instance's
+/// leftovers refuses the name (HVF treats them as evidence it cannot discard
+/// itself), so every start path that is not that boot -- a restart, a
+/// reconfigure, a recreate -- has to clear them first. A machine that is still
+/// running owns its dirs and is left alone.
+fn discard_stopped_runtime_state(hypervisor: &str, name: &str) -> Result<()> {
+    if crate::backend_is_running(hypervisor, name) {
+        return Ok(());
+    }
+    remove_vm_runtime_dirs(name)
+}
+
 /// Remove a directory tree, treating "already absent" as success.
 fn remove_dir_if_present(dir: &std::path::Path) -> Result<()> {
     match std::fs::remove_dir_all(dir) {

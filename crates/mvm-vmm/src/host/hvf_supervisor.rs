@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
+pub mod failure_record;
+#[cfg(unix)]
 mod startup_diagnostics;
 #[cfg(unix)]
 pub use startup_diagnostics::{StartupDiagnostics, StartupReporter, StartupStage, StartupSummary};

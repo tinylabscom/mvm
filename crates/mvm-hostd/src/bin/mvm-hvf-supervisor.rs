@@ -542,7 +542,21 @@ fn restore_image_from(
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+/// The validated state directory, once startup has established it. A failure
+/// before this point has nowhere private to be recorded.
+static FAILURE_RECORD_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn main() -> anyhow::Result<()> {
+    let outcome = run();
+    if let (Err(error), Some(dir)) = (&outcome, FAILURE_RECORD_DIR.get()) {
+        mvm_vmm::host::hvf_supervisor::failure_record::record(dir, error);
+    }
+    outcome
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn run() -> anyhow::Result<()> {
     use std::os::fd::AsRawFd;
     use std::time::Duration;
 
@@ -655,6 +669,7 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("protected handoff requires a planless vsock standby");
     }
 
+    let _ = FAILURE_RECORD_DIR.set(state_dir.to_path_buf());
     diagnostics.stage(StartupStage::StartupInputs);
     // Adopt the verified saved state before anything else can open a file, so
     // no descriptor number is reused out from under it.

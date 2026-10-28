@@ -24,7 +24,7 @@
 //! reaches workloads and silently misses parents, which is exactly how the
 //! parent came to boot without the runtime overlay.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbyError, StandbySpec, VmStartConfig};
@@ -332,6 +332,18 @@ pub fn factory_parent_spec_live(
     factory_parent_spec_inner(config, state_dir, base_bootargs, true)
 }
 
+/// The warm parent's stable egress socket. It sits in the VM's socket
+/// directory, beside its agent socket, so a state dir too deep for a Unix path
+/// moves both to the short namespace.
+pub(super) fn standby_egress_socket(state_dir: &Path) -> PathBuf {
+    mvm_core::config::vm_socket_dir_at(state_dir).join("standby-egress.sock")
+}
+
+/// The warm parent's stable broker socket; see [`standby_egress_socket`].
+pub(super) fn standby_broker_socket(state_dir: &Path) -> PathBuf {
+    mvm_core::config::vm_socket_dir_at(state_dir).join("standby-broker.sock")
+}
+
 fn factory_parent_spec_inner(
     config: &VmStartConfig,
     state_dir: &Path,
@@ -347,9 +359,9 @@ fn factory_parent_spec_inner(
         state_dir,
         mvm_net::channel::GuestService::Telemetry.port(),
     );
-    let egress = state_dir.join("standby-egress.sock");
+    let egress = standby_egress_socket(state_dir);
     let exit = state_dir.join("workload.exit");
-    let broker = state_dir.join("standby-broker.sock");
+    let broker = standby_broker_socket(state_dir);
     let sockets = WorkloadSockets {
         agent: &agent,
         telemetry: &telemetry,
@@ -370,7 +382,6 @@ fn factory_parent_spec_inner(
 mod tests {
     use super::*;
 
-    use std::path::PathBuf;
     use std::sync::MutexGuard;
 
     use mvm_core::util::test_env::TestEnv;

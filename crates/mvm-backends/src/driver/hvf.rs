@@ -648,9 +648,10 @@ fn boot_retaining_child(
                     .unwrap_or_default();
                 startup_failure_record(summary, Some(status)).emit();
                 bail!(
-                    "HVF supervisor exited before readiness ({}); {}; retain runtime evidence",
+                    "HVF supervisor exited before readiness ({}); {}{}; retain runtime evidence",
                     summary.exited(status),
-                    mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
+                    mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT,
+                    mvm_vmm::host::hvf_supervisor::failure_record::detail(&paths.state_dir)
                 );
             }
             if deadline_reached(Instant::now(), deadline) {
@@ -660,9 +661,10 @@ fn boot_retaining_child(
                     .unwrap_or_default();
                 startup_failure_record(summary, None).emit();
                 bail!(
-                    "HVF supervisor readiness deadline; {}; {}; retain runtime evidence",
+                    "HVF supervisor readiness deadline; {}; {}{}; retain runtime evidence",
                     summary.child_status(None),
-                    mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
+                    mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT,
+                    mvm_vmm::host::hvf_supervisor::failure_record::detail(&paths.state_dir)
                 );
             }
             // External readiness is reconciled; only authenticated control is
@@ -687,9 +689,10 @@ fn boot_retaining_child(
                 .unwrap_or_default();
             startup_failure_record(summary, observed_exit).emit();
             return Err(error).context(format!(
-                "HVF supervisor failed readiness; {}; {}",
+                "HVF supervisor failed readiness; {}; {}{}",
                 summary.child_status(observed_exit),
-                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
+                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT,
+                mvm_vmm::host::hvf_supervisor::failure_record::detail(&paths.state_dir)
             ));
         }
         Ok(())

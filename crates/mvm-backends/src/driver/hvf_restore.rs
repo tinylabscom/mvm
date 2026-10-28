@@ -556,9 +556,10 @@ fn await_restored(
 /// Report control-plane status without reflecting untrusted supervisor stderr.
 fn restore_failure(req: &HvfRestoreRequest<'_>, what: &str) -> String {
     format!(
-        "HVF restore of '{}': the supervisor {what}; {}",
+        "HVF restore of '{}': the supervisor {what}; {}{}",
         req.vm_name,
-        mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
+        mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT,
+        mvm_vmm::host::hvf_supervisor::failure_record::detail(req.state_dir)
     )
 }
 
