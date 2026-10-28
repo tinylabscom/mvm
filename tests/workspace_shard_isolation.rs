@@ -109,9 +109,7 @@ fn workspace_shards_keep_mutable_state_per_worker_run() {
         .expect("read workspace shard workflow");
 
     assert!(
-        worker.contains(
-            "base=\"/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
-        ),
+        worker.contains("base=\"/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""),
         "the persistent runner must not reuse another job's mutable state"
     );
     assert!(worker.contains("mkdir -m 700 -- \"$base\""));
