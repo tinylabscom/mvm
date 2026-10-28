@@ -8,10 +8,11 @@ fn pid_is_alive(pid: libc::pid_t) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// Summarize the per-tenant host-agent daemons under `root`.
+/// Summarize the per-tenant host-agent daemons under `home`.
 /// Reports warm daemons, stale daemon artifacts, or "absent" when none exist.
-fn host_agent_daemon_summary(root: &std::path::Path) -> String {
-    let Ok(entries) = std::fs::read_dir(root) else {
+fn host_agent_daemon_summary(home: &std::path::Path) -> String {
+    let root = mvm_core::config::host_agent_root_at(home);
+    let Ok(entries) = std::fs::read_dir(&root) else {
         return "absent (no per-tenant daemon yet; an admitted workload starts one)".to_string();
     };
     let mut warm = Vec::new();
@@ -27,7 +28,7 @@ fn host_agent_daemon_summary(root: &std::path::Path) -> String {
         let pid = std::fs::read_to_string(&pid_file)
             .ok()
             .and_then(|s| s.trim().parse::<libc::pid_t>().ok());
-        let sock = dir.join("control.sock").exists();
+        let sock = mvm_core::config::host_agent_control_socket_at(home, &tenant).exists();
         if let Some(p) = pid.filter(|p| pid_is_alive(*p))
             && sock
         {
@@ -59,7 +60,7 @@ pub(super) fn host_agent_daemon_check() -> Check {
         name: "host-agent daemon",
         category: "platform",
         ok: true,
-        info: host_agent_daemon_summary(&mvm_core::config::host_agent_root()),
+        info: host_agent_daemon_summary(std::path::Path::new(&mvm_core::config::mvm_home())),
     }
 }
 
@@ -69,27 +70,49 @@ mod tests {
 
     #[test]
     fn host_agent_daemon_summary_reports_absent_warm_and_stale() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(host_agent_daemon_summary(&root.path().join("missing")).starts_with("absent"));
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let root = mvm_core::config::host_agent_root_at(home.path());
+        assert!(host_agent_daemon_summary(&home.path().join("missing")).starts_with("absent"));
 
         // No dirs yet means absent.
-        assert!(host_agent_daemon_summary(root.path()).starts_with("absent"));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(host_agent_daemon_summary(home.path()).starts_with("absent"));
 
         // A "running" tenant: live pid (this process) + control.sock.
-        let live = root.path().join("local");
+        let live = root.join("local");
         std::fs::create_dir_all(&live).unwrap();
         std::fs::write(live.join("daemon.pid"), std::process::id().to_string()).unwrap();
         std::fs::write(live.join("control.sock"), "").unwrap();
-        let s = host_agent_daemon_summary(root.path());
+        let s = host_agent_daemon_summary(home.path());
         assert!(s.contains("1 warm"), "got {s:?}");
         assert!(s.contains("local: running"), "got {s:?}");
 
         // A "stale" tenant: a dead pid + a leftover socket.
-        let dead = root.path().join("acme");
+        let dead = root.join("acme");
         std::fs::create_dir_all(&dead).unwrap();
         std::fs::write(dead.join("daemon.pid"), "2147483647").unwrap();
         std::fs::write(dead.join("control.sock"), "").unwrap();
-        let s = host_agent_daemon_summary(root.path());
+        let s = host_agent_daemon_summary(home.path());
         assert!(s.contains("stale: acme"), "got {s:?}");
+    }
+
+    #[test]
+    fn host_agent_daemon_summary_finds_a_relocated_control_socket() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let home = directory.path().join("long-home-".repeat(12));
+        let state = mvm_core::config::host_agent_dir_at(&home, "local");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("daemon.pid"), std::process::id().to_string()).unwrap();
+        let socket = mvm_core::config::host_agent_control_socket_at(&home, "local");
+        assert_ne!(socket, state.join("control.sock"));
+        let socket_dir = socket.parent().unwrap();
+        mvm_core::private_fs::create_owned_private_dir(socket_dir).unwrap();
+        std::fs::write(&socket, "").unwrap();
+
+        let summary = host_agent_daemon_summary(&home);
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::remove_dir(socket_dir).unwrap();
+        assert!(summary.contains("local: running"), "got {summary:?}");
+        assert!(!summary.contains("stale:"), "got {summary:?}");
     }
 }

@@ -135,6 +135,8 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     let dir = mvm_core::config::host_agent_dir(tenant);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create host-agent dir {}", dir.display()))?;
+    mvm_core::config::secure_host_agent_socket_dir(tenant)
+        .context("prepare owner-private host-agent socket directory")?;
     warm_claim_debug("daemon_dir_ready");
     let control_socket = mvm_core::config::host_agent_control_socket(tenant);
 
@@ -180,6 +182,7 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     let cfg = serde_json::json!({
         "tenant_id": tenant,
         "control_socket": control_socket,
+        "registration_journal_path": dir.join("registrations.json"),
         "host_signer_public_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_PUB),
         "signer_helper_uds_path": mvm_core::config::host_agent_signer_helper_socket(tenant),
         "software_chain_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY),

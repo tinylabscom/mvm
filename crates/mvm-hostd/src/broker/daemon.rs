@@ -72,6 +72,10 @@ pub struct HostAgentConfig {
     pub tenant_id: String,
     /// The per-tenant control UDS to bind (mode 0700, host-only).
     pub control_socket: PathBuf,
+    /// Persistent registration snapshot, independent of the socket namespace.
+    /// Omitted by legacy configs whose sockets live beside their durable state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_journal_path: Option<PathBuf>,
     /// Path to the host signer's 32-byte Ed25519 public key, used to verify
     /// every control message.
     pub host_signer_public_key_path: PathBuf,
@@ -87,6 +91,19 @@ pub struct HostAgentConfig {
 }
 
 impl HostAgentConfig {
+    /// Resolve durable recovery state. Only legacy configs derive it from the
+    /// control socket; new launchers supply the persistent tenant-state path.
+    pub fn registration_journal_path(&self) -> Result<PathBuf> {
+        if let Some(path) = &self.registration_journal_path {
+            return Ok(path.clone());
+        }
+        let dir = self
+            .control_socket
+            .parent()
+            .context("host-agent control socket path must have a parent directory")?;
+        Ok(dir.join("registrations.json"))
+    }
+
     /// Load the verifying key from `host_signer_public_key_path`.
     pub fn load_verifying_key(&self) -> Result<VerifyingKey> {
         let bytes = std::fs::read(&self.host_signer_public_key_path).with_context(|| {
@@ -646,16 +663,7 @@ impl HostAgentDaemon {
     /// Shared-state control loop used when another supervisor task needs to
     /// replay helper registrations after a helper restart.
     pub async fn run_shared(daemon: Arc<Mutex<Self>>, control_socket: &Path) -> Result<()> {
-        if let Some(parent) = control_socket.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create control socket dir {}", parent.display()))?;
-        }
-        let _ = std::fs::remove_file(control_socket);
-        let listener = UnixListener::bind(control_socket)
-            .with_context(|| format!("bind control socket {}", control_socket.display()))?;
-        // Host-only: no group/other access to the control plane.
-        std::fs::set_permissions(control_socket, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("chmod 0700 {}", control_socket.display()))?;
+        let listener = bind_host_agent_listener(control_socket, 0o700)?;
 
         loop {
             let (mut stream, _addr) = listener
@@ -693,6 +701,32 @@ impl HostAgentDaemon {
             }
         }
     }
+}
+
+/// Prepare and bind a host-agent control or signer listener, including restarts.
+/// Revalidate the short namespace before any stale unlink: it may have been
+/// removed or replaced since the launcher created it. Legacy socket parents
+/// retain their creation behavior and are not chmodded.
+pub fn bind_host_agent_listener(socket: &Path, mode: u32) -> Result<UnixListener> {
+    if let Some(parent) = socket.parent() {
+        let short_namespace = parent.parent() == Some(Path::new("/tmp"))
+            && parent
+                .file_name()
+                .is_some_and(|name| name.as_encoded_bytes().starts_with(b"mvm-sock-"));
+        if short_namespace {
+            mvm_core::private_fs::create_owned_private_dir(parent)
+                .with_context(|| format!("prepare private socket dir {}", parent.display()))?;
+        } else {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create socket dir {}", parent.display()))?;
+        }
+    }
+    let _ = std::fs::remove_file(socket);
+    let listener =
+        UnixListener::bind(socket).with_context(|| format!("bind socket {}", socket.display()))?;
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("chmod socket {}", socket.display()))?;
+    Ok(listener)
 }
 
 fn registration_owner_is_dead(registration: &RegisterVm) -> bool {
@@ -840,6 +874,67 @@ mod tests {
         assert!(daemon.apply(&request).is_err());
         assert!(daemon.vms.is_empty());
         assert!(daemon.registrations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn host_agent_listener_restart_recreates_private_short_namespace() {
+        for (name, mode) in [("control.sock", 0o700), ("signer-helper.sock", 0o600)] {
+            let dir = tempfile::Builder::new()
+                .prefix("mvm-sock-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let socket = dir.path().join(name);
+            let listener = bind_host_agent_listener(&socket, mode).unwrap();
+            drop(listener);
+            std::fs::remove_file(&socket).unwrap();
+            std::fs::remove_dir(dir.path()).unwrap();
+
+            let _restarted = bind_host_agent_listener(&socket, mode).unwrap();
+            assert_eq!(
+                std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn host_agent_listener_restart_refuses_replaced_short_namespace_before_unlink() {
+        use std::os::unix::fs::symlink;
+
+        for (name, mode) in [("control.sock", 0o700), ("signer-helper.sock", 0o600)] {
+            let dir = tempfile::Builder::new()
+                .prefix("mvm-sock-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let target = tempfile::tempdir().unwrap();
+            let sentinel = target.path().join(name);
+            std::fs::write(&sentinel, b"must not unlink").unwrap();
+            std::fs::remove_dir(dir.path()).unwrap();
+            symlink(target.path(), dir.path()).unwrap();
+            assert!(bind_host_agent_listener(&dir.path().join(name), mode).is_err());
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"must not unlink");
+            std::fs::remove_file(dir.path()).unwrap();
+
+            std::fs::write(dir.path(), b"not a directory").unwrap();
+            assert!(bind_host_agent_listener(&dir.path().join(name), mode).is_err());
+            assert_eq!(std::fs::read(dir.path()).unwrap(), b"not a directory");
+            std::fs::remove_file(dir.path()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn host_agent_listener_preserves_legacy_parent_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _listener = bind_host_agent_listener(&dir.path().join("control.sock"), 0o700).unwrap();
+        assert_eq!(
+            std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
     }
 
     fn register(dir: &Path, vm: &str, tenant: &str, signer: Option<PathBuf>) -> RegisterVm {
@@ -1110,6 +1205,72 @@ mod tests {
         assert_eq!(restarted.restore_journaled_registrations().unwrap(), 1);
         assert!(restarted.is_registered("vm-1"));
         assert!(sock.exists(), "restarted daemon rebound broker socket");
+    }
+
+    fn legacy_host_agent_config(control_socket: &Path) -> HostAgentConfig {
+        serde_json::from_value(serde_json::json!({
+            "tenant_id": "local",
+            "control_socket": control_socket,
+            "host_signer_public_key_path": "/unused/host.pub",
+            "signer_helper_uds_path": "/unused/signer.sock",
+            "software_chain_key_path": "/unused/host.key",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn registration_journal_config_preserves_legacy_path_and_roundtrips() {
+        let mut cfg = legacy_host_agent_config(Path::new("/private/state/control.sock"));
+        assert_eq!(cfg.registration_journal_path, None);
+        assert_eq!(
+            cfg.registration_journal_path().unwrap(),
+            PathBuf::from("/private/state/registrations.json")
+        );
+        cfg.registration_journal_path = Some("/persistent/registrations.json".into());
+        cfg.control_socket = "/tmp/short/control.sock".into();
+        let decoded: HostAgentConfig =
+            serde_json::from_slice(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+        assert_eq!(decoded, cfg);
+        assert_eq!(
+            decoded.registration_journal_path().unwrap(),
+            PathBuf::from("/persistent/registrations.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn relocated_control_socket_recovers_original_persistent_journal() {
+        let persistent = tempfile::tempdir().unwrap();
+        let sockets = tempfile::tempdir().unwrap();
+        let state = persistent
+            .path()
+            .join("deep".repeat(40))
+            .join("host-agent/local");
+        let legacy = legacy_host_agent_config(&state.join("control.sock"));
+        let journal = legacy.registration_journal_path().unwrap();
+        let reg = register(sockets.path(), "vm-1", "local", None);
+        let broker_socket = PathBuf::from(&reg.broker_listen_socket);
+        {
+            let mut original = daemon("local").with_registration_journal(&journal);
+            original.apply(&register_control(reg)).unwrap();
+        }
+        assert!(journal.exists());
+        assert!(!broker_socket.exists());
+
+        let mut relocated = legacy;
+        relocated.control_socket = sockets.path().join("control.sock");
+        relocated.registration_journal_path = Some(journal.clone());
+        let socket_journal = sockets.path().join("registrations.json");
+        std::fs::write(&socket_journal, b"not the authoritative journal").unwrap();
+        let mut restarted = daemon("local")
+            .with_registration_journal(relocated.registration_journal_path().unwrap());
+        assert_eq!(restarted.restore_journaled_registrations().unwrap(), 1);
+        assert!(restarted.is_registered("vm-1"));
+        assert!(broker_socket.exists());
+        assert_eq!(
+            std::fs::read(&socket_journal).unwrap(),
+            b"not the authoritative journal"
+        );
+        assert_eq!(RegistrationJournal::new(journal).load().unwrap().len(), 1);
     }
 
     #[tokio::test]
