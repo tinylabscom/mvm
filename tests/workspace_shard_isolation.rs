@@ -2,7 +2,16 @@ use std::fs;
 
 #[test]
 fn workspace_isolation_resolves_runner_home_and_refuses_missing_accounts() {
-    let worker = fs::read_to_string(".github/workflows/workspace-shard.yml").unwrap();
+    for workflow in [
+        ".github/workflows/workspace-shard.yml",
+        ".github/workflows/ci-main.yml",
+    ] {
+        check_isolation(workflow);
+    }
+}
+
+fn check_isolation(workflow: &str) {
+    let worker = fs::read_to_string(workflow).unwrap();
     let script = worker
         .split("- name: Isolate test state\n")
         .nth(1)
@@ -10,17 +19,19 @@ fn workspace_isolation_resolves_runner_home_and_refuses_missing_accounts() {
         .split("        run: |\n")
         .nth(1)
         .unwrap()
-        .split("\n      #")
-        .next()
-        .unwrap()
         .lines()
+        .take_while(|line| line.is_empty() || line.starts_with("          "))
         .map(|line| line.strip_prefix("          ").unwrap_or(line))
         .collect::<Vec<_>>()
         .join("\n");
-    // Mock only account lookup so the Linux service-runner setup is testable on macOS.
+    // Mock account/toolchain discovery so the Linux setup is testable on macOS.
     let script = format!(
         r#"
 id() {{ [[ "$*" == "-u" ]] || return 1; printf '1234\n'; }}
+rustup() {{
+  [[ "$*" == "show home" && "$ACCOUNT" != "cache-overrides" ]] || return 1
+  printf '/installed/rustup\n'
+}}
 mkdir() {{
   command mkdir "$@" || return
   shift 3
@@ -63,7 +74,11 @@ getent() {{
                 .as_nanos(),
             std::process::id()
         );
-        let base = std::path::PathBuf::from(format!("/tmp/mvm-w-{run_id}-1-1"));
+        let base = if workflow.ends_with("workspace-shard.yml") {
+            std::path::PathBuf::from(format!("/tmp/mvm-w-{run_id}-1-1"))
+        } else {
+            temp.join(format!("mvm-w-{run_id}-1-1"))
+        };
         let mut command = std::process::Command::new("bash");
         command
             .args(["--noprofile", "--norc", "-c", &script])
@@ -148,7 +163,7 @@ getent() {{
             assert!(vars.contains("RUSTUP_HOME=/cache rustup\n"));
         } else {
             assert!(vars.contains(&format!("CARGO_HOME={original}/.cargo\n")));
-            assert!(vars.contains(&format!("RUSTUP_HOME={original}/.rustup\n")));
+            assert!(vars.contains("RUSTUP_HOME=/installed/rustup\n"));
         }
         assert!(vars.contains(&format!("HOME={}/home\n", base.display())));
         assert!(vars.contains(&format!("MVM_HOME={}/mvm\n", base.display())));
@@ -264,11 +279,9 @@ fn arm_suite_builds_only_after_its_final_environment_is_set() {
 #[test]
 fn isolation_preserves_toolchain_homes_when_runner_home_is_unset() {
     let workflow = fs::read_to_string(".github/workflows/ci-main.yml").unwrap();
-    assert!(
-        workflow.contains("original_home=\"${HOME:-$(getent passwd \"$(id -u)\" | cut -d: -f6)}\"")
-    );
-    assert!(workflow.contains("${CARGO_HOME:-$original_home/.cargo}"));
-    assert!(workflow.contains("${RUSTUP_HOME:-$original_home/.rustup}"));
+    assert!(workflow.contains("runner_home=\"$(getent passwd \"$(id -u)\" | cut -d: -f6)\""));
+    assert!(workflow.contains("${CARGO_HOME:-$runner_home/.cargo}"));
+    assert!(workflow.contains("rustup_home=\"${RUSTUP_HOME:-$(rustup show home)}\""));
 }
 
 #[test]

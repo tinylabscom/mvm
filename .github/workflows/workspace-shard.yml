@@ -198,9 +198,10 @@ jobs:
             echo "cannot determine the runner home directory" >&2
             exit 1
           }
+          rustup_home="${RUSTUP_HOME:-$(rustup show home)}"
           {
             printf 'RUNNER_ORIGINAL_HOME=%s\n' "$runner_home"
-            printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$runner_home/.cargo}" "${RUSTUP_HOME:-$runner_home/.rustup}"
+            printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$runner_home/.cargo}" "$rustup_home"
             printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
           } >> "$GITHUB_ENV"
 
