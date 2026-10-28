@@ -472,15 +472,12 @@ fn sdk_sidecar_cached() -> bool {
 
 /// The mvm home the live scenarios actually run against.
 ///
-/// The runner exports `MVM_E2E_HOME`; it does not set `MVM_HOME`. So
-/// `mvm_core::config`'s ambient helpers resolve the *default* home inside this
-/// process, which is a different directory from the one every live step hands
-/// to `mvmctl`. A capability probe reading the default home reports on
-/// artifacts the scenario will never see: where that home happens to hold the
-/// image, the gate says "available", the scenario runs against the isolated
-/// home, and admission refuses it there — a setup gap surfacing as a product
-/// failure. Both paths are the same on a developer laptop, so this is visible
-/// only in the isolated configuration the gate exists to serve.
+/// The documented-surface runner sets both `MVM_E2E_HOME` and `MVM_HOME` to
+/// its prepared home, so ambient helpers and CLI subprocesses use the same
+/// artifacts. Direct harness invocations may set only `MVM_E2E_HOME`; prefer
+/// that explicit live home for capability probes rather than inspecting an
+/// unrelated default cache. Individual scenarios may still override the home
+/// to exercise isolated preparation and admission.
 fn live_home() -> std::path::PathBuf {
     std::env::var_os("MVM_E2E_HOME")
         .map(std::path::PathBuf::from)

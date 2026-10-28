@@ -48,6 +48,7 @@ bytes = "1"
 chrono.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
+rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }
 # Folded in with the former mvm-base crate: the base substrate's ui
 # (ANSI output, in-house spinners + prompts) and secret handling (secrecy).
 # Crypto helpers come from mvm_core::crypto, already available via the

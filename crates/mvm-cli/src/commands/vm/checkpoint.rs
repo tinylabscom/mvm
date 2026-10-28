@@ -537,7 +537,7 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
 }
 
 fn ls(json: bool) -> Result<()> {
-    let metas = CheckpointStore::open().list()?;
+    let metas = mvm_client::checkpoint::Checkpoints::open().list()?;
     if json {
         crate::json_out::emit_json(&metas)?;
         return Ok(());
@@ -1954,6 +1954,28 @@ mod tests {
     fn validated_checkpoint_id_accepts_normal() {
         assert!(validated_checkpoint_id("ckpt-myvm-1700000000").is_ok());
         assert!(validated_checkpoint_id("fork-child-42").is_ok());
+    }
+
+    #[test]
+    fn checkpoint_list_cli_json_preserves_full_metadata_and_legacy_omissions() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/checkpoint/catalog.json"
+        ))
+        .unwrap();
+        for record in fixture.as_array().unwrap() {
+            let dir = mvm_core::config::checkpoints_dir().join(record["id"].as_str().unwrap());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("meta.json"), serde_json::to_vec(record).unwrap()).unwrap();
+        }
+        let records = mvm_client::checkpoint::Checkpoints::open().list().unwrap();
+        let rendered = crate::json_out::to_json_string(&records).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&rendered).unwrap(),
+            fixture
+        );
     }
 
     #[test]

@@ -591,6 +591,132 @@ mod tests {
         workflow("ci-main.yml")
     }
 
+    #[test]
+    fn macos_evidence_dispatch_is_read_only_main_and_keeps_full_coverage() {
+        let dispatch = workflow("e2e-docs-macos-evidence.yml");
+        assert!(dispatch.contains("on:\n  workflow_dispatch:\n"));
+        assert!(dispatch.contains("permissions:\n  contents: read\n"));
+        let lane = job_block(&dispatch, "evidence");
+        assert_eq!(
+            job_if(lane),
+            "github.repository == 'tinylabscom/mvm' && github.ref == 'refs/heads/main'"
+        );
+        for required in [
+            "uses: ./.github/workflows/e2e-docs.yml",
+            "run_linux: false",
+            "run_macos: true",
+            "allow_runtime_candidate_skip: true",
+            "macos_blocks_on_unusable_host: true",
+        ] {
+            assert!(lane.contains(required), "missing {required}");
+        }
+        for forbidden in [
+            "secrets:",
+            "write",
+            "release.yml",
+            "steps:",
+            "inputs:",
+            "publish",
+            "deploy",
+        ] {
+            assert!(!dispatch.contains(forbidden), "unexpected {forbidden}");
+        }
+
+        let reusable = workflow("e2e-docs.yml");
+        for os in ["linux", "macos"] {
+            assert!(reusable.contains(&format!(
+                "      run_{os}:\n        description: Run the full {} documented surface\n        type: boolean\n        default: true",
+                if os == "linux" { "Linux" } else { "macOS" }
+            )));
+        }
+        assert_eq!(
+            job_if(job_block(&reusable, "e2e-docs-linux")),
+            "inputs.run_linux"
+        );
+        assert_eq!(
+            job_if(job_block(&reusable, "e2e-docs-macos-host-check")),
+            "inputs.run_macos"
+        );
+        let mac = job_block(&reusable, "e2e-docs-macos");
+        assert_eq!(
+            job_if(mac),
+            "inputs.run_macos && needs.e2e-docs-macos-host-check.outputs.supported == 'true'"
+        );
+        for required in [
+            "runs-on: [self-hosted, macOS, ARM64, m1]",
+            "shard: [\"0/2\", \"1/2\"]",
+            "MVM_BDD_SNAPSHOT: \"1\"",
+            "just e2e::docs",
+            "uses: actions/checkout@v6\n",
+        ] {
+            assert!(mac.contains(required), "missing {required}");
+        }
+        assert!(
+            !mac.contains("ref:"),
+            "checkout must retain event SHA semantics"
+        );
+        assert!(
+            job_if(job_block(&reusable, "e2e-docs-macos-evidence"))
+                .contains("inputs.run_macos && inputs.macos_blocks_on_unusable_host")
+        );
+        let release = workflow("release.yml");
+        assert!(!release.contains("run_linux: false") && !release.contains("run_macos: false"));
+        assert!(!release.contains("allow_runtime_candidate_skip: true"));
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let prompt = std::fs::read_to_string(
+            root.join("features/suites/s32_documented_surface/agent_prompt.feature"),
+        )
+        .unwrap();
+        assert!(prompt.contains(
+            "@live @snapshot\n  Scenario: recorded prompts replay onto a fork of the session's base"
+        ));
+        assert!(!prompt.contains("@runtime_candidate"));
+        for required in ["turn 3: third", "turn 4: fourth", "step checkpoint failed"] {
+            assert!(prompt.contains(required), "missing {required}");
+        }
+        let script =
+            std::fs::read_to_string(root.join("scripts/e2e-documented-surface.sh")).unwrap();
+        assert!(script.contains("MVM_BDD_LIVE=1"));
+        assert!(script.contains("MVM_BDD_STRICT_SKIPS=1"));
+        assert!(script.contains("--test conformance --features bdd"));
+    }
+
+    #[test]
+    fn sdk_distribution_evidence_survives_the_release_review_window() {
+        for (file, job, step, artifact) in [
+            (
+                "publish-npm.yml",
+                "build",
+                "Upload packed artifacts",
+                "npm-dist",
+            ),
+            (
+                "publish-pypi.yml",
+                "build",
+                "Upload built artifacts",
+                "pypi-dist-${{ matrix.platform }}",
+            ),
+        ] {
+            let source = workflow(file);
+            let upload = job_block(&source, job)
+                .split(&format!("      - name: {step}\n"))
+                .nth(1)
+                .expect("distribution upload step must exist")
+                .split("\n      - ")
+                .next()
+                .unwrap();
+            for required in [
+                "uses: actions/upload-artifact@",
+                &format!("name: {artifact}"),
+                "retention-days: 30",
+                "if-no-files-found: error",
+            ] {
+                assert!(upload.contains(required), "{file}: missing {required}");
+            }
+        }
+    }
+
     fn workflow(name: &str) -> String {
         std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1388,6 +1514,27 @@ mod tests {
                 "the aarch64 suite must run whole on one runner: found {absent:?}"
             );
         }
+    }
+
+    #[test]
+    fn short_output_stress_runs_on_native_aarch64_with_prepared_workspace() {
+        let workflow = main_workflow();
+        let job = job_block(&workflow, "test-workspace-aarch64");
+        assert!(job.contains("runs-on: ubuntu-24.04-arm\n"));
+        let preparation = job
+            .find("run: cargo nextest run --workspace --exclude mvm-fs --all-targets\n")
+            .expect("the workspace suite prepares the native test artifacts");
+        let stress = job
+            .find("run: cargo nextest run --stress-count 200 -E 'test(run_job_matches_streaming_for_short_output)'\n")
+            .expect("the exact short-output stress witness must run");
+        let restore = job
+            .find("- name: Restore HOME")
+            .expect("restore runner HOME");
+        assert!(preparation < stress && stress < restore);
+        let step = &job[job[..stress].rfind("- name:").expect("stress step")..restore];
+        assert!(step.contains("working-directory: crates/mvm-builder-guest\n"));
+        assert!(!step.contains("if:"));
+        assert!(!step.contains("continue-on-error:"));
     }
 
     #[test]

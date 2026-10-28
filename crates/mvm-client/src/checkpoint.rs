@@ -34,6 +34,14 @@ impl Checkpoints {
         }
     }
 
+    /// List complete checkpoint metadata in ID order, without opening content.
+    ///
+    /// Missing catalogs are empty. Malformed, misbound or unsafe metadata fails
+    /// the whole read rather than returning a misleading partial catalog.
+    pub fn list(&self) -> Result<Vec<CheckpointMeta>> {
+        self.store.list()
+    }
+
     /// Read one checkpoint, preserving the command-facing not-found context.
     pub fn read(&self, id: &CheckpointId) -> Result<CheckpointMeta> {
         let id = validated_id(id.as_str())?;
@@ -124,20 +132,7 @@ impl WorkspaceImage {
 
 /// Validate a checkpoint identifier before it becomes an on-disk directory.
 pub fn validated_id(raw: &str) -> Result<CheckpointId> {
-    if raw.is_empty() {
-        bail!("invalid checkpoint id: empty");
-    }
-    let bad = raw.contains('/')
-        || raw.contains('\\')
-        || raw.contains("..")
-        || raw.bytes().any(|byte| byte == 0 || byte.is_ascii_control());
-    if bad {
-        bail!(
-            "invalid checkpoint id {raw:?}: must not contain '/', '\\', '..', \
-             NUL, or control characters"
-        );
-    }
-    Ok(CheckpointId::new(raw.to_string()))
+    CheckpointId::try_from_path_component(raw).map_err(Into::into)
 }
 
 impl Default for Checkpoints {
@@ -149,6 +144,24 @@ impl Default for Checkpoints {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_list_preserves_complete_and_legacy_json() {
+        let root = tempfile::tempdir().expect("root");
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/checkpoint/catalog.json"
+        ))
+        .unwrap();
+        for record in fixture.as_array().unwrap() {
+            let path = root.path().join(record["id"].as_str().unwrap());
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join("meta.json"), serde_json::to_vec(record).unwrap()).unwrap();
+        }
+        let records = Checkpoints::at(root.path()).list().unwrap();
+        assert_eq!(serde_json::to_value(&records).unwrap(), fixture);
+        assert!(records[1].key_domain.is_host());
+        assert!(records[1].protection.is_unprotected());
+    }
 
     #[test]
     fn absent_checkpoint_is_reported_at_the_facade_boundary() {
