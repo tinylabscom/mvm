@@ -941,6 +941,9 @@ fn an_entry_whose_kernel_a_launch_hashed_still_hits() {
     fx.publish(&key);
     let kernel = kernel_in(&fx.cache.entry_dir(&key));
 
+    std::thread::sleep(
+        mvm_core::crypto::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+    );
     let digest = mvm_core::crypto::image_verify::sha256_file_cached(&kernel).unwrap();
 
     assert_eq!(digest, Sha256Hex::from_bytes(KERNEL).as_str());

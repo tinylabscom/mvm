@@ -400,6 +400,9 @@ mod tests {
         let kpath = dir.path().join("vmlinux");
         std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x99))).unwrap();
 
+        std::thread::sleep(
+            mvm_core::crypto::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+        );
         ensure_fc_loadable_kernel(&kpath).unwrap();
 
         let (_, source) = sha256_file_cached_report_source(&kpath).unwrap();
@@ -418,6 +421,9 @@ mod tests {
         let kpath = dir.path().join("vmlinux");
         std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x42))).unwrap();
 
+        std::thread::sleep(
+            mvm_core::crypto::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+        );
         ensure_fc_loadable_kernel(&kpath).unwrap();
 
         let mut left: Vec<PathBuf> = std::fs::read_dir(dir.path())

@@ -69,7 +69,10 @@ mod tests {
 
     #[test]
     fn host_agent_daemon_summary_reports_absent_warm_and_stale() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix(&"doctor-host-agent-".repeat(6))
+            .tempdir()
+            .unwrap();
         assert!(host_agent_daemon_summary(&root.path().join("missing")).starts_with("absent"));
 
         // No dirs yet means absent.
@@ -79,7 +82,9 @@ mod tests {
         let live = root.path().join("local");
         std::fs::create_dir_all(&live).unwrap();
         std::fs::write(live.join("daemon.pid"), std::process::id().to_string()).unwrap();
-        std::fs::write(live.join("control.sock"), "").unwrap();
+        let live_socket = mvm_core::config::host_agent_control_socket_in(&live);
+        mvm_core::config::create_private_dir(live_socket.parent().unwrap()).unwrap();
+        std::fs::write(&live_socket, "").unwrap();
         let s = host_agent_daemon_summary(root.path());
         assert!(s.contains("1 warm"), "got {s:?}");
         assert!(s.contains("local: running"), "got {s:?}");
@@ -88,8 +93,16 @@ mod tests {
         let dead = root.path().join("acme");
         std::fs::create_dir_all(&dead).unwrap();
         std::fs::write(dead.join("daemon.pid"), "2147483647").unwrap();
-        std::fs::write(dead.join("control.sock"), "").unwrap();
+        let dead_socket = mvm_core::config::host_agent_control_socket_in(&dead);
+        mvm_core::config::create_private_dir(dead_socket.parent().unwrap()).unwrap();
+        std::fs::write(&dead_socket, "").unwrap();
         let s = host_agent_daemon_summary(root.path());
         assert!(s.contains("stale: acme"), "got {s:?}");
+
+        for (tenant, socket) in [(&live, &live_socket), (&dead, &dead_socket)] {
+            if socket.parent().unwrap() != tenant {
+                std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+            }
+        }
     }
 }
