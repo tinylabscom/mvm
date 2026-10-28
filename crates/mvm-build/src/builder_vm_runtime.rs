@@ -1221,10 +1221,18 @@ fn read_flake_job_result(
         Ok(result) => Ok(result),
         Err(BuilderVmError::NixBuildFailed(primary)) => match parse_job_result(artifact_out) {
             Ok(result) => Ok(result),
-            Err(BuilderVmError::NixBuildFailed(_)) => Err(BuilderVmError::NixBuildFailed(format!(
-                "{primary}; mirrored result was also absent at {}",
-                artifact_out.join("result").display()
-            ))),
+            Err(BuilderVmError::NixBuildFailed(_)) => {
+                // The job dir sits directly under the VM's state dir, which is
+                // where its console and supervisor logs are.
+                let diagnostics = job_dir
+                    .parent()
+                    .map(|state| missing_job_result_diagnostics(job_dir, state))
+                    .unwrap_or_default();
+                Err(BuilderVmError::NixBuildFailed(format!(
+                    "{primary}; mirrored result was also absent at {}\n{diagnostics}",
+                    artifact_out.join("result").display()
+                )))
+            }
             Err(err) => Err(err),
         },
         Err(err) => Err(err),
@@ -1917,6 +1925,26 @@ mod tests {
 
         let artifacts = finalize_flake_job(&job_dir, &artifact_out, "fallback-job-id").unwrap();
         assert!(matches!(artifacts, BuilderArtifacts::Image { .. }));
+    }
+
+    #[test]
+    fn a_flake_job_with_no_result_anywhere_reports_the_vms_console() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let state = scratch.path().join("vm");
+        let job_dir = state.join("out");
+        let artifact_out = scratch.path().join("artifacts");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::create_dir_all(&artifact_out).unwrap();
+        std::fs::write(state.join("console.log"), "kernel panic: not syncing").unwrap();
+
+        let err = finalize_flake_job(&job_dir, &artifact_out, "job").unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("mirrored result was also absent"),
+            "{message}"
+        );
+        assert!(message.contains("kernel panic: not syncing"), "{message}");
     }
 
     /// `read_last_bytes_of` returns the trailing `max_bytes` of a
