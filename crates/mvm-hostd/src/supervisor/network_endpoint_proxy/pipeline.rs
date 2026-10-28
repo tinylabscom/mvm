@@ -136,6 +136,7 @@ impl SubstitutionService {
         let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
             method: request.method.clone(),
             url: request.url.clone(),
+            request_bytes: request.body.len() as u64,
         });
         self.audit_handoff(&flow).await;
         match self.forwarder.forward(request).await {
@@ -190,6 +191,7 @@ impl SubstitutionService {
         let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
             method: request.method.clone(),
             url: request.url.clone(),
+            request_bytes: request.body.len() as u64,
         });
         self.audit_handoff(&flow).await;
         let upstream = match self.forwarder.forward_stream(request).await {
@@ -308,6 +310,7 @@ impl SubstitutionService {
         let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
             method: request.method.clone(),
             url: request.url.clone(),
+            request_bytes: head.body_len,
         });
         let expected_len = head.body_len;
         let (sender, receiver) = tokio::sync::mpsc::channel(4);
@@ -580,7 +583,7 @@ impl SubstitutionService {
 
         self.audit_completed_flow(&flow, &reinject_proofs).await;
         if let Some(meta) = ai_meta {
-            self.record_streaming_ai_usage(&meta, head.status, &head.body)
+            self.record_streaming_ai_usage(&meta, head.status, &head.body, head.body.len() as u64)
                 .await;
         }
         self.audit_reflection_scrubbed(&scrub_counts, flow.destination.as_deref())
@@ -689,6 +692,7 @@ impl SubstitutionService {
                 } else {
                     None
                 };
+                let mut response_bytes = 0_u64;
                 let mut reinjector = StreamingReinjector::new();
                 while let Some(next) = upstream.body.recv().await {
                     let chunk = match next {
@@ -702,6 +706,7 @@ impl SubstitutionService {
                         Some(scrubber) => scrubber.push(&chunk),
                         None => chunk,
                     };
+                    response_bytes = response_bytes.saturating_add(chunk.len() as u64);
                     if let Some(buf) = ai_body_buffer.as_mut().filter(|buf| {
                         buf.len().saturating_add(chunk.len()) <= MAX_AI_STREAM_BUFFER_BYTES
                     }) {
@@ -817,7 +822,7 @@ impl SubstitutionService {
                 service.audit_completed_flow(&flow, &reinject_proofs).await;
                 if let (Some(meta), Some(body)) = (ai_meta, ai_body_buffer) {
                     service
-                        .record_streaming_ai_usage(&meta, response_status, &body)
+                        .record_streaming_ai_usage(&meta, response_status, &body, response_bytes)
                         .await;
                 }
                 ForwardOutcome::Completed
