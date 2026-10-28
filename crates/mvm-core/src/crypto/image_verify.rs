@@ -534,33 +534,41 @@ mod tests {
         assert!(!sha256_cache_path(&path).exists(), "nothing was sealed");
     }
 
+    /// Real time passes between the read starting and the seal being decided: a
+    /// file that was fresh when the read began must not be sealed because the
+    /// (slow) hash outlasted the settle window. Reverting the seal to use the
+    /// current time instead of `read_started` makes this fail.
     #[cfg(unix)]
     #[test]
     fn a_slow_read_does_not_age_a_fresh_identity_into_a_seal() {
         use super::super::digest_cache::FileIdentity;
-        use std::os::unix::fs::MetadataExt as _;
-        use std::time::{Duration, UNIX_EPOCH};
 
         let dir = tempfile::tempdir().unwrap();
         let path = artifact(&dir, "slow-read", b"verified bytes");
-        let meta = fs::metadata(&path).unwrap();
-        let identity = FileIdentity::of(&meta).unwrap();
-        let newest = (meta.mtime(), meta.mtime_nsec()).max((meta.ctime(), meta.ctime_nsec()));
-        let stamped =
-            UNIX_EPOCH + Duration::new(newest.0.try_into().unwrap(), newest.1.try_into().unwrap());
-        let read_started = stamped + Duration::from_millis(100);
-        let seal_at = read_started + Duration::from_millis(300);
-        assert!(!identity.settled(read_started, super::super::verified_digest::RACY_WINDOW));
-        assert!(identity.settled(seal_at, super::super::verified_digest::RACY_WINDOW));
+        let identity = FileIdentity::of(&fs::metadata(&path).unwrap()).unwrap();
         let key = test_key(1);
         let digest = sha256_file(&path).unwrap();
+
+        let read_started = std::time::SystemTime::now();
+        settle(); // the hash "takes" longer than the window
         assert!(!seal_if_unchanged_and_settled(
             &path,
             &(&key, identity),
             &digest,
             read_started,
         ));
-        assert!(!sha256_cache_path(&path).exists());
+        assert!(!sha256_cache_path(&path).exists(), "nothing was sealed");
+
+        assert!(seal_if_unchanged_and_settled(
+            &path,
+            &(&key, identity),
+            &digest,
+            std::time::SystemTime::now(),
+        ));
+        assert!(
+            sha256_cache_path(&path).exists(),
+            "a fresh read start seals"
+        );
     }
 
     #[test]

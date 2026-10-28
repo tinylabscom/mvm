@@ -311,7 +311,8 @@ pub(crate) fn seal_accepted_digests(accepted: &RuntimeArtifacts) {
         .max()
         .unwrap_or_default();
     if !delay.is_zero() {
-        std::thread::sleep(delay);
+        // A few ms past the window, so the seal that follows sees it as elapsed.
+        std::thread::sleep(delay + std::time::Duration::from_millis(10));
     }
     for artifact in artifacts {
         let _ = mvm_core::crypto::image_verify::seal_digest_if_matches(
