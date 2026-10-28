@@ -350,6 +350,33 @@ fn copy_fixture_file(url: &str, destination: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn commit(fill: char) -> GitCommit {
+    GitCommit::new(fill.to_string().repeat(40)).unwrap()
+}
+
+fn placeholder_member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
+    let name = format!("{role}-{target}.placeholder");
+    ImageSetMember {
+        role,
+        target,
+        build_mode: None,
+        source_fingerprint: None,
+        boot_protocol: role.is_bootable().then_some(BootProtocol::LinuxDirect),
+        artifacts: vec![MemberArtifact {
+            name: ArtifactName::new(name.as_str()).unwrap(),
+            format: ArtifactFormat::Text,
+            sha256: Sha256Hex::from_bytes(name.as_bytes()),
+            size: 1,
+        }],
+        required_capabilities: Vec::new(),
+        pack_hash: Some(Sha256Hex::from_bytes(format!("pack:{name}").as_bytes())),
+        sbom: Some(SbomReference {
+            uri: format!("https://example.test/sbom/{name}.cdx.json"),
+            sha256: Sha256Hex::from_bytes(format!("sbom:{name}").as_bytes()),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod transport_tests {
     use super::copy_fixture_file;
@@ -375,32 +402,5 @@ mod transport_tests {
             copy_fixture_file("https://example.invalid/artifact", &destination).unwrap_err();
         assert!(error.to_string().contains("only support file://"));
         assert!(!destination.exists());
-    }
-}
-
-fn commit(fill: char) -> GitCommit {
-    GitCommit::new(fill.to_string().repeat(40)).unwrap()
-}
-
-fn placeholder_member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
-    let name = format!("{role}-{target}.placeholder");
-    ImageSetMember {
-        role,
-        target,
-        build_mode: None,
-        source_fingerprint: None,
-        boot_protocol: role.is_bootable().then_some(BootProtocol::LinuxDirect),
-        artifacts: vec![MemberArtifact {
-            name: ArtifactName::new(name.as_str()).unwrap(),
-            format: ArtifactFormat::Text,
-            sha256: Sha256Hex::from_bytes(name.as_bytes()),
-            size: 1,
-        }],
-        required_capabilities: Vec::new(),
-        pack_hash: Some(Sha256Hex::from_bytes(format!("pack:{name}").as_bytes())),
-        sbom: Some(SbomReference {
-            uri: format!("https://example.test/sbom/{name}.cdx.json"),
-            sha256: Sha256Hex::from_bytes(format!("sbom:{name}").as_bytes()),
-        }),
     }
 }
