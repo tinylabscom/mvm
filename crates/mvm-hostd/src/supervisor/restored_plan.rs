@@ -112,13 +112,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unverifiable_plan_arms_nothing_and_emits_nothing() {
+    fn plan_to_arm_refuses_an_unverifiable_restore_plan_and_passes_a_cold_boots_through() {
         let dir = tempfile::tempdir().unwrap();
-        let audit = tempfile::tempdir().unwrap();
         let key = dir.path().join("host-signer.ed25519");
         let json = signed_json("other", dir.path());
         assert!(plan_to_arm(Some(&json), true, "child", Some(&key)).is_err());
-        assert_eq!(std::fs::read_dir(audit.path()).unwrap().count(), 0);
         // A cold boot's plan passes through untouched.
         assert_eq!(
             plan_to_arm(Some(&json), false, "child", Some(&key)).unwrap(),
@@ -180,10 +178,19 @@ mod tests {
             pid_file: &pid,
         };
         let _guard = arm_for_supervisor(inputs, Box::new(Counting(kills.clone()))).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert_eq!(kills.load(Ordering::SeqCst), 0, "not born expired");
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        assert_eq!(kills.load(Ordering::SeqCst), 1);
+        let armed_at = std::time::Instant::now();
+        let bound = std::time::Duration::from_secs(1);
+        let deadline = armed_at + std::time::Duration::from_secs(30);
+        while kills.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let fired_after = armed_at.elapsed();
+        assert_eq!(kills.load(Ordering::SeqCst), 1, "the bound must fire");
+        // Born expired would fire at once, well under the bound.
+        assert!(
+            fired_after >= bound - std::time::Duration::from_millis(50),
+            "deadline runs from arming, fired after {fired_after:?}"
+        );
         let chain = std::fs::read_dir(audit.path())
             .unwrap()
             .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
