@@ -2329,6 +2329,7 @@ dependencies = [
  "mvm-vmm",
  "nix",
  "rand",
+ "rustix",
  "secrecy",
  "serde",
  "serde_json",
