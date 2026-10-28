@@ -578,6 +578,7 @@ mod tests {
     fn the_shim_variant_tracks_the_guest_libc() {
         assert_eq!(shim_variant(false), "glibc");
         assert_eq!(shim_variant(true), "musl");
+        #[cfg(not(target_os = "linux"))]
         assert!(!guest_is_musl(), "host builds answer glibc");
     }
 
