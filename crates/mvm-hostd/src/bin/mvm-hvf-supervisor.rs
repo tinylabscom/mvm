@@ -807,10 +807,19 @@ fn run() -> anyhow::Result<()> {
     // The timer records its timeout exit code beside the pid file. A plan-
     // bearing boot with nowhere to record it is refused rather than booted
     // unbounded — same fail-closed posture as an unauditable kill.
+    // A restored child's plan arrives over the spawn pipe: verify it before any
+    // timer or audit emitter exists, and arm only from the verified value.
+    let armed_plan = mvm_hostd::supervisor::restored_plan::plan_to_arm(
+        cfg.plan.as_ref(),
+        restore.is_some(),
+        &cfg.vm_name,
+        cfg.signing_key_path.as_deref(),
+    )
+    .map_err(|_| anyhow::anyhow!("restored child plan failed verification"))?;
     let _wall_clock = match cfg.pid_file.parent() {
         Some(vm_state_dir) => {
             let timer_inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
-                plan_json: cfg.plan.as_ref(),
+                plan_json: armed_plan.as_ref(),
                 audit_dir: cfg.audit_dir.as_deref(),
                 signing_key_path: cfg.signing_key_path.as_deref(),
                 vm_state_dir,
@@ -853,24 +862,11 @@ fn run() -> anyhow::Result<()> {
     // supervisor only wires the relay socket paths through.
     diagnostics.stage(StartupStage::CapturePolicy);
     use mvm_hostd::stream::protected::{CaptureAuthority, CaptureParams};
-    // A restored child's plan arrives over the spawn pipe, so it is verified
-    // here against the host key and this child's identity before it becomes
-    // capture authority.
-    let admitted_plan = match (cfg.plan.as_ref(), restore.is_some()) {
-        (Some(plan), true) => Some(
-            mvm_hostd::supervisor::restored_plan::verify_restored_plan(
-                plan,
-                &cfg.vm_name,
-                cfg.signing_key_path.as_deref(),
-            )
-            .map_err(|_| anyhow::anyhow!("restored child plan failed verification"))?,
-        ),
-        (Some(plan), false) => Some(
-            mvm_hostd::supervisor::wall_clock::decode_admitted_plan(plan)
-                .map_err(|_| anyhow::anyhow!("invalid admitted capture policy"))?,
-        ),
-        (None, _) => None,
-    };
+    let admitted_plan = armed_plan
+        .as_ref()
+        .map(mvm_hostd::supervisor::wall_clock::decode_admitted_plan)
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("invalid admitted capture policy"))?;
     let redaction = admitted_plan
         .as_ref()
         .map(|plan| plan.redaction.clone())

@@ -453,7 +453,7 @@ fn verify_child_plan_binds_restore(
         &trusted,
         &mvm_core::plan::RestoredChildBinding {
             vm_name: child_vm_name,
-            image_sha256: Some(image_sha256),
+            image: mvm_core::plan::ImageBinding::Pinned(image_sha256),
             now: chrono::Utc::now(),
         },
     )

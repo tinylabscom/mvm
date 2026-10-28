@@ -9,13 +9,20 @@ use ed25519_dalek::VerifyingKey;
 
 use super::{ExecutionPlan, SignedExecutionPlan, verify_plan, verify_plan_id};
 
+/// Whether the caller holds a chain-verified digest of the restored rootfs.
+#[derive(Clone, Copy)]
+pub enum ImageBinding<'a> {
+    /// The plan must pin exactly this digest.
+    Pinned(&'a str),
+    /// The caller has no verified digest; only identity and signature bind.
+    NotChecked,
+}
+
 /// What the restored machine is, as the verifier must find the plan describing.
 pub struct RestoredChildBinding<'a> {
     /// The fresh identity the child runs under; the plan's workload.
     pub vm_name: &'a str,
-    /// Digest of the rootfs actually restored, when the caller holds a
-    /// chain-verified one.
-    pub image_sha256: Option<&'a str>,
+    pub image: ImageBinding<'a>,
     pub now: DateTime<Utc>,
 }
 
@@ -37,7 +44,7 @@ pub fn verify_restored_child_plan(
         plan.workload.0,
         binding.vm_name
     );
-    if let Some(image) = binding.image_sha256 {
+    if let ImageBinding::Pinned(image) = binding.image {
         anyhow::ensure!(
             plan.image.sha256.eq_ignore_ascii_case(image),
             "restored child plan pins a different image than the one restored"
@@ -77,7 +84,7 @@ mod tests {
             &k.verifying_key(),
             &RestoredChildBinding {
                 vm_name: vm,
-                image_sha256: image,
+                image: image.map_or(ImageBinding::NotChecked, ImageBinding::Pinned),
                 now: Utc::now(),
             },
         )
