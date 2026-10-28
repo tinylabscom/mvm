@@ -26,6 +26,7 @@ use std::path::Path;
 pub fn clear_prior_run(state_dir: &Path) {
     let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(state_dir));
     let _ = std::fs::remove_file(mvm_core::usage_capture::usage_file_path(state_dir));
+    #[cfg(unix)]
     mvm_vmm::host::hvf_supervisor::failure_record::clear(state_dir);
 }
 
