@@ -63,9 +63,7 @@ export MVM_EMBED_NO_CACHE
 # half-hour of nix on an unloaded host and longer on a busy one. At the default
 # the gate fails on a slow build rather than a broken one — and fails ~30
 # minutes in, after the expensive part, which is the worst possible place to
-# learn nothing. `ci-full.yml` already runs its builder lane at 7200 for the
-# same reason; matching it keeps the two from disagreeing about how long a
-# build is allowed to take.
+# learn nothing. 7200 leaves room for a cold build.
 #
 # Respects an operator override so a bisect can still set it lower.
 export MVM_BUILDER_VM_TIMEOUT_SECS="${MVM_BUILDER_VM_TIMEOUT_SECS:-7200}"

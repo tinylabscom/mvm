@@ -4,7 +4,7 @@
 # Usage: job-cleanup.sh <isolated-base>
 #
 # <isolated-base> is the per-job directory the workflow pointed HOME, MVM_HOME
-# and TMPDIR at (/tmp/mvm-w-<run>-<attempt>-<shard>). Every workflow job that
+# and TMPDIR at ($RUNNER_TEMP/mvm-w-<run>-<attempt>-<shard>). Every workflow job that
 # can run on the KVM pool calls this from an `if: always()` final step;
 # tests/github_actions_self_hosted_runner.rs fails the build when one does not.
 #
@@ -30,8 +30,20 @@ status=0
 
 log() { printf 'job-cleanup: %s\n' "$*"; }
 
-if [[ ! "$base" =~ ^/tmp/mvm-w-[0-9]+-[0-9]+-[1-9]$ ]]; then
-  log "refusing isolated base ${base@Q}: expected /tmp/mvm-w-<run>-<attempt>-<shard>"
+base_is_valid=0
+if [[ "$base" =~ ^/tmp/mvm-w-[0-9]+-[0-9]+-[1-9]$ ]]; then
+  # Accept the historical /tmp location while older workflows are updated.
+  base_is_valid=1
+elif [ -n "${RUNNER_TEMP:-}" ]; then
+  runner_temp=${RUNNER_TEMP%/}
+  prefix="$runner_temp/mvm-w-"
+  if [[ "$base" == "$prefix"* ]]; then
+    suffix=${base#"$prefix"}
+    [[ "$suffix" =~ ^[0-9]+-[0-9]+-[1-9]$ ]] && base_is_valid=1
+  fi
+fi
+if [ "$base_is_valid" != 1 ]; then
+  log "refusing isolated base ${base@Q}: expected ${RUNNER_TEMP:-RUNNER_TEMP}/mvm-w-<run>-<attempt>-<shard>"
   exit 2
 fi
 if [[ ! "$budget_gib" =~ ^[0-9]+$ ]]; then

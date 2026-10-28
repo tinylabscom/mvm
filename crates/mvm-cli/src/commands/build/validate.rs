@@ -1,4 +1,4 @@
-//! `mvmctl validate` — run `nix flake check` to validate a flake before
+//! `mvmctl dev validate` — run `nix flake check` to validate a flake before
 //! building. Flat verb (no subcommand layer) since `check` is the only
 //! action.
 
@@ -56,14 +56,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 } else {
                     let msg = combined.trim().replace('"', "'");
                     println!("{{\"valid\":false,\"error\":\"{msg}\"}}");
-                    mvm_observability::exit(1);
+                    crate::observability::exit(1);
                 }
                 Ok(())
             }
             Err(e) => {
                 let msg = e.to_string().replace('"', "'");
                 println!("{{\"valid\":false,\"error\":\"{msg}\"}}");
-                mvm_observability::exit(1);
+                crate::observability::exit(1);
             }
         }
     } else {
@@ -101,7 +101,7 @@ fn render_typed_verdict(
             if json {
                 let msg = message.trim().replace('"', "'");
                 println!("{{\"valid\":false,\"error\":\"{msg}\"}}");
-                mvm_observability::exit(1);
+                crate::observability::exit(1);
             }
             Err(anyhow::anyhow!("Flake check failed:\n{}", message.trim()))
         }

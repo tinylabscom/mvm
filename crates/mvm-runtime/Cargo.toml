@@ -23,7 +23,7 @@ mvm-backends = { workspace = true }
 # `egress-ca`: `network_endpoint_spawn::build_egress_tls_delivery`
 # mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
 # guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
-mvm-core = { workspace = true, features = ["egress-ca"] }
+mvm-core = { workspace = true, features = ["egress-ca", "host-state", "os-keyring"] }
 # The L3 policy core: the address allocator and the gateway's admitted
 # configuration shape. Acyclic HIGH->LOW — mvm-net deps only mvm-core and
 # mvm-contract.
@@ -48,6 +48,7 @@ bytes = "1"
 chrono.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
+rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }
 # Folded in with the former mvm-base crate: the base substrate's ui
 # (ANSI output, in-house spinners + prompts) and secret handling (secrecy).
 # Crypto helpers come from mvm_core::crypto, already available via the
@@ -63,7 +64,8 @@ object_store = { version = "0.14", optional = true, default-features = false, fe
 # Optional + off by default (`wasm-backend` feature) so the default workspace
 # build carries no wasmtime — it is a large dependency tree, like
 # object_store behind the template-registry feature above.
-wasmtime = { version = "49", optional = true }
+# Every default feature except `cache`: it pulls zstd, and the engine never enables a compilation cache.
+wasmtime = { version = "49", optional = true, default-features = false, features = ["anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null", "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator", "demangle", "addr2line", "coredump", "debug-builtins", "runtime", "component-model", "component-model-async", "threads", "stack-switching", "std", "debug", "compile-time-builtins", "wit-parser"] }
 wasmtime-wasi = { version = "49", optional = true }
 serde.workspace = true
 serde_json.workspace = true

@@ -1,4 +1,4 @@
-//! `mvmctl build sdk-sidecar build` — explicitly populate the SDK sidecar
+//! `mvmctl dev sdk-sidecar build` — explicitly populate the SDK sidecar
 //! cache for both guest libcs, packed on the host from a guest runtime: this
 //! checkout's archive, or the published one of this CLI's version. The image
 //! set carries no sidecar.
@@ -168,10 +168,10 @@ mod tests {
     #[test]
     fn the_build_verb_parses_its_source_and_force() {
         for argv in [
-            vec!["mvmctl", "build", "sdk-sidecar", "build"],
+            vec!["mvmctl", "dev", "sdk-sidecar", "build"],
             vec![
                 "mvmctl",
-                "build",
+                "dev",
                 "sdk-sidecar",
                 "build",
                 "--source",
@@ -180,7 +180,7 @@ mod tests {
             ],
         ] {
             let cli = Cli::try_parse_from(&argv).expect("parse");
-            let Commands::Build(group) = cli.command else {
+            let Commands::Dev(group) = cli.command else {
                 panic!("expected build group");
             };
             assert!(matches!(group.action, build_group::BuildCmd::SdkSidecar(_)));
@@ -192,7 +192,7 @@ mod tests {
     fn source_download_is_no_longer_accepted() {
         Cli::try_parse_from([
             "mvmctl",
-            "build",
+            "dev",
             "sdk-sidecar",
             "build",
             "--source",

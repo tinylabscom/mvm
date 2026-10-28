@@ -6,6 +6,7 @@
 pub mod bundle;
 pub mod environment;
 pub mod execution_plan;
+pub mod network_limits;
 pub mod output_grant;
 pub mod sdk_sidecar;
 pub mod types;
@@ -14,6 +15,7 @@ pub mod verb;
 pub mod verb_grant;
 pub mod verb_trust;
 
+pub use environment::EnvironmentPolicy;
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 pub use output_grant::{OutputGrant, OutputGrantError, validate_output_grants};
 pub use sdk_sidecar::{

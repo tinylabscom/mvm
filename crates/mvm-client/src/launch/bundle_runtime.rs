@@ -15,6 +15,10 @@ use mvm_core::plan::bundle::{
 };
 use mvm_core::vm_backend::{BackendKind, BundleBootAssetsPin, VmStartConfig};
 
+#[cfg(test)]
+#[path = "../../../mvm-core/src/image_set/fixtures/published_root.rs"]
+mod published_root;
+
 /// Locate a registry-owned bundle. This path is only a hint; never proof.
 pub fn installed_archive_for_rootfs(rootfs: &Path) -> Result<Option<PathBuf>> {
     let registry = BundleRegistry::default_path()?;
@@ -98,6 +102,14 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             "bundle boot-assets architecture differs from host"
         );
         let kind = BackendKind::from_label(backend).context("unknown bundle boot backend")?;
+        // A canonical bundle retains a kernel generation only where the
+        // backend can prove that generation's exit; refuse the rest before
+        // paying for image selection or runtime assembly, not after.
+        let needs_owner = canonical && config.canonical_kernel.is_none();
+        ensure!(
+            !needs_owner || mvm_core::canonical_linux::supports_lifetime_custody(kind),
+            "canonical kernel lifetime custody unsupported by this backend"
+        );
         let support = BackendImageSupport::for_backend(kind)
             .context("backend cannot consume bundle boot assets")?;
         mvm_core::plan::bundle::check_boot_assets_for_backend(
@@ -106,11 +118,7 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             &mvm_build::stage0_kernel::current_image_set_protocol_support(),
         )?;
         attach_cli_runtime(config, &installed, runtime)?;
-        if canonical && config.canonical_kernel.is_none() {
-            ensure!(
-                mvm_core::canonical_linux::supports_lifetime_custody(kind),
-                "canonical kernel lifetime custody unsupported by this backend"
-            );
+        if needs_owner {
             let owner = std::sync::Arc::new(super::canonical_linux::prepare_canonical_linux(
                 &archive,
                 &verified.plan_artifact(),
@@ -801,7 +809,25 @@ mod tests {
         }
         assert_eq!(attached.roothash.as_deref(), Some(workload_hash.as_str()));
         let verity_path = PathBuf::from(attached.verity_path.as_ref().unwrap());
-        assert!(!verity_path.with_extension("roothash").exists());
+        let raw_hash_path = verity_path.with_extension("roothash");
+        let raw_hash = format!("{workload_hash}\n").into_bytes();
+        assert_eq!(raw_hash.len(), 65);
+        assert_eq!(std::fs::read(&raw_hash_path).unwrap(), raw_hash);
+        let declarations: Vec<_> = installed
+            .manifest
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.name == "rootfs.roothash")
+            .collect();
+        assert_eq!(declarations.len(), 1);
+        let declaration = declarations[0];
+        assert_eq!(declaration.role, ArtifactRole::Other);
+        assert_eq!(declaration.size_bytes, 65);
+        assert_eq!(
+            declaration.sha256,
+            mvm_core::plan::bundle::sha256_hex(&raw_hash)
+        );
+        assert_eq!(installed.root.join(&declaration.path), raw_hash_path);
         assert_eq!(
             verity_path,
             installed.root.join(
@@ -1067,5 +1093,163 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("refusing runtime fallback"));
         assert!(config.runtime_overlay_path.is_none());
+    }
+
+    /// The genuine pinned kernel and signed Linux root, with synthetic CLI
+    /// runtime bytes: the bundle and its embedded set verify, but nothing here
+    /// is runtime authentication or a native start.
+    #[test]
+    #[ignore = "requires the actual pinned public kernel in MVM_TEST_CANONICAL_KERNEL; no download"]
+    fn a_canonical_bundle_is_refused_for_libkrun_and_qemu_before_runtime_assembly() {
+        use mvm_core::plan::bundle::{
+            BundleArtifact, BundleManifest, BundleMember, CanonicalLinuxProof,
+            EmbeddedCliBootAssets, key_id_from_pubkey, sha256_hex, write_bundle,
+        };
+        const REVOCATIONS: &[u8] = include_bytes!(
+            "../../../mvm-core/tests/fixtures/image-set-revocations/revocation-list-v1/revocations.json"
+        );
+        const REVOCATIONS_SIGNATURE: &[u8] = include_bytes!(
+            "../../../mvm-core/tests/fixtures/image-set-revocations/revocation-list-v1/revocations.json.bundle"
+        );
+        let kernel = std::fs::read(
+            std::env::var_os("MVM_TEST_CANONICAL_KERNEL").expect("public kernel path"),
+        )
+        .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let producer = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[76; 32]);
+        let runtime = EmbeddedCliBootAssets {
+            manifest_artifact: "linux.json".into(),
+            version: "0.24.0".into(),
+            arch: GuestArch::host().to_string(),
+            archive_artifact: "runtime.tar.gz".into(),
+            checksum_artifact: "runtime.sha256".into(),
+            signature_bundle_artifact: "runtime.bundle".into(),
+            checksum_signature_bundle_artifact: "runtime.sha256.bundle".into(),
+            overlay_artifact: "overlay".into(),
+            overlay_verity_artifact: "overlay.verity".into(),
+            initramfs_artifact: "initrd".into(),
+            overlay_roothash: "a".repeat(64),
+            protocol_version: 2,
+            min_supported_protocol_version: 2,
+        };
+        let mut payload: Vec<(String, Vec<u8>)> = vec![
+            ("kernel".into(), kernel),
+            ("rootfs.ext4".into(), b"synthetic rootfs".to_vec()),
+            ("initrd".into(), b"synthetic initrd".to_vec()),
+            ("linux.json".into(), published_root::MANIFEST.to_vec()),
+            ("linux.bundle".into(), published_root::BUNDLE.to_vec()),
+            ("revocations.json".into(), REVOCATIONS.to_vec()),
+            ("revocations.bundle".into(), REVOCATIONS_SIGNATURE.to_vec()),
+        ];
+        for name in [
+            "runtime.tar.gz",
+            "runtime.sha256",
+            "runtime.bundle",
+            "runtime.sha256.bundle",
+            "overlay",
+            "overlay.verity",
+        ] {
+            payload.push((name.into(), format!("synthetic {name}").into_bytes()));
+        }
+        let artifacts: Vec<BundleArtifact> = payload
+            .iter()
+            .map(|(name, bytes)| BundleArtifact {
+                name: name.clone(),
+                path: format!("artifacts/{name}"),
+                role: match name.as_str() {
+                    "kernel" => ArtifactRole::Kernel,
+                    "rootfs.ext4" => ArtifactRole::Rootfs,
+                    "initrd" => ArtifactRole::Initrd,
+                    _ => ArtifactRole::Other,
+                },
+                sha256: sha256_hex(bytes),
+                size_bytes: bytes.len() as u64,
+            })
+            .collect();
+        let manifest = BundleManifest {
+            schema_version: 7,
+            publisher: "test-only-application".into(),
+            key_id: key_id_from_pubkey(&key.verifying_key()),
+            arch: GuestArch::host().to_string(),
+            kernel_version: None,
+            profile: None,
+            workload_label: None,
+            created_at: "2026-10-16T00:00:00Z".into(),
+            labels: Default::default(),
+            artifacts,
+            members: vec![
+                BundleMember::EmbeddedCliBootAssets(runtime),
+                BundleMember::CanonicalLinuxProof(CanonicalLinuxProof {
+                    manifest_artifact: "linux.json".into(),
+                    signature_bundle_artifact: "linux.bundle".into(),
+                    revocation_document_artifact: "revocations.json".into(),
+                    revocation_signature_bundle_artifact: "revocations.bundle".into(),
+                }),
+            ],
+            verity: None,
+            resources: None,
+        };
+        let archive = producer.path().join("canonical.mvmpkg");
+        let payload = payload
+            .into_iter()
+            .map(|(name, bytes)| (format!("artifacts/{name}"), bytes))
+            .collect();
+        std::fs::write(&archive, write_bundle(&manifest, &key, payload).unwrap()).unwrap();
+        let trust = FsTrustStore::default_path().unwrap();
+        std::fs::create_dir_all(trust.root()).unwrap();
+        std::fs::write(
+            trust.root().join(format!("{}.pub", manifest.key_id.0)),
+            key.verifying_key().as_bytes(),
+        )
+        .unwrap();
+        let registry = BundleRegistry::default_path().unwrap();
+        let installed = registry.install_file(&archive, &trust, false).unwrap();
+        let config = VmStartConfig {
+            name: "canonical-refusal-unit".into(),
+            rootfs_path: installed
+                .root
+                .join("artifacts/rootfs.ext4")
+                .display()
+                .to_string(),
+            kernel_path: Some(
+                installed
+                    .root
+                    .join("artifacts/kernel")
+                    .display()
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let original = format!("{config:?}");
+        for backend in ["libkrun", "qemu"] {
+            let mut refused = config.clone();
+            let error = attach_if_installed_bundle(&mut refused, backend).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("canonical kernel lifetime custody unsupported"),
+                "{backend}: {error:#}"
+            );
+            assert_eq!(format!("{refused:?}"), original, "{backend}");
+        }
+        assert!(
+            !home.path().join("canonical-kernel-generations").exists(),
+            "a refused attach must not retain a kernel generation"
+        );
+        // A custody-capable backend clears this gate and fails later — on this
+        // host the unsigned synthetic runtime or the builder-ABI support of a
+        // payload-less test shell, never on custody.
+        #[cfg(unix)]
+        {
+            let mut admitted = config.clone();
+            let error = attach_if_installed_bundle(&mut admitted, "hvf").unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                !message.contains("canonical kernel lifetime custody unsupported"),
+                "hvf: {message}"
+            );
+            assert_eq!(format!("{admitted:?}"), original, "hvf");
+        }
     }
 }

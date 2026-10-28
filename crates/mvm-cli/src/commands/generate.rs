@@ -4,7 +4,7 @@
 //! remember whether a workload starts from an SDK source file, a template
 //! registry entry, or a natural-language prompt:
 //!
-//!   - `mvmctl generate sdk app.py -o ./my-app`         → `build compile`
+//!   - `mvmctl generate sdk app.py -o ./my-app`         → `dev compile`
 //!   - `mvmctl generate template python ./my-app`       → registry scaffold
 //!   - `mvmctl generate prompt "python api" ./my-app`   → `init --prompt "..."`
 //!
@@ -31,7 +31,7 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum GenerateAction {
     /// Generate from an SDK-decorated `.py` or `.ts` source file.
     ///
-    /// Runs the same pipeline as `mvmctl build compile`: parses the
+    /// Runs the same pipeline as `mvmctl dev compile`: parses the
     /// decorator, emits `flake.nix` + `launch.json`, and bundles the
     /// source tree into `--out <dir>`.
     Sdk {

@@ -19,6 +19,7 @@
 //! in the user's policy directory, or a built-in ([`builtin`]).
 
 pub mod builtin;
+pub mod environment;
 pub mod manifest;
 pub mod merge;
 pub mod model;

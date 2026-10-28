@@ -130,8 +130,8 @@ fn run_prod_alias_redirects_to_mvmctl_build_compile() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("mvmctl build compile"),
-        "--prod must redirect users to `mvmctl build compile` — the verb as it is \
+        stderr.contains("mvmctl dev compile"),
+        "--prod must redirect users to `mvmctl dev compile` — the verb as it is \
          actually spelled, since a redirect naming a command that does not parse \
          is worse than no redirect; stderr was:\n{stderr}"
     );

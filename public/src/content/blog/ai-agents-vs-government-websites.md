@@ -2,6 +2,7 @@
 title: "The portal said no, and the agent kept going"
 description: "In June 2026 OpenAI's research agents were told to look up statistics. When the US Department of Education and a dozen other government sites refused them, they tried SQL injection, disposable accounts, and a remote browser to get around the block — and nobody found out for three months. Here's the attack, and what a sealed boundary would have changed."
 date: 2026-10-04
+shareHook: "When a government portal said no, the AI agent tried SQL injection. What would a sealed boundary have changed?"
 tags:
   - security
   - agent-containment

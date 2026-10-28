@@ -1,0 +1,68 @@
+--- a/Makefile
++++ b/Makefile
+@@ -1,4 +1,4 @@
+-KERNEL_VERSION = linux-6.12.109
++KERNEL_VERSION = linux-6.12.114
+ KERNEL_REMOTE = https://cdn.kernel.org/pub/linux/kernel/v6.x/$(KERNEL_VERSION).tar.xz
+ KERNEL_TARBALL = tarballs/$(KERNEL_VERSION).tar.xz
+ KERNEL_SOURCES = $(KERNEL_VERSION)
+@@ -112,7 +112,10 @@ ifeq ($(MACOS_BUILDER),native)
+         OBJCOPY=$(KERNEL_OBJCOPY) OBJDUMP=$(KERNEL_OBJDUMP) STRIP=$(KERNEL_STRIP) \
+         READELF=$(KERNEL_READELF) HOSTCC=$(KERNEL_HOSTCC) \
+         $(KERNEL_FLAGS)
+     MACOS_HOST_INCLUDE = $(CURDIR)/include/macos-host
+-    KERNEL_HOSTFLAGS = HOSTCFLAGS="-I$(MACOS_HOST_INCLUDE) -D_UUID_T -D__GETHOSTUUID_H"
++    MACOS_SDK ?= $(shell xcrun --show-sdk-path)
++    KERNEL_HOSTFLAGS = HOSTCFLAGS="-I$(MACOS_HOST_INCLUDE) -isysroot $(MACOS_SDK) -Wno-nullability-completeness" HOSTLDFLAGS="-isysroot $(MACOS_SDK)"
++    KRUNFW_HOST_FLAGS = -isysroot $(MACOS_SDK) \
++        -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)
+ endif
+ endif
+@@ -206,3 +209,3 @@ ifeq ($(OS),Windows)
+ else
+-	$(CC) -fPIC -DABI_VERSION=$(ABI_VERSION) -shared $(SONAME_$(OS)) -o $@ $(KERNEL_C_BUNDLE) $(QBOOT_C_BUNDLE) $(INITRD_C_BUNDLE)
++	$(CC) $(KRUNFW_HOST_FLAGS) -fPIC -DABI_VERSION=$(ABI_VERSION) -shared $(SONAME_$(OS)) -o $@ $(KERNEL_C_BUNDLE) $(QBOOT_C_BUNDLE) $(INITRD_C_BUNDLE)
+ ifeq ($(OS),Linux)
+--- a/bin2cbundle.py
++++ b/bin2cbundle.py
+@@ -4,2 +4,0 @@
+-from elftools.elf.elffile import ELFFile
+-
+@@ -28,2 +26,4 @@ def write_padding(ofile, padding, col):
+ def write_elf_cbundle(ifile, ofile, page_size) -> int:
++    from elftools.elf.elffile import ELFFile
++
+     elffile = ELFFile(ifile)
+--- /dev/null
++++ b/patches/0099-macos-file2alias-uuid.patch
+@@ -0,0 +1,30 @@
++From: TinyLabs MVM release build
++Subject: scripts/mod: isolate the kernel UUID type on macOS
++
++Apple's SDK exposes uuid_t as an unsigned-byte array through sys/types.h,
++while file2alias needs the kernel's struct-shaped UUID to inspect the b field.
++Alias the type only while the kernel device-table header is parsed by the
++macOS host tool. Other hosts retain the upstream source exactly.
++
++--- a/scripts/mod/file2alias.c
+++++ b/scripts/mod/file2alias.c
++@@ -44,3 +44,10 @@
++-typedef struct {
++-	__u8 b[16];
++-} uuid_t;
+++#ifdef __APPLE__
+++typedef struct {
+++	__u8 b[16];
+++} kernel_uuid_t;
+++#define uuid_t kernel_uuid_t
+++#else
+++typedef struct {
+++	__u8 b[16];
+++} uuid_t;
+++#endif
++@@ -54 +61,4 @@
++-#include "../../include/linux/mod_devicetable.h"
+++#include "../../include/linux/mod_devicetable.h"
+++#ifdef __APPLE__
+++#undef uuid_t
+++#endif

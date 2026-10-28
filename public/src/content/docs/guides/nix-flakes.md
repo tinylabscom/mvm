@@ -156,7 +156,7 @@ Operationally, this means:
 - Updating the runtime overlay is the normal way to update guest runtime
   binaries for **future boots**.
 - You can prebuild that artifact explicitly with
-  `mvmctl build runtime-overlay build` (or `just check::overlay` in a
+  `mvmctl dev runtime-overlay build` (or `just check::overlay` in a
   source checkout) so later required-overlay boots do not pay guest-binary
   rebuild cost on the hot path.
 - A stopped VM picks up the newer overlay on its next `machine start` /
@@ -381,7 +381,7 @@ Two things make this image different from a plain `entrypoint.command` image:
 
 The secret is declared in Workload IR, not in the flake and not in `mvm.toml`
 (which has no secret key). The SDKs write this file for you
-(`mvm.secret(...)` compiled by `mvmctl build compile`); for a hand-written
+(`mvm.secret(...)` compiled by `mvmctl dev compile`); for a hand-written
 flake, write it yourself next to `flake.nix`:
 
 ```json

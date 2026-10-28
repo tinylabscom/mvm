@@ -21,7 +21,7 @@ class PreflightTests(unittest.TestCase):
     def test_workspace_compatibility_and_independent_sdk_version(self):
         release = preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)
         self.assertEqual(release["version"], "0.15.2")
-        self.assertEqual(release["runtime_version"], "0.24.0")
+        self.assertEqual(release["runtime_version"], "0.26.0")
         self.assertNotEqual(release["version"], release["runtime_version"])
         preflight.validate_metadata(ROOT, "release", "sdk-v" + release["version"], False)
         with self.assertRaises(ValueError):

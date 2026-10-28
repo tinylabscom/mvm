@@ -447,6 +447,31 @@ pub fn check_declared_protocol_compatibility(
     declared: &super::ImageSetCompatibility,
     host: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
+    check_workload_protocol_compatibility(declared, host)?;
+    if declared.builder_cache_contract != host.builder_cache_contract {
+        return Err(ImageSetError::BuilderCacheContractMismatch {
+            set: declared.builder_cache_contract,
+            host: host.builder_cache_contract,
+        });
+    }
+    let abi = declared.builder_boot_abi_or_legacy();
+    if !host.builder_boot_abi.contains(abi) {
+        return Err(ImageSetError::BuilderBootAbiUnsupported {
+            set: abi,
+            host: host.builder_boot_abi,
+        });
+    }
+    Ok(())
+}
+
+/// Check the workload base contract without requiring builder execution support.
+///
+/// Callers must still select every consumed member against the actual backend
+/// and guest architecture. This does not authorize builder execution.
+pub fn check_workload_protocol_compatibility(
+    declared: &super::ImageSetCompatibility,
+    host: &HostProtocolSupport,
+) -> Result<(), ImageSetError> {
     let base = declared.base_image_contract_or_legacy();
     if !host.base_image_contract.contains(base) {
         return Err(ImageSetError::BaseImageContractUnsupported {
@@ -460,19 +485,6 @@ pub fn check_declared_protocol_compatibility(
         return Err(ImageSetError::BaseBuilderBootAbiMismatch {
             declared: declared.builder_boot_abi,
             required: super::BuilderBootAbi::NO_MVM_BINARY,
-        });
-    }
-    if declared.builder_cache_contract != host.builder_cache_contract {
-        return Err(ImageSetError::BuilderCacheContractMismatch {
-            set: declared.builder_cache_contract,
-            host: host.builder_cache_contract,
-        });
-    }
-    let abi = declared.builder_boot_abi_or_legacy();
-    if !host.builder_boot_abi.contains(abi) {
-        return Err(ImageSetError::BuilderBootAbiUnsupported {
-            set: abi,
-            host: host.builder_boot_abi,
         });
     }
     Ok(())

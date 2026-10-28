@@ -251,6 +251,7 @@ pub(super) fn curl_download_args(dest: &str, url: &str) -> Vec<String> {
         "-o".to_string(),
         dest.to_string(),
     ];
+    args.extend(mvm_core::util::curl::curl_transport_args(url).map(str::to_string));
     args.push(url.to_string());
     args
 }
@@ -390,6 +391,19 @@ mod tests {
             "connection resets must be retried: {args:?}"
         );
         assert_eq!(args.last().unwrap(), "https://example/x");
+    }
+
+    #[test]
+    fn curl_download_args_confine_the_fetch_to_https() {
+        let args = curl_download_args("/tmp/out", "https://example/x");
+        assert!(
+            args.windows(2).any(|w| w == ["--proto", "=https"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["--proto-redir", "=https"]),
+            "{args:?}"
+        );
     }
 
     #[test]

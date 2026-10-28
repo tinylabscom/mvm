@@ -24,6 +24,7 @@ export const sidebar: SidebarGroup[] = [
     // run your first thing before architecture / threat-model detail.
     items: [
       { label: "Installation", slug: "getting-started/installation" },
+      { label: "Native local demo", slug: "getting-started/native-demo" },
       { label: "First-Use Happy Paths", slug: "getting-started/happy-paths" },
       { label: "Quick Start", slug: "getting-started/quickstart" },
       { label: "Why mvm", slug: "getting-started/why-mvm" },

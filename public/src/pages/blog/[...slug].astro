@@ -1,6 +1,7 @@
 ---
 import { getCollection, render } from "astro:content";
 import BlogLayout from "../../layouts/BlogLayout.astro";
+import BlogShare from "../../components/BlogShare";
 
 export async function getStaticPaths() {
   const posts = await getCollection("blog");
@@ -27,7 +28,10 @@ const { Content } = await render(post);
         })}
       </time>
       <h1>{post.data.title}</h1>
-      <p>{post.data.description}</p>
+      <div class="blog-subtitle-row">
+        <p>{post.data.description}</p>
+        <BlogShare client:load url={new URL(Astro.url.pathname, Astro.site).href} hook={post.data.shareHook} />
+      </div>
       <div class="blog-tags" aria-label="Tags">
         {post.data.tags.map((tag) => <span>{tag}</span>)}
       </div>

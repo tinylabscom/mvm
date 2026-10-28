@@ -4,23 +4,35 @@
 //! admit a plan, start a backend, or make the prepared owner a native capability.
 
 use crate as mvm_core;
-use anyhow::{Context, Result, ensure};
+#[cfg(feature = "host-state")]
+use anyhow::Context;
+use anyhow::{Result, ensure};
+#[cfg(feature = "host-state")]
 use chrono::{DateTime, Utc};
 use mvm_core::arch::GuestArch;
+#[cfg(feature = "host-state")]
+use mvm_core::image_set::HostProtocolSupport;
+use mvm_core::image_set::ImageSetMember;
+#[cfg(feature = "host-state")]
 use mvm_core::image_set::{
-    BackendImageSupport, BootProtocol, HostProtocolSupport, ImageSetMember, ImageSetRequirement,
-    ImageSetRole, ImageSetVerification, image_train_lock, select_member, verify_image_set_root,
+    BackendImageSupport, BootProtocol, ImageSetRequirement, ImageSetRole, ImageSetVerification,
+    image_train_lock, select_member, verify_image_set_root,
 };
+#[cfg(feature = "host-state")]
+use mvm_core::image_set_revocation::ImageSetRevocationStore;
+#[cfg(feature = "host-state")]
 use mvm_core::image_set_revocation::{
-    ImageSetRevocationStore, verify_image_set_artifacts_under_revocations,
-    verify_image_set_revocations,
+    verify_image_set_artifacts_under_revocations, verify_image_set_revocations,
 };
+#[cfg(feature = "host-state")]
 use mvm_core::packs::PackRevocationChecker;
-use mvm_core::plan::bundle::{
-    CapturedCanonicalLinuxInputs, FsTrustStore, PlanArtifact, capture_canonical_linux_inputs,
-};
+use mvm_core::plan::bundle::{CapturedCanonicalLinuxInputs, PlanArtifact};
+#[cfg(feature = "host-state")]
+use mvm_core::plan::bundle::{FsTrustStore, capture_canonical_linux_inputs};
 use mvm_core::vm_backend::BackendKind;
+#[cfg(feature = "host-state")]
 use std::fs::File;
+#[cfg(feature = "host-state")]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,13 +45,17 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug)]
 pub struct PreparedCanonicalLinux {
     inputs: CapturedCanonicalLinuxInputs,
+    #[cfg(feature = "host-state")]
     view_guard: Mutex<Option<tempfile::TempDir>>,
     view_path: std::path::PathBuf,
     declaration: ImageSetMember,
     arch: GuestArch,
     backend: BackendKind,
+    #[cfg(feature = "host-state")]
     store: ImageSetRevocationStore,
+    #[cfg(feature = "host-state")]
     host_protocols: HostProtocolSupport,
+    #[cfg(feature = "host-state")]
     home: std::path::PathBuf,
     bound_vm: Mutex<Option<String>>,
     native_claimed: AtomicBool,
@@ -68,6 +84,12 @@ impl PreparedCanonicalLinux {
         self.declaration.artifacts[0].sha256.as_str()
     }
 
+    /// Original canonical signed declaration, for checking a held kernel file.
+    /// This is byte evidence, not native launch authority.
+    pub fn kernel_declaration(&self) -> &crate::image_set::MemberArtifact {
+        &self.declaration.artifacts[0]
+    }
+
     /// Bind this SAME in-process owner to one VM, not a path/hash claim.
     pub fn bind_to_config(
         self: &Arc<Self>,
@@ -92,6 +114,7 @@ impl PreparedCanonicalLinux {
         Ok(())
     }
 
+    #[cfg(feature = "host-state")]
     pub fn verify_config(
         self: &Arc<Self>,
         config: &crate::vm_backend::VmStartConfig,
@@ -133,6 +156,7 @@ impl PreparedCanonicalLinux {
 
     /// Single-use resource retention. Cleanup requires actual backend lifetime
     /// evidence; dropping this owner after a failed start never deletes readers.
+    #[cfg(feature = "host-state")]
     pub fn retain_for_native_handoff(
         self: &Arc<Self>,
         config: &crate::vm_backend::VmStartConfig,
@@ -173,10 +197,12 @@ impl PreparedCanonicalLinux {
 
     /// Re-authenticate against the SAME consumer store at actual use time.
     /// This returns checked bytes, not launch permission or a teardown receipt.
+    #[cfg(feature = "host-state")]
     pub fn kernel_file(&self) -> Result<File> {
         self.kernel_file_at(Utc::now())
     }
 
+    #[cfg(feature = "host-state")]
     fn kernel_file_at(&self, now: DateTime<Utc>) -> Result<File> {
         let policy = self.store.load(now)?;
         let declaration =
@@ -203,7 +229,7 @@ impl PreparedCanonicalLinux {
             &image_train_lock().image_set,
             &self.view_path,
         )
-        .with_host_protocols(host);
+        .with_workload_protocols(host);
         // The policy wrapper owns an authenticated, fresh store load. The
         // canonical verifier checks the actual private view under that policy.
         mvm_core::image_set::verify_image_set_artifacts(
@@ -249,6 +275,7 @@ pub fn supports_lifetime_custody(backend: BackendKind) -> bool {
 /// signed feed through the existing rollback-protected store. Missing, stale,
 /// invalid, revoked or rolled-back evidence refuses. No download, trust-key
 /// enrollment, source build, runtime selection or native start occurs here.
+#[cfg(feature = "host-state")]
 pub fn prepare_canonical_linux(
     archive: &Path,
     pin: &PlanArtifact,
@@ -259,6 +286,7 @@ pub fn prepare_canonical_linux(
     prepare_with_clock(inputs, backend, host_protocols, Utc::now)
 }
 
+#[cfg(feature = "host-state")]
 fn prepare_with_clock(
     inputs: CapturedCanonicalLinuxInputs,
     backend: BackendKind,
@@ -312,7 +340,7 @@ fn prepare_with_clock(
         &image_train_lock().image_set,
         view.path(),
     )
-    .with_host_protocols(host);
+    .with_workload_protocols(host);
     verify_image_set_artifacts_under_revocations(
         request,
         std::slice::from_ref(&artifact.name),
@@ -342,6 +370,7 @@ fn prepare_with_clock(
     Ok(prepared)
 }
 
+#[cfg(feature = "host-state")]
 fn read_member(inputs: &CapturedCanonicalLinuxInputs, name: &str, limit: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     inputs
@@ -355,6 +384,7 @@ fn read_member(inputs: &CapturedCanonicalLinuxInputs, name: &str, limit: u64) ->
     Ok(bytes)
 }
 
+#[cfg(feature = "host-state")]
 fn select_canonical_kernel(
     inputs: &CapturedCanonicalLinuxInputs,
     backend: BackendKind,
@@ -371,6 +401,7 @@ fn select_canonical_kernel(
     select_from_root(&manifest, &signature, arch, backend, policy, host)
 }
 
+#[cfg(feature = "host-state")]
 fn select_from_root(
     manifest: &[u8],
     signature: &[u8],
@@ -395,7 +426,7 @@ fn select_from_root(
         Path::new(""),
     )
     .require(&requirement)
-    .with_host_protocols(host)
+    .with_workload_protocols(host)
     .with_revocations(policy);
     let root = verify_image_set_root(&request)?;
     let support = BackendImageSupport::for_backend(backend).context("backend cannot boot Linux")?;
@@ -414,10 +445,10 @@ fn select_from_root(
     Ok(selected.clone())
 }
 
-#[cfg(all(test, unix, feature = "manifest-verify"))]
+#[cfg(all(test, unix, feature = "manifest-verify", feature = "host-state"))]
 use crate::image_set::published_root;
 
-#[cfg(all(test, unix, feature = "manifest-verify"))]
+#[cfg(all(test, unix, feature = "manifest-verify", feature = "host-state"))]
 mod tests {
     #[test]
     fn lifetime_custody_is_limited_to_backends_with_exit_evidence() {
@@ -456,7 +487,7 @@ mod tests {
         HostProtocolSupport {
             base_image_contract: crate::image_set::BaseImageContractRange::SUPPORTED,
             builder_cache_contract: image_train_lock().compatibility.builder_cache_contract,
-            builder_boot_abi: crate::image_set::BuilderBootAbiRange::WITH_PAYLOAD,
+            builder_boot_abi: crate::image_set::BuilderBootAbiRange::LEGACY_ONLY,
         }
     }
     fn prepare_with_clock(

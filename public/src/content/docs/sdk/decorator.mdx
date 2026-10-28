@@ -76,14 +76,14 @@ export const run = mvm.app({
 Compile and inspect:
 
 ```sh
-mvmctl build compile tool.py --out /tmp/agent-tool
+mvmctl dev compile tool.py --out /tmp/agent-tool
 mvmctl machine build --flake /tmp/agent-tool
 mvmctl machine run --flake /tmp/agent-tool
 ```
 
 ## Why static compile matters
 
-The safe path is static analysis: `mvmctl build compile` reads the declaration and emits IR without importing and executing the user's source file. That keeps untrusted or side-effecting module import code out of the host process.
+The safe path is static analysis: `mvmctl dev compile` reads the declaration and emits IR without importing and executing the user's source file. That keeps untrusted or side-effecting module import code out of the host process.
 
 Record-mode and live-mode runtime scripts exist for the imperative `Sandbox.create(...)` workflow, but they have a different trust posture because the user's script runs on the host process invoking the SDK. Prefer the static declaration form for security-sensitive deployable workloads.
 

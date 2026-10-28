@@ -298,6 +298,9 @@ fn acquire_application(
             .archive_sha256
             .as_str(),
     );
+    if cached.is_file() {
+        crate::commands::bundle::fetch::refuse_application_local_build(&cached)?;
+    }
     let candidate = match verify_application_bundle(application, &cached, &trust) {
         Ok(candidate) => candidate,
         Err(_) => {

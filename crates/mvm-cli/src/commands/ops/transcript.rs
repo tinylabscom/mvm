@@ -803,6 +803,62 @@ mod tests {
         assert!(evidence.contains("transcript.retired"));
     }
 
+    #[test]
+    fn expired_export_refusal_records_no_retirement_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let c = ctx(root.path());
+        persist_plan(&c, "local", "vm1");
+        let id = c.arm("local", "vm1", None, bounds()).unwrap();
+        let (dir, opened) = c.load_manifest("local", &id).unwrap();
+        let kek = transcript::load_kek(&c.keys_dir).unwrap().unwrap();
+        let key = transcript::unwrap_data_key(&kek, &opened.wrapped_data_key_b64).unwrap();
+        let mut writer = TranscriptWriter::new(
+            &dir,
+            key,
+            TranscriptWriterConfig {
+                capture_id: id.clone(),
+                binding: opened.binding,
+                bounds: opened.bounds,
+                retention: opened.retention,
+                at_rest: opened.at_rest,
+                generation_budget: None,
+                payload_encoding: Default::default(),
+                created_unix_secs: 100,
+                recipient: opened.recipient,
+                wrapped_data_key_b64: opened.wrapped_data_key_b64,
+            },
+        )
+        .unwrap();
+        writer
+            .push(Direction::Stdout, b"synthetic expired read")
+            .unwrap();
+        let terminal = writer.finalize_at(200).unwrap();
+        write_manifest(&dir, &terminal).unwrap();
+        drop(writer);
+        c.disarm("local", &id).unwrap();
+        let payload = dir.join(&terminal.chunks[0].file);
+        let err = format!("{:#}", c.export("local", &id).unwrap_err());
+        assert!(
+            err.contains("retention deadline has passed"),
+            "read expiry refuses before cleanup: {err}"
+        );
+        // The refused read signed nothing and removed nothing; only an
+        // explicit reconciliation retires the payload afterwards.
+        let trusted = super::super::audit::load_verifying_key(&c.verifying_key_path).unwrap();
+        assert!(
+            !mvm_hostd::audit::transcript_retirement::authenticated_retirement(
+                &c.audit_dir,
+                &trusted,
+                &terminal
+            )
+            .unwrap(),
+            "an expired export must not create retirement evidence"
+        );
+        assert!(payload.exists());
+        c.reconcile("local", &id).unwrap();
+        assert!(!payload.exists());
+    }
+
     fn audit_contains(c: &TranscriptCtx, token: &str) -> bool {
         std::fs::read_to_string(c.audit_path.as_ref().unwrap())
             .map(|s| s.contains(token))

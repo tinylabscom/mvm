@@ -254,14 +254,11 @@ fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
     )
 }
 
-fn stream_command_with_environment<F: FnMut(ExecEvent)>(
-    mut builder: Command,
+fn configure_stream_environment(
+    builder: &mut Command,
     leader: Leader<'_>,
-    stdin_data: Option<&str>,
-    timeout_secs: Option<u64>,
     environment: &crate::workload_env::WorkloadEnvironment,
-    mut emit: F,
-) -> ExecEvent {
+) {
     // Variables already set on the builder are the caller's and win over
     // the resolved workload environment.
     let provisioned: Vec<(std::ffi::OsString, std::ffi::OsString)> = builder
@@ -272,7 +269,24 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
         .env_clear()
         .envs(environment.vars())
         .envs(provisioned)
-        .current_dir(environment.working_dir())
+        .current_dir(environment.working_dir());
+    if matches!(leader, Leader::AttributedSession(_) | Leader::MediatedRelay) {
+        // Sanitize after merging all image/request variables so mediated
+        // execution cannot reintroduce startup controls or a workload PATH.
+        crate::trusted_env::configure_explicit_command(builder);
+    }
+}
+
+fn stream_command_with_environment<F: FnMut(ExecEvent)>(
+    mut builder: Command,
+    leader: Leader<'_>,
+    stdin_data: Option<&str>,
+    timeout_secs: Option<u64>,
+    environment: &crate::workload_env::WorkloadEnvironment,
+    mut emit: F,
+) -> ExecEvent {
+    configure_stream_environment(&mut builder, leader, environment);
+    builder
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
         } else {
@@ -448,6 +462,67 @@ mod tests {
             })
             .flatten()
             .collect()
+    }
+
+    #[test]
+    fn mediated_environment_is_sanitized_after_image_and_request_overrides() {
+        let environment = crate::workload_env::WorkloadEnvironment::builder()
+            .overrides([
+                ("PATH", "/work/image-bin"),
+                ("PYTHONPATH", "/work/image-lib"),
+            ])
+            .build();
+        let binding = ToolInvocationBinding::from_random([8; 16]);
+        for leader in [Leader::MediatedRelay, Leader::AttributedSession(&binding)] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .env("PATH", "/data/request-bin")
+                .env("LD_PRELOAD", "/data/request.so")
+                .env("BASH_ENV", "/data/startup")
+                .env("APPLICATION_VALUE", "kept");
+            configure_stream_environment(&mut command, leader, &environment);
+            let value = |key: &str| {
+                command
+                    .get_envs()
+                    .find(|(name, _)| *name == key)
+                    .and_then(|(_, value)| value)
+            };
+            assert_eq!(
+                value("PATH"),
+                Some(std::ffi::OsStr::new(crate::trusted_env::TRUSTED_PATH))
+            );
+            for key in ["LD_PRELOAD", "BASH_ENV", "PYTHONPATH"] {
+                assert!(value(key).is_none(), "{key} survived mediated launch");
+            }
+            assert_eq!(
+                value("APPLICATION_VALUE"),
+                Some(std::ffi::OsStr::new("kept"))
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_stream_environment_preserves_request_search_and_loader_settings() {
+        let environment = crate::workload_env::WorkloadEnvironment::builder()
+            .overrides([("PATH", "/work/image-bin")])
+            .build();
+        let mut command = Command::new("/bin/sh");
+        command
+            .env("PATH", "/data/request-bin")
+            .env("LD_PRELOAD", "/data/request.so");
+        configure_stream_environment(&mut command, Leader::ProcessGroup, &environment);
+        for (key, expected) in [
+            ("PATH", "/data/request-bin"),
+            ("LD_PRELOAD", "/data/request.so"),
+        ] {
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(name, _)| *name == key)
+                    .and_then(|(_, value)| value),
+                Some(std::ffi::OsStr::new(expected))
+            );
+        }
     }
 
     #[test]

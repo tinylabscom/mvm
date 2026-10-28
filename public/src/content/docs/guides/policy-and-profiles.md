@@ -349,7 +349,7 @@ pack allows, and that deny wins. A generated template can use the same
 `[policy]` table to expose its shipped policy to the application.
 
 `pull` follows pack references in the signed profile, verifying and pinning
-each dependency; `agent/claude` includes `runtime/python`.
+each dependency; the policy-only `agent/claude@1.0.1` includes `runtime/python`.
 If a root pack also declares a signed workload image, `run` and `machine run`
 select that image when no explicit boot source was supplied. The image's
 `mvm.toml`, `flake.nix`, and `flake.lock` are verified as signed payload; the

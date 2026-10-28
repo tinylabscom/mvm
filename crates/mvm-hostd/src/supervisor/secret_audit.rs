@@ -71,6 +71,33 @@ pub enum ForwardOutcome {
     Canceled,
 }
 
+/// Whether a forward leg dialed its destination directly or through the
+/// operator's upstream proxy. Recorded beside the outcome so a proxied
+/// connection never reads as a direct one in the chain.
+///
+/// `NoProxyBypass` is a direct dial too, but it is recorded apart from
+/// `Direct`: a bypass is an operator-declared exception to a configured
+/// proxy, and a chain reader must be able to tell it from a leg that had no
+/// proxy to take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardPath {
+    Direct,
+    Proxy,
+    NoProxyBypass,
+}
+
+impl ForwardPath {
+    /// The fixed label recorded in the chain.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Proxy => "proxy",
+            Self::NoProxyBypass => "no_proxy",
+        }
+    }
+}
+
 impl ForwardOutcome {
     /// The fixed label recorded in the chain.
     #[must_use]
@@ -86,13 +113,16 @@ impl ForwardOutcome {
     }
 }
 
-/// Emit `secret.forward_outcome { destination, outcome }` — how a forward that
-/// carried a substituted credential ended. `outcome` is a fixed label; no error
-/// text is recorded, because an upstream error can quote the request URL.
+/// Emit `secret.forward_outcome { destination, outcome, via }` — how a forward
+/// that carried a substituted credential ended, and whether the leg dialed
+/// directly, went through the operator's upstream proxy, or was excepted by
+/// its `NO_PROXY` list. `outcome` and `via` are fixed labels; no error text is
+/// recorded, because an upstream error can quote the request URL.
 pub async fn emit_secret_forward_outcome(
     recorder: &Recorder,
     destination: &str,
     outcome: ForwardOutcome,
+    path: ForwardPath,
 ) -> Result<(), RecorderError> {
     recorder
         .record_unbound(
@@ -101,6 +131,7 @@ pub async fn emit_secret_forward_outcome(
             [
                 ("destination".to_string(), destination.to_string()),
                 ("outcome".to_string(), outcome.label().to_string()),
+                ("via".to_string(), path.label().to_string()),
             ],
         )
         .await
@@ -307,6 +338,25 @@ mod tests {
         let labels: std::collections::BTreeSet<&str> =
             outcomes.iter().map(|outcome| outcome.label()).collect();
         assert_eq!(labels.len(), outcomes.len());
+    }
+
+    /// Each forward path has its own label: a proxied leg, a NO_PROXY bypass,
+    /// and a direct dial are three different facts, and collapsing any two
+    /// would let one read as another in the chain.
+    #[test]
+    fn every_forward_path_has_a_distinct_label() {
+        let paths = [
+            ForwardPath::Direct,
+            ForwardPath::Proxy,
+            ForwardPath::NoProxyBypass,
+        ];
+        let labels: std::collections::BTreeSet<&str> =
+            paths.iter().map(|path| path.label()).collect();
+        assert_eq!(labels.len(), paths.len());
+        // The wire strings are pinned: downstream readers grep these literals.
+        assert_eq!(ForwardPath::Direct.label(), "direct");
+        assert_eq!(ForwardPath::Proxy.label(), "proxy");
+        assert_eq!(ForwardPath::NoProxyBypass.label(), "no_proxy");
     }
 
     /// Each refresh outcome has its own label, so the chain can tell a refresh

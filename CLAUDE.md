@@ -20,7 +20,7 @@ Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Pl
 
 ## Host dependencies (macOS)
 
-The libkrun-backed builder VM (started automatically by `mvmctl bootstrap`, `mvmctl build`, or `mvmctl machine run`) needs two Homebrew packages installed:
+The libkrun-backed builder VM (started automatically by `mvmctl bootstrap`, `mvmctl dev compile`, or `mvmctl machine run`) needs two Homebrew packages installed:
 
 ```sh
 brew install slp/krun/libkrun slp/krun/libkrunfw
@@ -98,7 +98,7 @@ After changing the guest-facing C ABI in `crates/mvm-host-services`, refresh
 the source sidecar explicitly:
 
 ```sh
-./target/debug/mvmctl build sdk-sidecar build
+./target/debug/mvmctl dev sdk-sidecar build
 ```
 
 It packs both libc variants on the host from this checkout's guest-runtime
@@ -121,7 +121,7 @@ initramfs, both sidecars) the same way, from one resolved archive
 tree, and the image set it used to install from in download mode carries none.
 The selector still decides how the OCI guest runtime is keyed (by the source
 under `build`, by this version otherwise) and opts bootstrap into source-built
-host helpers, which an unreleased version needs. `mvmctl build runtime-overlay
+host helpers, which an unreleased version needs. `mvmctl dev runtime-overlay
 build` assembles the overlay from the same archive, and a selected
 `MVM_IMAGES_DIR` checkout no longer turns it into a pair build. Each assembled
 piece records its archive digest in a file beside its files
@@ -226,15 +226,14 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 - `mvm-fs` -- image → mountable rootfs: OCI distribution client (registry/manifest/layer fetch + allow-listed `unpack/`) + a pure-Rust, memory-safe, deterministic ext4 writer (no `mkfs`, no subprocess) + `overlay`. Absorbs the old `mvm-ext4` + `mvm-oci`.
 - `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`; the concrete TAP/bridge impl lives in `mvm-runtime`.
 - `mvm-build` -- Nix builder pipeline + artifact cache; hosts the builder-VM-only `[[bin]]`s (`mvm-host-vm-init` etc., cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
-- `mvm-bundler` -- seals built artifacts into a signed `.mvmpkg`: `export_bundle_with_signer` reads the kernel, rootfs, optional initrd, dm-verity pair and guest sidecar, builds the manifest, and signs it under a caller-supplied `BundleSigner`. It decides what an exported bundle contains; the format itself stays in `mvm_core::plan::bundle`. Depends on `mvm-core` alone — verity probing and template resolution stay with the caller, so no backend is in its closure. `mvmctl bundle export` reaches it through `mvm_client::bundle`, which adds `HostBundleSigner` over the host key.
+- `mvm-bundler` -- seals built artifacts into a signed `.mvmpkg`: `export_bundle_with_signer` reads the kernel, rootfs, optional initrd, dm-verity pair and guest sidecar, builds the manifest, and signs it under a caller-supplied `BundleSigner`. It decides what an exported bundle contains; the format itself stays in `mvm_core::plan::bundle`. Depends on `mvm-core` alone — verity probing and template resolution stay with the caller, so no backend is in its closure. `mvmctl build` reaches it through `mvm_client::bundle`, which adds `HostBundleSigner` over the host key.
 - `mvm-vmm` -- backend-agnostic VMM device model and hypervisor seam: guest memory, FDT, arm64 kernel loading, virtio-mmio, the `hv::HypervisorVm`/`HypervisorVcpu` traits, the `driver::VmmDriver` seam, and the vsock transport. Low enough that `mvm-backends` can implement a backend without depending on `mvm-runtime`'s orchestration.
 - `mvm-backends` -- the concrete VMM mechanics behind that seam: `driver/{fc,hvf,libkrun,qemu}.rs` (the `VmmDriver` impls), their `*_process.rs` host-process siblings, `fc/`, and `mock.rs`. There is no `legacy` module — the `*_process.rs` files were briefly named `*_legacy` during the backend split and nothing in them is legacy. Orchestration stays in `mvm-runtime`; this crate owns only how a VM is built and run.
 - `mvm-http` -- a minimal HTTP/1.1-over-rustls client, deliberately smaller than a general one (no HTTP/2, redirects, pooling, proxy, compression), to keep the hyper/tower stack out of the shipped `mvmctl` closure.
 - `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait and the `AnyBackend` dispatch over every backend, VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin), `network/` (the TAP/gateway impl behind the `mvm-net` seam). Re-exports the `mvmctl::runtime`/`::backend` contract.
 - `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), the canonical host-wide machine inventory (`inventory`, which backs `mvmctl machine ls` and non-CLI consumers), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. It is the one Rust library an embedder depends on: it also re-exports the launch request's parts (`RootfsSource`, `Grants`, `HostPort`), the guest payload types in its `guest` module, inventory records, plan types, the error codes, and the workload authoring surface as `mvm_client::authoring`. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly for the backend surface, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
-- `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries.
+- `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries. Its `observability` module owns the tracing subscriber assembly (fmt, span-timing and OTLP layers) for the host-side binaries.
 - `mvm-host-services` -- the in-guest host-services C ABI: one JSON-in/JSON-out entry point over the vsock broker, built as the `libmvm_host_services.so` cdylib every language SDK `dlopen`s. The package name is what makes cargo emit that filename directly. Its closure is deliberately tiny (no C, no async runtime) because it is compiled into every guest — `check-sdk-transport-free` holds that line, and the SDK sidecar's staleness fingerprint watches this crate and its dependencies rather than `mvm-sdk`.
-- `mvm-observability` -- tracing subscriber assembly for the host-side binaries.
 - `mvm-capture` -- project-environment capture frontend.
 - `mvm-mcp` -- bounded stdio MCP adapter over the `MvmClient` facade.
 
@@ -286,7 +285,7 @@ BuildEnvironment : ShellEnvironment (extends)
   record_revision()
 ```
 
-- **Dev mode** (`mvmctl build`, `mvmctl machine build`): uses `dev_build()` with `&dyn ShellEnvironment`
+- **Dev mode** (`mvmctl dev compile`, `mvmctl machine build`): uses `dev_build()` with `&dyn ShellEnvironment`
 - **Fleet mode** (in mvmd): uses `pool_build()` with `&dyn BuildEnvironment`
 
 The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `BuildEnvironment` impl lives in mvmd-runtime.
@@ -582,14 +581,9 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     a VM spawn. The `app-deps-audit` job lives in
     `.github/workflows/security.yml` (Followup D), not `ci.yml` — it runs
     on the nightly cron and on release tags, so this lane does **not**
-    gate every PR. It lived in `ci-full.yml` until 2026-08-21, which was
-    `workflow_dispatch`-only and had been triggered zero times since it
-    was written: ADR-001's ledger cited `ci:app-deps-audit` for claim 11
-    the whole time, against a lane that had never once run. (`ci-full.yml`
-    still exists, as `Extended CI`, and now runs nightly — it kept the
-    lanes that are neither security-bearing nor duplicated by `ci.yml`,
-    including the repository's only macOS coverage.) It exercises
-    `mvmctl build compile` on
+    gate every PR. It lived in a dispatch-only workflow
+    that never ran until 2026-08-21; that workflow is deleted. It exercises
+    `mvmctl dev compile` on
     `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
     fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
     asserts `mvmctl deps inspect --json` reports a well-formed report,
@@ -692,8 +686,8 @@ prod_pull_requires_digest_pin_before_network` and
       `image-runner-smoke`) are the `oci-hardening` matrix in
       `.github/workflows/security.yml`, not `ci.yml` — so none of the six
       gate a PR; they run nightly and on release tags. They were six
-      separate dispatch-only jobs in `ci-full.yml` until 2026-08-21 and
-      had never been run. Note that ADR-001's ledger does not cite them:
+      separate dispatch-only jobs in a since-deleted workflow and had never
+      been run. Note that ADR-001's ledger does not cite them:
       claim 14's row names no `ci:` witness, so this paragraph is prose
       about lanes the gate does not check, and the table is what binds.
 15. **A sealed production microVM has no shell, no DevOnly guest-agent
@@ -984,13 +978,13 @@ those, the owner wins and the note is stale.
 
 ```bash
 cargo build
-cargo run -- --help   # full verb surface: build/run/template/image/network/console/init/cache/doctor/…
+cargo run -- --help   # full verb surface: machine/run/dev/template/image/network/init/cache/doctor/…
 ```
 
 Every subcommand is self-documenting via `--help`; the complete reference is
-`public/src/content/docs/reference/cli-commands.md`. Build-time verbs
-(`image`/`run`/`template`) live under `build`; `console` is an interactive PTY,
-dev-mode only.
+`public/src/content/docs/reference/cli-commands.md`. Contributor compilation,
+validation, and artifact-preparation verbs live under `dev`; `console` is an
+interactive PTY, dev-mode only.
 
 ## Dev Network Layout
 

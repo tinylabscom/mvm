@@ -16,6 +16,25 @@ Feature: s13_bundle_boot verify-and-boot
   scenarios.
 
   @MVM-SEC-25 @build
+  Scenario: Fetch verifies a publisher artifact only after explicit enrollment
+    Given an isolated mvm home
+    And a scratch working directory
+    And a signed artifact "my-app.mvmpkg" in the scratch directory
+    When I run mvmctl in the scratch directory with "bundle fetch ./my-app.mvmpkg"
+    Then the command exits with code 1
+    And the failure names the untrusted publisher key
+    Given the isolated mvm home trusts the artifact's publisher
+    When I run mvmctl in the scratch directory with "bundle fetch ./my-app.mvmpkg"
+    Then the command exits with code 0
+    And the output contains "Bundle verified"
+    And the isolated mvm home has no installed bundle
+    Given the artifact "my-app.mvmpkg" has its rootfs altered after signing
+    When I run mvmctl in the scratch directory with "bundle fetch ./my-app.mvmpkg"
+    Then the command exits with code 1
+    And the error output contains "sha256 mismatch"
+    And the isolated mvm home has no installed bundle
+
+  @MVM-SEC-25 @build
   Scenario: A trusted artifact verifies and plans without installing or booting
     Given an isolated mvm home
     And a scratch working directory
@@ -24,6 +43,50 @@ Feature: s13_bundle_boot verify-and-boot
     When I run mvmctl in the scratch directory with "machine run --dry-run ./app.mvmpkg -- /bin/true"
     Then the command exits with code 0
     And the error output contains "verified ./app.mvmpkg as bundle"
+    And the isolated mvm home has no installed bundle
+
+  @MVM-SEC-25 @build @local_build
+  Scenario: This host can dry-run its own labeled local build without enrollment
+    Given an isolated mvm home
+    And a scratch working directory
+    And a host-signed local build "app.mvmpkg" in the scratch directory
+    When I run mvmctl in the scratch directory with "machine run --dry-run ./app.mvmpkg -- /bin/true"
+    Then the command exits with code 0
+    And the error output contains "local build, signed by this host's key; not release-verified"
+    And the isolated mvm home has no installed bundle
+
+  @MVM-SEC-25 @build @local_build
+  Scenario: Artifact diagnostics distinguish a local build from a release
+    Given an isolated mvm home
+    And a scratch working directory
+    And a host-signed local build "app.mvmpkg" in the scratch directory
+    When I run mvmctl in the scratch directory with "machine check-artifact app.mvmpkg"
+    Then the command exits with code 0
+    And the output contains "local build, signed by this host's key; not release-verified"
+    And the output does not contain "verified, architecture compatible"
+
+  @MVM-SEC-25 @build @local_build
+  Scenario: Production refuses this host's local build
+    Given an isolated mvm home
+    And a scratch working directory
+    And a host-signed local build "app.mvmpkg" in the scratch directory
+    When I run mvmctl in the scratch directory with "machine run --prod --dry-run ./app.mvmpkg"
+    Then the command exits with code 1
+    And the error output contains "local builds are not release-verified"
+    And the isolated mvm home has no installed bundle
+
+  @MVM-SEC-25 @build @local_build
+  Scenario: Ordinary installation refuses a host-local build
+    Given an isolated mvm home
+    And a scratch working directory
+    And a host-signed local build "app.mvmpkg" in the scratch directory
+    When I run mvmctl in the scratch directory with "bundle install ./app.mvmpkg"
+    Then the command exits with code 1
+    And the error output contains "run its local `.mvmpkg` path directly"
+    And the isolated mvm home has no installed bundle
+    When I run mvmctl in the scratch directory with "bundle fetch ./app.mvmpkg"
+    Then the command exits with code 1
+    And the error output contains "refusing to fetch a local build"
     And the isolated mvm home has no installed bundle
 
   @MVM-SEC-25 @build
@@ -69,9 +132,10 @@ Feature: s13_bundle_boot verify-and-boot
     And the error output contains "app.mvmpkg"
     And the isolated mvm home has no installed bundle
 
-  @live @bundle_boot_live
+  @live @bundle_boot_live @runtime_candidate
   Scenario: A signed OCI artifact boots as the positional source
     Given an isolated mvm home
+    And the isolated mvm home is prepared for live launches
     And a scratch working directory
     When I seal "docker.io/library/alpine:3.20" into a signed artifact in the live home
     And I boot the signed artifact in the live home with "-- /bin/echo bundle-boot-witness"

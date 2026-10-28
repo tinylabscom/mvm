@@ -700,7 +700,7 @@ fn deliver_hvf_fork_post_restore(
     let outcome = mvm_vmm::post_restore::signal_post_restore(
         child_vm_name,
         &mvm_vmm::post_restore::VsockPostRestoreSignal::for_resumed_child(token, grant_envelope),
-        mvm_vmm::post_restore::POST_RESTORE_READY_TIMEOUT,
+        mvm_vmm::post_restore::POST_RESTORE_CLAIM_READY_TIMEOUT,
     )
     .with_context(|| format!("sending PostRestore to '{child_vm_name}'"))?;
     anyhow::ensure!(

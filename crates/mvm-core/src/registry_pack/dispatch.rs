@@ -90,6 +90,37 @@ impl AuthenticatedRegistryManifest for VerifiedRegistryApplication {
     }
 }
 
+impl sealed::Sealed for VerifiedRegistryManifest {}
+impl AuthenticatedRegistryManifest for VerifiedRegistryManifest {
+    fn reference(&self) -> &PackReference {
+        match self {
+            Self::Legacy(pack) => pack.reference(),
+            Self::Application(application) => application.reference(),
+        }
+    }
+
+    fn manifest_sha256(&self) -> &Sha256Hex {
+        match self {
+            Self::Legacy(pack) => pack.manifest_sha256(),
+            Self::Application(application) => application.manifest_sha256(),
+        }
+    }
+
+    fn signer(&self) -> &VerifiedSigner {
+        match self {
+            Self::Legacy(pack) => pack.signer(),
+            Self::Application(application) => application.signer(),
+        }
+    }
+
+    fn requires_operator_revocations(&self) -> bool {
+        match self {
+            Self::Legacy(pack) => pack.requires_operator_revocations(),
+            Self::Application(application) => application.requires_operator_revocations(),
+        }
+    }
+}
+
 /// Verify lock drift and the namespace publisher before dispatching original bytes.
 pub fn verify_registry_manifest(
     request: &RegistryPackVerification<'_>,
@@ -216,9 +247,10 @@ mod tests {
             signature_bundle: b"bundle",
             publisher_policy: &policy,
         };
-        let VerifiedRegistryManifest::Application(app) =
-            adopt_with(&request, accept_signature).unwrap()
-        else {
+        let verified = adopt_with(&request, accept_signature).unwrap();
+        assert_eq!(verified.reference(), &reference);
+        assert_eq!(verified.manifest_sha256(), &Sha256Hex::from_bytes(&bytes));
+        let VerifiedRegistryManifest::Application(app) = verified else {
             panic!("expected application")
         };
         let now = Utc::now();

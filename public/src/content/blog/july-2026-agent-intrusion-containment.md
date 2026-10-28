@@ -2,6 +2,7 @@
 title: "The July 2026 agent intrusion, read against a real boundary"
 description: "A walk through the ExploitGym sandbox escape, step by step, asking at each turn what the agent would have hit inside a sealed microVM — and being straight about the half of the incident that sits outside that boundary entirely."
 date: 2026-09-14
+shareHook: "Walk an agent sandbox escape against a real microVM boundary: what it can contain, and what sits outside its reach."
 tags:
   - security
   - agent-containment

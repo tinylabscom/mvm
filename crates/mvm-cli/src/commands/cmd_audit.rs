@@ -160,6 +160,8 @@ impl Commands {
                 r.run.json || r.up_json || !r.run.argv.is_empty()
             }
             Commands::Why(a) => a.json,
+            Commands::Pull(a) => a.json,
+            Commands::Search(a) => a.json,
             Commands::SdkNoVm(_) => true,
             Commands::Machine(a) => match &a.action {
                 // Folded advanced ops delegate to their own check.
@@ -250,8 +252,10 @@ impl Commands {
             Commands::Run(_) => "run",
             Commands::SdkNoVm(_) => "__sdk-no-vm",
             Commands::Doctor(_) => "doctor",
+            Commands::Backend(_) => "backend",
             Commands::Dashboard(_) => "dashboard",
             Commands::Prepare(_) => "prepare",
+            Commands::Build(_) => "build",
             Commands::Kernel(_) => "kernel",
             Commands::Generate(_) => "generate",
             Commands::Template(_) => "template",
@@ -263,8 +267,8 @@ impl Commands {
             // keep their per-op verb; native lifecycle verbs report `machine`.
             Commands::Machine(a) => a.action.verb_name(),
             Commands::Storage(_) => "storage",
-            // `build <sub>` delegates to the per-op verb (image/compile/validate/kernel).
-            Commands::Build(a) => a.action.verb_name(),
+            // `dev <sub>` delegates while preserving each operation's audit verb.
+            Commands::Dev(a) => a.action.verb_name(),
             Commands::Deploy(_) => "deploy",
             Commands::Deployments(_) => "deployments",
             Commands::ShellInit(_) => "shell-init",

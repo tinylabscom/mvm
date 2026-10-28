@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list kernel
+
 # Set MVM_KERNEL_SOURCE=download to use the hash-verified release artifact, or
 # MVM_KERNEL_SOURCE=auto to prefer it and compile when no asset is available.
 

@@ -617,19 +617,19 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
         .env("HOME", &data_dir)
         .env("MVM_HOME", &data_dir)
         .args([
-            "build",
+            "dev",
             "compile",
             app_path.to_str().expect("hello-app path utf-8"),
             "--out",
             compile_out.to_str().expect("compile out utf-8"),
         ])
         .output()
-        .expect("spawn mvmctl build compile hello-app");
+        .expect("spawn mvmctl dev compile hello-app");
     let compile_stdout = String::from_utf8_lossy(&compile.stdout);
     let compile_stderr = String::from_utf8_lossy(&compile.stderr);
     assert!(
         compile.status.success(),
-        "mvmctl build compile failed with {:?}\nstdout:\n{compile_stdout}\nstderr:\n{compile_stderr}",
+        "mvmctl dev compile failed with {:?}\nstdout:\n{compile_stdout}\nstderr:\n{compile_stderr}",
         compile.status.code()
     );
 

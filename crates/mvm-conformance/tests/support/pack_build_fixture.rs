@@ -5,15 +5,9 @@ pub fn producer_binary(
     live: bool,
     configured: Option<std::ffi::OsString>,
 ) -> Option<std::ffi::OsString> {
-    // Both verbs seal an archive and so carry the release guest runtime;
-    // everything that consumes one runs on the ordinary binary.
-    if live
-        && matches!(
-            (arguments.first(), arguments.get(1)),
-            (Some(group), Some(verb))
-                if verb == "build" && (group == "pack" || group == "bundle")
-        )
-    {
+    // The build front door seals an archive and carries the release guest
+    // runtime; everything that consumes one runs on the ordinary binary.
+    if live && arguments.first().is_some_and(|verb| verb == "build") {
         configured
     } else {
         None

@@ -768,6 +768,31 @@ mod tests {
     }
 
     #[test]
+    fn a_retained_firecracker_generation_blocks_the_vm_name_until_resolved() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lease = RuntimeLifecycleLease::acquire("kernel-fc-unit").unwrap();
+        let config = VmStartConfig {
+            name: "kernel-fc-unit".into(),
+            ..Default::default()
+        };
+        // Both record shapes a failed start leaves behind: never bound to a
+        // process, and bound to one that has not been confirmed gone.
+        for process in [None, Some(fc_process(1))] {
+            let (generation, path) = process_record(home.path(), &lease, process);
+            assert!(has_retained_kernel(&lease).unwrap());
+            let error = KernelBoundLaunch::bind(config.clone(), BackendKind::Firecracker, &lease)
+                .err()
+                .expect("a retained generation must block reuse of the VM name");
+            assert!(format!("{error:#}").contains("still retained"), "{error:#}");
+            assert!(generation.exists() && path.exists());
+            std::fs::remove_file(&path).unwrap();
+        }
+        assert!(!has_retained_kernel(&lease).unwrap());
+    }
+
+    #[test]
     fn a_native_instance_record_cannot_be_released_by_process_exit() {
         let home = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();

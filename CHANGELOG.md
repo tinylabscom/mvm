@@ -2,13 +2,114 @@
 
 All notable changes to mvm are documented in this file.
 
-## [Unreleased]
+## [0.26.0] — 2026-10-26
+
+Supersedes 0.25.0, which was tagged but never published.
+
+### Added
+- **cli**: `mvmctl trust audit usage` rolls the verified audit chain's chain-signed AI egress metering up per destination (#4753)
+- **hostd**: `secret.forward_outcome` audit entries record whether the forward leg went direct or through the upstream proxy (#4750)
+
+### Changed
+- **core**: Gate `toml` and `regex` behind `host-state`, shrinking the guest closure from 100 to 87 crates (#4742, #4713)
+- **image**: Workload and builder image compatibility are checked separately, so a workload launch no longer has to satisfy the builder boot ABI (#4754)
+- **contract**: Network flow ceilings share one source of truth and the per-stream credit window is admitted by the signed plan (#4748)
+- **ci**: Minimal merge-queue gate, push-only matrix, smaller test archive (#4720, #4732, #4736, #4738)
 
 ### Fixed
+- **release**: The macOS libkrunfw kernel build installs `lld` (#4752)
+- **release**: The libkrunfw basename is staged as a regular file instead of a symlink the archive inspector refuses (#4758)
+- **ci**: Pack signing smoke builds the application fixture with the `host-state` feature (#4751)
+- **fc**: The Firecracker short socket directory is created private and checked for owner and mode before a privileged helper uses it (#4745)
+- **gpu**: Module and function handles given to the guest are opaque, per-session and validated on use (#4746)
+- **plan**: Spent nonces of externally signed plans are remembered across launches, so the same plan cannot be replayed (#4747)
+- **agentd**: Resume no longer fails with EPERM when the guest already has the requested hostname (#4739)
+
+### Security
+- **deps**: Drop wasmtime's compilation cache feature, removing the zstd stack and RUSTSEC-2026-0391, RUSTSEC-2026-0398 and RUSTSEC-2026-0403 (#4757)
+
+## [0.25.0] — 2026-10-25
+
+Tagged v0.25.0; its release run failed before publication (macOS libkrun tier build), so no release was published. Superseded by 0.26.0.
+
+### Added
+- **cli**: Launch signed Claude applications with an embedded exact-destination environment policy, defaulting to the baked entrypoint with bounded one-shot stdin (#4726)
+
+### Changed
+- **core**: Gate host-only `mvm-core` modules behind the off-by-default `host-state` feature (#4728)
+- **ci**: Pin Linux CI and release jobs to ubuntu-24.04 (#4638, #4662)
+- **ci**: The merge queue runs only the fast gate; the heavy lanes run on push to main (#4720)
+- **ci**: Delete the miri, hvf-native, install-url-watch and site-isolation-watch workflows and the triggers that gated nothing (#4716)
+- **ci**: Delete the nightly mutation-witness lane (#4719)
+- **ci**: Remove Extended CI (`ci-full.yml`); its documented-surface coverage stays in the release workflow's e2e-docs, which now gates promotion (#4718)
+- **release**: Publish the signed prerelease before e2e-docs and gate promotion on it (#4721)
+
+### Fixed
+- **vmm**: Bound what a guest can make the vsock device allocate: oversize transmit chains are dropped and queued control replies are capped (#4735)
+- **hostd**: The UDP relay forwards inbound datagrams only from peers the guest has sent to, with the peer set bounded (#4737)
+- **bdd**: Gate the macOS HVF entrypoint scenarios to Firecracker (#4658, #4660, tracker #4655)
+- **bundle**: Keep the signed initramfs when its digest matches the release declaration (#4665)
+
+### Security
+- **deps**: Bump tokio to 1.53.3 and ctutils to 0.4.4 past RUSTSEC-2026-0386 and RUSTSEC-2026-0385 (#4693)
+
+### Testing
+- **e2e**: Pull the documented launch images once per run instead of once per scenario (#4695)
+- **fuzz**: Run the application-locator fuzz target in the nightly lane (#4654)
+
+## [0.24.1-rc.1] — 2026-10-23
+
+### Added
+- **cli**: Build pack specs, manifest projects, and Nix flakes into host-signed local `.mvmpkg` archives through `mvmctl build` (#4584)
+- **cli**: Build SDK-decorated sources and OCI image references through the same `mvmctl build` front door (#4584)
+- **cli**: Run a host-signed local build on its producing host with explicit non-release audit provenance and production refusal (#4584)
+- **core**: Require independent current feeds for applications
+- **release**: Ship a signed, relocatable libkrun runtime preview for macOS 13–25 Apple Silicon (#4577)
+- **core**: Retain current-trust application archive custody
+- **bundle**: Firecracker canonical kernel custody; open the canonical-bundle launch gate
+- **core**: Bind application boot inputs to original signed members
+
+### Changed
+- **cli**: Move contributor build and inspection subcommands from `mvmctl build` to `mvmctl dev` (#4584)
+- **cli**: Remove the legacy `pack build`, `bundle build`, `bundle export`, and `artifact pack` entry points in favor of `mvmctl build` (#4584)
+- **nix**: Bump the libkrunfw kernel to Linux 6.12.114
+
+### Documentation
+- **specs**: Record the green pack signing smoke run for #4590
+- **specs**: Design mvmctl build as the front door to a .mvmpkg
+- **specs**: Design the libkrun tier in the release archive and backend selection at install
+- **specs**: Record the green scheduled Security run as lane evidence
+- Explain PHP2Shell containment boundary
+- **specs**: Record the dispatched claim-witness freshness run as watcher evidence
+- **changelog**: Complete v0.24.1 notes
+
+### Fixed
+- **applications**: Bind installed application descriptor pins into signed plans and reverify their trusted bundle at host boot admission (#4511)
+- **bundle**: Reserve signed local-build provenance and refuse host-local archives at every registry boundary (#4584)
+- **hvf**: Reap a stopped standby and remove its state (#4575)
+- **hvf**: Start persistent machines on the default macOS backend
+- **hvf**: List a machine that has a pid file but no console log
+- **ci**: Preserve PTY output and registry lookup errors
+- **ci**: Fetch the runtime candidate over the REST API when gh is absent
+- **builder-guest**: Do not drop stderr written just before the child exits (#4581)
+- **hvf**: Report a repeated machine stop as already stopped (#4576)
+- **build**: Export MVM_WORKSPACE_PATH only when /work is the mvm workspace
+- **vmm**: Count a macOS zombie as not alive (#4575)
+- **conformance**: Prepare all source-tree live homes
 - **fs**: Hold a runtime overlay to the guest paths its own version promises, so a signed bundle pinned to the published image set's overlay boots again instead of being refused for the declared-command shims it predates
 - **bdd**: Accept the standby an unnamed run leaves behind, and the child preloaded for it, in the live warm-claim leak check, waiting a bounded time for the detached refill to register them
 - **bdd**: Expect the proxy-era denial from the entrypoint-denial example: the host names the blocked destination and curl exits 22
-- **sdk**: Pin the SDK release manifest's runtime to the 0.24.0 workspace it is compiled against
+- **sdk**: Pin the SDK release manifest's runtime to the 0.24.1 workspace it is compiled against
+
+### Testing
+- Host-userland-independent tests and wider CI VMM diagnostics
+- **hostd**: Pin unlinked inodes so fd identity check cannot alias a concurrent test
+
+## [Unreleased]
+
+### Added
+- **mailbox**: Define the canonical no-std signed/encrypted envelope, capability, replay, and destination-receipt contract (#4628)
+- **mailbox**: Add replaceable authenticated peer-overlay and bounded byte-transport interfaces with deterministic direct, relay, partition, reconnect, refusal, and shutdown conformance (#4632)
 
 ## [0.24.0] — 2026-10-12
 

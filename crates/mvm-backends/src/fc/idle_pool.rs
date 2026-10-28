@@ -354,8 +354,8 @@ fn infer_origin_dir(root: &Path, claimed_name: &str) -> PathBuf {
     root.join(origin_name)
 }
 
-/// Idle entries of `shape` whose process is running and whose socket exists,
-/// oldest first.
+/// Idle entries of `shape` whose process is running and whose socket has been
+/// handed privately to the invoking user, oldest first.
 fn ready_entries(root: &Path, shape: IdleShape) -> Vec<PathBuf> {
     let mut entries: Vec<(std::time::SystemTime, PathBuf)> = idle_entries(root)
         .into_iter()
@@ -391,10 +391,16 @@ fn entry_shape(dir: &Path) -> Option<IdleShape> {
 }
 
 fn is_ready(dir: &Path) -> bool {
-    use std::os::unix::fs::FileTypeExt as _;
-    let socket_up =
-        std::fs::symlink_metadata(dir.join(API_SOCKET)).is_ok_and(|m| m.file_type().is_socket());
-    socket_up && confirmed_firecracker(dir, &dir.join(API_SOCKET)).is_some()
+    is_ready_socket(&dir.join(API_SOCKET), effective_uid())
+        && confirmed_firecracker(dir, &dir.join(API_SOCKET)).is_some()
+}
+
+fn is_ready_socket(socket: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    // The process and socket appear before refill finishes the ownership
+    // handoff. Claiming earlier moves the root-owned socket out from under it.
+    std::fs::symlink_metadata(socket)
+        .is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid && m.mode() & 0o7777 == 0o600)
 }
 
 fn read_pid(path: &Path) -> Option<u32> {
@@ -465,6 +471,9 @@ fn create_private_dir(path: &Path) -> Result<()> {
 
 /// Move a claimed process's files into the VM's state dir, pid marker last.
 fn adopt(claimed: &Path, origin_dir: &Path, state_dir: &Path, api_socket: &Path) -> Result<()> {
+    if !is_ready_socket(&claimed.join(API_SOCKET), effective_uid()) {
+        bail!("the claimed idle Firecracker socket is not private to the invoking user");
+    }
     if confirmed_firecracker(claimed, &origin_dir.join(API_SOCKET)).is_none() {
         bail!("the claimed idle Firecracker is no longer the process its entry recorded");
     }
@@ -800,6 +809,65 @@ mod tests {
             ready_entries(root.path(), shape(512)).is_empty(),
             "dead pid"
         );
+    }
+
+    #[test]
+    fn an_idle_socket_is_not_claimable_before_its_private_ownership_handoff() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join(API_SOCKET);
+        let uid = effective_uid();
+        assert!(!is_ready_socket(&socket, uid), "missing socket");
+        std::fs::write(&socket, b"not a socket").unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!is_ready_socket(&socket, uid), "regular file");
+        std::fs::remove_file(&socket).unwrap();
+        let _listener = UnixListener::bind(&socket).unwrap();
+        for mode in [0o755, 0o644, 0o666, 0o400] {
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(!is_ready_socket(&socket, uid), "unadopted mode {mode:o}");
+        }
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            !is_ready_socket(&socket, uid.wrapping_add(1)),
+            "private socket still owned by the launcher, not the caller"
+        );
+        assert!(is_ready_socket(&socket, uid), "handoff complete");
+
+        let claimed = dir.path().join("claimed.socket");
+        std::fs::rename(&socket, &claimed).unwrap();
+        assert!(is_ready_socket(&claimed, uid), "rename preserves custody");
+        std::os::unix::fs::symlink(&claimed, &socket).unwrap();
+        assert!(!is_ready_socket(&socket, uid), "symlink is not a socket");
+        std::fs::set_permissions(&claimed, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            !is_ready_socket(&claimed, uid),
+            "selection must recheck permissions after a rename"
+        );
+    }
+
+    #[test]
+    fn adoption_rechecks_socket_permissions_before_moving_any_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let claimed = root.path().join("claimed-idle-a-1");
+        create_private_dir(&claimed).unwrap();
+        let socket = claimed.join(API_SOCKET);
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let api = state.path().join(API_SOCKET);
+        let error = adopt(&claimed, &root.path().join("idle-a"), state.path(), &api).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not private to the invoking user")
+        );
+        assert!(socket.exists(), "rejection must not move the socket");
+        assert!(!api.exists(), "rejection must not adopt an unready socket");
     }
 
     #[test]

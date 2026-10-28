@@ -46,7 +46,7 @@ impl WarmSource {
             }
             Self::Manifest(arg) => {
                 let mut manifest = Some(arg.clone());
-                bundle::settle_manifest_archive(&mut manifest, false)?;
+                bundle::settle_manifest_archive(&mut manifest, false, false)?;
                 let settled = manifest.unwrap_or_else(|| arg.clone());
                 manifest_template_source(&settled)
             }

@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list e2e
+
 # End-to-end launch gate: boot a real guest through every README-documented
 # entry point (CLI verbs, runtime SDK, decorator SDK, Rust library facade) on
 # whatever backend this host has. Unlike `live-ci` this is deliberately NOT
@@ -61,7 +66,7 @@ docs:
 
 # The release lane fetches the signed builder image; this proves a checkout can
 # still build one from nothing. Needs an empty MVM_E2E_HOME, Linux with KVM, and
-# the time a cold Stage 0 takes — Extended CI runs it nightly.
+# the time a cold Stage 0 takes — run it by hand.
 #
 
 # Bootstrap the builder image from source against a cold home

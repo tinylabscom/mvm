@@ -415,6 +415,7 @@ pub fn seed_resolv_conf_bytes(seed: &[u8]) -> Result<(), String> {
     // matters, not the mechanism.
     if std::path::Path::new("/etc/resolv.conf").exists() {
         let mut command = std::process::Command::new("/bin/busybox");
+        crate::trusted_env::configure_command(&mut command);
         command.args([
             "mount",
             "--bind",
@@ -474,6 +475,7 @@ pub fn configure_guest_network(
     // needs no in-guest networking tools.
     let script = "/etc/udhcpc/default.script";
     let mut cmd = std::process::Command::new("/bin/udhcpc");
+    crate::trusted_env::configure_command(&mut cmd);
     cmd.args(["-i", iface, "-n", "-q"]);
     if std::path::Path::new(script).is_file() {
         cmd.args(["-s", script]);

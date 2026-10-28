@@ -39,7 +39,8 @@ jobs:
             artifact: first-run-macos-hvf
             target: aarch64-apple-darwin
           - lane: Linux, Firecracker
-            runner: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
             artifact: first-run-linux-firecracker
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}

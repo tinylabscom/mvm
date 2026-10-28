@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use crate::arch::GuestArch;
 use crate::image_set::{
     ArtifactFormat, BackendImageSupport, HostProtocolSupport, ImageSetManifest, MemberArtifact,
-    WorkloadImageProfile, image_set_root_proof_cache, image_train_lock, read_cached_image_set_root,
-    select_workload_image,
+    WorkloadImageProfile, image_set_root_proof_cache, image_train_lock,
+    read_cached_workload_image_set_root, select_workload_image,
 };
 use crate::image_set_revocation::{ImageSetRevocationStore, VerifiedImageSetRevocations};
 use crate::kernel_format::KernelFormat;
@@ -26,6 +26,9 @@ use crate::plan::{AssetKind, ExecutionPlan};
 use crate::protocol::vm_backend::{BackendKind, VmStartConfig};
 use crate::registry_pack::{PackPin, RegistryPackImage};
 use crate::registry_pack_image::{BuiltImagePlatform, BuiltPackImageDescriptor};
+
+/// Signed raw member emitted by the canonical sealed-bundle producer.
+pub const APPLICATION_ROOT_HASH_MEMBER_NAME: &str = "rootfs.roothash";
 
 /// One freshly authenticated installed image and its accepted base declarations.
 ///
@@ -62,6 +65,142 @@ pub struct AuthenticatedBootImageExpectations {
 }
 
 impl AuthenticatedBootImageExpectations {
+    /// Bind application byte facts to the original descriptor/archive selection.
+    ///
+    /// Plan/config are expectations, not admission. Current trust, compatibility,
+    /// canonical kernel preparation and native custody remain mandatory at the
+    /// caller's admission and handoff boundaries.
+    /// Legacy archives without the original signed raw root-hash member are
+    /// unsupported by this route; they are never silently upgraded or repinned.
+    pub fn for_application(
+        application: &crate::registry_pack::application_bundle::VerifiedApplicationBundle,
+        plan: &ExecutionPlan,
+        config: &VmStartConfig,
+    ) -> Result<Self> {
+        use crate::image_set::ArtifactName;
+        use crate::plan::bundle::{ArtifactRole, BundleArtifact, BundleRegistry};
+        use crate::registry_pack::AuthenticatedRegistryManifest;
+
+        let original = application.bundle().plan_artifact();
+        ensure!(
+            plan.bundle.as_ref() == Some(&original),
+            "application plan differs from the original archive, signature or author"
+        );
+        let descriptor = application.application();
+        let reference = descriptor.reference().to_string();
+        let mut identities = plan
+            .asset_identities
+            .iter()
+            .filter(|asset| asset.kind == AssetKind::RegistryPack && asset.name == reference);
+        let identity = identities
+            .next()
+            .context("application plan does not bind its descriptor reference")?;
+        ensure!(
+            identities.next().is_none(),
+            "application plan descriptor reference is ambiguous"
+        );
+        ensure!(
+            identity.digest == descriptor.manifest_sha256().as_str(),
+            "application plan descriptor digest differs from its authenticated descriptor"
+        );
+        let manifest = &application.bundle().manifest;
+        let mut paths = std::collections::BTreeSet::new();
+        ensure!(
+            manifest
+                .artifacts
+                .iter()
+                .all(|artifact| paths.insert(&artifact.path)),
+            "application signed inventory contains duplicate paths"
+        );
+        let unique_role = |role: ArtifactRole| -> Result<&BundleArtifact> {
+            let mut found = manifest
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.role == role);
+            let selected = found
+                .next()
+                .context("application signed boot role is missing")?;
+            ensure!(
+                found.next().is_none(),
+                "application signed boot role is ambiguous"
+            );
+            ensure!(selected.size_bytes > 0, "application boot member is empty");
+            Ok(selected)
+        };
+        let named_other = |name: &str| -> Result<&BundleArtifact> {
+            let mut found = manifest
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.name == name);
+            let selected = found
+                .next()
+                .context("application signed boot member is missing")?;
+            ensure!(
+                found.next().is_none()
+                    && selected.role == ArtifactRole::Other
+                    && selected.size_bytes > 0,
+                "application named boot member is ambiguous, empty or has the wrong role"
+            );
+            Ok(selected)
+        };
+        let rootfs = unique_role(ArtifactRole::Rootfs)?;
+        let verity = unique_role(ArtifactRole::VerityHashSidecar)?;
+        let binding = manifest
+            .verity
+            .as_ref()
+            .context("application has no signed verity binding")?;
+        ensure!(
+            binding.sidecar_artifact == verity.name,
+            "application verity binding selects a different signed member"
+        );
+        let metadata = named_other(crate::guest_sidecar::SIDECAR_FILENAME)?;
+        let roothash = named_other(APPLICATION_ROOT_HASH_MEMBER_NAME)?;
+        let directory = Path::new(&rootfs.path)
+            .parent()
+            .context("application rootfs parent missing")?;
+        ensure!(
+            Path::new(&metadata.path) == directory.join(crate::guest_sidecar::SIDECAR_FILENAME)
+                && Path::new(&roothash.path) == directory.join(APPLICATION_ROOT_HASH_MEMBER_NAME),
+            "application metadata or root hash is outside the supported rootfs layout"
+        );
+        let installed = BundleRegistry::default_path()?.install_dir(&original.bundle_sha256);
+        ensure!(
+            Path::new(&config.rootfs_path) == installed.join(&rootfs.path)
+                && config.verity_path.as_deref().map(Path::new)
+                    == Some(installed.join(&verity.path).as_path())
+                && plan.image.sha256 == rootfs.sha256,
+            "application effective config or plan rootfs differs from its signed inventory"
+        );
+        let canonical_hash = Sha256Hex::new(binding.roothash.clone())?;
+        let expected_bytes = format!("{}\n", canonical_hash.as_str());
+        ensure!(
+            roothash.size_bytes == 65
+                && roothash.sha256 == crate::plan::bundle::sha256_hex(expected_bytes.as_bytes()),
+            "application root hash member must sign exactly 64 lowercase hex bytes and one LF"
+        );
+        let bytes = application.application_root_hash_member()?;
+        ensure!(
+            bytes == expected_bytes.as_bytes()
+                && config.roothash.as_deref() == Some(canonical_hash.as_str()),
+            "application raw member, manifest verity and effective root hash disagree"
+        );
+        let asset =
+            |artifact: &BundleArtifact| -> Result<crate::registry_pack_image::BuiltImageAsset> {
+                Ok(crate::registry_pack_image::BuiltImageAsset {
+                    name: ArtifactName::new(artifact.name.clone())?,
+                    sha256: Sha256Hex::new(artifact.sha256.clone())?,
+                    size: artifact.size_bytes,
+                })
+            };
+        Ok(Self {
+            rootfs: asset(rootfs)?,
+            verity: asset(verity)?,
+            metadata: asset(metadata)?,
+            roothash: asset(roothash)?,
+            root_hash: canonical_hash.as_str().to_owned(),
+        })
+    }
+
     fn asset(&self, role: BootImageAsset) -> &crate::registry_pack_image::BuiltImageAsset {
         match role {
             BootImageAsset::Rootfs => &self.rootfs,
@@ -153,7 +292,7 @@ impl BuiltPackBootContract {
         };
         let accepted = &image_train_lock().image_set;
         image.validate_pin(pin.reference(), accepted)?;
-        let root = read_cached_image_set_root(
+        let root = read_cached_workload_image_set_root(
             &image_set_root_proof_cache(),
             accepted,
             host,

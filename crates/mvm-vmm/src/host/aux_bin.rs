@@ -697,14 +697,15 @@ fn resolve_from(spec: &AuxBin, lookup: &Lookup) -> Result<PathBuf> {
 }
 
 /// The error for a helper that resolved nowhere. A release download ships a
-/// fixed set of helpers, so for one the remedy is a choice of backend, not a
-/// `cargo build`.
+/// fixed set of helpers, so for one the remedy is adding the signed component
+/// set or choosing another backend, never a `cargo build`.
 fn missing_message(spec: &AuxBin, release_binary: bool) -> String {
     if release_binary && spec.bin == LIBKRUN_SUPERVISOR_BIN {
         return format!(
-            "{} not found. The libkrun backend is not included in this release download yet. \
-             Use HVF on macOS 26+ (the default), or build mvmctl from source to use libkrun. \
-             See https://runmvm.com/reference/platform-support/.",
+            "{} not found. This release install can fetch the signed libkrun component \
+             set: run `mvmctl backend add libkrun` (macOS 13-25 Apple Silicon); no \
+             separate libkrun install is needed. On macOS 26+ the default HVF backend \
+             needs no libkrun files. See https://runmvm.com/reference/platform-support/.",
             spec.bin
         );
     }
@@ -1550,18 +1551,18 @@ mod tests {
     }
 
     #[test]
-    fn a_release_binary_says_libkrun_is_not_in_the_download() {
+    fn a_release_binary_names_the_backend_add_and_hvf_remedies() {
         let spec = AuxBin::new(
             "mvm-libkrun-supervisor",
             "MVM_LIBKRUN_SUPERVISOR",
             "mvm-hostd",
         );
         let message = missing_message(&spec, true);
-        assert!(message.contains("not included in this release download"));
-        assert!(message.contains("HVF on macOS 26+"));
-        assert!(message.contains("build mvmctl from source"));
-        assert!(!message.contains("cargo build"));
-        assert!(!message.to_lowercase().contains("brew"));
+        assert!(message.contains("mvmctl backend add libkrun"), "{message}");
+        assert!(message.contains("HVF"), "{message}");
+        assert!(!message.contains("cargo build"), "{message}");
+        // A release install never prints a Homebrew instruction.
+        assert!(!message.to_lowercase().contains("brew"), "{message}");
     }
 
     #[test]

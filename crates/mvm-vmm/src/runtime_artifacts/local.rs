@@ -119,6 +119,7 @@ impl Observer {
         // Do not unlink a pre-existing endpoint: a second supervisor must not
         // silently steal an existing instance's query channel.
         let path = socket_path(state_dir);
+        mvm_core::config::secure_fallback_socket_dir_at(state_dir)?;
         if let Some(parent) = path.parent() {
             mvm_core::private_fs::ensure_private_dir(parent)?;
         }

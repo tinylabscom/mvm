@@ -2,7 +2,7 @@
 
 Two routes from this file produce the same Workload IR:
 
-  - `mvmctl build compile examples/python/hello-app/app.py` walks the AST
+  - `mvmctl dev compile examples/python/hello-app/app.py` walks the AST
     statically and emits flake.nix + launch.json + bundled src/. The
     host never imports or executes this script.
 

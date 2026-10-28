@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// The environment variable naming the trace file.
 pub const AGENT_DEBUG_ENV: &str = "MVM_HVF_AGENT_DEBUG";
@@ -35,6 +36,27 @@ pub fn line(tag: &str, message: impl std::fmt::Display) {
     if let Some(path) = path() {
         line_at(path, tag, message);
     }
+}
+
+/// Append `[tag] {fields} elapsed_us=.. unix_us=..` when tracing is on: how long
+/// into a step `started` marks the caller is, and the wall clock so a detached
+/// helper's lines line up with the launch that spawned it.
+pub fn phase(tag: &str, started: Instant, fields: impl std::fmt::Display) {
+    if let Some(path) = path() {
+        phase_at(path, tag, started, fields);
+    }
+}
+
+fn phase_at(path: &Path, tag: &str, started: Instant, fields: impl std::fmt::Display) {
+    let elapsed_us = started.elapsed().as_micros();
+    let unix_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros());
+    line_at(
+        path,
+        tag,
+        format_args!("{fields} elapsed_us={elapsed_us} unix_us={unix_us}"),
+    );
 }
 
 fn open_at(path: &Path) -> Option<File> {
@@ -67,6 +89,16 @@ mod tests {
             std::fs::read_to_string(&trace).unwrap(),
             "[vsock] SYNTHETIC_MARKER first\n[handoff] second\n"
         );
+    }
+
+    #[test]
+    fn a_phase_line_carries_the_step_and_both_clocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace = dir.path().join("agent-debug.log");
+        phase_at(&trace, "pool-refill", Instant::now(), "phase=scheduled");
+        let written = std::fs::read_to_string(&trace).unwrap();
+        assert!(written.starts_with("[pool-refill] phase=scheduled elapsed_us="));
+        assert!(written.contains(" unix_us="));
     }
 
     #[test]

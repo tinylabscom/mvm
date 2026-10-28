@@ -267,7 +267,9 @@ jobs:
         with:
           name: pypi-dist-${{ matrix.platform }}
           path: dist/*
-          retention-days: 1
+          # Keep the actual package bytes available for release evidence review.
+          retention-days: 30
+          if-no-files-found: error
 
   publish:
     if: ${{ !inputs.dry_run }}

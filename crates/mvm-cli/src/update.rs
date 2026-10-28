@@ -194,7 +194,7 @@ fn signed_archive_digest(tag: &str, archive_name: &str) -> Result<String> {
 }
 
 /// Hold a downloaded archive to the digest the signed manifest publishes for it.
-fn verify_checksum(tag: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
+pub(crate) fn verify_checksum(tag: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
     let expected = signed_archive_digest(tag, archive_name)?;
 
     let bytes = std::fs::read(archive_path).with_context(|| {
@@ -219,7 +219,7 @@ fn verify_checksum(tag: &str, archive_name: &str, archive_path: &Path) -> Result
 }
 
 /// Download the release archive into the given temp directory.
-fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
+pub(crate) fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
     let archive_name = format!("mvmctl-{}.tar.gz", target);
     let download_url = format!("{}/{}", release_base(version), archive_name);
     let dest = tmp_dir.join(&archive_name);
@@ -332,7 +332,7 @@ fn publish_downloaded_kernel(download: tempfile::TempPath, dest: &Path) -> Resul
 }
 
 /// Check if a directory is writable by the current user.
-fn is_writable(path: &Path) -> bool {
+pub(crate) fn is_writable(path: &Path) -> bool {
     tempfile::Builder::new()
         .prefix(".mvm-write-test-")
         .tempfile_in(path)
@@ -921,7 +921,7 @@ fn set_executable(_path: &Path) -> Result<()> {
 }
 
 /// Recursively copy a directory.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -944,7 +944,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// verdict as one with it. A missing, unparseable, or foreign-signed bundle
 /// refuses the update. The SHA-256 checked before this already came from a
 /// signed manifest; this binds the archive to the workflow directly as well.
-fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
+pub(crate) fn verify_signature(
+    version: &str,
+    archive_name: &str,
+    archive_path: &Path,
+) -> Result<()> {
     ui::info("Verifying release signature...");
     verify_archive_signature_at(&release_base(version), version, archive_name, archive_path)?;
     ui::success("Signature verified.");

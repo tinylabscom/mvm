@@ -98,7 +98,7 @@ selectors, and host-grant fields. An image source never authorizes a host
 directory share or a guest network device.
 
 For an application image, the SDK compiler can generate the flake from a
-Python or TypeScript workload declaration. `mvmctl build compile` accepts
+Python or TypeScript workload declaration. `mvmctl dev compile` accepts
 `--mvm-revision` with an exact 40-character commit ID; this pins the mvm input
 instead of using the compiler's normal development input. Put the generated
 `flake.nix`, `launch.json`, `workload.json`, and `src/` together under the

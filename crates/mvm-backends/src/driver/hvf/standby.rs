@@ -57,8 +57,10 @@ fn handoff_config(parent_vm_name: &str) -> Result<HandoffConfig> {
     let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
         .context("load host identity for HVF handoff")?;
     let state_dir = vm_state_dir(parent_vm_name);
+    mvm_core::config::secure_fallback_socket_dir_at(&state_dir)
+        .context("prepare HVF handoff socket directory")?;
     Ok(HandoffConfig {
-        socket: state_dir.join("hvf-handoff.sock"),
+        socket: mvm_core::config::vm_hvf_handoff_socket_at(&state_dir),
         root: mvm_core::config::vms_dir(),
         verify_key: hex::encode(identity.verifying.to_bytes()),
     })

@@ -17,13 +17,7 @@ fn compile_hello_app_lowers_decorator_to_flake() {
     #[allow(deprecated)]
     let st = Command::cargo_bin("mvmctl")
         .expect("locate mvmctl")
-        .args([
-            "build",
-            "compile",
-            app,
-            "--out",
-            out.path().to_str().unwrap(),
-        ])
+        .args(["dev", "compile", app, "--out", out.path().to_str().unwrap()])
         .status()
         .expect("spawn mvmctl compile");
 

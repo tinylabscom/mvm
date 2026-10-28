@@ -7,12 +7,16 @@
 //! refuses to seal such a manifest, and [`super::read_and_verify_bundle`]
 //! refuses to accept one.
 
+#[cfg(feature = "host-state")]
 use mvm_contract::plan::bundle::{
-    ArtifactRole, BundleManifest, BundleMember, BundleSecurityPosture,
-    ENVIRONMENT_MEMBER_MIN_SCHEMA, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES,
+    ArtifactRole, BundleManifest, BundleMember, ENVIRONMENT_MEMBER_MIN_SCHEMA,
     MAX_KERNEL_CMDLINE_BYTES,
 };
+use mvm_contract::plan::bundle::{
+    BundleSecurityPosture, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES,
+};
 use mvm_contract::plan::environment::{EnvironmentCapability, EnvironmentDescriptor};
+#[cfg(feature = "host-state")]
 use mvm_contract::plan::types::BuildProvenance;
 use mvm_contract::policy::security::AgentProfile;
 
@@ -54,6 +58,7 @@ impl BundleSizeBudget {
 
 /// Every check on a manifest's declarations: the size caps over its declared
 /// artifacts, then each declaration member.
+#[cfg(feature = "host-state")]
 pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), BundleVerifyError> {
     let mut budget = BundleSizeBudget::default();
     for artifact in &manifest.artifacts {
@@ -134,6 +139,7 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn declaration_class(member: &BundleMember) -> Option<&'static str> {
     match member {
         BundleMember::EmbeddedImageSet { .. } => None,
@@ -147,6 +153,7 @@ fn declaration_class(member: &BundleMember) -> Option<&'static str> {
     }
 }
 
+#[cfg(feature = "host-state")]
 fn validate_canonical_linux_proof(
     proof: &mvm_contract::plan::bundle::CanonicalLinuxProof,
     manifest: &BundleManifest,
@@ -211,6 +218,7 @@ fn validate_canonical_linux_proof(
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn validate_cli_runtime(
     runtime: &mvm_contract::plan::bundle::EmbeddedCliBootAssets,
     manifest: &BundleManifest,
@@ -282,6 +290,7 @@ fn validate_cli_runtime(
 
 /// Two postures in one bundle would leave the launcher to pick one, and
 /// whichever it picked the other was signed for nothing.
+#[cfg(feature = "host-state")]
 fn refuse_repeated_declarations(members: &[BundleMember]) -> Result<(), BundleVerifyError> {
     let mut seen: Vec<&'static str> = Vec::new();
     for class in members.iter().filter_map(declaration_class) {
@@ -293,6 +302,7 @@ fn refuse_repeated_declarations(members: &[BundleMember]) -> Result<(), BundleVe
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn validate_cmdline(cmdline: &str) -> Result<(), BundleVerifyError> {
     let malformed = |reason: String| Err(BundleVerifyError::MalformedCmdline { reason });
     if cmdline.trim().is_empty() {
@@ -312,6 +322,7 @@ fn validate_cmdline(cmdline: &str) -> Result<(), BundleVerifyError> {
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn validate_posture(
     posture: &BundleSecurityPosture,
     has_verity_binding: bool,
@@ -345,6 +356,7 @@ fn validate_posture(
 /// signed posture permits. A descriptor that requires any capability without a
 /// posture to measure it against is refused: there is nothing to say the
 /// publisher permitted it.
+#[cfg(feature = "host-state")]
 fn validate_environment(
     environment: &EnvironmentDescriptor,
     manifest: &BundleManifest,
@@ -401,6 +413,46 @@ pub fn unsupported_environment_requirements(
     fields
 }
 
+/// Whether a concrete launch network is contained in the signed environment.
+/// This measures a ceiling only; it never supplies authority or defaults.
+pub fn environment_network_permitted(
+    environment: &EnvironmentDescriptor,
+    network: &crate::network_policy::NetworkPolicy,
+) -> bool {
+    use mvm_contract::grants::{EgressGrant, Grants, subset::grants_are_subset};
+    use mvm_contract::plan::environment::EnvironmentPolicy;
+    let Some(policy) = &environment.policy else {
+        return true;
+    };
+    if policy.validate().is_err() || !network.peers().is_empty() {
+        return false;
+    }
+    let Some(rules) = network.resolve_rules() else {
+        return false;
+    };
+    let allowed: Vec<_> = policy
+        .allow_hosts
+        .iter()
+        .filter_map(|host| EnvironmentPolicy::parse_authority(host).ok())
+        .collect();
+    let child = Grants {
+        egress: Some(EgressGrant { allow: rules }),
+        ..Default::default()
+    };
+    let parent = Grants {
+        egress: Some(EgressGrant {
+            allow: allowed.clone(),
+        }),
+        ..Default::default()
+    };
+    grants_are_subset(&child, &parent).is_ok()
+        && network.routes().iter().all(|route| {
+            allowed
+                .iter()
+                .any(|host| host.host == route.host && host.port == route.port)
+        })
+}
+
 /// Required descriptor slots not bound by the signed plan. This checks names,
 /// not secret values or endpoint substitution, which remain broker-owned.
 pub fn unbound_environment_secret_slots(
@@ -445,6 +497,7 @@ fn posture_permits(posture: &BundleSecurityPosture, capability: EnvironmentCapab
 /// bundle carries must match it. Digests for outputs a bundle has no role for
 /// (`mvm_init`, `snapshot_base`) describe the build, not the archive, and are
 /// carried as recorded.
+#[cfg(feature = "host-state")]
 fn validate_provenance(
     provenance: &BuildProvenance,
     manifest: &BundleManifest,
@@ -483,7 +536,7 @@ fn validate_provenance(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-state"))]
 mod tests {
     use super::*;
     use mvm_contract::plan::bundle::{BUNDLE_SCHEMA_VERSION, BundleArtifact, KeyId, VerityInfo};
@@ -882,6 +935,94 @@ mod tests {
             requires_auth: true,
             allows_volumes: true,
             allows_egress: true,
+        }
+    }
+
+    #[test]
+    fn signed_policy_is_an_exact_network_ceiling_not_authority() {
+        use crate::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
+        let mut descriptor = environment(&["egress"]);
+        descriptor.policy = Some(mvm_contract::plan::EnvironmentPolicy {
+            allow_hosts: vec!["api.anthropic.com:443".into()],
+        });
+        for network in [
+            NetworkPolicy::deny_all(),
+            NetworkPolicy::allow_list(vec![HostPort::new("api.anthropic.com", 443)]),
+        ] {
+            assert!(environment_network_permitted(&descriptor, &network));
+        }
+        for network in [
+            NetworkPolicy::unrestricted(),
+            NetworkPolicy::preset(NetworkPreset::Dev),
+            NetworkPolicy::allow_list(vec![HostPort::new("api.openai.com", 443)]),
+            NetworkPolicy::allow_list(vec![HostPort::new("api.anthropic.com", 8443)]),
+            NetworkPolicy::allow_list(vec![HostPort::new("API.ANTHROPIC.COM", 443)]),
+            NetworkPolicy::allow_list(vec![HostPort::new("*.anthropic.com", 443)]),
+            NetworkPolicy::allow_list(vec![HostPort::new("::1", 443)]),
+        ] {
+            assert!(
+                !environment_network_permitted(&descriptor, &network),
+                "{network:?}"
+            );
+        }
+        for host in ["*.anthropic.com", "api.openai.com"] {
+            let route = serde_json::from_value(serde_json::json!({
+                "id": "route", "host": host, "port": 443
+            }))
+            .unwrap();
+            assert!(!environment_network_permitted(
+                &descriptor,
+                &NetworkPolicy::deny_all().with_routes(vec![route])
+            ));
+        }
+        let exact_route = serde_json::from_value(serde_json::json!({
+            "id": "exact", "host": "api.anthropic.com", "port": 443
+        }))
+        .unwrap();
+        assert!(environment_network_permitted(
+            &descriptor,
+            &NetworkPolicy::allow_list(vec![HostPort::new("api.anthropic.com", 443)])
+                .with_routes(vec![exact_route])
+        ));
+        let peer = serde_json::from_value(serde_json::json!({
+            "name": "db.mvm.peer", "port": 5432, "host_addr": "127.0.0.1", "host_port": 5432
+        }))
+        .unwrap();
+        assert!(!environment_network_permitted(
+            &descriptor,
+            &NetworkPolicy::deny_all().with_peers(vec![peer])
+        ));
+        descriptor.policy = None;
+        assert!(environment_network_permitted(
+            &descriptor,
+            &NetworkPolicy::unrestricted()
+        ));
+    }
+
+    #[test]
+    fn signed_ipv6_authorities_match_only_the_canonical_runtime_host() {
+        use crate::network_policy::{HostPort, NetworkPolicy};
+        let mut descriptor = environment(&["egress"]);
+        descriptor.policy = Some(mvm_contract::plan::EnvironmentPolicy {
+            allow_hosts: vec!["[2001:db8::1]:443".into()],
+        });
+        assert!(environment_network_permitted(
+            &descriptor,
+            &NetworkPolicy::allow_list(vec![HostPort::new("2001:db8::1", 443)])
+        ));
+        for host in [
+            "[2001:db8::1]",
+            "2001:0db8::1",
+            "2001:db8::2",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(
+                !environment_network_permitted(
+                    &descriptor,
+                    &NetworkPolicy::allow_list(vec![HostPort::new(host, 443)])
+                ),
+                "{host}"
+            );
         }
     }
 

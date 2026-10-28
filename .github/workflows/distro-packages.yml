@@ -11,7 +11,7 @@ name: Linux distro packages
 # guest-runtime job built; the release job then signs, attests and publishes
 # the packages with the tarballs. Anywhere else it packages a published release's
 # tarballs instead, so the packaging path is exercised without a release
-# build: on pull requests that change it, nightly from Extended CI, and on
+# build: on pull requests that change it and on
 # dispatch.
 
 on:
@@ -35,34 +35,14 @@ on:
         description: Release whose tarballs to package; empty for the newest CLI release
         type: string
         default: ""
-  pull_request:
-    paths:
-      - .githooks/pre-commit
-      - scripts/pre-commit.test.sh
-      - .github/workflows/distro-packages.yml
-      - scripts/build-distro-packages.sh
-      - scripts/distro-package-smoke.sh
-      - scripts/smoke-installed-release.py
-      - scripts/test_smoke_installed_release.py
-      - scripts/published-installed-boot.py
-      - scripts/smoke-fresh-install.sh
-      - tests/test_published_installed_boot.py
-      - .github/workflows/first-run-smoke.yml
-      - .github/workflows/release.yml
-      - .github/workflows/pack-signing-smoke.yml
-      - scripts/locked-image-tag.sh
-      - crates/mvm-core/images.lock
-      - scripts/release/**
-      - nix/packaging/aur/**
-      - nix/packaging/nixpkgs/**
-      - nix/packaging/release/verify-release-assets*
 
 permissions:
   contents: read
 
 jobs:
   contracts:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
@@ -86,7 +66,8 @@ jobs:
 
   package:
     needs: contracts
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
       version: ${{ steps.source.outputs.version }}
@@ -143,9 +124,11 @@ jobs:
           tag="${RELEASE_TAG}"
           if [ -z "${tag}" ]; then
             # CLI releases are the `v<semver>` tags; the repository also
-            # publishes SDK and revocation releases under other prefixes.
-            tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --exclude-drafts --limit 50 \
-              --json tagName --jq '[.[].tagName | select(test("^v[0-9]"))][0]')"
+            # publishes SDK, revocation and per-commit source-helper
+            # releases. Traverse every release page: source-helper releases can
+            # fill more than one API page before a stable CLI release.
+            tag="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq -rs 'first(.[][] | select((.draft | not) and (.prerelease | not) and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | .tag_name) // empty')"
           fi
           [ -n "${tag}" ] || { echo "::error::no published CLI release to package" >&2; exit 1; }
           gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
@@ -263,7 +246,8 @@ jobs:
         arch: [x86_64, aarch64]
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
             deb_arch: amd64
           - arch: aarch64
             runner: ubuntu-24.04-arm

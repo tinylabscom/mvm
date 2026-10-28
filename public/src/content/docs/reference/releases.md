@@ -93,8 +93,8 @@ with the id of an earlier release run to smoke the archive that run built:
 | `brew install tinylabscom/mvm/mvmctl` | the same tarball, via the tap formula |
 | `cargo install --git https://github.com/tinylabscom/mvm mvmctl` | source from the repository (CLI binary only; no adjacent helper bundle). `mvmctl` is not on crates.io; only `mvm-contract` is published there |
 | `mvmctl env update` | the tarball for the latest release and that release's guest runtime, which it fetches and verifies before the in-place swap |
-| `mvmctl build kernel build --source download` | the kernel member of the pinned image set, verified against its signed root |
-| `mvmctl build runtime-overlay build --source download` (releases that predate the guest-runtime asset only) | `runtime-overlay-<arch>.tar.gz` from the pinned image set, verified against its signed root; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`. Current releases have no `--source download`: they assemble the overlay from their guest runtime |
+| `mvmctl dev kernel build --source download` | the kernel member of the pinned image set, verified against its signed root |
+| `mvmctl dev runtime-overlay build --source download` (releases that predate the guest-runtime asset only) | `runtime-overlay-<arch>.tar.gz` from the pinned image set, verified against its signed root; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`. Current releases have no `--source download`: they assemble the overlay from their guest runtime |
 
 ## Image releases and the support window
 

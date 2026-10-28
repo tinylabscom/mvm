@@ -46,7 +46,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     if let Some(snap) = revision {
         println!("\nSnapshot: yes (created {})", snap.created_at);
     } else {
-        println!("\nSnapshot: none — `mvmctl build --snapshot` to create one");
+        println!("\nSnapshot: none");
     }
 
     Ok(())

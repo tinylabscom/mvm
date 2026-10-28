@@ -74,7 +74,7 @@ use mvm_core::pack_cache::{PackVerifyCtx, resolve_pack_digest};
 use mvm_core::packs::{PackKind, Sha256Hex};
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
-    ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
+    ExecutionPlan, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
     check_embedded_image_set_for_backend, check_window, sign_plan, verify_plan, verify_plan_bundle,
     verify_plan_id,
 };
@@ -82,7 +82,6 @@ use mvm_core::policy::PolicyBundle;
 use mvm_core::spawn_scope;
 use mvm_core::vm_backend::BackendKind;
 use mvm_vmm::quota::QuotaConfig;
-use std::sync::Mutex;
 
 use crate::audit::host_keypair::host_signer_id;
 use mvm_contract::builder::BuilderError;
@@ -97,39 +96,19 @@ mod canonical_kernel;
 mod display_grants;
 mod final_gates;
 mod host_trust;
+mod nonce_ledger;
 mod registry_pack;
 mod verb_grant_sidecar;
 
 use assurance_runtime::{AssuranceRuntimeBinding, verify_selected_runtime};
 use host_trust::{host_grant_ceiling, host_trusted_plan_signers};
+pub use nonce_ledger::InMemoryNonceLedger;
 use registry_pack::verify_registry_pack_assets;
 use verb_grant_sidecar::mint_verb_grant_sidecar;
 
 pub use bundle_environment::BundleEnvironmentRefused;
 pub use mvm_core::time::{Clock, SystemClock};
 pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_built_pack_start};
-
-/// Production nonce ledger. Holds a `NonceStore` behind a mutex so
-/// it's `Send + Sync`. In v0 we instantiate one per boot —
-/// later when the supervisor is in-process, the ledger spans every
-/// up call for the lifetime of the supervisor.
-pub struct InMemoryNonceLedger {
-    inner: Mutex<NonceStore>,
-}
-
-impl InMemoryNonceLedger {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(NonceStore::default()),
-        }
-    }
-}
-
-impl Default for InMemoryNonceLedger {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Result of a successful admission. Carries everything the caller
 /// needs to hand to the backend (the plan + its id), to the audit
@@ -565,7 +544,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
             verify_plan_bundle(pin, ctx.resolver, ctx.trust)
         }
         .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
-        bundle_environment::verify_environment(&verified, &verified_bundle.manifest)?;
+        bundle_environment::verify_environment(&verified, &verified_bundle.manifest, posture)?;
         if !verified_bundle.embedded_image_sets.is_empty() {
             let image = ctx.image.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -602,12 +581,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
 
     // Spend the nonce only after every fallible descriptor and bundle check.
     // Refusal must not consume an externally signed plan's replay allowance.
-    {
-        let mut store = ledger.inner.lock().expect("nonce store mutex poisoned");
-        store
-            .check_and_insert(&signer_id, &verified)
-            .context("replay protection check")?;
-    }
+    ledger.spend(&signer_id, &verified, now)?;
 
     Ok(AdmittedPlan {
         plan_id: verified.plan_id.clone(),
@@ -4451,6 +4425,87 @@ mod tests {
     }
 
     #[test]
+    fn signed_environment_policy_refuses_missing_or_wider_actual_runtime() {
+        use mvm_core::network_policy::NetworkPolicy;
+        use mvm_core::plan::bundle::BundleMember;
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let environment = serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": format!("{arch}-linux"),
+            "entrypoint": { "argv": ["/usr/bin/agent"] },
+            "policy": { "allow_hosts": ["api.anthropic.com:443"] }
+        }))
+        .unwrap();
+        let (archive, pin) = make_test_bundle_with_members(
+            &sk,
+            b"kernel",
+            b"rootfs",
+            &arch,
+            vec![BundleMember::Environment(environment)],
+        );
+        let trust = MapTrust(HashMap::from([(
+            key_id_from_pubkey(&sk.verifying_key()),
+            sk.verifying_key(),
+        )]));
+        let resolver = FixedResolver(archive);
+        let ctx = BundleAdmissionContext {
+            resolver: &resolver,
+            trust: &trust,
+            image: None,
+        };
+        let input = input_with_pin("vm-policy", &pin);
+        let fleet = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let mut config = mvm_core::user_config::load(None);
+        config.trusted_plan_signers = vec![mvm_core::user_config::TrustedPlanSigner {
+            signer_id: "policy-fleet".into(),
+            ed25519_pubkey_hex: hex::encode(fleet.verifying_key().as_bytes()),
+        }];
+        mvm_core::user_config::save(&config, None).unwrap();
+        let signed = sign_plan(&synthesize_plan(&input).unwrap(), &fleet, "policy-fleet");
+        let wider = VmStartConfig {
+            network_policy: NetworkPolicy::unrestricted(),
+            ..Default::default()
+        };
+        for runtime in [None, Some(&wider)] {
+            let posture = RunPosture::without_backend(Variant::Dev).with_runtime(runtime);
+            let error = admit_for_run(
+                &input,
+                &SystemClock,
+                &InMemoryNonceLedger::new(),
+                Some(dir.path()),
+                Some(&ctx),
+                posture,
+            )
+            .expect_err("signed policy requires an actual bounded runtime");
+            assert!(
+                error.downcast_ref::<BundleEnvironmentRefused>().is_some(),
+                "{error:#}"
+            );
+            assert!(
+                format!("{error:#}").contains("actual launch network"),
+                "{error:#}"
+            );
+            let ledger = InMemoryNonceLedger::new();
+            for _ in 0..2 {
+                let error =
+                    admit_signed_plan_for_run(&signed, &SystemClock, &ledger, Some(&ctx), posture)
+                        .expect_err("external plans cannot bypass the runtime ceiling");
+                assert!(
+                    error.downcast_ref::<BundleEnvironmentRefused>().is_some(),
+                    "{error:#}"
+                );
+                assert!(
+                    !format!("{error:#}").contains("replay protection"),
+                    "{error:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn direct_host_admission_enforces_signed_environment_slots() {
         use mvm_core::plan::bundle::BundleMember;
         let (_env, _home) = host_with_ceiling(Default::default());
@@ -6663,6 +6718,43 @@ mod signed_plan_admission_tests {
             .expect_err("a plan whose window has not opened must be refused");
         assert!(
             format!("{err:#}").contains("plan validity window violated"),
+            "got: {err:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replayed_plan_is_refused_by_a_fresh_process_sharing_the_durable_ledger() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+        let dir = tempfile::tempdir().expect("ledger dir");
+        let ledger_dir = dir.path().join("plan-nonces");
+
+        // Two ledgers on one directory stand in for two launches, which each
+        // build their own ledger.
+        let first = InMemoryNonceLedger::durable_in(&ledger_dir).expect("open ledger");
+        admit(&signed, &first).expect("the first launch is admitted");
+        let second = InMemoryNonceLedger::durable_in(&ledger_dir).expect("open ledger");
+        let err = admit(&signed, &second).expect_err("the same plan in a later launch is a replay");
+        assert!(format!("{err:#}").contains("replay"), "got: {err:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plan_is_refused_when_its_nonce_cannot_be_recorded() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+        let dir = tempfile::tempdir().expect("ledger dir");
+        let ledger =
+            InMemoryNonceLedger::durable_in(dir.path().join("plan-nonces")).expect("open ledger");
+        std::fs::write(
+            dir.path().join("plan-nonces").join("nonces.tsv"),
+            "corrupt\n",
+        )
+        .expect("corrupt the ledger");
+        let err = admit(&signed, &ledger).expect_err("an unreadable ledger must refuse");
+        assert!(
+            format!("{err:#}").contains("cannot be recorded"),
             "got: {err:#}"
         );
     }

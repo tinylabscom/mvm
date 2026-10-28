@@ -8,7 +8,7 @@ explicit `mvm.literal(...)` wrapper.
 ## Build, run, invoke
 
 ```sh
-mvmctl build compile examples/python/hello-env/app.py --out /tmp/hello-env
+mvmctl dev compile examples/python/hello-env/app.py --out /tmp/hello-env
 mvmctl machine run --flake /tmp/hello-env --entrypoint
 # expect: "hello danny"
 ```

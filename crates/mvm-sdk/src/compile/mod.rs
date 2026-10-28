@@ -7,9 +7,12 @@
 //! and artifact signing are not compiler responsibilities.
 
 pub use mvm_compiler::{
-    archive, deps, deps_audit, explain, flake, func_describe, hooks, launch, mvm_pin, orchestrator,
+    archive, deps, explain, flake, func_describe, hooks, launch, mvm_pin, orchestrator,
     reachability, source, strip_framework,
 };
+/// The sealed-volume verifier. It lives in `mvm-core`, below both the compiler and
+/// the host daemons; the facade keeps its historical path.
+pub use mvm_core::deps_audit;
 
 pub use archive::{ArchiveError, archive_dir};
 pub use deps::{DepsError, validate_lockfiles};

@@ -31,6 +31,28 @@ fn just_module(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
+/// The macOS libkrunfw kernel build runs `make LLVM=1 LD=ld.lld`. Homebrew's
+/// `llvm` formula no longer ships `ld.lld`; it is the separate `lld` formula. The
+/// install step must name it and the build step must put its `bin` on PATH, or
+/// the Kconfig probe stops with "linker 'ld.lld' not found" (the v0.25.0 tag run).
+#[test]
+fn macos_libkrun_tier_installs_lld_and_puts_it_on_path() {
+    let workflow = release_workflow();
+    let install = workflow
+        .lines()
+        .find(|line| line.contains("brew install") && line.contains("llvm"))
+        .expect("the macOS libkrun dependency install step must exist");
+    assert!(
+        install.split_whitespace().any(|word| word == "lld"),
+        "the libkrunfw kernel build needs ld.lld, the separate `lld` formula: {install}"
+    );
+    assert!(
+        workflow.contains("lld_prefix=\"$(brew --prefix lld)\"")
+            && workflow.contains("${lld_prefix}/bin"),
+        "the libkrun tier build step must put the lld formula's bin on PATH"
+    );
+}
+
 /// Manual validation cannot issue tag-bound proof or create a release.
 ///
 /// Candidate proof requires the real tag-push identity and successful input
@@ -318,7 +340,7 @@ fn every_cross_compiled_release_target_is_pinned_by_the_toolchain_file() {
     // Runner image -> the triple its rustc is native to.
     let native = [
         ("macos-latest", "aarch64-apple-darwin"),
-        ("ubuntu-latest", "x86_64-unknown-linux-gnu"),
+        ("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
         ("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu"),
     ];
 
@@ -406,7 +428,7 @@ fn linux_release_assets_keep_their_names_but_build_musl_payloads() {
 }
 
 fn ci_workflow() -> String {
-    let path = Path::new(".github/workflows/ci.yml");
+    let path = Path::new(".github/workflows/ci-main.yml");
     fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
@@ -702,6 +724,46 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
     );
 }
 
+/// The packaging dry run runs independently of a tag push. It must not mistake
+/// source-build, SDK, draft, or pre-release assets for the stable CLI release
+/// whose tarballs it verifies and repackages.
+#[test]
+fn distro_packages_discover_an_exact_stable_cli_release_across_all_pages() {
+    let packages = fs::read_to_string(".github/workflows/distro-packages.yml")
+        .expect("distro-packages.yml must exist");
+    let downloader = packages
+        .split("- name: Download a published release's tarballs")
+        .nth(1)
+        .expect("distro-packages.yml must download published release tarballs")
+        .split("- name: Download and authenticate the published packages")
+        .next()
+        .expect("published tarball downloader must end before package download");
+
+    assert!(
+        downloader
+            .contains("gh api --paginate \"repos/${GITHUB_REPOSITORY}/releases?per_page=100\""),
+        "release discovery must exhaust every releases API page, not inspect a fixed window"
+    );
+    assert!(
+        !downloader.contains("gh api --paginate --slurp") && !downloader.contains("--slurp"),
+        "gh api does not support combining --slurp with --jq; aggregate the paginated JSON with jq"
+    );
+    assert!(
+        downloader.contains("| jq -rs"),
+        "release discovery must emit the selected tag as raw text for gh release download"
+    );
+    assert!(
+        downloader.contains(
+            "select((.draft | not) and (.prerelease | not) and (.tag_name | test(\"^v[0-9]+\\\\.[0-9]+\\\\.[0-9]+$\")))"
+        ),
+        "release discovery must use release metadata and accept only exact stable vX.Y.Z CLI tags"
+    );
+    assert!(
+        !downloader.contains("gh release list"),
+        "the fixed-size release-list command misses stable CLI releases after source-build pages"
+    );
+}
+
 /// The CLI release carries no image. Images are built and signed in
 /// mvm-images, and every consumer verifies them against the signed root the
 /// lock pins; a CLI release that rebuilt, mirrored or re-signed one would be a
@@ -752,7 +814,7 @@ fn the_cli_release_ships_its_guest_runtime_signed_and_listed() {
     let lane = fs::read_to_string(".github/workflows/guest-bins.yml").expect("guest-bins.yml");
     assert!(
         lane.contains("  workflow_call:\n")
-            && lane.contains("build guest-bins --out dist")
+            && lane.contains("dev guest-bins --out dist")
             && lane.contains("name: mvm-guest-bins-attempt-${{ github.run_attempt }}"),
         "guest-bins.yml must be callable and upload the archive under the name the release reads"
     );
@@ -881,7 +943,7 @@ fn every_release_archive_is_installed_and_its_hostlib_loaded_natively() {
     ] {
         assert!(smoke.contains(target), "{target} needs an installed smoke");
     }
-    for runner in ["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"] {
+    for runner in ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-15"] {
         assert!(
             smoke.contains(runner),
             "{runner} must run its native payload"
@@ -1537,7 +1599,7 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
          no hosted macOS runner can"
     );
     assert!(
-        smoke.contains("runner: ubuntu-latest") && smoke.contains("sudo chmod 666 /dev/kvm"),
+        smoke.contains("runner: ubuntu-24.04") && smoke.contains("sudo chmod 666 /dev/kvm"),
         "the Linux lane must boot through KVM on a hosted runner"
     );
     assert!(
@@ -1590,7 +1652,7 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
     );
     assert!(
         promote.contains(
-            "    needs: [published-installed-boot, published-package-smoke, recipe-install-smoke]\n"
+            "    needs: [e2e-docs, published-installed-boot, published-package-smoke, recipe-install-smoke]\n"
         ) && promote.contains("needs.published-installed-boot.result == 'success'")
             && promote.contains("needs.published-package-smoke.result == 'success'")
             && promote.contains("needs.recipe-install-smoke.result == 'success'"),
@@ -1669,7 +1731,7 @@ fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
     );
     let smoke = job_block(&lane, "release-archive-smoke");
     assert!(
-        smoke.contains("runs-on: ubuntu-latest") && smoke.contains("sudo chmod 666 /dev/kvm"),
+        smoke.contains("runs-on: ubuntu-24.04") && smoke.contains("sudo chmod 666 /dev/kvm"),
         "the archive must boot through KVM on a hosted runner"
     );
     for attempt in ["github.run_attempt", "inputs.run_attempt"] {
@@ -1866,7 +1928,7 @@ fn image_contract_reader_agrees_with_the_checked_lock() {
 
 #[test]
 fn remote_image_contract_checks_follow_the_locked_version() {
-    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("ci workflow");
+    let ci = fs::read_to_string(".github/workflows/ci-main.yml").expect("ci workflow");
     let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
         .expect("WebLinux downloader");
     let pin_update =
@@ -1893,7 +1955,7 @@ fn remote_base_image_contract_checks_follow_the_cli_window() {
         supported.max()
     );
     for path in [
-        ".github/workflows/ci.yml",
+        ".github/workflows/ci-main.yml",
         ".github/workflows/update-image-pin.yml",
         "scripts/download-qemu-wasm-smoke-pack.sh",
     ] {
@@ -1908,7 +1970,7 @@ fn remote_base_image_contract_checks_follow_the_cli_window() {
 
 #[test]
 fn remote_image_consumers_resolve_the_publisher_from_the_single_lock() {
-    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("ci workflow");
+    let ci = fs::read_to_string(".github/workflows/ci-main.yml").expect("ci workflow");
     let workers = fs::read_to_string(".github/workflows/workers.yml").expect("workers workflow");
     let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
         .expect("WebLinux downloader");
@@ -1974,6 +2036,10 @@ fn pull_requests_compile_mvmctl_with_the_release_feature_set() {
         features.contains(&"embed-host-bins") && features.contains(&"release-artifact-bootstrap"),
         "the parsed set no longer looks like the release's: {features:?}"
     );
+    assert!(
+        !features.contains(&"template-registry-s3"),
+        "the general release must not carry the fleet-only S3 registry backend: {features:?}"
+    );
 
     let ci = ci_workflow();
     let lane = job_block(&ci, "lint-features-embed");
@@ -1991,7 +2057,7 @@ fn pull_requests_compile_mvmctl_with_the_release_feature_set() {
         lane.contains("uses: ./.github/actions/install-zigbuild"),
         "`embed-host-bins` cross-compiles the host payload, which needs the pinned zig"
     );
-    let aggregate = job_block(&ci, "test");
+    let aggregate = job_block(&ci, "test-main");
     assert!(
         aggregate.contains("lint-features-embed"),
         "the lane must feed the required Test aggregate"

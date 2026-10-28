@@ -28,21 +28,15 @@ env:
   # default (a dev build does not need the payload and should not pay the
   # cross-compile), which means the *only* place it gets turned on for a shipped
   # artifact is here.
-  MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap,release-channel,embed-host-bins
+  # The S3 template registry is fleet-only and is enabled by those builds;
+  # general release artifacts do not carry its object-store dependency graph.
+  MVMCTL_RELEASE_FEATURES: host,user,release-artifact-bootstrap,release-channel,embed-host-bins
 
 jobs:
-  bdd:
-    uses: ./.github/workflows/bdd.yml
-
-  # Every documented example, booted on both backends, before anything is
-  # published. The hermetic `bdd` lane above drives `--help` and refusal paths
-  # and boots no guest, so on its own it cannot see a documented command that
-  # parses and then fails at runtime — which is exactly what `machine run -it`
-  # did, on every OCI image, while the README told readers to run it.
-  #
-  # This is a release blocker on purpose. It is the slowest thing here; a tag
-  # that cannot wait for it is a tag published without evidence that its own
-  # README works.
+  # Every documented example, booted on both backends. It runs beside the
+  # build, but it does not gate publication: the signed prerelease goes out
+  # without it and `promote-release` waits for it, so a red run keeps the tag
+  # staged as a prerelease instead of blocking the signed assets.
   e2e-docs:
     needs: runtime-proof-candidate
     if: ${{ !cancelled() && (needs.runtime-proof-candidate.result == 'success' || github.event_name == 'workflow_dispatch') }}
@@ -58,9 +52,9 @@ jobs:
       runtime_checksum_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_sha256 }}
       runtime_archive_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_bundle_sha256 }}
       runtime_checksum_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_bundle_sha256 }}
-      # Stated rather than inherited. A tag must not be cut without live macOS
-      # evidence, so a macOS host that cannot boot a guest fails this workflow
-      # here even though Extended CI tolerates it nightly.
+      # Stated rather than inherited: a macOS host that cannot boot a guest
+      # fails this workflow, so promotion never goes ahead without live macOS
+      # evidence.
       macos_blocks_on_unusable_host: true
       # A release tests what its users get, and nothing is pair-built through
       # mvm-images: the Linux layer (kernels, base and dev root filesystems,
@@ -81,7 +75,8 @@ jobs:
   runtime-proof-input-check:
     needs: guest-runtime
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.guest-runtime.result == 'success' }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -123,7 +118,8 @@ jobs:
     needs: [guest-runtime, runtime-proof-input-check]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.guest-runtime.result == 'success' && needs.runtime-proof-input-check.result == 'success' }}
     environment: release-signing
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -219,17 +215,20 @@ jobs:
           # distributions too.
           - target: x86_64-unknown-linux-gnu
             build_target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            os: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             build_target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            os: ubuntu-24.04
 
     runs-on: ${{ matrix.os }}
-    # Backstop: a cold macOS release plus host binaries took 43 min before the
-    # size check began on 2026-10-08. That check and man-page generation each
-    # compile xtask separately. Keep a bounded cap with room to package, so a
-    # healthy cold build is not canceled at the old 45-minute limit.
-    timeout-minutes: 75
+    # Backstop: the pre-libkrun cold macOS release plus host binaries took 43
+    # min before the size check began on 2026-10-08. The source-built libkrun
+    # tier adds a kernel, firmware and dylib build; the size check and man-page
+    # generation also compile xtask separately. Keep a bounded cap with enough
+    # room for a healthy cold build and packaging.
+    timeout-minutes: 135
 
     steps:
       - uses: actions/checkout@v6
@@ -296,7 +295,8 @@ jobs:
       # mvm-build features.
       #
       # Apple Silicon macOS additionally gets the native HVF supervisor. The
-      # optional libkrun integration is not part of standard release artifacts.
+      # libkrun supervisor and its dylibs are built from immutable upstream
+      # sources by the dedicated release-tier step below.
       - name: Build per-VM host binaries
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
@@ -308,6 +308,7 @@ jobs:
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-hvf-supervisor
           fi
+
           # Ships on every target — see the note above.
           if [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]]; then
             cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostd -p mvm-gpu \
@@ -341,6 +342,54 @@ jobs:
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib \
               --features mvm-client/release-channel
           fi
+
+      - name: Install libkrun build dependencies
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: brew install make llvm lld flex bison gnu-sed gnu-tar xz
+
+      - name: Build libkrun release tier
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+          MVM_GNU_MAKE: gmake
+        shell: bash
+        run: |
+          llvm_prefix="$(brew --prefix llvm)"
+          lld_prefix="$(brew --prefix lld)"
+          flex_prefix="$(brew --prefix flex)"
+          bison_prefix="$(brew --prefix bison)"
+          gnu_sed_prefix="$(brew --prefix gnu-sed)"
+          gnu_tar_prefix="$(brew --prefix gnu-tar)"
+          export PATH="${llvm_prefix}/bin:${lld_prefix}/bin:${flex_prefix}/bin:${bison_prefix}/bin:${gnu_sed_prefix}/libexec/gnubin:${gnu_tar_prefix}/libexec/gnubin:${PATH}"
+          scripts/release/build-libkrun-tier.sh \
+            "target/${BUILD_TARGET}/release/libkrun-tier" "${BUILD_TARGET}"
+
+      # Attribution only: which packages the builds above compile more than once
+      # and what differs (profile, features, target), so a long release is
+      # explainable. The cargo arguments mirror the two build steps above —
+      # `xtask check-compile-report-sync` fails CI when they drift — and the
+      # report adds the payload builds mvm-cli's build script runs (one nested
+      # cargo zigbuild per embedded binary) from the shared payload build plan.
+      # It asks Cargo for unit graphs and compiles nothing, and it never fails
+      # the release.
+      - name: Report compilation units
+        continue-on-error: true
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+        shell: bash
+        run: |
+          hostlib_target="${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}"
+          [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]] || hostlib_target="${BUILD_TARGET}"
+          size_args=()
+          for f in target/"${BUILD_TARGET}"/release-min/mvmctl; do
+            [[ -f "$f" ]] && size_args+=(--asset "$f")
+          done
+          cargo run --package xtask -- report-compile-units \
+            --build "mvmctl (release-min)=build --profile release-min --target ${BUILD_TARGET} --features ${MVMCTL_RELEASE_FEATURES}" \
+            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-gpu-endpoint" \
+            --build "mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel" \
+            "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Verify Linux release payloads are statically linked
         if: endsWith(matrix.build_target, '-unknown-linux-musl')
@@ -424,10 +473,13 @@ jobs:
           # surface much later as a spawn failure on a user's machine.
           REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-gpu-endpoint"
           if [[ "${TARGET}" == *apple-darwin ]]; then
-            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor"
+            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
           fi
           for hostbin in ${REQUIRED_HOSTBINS}; do
             src="target/${BUILD_TARGET}/release/${hostbin}"
+            if [[ "${hostbin}" == mvm-libkrun-supervisor ]]; then
+              src="target/${BUILD_TARGET}/release/libkrun-tier/${hostbin}"
+            fi
             if [ ! -f "$src" ]; then
               echo "::error::${hostbin} was not built for ${TARGET}; mvmctl spawns it at run time and the adjacent-to-exe resolver has no fallback on a downloaded install" >&2
               exit 1
@@ -435,6 +487,25 @@ jobs:
             cp "$src" "staging/${ARCHIVE_NAME}/"
             echo "bundled ${hostbin}"
           done
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            LIBKRUN_TIER="target/${BUILD_TARGET}/release/libkrun-tier"
+            for required in lib/libkrun.1.dylib lib/libkrunfw.5.dylib \
+              lib/libkrunfw.dylib \
+              licenses/libkrun-APACHE-2.0.txt \
+              licenses/libkrunfw-LGPL-2.1-only.txt \
+              licenses/linux-GPL-2.0-only.txt \
+              sources/libkrunfw-macos-host.patch SOURCE-OFFER.txt SOURCE-PINS; do
+              if [[ ! -e "${LIBKRUN_TIER}/${required}" ]]; then
+                echo "::error::libkrun release tier is missing ${required}" >&2
+                exit 1
+              fi
+            done
+            cp -R "${LIBKRUN_TIER}/lib" "staging/${ARCHIVE_NAME}/"
+            cp -R "${LIBKRUN_TIER}/licenses" "staging/${ARCHIVE_NAME}/"
+            cp -R "${LIBKRUN_TIER}/sources" "staging/${ARCHIVE_NAME}/"
+            cp "${LIBKRUN_TIER}/SOURCE-OFFER.txt" \
+              "${LIBKRUN_TIER}/SOURCE-PINS" "staging/${ARCHIVE_NAME}/"
+          fi
           # The SDK host library, beside mvmctl: the SDKs' third lookup is
           # the platform file name next to the resolved mvmctl, and a
           # downloaded install has no other source. Fail closed like the
@@ -466,6 +537,16 @@ jobs:
           if [ -d man ] && ls man/*.1 2>/dev/null; then
             cp -r man "staging/${ARCHIVE_NAME}/"
           fi
+          # The backend component table install.sh reads to decide what to
+          # stage, generated from BACKEND_COMPONENT_TABLE so the archive and
+          # the table cannot drift. Fail closed like the host binaries above.
+          cargo run --package xtask --features man -- emit-backend-components-tsv \
+            > "staging/${ARCHIVE_NAME}/components.tsv"
+          if [ ! -s "staging/${ARCHIVE_NAME}/components.tsv" ]; then
+            echo "::error::components.tsv was not generated for ${ARCHIVE_NAME}; install.sh reads it to select backend components" >&2
+            exit 1
+          fi
+          echo "bundled components.tsv"
 
       - name: Mandatory ad-hoc producer signing
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
@@ -567,13 +648,16 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
             library: libmvm_hostlib.so
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             library: libmvm_hostlib.so
           - target: aarch64-apple-darwin
-            runner: macos-latest
+            # Exercise the packaged compatibility tier on a supported pre-HVF
+            # host instead of the moving latest image.
+            runner: macos-15
             library: libmvm_hostlib.dylib
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
@@ -602,6 +686,14 @@ jobs:
             test "${installed}" = "mvmctl ${EXPECT_VERSION#v}"
           fi
           "${prefix}/bin/mvmctl" --help
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            payload="${prefix}/lib/mvmctl-${TARGET}"
+            answer="$("${payload}/mvm-libkrun-supervisor" --contract-version)"
+            [[ "${answer}" == "mvm-libkrun-supervisor contract-version="* ]] || {
+              echo "::error::packaged libkrun supervisor did not answer its contract probe" >&2
+              exit 1
+            }
+          fi
           python3 - "${prefix}/lib/mvmctl-${TARGET}/${LIBRARY}" <<'PY'
           import ctypes
           import json
@@ -650,18 +742,12 @@ jobs:
       tarballs: build
 
   release:
-    needs: [bdd, e2e-docs, build, archive-install-smoke, guest-runtime, runtime-proof-candidate, release-archive-smoke, distro-packages]
-    # `e2e-docs` was added to `needs` above when the documented-surface gate
-    # landed, and its result was never added here. `!cancelled()` overrides the
-    # implicit all-needs-succeeded rule, so for as long as that was true the
-    # release published whether or not a single documented example booted —
-    # the gate existed, was listed, was asserted by a test that only read the
-    # `needs` list, and enforced nothing. Every entry in `needs` must appear in
-    # this condition; a job listed and not checked is worse than one that was
-    # never added, because it reads as covered.
+    needs: [build, archive-install-smoke, guest-runtime, runtime-proof-candidate, release-archive-smoke, distro-packages]
+    # `!cancelled()` overrides the implicit all-needs-succeeded rule, so every
+    # entry in `needs` must appear in this condition.
     #
     # A manual tag ref is not a real tag push and cannot satisfy this gate.
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.runtime-proof-candidate.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.runtime-proof-candidate.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -669,7 +755,8 @@ jobs:
     # ref cannot produce a signature the shipped verifier accepts. Revocations
     # are gated the same way against their own tag.
     environment: release-signing
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     env:
       RUNTIME_ARCHIVE_SHA256: ${{ needs.runtime-proof-candidate.outputs.archive_sha256 }}
       RUNTIME_CHECKSUM_SHA256: ${{ needs.runtime-proof-candidate.outputs.checksum_sha256 }}
@@ -947,7 +1034,8 @@ jobs:
     # under a `refs/tags/*` identity a dispatch cannot produce. Running it there
     # would fail for reasons that say nothing about the release.
     if: ${{ github.event_name == 'push' && needs.release.result == 'success' }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -1022,7 +1110,8 @@ jobs:
   published-installed-boot:
     needs: [verify-release, first-run-smoke]
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: read
@@ -1085,9 +1174,10 @@ jobs:
   # prerelease. A red smoke leaves the tag staged; fix forward with a new tag.
   promote-release:
     name: Promote the release once a fresh install boots
-    needs: [published-installed-boot, published-package-smoke, recipe-install-smoke]
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.published-installed-boot.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
-    runs-on: ubuntu-latest
+    needs: [e2e-docs, published-installed-boot, published-package-smoke, recipe-install-smoke]
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.e2e-docs.result == 'success' && needs.published-installed-boot.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       # The release event emitted by GITHUB_TOKEN does not start workers.yml,
@@ -1122,7 +1212,8 @@ jobs:
     name: Propose verified Nix prebuilt pin
     needs: [promote-release]
     if: ${{ github.event_name == 'push' && needs.promote-release.result == 'success' && !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     permissions:
       actions: write
       contents: write

@@ -31,9 +31,15 @@ deferred to Task 7 — see plan.)
 local-first deploy store (`<mvm_home>/deployments/<ir-hash>/deploy.json`).
 Sits beside `deploy` (the write path) the way `deps` sits beside build.
 
+**`backend/`** (additive) — `backend list` · `add` · `remove` · `detect`:
+the per-backend host-component sets from the release archive's component
+table. Install-lifecycle verbs beside `env`; `detect` is install.sh's
+read-only probe.
 
-**`build/`** (D1) — `build image`(was the bare `build`) · `build compile`
-· `build validate` · `build kernel`(from flat `kernel.rs`).
+
+**`dev`** — contributor-only `dev compile` · `dev validate` · `dev kernel` ·
+`dev runtime-overlay` · `dev sdk-sidecar` · `dev address` · `dev image-set` ·
+`dev guest-bins`. User package construction lives at `machine build`.
 
 **`vm/`** — act on an existing/running VM: `vm pause` · `resume` · `snapshot`
 · `ttl`(was `set-ttl`) · `wait` · `boot-report` · `diff` · `cp` · `fs`

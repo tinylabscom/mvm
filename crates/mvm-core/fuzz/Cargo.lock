@@ -268,9 +268,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -570,16 +570,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keyring"
-version = "3.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
-dependencies = [
- "log",
- "zeroize",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -615,7 +605,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "mvm-contract"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -631,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -643,7 +633,6 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hmac",
- "keyring",
  "libc",
  "mvm-contract",
  "mvm-macho-sign",
@@ -679,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-macho-sign"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "plist",
  "sha1",

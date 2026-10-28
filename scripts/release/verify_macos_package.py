@@ -68,6 +68,14 @@ def entries(report):
     return result
 
 
+def verify_relocatable(path):
+    inspection = (sign_macos.run("otool", "-L", path) + "\n" +
+                  sign_macos.run("otool", "-l", path))
+    if any(marker in inspection for marker in
+           ("/opt/homebrew", "/usr/local", "mvm-libkrun-tier")):
+        raise ValueError(f"non-relocatable path in packaged Mach-O: {path}")
+
+
 def verify(archive, producer, notary, report, envelope=None,
            require_cli_inventory=False, sdk_layout=False):
     if report.resolve() in {p.resolve() for p in (archive, producer, notary) if p is not None}:
@@ -109,13 +117,15 @@ def verify(archive, producer, notary, report, envelope=None,
             payload = root / envelope
         code = sign_macos.targets(payload)
         if require_cli_inventory:
-            missing = {"mvmctl", "mvm-hvf-supervisor"} - {
+            missing = {"mvmctl", "mvm-hvf-supervisor", "mvm-libkrun-supervisor"} - {
                 path.name for path, kind in code if kind == 2}
             if missing:
                 raise ValueError("missing required CLI inventory")
         remaining = set(expected)
         actual = []
         for path, kind in code:
+            if require_cli_inventory:
+                verify_relocatable(path)
             keys = sign_macos.ROLES.get(path.name, []) if kind == 2 else []
             role = path.name if keys else "code"
             relative = str(path.relative_to(payload))

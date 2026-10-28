@@ -23,6 +23,18 @@ source "$REPO/scripts/e2e-phase-timings.sh"
 # shellcheck source=scripts/sdk-hostlib.sh
 source "$REPO/scripts/sdk-hostlib.sh"
 
+# Diagnostic initialization precedes every build/bootstrap operation. A refusal
+# disables collection for this invocation, never overwriting or uploading an old
+# destination, and never replacing the suite's own failure/cleanup outcome.
+unset MVM_E2E_FAILURE_INITIALIZED
+if [[ "${1:-}" != "--clean-only" && -n "${MVM_E2E_FAILURE_MANIFEST:-}" ]]; then
+  if MVM_E2E_FAILURE_INITIALIZED="$(python3 "$REPO/scripts/e2e-failure-manifest.py")"; then
+    export MVM_E2E_FAILURE_INITIALIZED
+  else
+    unset MVM_E2E_FAILURE_MANIFEST MVM_E2E_FAILURE_INITIALIZED
+  fi
+fi
+
 # Prefer an explicit `MVM_E2E_HOME`, then `MVM_HOME`, then the real home.
 #
 # `scripts/dev-env.sh` gives each worktree its own `MVM_HOME` *and* its own
@@ -464,7 +476,7 @@ fi
 # sidecar this CLI reads. No builder VM starts.
 e2e_phase sdk-sidecar
 echo "==> packing the SDK sidecar from this tree's guest runtime"
-MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build --source build
+MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" dev sdk-sidecar build --source build
 
 # The dev default image (`mvmctl run` with no image) is the writable variant.
 # With no image checkout selected, `image dev ensure` installs it from the
@@ -499,7 +511,7 @@ fi
 warm_launch_artifacts() {
   echo "==> warming launch artifacts (runtime overlay + universal initramfs)"
 
-  MVM_HOME="$E2E_HOME" "$MVMCTL" build runtime-overlay build >/dev/null 2>&1 \
+  MVM_HOME="$E2E_HOME" "$MVMCTL" dev runtime-overlay build >/dev/null 2>&1 \
     && echo "    runtime overlay ready" \
     || echo "    runtime overlay: not warmed (scenarios needing it will say so)"
 
@@ -770,6 +782,13 @@ SUITE_STARTED=""
 # runner must never be that host, so opting this lane in would be the failure.
 ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share,needs-unenforceable-wall-clock,needs-warm-claim,needs-destructive-lab-opt-in"
 
+# Portable bundle creation needs a signed runtime for this exact release. The
+# nightly `main` run has no versioned candidate, so name those scenarios as
+# skipped there; release.yml supplies the signed candidate and must run them.
+if [[ "${MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP:-false}" == "true" && -z "${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}" ]]; then
+  ALLOWED_SKIPS="$ALLOWED_SKIPS,needs-runtime-candidate"
+fi
+
 # `needs-firecracker` is deliberately intolerable above, and stays that way on
 # the lane that runs Firecracker. On macOS there is no `/dev/kvm` and no
 # Firecracker to put on PATH, so the skip is a property of the tier rather than
@@ -823,6 +842,7 @@ MVM_BDD_GUEST_BIN_DIR="$MVM_BDD_GUEST_BIN_DIR" \
 MVM_BDD_STRICT_SKIPS=1 \
 MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \
+MVM_HOME="$E2E_HOME" \
   python3 scripts/run-bounded-command.py \
     --timeout "$E2E_TIMEOUT_SECS" \
     --grace 5 \

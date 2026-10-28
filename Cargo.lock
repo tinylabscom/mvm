@@ -1148,9 +1148,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -1395,27 +1395,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "directories-next"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "339ee130d97a610ea5a5872d2bbb130fdf68884ff09d3028b81bec8a1ac23bbc"
-dependencies = [
- "cfg-if",
- "dirs-sys-next",
-]
-
-[[package]]
-name = "dirs-sys-next"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ebda144c4fe02d1f7ea1a7d9641b6fc6b580adcfa024ae48797ecdeb6825b4d"
-dependencies = [
- "libc",
- "redox_users",
- "winapi",
-]
-
-[[package]]
 name = "dispatch2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1545,15 +1524,6 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "etherparse"
-version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aeebdb565da33451794551a771bd0b4e6f416d3182adc3ed2837f614d6168f9a"
-dependencies = [
- "arrayvec",
 ]
 
 [[package]]
@@ -3438,7 +3408,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libkrun-sys"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "libc",
  "mvm-agentd",
@@ -3464,15 +3434,6 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
-
-[[package]]
-name = "libredox"
-version = "0.1.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c943259e342f1e06ff2da7a83eabdfe7f92ce10262688dbf1895ff0b3e6e4652"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "linked-hash-map"
@@ -3644,7 +3605,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-agentd"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3675,7 +3636,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-backends"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -3696,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3711,7 +3672,6 @@ dependencies = [
  "lzma-rs",
  "mvm-agentd",
  "mvm-builder-guest",
- "mvm-compiler",
  "mvm-contract",
  "mvm-core",
  "mvm-fs",
@@ -3726,7 +3686,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
- "toml 0.8.23",
+ "toml",
  "tracing",
  "uuid",
  "which",
@@ -3735,7 +3695,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-builder-guest"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -3755,7 +3715,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-bundler"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3769,9 +3729,8 @@ dependencies = [
 
 [[package]]
 name = "mvm-capture"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
- "anyhow",
  "chrono",
  "hex",
  "mvm-compiler",
@@ -3782,13 +3741,12 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
- "tracing",
  "which",
 ]
 
 [[package]]
 name = "mvm-cli"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3815,13 +3773,13 @@ dependencies = [
  "mvm-hostd",
  "mvm-http",
  "mvm-mcp",
- "mvm-observability",
  "mvm-runtime",
  "mvm-sdk",
  "mvm-vmm",
  "nix",
  "notify",
  "notify-debouncer-mini",
+ "percent-encoding",
  "rand 0.10.2",
  "rustls",
  "secrecy",
@@ -3831,9 +3789,10 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
- "toml 0.8.23",
+ "toml",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "which",
  "zeroize",
@@ -3841,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-client"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3876,14 +3835,15 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "toml 0.8.23",
+ "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
 name = "mvm-compiler"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "flate2",
  "globset",
@@ -3895,7 +3855,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
- "toml 0.8.23",
+ "toml",
  "tree-sitter",
  "tree-sitter-javascript",
  "tree-sitter-python",
@@ -3904,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-conformance"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3933,13 +3893,13 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
- "toml 0.8.23",
+ "toml",
  "tracing",
 ]
 
 [[package]]
 name = "mvm-contract"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3954,12 +3914,12 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "toml 0.8.23",
+ "toml",
 ]
 
 [[package]]
 name = "mvm-core"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -3998,7 +3958,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "toml 0.8.23",
+ "toml",
  "tracing",
  "tss-esapi",
  "unicode-normalization",
@@ -4010,7 +3970,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-fc-lifecycle"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "hex",
  "libc",
@@ -4024,7 +3984,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-fs"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "am-fs-ext4",
  "async-trait",
@@ -4054,21 +4014,18 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "libc",
  "mvm-contract",
  "mvm-gpu-shim-core",
  "mvm-vmm",
- "serde",
- "serde_json",
  "tempfile",
- "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "mvm-gpu-cuda-shim"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -4077,7 +4034,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-cudart-shim"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -4086,7 +4043,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-nvml-shim"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -4095,17 +4052,15 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-shim-core"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "libc",
  "mvm-contract",
- "serde",
- "serde_json",
 ]
 
 [[package]]
 name = "mvm-host-services"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "mvm-agentd",
  "mvm-core",
@@ -4115,7 +4070,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-hostd"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4125,7 +4080,6 @@ dependencies = [
  "core-foundation 0.10.1",
  "ctor",
  "ed25519-dalek",
- "etherparse",
  "hex",
  "hickory-proto",
  "hickory-resolver",
@@ -4140,14 +4094,12 @@ dependencies = [
  "mio",
  "mvm-agentd",
  "mvm-build",
- "mvm-compiler",
  "mvm-contract",
  "mvm-core",
  "mvm-fs",
  "mvm-http",
  "mvm-net",
  "mvm-runtime",
- "mvm-sdk",
  "mvm-vmm",
  "rand 0.10.2",
  "regex",
@@ -4175,7 +4127,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-hostlib"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4195,12 +4147,13 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
  "http",
  "httparse",
+ "rcgen",
  "reqwest",
  "rustls",
  "rustls-pki-types",
@@ -4215,7 +4168,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-macho-sign"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "plist",
  "sha1",
@@ -4224,7 +4177,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-mcp"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4238,7 +4191,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-net"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "mvm-contract",
  "mvm-core",
@@ -4246,22 +4199,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-observability"
-version = "0.24.0"
-dependencies = [
- "mvm-core",
- "mvm-http",
- "percent-encoding",
- "rand 0.10.2",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "mvm-runtime"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4287,6 +4226,7 @@ dependencies = [
  "nix",
  "object_store",
  "rand 0.10.2",
+ "rustix",
  "secrecy",
  "serde",
  "serde_json",
@@ -4294,7 +4234,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "toml 0.8.23",
+ "toml",
  "tracing",
  "uuid",
  "wasmtime",
@@ -4304,7 +4244,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -4323,21 +4263,21 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
- "toml 0.8.23",
+ "toml",
  "tree-sitter",
  "tree-sitter-nix",
 ]
 
 [[package]]
 name = "mvm-setpriv"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "mvm-vmm"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4351,6 +4291,7 @@ dependencies = [
  "mvm-contract",
  "mvm-core",
  "mvm-fs",
+ "mvm-http",
  "mvm-macho-sign",
  "mvm-net",
  "plist",
@@ -4370,7 +4311,7 @@ dependencies = [
 
 [[package]]
 name = "mvmctl"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4398,7 +4339,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
- "toml 0.8.23",
+ "toml",
  "which",
 ]
 
@@ -5287,17 +5228,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redox_users"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
-dependencies = [
- "getrandom 0.2.17",
- "libredox",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "ref-cast"
 version = "1.0.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5431,7 +5361,7 @@ checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
 
 [[package]]
 name = "runmvm-client"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "libloading",
  "serde_json",
@@ -5802,15 +5732,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_spanned"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
-dependencies = [
- "serde_core",
-]
-
-[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5969,8 +5890,6 @@ dependencies = [
 [[package]]
 name = "sigstore-rekor"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b97c5a866f849a9445ae657bef0caa2db053a82827e6dae3a2b3de9c15a6a1a"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -6006,8 +5925,6 @@ dependencies = [
 [[package]]
 name = "sigstore-tsa"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b58fe92d4d8cf4b7215b927b70bc1245b6e0d70d801febdfe0cd265ad97ebf8b"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -6537,9 +6454,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
@@ -6606,24 +6523,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
  "serde",
- "serde_spanned 0.6.9",
- "toml_datetime 0.6.11",
+ "serde_spanned",
+ "toml_datetime",
  "toml_edit",
-]
-
-[[package]]
-name = "toml"
-version = "1.1.6+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
-dependencies = [
- "indexmap",
- "serde_core",
- "serde_spanned 1.1.1",
- "toml_datetime 1.1.1+spec-1.1.0",
- "toml_parser",
- "toml_writer",
- "winnow 1.0.4",
 ]
 
 [[package]]
@@ -6636,15 +6538,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toml_datetime"
-version = "1.1.1+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
-dependencies = [
- "serde_core",
-]
-
-[[package]]
 name = "toml_edit"
 version = "0.22.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6652,19 +6545,10 @@ checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
 dependencies = [
  "indexmap",
  "serde",
- "serde_spanned 0.6.9",
- "toml_datetime 0.6.11",
+ "serde_spanned",
+ "toml_datetime",
  "toml_write",
- "winnow 0.7.15",
-]
-
-[[package]]
-name = "toml_parser"
-version = "1.1.3+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
-dependencies = [
- "winnow 1.0.4",
+ "winnow",
 ]
 
 [[package]]
@@ -6672,12 +6556,6 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
-
-[[package]]
-name = "toml_writer"
-version = "1.1.2+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tower"
@@ -7355,7 +7233,6 @@ dependencies = [
  "wasm-encoder 0.258.3",
  "wasmparser 0.258.3",
  "wasmtime-environ",
- "wasmtime-internal-cache",
  "wasmtime-internal-component-macro",
  "wasmtime-internal-component-util",
  "wasmtime-internal-core",
@@ -7399,26 +7276,6 @@ dependencies = [
  "wasmprinter",
  "wasmtime-internal-component-util",
  "wasmtime-internal-core",
-]
-
-[[package]]
-name = "wasmtime-internal-cache"
-version = "49.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96e4469e885ac50f8dc06337245f9905b22c68d55416267f9afd07f7f76687be"
-dependencies = [
- "base64 0.22.1",
- "directories-next",
- "log",
- "postcard",
- "rustix",
- "serde",
- "serde_derive",
- "sha2 0.10.9",
- "toml 1.1.6+spec-1.1.0",
- "wasmtime-environ",
- "windows-sys 0.61.2",
- "zstd",
 ]
 
 [[package]]
@@ -7922,12 +7779,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "winnow"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
-
-[[package]]
 name = "winsafe"
 version = "0.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8169,7 +8020,7 @@ dependencies = [
  "sha2 0.11.0",
  "syn",
  "tempfile",
- "toml 0.8.23",
+ "toml",
 ]
 
 [[package]]
@@ -8309,31 +8160,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[package]]
-name = "zstd"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
-dependencies = [
- "zstd-safe",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
-dependencies = [
- "zstd-sys",
-]
-
-[[package]]
-name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
-dependencies = [
- "cc",
- "pkg-config",
-]

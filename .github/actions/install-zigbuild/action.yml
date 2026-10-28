@@ -31,14 +31,41 @@ runs:
         ARCH=$(uname -m)
         # macOS `uname -m` reports arm64; zig's release tarballs are named aarch64.
         [ "$ARCH" = "arm64" ] && ARCH=aarch64
-        if [ "$OS" = "Darwin" ]; then
-          TARBALL="zig-macos-${ARCH}-${ZIG_VERSION}.tar.xz"
+        case "$OS:$ARCH" in
+          Linux:x86_64)
+            TARGET=linux-x86_64
+            SHA256=d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea
+            ;;
+          Linux:aarch64)
+            TARGET=linux-aarch64
+            SHA256=041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556
+            ;;
+          Darwin:x86_64)
+            TARGET=macos-x86_64
+            SHA256=8b06ed1091b2269b700b3b07f8e3be3b833000841bae5aa6a09b1a8b4773effd
+            ;;
+          Darwin:aarch64)
+            TARGET=macos-aarch64
+            SHA256=46fae219656545dfaf4dce12fb4e8685cec5b51d721beee9389ab4194d43394c
+            ;;
+          *)
+            echo "::error::no pinned zig binary for $OS/$ARCH" >&2
+            exit 1
+            ;;
+        esac
+        TARBALL="zig-${TARGET}-${ZIG_VERSION}.tar.xz"
+        WORK=$(mktemp -d)
+        trap 'rm -rf "$WORK"' EXIT
+        curl -fL --retry 3 --retry-all-errors --retry-delay 2 \
+          --connect-timeout 10 --max-time 120 --retry-max-time 300 \
+          -o "$WORK/$TARBALL" "https://ziglang.org/download/${ZIG_VERSION}/${TARBALL}"
+        if [ "$OS" = Darwin ]; then
+          printf '%s  %s\n' "$SHA256" "$WORK/$TARBALL" | shasum -a 256 -c -
         else
-          TARBALL="zig-linux-${ARCH}-${ZIG_VERSION}.tar.xz"
+          printf '%s  %s\n' "$SHA256" "$WORK/$TARBALL" | sha256sum -c -
         fi
         sudo mkdir -p /opt
-        curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${TARBALL}" \
-          | sudo tar xJ -C /opt
+        sudo tar -xJf "$WORK/$TARBALL" -C /opt
         DIR="${TARBALL%.tar.xz}"
         sudo ln -sf "/opt/${DIR}/zig" /usr/local/bin/zig
         zig version
@@ -105,7 +132,7 @@ runs:
       # natively for x86_64-musl (no zig); a cross path zigbuilds. Add both
       # musl targets so either path resolves regardless of runner arch, and
       # both glibc targets for the guest shared objects that
-      # `mvmctl build guest-bins` cross-compiles.
+      # `mvmctl dev guest-bins` cross-compiles.
       #
       # Read without Python: `tomllib` needs 3.11, and the system python3 on
       # macOS is 3.9, so a self-hosted Mac without a newer Python would stop

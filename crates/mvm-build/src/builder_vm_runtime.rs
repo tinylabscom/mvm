@@ -39,8 +39,8 @@ pub use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
 mod image_lock;
 
 pub use image_lock::{
-    DEFAULT_LOCK_WAIT, LOCK_WAIT_ENV, LockSubject, LockWait, LockWaitError, NixStoreImageLock,
-    UnlockedStoreImage, acquire_lock_waiting, acquire_nix_store_image_lock,
+    DEFAULT_LOCK_WAIT, HeldImageLock, LOCK_WAIT_ENV, LockSubject, LockWait, LockWaitError,
+    NixStoreImageLock, UnlockedStoreImage, acquire_lock_waiting, acquire_nix_store_image_lock,
     acquire_nix_store_image_lock_named, ensure_nix_store_image_unlocked, hold_image_lock,
     nix_store_image_is_contended,
 };
@@ -1265,7 +1265,7 @@ pub struct InstallResultReport {
 /// `<artifact_out>/result.json`, fail closed on
 /// `installer_exit_code != 0`, and return
 /// [`BuilderArtifacts::InstallVolume`] pointing at the directory.
-/// Sealing the volume (via `mvm_compiler::deps_audit::seal_volume`)
+/// Sealing the volume (via `mvm_core::deps_audit::seal_volume`)
 /// and renaming into the deps cache is the orchestrator's job
 /// (`mvm_build::app_deps::install_app_deps`) — keeping it out of the
 /// builder VM means the same code path covers fresh installs and

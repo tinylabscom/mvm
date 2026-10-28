@@ -1,0 +1,19 @@
+name: macOS documented surface evidence
+run-name: macOS documented surface evidence at ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    # Admit only reviewed main code before scheduling the self-hosted lane.
+    if: github.repository == 'tinylabscom/mvm' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/e2e-docs.yml
+    with:
+      run_linux: false
+      run_macos: true
+      allow_runtime_candidate_skip: true
+      macos_blocks_on_unusable_host: true

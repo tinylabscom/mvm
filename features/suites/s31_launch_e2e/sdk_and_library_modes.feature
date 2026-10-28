@@ -2,7 +2,7 @@ Feature: the README's SDK entry points reach the same launch path
 
   Besides the CLI verbs, the README documents two other ways in: the runtime SDK
   driven through `mvmctl run --mode plan|live`, and the decorator SDK compiled by
-  `mvmctl build compile`. Each is a separate seam into the same launch path, and
+  `mvmctl dev compile`. Each is a separate seam into the same launch path, and
   each can break without the CLI scenarios noticing.
 
   The Rust `MvmClient` library seam is the third, and it is covered by
@@ -66,5 +66,5 @@ Feature: the README's SDK entry points reach the same launch path
 
   @live
   Scenario: a decorator workload compiles from its source file
-    When I launch "build compile examples/python/hello-app/app.py -o /tmp/mvm-e2e-hello-app"
+    When I launch "dev compile examples/python/hello-app/app.py -o /tmp/mvm-e2e-hello-app"
     Then the launch succeeds

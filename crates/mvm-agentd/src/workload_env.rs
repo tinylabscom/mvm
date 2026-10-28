@@ -775,6 +775,31 @@ mod tests {
     }
 
     #[test]
+    fn workload_path_and_loader_overrides_remain_user_intent() {
+        let env = WorkloadEnvironment::builder()
+            .overrides([
+                ("PATH", "/work/bin:/data/bin::./tools"),
+                ("LD_PRELOAD", "/work/plugin.so"),
+                ("LD_LIBRARY_PATH", "/data/lib"),
+            ])
+            .build();
+        assert_eq!(
+            value(&env, "PATH").as_deref(),
+            Some("/work/bin:/data/bin::./tools")
+        );
+        assert_eq!(
+            value(&env, "LD_PRELOAD").as_deref(),
+            Some("/work/plugin.so")
+        );
+        // GPU boots may prepend the runtime shim, but must preserve user intent.
+        assert!(
+            value(&env, "LD_LIBRARY_PATH")
+                .unwrap()
+                .ends_with("/data/lib")
+        );
+    }
+
+    #[test]
     fn unrepresentable_overrides_are_dropped_not_truncated() {
         let env = WorkloadEnvironment::builder()
             .overrides([

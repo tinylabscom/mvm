@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use clap::Args as ClapArgs;
 use mvm_compiler::PinnedMvmRevision;
-use mvm_compiler::pack::{PackInput, compile_frozen, lock_pack};
 use mvm_contract::pack_lock::PackLock;
 use mvm_contract::pack_spec::PackSpec;
+use mvm_sdk::pack::{PackInput, compile_frozen, lock_pack};
 
 /// File name a lock is written to beside its spec when no path is given.
-pub(super) use mvm_compiler::pack::LOCK_FILE as DEFAULT_LOCK_FILE;
+pub(super) use mvm_sdk::pack::LOCK_FILE as DEFAULT_LOCK_FILE;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct LockArgs {

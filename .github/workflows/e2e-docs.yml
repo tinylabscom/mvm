@@ -3,9 +3,8 @@ name: Documented surface e2e
 # Every documented example, executed against a real host on both backends mvm
 # ships: Firecracker on Linux/KVM and HVF on macOS.
 #
-# Reusable rather than inlined, because two callers need the *same* lane and had
-# been getting different ones. Extended CI runs it nightly. `release.yml` waits
-# on it before it will cut a tag — until then a release blocked only on the
+# Reusable rather than inlined so the release lane and a manual run get the
+# *same* lane. `release.yml` waits on it before it will cut a tag — until then a release blocked only on the
 # hermetic BDD gate, which drives `--help` and refusal paths and boots nothing.
 # That is how `machine run -it`, printed in the README, shipped for as long as
 # it did with a guest console that failed on every OCI image: no lane that could
@@ -18,6 +17,14 @@ name: Documented surface e2e
 on:
   workflow_call:
     inputs:
+      run_linux:
+        description: Run the full Linux documented surface
+        type: boolean
+        default: true
+      run_macos:
+        description: Run the full macOS documented surface
+        type: boolean
+        default: true
       runtime_candidate_artifact_id:
         description: Current release candidate upload ID; empty for ordinary contributor coverage
         type: string
@@ -42,15 +49,21 @@ on:
         description: Candidate checksum signature bundle byte pin
         type: string
         default: ""
+      allow_runtime_candidate_skip:
+        description: >-
+          Allow unreleased main coverage to report portable-creation
+          scenarios as named skips when no signed runtime candidate is supplied.
+          Release workflows must leave this false.
+        type: boolean
+        required: false
+        default: false
       macos_blocks_on_unusable_host:
         description: >-
           Whether a macOS host that cannot run any workload backend has to be
           backed by a committed evidence record before this workflow passes.
           `release.yml` leaves it true, so a tag still cannot be cut without
           live macOS evidence — either from a runner that booted a guest, or
-          from a recorded local run covering this exact tree. Extended CI
-          passes false so its nightly red means a regression rather than the
-          standing hardware gap.
+          from a recorded local run covering this exact tree.
         type: boolean
         required: false
         default: true
@@ -62,13 +75,15 @@ env:
 jobs:
   e2e-docs-linux:
     name: Documented surface e2e (Linux, Firecracker, shard ${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    if: inputs.run_linux
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     # Both required matrix jobs partition the complete scenario inventory;
     # neither shard is a substitute for the other. Separate hosted runners
     # retain the full live witness without one serial suite exhausting its
     # deadline before the scenario summary can be produced.
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         shard: ["0/2", "1/2"]
     # The job must have time for checkout, toolchain setup, mvmctl compilation,
@@ -185,6 +200,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MVM_E2E_RUNTIME_CANDIDATE_DIR: ${{ steps.candidate.outputs.directory }}
+          MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: ${{ inputs.allow_runtime_candidate_skip }}
           RUNTIME_ARCHIVE_SHA256: ${{ inputs.runtime_archive_sha256 }}
           RUNTIME_CHECKSUM_SHA256: ${{ inputs.runtime_checksum_sha256 }}
           RUNTIME_ARCHIVE_BUNDLE_SHA256: ${{ inputs.runtime_archive_bundle_sha256 }}
@@ -213,6 +229,7 @@ jobs:
   # decided by `macos_blocks_on_unusable_host` in the evidence job below.
   e2e-docs-macos-host-check:
     name: Documented surface e2e (macOS, host check)
+    if: inputs.run_macos
     # The self-hosted Apple Silicon runner (issue #3011). While it is offline
     # this job waits in the queue rather than falling back to the evidence job
     # below — a release blocks until the runner is back, which is the intended
@@ -268,9 +285,10 @@ jobs:
     name: Documented surface e2e (macOS, recorded local run)
     needs: e2e-docs-macos-host-check
     if: >-
-      inputs.macos_blocks_on_unusable_host &&
+      inputs.run_macos && inputs.macos_blocks_on_unusable_host &&
       needs.e2e-docs-macos-host-check.outputs.supported != 'true'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       # Full history: on a mismatch the gate diffs the recorded commit against
@@ -293,7 +311,7 @@ jobs:
   e2e-docs-macos:
     name: Documented surface e2e (macOS, HVF)
     needs: e2e-docs-macos-host-check
-    if: needs.e2e-docs-macos-host-check.outputs.supported == 'true'
+    if: inputs.run_macos && needs.e2e-docs-macos-host-check.outputs.supported == 'true'
     # The macOS default backend is HVF, and every guest-booting BDD scenario
     # before this one carried `@firecracker` — so the backend most users run
     # had no lane that booted anything. This is that lane.
@@ -306,8 +324,15 @@ jobs:
     # before it can print a summary and proves nothing. A cold artifact home
     # on the runner spends its first stretch acquiring images.
     timeout-minutes: 180
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        shard: ["0/2", "1/2"]
     env:
       MVM_E2E_TIMEOUT_SECS: "7200"
+      MVM_BDD_SHARD: ${{ matrix.shard }}
+      MVM_E2E_HOME: ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
       # The documented surface includes signed release downloads. Build the
       # exact binary under test with their verifier enabled.
       MVM_E2E_FEATURES: user,release-artifact-bootstrap
@@ -323,10 +348,8 @@ jobs:
       # macOS 26+ default, and the fetched builder image is self-contained, so
       # source artifact jobs run inside it under HVF.
       MVM_BUILDER_BACKEND: hvf
-      # Every warm launch here is held to the 300 ms startup ceiling, which is
-      # a property of an optimized build. Unoptimized, plan admission alone
-      # took 268 ms of it on this runner. The Linux warm-claim witness builds
-      # the same profile for the same reason.
+      # Keep release-docs binaries optimized. Warm-claim coverage belongs to
+      # the separately privileged Linux lane, not these cold-launch scenarios.
       MVM_E2E_PROFILE: release-witness
     steps:
       - uses: actions/checkout@v6
@@ -376,6 +399,7 @@ jobs:
           checksum-bundle-sha256: ${{ inputs.runtime_checksum_bundle_sha256 }}
 
       - name: Run the documented surface end to end
+        id: documented-suite
         # HVF reports snapshot tier `save-restore`, so the pause/resume and
         # checkpoint scenarios can run here. The Linux lane leaves this unset:
         # Firecracker reports `unsupported` and those verbs refuse by capability.
@@ -393,15 +417,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MVM_E2E_RUNTIME_CANDIDATE_DIR: ${{ steps.candidate.outputs.directory }}
+          MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: ${{ inputs.allow_runtime_candidate_skip }}
           RUNTIME_ARCHIVE_SHA256: ${{ inputs.runtime_archive_sha256 }}
           RUNTIME_CHECKSUM_SHA256: ${{ inputs.runtime_checksum_sha256 }}
           RUNTIME_ARCHIVE_BUNDLE_SHA256: ${{ inputs.runtime_archive_bundle_sha256 }}
           RUNTIME_CHECKSUM_BUNDLE_SHA256: ${{ inputs.runtime_checksum_bundle_sha256 }}
           MVM_BDD_SNAPSHOT: "1"
           MVM_BDD_WALL_CLOCK: "1"
+          MVM_E2E_HOME: ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
+          MVM_E2E_FAILURE_MANIFEST: ${{ runner.temp }}/failure-manifest-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}.json
         run: |
           set -o pipefail
           uv run --no-project --python 3.12 -- just e2e::docs 2>&1 | tee "$RUNNER_TEMP/e2e-docs.log"
+
+      - name: Export bounded failure observations
+        id: failure-export
+        if: always()
+        continue-on-error: true
+        env:
+          MVM_E2E_FAILURE_MANIFEST: ${{ runner.temp }}/failure-manifest-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}.json
+          MVM_E2E_FAILURE_AUTHORIZATION: ${{ steps.documented-suite.outputs.failure_manifest }}
+          MVM_E2E_FAILURE_EXPORT: ${{ runner.temp }}/failure-observations-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}.json
+        run: python3 scripts/e2e-failure-manifest.py --export
 
       # Nobody logs in to the runner to read a log. Upload on success too: a
       # green run's "did NOT run" tally is how a skipped scenario gets noticed.
@@ -409,18 +446,19 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-docs-macos-logs
+          name: e2e-docs-macos-logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
           path: |
+            ${{ steps.failure-export.outputs.failure_manifest }}
             ${{ runner.temp }}/e2e-docs.log
-            ~/.mvm/vms/*/console.log
-            ~/.mvm/vms/*/supervisor.log
+            ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/vms/*/console.log
+            ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/vms/*/supervisor.log
           if-no-files-found: warn
           retention-days: 14
 
       - name: Dump VMM diagnostics on failure
         if: failure()
         run: |
-          for d in "$HOME"/.mvm/vms/*/; do
+          for d in "$MVM_E2E_HOME"/vms/*/; do
             echo "===== $d ====="
             ls -la "$d" || true
             # HVF flushes console.log only when the supervisor exits, so an

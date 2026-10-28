@@ -31,10 +31,10 @@ use super::validate::{check_lock_schema_version, check_manifest_digest, require_
 use super::{
     ArtifactName, HostProtocolSupport, ImageLock, ImageSetError, ImageSetManifest, ImageSetMember,
     ImageSetRequirement, ImageSetRole, ImageTrustTier, MemberArtifact, MemberTarget,
-    ReleaseProducer, check_against_lock, check_protocol_compatibility, require_complete,
-    validate_structure,
+    ReleaseProducer, check_against_lock, check_protocol_compatibility,
+    check_workload_protocol_compatibility, require_complete, validate_structure,
 };
-use crate::crypto::image_verify::{sha256_file, verify_signed_payload_under_any_identity};
+use crate::crypto::image_verify::verify_signed_payload_under_any_identity;
 use crate::packs::{KeylessTrust, PackRevocationChecker, RevocationStatus, Sha256Hex};
 use crate::plan::bundle::{KeyId, key_id_from_identity};
 
@@ -45,6 +45,7 @@ pub(crate) use root_cache::published_root;
 pub use root_cache::{
     RetainedImageSetRootProof, cache_image_set_root, image_set_root_proof_cache,
     read_cached_image_set_root, read_cached_image_set_root_proof,
+    read_cached_workload_image_set_root, read_cached_workload_image_set_root_proof,
 };
 
 /// One image set to verify, and the optional policy inputs that add checks.
@@ -62,8 +63,14 @@ pub struct ImageSetVerification<'a> {
     /// Directory holding the member artifacts, each under its declared name.
     artifact_dir: &'a Path,
     requirement: Option<&'a ImageSetRequirement>,
-    host_protocols: Option<&'a HostProtocolSupport>,
+    host_protocols: Option<ConsumerProtocols<'a>>,
     revocations: Option<&'a dyn PackRevocationChecker>,
+}
+
+#[derive(Clone, Copy)]
+enum ConsumerProtocols<'a> {
+    AllImages(&'a HostProtocolSupport),
+    Workload(&'a HostProtocolSupport),
 }
 
 impl<'a> ImageSetVerification<'a> {
@@ -94,7 +101,17 @@ impl<'a> ImageSetVerification<'a> {
     /// Also refuse a set declaring protocols this host cannot speak.
     #[must_use]
     pub fn with_host_protocols(mut self, host: &'a HostProtocolSupport) -> Self {
-        self.host_protocols = Some(host);
+        self.host_protocols = Some(ConsumerProtocols::AllImages(host));
+        self
+    }
+
+    /// Check workload protocols only, not builder cache or payload support.
+    ///
+    /// The caller must select consumed members for the actual backend and
+    /// architecture. The resulting root is not builder execution authority.
+    #[must_use]
+    pub fn with_workload_protocols(mut self, host: &'a HostProtocolSupport) -> Self {
+        self.host_protocols = Some(ConsumerProtocols::Workload(host));
         self
     }
 
@@ -299,8 +316,12 @@ fn verify_root_structure(
     if let Some(requirement) = request.requirement {
         require_complete(&manifest, requirement)?;
     }
-    if let Some(host) = request.host_protocols {
-        check_protocol_compatibility(&manifest, host)?;
+    match request.host_protocols {
+        Some(ConsumerProtocols::AllImages(host)) => check_protocol_compatibility(&manifest, host)?,
+        Some(ConsumerProtocols::Workload(host)) => {
+            check_workload_protocol_compatibility(&manifest.compatibility, host)?;
+        }
+        None => {}
     }
 
     let signer_key_id = locked_signer_key_id(lock);
@@ -507,7 +528,8 @@ fn artifact_digest(
     artifact: &MemberArtifact,
     path: &Path,
 ) -> Result<Sha256Hex, ImageSetError> {
-    let hex = sha256_file(path).map_err(|error| read_failure(member, artifact, path, &error))?;
+    let hex = crate::crypto::verified_digest::sha256_file_verified(path)
+        .map_err(|error| read_failure(member, artifact, path, &error))?;
     Sha256Hex::new(hex).map_err(|error| ImageSetError::ArtifactUnreadable {
         role: member.role,
         target: member.target,

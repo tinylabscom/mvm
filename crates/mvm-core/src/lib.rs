@@ -13,6 +13,7 @@ pub mod build_env;
 pub mod canonical_linux;
 pub mod catalog;
 pub mod checkpoint;
+pub mod deps_audit;
 /// Content-addressed build-action cache records: a typed identity for one
 /// cached action's output artifacts, and a verify-on-read helper that
 /// recomputes each artifact's digest before a cache entry is trusted.
@@ -26,6 +27,9 @@ pub mod client;
 pub mod cold_build;
 pub mod config;
 pub mod dev_network;
+/// did:key codec for host-side signing identity (receipts, conformance).
+/// Host-state only: guest binaries never sign or parse host identity.
+#[cfg(feature = "host-state")]
 pub mod did_key;
 /// The single `sha256:<64 lowercase hex>` shape check every prefixed
 /// content-address newtype in this crate shares (crate-private).
@@ -62,6 +66,8 @@ pub mod kernel_advisory;
 pub mod kernel_format;
 /// Backend-recorded launch phases, so a caller can see inside `start`.
 pub mod launch_trace;
+/// Canonical mailbox codec, cryptography, capability checks, and replay seam.
+pub mod mailbox;
 /// Shared backoff for polls that wait on a condition.
 pub mod poll_backoff;
 /// Per-VM host bounds on a VMM process through a transient systemd scope on
@@ -89,6 +95,9 @@ pub mod pack_cache;
 pub mod pack_revocation;
 pub mod pack_trust;
 pub mod packs;
+/// PII/secret redaction rules applied to host-read workload output.
+/// Host-state only: redaction runs where a host reads the stream.
+#[cfg(feature = "host-state")]
 pub mod pii;
 /// Compiled-in release-signing identity: the OIDC issuer and identity
 /// templates a stock binary trusts for its own release packs, with
@@ -99,25 +108,41 @@ pub mod release_trust;
 pub mod release_version;
 pub use release_version::{ReleaseVersion, VersionSyntax};
 /// Named product-pack references and their fail-closed manifest lockfile.
+/// The registry-pack family is host-state: packs are fetched, verified and
+/// installed by the host, never from inside a guest.
+#[cfg(feature = "host-state")]
 pub mod registry_pack;
+#[cfg(feature = "host-state")]
 pub mod registry_pack_boot;
+#[cfg(feature = "host-state")]
 pub mod registry_pack_image;
+#[cfg(feature = "host-state")]
 pub mod registry_pack_revocation;
+#[cfg(feature = "host-state")]
 pub mod registry_pack_revocation_store;
+#[cfg(feature = "host-state")]
 pub mod registry_pack_store;
 /// Crash-ordered, fail-closed on-disk cache shared by signed revocation feeds.
 pub(crate) mod signed_feed_store;
 /// UOR-ADDR-compatible canonical content identity for the Workload IR,
 /// distinct from every exact-byte, trust, and replay identity type.
+/// Host-state only: the address is minted where workloads are authored.
+#[cfg(feature = "host-state")]
 pub mod workload_address;
+#[cfg(feature = "host-state")]
 pub use workload_address::{
     WorkloadAddress, WorkloadAddressError, WorkloadAddressParseError, workload_address,
 };
+/// Persistent operator configuration (`~/.mvm/config/config.toml`).
+/// Host-state only: guest binaries never read operator config.
+#[cfg(feature = "host-state")]
 pub mod user_config;
 
 /// Test-only drift-lock proving `mvm_contract::ir::canonicalize` and
 /// `serde_jcs` emit byte-identical canonical form for the same workload.
-#[cfg(test)]
+/// Cross-checks the host-state `workload_address`, so it runs only where
+/// that module is built.
+#[cfg(all(test, feature = "host-state"))]
 mod canonicalizer_equivalence;
 
 /// Cryptographic primitives — attestation, key rotation, keystore,
@@ -140,9 +165,13 @@ pub mod private_fs;
 pub mod protocol;
 #[cfg(feature = "provenance")]
 pub mod provenance;
+/// Signed execution receipts. Host-state: the signing identity is a
+/// host did:key and only the host signs or verifies receipts.
+#[cfg(feature = "host-state")]
 pub mod receipt;
 /// The signed index of an evidence archive: manifest, citations, and the
 /// checked-versus-asserted completeness distinction.
+#[cfg(feature = "host-state")]
 pub mod receipt_archive;
 pub mod residency;
 /// What a caller declared a machine should boot from — the one type both the
@@ -158,6 +187,8 @@ pub mod snapshot_frame;
 /// and the framed transport to a VM's host-side broker. Lives here rather
 /// than in `mvm-client` so `mvm-sdk` — which sits below `mvm-hostd`, which
 /// `mvm-client` depends on — can expose the same reader without a cycle.
+/// Host-state: the console reader redacts with `pii::PiiRedactor`.
+#[cfg(feature = "host-state")]
 pub mod stream_client;
 /// The guest↔host substitution-endpoint wire contract, shared so the
 /// in-guest client and the host server serialize identical bytes.
@@ -179,7 +210,9 @@ pub mod util;
 // continue to resolve.
 // ----------------------------------------------------------------------------
 
-pub use domain::{agent, instance, manifest, node, pool, session, template, tenant, volume};
+#[cfg(feature = "host-state")]
+pub use domain::manifest;
+pub use domain::{agent, instance, node, pool, session, template, tenant, volume};
 pub use platform::linux_env;
 pub use policy::{audit, network_policy, security};
 pub use protocol::{routing, signing, vm_backend};

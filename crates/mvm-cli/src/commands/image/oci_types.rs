@@ -106,6 +106,26 @@ pub(super) struct CachedOciLayer {
 }
 
 impl CachedOciImage {
+    /// Preserve a pinned source, or pin a tag to its resolved manifest.
+    pub(super) fn digest_reference(&self) -> anyhow::Result<String> {
+        let mut reference: ImageReference = self.reference.parse()?;
+        anyhow::ensure!(
+            reference.registry == self.registry && reference.repository == self.repository,
+            "cached OCI reference disagrees with registry/repository provenance"
+        );
+        super::cache::sha256_hex(&self.resolved_digest)?;
+        // An immutable source may name an index whose selected platform
+        // manifest has a different digest. Keep that original pin rather
+        // than asserting an index-to-child proof the cache does not retain.
+        if let Some(digest) = reference.digest.as_ref() {
+            super::cache::sha256_hex(digest)?;
+        } else {
+            reference.digest = Some(self.resolved_digest.clone());
+        }
+        reference.tag = None;
+        Ok(reference.canonical())
+    }
+
     pub(super) fn provenance(
         &self,
         source: &str,
@@ -277,6 +297,53 @@ mod tests {
                 size_bytes: 4,
                 path: Some(layer_path.to_string()),
             }],
+        }
+    }
+
+    #[test]
+    fn digest_reference_is_canonical_and_validates_cached_identity() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let image = sample_image("alpine:3.20", &digest, "blobs/a");
+        assert_eq!(
+            image.digest_reference().unwrap(),
+            format!("docker.io/library/alpine@{digest}")
+        );
+        for invalid in ["", "sha256:abc", "sha512:abc", "sha256:\n"] {
+            let mut invalid_image = image.clone();
+            invalid_image.resolved_digest = invalid.to_string();
+            assert!(invalid_image.digest_reference().is_err());
+        }
+        for (registry, repository) in [
+            ("evil.example", "library/alpine"),
+            ("docker.io", "library/other"),
+            ("docker.io\n", "library/alpine"),
+            ("docker.io", "library/alpine\n"),
+        ] {
+            let mut invalid_image = image.clone();
+            invalid_image.registry = registry.to_string();
+            invalid_image.repository = repository.to_string();
+            assert!(invalid_image.digest_reference().is_err());
+        }
+        let mut invalid_image = image.clone();
+        invalid_image.reference.push('\n');
+        assert!(invalid_image.digest_reference().is_err());
+        invalid_image.reference = "alpine@sha256:abc".to_string();
+        assert!(invalid_image.digest_reference().is_err());
+    }
+
+    #[test]
+    fn digest_reference_preserves_an_index_pin_with_a_different_platform_manifest() {
+        let index_digest = format!("sha256:{}", "b".repeat(64));
+        let manifest_digest = format!("sha256:{}", "a".repeat(64));
+        for source in [
+            format!("alpine@{index_digest}"),
+            format!("alpine:3.20@{index_digest}"),
+        ] {
+            let image = sample_image(&source, &manifest_digest, "blobs/a");
+            assert_eq!(
+                image.digest_reference().unwrap(),
+                format!("docker.io/library/alpine@{index_digest}")
+            );
         }
     }
 

@@ -1,4 +1,4 @@
-//! `mvmctl build guest-bins` — assemble the publishable `mvm-guest-bins`
+//! `mvmctl dev guest-bins` — assemble the publishable `mvm-guest-bins`
 //! artifact from this source checkout.
 //!
 //! The archive carries every guest artifact mvm owns: the static guest
@@ -99,7 +99,7 @@ fn validate_complete_runtime(
 
 fn no_source_checkout() -> anyhow::Error {
     anyhow::anyhow!(
-        "`mvmctl build guest-bins` builds from an mvm source checkout, and none was found; \
+        "`mvmctl dev guest-bins` builds from an mvm source checkout, and none was found; \
          run it from a clone of the mvm repository"
     )
 }

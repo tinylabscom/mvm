@@ -23,7 +23,6 @@ const MAX_PROD_LINES: usize = 1500;
 /// the gate was repaired: a file may shrink, but may not grow, and its entry
 /// must disappear once the ordinary limit is met.
 const GRANDFATHERED: &[(&str, usize)] = &[
-    ("crates/mvm-agentd/src/guest_mount.rs", 1620),
     ("crates/mvm-builder-guest/src/bin/mvm-host-vm-init.rs", 3637),
     ("crates/mvm-build/src/libkrun_builder.rs", 4485),
     ("crates/mvm-cli/src/commands/machine/mod.rs", 1733),

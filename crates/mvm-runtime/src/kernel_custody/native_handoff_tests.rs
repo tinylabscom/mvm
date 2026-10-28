@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[path = "../../../mvm-core/src/image_set/fixtures/published_root.rs"]
 mod published_root;
 
-fn prepared_owner() -> Arc<PreparedCanonicalLinux> {
+fn prepared_owner(backend: BackendKind) -> Arc<PreparedCanonicalLinux> {
     let kernel = std::fs::read(
         std::env::var_os("MVM_TEST_CANONICAL_KERNEL").expect("actual pinned public kernel"),
     )
@@ -85,7 +85,7 @@ fn prepared_owner() -> Arc<PreparedCanonicalLinux> {
         mvm_core::canonical_linux::prepare_canonical_linux(
             &archive,
             &pin,
-            BackendKind::Hvf,
+            backend,
             mvm_build::stage0_kernel::current_image_set_protocol_support(),
         )
         .unwrap(),
@@ -139,7 +139,7 @@ fn exact_final_config_and_physical_recipe_are_checked_before_native_effects() {
     let home = tempfile::tempdir().unwrap();
     let mut env = TestEnv::new();
     env.isolate_mvm_home(home.path());
-    let owner = prepared_owner();
+    let owner = prepared_owner(BackendKind::Hvf);
     let mut config = VmStartConfig {
         name: "kernel-physical-unit".into(),
         ..Default::default()
@@ -202,4 +202,166 @@ fn exact_final_config_and_physical_recipe_are_checked_before_native_effects() {
             .is_none()
     );
     // No driver was called: this is failed-start retention, not a boot/stop witness.
+}
+
+/// A driver handle whose process-table witness and HVF witness both answer.
+/// The Firecracker observation must bind the process, never the instance.
+#[cfg(target_os = "linux")]
+struct DualWitnessVm {
+    id: mvm_core::vm_backend::VmId,
+    process: Option<mvm_vmm::host::process_identity::ProcessIdentity>,
+}
+
+#[cfg(target_os = "linux")]
+impl mvm_vmm::driver::traits::RunningVm for DualWitnessVm {
+    fn id(&self) -> &mvm_core::vm_backend::VmId {
+        &self.id
+    }
+    fn wait(&self) -> Result<mvm_core::vm_backend::VmExitStatus> {
+        unreachable!("an observation fixture never waits")
+    }
+    fn kill(&self) -> Result<()> {
+        unreachable!("an observation fixture never kills")
+    }
+    fn pause(&self) -> Result<()> {
+        unreachable!("an observation fixture never pauses")
+    }
+    fn resume(&self) -> Result<()> {
+        unreachable!("an observation fixture never resumes")
+    }
+    fn status(&self) -> Result<mvm_core::vm_backend::VmStatus> {
+        unreachable!("an observation fixture never reports status")
+    }
+    fn vsock_connect(
+        &self,
+        _guest_port: u32,
+    ) -> Result<Box<dyn mvm_vmm::driver::traits::DuplexStream>> {
+        unreachable!("an observation fixture never dials")
+    }
+    fn process_identity(&self) -> Result<Option<mvm_vmm::host::process_identity::ProcessIdentity>> {
+        Ok(self.process.clone())
+    }
+    fn authenticated_hvf_instance(
+        &self,
+    ) -> Result<Option<mvm_core::protocol::hvf_control::HvfInstance>> {
+        Ok(Some(mvm_core::protocol::hvf_control::HvfInstance {
+            vm_id: self.id.0.clone(),
+            boot_nonce: [7; 32],
+        }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bound_firecracker_launch(
+    name: &str,
+) -> (
+    Arc<PreparedCanonicalLinux>,
+    KernelBoundLaunch,
+    RuntimeLifecycleLease,
+) {
+    let owner = prepared_owner(BackendKind::Firecracker);
+    let mut config = VmStartConfig {
+        name: name.into(),
+        ..Default::default()
+    };
+    owner.bind_to_config(&mut config).unwrap();
+    let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
+    let bound = KernelBoundLaunch::bind(config, BackendKind::Firecracker, &lease).unwrap();
+    (owner, bound, lease)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the actual pinned public kernel in MVM_TEST_CANONICAL_KERNEL; boots no VM"]
+fn observe_booted_binds_the_firecracker_process_witness_not_an_hvf_instance() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+
+    // A live process stands in for the Firecracker the driver just observed.
+    let mut child = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+
+    let name = "kernel-fc-dispatch-unit";
+    let (owner, bound, lease) = bound_firecracker_launch(name);
+    let identity =
+        mvm_vmm::host::process_identity::ProcessIdentity::capture(name, child.id()).unwrap();
+    let vm = DualWitnessVm {
+        id: mvm_core::vm_backend::VmId(name.into()),
+        process: Some(identity.clone()),
+    };
+    bound.observe_booted(&vm).unwrap();
+    let record = read_record(&lease.canonical_kernel_record()).unwrap();
+    assert_eq!(record.process.as_ref(), Some(&identity));
+    assert!(
+        record.instance.is_none(),
+        "the Firecracker branch must bind the process witness, never an HVF instance"
+    );
+    drop(bound);
+    drop(owner);
+    drop(lease);
+
+    // A started VM with no observable process retains the generation, keeps
+    // the record unbound, and blocks the name against reuse.
+    let name = "kernel-fc-dispatch-unobserved";
+    let (owner, bound, lease) = bound_firecracker_launch(name);
+    let vm = DualWitnessVm {
+        id: mvm_core::vm_backend::VmId(name.into()),
+        process: None,
+    };
+    let error = bound.observe_booted(&vm).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no observable process identity"),
+        "{error:#}"
+    );
+    assert!(has_retained_kernel(&lease).unwrap());
+    let record = read_record(&lease.canonical_kernel_record()).unwrap();
+    assert!(record.process.is_none() && record.instance.is_none());
+    drop(bound);
+    drop(owner);
+    let rebound = prepared_owner(BackendKind::Firecracker);
+    let mut config = VmStartConfig {
+        name: name.into(),
+        ..Default::default()
+    };
+    rebound.bind_to_config(&mut config).unwrap();
+    let error = KernelBoundLaunch::bind(config, BackendKind::Firecracker, &lease)
+        .err()
+        .expect("a retained generation must block reuse of the VM name");
+    assert!(format!("{error:#}").contains("still retained"), "{error:#}");
+    drop(rebound);
+    drop(lease);
+
+    // A driver answering for another VM is never bound to this record, and a
+    // process witness naming another VM is refused just the same.
+    let name = "kernel-fc-dispatch-other";
+    let (owner, bound, lease) = bound_firecracker_launch(name);
+    let vm = DualWitnessVm {
+        id: mvm_core::vm_backend::VmId("someone-else".into()),
+        process: Some(identity.clone()),
+    };
+    let error = bound.observe_booted(&vm).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("driver returned another VM"),
+        "{error:#}"
+    );
+    let vm = DualWitnessVm {
+        id: mvm_core::vm_backend::VmId(name.into()),
+        process: Some(identity.clone()),
+    };
+    let error = bound.observe_booted(&vm).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("kernel reader identity belongs to another VM"),
+        "{error:#}"
+    );
+    let record = read_record(&lease.canonical_kernel_record()).unwrap();
+    assert!(record.process.is_none() && record.instance.is_none());
+    drop(bound);
+    drop(owner);
+    drop(lease);
+
+    child.kill().unwrap();
+    child.wait().unwrap();
 }

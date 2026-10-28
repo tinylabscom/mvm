@@ -490,7 +490,7 @@ impl BundleContents {
             sha256,
             size_bytes,
             BundlePayload::File(PathBuf::from(path)),
-        );
+        )?;
         Ok(())
     }
 
@@ -501,7 +501,7 @@ impl BundleContents {
             .admit(name, size_bytes)
             .with_context(|| format!("{name} cannot be bundled"))?;
         let sha256 = sha256_hex(&bytes);
-        self.declare(name, role, sha256, size_bytes, BundlePayload::Bytes(bytes));
+        self.declare(name, role, sha256, size_bytes, BundlePayload::Bytes(bytes))?;
         Ok(())
     }
 
@@ -512,8 +512,15 @@ impl BundleContents {
         sha256: String,
         size_bytes: u64,
         payload: BundlePayload,
-    ) {
+    ) -> Result<()> {
         let path = format!("{ARTIFACTS_DIR}/{name}");
+        anyhow::ensure!(
+            !self
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.name == name || artifact.path == path),
+            "duplicate bundle artifact name or path: {name}"
+        );
         self.artifacts.push(BundleArtifact {
             name: name.to_string(),
             role,
@@ -522,9 +529,12 @@ impl BundleContents {
             size_bytes,
         });
         self.payload.push((path, payload));
+        Ok(())
     }
 
     /// Carry the dm-verity sidecar and return the binding the manifest records.
+    /// Also sign its raw root hash as `Other`: 64 lowercase ASCII hex bytes
+    /// followed by one LF. Consumers must not synthesize this member.
     ///
     /// A sidecar without a root hash, or the reverse, is a misbuild. It is
     /// refused rather than exported unsealed: dropping the half that is there
@@ -536,10 +546,16 @@ impl BundleContents {
     ) -> Result<Option<VerityInfo>> {
         match (sidecar, roothash) {
             (Some(sidecar), Some(roothash)) => {
+                let hash = mvm_core::packs::Sha256Hex::new(roothash)?;
                 self.push(
                     VERITY_NAME,
                     ArtifactRole::VerityHashSidecar,
                     sidecar.to_vec(),
+                )?;
+                self.push(
+                    mvm_core::registry_pack_boot::APPLICATION_ROOT_HASH_MEMBER_NAME,
+                    ArtifactRole::Other,
+                    format!("{}\n", hash.as_str()).into_bytes(),
                 )?;
                 Ok(Some(VerityInfo {
                     roothash: roothash.to_string(),
@@ -664,7 +680,7 @@ fn manifest_for(
     members: Vec<BundleMember>,
     verity: Option<VerityInfo>,
 ) -> BundleManifest {
-    BundleManifest {
+    let mut manifest = BundleManifest {
         schema_version: schema_for(&members),
         publisher: signer.publisher_id(),
         key_id: key_id.clone(),
@@ -678,7 +694,11 @@ fn manifest_for(
         members,
         verity,
         resources: inputs.resources.clone(),
+    };
+    if inputs.local_build {
+        mvm_core::plan::bundle::mark_local_build(&mut manifest);
     }
+    manifest
 }
 
 /// A lazy private staging writer.
@@ -765,6 +785,50 @@ fn write_summary(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    struct TestSigner(ed25519_dalek::SigningKey);
+
+    impl BundleSigner for TestSigner {
+        fn publisher_id(&self) -> String {
+            "host:test".to_string()
+        }
+
+        fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+            self.0.verifying_key()
+        }
+
+        fn sign(&self, canonical_manifest: &[u8]) -> Result<[u8; 64]> {
+            use ed25519_dalek::Signer as _;
+            Ok(self.0.sign(canonical_manifest).to_bytes())
+        }
+    }
+
+    #[test]
+    fn local_build_inputs_stamp_the_signed_origin_label() {
+        let inputs = BundleExportInputs::new(
+            "/tmp/kernel",
+            "/tmp/rootfs",
+            "x86_64-linux",
+            Path::new("/tmp/app.mvmpkg"),
+        )
+        .local_build();
+        let signer = TestSigner(ed25519_dalek::SigningKey::from_bytes(&[7; 32]));
+        let manifest = manifest_for(
+            &inputs,
+            &signer,
+            &signer.key_id(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        assert_eq!(
+            manifest
+                .labels
+                .get(mvm_core::plan::bundle::BUNDLE_ORIGIN_LABEL)
+                .map(String::as_str),
+            Some(mvm_core::plan::bundle::LOCAL_BUILD_ORIGIN)
+        );
+    }
 
     #[test]
     fn sidecar_resolves_beside_the_rootfs() {

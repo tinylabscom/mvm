@@ -1,4 +1,4 @@
-//! `mvmctl build compile` — Workload IR to staged build artifacts.
+//! `mvmctl dev compile` — Workload IR to staged build artifacts.
 //!
 //! Renders `flake.nix`, `launch.json`, and the bundled source tree
 //! into `--out <dir>` (or a deterministic `.tar.gz`/`.tgz` archive when
@@ -91,15 +91,15 @@ pub(in crate::commands) struct Args {
     #[arg(long = "mvm-revision", value_name = "COMMIT")]
     pub mvm_revision: Option<String>,
 
-    /// Explicit mode. `record` is the default for `mvmctl build compile`.
+    /// Explicit mode. `record` is the default for `mvmctl dev compile`.
     #[arg(long = "mode", value_enum)]
     pub mode: Option<Mode>,
 
-    /// Friendly alias — resolves to `--mode record` on `mvmctl build compile`.
+    /// Friendly alias — resolves to `--mode record` on `mvmctl dev compile`.
     #[arg(long = "prod", conflicts_with_all = ["dev", "mode"])]
     pub prod: bool,
 
-    /// Refused on `mvmctl build compile` — use `mvmctl run` for the live
+    /// Refused on `mvmctl dev compile` — use `mvmctl run` for the live
     /// transport. Accepted only to surface the rejection clearly.
     #[arg(long = "dev", conflicts_with_all = ["prod", "mode"])]
     pub dev: bool,
@@ -122,7 +122,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let resolved_mode = resolve_mode(&args)?;
     if !matches!(resolved_mode, Mode::Record) {
         bail!(
-            "mvmctl build compile only supports --mode record (alias --prod) in v1; \
+            "mvmctl dev compile only supports --mode record (alias --prod) in v1; \
              received {resolved_mode:?}. Use `mvmctl run` for live/plan modes \
              (lands in SDK-port Phase 7)."
         );
@@ -213,7 +213,7 @@ fn resolve_mode(args: &Args) -> Result<Mode> {
     }
     if args.dev {
         bail!(
-            "--dev is refused on `mvmctl build compile` (it boots a live microVM, which is the \
+            "--dev is refused on `mvmctl dev compile` (it boots a live microVM, which is the \
              `mvmctl run` verb). Drop the flag, or run `mvmctl run --dev <script>` instead."
         );
     }

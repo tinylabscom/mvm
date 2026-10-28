@@ -36,7 +36,7 @@ mvm-contract.workspace = true
 # The builder-VM guest binaries and the contract shared with the host that
 # boots them; every module they own is re-exported from this crate.
 mvm-builder-guest.workspace = true
-mvm-core.workspace = true
+mvm-core = { workspace = true, features = ["host-state"] }
 mvm-http.workspace = true
 mvm-fs.workspace = true
 # Reads a builder image's boot ABI marker off the ext4 image on the host.
@@ -86,8 +86,6 @@ which.workspace = true
 [target.'cfg(unix)'.dependencies]
 mvm-agentd.workspace = true
 mvm-vmm.workspace = true
-# App-dependency orchestration shares the compiler's sealed-volume verifier.
-mvm-compiler.workspace = true
 libkrun-sys = { workspace = true, optional = true }
 # `LibkrunNetworkProvider` implements the optional backend's network seam.
 mvm-net = { workspace = true, optional = true }

@@ -6,8 +6,8 @@
 //! filesystem where each snapshot lives under its opaque id.
 //!
 //! Two layouts are supported, both keeping snapshot *content* strictly
-//! separate from the `.mvm-snapshot-*` sidecars (meta, refcount) that live
-//! directly under `<root>/<id>/`. `materialize` clones content only, never
+//! separate from the `.mvm-snapshot-*` sidecars (meta, refcount, v2 chunk
+//! manifest) that live directly under `<root>/<id>/`. `materialize` clones content only, never
 //! the sidecars — so a materialized snapshot contains exactly the original
 //! bytes and re-hashing it via [`crate::hash::hash_source`] reproduces the
 //! same content-addressed id:
@@ -39,10 +39,12 @@ use std::path::{Path, PathBuf};
 
 use crate::clone::{CloneStrategy, reflink_or_copy, reflink_or_copy_dir};
 use crate::hash;
+use crate::manifest::Manifest;
 
 const FILE_MARKER: &str = ".mvm-snapshot-is-file";
 const META_FILE: &str = ".mvm-snapshot-meta";
 const REFCOUNT_FILE: &str = ".mvm-snapshot-refcount";
+const MANIFEST_V2_FILE: &str = ".mvm-snapshot-manifest-v2";
 const DATA_FILE: &str = "data";
 const CONTENT_DIR: &str = "content";
 
@@ -364,6 +366,86 @@ impl FsSnapshotStore {
         self.create(&id, source)?;
         Self::write_refcount(&dir, 1)?;
         Ok(id)
+    }
+
+    /// Persist `source` under a v2 chunked-manifest content address.
+    ///
+    /// Same dedup and refcount semantics as [`Self::create_content_addressed`],
+    /// but the id derives from a per-chunk manifest ([`Manifest`]) that is
+    /// persisted beside the content, so a later
+    /// [`Self::create_child_content_addressed_v2`] reuses this snapshot's
+    /// chunk digests for content the kernel proves unchanged instead of
+    /// rehashing the whole tree. v2 ids are domain-separated from v1 ids:
+    /// the same bytes address differently under each version, and snapshots
+    /// created by either version verify under their own rules forever.
+    pub fn create_content_addressed_v2(&self, source: &Path) -> io::Result<SnapshotId> {
+        let manifest = Manifest::compute(source)?;
+        self.store_v2(source, &manifest)
+    }
+
+    /// Persist `source` as a v2 child of `parent`: identical to
+    /// [`Self::create_content_addressed_v2`], but chunks whose bytes the
+    /// parent's stored content proves unchanged (CoW-shared extents, or
+    /// holes) contribute the parent's persisted digests without being read.
+    /// A parent without a persisted v2 manifest, or whose manifest no longer
+    /// matches its snapshot id, degrades the child to the full computation —
+    /// never to a different id for the same bytes.
+    pub fn create_child_content_addressed_v2(
+        &self,
+        parent: &SnapshotId,
+        source: &Path,
+    ) -> io::Result<SnapshotId> {
+        let parent_dir = self.existing_snapshot_dir(parent)?;
+        let base = self.read_manifest_v2(&parent_dir)?.and_then(|manifest| {
+            if manifest.root_digest() == parent.id() {
+                Some(manifest)
+            } else {
+                tracing::warn!(
+                    parent = %parent.id(),
+                    "snapshot manifest does not match its snapshot id; ignoring it"
+                );
+                None
+            }
+        });
+        let manifest = match base {
+            Some(base) => {
+                let base_content = if parent_dir.join(FILE_MARKER).exists() {
+                    parent_dir.join(DATA_FILE)
+                } else {
+                    parent_dir.join(CONTENT_DIR)
+                };
+                Manifest::compute_from_base(source, &base, &base_content)?.0
+            }
+            None => Manifest::compute(source)?,
+        };
+        self.store_v2(source, &manifest)
+    }
+
+    fn store_v2(&self, source: &Path, manifest: &Manifest) -> io::Result<SnapshotId> {
+        let h = manifest.root_digest().to_string();
+        let id = SnapshotId::with_digest(h.clone(), format!("sha256-manifest-v2:{h}"));
+        let dir = self.snapshot_dir(&id);
+
+        if dir.exists() {
+            self.retain(&id)?;
+            return Ok(id);
+        }
+
+        self.create(&id, source)?;
+        let json = manifest
+            .to_json()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        fs::write(dir.join(MANIFEST_V2_FILE), json)?;
+        Self::write_refcount(&dir, 1)?;
+        Ok(id)
+    }
+
+    fn read_manifest_v2(&self, dir: &Path) -> io::Result<Option<Manifest>> {
+        match fs::read_to_string(dir.join(MANIFEST_V2_FILE)) {
+            Ok(json) => Manifest::from_json(&json).map(Some),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Increment `id`'s reference count and return the new value.
@@ -693,6 +775,259 @@ mod tests {
             mem,
             "stored snapshot must be unaffected by instance mutation"
         );
+    }
+
+    // -- v2 chunked manifests: chain reuse, determinism, fail-closed --
+
+    fn write_chain_tree(root: &Path) {
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub").join("config"), b"parent-config").unwrap();
+        // A sparse blob with real holes, shaped like a memory snapshot.
+        let mut blob = vec![0xAA_u8; 4096];
+        blob.extend(std::iter::repeat_n(0u8, 3 * 1024 * 1024));
+        blob.extend(vec![0xBB_u8; 4096]);
+        fs::write(root.join("mem.bin"), &blob).unwrap();
+    }
+
+    #[test]
+    fn v2_snapshot_roundtrips_and_rehashes_to_same_id() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let source = tmp.path().join("tree");
+        write_chain_tree(&source);
+
+        let id = store
+            .create_content_addressed_v2(&source)
+            .expect("store v2");
+        assert_eq!(store.refcount(&id).expect("refcount"), 1);
+        assert!(
+            store
+                .snapshot_dir(&id)
+                .join(".mvm-snapshot-manifest-v2")
+                .is_file(),
+            "the chunk manifest sidecar is persisted beside the content"
+        );
+
+        let dst = tmp.path().join("instance");
+        store.materialize(&id, &dst).expect("materialize");
+        assert_eq!(
+            Manifest::compute(&dst).expect("rehash").root_digest(),
+            id.id(),
+            "a materialized v2 tree must re-hash to its snapshot id"
+        );
+        // No store sidecars leaked into the materialized output.
+        for entry in fs::read_dir(&dst).unwrap() {
+            let name = entry.unwrap().file_name();
+            assert!(
+                !name.to_string_lossy().starts_with(".mvm-snapshot"),
+                "materialized dir must not contain store sidecars, found {}",
+                name.to_string_lossy()
+            );
+        }
+    }
+
+    #[test]
+    fn v2_ids_are_domain_separated_from_v1_for_identical_bytes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let source = tmp.path().join("tree");
+        write_chain_tree(&source);
+
+        let v1 = store.create_content_addressed(&source).expect("store v1");
+        let v2 = store
+            .create_content_addressed_v2(&source)
+            .expect("store v2");
+        assert_ne!(
+            v1.id(),
+            v2.id(),
+            "the same bytes must not collide across manifest versions"
+        );
+        // Both coexist and dedup independently.
+        assert_eq!(store.refcount(&v1).unwrap(), 1);
+        assert_eq!(store.refcount(&v2).unwrap(), 1);
+    }
+
+    #[test]
+    fn v2_child_of_a_cow_clone_derives_the_same_id_a_full_hash_would() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let parent_src = tmp.path().join("parent-src");
+        write_chain_tree(&parent_src);
+        let parent = store
+            .create_content_addressed_v2(&parent_src)
+            .expect("store parent");
+
+        // Child = clone of the parent's content + a small delta, the CoW
+        // chain shape from the warm pool.
+        let child_src = tmp.path().join("child-src");
+        store.materialize(&parent, &child_src).expect("materialize");
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut blob = fs::OpenOptions::new()
+                .write(true)
+                .open(child_src.join("mem.bin"))
+                .unwrap();
+            blob.seek(SeekFrom::Start(2 * 1024 * 1024)).unwrap();
+            blob.write_all(&[0x42; 4096]).unwrap();
+        }
+        fs::write(child_src.join("sub").join("config"), b"child-config").unwrap();
+
+        let child = store
+            .create_child_content_addressed_v2(&parent, &child_src)
+            .expect("store child");
+        assert_eq!(
+            child.id(),
+            Manifest::compute(&child_src).unwrap().root_digest(),
+            "the chain-derived id must equal the full-computation id"
+        );
+        assert_ne!(child.id(), parent.id());
+
+        // Grandchild through the same machinery, reusing the child's
+        // manifest: the chain stays deterministic at every depth.
+        let grandchild_src = tmp.path().join("grandchild-src");
+        store.materialize(&child, &grandchild_src).unwrap();
+        fs::write(grandchild_src.join("new-file"), b"new").unwrap();
+        let grandchild = store
+            .create_child_content_addressed_v2(&child, &grandchild_src)
+            .expect("store grandchild");
+        assert_eq!(
+            grandchild.id(),
+            Manifest::compute(&grandchild_src).unwrap().root_digest()
+        );
+    }
+
+    #[test]
+    fn v2_child_of_a_v1_parent_falls_back_to_a_full_hash() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let parent_src = tmp.path().join("parent-src");
+        write_chain_tree(&parent_src);
+        // A v1 parent carries no v2 sidecar; the child must not need one.
+        let parent = store
+            .create_content_addressed(&parent_src)
+            .expect("store v1 parent");
+        assert!(
+            !store
+                .snapshot_dir(&parent)
+                .join(".mvm-snapshot-manifest-v2")
+                .exists()
+        );
+
+        let child_src = tmp.path().join("child-src");
+        store.materialize(&parent, &child_src).unwrap();
+        let child = store
+            .create_child_content_addressed_v2(&parent, &child_src)
+            .expect("store child of v1 parent");
+        assert_eq!(
+            child.id(),
+            Manifest::compute(&child_src).unwrap().root_digest(),
+            "an un-reused child is still exactly the full-computation id"
+        );
+        // And the v1 parent itself still verifies under v1 rules.
+        let dst = tmp.path().join("roundtrip");
+        store.materialize(&parent, &dst).unwrap();
+        assert_eq!(hash::hash_source(&dst).unwrap(), parent.id());
+    }
+
+    #[test]
+    fn v2_child_of_a_parent_with_a_stale_manifest_falls_back_to_full() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let parent_src = tmp.path().join("parent-src");
+        write_chain_tree(&parent_src);
+        let parent = store
+            .create_content_addressed_v2(&parent_src)
+            .expect("store parent");
+
+        // Simulate a misplaced/restored store: the sidecar no longer
+        // describes the snapshot id it sits under. The child must not reuse
+        // digests through a manifest whose root disagrees with the id.
+        let other_src = tmp.path().join("other-src");
+        fs::create_dir_all(&other_src).unwrap();
+        fs::write(other_src.join("other"), b"other").unwrap();
+        let other_manifest = Manifest::compute(&other_src).unwrap();
+        fs::write(
+            store
+                .snapshot_dir(&parent)
+                .join(".mvm-snapshot-manifest-v2"),
+            other_manifest.to_json().unwrap(),
+        )
+        .unwrap();
+
+        let child_src = tmp.path().join("child-src");
+        store.materialize(&parent, &child_src).unwrap();
+        let child = store
+            .create_child_content_addressed_v2(&parent, &child_src)
+            .expect("store child despite stale parent manifest");
+        assert_eq!(
+            child.id(),
+            Manifest::compute(&child_src).unwrap().root_digest()
+        );
+    }
+
+    #[test]
+    fn tampering_stored_v2_content_changes_its_recomputed_id() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let source = tmp.path().join("tree");
+        write_chain_tree(&source);
+        let id = store.create_content_addressed_v2(&source).expect("store");
+
+        // Flip stored bytes after sealing. Recomputing from the tampered
+        // content must not reproduce the stored id: the store-level
+        // integrity property is unchanged from v1.
+        let stored = store.snapshot_dir(&id).join("content").join("mem.bin");
+        {
+            use std::io::{Read, Seek, SeekFrom, Write};
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&stored)
+                .unwrap();
+            let mut byte = [0u8; 1];
+            file.read_exact(&mut byte).unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.write_all(&[byte[0] ^ 0xFF]).unwrap();
+        }
+        let recomputed = Manifest::compute(store.snapshot_dir(&id).join("content").as_path())
+            .unwrap()
+            .root_digest()
+            .to_string();
+        assert_ne!(
+            recomputed,
+            id.id(),
+            "tampered content must not hash to the sealed id"
+        );
+    }
+
+    #[test]
+    fn v2_file_snapshots_chain_like_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let parent_src = tmp.path().join("parent-mem.bin");
+        let mut mem = vec![0xEE_u8; 8192];
+        mem.extend(std::iter::repeat_n(0u8, 2 * 1024 * 1024));
+        fs::write(&parent_src, &mem).unwrap();
+        let parent = store
+            .create_content_addressed_v2(&parent_src)
+            .expect("store parent file");
+
+        let child_src = tmp.path().join("child-mem.bin");
+        store.materialize(&parent, &child_src).unwrap();
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = fs::OpenOptions::new().write(true).open(&child_src).unwrap();
+            file.seek(SeekFrom::Start(4096)).unwrap();
+            file.write_all(&[0x11; 4096]).unwrap();
+        }
+        let child = store
+            .create_child_content_addressed_v2(&parent, &child_src)
+            .expect("store child file");
+        assert_eq!(
+            child.id(),
+            Manifest::compute(&child_src).unwrap().root_digest()
+        );
+        assert_ne!(child.id(), parent.id());
     }
 
     #[test]

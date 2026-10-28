@@ -180,3 +180,102 @@ pub fn recover_abandoned_at(
     manifest.sealed_root_hex = sealed_root_hex(manifest)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::{
+        CaptureBinding, CaptureBounds, LEGACY_TRANSCRIPT_MANIFEST_FORMAT_VERSION, RetentionPolicy,
+        TRANSCRIPT_MANIFEST_FORMAT_VERSION,
+    };
+
+    fn manifest(format_version: u32, created: u64, sealed: Option<u64>) -> TranscriptManifest {
+        let mut manifest = TranscriptManifest {
+            format_version,
+            capture_id: "synthetic".into(),
+            binding: CaptureBinding {
+                tenant_id: "local".into(),
+                vm_name: "synthetic".into(),
+                session_id: None,
+            },
+            bounds: CaptureBounds {
+                max_duration_secs: 3_600,
+                max_bytes: 4_096,
+                max_chunks: 10,
+            },
+            created_unix_secs: created,
+            at_rest: None,
+            generation_budget: None,
+            payload_encoding: PayloadEncoding::Raw,
+            sealed_unix_secs: sealed,
+            wrapped_data_key_b64: "synthetic-envelope".into(),
+            recipient: "transcript-kek".into(),
+            retention: RetentionPolicy::FailClosed,
+            chunks: Vec::new(),
+            refused_chunks: 0,
+            refused_bytes: 0,
+            evicted_chunks: 0,
+            evicted_bytes: 0,
+            adopted: false,
+            sealed_root_hex: String::new(),
+        };
+        if format_version == TRANSCRIPT_MANIFEST_FORMAT_VERSION {
+            manifest.at_rest = Some(AtRestRetention::default());
+        }
+        manifest.sealed_root_hex = sealed_root_hex(&manifest).unwrap();
+        manifest
+    }
+
+    #[test]
+    fn read_expiry_is_exact_and_never_alters_verification() {
+        let manifest = manifest(TRANSCRIPT_MANIFEST_FORMAT_VERSION, 100, Some(200));
+        let deadline = manifest.retention_deadline().unwrap().unwrap();
+        assert_eq!(deadline, 200 + 604_800);
+        assert!(manifest.check_readable_at(deadline - 1).is_ok());
+        assert_eq!(
+            manifest.check_readable_at(deadline),
+            Err(TranscriptError::PayloadExpired)
+        );
+        // Checked arithmetic fails closed rather than granting extra time.
+        assert_eq!(
+            manifest.check_readable_at(u64::MAX),
+            Err(TranscriptError::RetentionClock)
+        );
+        assert_eq!(
+            manifest.check_readable_at(99),
+            Err(TranscriptError::RetentionClock)
+        );
+        assert_eq!(
+            manifest.check_readable_at(199),
+            Err(TranscriptError::RetentionClock)
+        );
+        // Expiry is a read refusal only: the manifest's own integrity root
+        // still verifies, so a later authenticated cleanup can bind it.
+        verify_sealed_root(&manifest).unwrap();
+    }
+
+    #[test]
+    fn unsealed_capture_has_no_cleanup_deadline_but_still_has_a_read_horizon() {
+        let manifest = manifest(TRANSCRIPT_MANIFEST_FORMAT_VERSION, 100, None);
+        // Without a terminal seal there is no destructive-retirement deadline.
+        assert_eq!(manifest.retention_deadline().unwrap(), None);
+        // Reads still expire at the maximum generation end plus the payload
+        // period, so an abandoned capture cannot stay readable forever.
+        let horizon = 100 + 3_600 + 604_800;
+        assert!(manifest.check_readable_at(horizon - 1).is_ok());
+        assert_eq!(
+            manifest.check_readable_at(horizon),
+            Err(TranscriptError::PayloadExpired)
+        );
+        verify_sealed_root(&manifest).unwrap();
+    }
+
+    #[test]
+    fn legacy_capture_has_no_read_expiry_at_any_clock() {
+        let manifest = manifest(LEGACY_TRANSCRIPT_MANIFEST_FORMAT_VERSION, 100, None);
+        assert_eq!(manifest.retention_deadline().unwrap(), None);
+        assert!(manifest.check_readable_at(0).is_ok());
+        assert!(manifest.check_readable_at(u64::MAX).is_ok());
+        verify_sealed_root(&manifest).unwrap();
+    }
+}

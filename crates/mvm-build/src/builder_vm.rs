@@ -122,7 +122,7 @@ pub enum BuilderArtifacts {
         /// Directory the builder VM sealed the application-deps
         /// volume into (content + SBOM + fetch log + CVE scan +
         /// attestations + meta). Caller hashes this with
-        /// `mvm_compiler::deps_audit::verify_sealed_volume` to
+        /// `mvm_core::deps_audit::verify_sealed_volume` to
         /// derive the canonical `volume_hash`.
         volume_dir: PathBuf,
         /// JSON sidecar emitted by `mvm-host-vm-init` next to the
@@ -669,6 +669,29 @@ pub enum BuilderVmError {
 }
 
 impl BuilderVmError {
+    /// Project only typed, payload-free fields for an observational record.
+    pub fn failure_diagnostic(&self) -> mvm_core::launch_trace::failure::Record {
+        use crate::builder_job_contract::FailureCategory as C;
+        use mvm_core::launch_trace::failure::{Category, Phase, Record};
+        let mut record = Record::new(Phase::BuilderJob);
+        record.category = match self.failure_category() {
+            C::Unknown => Category::Unknown,
+            C::Internal => Category::Internal,
+            C::InvalidRequest => Category::InvalidRequest,
+            C::Unsupported => Category::Unsupported,
+            C::Version => Category::Version,
+            C::Fetch => Category::Fetch,
+            C::NixBuild => Category::NixBuild,
+            C::NixEval => Category::NixEval,
+            C::Timeout => Category::Timeout,
+            C::OutputContract => Category::OutputContract,
+        };
+        if let Self::SupervisorExited { exit_code, .. } = self {
+            record.exit_code = Some(*exit_code);
+        }
+        record
+    }
+
     /// The stable category this failure belongs to, for callers that choose a
     /// message or a retry posture without parsing the text.
     pub fn failure_category(&self) -> crate::builder_job_contract::FailureCategory {
@@ -1390,6 +1413,26 @@ pub struct BuilderShellResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_excludes_builder_detail_and_paths() {
+        let errors = [
+            BuilderVmError::JobFailed {
+                category: crate::builder_job_contract::FailureCategory::NixEval,
+                detail: "SENTINEL_SECRET".into(),
+            },
+            BuilderVmError::SupervisorExited {
+                exit_code: 17,
+                vm_state_dir: "SENTINEL_SECRET".into(),
+            },
+        ];
+        for error in &errors {
+            let bytes = serde_json::to_string(&error.failure_diagnostic()).unwrap();
+            assert!(!bytes.contains("SENTINEL_SECRET"));
+            assert!(error.to_string().contains("SENTINEL_SECRET"));
+        }
+        assert_eq!(errors[1].failure_diagnostic().exit_code, Some(17));
+    }
 
     #[test]
     fn dangling_store_line_matches_the_nix_gc_signature() {

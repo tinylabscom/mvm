@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-mvm-core = { workspace = true }
+mvm-core = { workspace = true, features = ["host-state"] }
 # In-guest host-services FFI: drives `host.audit.v1` / `host.time.v1` /
 # `host.cost.v1` over the vsock broker. The broker client and vsock primitives
 # live in the guest-agent crate; mvm-sdk only holds the C-ABI veneer.

@@ -2,6 +2,7 @@
 title: "PHP2Shell gets a process. Not the keys."
 description: "What an attacker can reach after exploiting PHP2Shell inside MVM, what stays outside PHP's access, and how to update an affected guest."
 date: 2026-10-21T12:00:00-07:00
+shareHook: "PHP2Shell can own the process. Does that mean it gets the network too? Where microVM containment helps, and why patching still matters."
 tags:
   - security
   - php2shell

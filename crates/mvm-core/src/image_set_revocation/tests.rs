@@ -674,6 +674,7 @@ mod published {
         ));
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn the_published_bundle_does_not_vouch_for_another_feed() {
         let err = crate::registry_pack_revocation::verify_registry_pack_revocations(

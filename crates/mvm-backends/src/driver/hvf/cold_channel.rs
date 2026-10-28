@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use super::{
     ConnectedInstance, HandoffConfig, HvfInstance, HvfRunningVm, HvfSupervisorConfig,
-    OwnedInstance, SupervisorLaunchPolicy, VmId, VmmSpec, boot_retaining_child, stop_wire,
+    OwnedInstance, SupervisorLaunchPolicy, VmId, VmmSpec, boot_retaining_child,
 };
 
 pub(super) struct BootInputFiles<'a> {
@@ -437,7 +437,8 @@ impl ColdNativeCustody {
             .owned
             .as_ref()
             .context("reattached HVF handle has no original child")?
-            .open_agent_bridge(&self.vm.agent_socket, &mut self.bridge.stream)?;
+            .open_agent_bridge(&self.vm.agent_socket, &mut self.bridge.stream)
+            .context("open the original native agent bridge")?;
         let ColdBridge {
             stream,
             session,
@@ -445,12 +446,12 @@ impl ColdNativeCustody {
             ..
         } = &mut self.bridge;
         let stream = stream.as_mut().context("native bridge missing")?;
-        stream.set_read_timeout(Some(stop_wire::CONNECTION_BUDGET))?;
-        stream.set_write_timeout(Some(stop_wire::CONNECTION_BUDGET))?;
+        stream.set_read_timeout(Some(mvm_agentd::vsock::COLD_GUEST_AGENT_READY_BUDGET))?;
+        stream.set_write_timeout(Some(mvm_agentd::vsock::COLD_GUEST_AGENT_READY_BUDGET))?;
         mvm_agentd::vsock::run_with_stream_deadline(
             stream,
             Instant::now()
-                .checked_add(stop_wire::CONNECTION_BUDGET)
+                .checked_add(mvm_agentd::vsock::COLD_GUEST_AGENT_READY_BUDGET)
                 .context("cold guest handshake deadline overflow")?,
             |stream| {
                 let (authenticated, key) =
@@ -462,7 +463,8 @@ impl ColdNativeCustody {
                 *first_guest_key = Some(key);
                 Ok(())
             },
-        )?;
+        )
+        .context("authenticate the guest on the original native bridge")?;
         self.owned()?.validate_agent_bridge(
             self.bridge
                 .stream

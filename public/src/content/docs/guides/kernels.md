@@ -1,6 +1,6 @@
 ---
 title: "Custom microVM kernels"
-description: "Build or download the slim builder/workload kernels mvm boots, with mvmctl build kernel build."
+description: "Build or download the slim builder/workload kernels mvm boots, with mvmctl dev kernel build."
 ---
 
 mvm boots slim, custom-configured Linux kernels for the builder VM and for
@@ -8,20 +8,20 @@ workload microVMs. Because the config is custom, the public Nix cache has no
 substitute for them. Installed binaries use the published, hash-verified
 workload kernel on a cold cache. A source checkout builds the dedicated kernel
 automatically on the first image-backed run through Stage 0, then reuses it.
-`mvmctl build kernel build` or `just kernel::workload` remains available when you
+`mvmctl dev kernel build` or `just kernel::workload` remains available when you
 want to prewarm the cache explicitly.
 
 ## Build a kernel
 
 ```bash
 # Compile the builder kernel for this host (slow on first run, then cached)
-mvmctl build kernel build --which builder --source compile
+mvmctl dev kernel build --which builder --source compile
 
 # Download the prebuilt, hash-verified kernel that shipped with this mvmctl
-mvmctl build kernel build --which workload --source download
+mvmctl dev kernel build --which workload --source download
 
 # Download if a prebuilt exists for this release, else compile locally
-mvmctl build kernel build --all --source auto
+mvmctl dev kernel build --all --source auto
 ```
 
 Flags:

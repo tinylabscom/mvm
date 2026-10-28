@@ -1317,7 +1317,9 @@ fn verify_file_sha256_strict(
 /// (dev image, builder VM image, runtime overlay).
 pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlayError> {
     let output = mvm_core::env_hygiene::helper_command("curl")
-        .args(["-fSL", "--silent", "--show-error", "-o"])
+        .args(["-fSL", "--silent", "--show-error"])
+        .args(mvm_core::util::curl::curl_transport_args(url))
+        .arg("-o")
         .arg(dest)
         .arg(url)
         .output();

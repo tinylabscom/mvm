@@ -1,9 +1,10 @@
-//! `mvmctl pack build` — turn a locked pack spec into a signed `.mvmpkg`.
+//! Pack-source implementation for the `mvmctl build` front door.
 //!
 //! One path, every step reusing what already exists: the frozen compile
-//! (`mvm_compiler::pack`), the flake build into a template slot (the builder
-//! VM), a health boot of the baked entrypoint under the admitted launch path,
-//! and the bundle export signed by the host key. Each artifact is digested
+//! (`mvm_sdk::pack`, re-exported from `mvm_compiler::pack`), the flake build
+//! into a template slot (the builder VM), a health boot of the baked
+//! entrypoint under the admitted launch path, and the archive signed by the
+//! host key. Each artifact is digested
 //! before the health boot and again before signing; anything that changed in
 //! between is refused, so what is signed is exactly what was checked.
 //!
@@ -16,7 +17,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use mvm_build::pipeline::frozen::{FrozenInputs, tree_digest};
-use mvm_compiler::pack::compile_frozen;
 use mvm_contract::pack_lock::PackLock;
 use mvm_contract::pack_spec::{PackSpec, PackTarget};
 use mvm_core::arch::GuestArch;
@@ -27,9 +27,10 @@ use mvm_core::plan::bundle::{
 };
 use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::security::AgentProfile;
+use mvm_sdk::pack::compile_frozen;
 
 use super::author::{LoadedSpec, locked_revision, read_lock};
-use crate::commands::bundle::export::{TemplateExport, stage_template};
+use crate::commands::bundle::export::{ExportOptions, TemplateExport, stage_template};
 use crate::commands::vm::denial_review::{NoManifest, ReviewSource};
 use crate::commands::vm::invoke::{EntrypointCall, EntrypointStdin, boot_entrypoint};
 use mvm_client::bundle::{
@@ -58,7 +59,14 @@ pub(in crate::commands) struct BuildArgs {
     pub input_observation: Option<PathBuf>,
 }
 
-pub(super) fn run(args: BuildArgs) -> Result<()> {
+pub(in crate::commands) fn run_for_front_door(
+    args: BuildArgs,
+    options: ExportOptions,
+) -> Result<()> {
+    run_inner(args, options)
+}
+
+fn run_inner(args: BuildArgs, options: ExportOptions) -> Result<()> {
     let observation = args
         .input_observation
         .as_ref()
@@ -174,7 +182,8 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
 
     // ---- 5. Seal and sign under the host key ----
     producer.build.verify_revision()?;
-    let mut export = pack_export(&args.out, &loaded.spec, &lock, image_argv)?;
+    let mut export = options.apply(pack_export(&args.out, &loaded.spec, &lock, image_argv)?)?;
+    export.local_build = true;
     export.portable_boot_assets = Some(std::sync::Arc::clone(&producer.boot));
     let mut staged = stage_template(slot, export)?;
     // The exporter re-read the slot's files; what it sealed must be what the
@@ -378,6 +387,7 @@ fn pack_environment(
             working_dir: None,
         },
         resources: Some(spec.resources.clone()),
+        policy: None,
         volumes: Vec::new(),
         secret_slots: Vec::new(),
         capabilities: Vec::new(),
@@ -582,7 +592,9 @@ mod tests {
             report.to_str().unwrap(),
         ])
         .unwrap();
-        let error = run(parsed.args).unwrap_err().to_string();
+        let error = run_for_front_door(parsed.args, ExportOptions::default())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("destination already exists"), "{error}");
         assert_eq!(fs::read(&report).unwrap(), b"existing");
     }

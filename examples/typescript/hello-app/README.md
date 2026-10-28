@@ -7,7 +7,7 @@ either source language.
 ## Build
 
 ```sh
-mvmctl build compile examples/typescript/hello-app/app.ts --out /tmp/hello-app
+mvmctl dev compile examples/typescript/hello-app/app.ts --out /tmp/hello-app
 mvmctl machine run --flake /tmp/hello-app --entrypoint
 ```
 

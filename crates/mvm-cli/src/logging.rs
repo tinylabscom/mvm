@@ -1,9 +1,9 @@
 //! CLI logging setup.
 //!
-//! The subscriber assembly itself lives in `mvm_observability::logging`;
-//! this module only maps the CLI's `-v` count onto a filter.
+//! The subscriber assembly itself lives in [`crate::observability`]; this
+//! module only maps the CLI's `-v` count onto a filter.
 
-pub use mvm_observability::{LogFormat, ObservabilityConfig, ObservabilityGuard};
+pub use crate::observability::{LogFormat, ObservabilityConfig, ObservabilityGuard};
 
 /// The default tracing filter for a `-v` count when `RUST_LOG` is unset.
 /// 0 = quiet (errors only); each `-v` widens it.
@@ -28,7 +28,7 @@ pub fn filter_for_verbosity(verbosity: u8) -> &'static str {
 ///
 /// Hold the returned guard until the command finishes; dropping it flushes
 /// spans still queued for export. A command that ends early instead goes
-/// through `mvm_observability::exit`, which flushes the same export.
+/// through [`crate::observability::exit`], which flushes the same export.
 pub fn init(format: LogFormat, verbosity: u8) -> ObservabilityGuard {
     ObservabilityConfig::new(format)
         .with_fallback_filter(filter_for_verbosity(verbosity))

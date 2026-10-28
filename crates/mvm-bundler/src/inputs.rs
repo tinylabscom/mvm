@@ -82,6 +82,8 @@ pub struct BundleExportInputs<'a> {
     /// `arch_label` or whose capabilities the posture does not permit, so a
     /// descriptor that needs a capability needs a posture beside it.
     pub environment: Option<EnvironmentDescriptor>,
+    /// Stamp this host-signed archive as local build output.
+    pub local_build: bool,
     /// Where the archive is written. Missing parent directories are created;
     /// publication refuses any existing destination without replacing it.
     pub out: &'a Path,
@@ -109,6 +111,7 @@ impl<'a> BundleExportInputs<'a> {
             posture: None,
             provenance: None,
             environment: None,
+            local_build: false,
             out,
             debug_out: None,
         }
@@ -158,6 +161,11 @@ impl<'a> BundleExportInputs<'a> {
 
     pub fn environment(mut self, environment: EnvironmentDescriptor) -> Self {
         self.environment = Some(environment);
+        self
+    }
+
+    pub fn local_build(mut self) -> Self {
+        self.local_build = true;
         self
     }
 

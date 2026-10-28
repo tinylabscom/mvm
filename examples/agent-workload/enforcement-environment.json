@@ -1,0 +1,9 @@
+{
+  "descriptor_version": 1,
+  "pack": { "name": "agent/claude-demo", "version": "0.1.0" },
+  "target": "aarch64-linux",
+  "entrypoint": { "argv": ["/etc/mvm/entrypoint"] },
+  "resources": { "cpu_cores": 2, "memory_mb": 4096 },
+  "secret_slots": [{ "name": "ANTHROPIC_API_KEY", "required": true }],
+  "capabilities": ["egress"]
+}

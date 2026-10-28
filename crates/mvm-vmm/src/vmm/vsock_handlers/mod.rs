@@ -138,6 +138,9 @@ pub(crate) trait GuestPortHandler: Any + Send {
 }
 
 pub(crate) trait HostInitiatedHandler: Any + Send {
+    fn readiness_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn accepts_stream(&self, conn_id: u32) -> bool;
     fn on_packet(&mut self, ctx: &mut VsockHandlerContext<'_>, hdr: VsockHdr, payload: &[u8]);
@@ -442,6 +445,21 @@ impl VsockHandlerRegistry {
         fds
     }
 
+    pub(crate) fn readiness_timeout(&self) -> Option<std::time::Duration> {
+        self.host_initiated
+            .iter()
+            .filter_map(|handler| handler.readiness_timeout())
+            .min()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_stream_fd(&mut self, conn_id: u32) -> Option<RawFd> {
+        self.host_handler_mut::<AgentVsockHandler>()
+            .expect("agent handler present")
+            .bridge
+            .stream_fd(conn_id)
+    }
+
     /// Whether any handler holds guest bytes a host socket has not taken yet.
     pub(crate) fn has_host_backlog(&self) -> bool {
         self.host_initiated
@@ -740,6 +758,10 @@ impl AgentVsockHandler {
 }
 
 impl HostInitiatedHandler for AgentVsockHandler {
+    fn readiness_timeout(&self) -> Option<std::time::Duration> {
+        self.bridge.readiness_timeout(std::time::Instant::now())
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
@@ -754,6 +776,10 @@ impl HostInitiatedHandler for AgentVsockHandler {
 
     fn on_packet(&mut self, ctx: &mut VsockHandlerContext<'_>, hdr: VsockHdr, payload: &[u8]) {
         match hdr.op {
+            OP_RST
+                if self
+                    .bridge
+                    .on_reset_at(hdr.dst_port, std::time::Instant::now()) => {}
             OP_RESPONSE => self.bridge.on_established(hdr.dst_port),
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
@@ -792,7 +818,8 @@ impl HostInitiatedHandler for AgentVsockHandler {
                 mvm_agentd::vsock::GUEST_AGENT_PORT
             ));
         }
-        for conn_id in opened {
+        let retries = self.bridge.readiness_at(std::time::Instant::now());
+        for conn_id in opened.into_iter().chain(retries) {
             ctx.queue_host_packet(
                 conn_id,
                 mvm_agentd::vsock::GUEST_AGENT_PORT,

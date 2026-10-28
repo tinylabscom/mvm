@@ -1,9 +1,9 @@
 ---
 title: First-Use Happy Paths
-description: Three-command paths to get a microVM running for each mvm audience.
+description: Short preparation-and-run paths for each mvm audience.
 ---
 
-mvm has six primary audiences. Each one has a **three-command happy
+mvm has six primary audiences. Each one has a **short happy
 path** that takes you from "I have a thing to run" to "it's running
 under mvm." Pair each path with `mvmctl doctor --workflow <name>` to
 preflight only the host requirements that matter for your audience —
@@ -27,6 +27,11 @@ interactive-shell user no longer needs host rustup.
 
 You have an OCI image reference and want to run one command in a fresh
 microVM without writing a flake or installing host Nix.
+
+For the smallest bounded cold-run demonstration, start with the
+[native local demo](/getting-started/native-demo/). It uses a pinned cached
+image, no daemon or persistent volume, and a named foreground transient run
+so it leaves no standby behind.
 
 ```bash
 mvmctl doctor --workflow cli-run                 # preflight
@@ -94,12 +99,12 @@ callable function.
 
 ```bash
 mvmctl doctor --workflow python-sdk                              # preflight
-mvmctl build compile my_app.py --out /tmp/my-app                 # compile (static parse)
+mvmctl dev compile my_app.py --out /tmp/my-app                 # compile (static parse)
 echo '[[], {"name":"ari"}]' | \
   mvmctl machine run --entrypoint --flake /tmp/my-app            # build + boot + call → "hello ari"
 ```
 
-`mvmctl build compile` parses the decorator statically; user code does not
+`mvmctl dev compile` parses the decorator statically; user code does not
 execute on the host (only inside the microVM). `mvmctl machine run --entrypoint`
 invokes the baked function, taking its arguments as an `[args, kwargs]` JSON
 payload on stdin (empty ⇒ `[[], {}]`). See
@@ -120,7 +125,7 @@ Same shape as the Python flow with a `.ts` (or `.js`) entry file.
 
 ```bash
 mvmctl doctor --workflow typescript-sdk                          # preflight
-mvmctl build compile my-app.ts --out /tmp/my-app                 # compile (static parse)
+mvmctl dev compile my-app.ts --out /tmp/my-app                 # compile (static parse)
 echo '[[], {"name":"ari"}]' | \
   mvmctl machine run --entrypoint --flake /tmp/my-app            # build + boot + call → "hello ari"
 ```
@@ -149,6 +154,12 @@ mvmctl run ./my-app.mvmpkg -- <cmd>          # verify, install on first use, boo
 and installs it into `~/.mvm/bundles/` the first time. `mvmctl bundle install`
 does the install on its own, for a host that should hold the bundle before
 anything runs it.
+
+For an archive just produced by `mvmctl build`, skip `bundle fetch` and run the
+local path directly. Its signed local-build label and this host's key are both
+required; the run reports that the archive is not release-verified, records its
+origin and digest in the signed plan, and refuses it under `--prod`. This does
+not enroll the host key, and `bundle install` still refuses local builds.
 
 `mvmctl machine check-artifact` verifies the same bundle without installing
 or booting it, and shows the posture it declares — the ceilings any launch of

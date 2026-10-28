@@ -59,7 +59,9 @@ pub struct ResolvedPolicy {
     pub policy: PolicyBody,
     /// The layers, lowest precedence first.
     pub layers: Vec<LayerSummary>,
-    /// Which layer contributed each item, keyed `section.field.value`.
+    /// Which layer authored each item, keyed `section.field.value`, including
+    /// network selections removed by denies. `network.selection` records a
+    /// resolved manifest's complete effective network, including an empty one.
     pub provenance: BTreeMap<String, String>,
     /// What the merge dropped or narrowed, for the operator.
     pub notes: Vec<String>,
@@ -69,6 +71,20 @@ pub struct ResolvedPolicy {
 }
 
 impl ResolvedPolicy {
+    /// Whether authored layers or a resolved manifest selected network access,
+    /// even if the effective selection is empty.
+    #[must_use]
+    pub fn network_selected(&self) -> bool {
+        self.policy.network.block == Some(true)
+            || !self.policy.network.allow.is_empty()
+            || !self.policy.network.routes.is_empty()
+            || self.provenance.contains_key("network.selection")
+            || self
+                .provenance
+                .keys()
+                .any(|key| key.starts_with("network.allow.") || key.starts_with("network.routes."))
+    }
+
     /// A policy that says nothing.
     #[must_use]
     pub fn empty() -> Self {
@@ -171,21 +187,47 @@ pub(crate) fn canonical_allow(entry: &str) -> Result<String, String> {
 /// port.
 fn parse_deny(entry: &str) -> Result<(String, Option<u16>), String> {
     let entry = entry.trim();
-    let (host, port) = match entry.rsplit_once(':') {
-        Some((host, port)) => (
-            host,
+    let (host, port) = if let Some(bracketed) = entry.strip_prefix('[') {
+        let (host, rest) = bracketed
+            .split_once(']')
+            .ok_or_else(|| format!("{entry:?}: missing closing IPv6 bracket"))?;
+        host.parse::<std::net::Ipv6Addr>()
+            .map_err(|_| format!("{entry:?}: invalid IPv6 host"))?;
+        let port = if rest.is_empty() {
+            None
+        } else {
             Some(
-                port.parse::<u16>()
-                    .map_err(|_| format!("{entry:?}: {port:?} is not a port"))?,
-            ),
-        ),
-        None => (entry, None),
+                rest.strip_prefix(':')
+                    .ok_or_else(|| format!("{entry:?}: expected a port after IPv6 host"))?,
+            )
+        };
+        (host, port)
+    } else {
+        match entry.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (entry, None),
+        }
     };
+    let port = port
+        .map(|port| {
+            port.parse::<u16>()
+                .map_err(|_| format!("{entry:?}: {port:?} is not a port"))
+        })
+        .transpose()?;
     let bare = host.strip_prefix("*.").unwrap_or(host);
     if bare.is_empty() || bare.contains(['*', '/', ' ']) {
         return Err(format!("{entry:?} must be HOST[:PORT] or *.suffix[:PORT]"));
     }
-    Ok((host.to_ascii_lowercase(), port))
+    Ok((deny_host_identity(host), port))
+}
+
+fn deny_host_identity(host: &str) -> String {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<std::net::IpAddr>()
+        .map_or_else(|_| host.to_ascii_lowercase(), |address| address.to_string())
 }
 
 /// Whether deny pattern `deny` covers `host:port`.
@@ -196,7 +238,7 @@ pub(crate) fn deny_covers(deny: &str, host: &str, port: u16) -> bool {
     if deny_port.is_some_and(|p| p != port) {
         return false;
     }
-    let host = host.to_ascii_lowercase();
+    let host = deny_host_identity(host);
     match pattern.strip_prefix("*.") {
         Some(suffix) => host.len() > suffix.len() && host.ends_with(&format!(".{suffix}")),
         None => host == pattern,
@@ -578,6 +620,17 @@ impl Accumulator {
         let mut provenance = BTreeMap::new();
         let mut notes = std::mem::take(&mut self.notes);
 
+        // Keep authored selections even when deny filtering removes every destination.
+        for entry in &self.allow {
+            provenance.insert(format!("network.allow.{}", entry.value), entry.from.clone());
+        }
+        for route in &self.routes {
+            provenance.insert(
+                format!("network.routes.{}", route.value.id),
+                route.from.clone(),
+            );
+        }
+
         // Network: a block drops everything; otherwise a deny drops what it covers.
         let (allow, routes) =
             if let Some(by) = &self.blocked_by {
@@ -628,15 +681,6 @@ impl Accumulator {
                         .collect();
                 (allow, routes)
             };
-        for entry in &allow {
-            provenance.insert(format!("network.allow.{}", entry.value), entry.from.clone());
-        }
-        for route in &routes {
-            provenance.insert(
-                format!("network.routes.{}", route.value.id),
-                route.from.clone(),
-            );
-        }
         let route_values: Vec<EgressRoute> = routes.into_iter().map(|r| r.value).collect();
         if !route_values.is_empty() {
             RouteSet::new(route_values.clone()).map_err(|error| {

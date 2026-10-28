@@ -1,4 +1,4 @@
-//! `mvmctl build` — build an Mvmfile or Nix flake into a microVM image.
+//! `mvmctl machine build` — build an Mvmfile or Nix flake into a microVM image.
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
@@ -84,14 +84,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // `mvm_build::pipeline::dev_build` reads. Set once at the top so every
     // subsequent dispatch (flake / manifest / mvmfile) sees the same toggle,
     // and left set for the process's lifetime so every codepath under
-    // `mvmctl build` agrees on the choice.
+    // `mvmctl machine build` agrees on the choice.
     if args.no_persistent_builder {
         crate::commands::set_cli_env("MVM_NO_PERSISTENT_BUILDER", "1");
     }
     // `--deps` narrows the build to the deps
     // volume only. We invalidate the cache index entries pointing at
     // the project's lockfile and short-circuit before the rootfs
-    // build. The next install-pipeline run (`mvmctl build` without
+    // build. The next install-pipeline run (`mvmctl machine build` without
     // `--deps`) rebuilds the volume from scratch.
     if args.deps {
         return invalidate_deps_cache(&args);
@@ -114,13 +114,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 
     if let Some(manifest_path) = resolve_manifest_for_args(&args)? {
-        return build_manifest(
+        build_manifest(
             &manifest_path,
             args.force,
             args.update_hash,
             args.json,
             args.build_mode.resolve(),
-        );
+        )?;
+        return Ok(());
     }
 
     build_mvmfile(&args.path, args.output.as_deref())
@@ -165,7 +166,7 @@ fn build_manifest(
     update_hash: bool,
     json: bool,
     mode: mvm_build::pipeline::BuildMode,
-) -> Result<()> {
+) -> Result<String> {
     let manifest = Manifest::read_file(manifest_path)?;
     let canonical = std::fs::canonicalize(manifest_path).with_context(|| {
         format!(
@@ -182,7 +183,7 @@ fn build_manifest(
     }
 
     // Resolve flake "." relative to the manifest's parent directory so a
-    // user running `mvmctl build /elsewhere/mvm.toml` from any cwd still
+    // user running `mvmctl machine build /elsewhere/mvm.toml` from any cwd still
     // picks up the right flake.
     let flake = manifest.flake_ref();
     let resolved_flake = if flake == "." {
@@ -302,7 +303,20 @@ fn build_manifest(
         ));
     }
 
-    Ok(())
+    Ok(persisted.manifest_hash)
+}
+
+/// Build a manifest through the existing machine-build path and return its slot.
+pub(in crate::commands) fn build_manifest_to_slot(
+    manifest_path: &std::path::Path,
+) -> Result<String> {
+    build_manifest(
+        manifest_path,
+        false,
+        false,
+        false,
+        mvm_build::pipeline::BuildMode::Prod,
+    )
 }
 
 /// Build a slot from an `image`-source manifest.
@@ -317,7 +331,7 @@ fn build_manifest_from_image(
     image_ref: &str,
     json: bool,
     mode: mvm_build::pipeline::BuildMode,
-) -> Result<()> {
+) -> Result<String> {
     if json {
         PhaseEvent::new("build", "manifest", "started")
             .with_message(&format!(
@@ -405,7 +419,7 @@ fn build_manifest_from_image(
         ));
     }
 
-    Ok(())
+    Ok(persisted.manifest_hash)
 }
 
 /// Bring the builder image a flake build boots into the cache before the
@@ -605,14 +619,14 @@ fn audit_build_error(mode: &str, source: &str, err: &anyhow::Error) {
     );
 }
 
-/// `mvmctl build --deps` implementation.
+/// `mvmctl machine build --deps` implementation.
 ///
 /// Narrows the build to the deps volume by invalidating the cache
 /// index entries pointing at lockfiles under the project root. The
 /// next install-pipeline run rebuilds the volume from scratch. We
 /// deliberately do NOT spawn the builder VM here — that's the
 /// install pipeline's job, kicked off by the
-/// orchestrator on the next `mvmctl build`.
+/// orchestrator on the next `mvmctl machine build`.
 ///
 /// Invalidation strategy: walk `<deps_volumes_dir>/index/`, read
 /// each `<lockfile_hash>` pointer's volume hash, and delete both
@@ -631,7 +645,7 @@ fn invalidate_deps_cache(args: &Args) -> Result<()> {
     if !index_dir.is_dir() {
         ui::info(
             "No deps cache index found; nothing to invalidate. The next \
-             `mvmctl build` will populate it on first install.",
+             `mvmctl machine build` will populate it on first install.",
         );
         return Ok(());
     }
@@ -689,7 +703,7 @@ fn invalidate_deps_cache(args: &Args) -> Result<()> {
 
     if invalidated.is_empty() {
         ui::info(
-            "No matching deps cache entries to invalidate. Run `mvmctl build` \
+            "No matching deps cache entries to invalidate. Run `mvmctl machine build` \
              without `--deps` to (re)populate the volume on next install.",
         );
     } else {
@@ -763,7 +777,7 @@ fn lockfile_sha256s_under(project_root: &std::path::Path) -> Vec<String> {
 /// Build a Nix flake into a reusable template slot and return the slot hash.
 ///
 /// This is the backing function for `machine run --flake <ref>`: it runs the
-/// same flake build as `mvmctl build --flake` but registers the result as a
+/// same flake build as `mvmctl machine build --flake` but registers the result as a
 /// `PersistedManifest` slot so downstream persistent and transient runners can
 /// reference it by hash without re-running the build.
 ///

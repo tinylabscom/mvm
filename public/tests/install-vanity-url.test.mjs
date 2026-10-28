@@ -44,20 +44,6 @@ test("all current mvm install commands use the production vanity URL", () => {
   }
 });
 
-test("the scheduled monitor checks status, content type, and the installer marker", () => {
-  const workflow = readFileSync(join(repoRoot, ".github/workflows/install-url-watch.yml"), "utf8");
-  const check = readFileSync(join(repoRoot, "scripts/check-published-installer.sh"), "utf8");
-
-  assert.match(workflow, /schedule:/);
-  assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /https:\/\/runmvm\.com\/install\.sh/);
-  assert.match(workflow, /scripts\/check-published-installer\.sh/);
-  assert.match(check, /expected HTTP 200/);
-  assert.match(check, /text\/x-shellscript/);
-  assert.match(check, /# mvmctl installer\./);
-  assert.match(workflow, /gh issue create/);
-});
-
 test("site deploy verifies the installer through the production hostname", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/workers.yml"), "utf8");
 

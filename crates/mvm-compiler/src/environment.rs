@@ -47,6 +47,7 @@ pub fn claude_code_environment(claude_version: &str, target: PackTarget) -> Envi
             EnvironmentCapability::HostVolumes,
         ],
         services: Vec::new(),
+        policy: None,
     }
 }
 

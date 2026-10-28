@@ -6,7 +6,7 @@
 # The Rust side reads the same file through
 # `mvm_core::image_set::image_train_lock()`, and `xtask release-boot-image tag`
 # prints the boot-image tag from there. This reader exists because the jobs that
-# need the tag are not all Rust jobs: `ci-full.yml`'s bounded no-KVM builder
+# need the tag are not all Rust jobs: a bounded no-KVM builder
 # installs a prebuilt binary and carries no toolchain and no cargo cache, so
 # resolving one string through cargo would cost it a full xtask build. Reading
 # the lock is not a second copy of the pin, and `xtask check-image-lock` fails

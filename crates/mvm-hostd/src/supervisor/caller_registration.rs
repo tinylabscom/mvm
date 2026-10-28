@@ -264,18 +264,7 @@ impl StartupFiles {
         );
         let claims = cfg.boot_image_claims().map_err(anyhow::Error::msg)?;
         mvm_vmm::host::hvf_supervisor::refuse_bootarg_overrides()?;
-        let contract = reopen_caller_image(&launch.plan)?;
-        contract.verify_plan(
-            &launch.plan,
-            mvm_core::arch::GuestArch::Aarch64,
-            mvm_core::vm_backend::BackendKind::Hvf,
-        )?;
         let kernel = self.kernel.context("original kernel missing")?;
-        let declaration = contract.kernel(
-            mvm_core::arch::GuestArch::Aarch64,
-            mvm_core::vm_backend::BackendKind::Hvf,
-        )?;
-        verify_kernel_contents(&kernel, &declaration)?;
         let [rootfs, verity, metadata, root_hash] =
             self.images.context("checked image files missing")?;
         // Only the verifier-consumed roothash field is projected; unused defaults
@@ -284,16 +273,9 @@ impl StartupFiles {
             roothash: Some(claims.root_hash().to_owned()),
             ..Default::default()
         };
-        let facts = contract.capture_image_expectations(
-            &launch.plan,
-            &projection,
-            mvm_core::arch::GuestArch::Aarch64,
-            mvm_core::vm_backend::BackendKind::Hvf,
-            BootReader {
-                file: &root_hash,
-                offset: 0,
-            },
-        )?;
+        let (facts, declaration) =
+            reopen_caller_image(&launch.plan, &launch.vm, &projection, &root_hash)?;
+        verify_kernel_contents(&kernel, &declaration)?;
         for (role, file) in [
             (Role::Rootfs, &rootfs),
             (Role::Verity, &verity),
@@ -349,8 +331,21 @@ fn verify_kernel_digest(
 
 fn reopen_caller_image(
     plan: &ExecutionPlan,
-) -> Result<mvm_core::registry_pack_boot::BuiltPackBootContract> {
-    use mvm_core::registry_pack::{PackPin, RegistryPackImage};
+    vm: &str,
+    projection: &mvm_core::vm_backend::VmStartConfig,
+    root_hash: &std::fs::File,
+) -> Result<(
+    mvm_core::registry_pack_boot::AuthenticatedBootImageExpectations,
+    mvm_core::image_set::MemberArtifact,
+)> {
+    use mvm_core::registry_pack::{
+        AuthenticatedRegistryManifest as _, PackPin, RegistryPackImage, VerifiedRegistryManifest,
+    };
+    use mvm_core::registry_pack_boot::{AuthenticatedBootImageExpectations, BuiltPackBootContract};
+    use mvm_core::vm_backend::BackendKind;
+    let arch = mvm_core::arch::GuestArch::Aarch64;
+    let backend = BackendKind::Hvf;
+    let protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
     let mut selected = None;
     for asset in plan
         .asset_identities
@@ -366,7 +361,7 @@ fn reopen_caller_image(
         let policy = mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
             &config::registry_pack_publisher_policy_path(),
         )?;
-        let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
+        let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_manifest(
             &config::registry_pack_cache_dir(),
             &lock,
             &policy.policy,
@@ -376,17 +371,111 @@ fn reopen_caller_image(
             verified.manifest_sha256() == pin.manifest_sha256(),
             "caller pack pin changed"
         );
-        if matches!(verified.manifest().image, Some(RegistryPackImage::Built(_))) {
-            anyhow::ensure!(selected.is_none(), "ambiguous caller built image");
-            selected = Some(
-                mvm_core::registry_pack_boot::BuiltPackBootContract::open_for_admission(
-                    &pin,
-                    &mvm_build::stage0_kernel::current_image_set_protocol_support(),
-                )?,
-            );
+        match verified {
+            VerifiedRegistryManifest::Legacy(verified) => {
+                if matches!(verified.manifest().image, Some(RegistryPackImage::Built(_))) {
+                    anyhow::ensure!(selected.is_none(), "ambiguous caller boot image");
+                    let contract = BuiltPackBootContract::open_for_admission(&pin, &protocols)?;
+                    contract.verify_plan(plan, arch, backend)?;
+                    selected = Some((
+                        contract.capture_image_expectations(
+                            plan,
+                            projection,
+                            arch,
+                            backend,
+                            BootReader {
+                                file: root_hash,
+                                offset: 0,
+                            },
+                        )?,
+                        contract.kernel(arch, backend)?,
+                    ));
+                }
+            }
+            VerifiedRegistryManifest::Application(_) => {
+                use mvm_core::plan::bundle::{
+                    ArtifactRole, BundleRegistry, FsBundleResolver, FsTrustStore,
+                    verify_canonical_plan_bundle,
+                };
+                anyhow::ensure!(selected.is_none(), "ambiguous caller boot image");
+                let registry = BundleRegistry::default_path()?;
+                let store =
+                    mvm_core::registry_pack::application_bundle::ApplicationInstallStore::new(
+                        config::registry_pack_cache_dir(),
+                        config::pack_lockfile_path(),
+                        registry.root(),
+                    );
+                let trust = FsTrustStore::default_path()?;
+                let application =
+                    mvm_core::registry_pack::application_bundle::resolve_installed_application_bundle(
+                        pin.reference(),
+                        &store,
+                        &config::registry_pack_publisher_policy_path(),
+                        &trust,
+                    )?;
+                let original = application.bundle().plan_artifact();
+                anyhow::ensure!(
+                    plan.bundle.as_ref() == Some(&original),
+                    "caller application differs from original bundle"
+                );
+                let owner =
+                    std::sync::Arc::new(mvm_core::canonical_linux::prepare_canonical_linux(
+                        &registry.archive_path(&original.bundle_sha256),
+                        &original,
+                        backend,
+                        protocols,
+                    )?);
+                anyhow::ensure!(owner.arch() == arch, "caller kernel architecture differs");
+                // This projection is only for independent byte authentication.
+                // It cannot recreate admission or claim a native handoff.
+                let mut config = mvm_core::vm_backend::VmStartConfig {
+                    name: vm.into(),
+                    roothash: projection.roothash.clone(),
+                    ..Default::default()
+                };
+                owner.bind_to_config(&mut config)?;
+                // Reuse the admission verifier: schema, signature, pin and
+                // canonical-proof errors must not be treated as a legacy bundle.
+                let verified = verify_canonical_plan_bundle(
+                    &original,
+                    &FsBundleResolver::new(registry.root()),
+                    &trust,
+                    &owner,
+                    &config,
+                    backend,
+                    &protocols,
+                )?;
+                owner.verify_bundle_manifest(&verified.manifest)?;
+                let installed = registry.install_dir(&original.bundle_sha256);
+                for artifact in &application.bundle().manifest.artifacts {
+                    match artifact.role {
+                        ArtifactRole::Rootfs => {
+                            config.rootfs_path =
+                                installed.join(&artifact.path).display().to_string();
+                        }
+                        ArtifactRole::VerityHashSidecar => {
+                            config.verity_path =
+                                Some(installed.join(&artifact.path).display().to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                let facts = AuthenticatedBootImageExpectations::for_application(
+                    &application,
+                    plan,
+                    &config,
+                )?;
+                anyhow::ensure!(
+                    plan.environment.as_ref().is_some_and(
+                        |environment| environment.kernel_sha256 == owner.kernel_sha256()
+                    ),
+                    "caller plan kernel differs from canonical declaration"
+                );
+                selected = Some((facts, owner.kernel_declaration().clone()));
+            }
         }
     }
-    selected.context("caller plan has no authenticated built image")
+    selected.context("caller plan has no authenticated boot image")
 }
 
 /// Verify and durably consume opt-in before any boot setup, status publication,

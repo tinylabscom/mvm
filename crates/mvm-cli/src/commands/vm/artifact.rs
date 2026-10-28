@@ -1,9 +1,5 @@
 //! `mvmctl artifact`.
 //!
-//! `pack` is `mvmctl bundle export` under the name it had when portable
-//! artifacts were a format of their own: it seals a built template into a
-//! signed `.mvmpkg`, with the same arguments and the same result.
-//!
 //! **Artifact-model operations**:
 //!   `model-inspect` / `model-validate` / `model-config` / `model-build` —
 //!   operate on `ArtifactManifest` directories under `~/.mvm/artifacts/<id>/`,
@@ -20,7 +16,6 @@ use mvm_runtime::artifacts::traits::{ArtifactError, ArtifactValidator, BackendCo
 use mvm_runtime::artifacts::{FirecrackerConfigWriter, StaticValidator};
 
 use super::Cli;
-use crate::commands::bundle::export as bundle_export;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -30,17 +25,13 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum Cmd {
-    /// Alias of `mvmctl bundle export`: seal a built template into a
-    /// signed `.mvmpkg`, optionally declaring its kernel command line,
-    /// security posture, and build provenance.
-    Pack(bundle_export::Args),
     // ── Artifact-model commands ───────────────────────────
     /// Print the build-level ArtifactManifest for an artifact directory.
     ///
     /// Reads `~/.mvm/artifacts/<id>/manifest.json` and pretty-prints it.
     /// The id is the artifact UUID or a unique prefix.
     #[command(name = "model-inspect")]
-    ModelInspect(ModelInspectArgs),
+    Inspect(ModelInspectArgs),
     /// Validate an artifact directory against the compat matrix.
     ///
     /// Loads the ArtifactManifest + MicrovmArtifact from
@@ -48,21 +39,21 @@ pub(in crate::commands) enum Cmd {
     /// hashes, arch/format compat, required boot args, /sbin/init
     /// presence), prints every check, and exits nonzero on failure.
     #[command(name = "model-validate")]
-    ModelValidate(ModelValidateArgs),
+    Validate(ModelValidateArgs),
     /// Write the backend-specific config for an artifact directory.
     ///
     /// Currently only `--backend firecracker` is implemented. Writes
     /// `firecracker.json` next to the artifact files
     /// and prints the path.
     #[command(name = "model-config")]
-    ModelConfig(ModelConfigArgs),
+    Config(ModelConfigArgs),
     /// Build a microVM artifact via the existing build pipeline.
     ///
-    /// This is a thin delegation stub — use `mvmctl build`
+    /// This is a thin delegation stub — use `mvmctl machine build`
     /// for the full build workflow. This subcommand
     /// exists to make the artifact group self-contained.
     #[command(name = "model-build")]
-    ModelBuild(ModelBuildArgs),
+    Build(ModelBuildArgs),
 }
 
 // ── model-command arg structs ──────────────────────────────────────────────────
@@ -112,13 +103,12 @@ pub(in crate::commands) struct ModelBuildArgs {
     pub flake: Option<String>,
 }
 
-pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.command {
-        Cmd::Pack(a) => bundle_export::run(cli, a, cfg),
-        Cmd::ModelInspect(a) => run_model_inspect(a),
-        Cmd::ModelValidate(a) => run_model_validate(a),
-        Cmd::ModelConfig(a) => run_model_config(a),
-        Cmd::ModelBuild(a) => run_model_build(a),
+        Cmd::Inspect(a) => run_model_inspect(a),
+        Cmd::Validate(a) => run_model_validate(a),
+        Cmd::Config(a) => run_model_config(a),
+        Cmd::Build(a) => run_model_build(a),
     }
 }
 
@@ -243,7 +233,7 @@ fn run_model_validate(args: ModelValidateArgs) -> Result<()> {
         Ok(())
     } else {
         crate::ui::warn("validation failed");
-        mvm_observability::exit(1);
+        crate::observability::exit(1);
     }
 }
 
@@ -266,11 +256,11 @@ fn run_model_config(args: ModelConfigArgs) -> Result<()> {
 }
 
 fn run_model_build(_args: ModelBuildArgs) -> Result<()> {
-    // Thin stub: the full build pipeline lives in `mvmctl build`.
+    // Thin stub: the full build pipeline lives in `mvmctl machine build`.
     // Wiring NixMicrovmBuilder end-to-end here would require a running builder
     // VM, which is a larger slice. Delegate with a clear message.
     crate::ui::info(
-        "Use `mvmctl build` to build a microVM artifact.\n\
+        "Use `mvmctl machine build` to build a microVM artifact.\n\
          `mvmctl artifact model-build` is reserved for a future slice that \
          integrates directly with the artifact-model pipeline.",
     );

@@ -91,7 +91,7 @@ impl ResolvedSource {
 ///    `a_misplaced_image_reference_is_refused_even_inside_a_detected_project`).
 /// 4. `--no-detect`, or a verb that only takes explicit sources, stops here.
 /// 5. An `mvm.toml` in or above the working directory, found by the same
-///    walk-up `mvmctl build` already uses.
+///    walk-up `mvmctl machine build` already uses.
 /// 6. The command being run, then a project file in the working directory.
 /// 7. The bundled default image.
 ///

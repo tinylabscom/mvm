@@ -1,8 +1,385 @@
-//! Synthetic contract tests, not signature, published pack, or native boot evidence.
+//! Contract/unit-Ed archive tests with injected descriptor authentication.
+//! Not published-publisher, admission or native boot evidence.
 use super::*;
 use crate::image_set::{ImageSetRole, MemberBuildMode, MemberTarget};
 use crate::plan::{AssetIdentity, EnvironmentRef};
 use crate::registry_pack_image::BuiltImageAsset;
+
+#[cfg(unix)]
+struct ApplicationFixture {
+    _directory: tempfile::TempDir,
+    _environment: crate::util::test_env::TestEnv,
+    candidate: crate::registry_pack::application_bundle::VerifiedApplicationBundle,
+    plan: ExecutionPlan,
+    config: VmStartConfig,
+}
+
+#[cfg(unix)]
+fn application_fixture(
+    change: impl FnOnce(&mut crate::plan::bundle::BundleManifest, &mut Vec<(String, Vec<u8>)>),
+) -> Result<ApplicationFixture> {
+    use crate::crypto::image_verify::VerifiedSigner;
+    use crate::plan::bundle::{
+        ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, BundleRegistry,
+        FsTrustStore, VerityInfo, key_id_from_pubkey, sha256_hex, write_bundle,
+    };
+    use crate::registry_pack::{
+        PackLockfile, RegistryPackPublisher, RegistryPackPublisherPolicy, RegistryPackVerification,
+        VerifiedRegistryManifest, verify_registry_manifest_with,
+    };
+    use ed25519_dalek::SigningKey;
+    let directory = tempfile::tempdir()?;
+    let mut environment = crate::util::test_env::TestEnv::new();
+    environment.isolate_mvm_home(directory.path().join("home"));
+    let key = SigningKey::from_bytes(&[91; 32]);
+    let key_id = key_id_from_pubkey(&key.verifying_key());
+    let trust = FsTrustStore::new(directory.path().join("trust"));
+    std::fs::create_dir(trust.root())?;
+    std::fs::write(
+        trust.root().join(format!("{}.pub", key_id.0)),
+        key.verifying_key().as_bytes(),
+    )?;
+    let hash = "a".repeat(64);
+    let assets = [
+        ("rootfs.ext4", ArtifactRole::Rootfs, vec![7; 128 * 1024]),
+        (
+            "rootfs.verity",
+            ArtifactRole::VerityHashSidecar,
+            b"unit verity".to_vec(),
+        ),
+        ("mvm-meta.json", ArtifactRole::Other, b"{}".to_vec()),
+        (
+            "rootfs.roothash",
+            ArtifactRole::Other,
+            format!("{hash}\n").into_bytes(),
+        ),
+    ];
+    let mut manifest = BundleManifest {
+        schema_version: BUNDLE_SCHEMA_VERSION,
+        publisher: "byte-expectation-unit".into(),
+        key_id: key_id.clone(),
+        arch: GuestArch::host().to_string(),
+        kernel_version: None,
+        profile: None,
+        workload_label: None,
+        created_at: "2026-01-01T00:00:00Z".into(),
+        labels: Default::default(),
+        artifacts: assets
+            .iter()
+            .map(|(name, role, bytes)| BundleArtifact {
+                name: (*name).into(),
+                role: role.clone(),
+                path: format!("artifacts/{name}"),
+                sha256: sha256_hex(bytes),
+                size_bytes: bytes.len() as u64,
+            })
+            .collect(),
+        members: Vec::new(),
+        verity: Some(VerityInfo {
+            roothash: hash.clone(),
+            sidecar_artifact: "rootfs.verity".into(),
+        }),
+        resources: None,
+    };
+    let mut payload = assets
+        .into_iter()
+        .map(|(name, _, bytes)| (format!("artifacts/{name}"), bytes))
+        .collect();
+    change(&mut manifest, &mut payload);
+    let archive = write_bundle(&manifest, &key, payload)?;
+    let archive_path = directory.path().join("input.mvmpkg");
+    std::fs::write(&archive_path, &archive)?;
+    let descriptor = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 2, "kind": "application",
+        "reference": "runtime/byte-expectations@1.0.0", "description": "Unit byte facts only",
+        "application": {"schema_version": 1, "guest_arch": GuestArch::host().to_string(),
+            "bundle": {"source": "https://example.test/unit.mvmpkg",
+                "archive_sha256": sha256_hex(&archive), "archive_size": archive.len(), "key_id": key_id}}
+    }))?;
+    let pin = PackPin::new(
+        "runtime/byte-expectations@1.0.0".parse()?,
+        Sha256Hex::from_bytes(&descriptor),
+    )?;
+    let lock = PackLockfile::new(vec![pin.clone()])?;
+    let policy = RegistryPackPublisherPolicy::new(vec![RegistryPackPublisher::new(
+        "runtime",
+        "unit issuer",
+        vec!["unit identity".into()],
+    )?])?;
+    // This seam authenticates only the synthetic descriptor, not a real publisher.
+    let verified = verify_registry_manifest_with(
+        &RegistryPackVerification::new(
+            pin.reference(),
+            &descriptor,
+            b"unit descriptor signature",
+            &lock,
+            &policy,
+        ),
+        |_, _, _| {
+            Ok(VerifiedSigner {
+                identity: "unit identity".into(),
+                issuer: "unit issuer".into(),
+            })
+        },
+    )?;
+    let VerifiedRegistryManifest::Application(application) = verified else {
+        anyhow::bail!("unit application expected");
+    };
+    let candidate = crate::registry_pack::application_bundle::verify_application_bundle(
+        &application,
+        &archive_path,
+        &trust,
+    )?;
+    let installed = BundleRegistry::default_path()?.install_dir(&candidate.bundle().bundle_sha256);
+    let mut plan = crate::plan::test_support::PlanFixture::new().build();
+    plan.image.sha256 = sha256_hex(&vec![7; 128 * 1024]);
+    plan.bundle = Some(candidate.bundle().plan_artifact());
+    plan.asset_identities.push(AssetIdentity::new(
+        AssetKind::RegistryPack,
+        pin.reference().to_string(),
+        pin.manifest_sha256().as_str(),
+    )?);
+    let config = VmStartConfig {
+        rootfs_path: installed
+            .join("artifacts/rootfs.ext4")
+            .display()
+            .to_string(),
+        verity_path: Some(
+            installed
+                .join("artifacts/rootfs.verity")
+                .display()
+                .to_string(),
+        ),
+        roothash: Some(hash),
+        ..Default::default()
+    };
+    Ok(ApplicationFixture {
+        _directory: directory,
+        _environment: environment,
+        candidate,
+        plan,
+        config,
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn application_expectations_bind_signed_members_original_pin_and_effective_config() {
+    let f = application_fixture(|_, _| {}).unwrap();
+    let facts =
+        AuthenticatedBootImageExpectations::for_application(&f.candidate, &f.plan, &f.config)
+            .unwrap();
+    assert_eq!(facts.root_hash(), "a".repeat(64));
+    assert_eq!(facts.expected_size(BootImageAsset::RootHash), 65);
+    assert_eq!(
+        facts.expected_sha256(BootImageAsset::RootHash),
+        &Sha256Hex::from_bytes(format!("{}\n", "a".repeat(64)).as_bytes())
+    );
+    let exact = f.plan.asset_identities.last().unwrap().clone();
+    let mut conflicting = exact.clone();
+    conflicting.digest = "f".repeat(64);
+    for duplicate in [exact.clone(), conflicting.clone()] {
+        let mut plan = f.plan.clone();
+        plan.asset_identities.push(duplicate);
+        let error =
+            AuthenticatedBootImageExpectations::for_application(&f.candidate, &plan, &f.config)
+                .unwrap_err();
+        assert!(error.to_string().contains("ambiguous"), "{error:#}");
+    }
+    let mut wrong = f.plan.clone();
+    wrong
+        .asset_identities
+        .retain(|asset| !(asset.kind == AssetKind::RegistryPack && asset.name == exact.name));
+    wrong.asset_identities.push(conflicting);
+    assert!(
+        AuthenticatedBootImageExpectations::for_application(&f.candidate, &wrong, &f.config)
+            .is_err()
+    );
+    let mut other = f.plan.clone();
+    other.asset_identities.push(
+        AssetIdentity::new(
+            AssetKind::RegistryPack,
+            "agent/distinct-policy@1.0.0",
+            "c".repeat(64),
+        )
+        .unwrap(),
+    );
+    AuthenticatedBootImageExpectations::for_application(&f.candidate, &other, &f.config).unwrap();
+    for case in ["signature", "archive", "author", "rootfs", "descriptor"] {
+        let mut wrong = f.plan.clone();
+        match case {
+            "signature" => wrong.bundle.as_mut().unwrap().manifest_sig_base64 = "changed".into(),
+            "archive" => wrong.bundle.as_mut().unwrap().bundle_sha256.push('0'),
+            "author" => wrong.bundle.as_mut().unwrap().key_id.0.push_str("-changed"),
+            "rootfs" => wrong.image.sha256 = "0".repeat(64),
+            "descriptor" => wrong.asset_identities.clear(),
+            _ => unreachable!(),
+        }
+        assert!(
+            AuthenticatedBootImageExpectations::for_application(&f.candidate, &wrong, &f.config)
+                .is_err(),
+            "{case}"
+        );
+    }
+    for case in ["rootfs", "verity", "roothash"] {
+        let mut config = f.config.clone();
+        match case {
+            "rootfs" => config.rootfs_path.push_str("-substituted"),
+            "verity" => config.verity_path = None,
+            "roothash" => config.roothash = Some("b".repeat(64)),
+            _ => unreachable!(),
+        }
+        assert!(
+            AuthenticatedBootImageExpectations::for_application(&f.candidate, &f.plan, &config)
+                .is_err(),
+            "{case}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn application_expectations_refuse_missing_mismatched_and_ambiguous_members() {
+    for case in [
+        "missing",
+        "mismatch",
+        "role",
+        "duplicate-role",
+        "duplicate-path",
+        "tamper",
+    ] {
+        let fixture = application_fixture(|manifest, payload| {
+            let index = manifest
+                .artifacts
+                .iter()
+                .position(|a| a.name == "rootfs.roothash")
+                .unwrap();
+            match case {
+                "missing" => {
+                    let removed = manifest.artifacts.remove(index);
+                    payload.retain(|(path, _)| path != &removed.path);
+                }
+                "mismatch" => manifest.verity.as_mut().unwrap().roothash = "b".repeat(64),
+                "role" => {
+                    manifest.artifacts[index].role = crate::plan::bundle::ArtifactRole::Initrd
+                }
+                "duplicate-role" => {
+                    let mut second = manifest.artifacts[0].clone();
+                    second.name = "alternate-root".into();
+                    second.path = "artifacts/alternate-root".into();
+                    payload.push((second.path.clone(), vec![7; 128 * 1024]));
+                    manifest.artifacts.push(second);
+                }
+                "duplicate-path" => {
+                    let mut second = manifest.artifacts[index].clone();
+                    second.name = "alias-root-hash".into();
+                    manifest.artifacts.push(second);
+                }
+                "tamper" => {
+                    let path = &manifest.artifacts[index].path;
+                    payload.iter_mut().find(|(name, _)| name == path).unwrap().1[0] = b'b';
+                }
+                _ => unreachable!(),
+            }
+        });
+        match fixture {
+            Ok(f) => assert!(
+                AuthenticatedBootImageExpectations::for_application(
+                    &f.candidate,
+                    &f.plan,
+                    &f.config
+                )
+                .is_err(),
+                "{case}"
+            ),
+            Err(error) => {
+                if case == "tamper" {
+                    assert!(
+                        format!("{error:#}").to_lowercase().contains("mismatch"),
+                        "{error:#}"
+                    );
+                } else {
+                    assert!(
+                        matches!(case, "duplicate-path" | "duplicate-role"),
+                        "{case}: {error:#}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn application_root_hash_reader_refuses_non65_byte_declarations_before_capture() {
+    for size in [0, 64, 66, 70 * 1024] {
+        let f = application_fixture(|manifest, payload| {
+            let member = manifest
+                .artifacts
+                .iter_mut()
+                .find(|a| a.name == "rootfs.roothash")
+                .unwrap();
+            let bytes = vec![b'a'; size];
+            member.size_bytes = size as u64;
+            member.sha256 = crate::plan::bundle::sha256_hex(&bytes);
+            payload
+                .iter_mut()
+                .find(|(path, _)| path == &member.path)
+                .unwrap()
+                .1 = bytes;
+        })
+        .unwrap();
+        let error = f.candidate.application_root_hash_member().unwrap_err();
+        assert!(error.to_string().contains("65"), "{size}: {error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn application_root_hash_reader_is_bounded_and_repeatable_across_independent_reads() {
+    let f = application_fixture(|_, _| {}).unwrap();
+    let expected = format!("{}\n", "a".repeat(64)).into_bytes();
+    let original = f._directory.path().join("input.mvmpkg");
+    let mut poisoned = std::fs::read(&original).unwrap();
+    let last = poisoned.len() - 1;
+    poisoned[last] ^= 1;
+    std::fs::write(&original, poisoned).unwrap();
+    let error = f
+        .candidate
+        .bundle()
+        .read_small_verified_member(
+            std::fs::File::open(&original).unwrap(),
+            APPLICATION_ROOT_HASH_MEMBER_NAME,
+            65,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("original archive pin"),
+        "{error}"
+    );
+    assert_eq!(
+        f.candidate.application_root_hash_member().unwrap(),
+        expected
+    );
+    assert_eq!(
+        f.candidate.application_root_hash_member().unwrap(),
+        expected
+    );
+    let application = &f.candidate;
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let expected = &expected;
+            scope.spawn(move || {
+                for _ in 0..8 {
+                    assert_eq!(
+                        application.application_root_hash_member().unwrap(),
+                        *expected
+                    );
+                }
+            });
+        }
+    });
+}
 
 struct Fixture {
     _directory: tempfile::TempDir,

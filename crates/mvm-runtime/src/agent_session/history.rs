@@ -133,8 +133,15 @@ pub fn load_history(path: &Path) -> Result<Vec<AgentSessionEventEnvelope>> {
     if metadata.len() > MAX_DURABLE_HISTORY_BYTES {
         bail!("agent-session history exceeds its size limit");
     }
-    let body = std::fs::read_to_string(path)
+    let mut body = std::fs::read_to_string(path)
         .with_context(|| format!("reading agent-session history {}", path.display()))?;
+    if !body.is_empty() && !body.ends_with('\n') {
+        let last_line_start = body.rfind('\n').map_or(0, |index| index + 1);
+        match serde_json::from_str::<AgentSessionEventEnvelope>(&body[last_line_start..]) {
+            Ok(_) => {}
+            Err(_) => body.truncate(last_line_start),
+        }
+    }
     body.lines()
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_str(line).context("parsing durable agent-session event"))
@@ -180,12 +187,29 @@ fn create_history(path: &Path, opened: &AgentSessionEventEnvelope) -> Result<()>
 }
 
 fn append_history(path: &Path, events: &[AgentSessionEventEnvelope]) -> Result<()> {
+    let current_len = std::fs::metadata(path)
+        .with_context(|| format!("reading agent-session history metadata {}", path.display()))?
+        .len();
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(path)
         .with_context(|| format!("opening agent-session history {}", path.display()))?;
     for event in events {
-        write_event(&mut file, event)?;
+        let mut encoded =
+            serde_json::to_vec(event).context("encoding durable agent-session event")?;
+        encoded.push(b'\n');
+        let next_len = file.metadata()?.len();
+        if next_len
+            .checked_add(encoded.len() as u64)
+            .is_none_or(|len| len > MAX_DURABLE_HISTORY_BYTES)
+        {
+            bail!("agent-session history would exceed its size limit");
+        }
+        if next_len < current_len {
+            bail!("agent-session history changed while appending");
+        }
+        file.write_all(&encoded)
+            .context("appending durable agent-session event")?;
     }
     file.sync_all().context("committing agent-session events")
 }
@@ -254,5 +278,41 @@ mod tests {
         assert!(DurableHistory::open(&path, &session(), [8; 32], 2).is_err());
         let other = AgentSessionId::parse("other-session").unwrap();
         assert!(DurableHistory::open(&path, &other, [7; 32], 2).is_err());
+    }
+
+    #[test]
+    fn a_partial_trailing_record_is_ignored_on_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history.jsonl");
+        let history = DurableHistory::open(&path, &session(), [7; 32], 1).unwrap();
+        let committed = std::fs::read(&path).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"partial\":")
+            .unwrap();
+
+        let recovered = DurableHistory::open(&path, &session(), [7; 32], 2).unwrap();
+        assert_eq!(recovered.committed_sequence(), history.committed_sequence());
+        assert_eq!(load_history(&path).unwrap().len(), 1);
+        assert_eq!(committed, std::fs::read(&path).unwrap()[..committed.len()]);
+    }
+
+    #[test]
+    fn a_durable_history_cannot_be_appended_past_its_recovery_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history.jsonl");
+        let mut history = DurableHistory::open(&path, &session(), [7; 32], 1).unwrap();
+        history.journal.apply(prompt("p-1", b"prompt"), 2).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_DURABLE_HISTORY_BYTES - 1)
+            .unwrap();
+
+        assert!(history.persist().is_err());
+        assert!(load_history(&path).is_ok());
     }
 }

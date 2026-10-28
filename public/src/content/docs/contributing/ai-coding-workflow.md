@@ -255,6 +255,16 @@ until the whole ladder is green.
 | 6 | `just check::gated` | Linux-gated `cfg(target_os = "linux")` files compile (macOS `--all-targets` silently skips them) | minutes |
 | 7 | `just ci` (`lint test tests::doc bdd::run`) | The local approximation of the full CI gate | longest |
 
+`just bdd::run` prints wall-clock seconds for `mvmctl-build`, `schema-emitters`
+(including xtask), `typescript-preparation`, and `conformance-compile-and-run`.
+The last phase includes Cargo's runner compilation and execution; it is not a
+test-only duration. On success or command failure, the recipe prints a timing
+table and exit status, naming the failing phase when applicable. In GitHub
+Actions it also appends that report to `GITHUB_STEP_SUMMARY`. Reporting does not
+replace the original command's exit status, and a failed command still stops
+the recipe immediately. These measurements retain the existing hermetic suite
+selection and do not enable live scenarios.
+
 Two notes from experience:
 
 - **Clippy is a gate, not a suggestion.** Never suppress with `#[allow(...)]`;
@@ -270,9 +280,20 @@ Two notes from experience:
 - `ci.yml` runs on pull requests, merge-queue (`merge_group` with
   `checks_requested`), and manual dispatch — not on ordinary branch pushes.
   It covers check/fmt/clippy/nextest and related gates used for merge readiness.
-  Feature-only suites share the existing stable-toolchain jobs: the
-  test-support job also runs the Wasm-backend and release-acquisition checks,
-  keeping those checks on PRs without adding another runner job.
+  Feature-only execution runs in the merge queue. The stable feature lane has
+  two parallel partitions: portable features and signature/refusal tests.
+  Both must pass; neither partition retries failures. The test-support job
+  also runs the Wasm-backend and release-acquisition checks.
+  Workspace workers, hosted or self-hosted, run only the default workspace
+  suite. The queue's extras job owns man-page tests, addon tests, doctests and
+  nextest filter validation, so selecting the self-hosted runner does not add
+  extra serial suites to the PR gate. The ARM lane runs its privileged
+  witnesses first, isolates test state, then compiles and runs the workspace
+  once under that final environment.
+  The shared Rust-cache action sets Cargo's worker count to the available CPUs
+  on dedicated GitHub-hosted Linux runners after cache restoration. Explicit
+  `CARGO_BUILD_JOBS` settings and shared/self-hosted machines retain their limits;
+  the local two-worker default does not cap dedicated CI machines.
   Nix evaluation runs only when the changed paths can affect the Nix surface;
   the required `Test` check still verifies its result for those changes.
 - `security.yml` runs on release tags, nightly schedule, and manual dispatch —

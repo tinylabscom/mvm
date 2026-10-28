@@ -1772,6 +1772,8 @@ mod tests {
     #[test]
     fn adopt_install_and_pin_publishes_and_records_a_pack() {
         let home = tempfile::tempdir().expect("tempdir");
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(home.path().join("home"));
         let cache = home.path().join("registry-packs");
         let lock_path = home.path().join("packs.lock.toml");
         let policy = publisher_policy();
@@ -2420,6 +2422,8 @@ mod tests {
     #[test]
     fn open_re_verifies_sidecars_and_payload_on_every_use() {
         let home = tempfile::tempdir().expect("tempdir");
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(home.path().join("home"));
         let cache = home.path().join("registry-packs");
         let lock_path = home.path().join("packs.lock.toml");
         let policy = publisher_policy();
@@ -2478,6 +2482,8 @@ mod tests {
     #[test]
     fn open_refuses_an_unpinned_or_version_drifted_request() {
         let home = tempfile::tempdir().expect("tempdir");
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(home.path().join("home"));
         let cache = home.path().join("registry-packs");
         let lock_path = home.path().join("packs.lock.toml");
         let policy = publisher_policy();
@@ -2535,6 +2541,8 @@ mod tests {
     #[test]
     fn remove_installed_registry_pack_drops_entry_and_pin() {
         let home = tempfile::tempdir().expect("tempdir");
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(home.path().join("home"));
         let cache = home.path().join("registry-packs");
         let lock_path = home.path().join("packs.lock.toml");
         let policy = publisher_policy();
@@ -2583,6 +2591,8 @@ mod tests {
     #[test]
     fn read_pack_policy_document_returns_declared_files_only() {
         let home = tempfile::tempdir().expect("tempdir");
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(home.path().join("home"));
         let cache = home.path().join("registry-packs");
         let lock_path = home.path().join("packs.lock.toml");
         let policy = publisher_policy();

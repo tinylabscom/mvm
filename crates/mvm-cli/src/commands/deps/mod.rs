@@ -1,7 +1,7 @@
 //! `mvmctl deps` — user-facing CLI for the sealed deps-volume cache.
 //!
 //! Three verbs over the sealed-volume primitives in
-//! `mvm_compiler::deps_audit` and the host orchestrator in
+//! `mvm_core::deps_audit` and the host orchestrator in
 //! `mvm_build::app_deps`:
 //!
 //! - **`mvmctl deps inspect <volume_hash>`** — pretty-print the four
@@ -13,7 +13,7 @@
 //!   and atomically rename the directory to the new hash (since
 //!   `cve.json` changed → `meta.json` changed → `volume_hash`
 //!   changed). Emits `LocalAuditKind::DepsAudit` per volume processed.
-//! - **`mvmctl build --deps`** — force a rebuild of the deps volume
+//! - **`mvmctl machine build --deps`** — force a rebuild of the deps volume
 //!   even on cache hit (handled in `crates/mvm-cli/src/commands/build/build.rs`,
 //!   not here).
 //!

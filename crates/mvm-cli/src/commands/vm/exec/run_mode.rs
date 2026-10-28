@@ -12,7 +12,7 @@ use super::{RunArgs, RunMode, SdkTransportArgs};
 /// mode was requested — in that case the verb falls back to the
 /// transient-sandbox runner over the trailing argv.
 ///
-/// Env-var precedence matches `mvmctl build compile`: `MVM_SDK_MODE`
+/// Env-var precedence matches `mvmctl dev compile`: `MVM_SDK_MODE`
 /// supersedes any flag-only override so a wrapper script can pin a
 /// mode without the user retyping `--mode`.
 pub(in crate::commands) fn resolve_run_mode(
@@ -60,15 +60,15 @@ pub(in crate::commands) fn resolve_run_mode(
             return Ok(None);
         }
         anyhow::bail!(
-            "`mvmctl run --prod` (alias for --mode record) redirects to `mvmctl build compile`, where \
-             record is the default mode. Re-run as `mvmctl build compile <script>`."
+            "`mvmctl run --prod` (alias for --mode record) redirects to `mvmctl dev compile`, where \
+             record is the default mode. Re-run as `mvmctl dev compile <script>`."
         );
     }
     match sdk.mode {
         None => Ok(None),
         Some(RunMode::Live) => Ok(Some(RunMode::Live)),
         Some(RunMode::Record) => anyhow::bail!(
-            "`mvmctl run --mode record` is unsupported — `mvmctl build compile` is the record-mode verb \
+            "`mvmctl run --mode record` is unsupported — `mvmctl dev compile` is the record-mode verb \
              (record is the default; pass the script as the positional entry)."
         ),
         Some(RunMode::Plan) => Ok(Some(RunMode::Plan)),
@@ -80,7 +80,7 @@ fn parse_env_run_mode(raw: &str) -> Result<RunMode> {
         "live" => Ok(RunMode::Live),
         "plan" => Ok(RunMode::Plan),
         "record" => anyhow::bail!(
-            "MVM_SDK_MODE=record on `mvmctl run` is unsupported — `mvmctl build compile` is the \
+            "MVM_SDK_MODE=record on `mvmctl run` is unsupported — `mvmctl dev compile` is the \
              record-mode verb (record is its default)."
         ),
         other => anyhow::bail!(

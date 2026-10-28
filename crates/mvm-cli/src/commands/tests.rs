@@ -1144,21 +1144,21 @@ fn machine_build_parses_image_and_flake() {
 }
 
 #[test]
-fn build_image_subcommand_removed() {
-    let err = Cli::try_parse_from(["mvmctl", "build", "image", "--flake", "."])
-        .expect_err("build image must not parse after removal");
-    assert_eq!(
-        err.kind(),
-        clap::error::ErrorKind::InvalidSubcommand,
-        "expected InvalidSubcommand, got: {err:?}"
-    );
+fn build_accepts_a_source_named_image() {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "image", "--flake", "."])
+        .expect("the unified build front door accepts any source path");
+    let Commands::Build(args) = cli.command else {
+        panic!("expected unified build command");
+    };
+    assert_eq!(args.source, Path::new("image"));
+    assert_eq!(args.flake.as_deref(), Some("."));
 }
 
 #[test]
 fn build_runtime_overlay_subcommand_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "runtime-overlay", "build"])
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "runtime-overlay", "build"])
         .expect("runtime-overlay build must parse");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group");
     };
     assert!(
@@ -1169,9 +1169,9 @@ fn build_runtime_overlay_subcommand_parses() {
 
 #[test]
 fn build_sdk_sidecar_subcommand_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "sdk-sidecar", "build"])
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "sdk-sidecar", "build"])
         .expect("SDK sidecar build command must parse");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group");
     };
     assert!(
@@ -1184,7 +1184,7 @@ fn build_sdk_sidecar_subcommand_parses() {
 fn build_guest_bins_subcommand_parses_repeated_arches() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "build",
+        "dev",
         "guest-bins",
         "--out",
         "/tmp/guest-bins",
@@ -1194,7 +1194,7 @@ fn build_guest_bins_subcommand_parses_repeated_arches() {
         "amd64",
     ])
     .expect("guest-bins build command must parse");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group");
     };
     let build_group::BuildCmd::GuestBins(args) = bg.action else {
@@ -1221,15 +1221,36 @@ fn top_level_kernel_build_subcommand_parses() {
 
 #[test]
 fn nested_kernel_build_subcommand_still_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "kernel", "build", "--which", "workload"])
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "kernel", "build", "--which", "workload"])
         .expect("nested kernel build must keep parsing");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group");
     };
     assert!(
         matches!(bg.action, build_group::BuildCmd::Kernel(_)),
         "expected nested kernel build command"
     );
+}
+
+#[test]
+fn dev_subcommands_keep_their_audit_verb_names() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["dev", "compile", "--from-ir", "/tmp/ir.json"], "compile"),
+        (&["dev", "validate"], "validate"),
+        (&["dev", "kernel", "build"], "kernel"),
+        (&["dev", "runtime-overlay", "build"], "runtime-overlay"),
+        (&["dev", "sdk-sidecar", "build"], "sdk-sidecar"),
+        (&["dev", "address", "--from-ir", "/tmp/ir.json"], "address"),
+        (&["dev", "image-set", "builder-vm"], "image-set"),
+        (&["dev", "guest-bins"], "guest-bins"),
+    ];
+
+    for (args, expected) in cases {
+        let command = Cli::try_parse_from(std::iter::once("mvmctl").chain(args.iter().copied()))
+            .unwrap_or_else(|error| panic!("{args:?} must parse: {error}"))
+            .command;
+        assert_eq!(command.verb_name(), *expected, "{args:?}");
+    }
 }
 
 #[test]
@@ -2538,10 +2559,38 @@ fn test_image_inspect_parses() {
         Commands::Image(image::Args {
             action: ImageAction::Inspect {
                 ref reference,
-                json: true
+                json: true,
+                digest_ref: false,
             },
         }) if reference == "docker.io/library/alpine:3.20"
     ));
+}
+
+#[test]
+fn test_image_inspect_digest_ref_parses_and_conflicts_with_json() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "image", "inspect", "alpine", "--digest-ref"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Image(image::Args {
+            action: ImageAction::Inspect {
+                digest_ref: true,
+                json: false,
+                ..
+            },
+        })
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "image",
+            "inspect",
+            "alpine",
+            "--digest-ref",
+            "--json"
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -2866,6 +2915,45 @@ fn test_audit_tail_chain_flag_parses() {
             assert_eq!(tenant, "local");
         }
         _ => panic!("Expected Audit::Tail with --chain"),
+    }
+}
+
+#[test]
+fn test_audit_usage_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "usage"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action: AuditAction::Usage { tenant, vm, json },
+        }) => {
+            assert_eq!(tenant, "local");
+            assert!(vm.is_none());
+            assert!(!json);
+        }
+        _ => panic!("Expected Audit::Usage"),
+    }
+}
+
+#[test]
+fn test_audit_usage_flags_parse() {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "trust", "audit", "usage", "--tenant", "acme", "--vm", "build-1", "--json",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action: AuditAction::Usage { tenant, vm, json },
+        }) => {
+            assert_eq!(tenant, "acme");
+            assert_eq!(vm.as_deref(), Some("build-1"));
+            assert!(json);
+        }
+        _ => panic!("Expected Audit::Usage with flags"),
     }
 }
 
@@ -5423,13 +5511,13 @@ fn test_up_tenant_override_via_flag() {
     );
 }
 
-// ---- `mvmctl compile --from-recording` ----
+// ---- `mvmctl dev compile --from-recording` ----
 
 #[test]
 fn test_compile_from_recording_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "build",
+        "dev",
         "compile",
         "--from-recording",
         "/tmp/rec.json",
@@ -5437,7 +5525,7 @@ fn test_compile_from_recording_parses() {
         "/tmp/out",
     ])
     .expect("parse");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group")
     };
     match bg.action {
@@ -5467,7 +5555,7 @@ fn test_compile_from_recording_conflicts_with_from_ir() {
     // accept both.
     let err = Cli::try_parse_from([
         "mvmctl",
-        "build",
+        "dev",
         "compile",
         "--from-recording",
         "/tmp/rec.json",
@@ -5484,9 +5572,9 @@ fn test_compile_from_recording_conflicts_with_from_ir() {
 
 #[test]
 fn test_compile_default_no_from_flags_leaves_them_none() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "compile", "--from-ir", "/tmp/ir.json"])
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "compile", "--from-ir", "/tmp/ir.json"])
         .expect("parse");
-    let Commands::Build(bg) = cli.command else {
+    let Commands::Dev(bg) = cli.command else {
         panic!("expected build group")
     };
     match bg.action {
@@ -5506,7 +5594,7 @@ fn test_compile_default_no_from_flags_leaves_them_none() {
 fn build_compile_accepts_an_explicit_publish_revision() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "build",
+        "dev",
         "compile",
         "--from-ir",
         "/tmp/ir.json",
@@ -5514,7 +5602,7 @@ fn build_compile_accepts_an_explicit_publish_revision() {
         "4e65b221744885e536ec91a3f2948cdc508dcb49",
     ])
     .expect("parse pinned compile");
-    let Commands::Build(group) = cli.command else {
+    let Commands::Dev(group) = cli.command else {
         panic!("expected build group");
     };
     let build_group::BuildCmd::Compile(args) = group.action else {
@@ -5776,6 +5864,24 @@ fn emits_machine_readable_stdout(argv: &[&str]) -> bool {
 }
 
 #[test]
+fn registry_json_commands_reserve_stdout() {
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl",
+        "pull",
+        "runtime/go",
+        "--json",
+    ]));
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "search", "go", "--json",
+    ]));
+    assert!(!emits_machine_readable_stdout(&[
+        "mvmctl",
+        "pull",
+        "runtime/go",
+    ]));
+}
+
+#[test]
 fn a_transient_run_with_a_command_reserves_stdout_for_the_guest() {
     // The guest's own stdout is relayed to the caller, so host chrome must not
     // share the stream — a warning printed there lands glued to the workload's
@@ -5897,6 +6003,10 @@ fn internal_helper_commands_short_circuit_before_startup_side_effects() {
     assert!(exits_early(&["mvmctl", "env", "uninstall"]));
     assert!(exits_early(&["mvmctl", "env", "uninstall", "--quiesce"]));
     assert!(!exits_early(&["mvmctl", "env", "cleanup"]));
+    // install.sh probes the just-extracted mvmctl before any state exists.
+    assert!(exits_early(&["mvmctl", "backend", "detect", "--plain"]));
+    assert!(!exits_early(&["mvmctl", "backend", "list"]));
+    assert!(!exits_early(&["mvmctl", "backend", "add", "libkrun"]));
     assert!(!exits_early(&[
         "mvmctl",
         "machine",
@@ -5911,7 +6021,7 @@ fn internal_helper_commands_short_circuit_before_startup_side_effects() {
 // --- Top-level help surface tests ---
 
 #[test]
-fn top_level_help_shows_user_facing_groups_and_hides_dev_tooling() {
+fn top_level_help_shows_user_facing_groups_and_hides_internal_tooling() {
     let visible: Vec<String> = cli_command()
         .get_subcommands()
         .filter(|cmd| !cmd.is_hide_set())
@@ -5925,13 +6035,14 @@ fn top_level_help_shows_user_facing_groups_and_hides_dev_tooling() {
     for shown in &[
         "machine",
         "run",
-        "build",
+        "dev",
         "kernel",
         "deploy",
         "generate",
         "template",
         "init",
         "doctor",
+        "backend",
         "bootstrap",
         "explain",
         "why",
@@ -5960,7 +6071,7 @@ fn top_level_help_shows_user_facing_groups_and_hides_dev_tooling() {
     }
 
     let help = cli_command().render_help().to_string();
-    // Dev tooling stays out of the way. It still works when typed.
+    // Internal tooling stays out of the way. It still works when typed.
     for hidden in &["storage", "reconcile", "seccomp-audit", "dashboard"] {
         // Commands are listed one per line; a hidden command's name should
         // not appear as a standalone word at the start of a help line.
@@ -6551,7 +6662,7 @@ fn the_separator_tip_stays_off_other_commands_and_errors() {
     assert!(
         separator_tip(
             ErrorKind::UnknownArgument,
-            &words(&["bundle", "export", "x"])
+            &words(&["bundle", "fetch", "x"])
         )
         .is_none()
     );

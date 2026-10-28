@@ -4,13 +4,128 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
-fn pack_build_help_advertises_explicit_input_observation() {
+fn ops_config_show_redacts_proxy_credentials_without_rewriting_config() {
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let path = config_dir.join("config.toml");
+    let raw = "[egress_proxy]\nhttps = 'http://username-token:password-token@proxy.corp:3128'\nhttp = 'invalid username-token:password-token'\n";
+    std::fs::write(&path, raw).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args(["pack", "build", "--help"])
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .args(["ops", "config", "show"])
         .output()
-        .expect("pack build help");
+        .expect("show isolated config");
     assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("--input-observation <PATH>"));
+    for bytes in [&out.stdout, &out.stderr] {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains("username-token"));
+        assert!(!text.contains("password-token"));
+    }
+    let shown: mvm_core::user_config::MvmConfig =
+        toml::from_str(std::str::from_utf8(&out.stdout).unwrap()).unwrap();
+    assert_eq!(
+        shown.egress_proxy.unwrap().https.as_deref(),
+        Some("<redacted>")
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+}
+
+#[test]
+fn caller_identity_help_exposes_explicit_enrollment_and_read_only_show() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["env", "caller-identity", "--help"])
+        .output()
+        .expect("run caller identity help");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("enroll"), "{help}");
+    assert!(help.contains("show"), "{help}");
+}
+
+#[test]
+fn caller_identity_show_and_status_do_not_create_state() {
+    for action in ["show", "status"] {
+        let temp = tempfile::tempdir().expect("isolated caller identity home");
+        let home = temp.path().join("absent");
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .env("MVM_HOME", &home)
+            .env("HOME", temp.path())
+            .args(["env", "caller-identity", action])
+            .output()
+            .expect("read missing caller identity");
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("explicitly run"), "{stderr}");
+        assert!(!home.exists(), "{action} created state");
+    }
+}
+
+#[test]
+fn legacy_build_verbs_are_removed() {
+    for args in [
+        &["pack", "build", "--help"][..],
+        &["bundle", "build", "--help"],
+        &["bundle", "export", "--help"],
+        &["artifact", "pack", "--help"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .args(args)
+            .output()
+            .expect("run removed build verb");
+        assert!(!out.status.success(), "{args:?} unexpectedly parsed");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn internal_template_export_is_callable_but_hidden_from_dev_help() {
+    let direct = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["dev", "export-template", "--help"])
+        .output()
+        .expect("run internal template exporter help");
+    assert!(direct.status.success());
+
+    let group = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["dev", "--help"])
+        .output()
+        .expect("run dev help");
+    assert!(group.status.success());
+    assert!(
+        !String::from_utf8_lossy(&group.stdout).contains("export-template"),
+        "internal fixture command must stay out of user-facing help"
+    );
+}
+
+#[test]
+fn build_help_advertises_every_workload_source_and_image_control() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["build", "--help"])
+        .output()
+        .expect("run build help");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    let normalized = help.to_ascii_lowercase();
+    for source in ["pack", "manifest", "flake", "sdk", "image"] {
+        assert!(
+            normalized.contains(source),
+            "build help missing {source}:\n{help}"
+        );
+    }
+    for flag in [
+        "--arch",
+        "--production",
+        "--debug-out",
+        "--input-observation",
+    ] {
+        assert!(help.contains(flag), "build help missing {flag}:\n{help}");
+    }
 }
 
 #[test]
@@ -71,9 +186,9 @@ fn env_verify_runtime_help_and_parser_require_explicit_release_inputs() {
 #[test]
 fn build_compile_help_advertises_pinned_publication_input() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args(["build", "compile", "--help"])
+        .args(["dev", "compile", "--help"])
         .output()
-        .expect("run build compile help");
+        .expect("run dev compile help");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("--mvm-revision"), "{stdout}");
@@ -84,14 +199,14 @@ fn build_compile_help_advertises_pinned_publication_input() {
 fn build_compile_rejects_invalid_pin_before_reading_source() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args([
-            "build",
+            "dev",
             "compile",
             "/does/not/exist.py",
             "--mvm-revision",
             "main",
         ])
         .output()
-        .expect("run build compile with invalid revision");
+        .expect("run dev compile with invalid revision");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("40-character hexadecimal"), "{stderr}");
@@ -117,51 +232,11 @@ fn machine_workspace_apply_verbs_are_discoverable() {
 }
 
 #[test]
-fn artifact_pack_takes_the_arguments_of_bundle_export() {
-    let help = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-            .args(args)
-            .output()
-            .expect("run help");
-        assert!(out.status.success(), "{args:?} --help failed");
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    };
-    let pack = help(&["artifact", "pack", "--help"]);
-    let export = help(&["bundle", "export", "--help"]);
-    for flag in [
-        "<TEMPLATE>",
-        "--out",
-        "--cmdline",
-        "--posture",
-        "--allow-egress",
-        "--allow-volumes",
-        "--allow-unauthenticated",
-    ] {
-        assert!(
-            pack.contains(flag),
-            "artifact pack help missing {flag}: {pack}"
-        );
-        assert!(
-            export.contains(flag),
-            "bundle export help missing {flag}: {export}"
-        );
-    }
-    assert!(pack.contains("Alias of `mvmctl bundle export`"), "{pack}");
-}
-
-#[test]
-fn bundle_export_refuses_an_allow_flag_without_a_posture() {
+fn build_refuses_an_allow_flag_without_a_posture() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args([
-            "bundle",
-            "export",
-            "tmpl",
-            "--out",
-            "/tmp/never.mvmpkg",
-            "--allow-egress",
-        ])
+        .args(["build", ".", "--allow-egress"])
         .output()
-        .expect("run bundle export");
+        .expect("run build");
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("--posture"),
@@ -203,12 +278,71 @@ fn help_text(argv: &[&str]) -> String {
         .join(" ")
 }
 
-/// `build guest-bins` produces mvmctl's guest-runtime archive; its help names
+#[test]
+fn dev_help_lists_every_contributor_subcommand() {
+    let help = help_text(&["dev", "--help"]);
+    for command in [
+        "compile",
+        "validate",
+        "kernel",
+        "runtime-overlay",
+        "sdk-sidecar",
+        "address",
+        "image-set",
+        "guest-bins",
+    ] {
+        assert!(help.contains(command), "dev help missing {command}: {help}");
+    }
+}
+
+#[test]
+fn build_help_advertises_source_detection_and_export_controls() {
+    let help = help_text(&["build", "--help"]);
+    for expected in [
+        "SOURCE",
+        "--out",
+        "--from",
+        "--flake",
+        "--label",
+        "--posture",
+        "--environment",
+        "--health-timeout",
+        "--input-observation",
+    ] {
+        assert!(
+            help.contains(expected),
+            "build help missing {expected}: {help}"
+        );
+    }
+}
+
+#[test]
+fn build_rejects_an_ambiguous_source_before_building() {
+    let source = tempfile::tempdir().expect("create source directory");
+    std::fs::write(source.path().join("mvm.toml"), "schema_version = 1\n")
+        .expect("write manifest marker");
+    std::fs::write(source.path().join("flake.nix"), "{ outputs = _: {}; }\n")
+        .expect("write flake marker");
+    let state = tempfile::tempdir().expect("create isolated state");
+    let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("HOME", state.path())
+        .env("MVM_HOME", state.path())
+        .args(["build"])
+        .arg(source.path())
+        .output()
+        .expect("run build source detection");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ambiguous source"), "{stderr}");
+    assert!(stderr.contains("--from manifest|flake"), "{stderr}");
+}
+
+/// `dev guest-bins` produces mvmctl's guest-runtime archive; its help names
 /// the output directory, the per-architecture selector, and whose archive it
 /// is, and its long help says mvm-images is not a consumer.
 #[test]
 fn build_guest_bins_help_names_output_and_arch_controls() {
-    let short = help_text(&["build", "guest-bins", "--help"]);
+    let short = help_text(&["dev", "guest-bins", "--help"]);
     for expected in [
         "--out",
         "--arch",
@@ -218,7 +352,7 @@ fn build_guest_bins_help_names_output_and_arch_controls() {
     ] {
         assert!(short.contains(expected), "help missing {expected}: {short}");
     }
-    let long = help_text(&["help", "build", "guest-bins"]);
+    let long = help_text(&["help", "dev", "guest-bins"]);
     assert!(
         long.contains("Its consumer is mvmctl; mvm-images does not consume it"),
         "{long}"
@@ -234,7 +368,7 @@ fn build_guest_bins_archive_check_is_read_only_and_rejects_build_controls() {
         .env("HOME", &home)
         .env("MVM_HOME", &home)
         .current_dir(directory.path())
-        .args(["build", "guest-bins", "--check-release-archive"])
+        .args(["dev", "guest-bins", "--check-release-archive"])
         .arg(&missing)
         .output()
         .expect("check a missing archive outside a source checkout");
@@ -252,7 +386,7 @@ fn build_guest_bins_archive_check_is_read_only_and_rejects_build_controls() {
     );
     for control in [vec!["--out", "output"], vec!["--arch", "x86_64"]] {
         let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-            .args(["build", "guest-bins", "--check-release-archive"])
+            .args(["dev", "guest-bins", "--check-release-archive"])
             .arg(&missing)
             .args(&control)
             .output()
@@ -267,9 +401,9 @@ fn build_guest_bins_archive_check_is_read_only_and_rejects_build_controls() {
 #[test]
 fn build_guest_bins_rejects_an_unknown_arch() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args(["build", "guest-bins", "--arch", "riscv64"])
+        .args(["dev", "guest-bins", "--arch", "riscv64"])
         .output()
-        .expect("run build guest-bins with a bad arch");
+        .expect("run dev guest-bins with a bad arch");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -319,6 +453,45 @@ fn machine_create_readme_form_persists_the_named_spec() {
     assert_eq!(spec["image"], "nginx");
     assert_eq!(spec["cpus"], 2);
     assert_eq!(spec["memory"], "512M");
+}
+
+#[test]
+fn checkpoint_ls_json_preserves_complete_and_legacy_catalog_metadata() {
+    let home = tempfile::tempdir().expect("isolated checkpoint home");
+    let list = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .env("MVM_HOME", home.path())
+            .env("HOME", home.path())
+            .env("MVM_NO_AUTO_DEV", "1")
+            .args(["machine", "checkpoint", "ls", "--json"])
+            .output()
+            .expect("run documented checkpoint ls command");
+        assert!(
+            output.status.success(),
+            "checkpoint ls --json failed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("checkpoint ls --json emits only catalog JSON")
+    };
+    assert_eq!(list(), serde_json::json!([]), "missing catalog is empty");
+
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/checkpoint/catalog.json"))
+            .expect("shared checkpoint catalog fixture");
+    for record in fixture.as_array().expect("catalog records").iter().rev() {
+        let directory = home
+            .path()
+            .join("checkpoints")
+            .join(record["id"].as_str().expect("checkpoint id"));
+        std::fs::create_dir_all(&directory).expect("checkpoint directory");
+        std::fs::write(
+            directory.join("meta.json"),
+            serde_json::to_vec(record).expect("serialize fixture metadata"),
+        )
+        .expect("write fixture metadata");
+    }
+    assert_eq!(list(), fixture);
 }
 
 /// `deployments ls` inventories the local-first deploy store
@@ -1131,31 +1304,19 @@ fn bundle_help_lists_push() {
         .expect("run mvmctl bundle --help");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for sub in ["build", "export", "fetch", "install", "push", "gc"] {
+    for sub in ["fetch", "install", "push", "gc"] {
         assert!(
             stdout.contains(sub),
             "bundle help must list {sub}:\n{stdout}"
         );
     }
-}
-
-#[test]
-fn bundle_build_help_names_oci_packaging_controls() {
-    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args(["bundle", "build", "--help"])
-        .output()
-        .expect("run bundle build help");
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    for flag in [
-        "--image",
-        "--out",
-        "--arch",
-        "--production",
-        "--label",
-        "--debug-out",
-    ] {
-        assert!(stdout.contains(flag), "missing {flag}: {stdout}");
+    for removed in ["build", "export"] {
+        assert!(
+            !stdout
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(removed)),
+            "bundle help still lists removed {removed}:\n{stdout}"
+        );
     }
 }
 
@@ -2359,7 +2520,13 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
         "{}",
         String::from_utf8_lossy(&pulled.stderr)
     );
-    let pull: serde_json::Value = serde_json::from_slice(&pulled.stdout).expect("pull JSON");
+    let pull: serde_json::Value = serde_json::from_slice(&pulled.stdout).unwrap_or_else(|error| {
+        panic!(
+            "pull JSON ({error}): stdout={} stderr={}",
+            String::from_utf8_lossy(&pulled.stdout),
+            String::from_utf8_lossy(&pulled.stderr)
+        )
+    });
     assert_eq!(pull["reference"], "runtime/go@1.0.0");
     let digest = pull["manifest_sha256"].as_str().expect("manifest digest");
 
@@ -2662,8 +2829,8 @@ fn pack_update_dispatches_by_exact_target_shape() {
 }
 
 /// `machine run --manifest <app.mvmpkg> -- <cmd>` parses as a bundle-archive
-/// launch, and an archive that does not verify is refused at the install step,
-/// before the run reaches admission or any backend, with nothing installed.
+/// launch, and an archive that does not verify is refused at the verification
+/// step — before install, admission, or any backend — with nothing installed.
 #[test]
 fn machine_run_refuses_an_unverifiable_bundle_archive_before_booting() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2687,7 +2854,7 @@ fn machine_run_refuses_an_unverifiable_bundle_archive_before_booting() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("failed verification"),
+        stderr.contains("verifying bundle archive"),
         "the refusal must come from bundle verification: {stderr}"
     );
     let installed = std::fs::read_dir(state.join("bundles"))

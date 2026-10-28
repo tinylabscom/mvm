@@ -164,6 +164,45 @@ dropped on the way out is uncounted` — the counts above are a floor, not an
   the capture is healthy and your filter matched nothing. Not a missing
   capture.
 
+## At-rest lifetime on the protected path
+
+On the native HVF protected path, each retained generation is enrolled with an
+at-rest policy when it is opened: a generation rotates after at most one hour,
+and its payload becomes unreadable exactly seven days (604,800 seconds) after
+its terminal seal, measured from the persisted seal timestamp — never from
+when you last read it.
+
+Expiry is a read refusal, not a deletion. Past the deadline, `machine logs`
+reports the window as a gap — `output payload is unavailable under
+authenticated retention policy`, with the dropped-window accounting as a
+warning — instead of payload, and the stored ciphertext and sealed manifest
+stay byte-for-byte unchanged. Physical removal is a separate, authenticated
+operation: reconciliation verifies the original host-signed seal for the
+concrete VM, durably signs a payload-free retirement record, and only then
+removes the ciphertext segments the manifest names. The sealed manifest, the
+wrapped data key, the Merkle root, and the chain-signed audit evidence are all
+kept and keep verifying, so an expired or retired window is always
+distinguishable from corruption or unaccounted loss. The operator surface is
+[protected forensic transcripts](/reference/cli-commands/#protected-forensic-transcripts).
+
+Separately from the per-capture ring above, one machine's protected
+generations share an aggregate budget of 8 MiB and 65,536 chunks of retained
+plaintext. Byte pressure seals the active generation and retires the oldest
+one under its own signed reason, distinct from age expiry.
+
+Two limits to plan around:
+
+- Cleanup runs while a capture owner is alive (at startup and on its
+  maintenance tick) or when you run `mvmctl trust audit transcript reconcile`.
+  A capture whose host never runs either is not physically deleted on
+  schedule — the read refusal still applies from the deadline.
+- Neither expiry nor reconciliation reaches a plaintext export you already
+  hold; an export is an intentional disclosure owned by its recipient.
+
+Legacy per-VM recordings on other backends carry no at-rest policy: they stay
+readable, reading or restarting never enrolls them, and they are removed with
+the VM's state directory.
+
 ## Retention mode
 
 Recording is on by default for every workload. The opt-out lives in the

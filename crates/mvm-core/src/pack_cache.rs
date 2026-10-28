@@ -278,6 +278,8 @@ where
     })
 }
 
+// Sole caller is the host-state registry-pack installer; gated with it.
+#[cfg(feature = "host-state")]
 pub(crate) fn atomically_populate_dir_at_no_replace<E>(
     cache_root: &Path,
     final_dir: &Path,

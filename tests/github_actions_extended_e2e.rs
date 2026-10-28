@@ -6,81 +6,9 @@ use std::process::Command;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
-/// The workflow that defines the documented-surface jobs.
-///
-/// They used to be inline in `ci-full.yml`, which is why this file is named for
-/// Extended CI. They now live in a reusable workflow because `release.yml`
-/// needs the identical lane — a release used to be cut without them at all —
-/// and `ci-full.yml` calls it rather than declaring its own copy.
+/// The reusable workflow that defines the documented-surface jobs.
 fn extended_ci() -> String {
     fs::read_to_string(".github/workflows/e2e-docs.yml").expect("read documented-surface workflow")
-}
-
-/// Extended CI must still reach those jobs, by calling the shared workflow.
-///
-/// Without this, moving them out of `ci-full.yml` would satisfy every
-/// assertion below while the nightly run stopped exercising them.
-#[test]
-fn extended_ci_calls_the_shared_documented_surface_workflow() {
-    let workflow =
-        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
-    assert!(
-        workflow.contains("uses: ./.github/workflows/e2e-docs.yml"),
-        "ci-full.yml must call the shared documented-surface workflow, or the \
-         nightly run no longer boots the documented examples"
-    );
-}
-
-/// Firecracker's snapshot contains absolute device paths. Loading a forked
-/// child remaps those paths with a private mount namespace and bind mounts,
-/// which requires CAP_SYS_ADMIN on Linux. GitHub's runner user can access KVM
-/// after chmod but does not gain that capability, so the live witness must run
-/// through the runner's passwordless sudo boundary. Otherwise the parent boots
-/// and captures successfully, then every preload fails while entering the
-/// mount namespace.
-#[test]
-fn the_live_warm_claim_runs_with_mount_namespace_privilege() {
-    let workflow =
-        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
-    let job = job_block(&workflow, "bdd-live-warm-claim");
-
-    assert!(
-        job.contains("sudo --preserve-env=HOME,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,RUSTFLAGS,MVM_KERNEL_SOURCE,FC_VERSION"),
-        "the live warm-claim process must have mount-namespace privilege, not only /dev/kvm access"
-    );
-    assert!(
-        job.contains("env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS")
-            && job.contains("\"PATH=$PATH\""),
-        "the privileged recipe must restore the provisioned runner PATH for cargo and rustc"
-    );
-    assert!(
-        job.contains("\"$HOME/.cargo/bin/just\" bdd::live-warm-claim"),
-        "the privileged step must use the runner's absolute just path because sudo replaces PATH"
-    );
-}
-
-#[test]
-fn an_operator_can_dispatch_the_tool_witness_without_waiting_for_other_live_bdd() {
-    let workflow =
-        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
-    assert!(
-        workflow.contains("tool_live_only:"),
-        "workflow_dispatch must expose the focused witness input"
-    );
-    let warm_claim = job_block(&workflow, "bdd-live-warm-claim");
-    assert!(
-        warm_claim.contains("!inputs.tool_live_only"),
-        "a focused tool witness must skip the warm-claim predecessor"
-    );
-    let readme = job_block(&workflow, "bdd-live-readme");
-    assert!(
-        readme.contains(r#"[{"witness":"tool_live","timeout":60,"slot":1}]"#),
-        "the focused matrix must contain only tool_live"
-    );
-    assert!(
-        readme.contains("inputs.tool_live_only && 'hetzner' || 'ubuntu-latest'"),
-        "the focused witness must use the dedicated self-hosted KVM runner"
-    );
 }
 
 /// So must the release workflow. This is the gate that did not exist: a tag
@@ -99,11 +27,20 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "release publication gate is incomplete: {:?}",
         release_gate_problem(&workflow)
     );
+    // The documented surface gates promotion, not the signed prerelease.
+    let promote = job_block(&workflow, "promote-release");
+    assert!(
+        promote.contains("needs: [e2e-docs,")
+            && promote.contains("needs.e2e-docs.result == 'success'"),
+        "promote-release must wait for the documented surface"
+    );
+    assert!(
+        !job_block(&workflow, "release").contains("e2e-docs"),
+        "the signed prerelease must not wait for the documented surface"
+    );
 }
 
 const RELEASE_GATES: &[&str] = &[
-    "bdd",
-    "e2e-docs",
     "build",
     "archive-install-smoke",
     "guest-runtime",
@@ -207,10 +144,8 @@ fn publication_gate_checks_ignore_other_jobs_and_reject_missing_success() {
 ///
 /// No GitHub-hosted macOS runner can boot an mvm guest (issue #3011), so on
 /// every hosted host the macOS lane is skipped and the release caller falls
-/// back to a committed evidence record instead. Extended CI opts out of that
-/// requirement nightly — otherwise its red never varies and stops being read at
-/// all — and the danger in having an opt-out is that the release caller quietly
-/// acquires it too. Then a tag cuts with no macOS evidence of any kind and
+/// back to a committed evidence record instead. The danger in having an opt-out is
+/// that the release caller quietly acquires it. Then a tag cuts with no macOS evidence of any kind and
 /// nothing says so, which is the same silent-gate failure that let `machine run
 /// -it` ship broken on every OCI image.
 #[test]
@@ -221,14 +156,6 @@ fn releases_still_block_on_a_macos_host_that_cannot_boot_a_guest() {
         workflow.contains("macos_blocks_on_unusable_host: true"),
         "release.yml must block on an unusable macOS host, or a tag is cut with \
          no evidence the documented examples boot on macOS"
-    );
-
-    let extended =
-        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
-    assert!(
-        extended.contains("macos_blocks_on_unusable_host: false"),
-        "Extended CI must tolerate the standing hardware gap, or its nightly red \
-         reports the same thing for a missing runner as for a regression"
     );
 }
 
@@ -248,8 +175,16 @@ fn the_macos_host_gate_defaults_to_blocking() {
         inputs.contains("macos_blocks_on_unusable_host:"),
         "the shared workflow must declare the macOS host gate as an input"
     );
+    let macos_gate = inputs
+        .split("      macos_blocks_on_unusable_host:")
+        .nth(1)
+        .expect("macOS host gate input")
+        .lines()
+        .take_while(|line| line.trim().is_empty() || line.starts_with("        "))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        inputs.contains("default: true"),
+        macos_gate.contains("default: true"),
         "the macOS host gate must default to blocking, so a caller that says \
          nothing gets the release-safe behaviour"
     );
@@ -280,9 +215,11 @@ fn the_macos_lane_runs_whenever_the_host_probe_says_the_host_can_boot() {
         "the macOS lane must wait on the host check"
     );
     assert!(
-        macos.contains("if: needs.e2e-docs-macos-host-check.outputs.supported == 'true'"),
-        "the macOS lane must run exactly when the host probe says the host can \
-         boot a guest"
+        macos.contains(
+            "if: inputs.run_macos && needs.e2e-docs-macos-host-check.outputs.supported == 'true'"
+        ),
+        "a selected macOS lane must run exactly when the host probe says the \
+         host can boot a guest"
     );
 }
 
@@ -309,7 +246,7 @@ fn an_unusable_macos_host_falls_back_to_a_checked_evidence_record() {
     assert!(
         evidence.contains("inputs.macos_blocks_on_unusable_host"),
         "the evidence job must be gated on the same input the release caller \
-         sets, or Extended CI's nightly starts failing on evidence staleness"
+         sets, so callers cannot silently disagree about required macOS evidence"
     );
     assert!(
         evidence.contains("needs.e2e-docs-macos-host-check.outputs.supported != 'true'"),
@@ -385,8 +322,8 @@ fn linux_documented_surface_requires_both_complete_inventory_shards() {
     assert!(
         linux.contains("shard: [\"0/2\", \"1/2\"]")
             && linux.contains("MVM_BDD_SHARD: ${{ matrix.shard }}")
-            && linux.contains("fail-fast: false"),
-        "both disjoint shards must be required CI jobs, even when one fails"
+            && linux.contains("fail-fast: true"),
+        "both disjoint shards remain required, and a failed shard cancels its sibling"
     );
     assert!(
         !script.contains("export MVM_BDD_ONLY_TAG="),
@@ -395,6 +332,156 @@ fn linux_documented_surface_requires_both_complete_inventory_shards() {
     assert!(
         script.contains("all shards must pass"),
         "a single green shard must not be presented as full coverage"
+    );
+}
+
+#[test]
+fn macos_documented_surface_uses_isolated_sequential_shards() {
+    let workflow = extended_ci();
+    let macos = job_block(&workflow, "e2e-docs-macos");
+
+    assert!(
+        macos.contains("max-parallel: 1")
+            && macos.contains("shard: [\"0/2\", \"1/2\"]")
+            && macos.contains("MVM_BDD_SHARD: ${{ matrix.shard }}"),
+        "the macOS suite must run both disjoint shards sequentially"
+    );
+    assert!(
+        macos.contains("MVM_E2E_HOME: ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}"),
+        "each run attempt and shard must use an isolated E2E home"
+    );
+    assert!(
+        macos.contains("name: e2e-docs-macos-logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}"),
+        "each run attempt and shard must upload to a unique artifact name"
+    );
+    assert!(
+        macos.contains(".mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/vms/*/console.log"),
+        "uploaded VM logs must come from this shard's isolated home"
+    );
+    let diagnostics = macos
+        .split_once("- name: Dump VMM diagnostics on failure")
+        .expect("macOS failure diagnostics step")
+        .1;
+    assert!(
+        diagnostics.contains("for d in \"$MVM_E2E_HOME\"/vms/*/; do")
+            && !diagnostics.contains("$HOME"),
+        "failure diagnostics must inspect only this shard's isolated home"
+    );
+    assert!(
+        !macos.contains("MVM_BDD_WARM_CLAIM"),
+        "macOS must not claim warm-claim coverage without capability opt-in"
+    );
+}
+
+#[test]
+fn documented_launches_are_cold_and_warm_scenarios_override_explicitly() {
+    let workflow = extended_ci();
+    let linux = job_block(&workflow, "e2e-docs-linux");
+    let macos = job_block(&workflow, "e2e-docs-macos");
+    let budgets = fs::read_to_string("features/suites/s31_launch_e2e/launch_budget.feature")
+        .expect("read launch budget scenarios");
+    let launch_modes =
+        fs::read_to_string("features/suites/s31_launch_e2e/cli_launch_modes.feature")
+            .expect("read launch mode scenarios");
+    let launcher = fs::read_to_string("crates/mvm-conformance/tests/steps/launch_e2e.rs")
+        .expect("read documented launch steps");
+
+    assert!(
+        !linux.contains("MVM_BDD_WARM_CLAIM") && !macos.contains("MVM_BDD_WARM_CLAIM"),
+        "release-docs lanes must not advertise the privileged warm-claim capability"
+    );
+    assert!(
+        launcher.contains("const DOCUMENTED_RESIDENCY: &str = \"cold\";")
+            && !launcher.contains("default_documented_residency"),
+        "a capability opt-in must not make unrelated documented launches warm"
+    );
+    assert!(
+        budgets.contains("Scenario: a cold transient launch reports its dispatch window")
+            && budgets.contains("@live @perf_budget @warm_claim\n  Scenario: a warm-residency")
+            && budgets
+                .contains("@live @perf_budget @warm_claim\n  Scenario: repeated warm launches")
+            && budgets.contains("@live @perf_budget @warm_claim\n  Scenario: a second run"),
+        "keep cold-launch coverage and gate only the warm-claim benchmarks"
+    );
+    assert!(
+        !launch_modes.contains("And an Alpine warm parent is ready"),
+        "ordinary launch scenarios must not prepare an unconditional warm parent"
+    );
+    let second_run = budgets
+        .split("Scenario: a second run of an image claims the standby the first run left")
+        .nth(1)
+        .expect("keep the automatic standby scenario");
+    let launches: Vec<_> = second_run
+        .lines()
+        .filter(|line| line.trim_start().starts_with("When I launch"))
+        .collect();
+    assert_eq!(launches.len(), 2, "keep both automatic standby launches");
+    assert!(
+        launches
+            .iter()
+            .all(|line| line.ends_with("with env \"MVM_RESIDENCY\" set to \"warm\"")),
+        "both automatic standby launches must explicitly request warm residency"
+    );
+}
+
+#[test]
+fn only_native_invocation_positives_require_firecracker() {
+    fn tags_for<'a>(feature: &'a str, title: &str) -> std::collections::BTreeSet<&'a str> {
+        let lines: Vec<_> = feature.lines().collect();
+        let scenario = format!("Scenario: {title}");
+        let index = lines
+            .iter()
+            .position(|line| line.trim() == scenario)
+            .expect("keep the documented scenario");
+        let mut tags = std::collections::BTreeSet::new();
+        for line in lines[..index].iter().rev().map(|line| line.trim()) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if !line.starts_with('@') {
+                break;
+            }
+            tags.extend(line.split_whitespace());
+        }
+        tags
+    }
+
+    let feature =
+        fs::read_to_string("features/suites/s29_doc_examples/documented_build_live.feature")
+            .expect("read documented build scenarios");
+    assert!(
+        feature
+            .lines()
+            .take_while(|line| !line.trim_start().starts_with("Feature:"))
+            .filter(|line| line.trim_start().starts_with('@'))
+            .all(|line| !line.split_whitespace().any(|tag| tag == "@firecracker")),
+        "do not restrict the whole feature to Firecracker"
+    );
+    assert_eq!(
+        tags_for(&feature, "the documented flake build produces an image"),
+        std::collections::BTreeSet::from(["@live", "@release_gate_flake"]),
+        "ordinary image building must retain macOS positive coverage"
+    );
+    assert_eq!(
+        tags_for(
+            &feature,
+            "the documented entrypoint launch runs the compiled workload"
+        ),
+        std::collections::BTreeSet::from(["@live", "@release_gate_flake", "@firecracker"]),
+        "entrypoint invocation must retain its Firecracker positive"
+    );
+    assert_eq!(
+        tags_for(
+            &feature,
+            "the documented pack build health-boots and signs a frozen workload"
+        ),
+        std::collections::BTreeSet::from([
+            "@live",
+            "@documented_pack_live",
+            "@firecracker",
+            "@runtime_candidate",
+        ]),
+        "pack health must retain its Firecracker positive"
     );
 }
 
@@ -812,13 +899,46 @@ fn perf_budget_scenario_prepares_its_parent_immediately_before_launch() {
     );
 }
 
-fn ci_full() -> String {
-    fs::read_to_string(".github/workflows/ci-full.yml").expect("read Extended CI workflow")
+#[test]
+fn hosted_ubuntu_ci_uses_explicit_release_labels() {
+    let ci = ["ci.yml", "ci-main.yml"]
+        .map(|name| {
+            fs::read_to_string(format!(".github/workflows/{name}")).expect("read CI workflow")
+        })
+        .join("\n");
+    // This is a text guard; historical alias mentions use full-line comments.
+    let moving_alias = ci
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .find(|line| line.contains("ubuntu-latest"));
+    assert!(
+        moving_alias.is_none(),
+        "hosted Ubuntu CI must use an explicit supported release: {moving_alias:?}"
+    );
+    for job in [
+        "lint-core",
+        "lint-feature-clippy",
+        "lint-policy",
+        "lint-features-test-support",
+        "lint-features-embed",
+        "lint-windows",
+    ] {
+        let body = job_block(&ci, job);
+        assert!(
+            body.lines()
+                .any(|line| line.trim() == "runs-on: ubuntu-24.04"),
+            "{job} must actually run on the pinned Ubuntu release"
+        );
+    }
 }
 
 #[test]
 fn guest_binary_producer_lanes_install_the_cross_toolchain_before_tests() {
-    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    let ci = ["ci.yml", "ci-main.yml"]
+        .map(|name| {
+            fs::read_to_string(format!(".github/workflows/{name}")).expect("read CI workflow")
+        })
+        .join("\n");
     for job in ["test-workspace-build", "test-workspace-aarch64"] {
         let body = job_block(&ci, job);
         let install = body
@@ -836,10 +956,6 @@ fn guest_binary_producer_lanes_install_the_cross_toolchain_before_tests() {
         "- uses: ./.github/actions/install-zigbuild\n        if: inputs.runner_kind == 'github'"
     ));
     assert!(shard.contains("command -v cargo-zigbuild"));
-
-    let extended = ci_full();
-    let live = job_block(&extended, "bdd-live-readme");
-    assert!(live.contains("- uses: ./.github/actions/install-zigbuild"));
 }
 
 fn source_bootstrap_script() -> String {
@@ -899,120 +1015,6 @@ fn linux_documented_surface_grants_nothing_stage0_needs() {
     }
 }
 
-/// The cold source path keeps a live witness of its own.
-#[test]
-fn extended_ci_runs_the_cold_source_bootstrap_witness() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    assert!(
-        job.contains("run: just e2e::source-bootstrap"),
-        "the nightly source bootstrap job must run the dedicated witness"
-    );
-    assert!(
-        job.contains("MVM_E2E_HOME: ${{ runner.temp }}/source-bootstrap-home"),
-        "the witness needs a cold home under the runner's temp directory"
-    );
-    assert!(
-        field_after(job, "MVM_BOOT_IMAGE:").is_none(),
-        "the source witness must not be pointed at the published image"
-    );
-    let e2e_mod = fs::read_to_string("just/e2e/mod.just").expect("read e2e module");
-    assert!(
-        e2e_mod.contains("source-bootstrap:\n    ./scripts/e2e-source-bootstrap.sh"),
-        "the recipe must run the source bootstrap witness"
-    );
-}
-
-/// The job runs checkout-controlled Nix inputs on a KVM host; it gets a
-/// read-only token and runs only in the canonical repository.
-#[test]
-fn the_source_bootstrap_job_is_least_privilege() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    assert!(
-        job.contains("permissions:\n      contents: read\n"),
-        "the source bootstrap job must hold a read-only token and nothing else"
-    );
-    assert!(
-        job.contains("if: github.repository == 'tinylabscom/mvm'"),
-        "the source bootstrap job must not run on forks"
-    );
-}
-
-/// Stage 0's builder timeout is two hours; a job budget below that reports a
-/// hang as a cancellation instead of as the builder error that names it.
-#[test]
-fn the_source_bootstrap_budget_outlasts_the_stage0_builder_timeout() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-    let minutes: u64 = field_after(job, "timeout-minutes:")
-        .and_then(|value| value.parse().ok())
-        .expect("the source bootstrap job must declare a budget");
-
-    assert!(
-        minutes > 120 + 30,
-        "timeout-minutes {minutes} leaves no room for setup beyond a two-hour Stage 0"
-    );
-}
-
-/// A refusing Stage 0 guest explains itself only on its console.
-#[test]
-fn the_source_bootstrap_job_keeps_the_guest_consoles_of_a_failed_run() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    assert!(
-        job.contains("if: failure()")
-            && job.contains("uses: actions/upload-artifact@v7")
-            && job.contains("${{ runner.temp }}/source-bootstrap-home/vms/*/console.log")
-            && job.contains("${{ runner.temp }}/source-bootstrap-home/vms/*/firecracker.log"),
-        "a failed source bootstrap must upload the guest consoles and the VMM log that \
-         name the cause; a Firecracker that refuses to start says why only in the latter"
-    );
-}
-
-/// The witness runs the backend a Linux/KVM host auto-detects, under a home
-/// deep enough that Firecracker's sockets must move to the short namespace.
-/// It was pinned to QEMU while that overflow made Firecracker exit before
-/// creating its API socket, which read as a hosted-runner limitation.
-#[test]
-fn the_source_bootstrap_job_bootstraps_through_firecracker() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    assert_eq!(
-        field_after(job, "MVM_BUILDER_BACKEND:").as_deref(),
-        Some("firecracker"),
-        "the cold source witness must bootstrap through the backend Linux/KVM auto-detects"
-    );
-    assert!(
-        job.contains("/usr/bin/firecracker --version"),
-        "the Firecracker Stage 0 needs the pinned Firecracker installed"
-    );
-}
-
-/// Firecracker brings its own vsock device and boots the downloaded kernel, so
-/// the grants a QEMU Stage 0 needed would only widen what the job can touch.
-#[test]
-fn the_source_bootstrap_job_grants_nothing_only_qemu_needed() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-
-    for qemu_only in [
-        "/dev/vhost-vsock",
-        "/boot/vmlinuz",
-        "qemu-system-x86",
-        "virtiofsd",
-    ] {
-        assert!(
-            !job.contains(qemu_only),
-            "the Firecracker source witness must not provision `{qemu_only}`"
-        );
-    }
-}
-
 /// Every step of the source witness is fatal, in the order the path runs.
 /// The builder image is bootstrapped through the unembedded binary: packing
 /// sidecars no longer reaches a builder VM, so this is the step that proves a
@@ -1021,7 +1023,7 @@ fn the_source_bootstrap_job_grants_nothing_only_qemu_needed() {
 fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
     let script = source_bootstrap_script();
     let steps = [
-        "\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build",
+        "\"$UNEMBEDDED_MVMCTL\" dev sdk-sidecar build",
         "\"$UNEMBEDDED_MVMCTL\" bootstrap",
         "\"$MVMCTL\" machine build --flake \"$FLAKE\"",
     ];
@@ -1054,47 +1056,6 @@ fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
     assert!(
         !script.contains("|| true") && !script.contains("if ! "),
         "the source witness must not tolerate a failed step"
-    );
-}
-
-/// The builder image recipe the witness builds from lives in mvm-images, so the
-/// job has to hand it a checkout — at the commit that produced the pinned set.
-/// Without one, the builder image is refused after the whole workspace has
-/// compiled. The checkout is the Linux layer only: the job also selects this
-/// tree's guest runtime, so no guest piece is pair-built through it.
-#[test]
-fn the_source_bootstrap_job_builds_from_the_pinned_images_checkout() {
-    let workflow = ci_full();
-    let job = job_block(&workflow, "source-bootstrap-linux");
-    let checkout_path = ".source-bootstrap-mvm-images";
-
-    assert_eq!(
-        field_after(job, "MVM_IMAGES_DIR:").as_deref(),
-        Some(format!("${{{{ github.workspace }}}}/{checkout_path}").as_str()),
-        "the witness must name the mvm-images checkout it builds from"
-    );
-    assert_eq!(
-        field_after(job, "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE:").as_deref(),
-        Some("build"),
-        "the guest runtime must come from this tree, not the image checkout or the set"
-    );
-    let resolve = job
-        .find("cargo run -q -p xtask -- image-source-ref")
-        .expect("the checkout ref must come from the image lock");
-    let checkout = job
-        .find("repository: tinylabscom/mvm-images")
-        .expect("the job must check out mvm-images");
-    let bootstrap = job
-        .find("run: just e2e::source-bootstrap")
-        .expect("the job must run the witness");
-    assert!(
-        job.contains("ref: ${{ steps.images-ref.outputs.ref }}")
-            && job.contains(&format!("path: {checkout_path}")),
-        "mvm-images must be checked out at the pinned commit, at the path MVM_IMAGES_DIR names"
-    );
-    assert!(
-        resolve < checkout && checkout < bootstrap,
-        "the pinned checkout must be in place before the witness runs"
     );
 }
 
@@ -1459,30 +1420,43 @@ fn root_manifest_keeps_libkrun_opt_in_on_macos() {
 }
 
 #[test]
-fn macos_release_build_is_libkrun_free() {
+fn macos_release_build_carries_isolated_libkrun_tier() {
     let workflow =
         fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
     let build = job_block(&workflow, "build");
+    let archive_smoke = job_block(&workflow, "archive-install-smoke");
 
     assert!(
-        !build.contains("uses: ./.github/actions/install-libkrun"),
-        "standard macOS release builds must not install libkrun"
+        build.contains("scripts/release/build-libkrun-tier.sh"),
+        "the macOS release must build the pinned libkrun tier"
     );
     assert!(
-        !build.contains("libkrun-sys"),
-        "released mvmctl binaries and helpers must not link optional libkrun FFI"
+        build.contains("gnu-sed") && build.contains("gnu-tar"),
+        "the native kernel build must select GNU-compatible archive and text tools"
     );
     assert!(
-        !build.contains("--bin mvm-libkrun-supervisor"),
-        "standard macOS release artifacts must not build the libkrun supervisor"
+        build.contains("mvm-hvf-supervisor mvm-libkrun-supervisor"),
+        "the macOS archive must package both native backend supervisors"
     );
     assert!(
-        !build.contains("mvm-hvf-supervisor mvm-libkrun-supervisor"),
-        "standard macOS release artifacts must not package the libkrun supervisor"
+        build.contains("lib/libkrunfw.dylib"),
+        "the archive must require libkrunfw's bare-name compatibility link"
+    );
+    assert!(
+        build.contains("SOURCE-OFFER.txt"),
+        "the libkrun release tier must ship corresponding-source directions"
+    );
+    assert!(
+        build.contains("libkrunfw-LGPL-2.1-only.txt"),
+        "the libkrun release tier must ship its license inventory"
+    );
+    assert!(
+        archive_smoke.contains("mvm-libkrun-supervisor\" --contract-version"),
+        "the archive-install lane must load and probe the packaged supervisor"
     );
     assert!(
         build.contains("--features \"${MVMCTL_RELEASE_FEATURES}\""),
-        "the release build must use the platform-neutral feature set directly"
+        "mvmctl itself must remain independent of the libkrun FFI"
     );
 }
 
@@ -1537,7 +1511,7 @@ fn documented_surface_builds_the_sidecar_through_an_unembedded_cli() {
         )
         .expect("the live suite must restore its embedded binary");
     let sidecar_warm = script
-        .find("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build")
+        .find("\"$UNEMBEDDED_MVMCTL\" dev sdk-sidecar build")
         .expect("the sidecar warm must execute the unembedded witness");
     let explicit_bootstrap = script
         .find("\"$MVMCTL\" bootstrap")
@@ -1605,12 +1579,9 @@ fn documented_surface_jobs_install_the_sdk_codegen_runtime() {
 fn the_documented_surface_builds_no_guest_piece_through_mvm_images() {
     let release =
         fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
-    let nightly =
-        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
     let workflow = extended_ci();
     for (name, text) in [
         ("release.yml", release.as_str()),
-        ("ci-full.yml", nightly.as_str()),
         ("e2e-docs.yml", workflow.as_str()),
     ] {
         assert!(
@@ -1647,7 +1618,7 @@ fn the_documented_surface_builds_no_guest_piece_through_mvm_images() {
     );
     assert!(
         script.contains(
-            "MVM_HOME=\"$E2E_HOME\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build --source build"
+            "MVM_HOME=\"$E2E_HOME\" \"$UNEMBEDDED_MVMCTL\" dev sdk-sidecar build --source build"
         ),
         "the sidecar must be packed from the tree"
     );
@@ -1662,7 +1633,7 @@ fn documented_surface_warms_the_source_matched_sdk_sidecar() {
     let script = documented_surface_script();
 
     assert!(
-        script.contains("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build"),
+        script.contains("\"$UNEMBEDDED_MVMCTL\" dev sdk-sidecar build"),
         "the live SDK scenarios must use a sidecar built from the checkout under test"
     );
 }
@@ -1741,168 +1712,4 @@ fn the_documented_surface_creates_its_mvm_home_private() {
         "the mvm home helper must chmod unconditionally — `mkdir -m` applies the \
          mode only to directories it creates, leaving an already-loose home loose"
     );
-}
-
-/// The hosted TCG boot must print its captured log however it dies.
-///
-/// Bundle preparation emits directly to the job log and is bounded to verified
-/// fixture assembly. The remaining guest boot is redirected wholesale to a
-/// file, so its diagnostic tail must be armed before the run starts.
-#[test]
-fn the_no_kvm_smoke_prints_its_boot_log_on_any_failure() {
-    let workflow =
-        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
-    let boot_trap = workflow
-        .find("trap 'echo \"::group::mvmctl bundle-run log (tail)\"")
-        .expect("the installed-bundle step must dump its log from an EXIT trap");
-    let boot = workflow
-        .find("--manifest \"$installed_sha\"")
-        .expect("the installed-bundle boot must remain present");
-    assert!(
-        boot_trap < boot,
-        "the boot log dump must be armed before the installed-bundle run"
-    );
-}
-
-/// Top-level job names of a workflow, in declaration order.
-fn workflow_jobs(workflow: &str) -> Vec<&str> {
-    let jobs = workflow
-        .split_once("\njobs:\n")
-        .map(|(_, jobs)| jobs)
-        .expect("workflow must declare jobs");
-    jobs.lines()
-        .filter_map(|line| {
-            let name = line.strip_prefix("  ")?.strip_suffix(':')?;
-            (!name.starts_with([' ', '#']) && !name.contains(' ')).then_some(name)
-        })
-        .collect()
-}
-
-/// The jobs one job waits for, in either the inline or the list form.
-fn job_needs(block: &str) -> Vec<&str> {
-    let mut lines = block.lines().skip(1);
-    while let Some(line) = lines.next() {
-        let Some(value) = line.strip_prefix("    needs:") else {
-            continue;
-        };
-        let value = value.trim();
-        if let Some(list) = value.strip_prefix('[') {
-            return list
-                .trim_end_matches(']')
-                .split(',')
-                .map(str::trim)
-                .collect();
-        }
-        if !value.is_empty() {
-            return vec![value];
-        }
-        return lines
-            .map_while(|line| line.strip_prefix("      - "))
-            .map(str::trim)
-            .collect();
-    }
-    Vec::new()
-}
-
-/// Extended CI shares the organization's hosted-runner pool with the merge
-/// queue. Keyed per dispatch, operator runs on feature branches stacked on top
-/// of the nightly and of each other, and merge-group jobs waited behind them
-/// for an hour. One group for every ref and trigger, never cancelling a run
-/// that has started, holds it to one run at a time.
-#[test]
-fn extended_ci_runs_one_at_a_time_across_every_ref() {
-    let workflow = ci_full();
-    assert!(
-        workflow.contains("\nconcurrency:\n  group: extended-ci\n  cancel-in-progress: false\n"),
-        "Extended CI must share one literal concurrency group across refs and triggers"
-    );
-    assert_eq!(
-        workflow.matches("concurrency:").count(),
-        1,
-        "a job-level concurrency group would let jobs escape the workflow's"
-    );
-    for per_run_key in ["github.run_id", "github.ref", "github.event_name }}-"] {
-        assert!(
-            !workflow
-                .split_once("\nconcurrency:\n")
-                .and_then(|(_, rest)| rest.split_once("\n\n"))
-                .is_some_and(|(group, _)| group.contains(per_run_key)),
-            "the concurrency group must not be keyed on {per_run_key}"
-        );
-    }
-}
-
-/// Every matrix in Extended CI is bounded, so adding a leg cannot widen the
-/// runner footprint unnoticed.
-#[test]
-fn every_extended_ci_matrix_runs_one_leg_at_a_time() {
-    let workflow = ci_full();
-    let mut matrices = 0;
-    for job in workflow_jobs(&workflow) {
-        let block = job_block(&workflow, job);
-        if block.contains("matrix:") {
-            matrices += 1;
-            assert!(
-                block.contains("max-parallel: 1"),
-                "{job} must run its matrix one leg at a time"
-            );
-        }
-    }
-    assert!(matrices > 0, "the live BDD matrix must still be found");
-}
-
-/// Extended CI runs as a few serial tracks so it holds about five hosted
-/// runners rather than twenty-odd. Each chained job runs under `!cancelled()`,
-/// so a red lane does not skip the lanes queued behind it; only the no-KVM
-/// pipeline, whose stages consume each other's artifacts, keeps the implicit
-/// all-succeeded rule.
-#[test]
-fn extended_ci_holds_one_hosted_runner_per_track() {
-    let workflow = ci_full();
-    let jobs = workflow_jobs(&workflow);
-    let heads: Vec<&str> = jobs
-        .iter()
-        .copied()
-        .filter(|job| job_needs(job_block(&workflow, job)).is_empty())
-        .collect();
-    assert_eq!(
-        heads,
-        [
-            "bdd-live-warm-claim",
-            "e2e-docs",
-            "source-bootstrap-linux",
-            "apple",
-            "no-kvm-prepare",
-        ],
-        "only the five track heads may start with the run"
-    );
-
-    let artifact_chain = ["no-kvm-bootstrap", "no-kvm-build", "no-kvm-smoke"];
-    for job in &jobs {
-        let block = job_block(&workflow, job);
-        if heads.contains(job) || artifact_chain.contains(job) {
-            continue;
-        }
-        assert!(
-            block.contains("    if: ${{ !cancelled() }}\n"),
-            "{job} must run whatever its predecessor concluded, unless the run is cancelled"
-        );
-    }
-
-    // The SDK dry-run's matrices are declared in the workflows it calls, out
-    // of reach of `max-parallel` here, so it must start only once every
-    // track has finished.
-    let sdk = job_block(&workflow, "sdk-release-dry-run");
-    let sdk_needs = job_needs(sdk);
-    for tail in jobs.iter().filter(|job| {
-        **job != "sdk-release-dry-run"
-            && !jobs
-                .iter()
-                .any(|other| job_needs(job_block(&workflow, other)).contains(job))
-    }) {
-        assert!(
-            sdk_needs.contains(tail),
-            "sdk-release-dry-run must wait for the {tail} track"
-        );
-    }
 }

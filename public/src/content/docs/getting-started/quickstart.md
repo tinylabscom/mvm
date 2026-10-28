@@ -1,6 +1,6 @@
 ---
 title: Quick Start
-description: Get a microVM running in under 5 minutes.
+description: Prepare a prebuilt image, then run a local transient microVM.
 ---
 
 :::tip[Looking for the shortest path to "it's running"?]
@@ -14,23 +14,34 @@ your audience actually has.
 
 ## 1. Run an OCI Image
 
-Prepare the runtime and the image, then launch:
+Start with the [native local demo](/getting-started/native-demo/): no `mvmd`,
+remote credentials, persistent volumes, or source build. Prepare the runtime
+and capture a pinned image reference, then launch:
 
 ```bash
+mvmctl doctor --workflow cli-run
 mvmctl bootstrap
 mvmctl image pull alpine
-mvmctl machine run --image alpine -- uname -a
+MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref)"
+mvmctl machine run --name local-demo --profile dev \
+  --image "${MVM_DEMO_IMAGE:?Run preparation in this terminal first}" \
+  --cpus 1 --memory 256M --timeout 30 \
+  -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'
 ```
 
 `bootstrap` also creates the host snapshot key that warm standbys are
 encrypted under, at `~/.mvm/keys/local.key`, when the host has none; keep a
 copy of it.
 
-Preparation owns downloads and materialization: `machine run` is cache-only, and
-a missing image fails quickly and names the command that prepares it. The first
-run of an image boots cold, says so on stderr, and records that in the audit
-log. It also leaves one standby of the image ready, so the next matching run
-claims it instead of booting and is held to the 300 ms startup ceiling.
+Preparation owns downloads and materialization: `machine run` is cache-only,
+and a missing image fails quickly and names the command that prepares it.
+The named foreground run above is transient and cold; it tears down on exit
+and requests no standby. The digest pin identifies prepared content; it is
+not a publisher signature or production-policy approval.
+
+For unnamed runs, the first cold boot also leaves one standby of the image
+ready, so the next matching run claims it instead of booting and is held to
+the 300 ms startup ceiling.
 Standbys stay within a host memory cap and are released after 20 idle minutes.
 To make even the first run warm, prepare a standby ahead of time with
 `mvmctl pool warm 1 --image alpine`; `MVM_RESIDENCY=cold` turns standbys off.
@@ -79,6 +90,10 @@ your platform:
 - **macOS 26+ Apple Silicon:** auto-selects the HVF builder backend
   (Hypervisor.framework, vsock-only, no Homebrew or libkrun dependency).
   HVF errors surface directly rather than activating a hidden fallback.
+- **macOS 13–25 Apple Silicon:** the signed release carries a libkrun preview
+  with no Homebrew dependency. It is not auto-selected; pass
+  `--hypervisor libkrun` for the workload. Packaged loading is verified, while
+  the real guest-launch witness remains open.
 
 mvm targets Apple Silicon on macOS and `/dev/kvm` on Linux. There is no Docker
 or container runtime path; a host without a supported microVM backend surfaces a

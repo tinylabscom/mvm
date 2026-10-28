@@ -92,26 +92,27 @@ MCP protocol version `2025-11-25`. The server echoes that version and
 
 ## The signed agent pack
 
-The official registry publishes `agent/claude`, a signed policy profile for a
+The immutable `agent/claude@1.0.1` is a signed policy profile for a
 Claude Code workload running in a microVM. It is separate from the MCP setup
 above: the pack governs what a guest may reach, not which MVM tools the host
-client may call. It composes the `runtime/python` group pack, and `pull`
+client may call. Pin this policy-only version rather than selecting a newer
+application descriptor as a policy. It composes the `runtime/python` group pack, and `pull`
 fetches exactly the pack it is given, so pull both:
 
 ```sh
-mvmctl pull agent/claude
+mvmctl pull agent/claude@1.0.1
 mvmctl pull runtime/python
-mvmctl why --host api.anthropic.com:443 --profile agent/claude
-mvmctl why --secret anthropic --profile agent/claude
+mvmctl why --host api.anthropic.com:443 --profile agent/claude@1.0.1
+mvmctl why --secret anthropic --profile agent/claude@1.0.1
 ```
 
-`mvmctl policy show agent/claude` prints the merged result:
+`mvmctl policy show agent/claude@1.0.1` prints the merged result:
 
 ```toml
 # layer: group `llm-apis` (built-in) (built-in)
 # layer: group `github` (built-in) (built-in)
 # layer: group `runtime/python` (pack) (pack)
-# layer: profile `agent/claude` (pack) overrides (pack)
+# layer: profile `agent/claude@1.0.1` (pack) overrides (pack)
 [network]
 allow = [
     "api.anthropic.com:443",
@@ -134,7 +135,7 @@ before a run selects the pack; the guest receives a placeholder in
 
 ```sh
 mvmctl secret set anthropic --provider anthropic
-mvmctl run --policy agent/claude -- claude -p "summarize the repo"
+mvmctl run --policy agent/claude@1.0.1 -- claude -p "summarize the repo"
 ```
 
 The pack is policy only. It ships no image and installs nothing, so the image

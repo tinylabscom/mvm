@@ -2,7 +2,7 @@
 //!
 //! The export is `mvm-bundler`'s, re-exported here so a caller names this
 //! crate alone. [`HostBundleSigner`] signs under this host's key, which is the
-//! key `mvmctl bundle export` signs under.
+//! key `mvmctl build` signs under.
 
 use std::path::Path;
 
@@ -58,6 +58,32 @@ impl BundleSigner for HostBundleSigner {
     }
 }
 
+/// This host's bundle-signing public key, when the keypair exists.
+///
+/// The read-only sibling of [`HostBundleSigner::load`]: asking whether a
+/// bundle was signed by this host must not mint a host identity to find out,
+/// so a missing key reads as `None` where `load` would create one.
+pub fn existing_host_verifying_key() -> Result<Option<VerifyingKey>> {
+    existing_host_verifying_key_at(&host_keypair::default_keys_dir()?)
+}
+
+/// Same as [`existing_host_verifying_key`], from an explicit keys directory.
+/// Test seam.
+pub fn existing_host_verifying_key_at(keys_dir: &Path) -> Result<Option<VerifyingKey>> {
+    let path = keys_dir.join(host_keypair::PUBLIC_FILENAME);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{} is not a 32-byte Ed25519 public key", path.display()))?;
+    VerifyingKey::from_bytes(&bytes)
+        .map(Some)
+        .with_context(|| format!("parsing {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use mvm_core::plan::bundle::key_id_from_pubkey;
@@ -98,6 +124,47 @@ mod tests {
         let rendered = format!("{signer:?}");
 
         assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    #[test]
+    fn a_host_keypair_that_was_never_created_reads_as_none() {
+        let keys = tempfile::tempdir().expect("tempdir");
+
+        assert!(
+            existing_host_verifying_key_at(keys.path())
+                .expect("read")
+                .is_none()
+        );
+        assert!(
+            !keys.path().join(host_keypair::PUBLIC_FILENAME).exists(),
+            "the read-only path must not mint a key"
+        );
+    }
+
+    #[test]
+    fn an_existing_host_keypair_reads_as_its_public_half() {
+        let keys = tempfile::tempdir().expect("tempdir");
+        let signer = host_keypair::load_or_init_at(keys.path()).expect("init");
+
+        let key = existing_host_verifying_key_at(keys.path())
+            .expect("read")
+            .expect("a created keypair is present");
+
+        assert_eq!(key, signer.verifying);
+    }
+
+    #[test]
+    fn a_truncated_public_key_is_an_error() {
+        let keys = tempfile::tempdir().expect("tempdir");
+        std::fs::write(keys.path().join(host_keypair::PUBLIC_FILENAME), [0u8; 16])
+            .expect("write truncated key");
+
+        let err = existing_host_verifying_key_at(keys.path()).expect_err("must refuse");
+
+        assert!(
+            err.to_string().contains("32-byte"),
+            "error names the expected length: {err}"
+        );
     }
 }
 

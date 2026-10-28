@@ -95,6 +95,9 @@ pub(in crate::commands) enum ImageAction {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Output only an immutable source reference, preserving an existing index pin
+        #[arg(long, conflicts_with = "json")]
+        digest_ref: bool,
     },
     /// Remove a cached OCI image and garbage-collect unreferenced layers
     Rm {
@@ -133,7 +136,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             })
         }
         ImageAction::Ls { registry, json } => ls::run(&cache_root, registry.as_deref(), json),
-        ImageAction::Inspect { reference, json } => inspect::run(&cache_root, &reference, json),
+        ImageAction::Inspect {
+            reference,
+            json,
+            digest_ref,
+        } => inspect::run(&cache_root, &reference, json, digest_ref),
         ImageAction::Rm { reference } => rm::run(&cache_root, &reference),
         ImageAction::Boot { action } => boot::run(action),
         ImageAction::Dev { action } => dev::run(action, cfg),

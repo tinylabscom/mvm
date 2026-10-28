@@ -30,7 +30,7 @@
 //! ## What's deferred
 //!
 //! - Auto-start from the builder VM bootstrap (post-merge follow-up).
-//! - `mvmctl build` routing into the persistent supervisor when a
+//! - `mvmctl machine build` routing into the persistent supervisor when a
 //!   session is active (`submit` now produces real artifacts, so
 //!   the routing target exists).
 //! - Install variant dispatch.

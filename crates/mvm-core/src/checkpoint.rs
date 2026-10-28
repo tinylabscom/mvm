@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 /// Stable identifier for a checkpoint (also its on-disk directory name under
 /// `config::checkpoints_dir()`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CheckpointId(String);
 
 impl CheckpointId {
@@ -16,7 +17,26 @@ impl CheckpointId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Validate a visible checkpoint directory name without changing persisted IDs.
+    pub fn try_from_path_component(raw: &str) -> Result<Self, CheckpointIdError> {
+        if raw.is_empty()
+            || raw.starts_with('.')
+            || raw.contains('/')
+            || raw.contains('\\')
+            || raw.contains("..")
+            || raw.bytes().any(|byte| byte == 0 || byte.is_ascii_control())
+        {
+            return Err(CheckpointIdError);
+        }
+        Ok(Self::new(raw))
+    }
 }
+
+/// A checkpoint ID cannot safely name a visible catalog directory.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid checkpoint id: expected a visible, safe path component")]
+pub struct CheckpointIdError;
 
 impl std::fmt::Display for CheckpointId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -38,6 +58,7 @@ impl std::fmt::Display for CheckpointId {
 /// [`CheckpointId`]), so handing one where another is expected does not compile.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CheckpointDigest(String);
 
 impl CheckpointDigest {
@@ -114,6 +135,7 @@ pub enum CheckpointDigestParseError {
 /// same model without a new surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum CheckpointClass {
     /// Copy-on-write clone of a quiesced rootfs (filesystem state only).
     FsQuick,
@@ -124,6 +146,7 @@ pub enum CheckpointClass {
 /// One named artifact inside a checkpoint's `content/` dir, with its hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ContentBlob {
     pub name: String,
     pub sha256: String,
@@ -137,6 +160,7 @@ pub struct ContentBlob {
 /// as a directory name; tenant-controlled text never becomes a path component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CheckpointKeyDomain(String);
 
 impl CheckpointKeyDomain {
@@ -210,6 +234,7 @@ pub enum CheckpointKeyDomainParseError {
 /// as protected, and is never opened through the sealed path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum CheckpointProtection {
     /// Plaintext chunk objects and whole files: the legacy layout, written
     /// only when a store was explicitly opened without key custody.
@@ -324,6 +349,7 @@ pub struct DeviceAnchors {
 /// first would freeze into every sealed record's `meta_digest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ApprovalHead(String);
 
 impl ApprovalHead {
@@ -409,6 +435,7 @@ pub enum ApprovalHeadParseError {
 /// executed immediately before this step was captured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SessionBinding {
     pub session_id: mvm_contract::protocol::agent_session::AgentSessionId,
     pub generation: u64,
@@ -434,6 +461,7 @@ pub struct SessionBinding {
 /// digest so the backfill does not perturb the content-address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CheckpointMeta {
     pub id: CheckpointId,
     pub class: CheckpointClass,
@@ -809,6 +837,42 @@ impl CheckpointMetaBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_fixture_pins_complete_and_legacy_serialization_and_digests() {
+        let value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/checkpoint/catalog.json"
+        ))
+        .unwrap();
+        let records: Vec<CheckpointMeta> = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&records).unwrap(), value);
+        for record in records {
+            assert_eq!(record.compute_meta_digest(), record.meta_digest);
+        }
+    }
+
+    #[test]
+    fn checked_path_component_preserves_valid_ids_and_refuses_unsafe_ones() {
+        for raw in ["checkpoint-1", "a_b", "é"] {
+            assert_eq!(
+                CheckpointId::try_from_path_component(raw).unwrap().as_str(),
+                raw
+            );
+        }
+        for raw in [
+            "", ".", ".staging", "..", "a..b", "a/b", "a\\b", "a\0b", "a\nb",
+        ] {
+            assert!(
+                CheckpointId::try_from_path_component(raw).is_err(),
+                "{raw:?}"
+            );
+        }
+        // Validation at a path boundary must not change persisted serde semantics.
+        assert_eq!(
+            serde_json::to_string(&CheckpointId::new(".old")).unwrap(),
+            "\".old\""
+        );
+    }
 
     fn parent_digest() -> CheckpointDigest {
         CheckpointDigest::parse(format!("sha256:{}", "a".repeat(64))).unwrap()
@@ -1339,6 +1403,7 @@ mod tests {
     ///
     /// [`OciDigest`]: crate::packs::OciDigest
     /// [`WorkloadAddress`]: crate::workload_address::WorkloadAddress
+    #[cfg(feature = "host-state")]
     #[test]
     fn checkpoint_digest_shape_overlaps_oci_digest_but_types_never_convert() {
         let m = digest_fixture_meta(vec![blob("rootfs.ext4", "aa")]);

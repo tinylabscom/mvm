@@ -1,5 +1,5 @@
-//! `mvmctl bundle export <template> --out <path>` — seal a built
-//! template into a signed `.mvmpkg`.
+//! Shared template-to-bundle implementation for `mvmctl build` and the hidden
+//! `mvmctl dev export-template` fixture command.
 //!
 //! Resolves the template's current revision artifacts (kernel,
 //! rootfs, optional initrd, optional dm-verity sidecar) and hands
@@ -43,6 +43,13 @@ pub(in crate::commands) struct Args {
     /// are created; existing destinations are refused without overwriting.
     #[arg(long, value_name = "PATH")]
     pub out: PathBuf,
+    #[command(flatten)]
+    pub options: ExportOptions,
+}
+
+/// Archive metadata shared by every source accepted by the build front door.
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub(in crate::commands) struct ExportOptions {
     /// Optional human-readable workload label baked into the
     /// manifest. Surfaced by `mvmctl bundle fetch` for diagnostics.
     #[arg(long)]
@@ -78,7 +85,9 @@ pub(in crate::commands) struct Args {
 /// Read and check the descriptor at `path` before any artifact is hashed, so
 /// a malformed file is refused with its own name rather than as a verifier
 /// error about the sealed manifest.
-fn read_environment(path: &std::path::Path) -> Result<EnvironmentDescriptor> {
+pub(in crate::commands) fn read_environment(
+    path: &std::path::Path,
+) -> Result<EnvironmentDescriptor> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("reading environment descriptor at {}", path.display()))?;
     let descriptor: EnvironmentDescriptor = serde_json::from_slice(&bytes)
@@ -108,14 +117,34 @@ impl From<PostureProfile> for AgentProfile {
     }
 }
 
-impl Args {
-    fn posture_inputs(&self) -> Option<PostureInputs> {
+impl ExportOptions {
+    pub(in crate::commands) fn posture_inputs(&self) -> Option<PostureInputs> {
         self.posture.map(|profile| {
             PostureInputs::new(profile.into())
                 .requires_auth(!self.allow_unauthenticated)
                 .allows_volumes(self.allow_volumes)
                 .allows_egress(self.allow_egress)
         })
+    }
+
+    pub(in crate::commands) fn apply(self, mut export: TemplateExport) -> Result<TemplateExport> {
+        let posture = self.posture_inputs();
+        if let Some(label) = self.label {
+            export.label = Some(label);
+        }
+        if let Some(path) = self.cmdline {
+            export.cmdline =
+                Some(std::fs::read_to_string(&path).with_context(|| {
+                    format!("reading kernel command line at {}", path.display())
+                })?);
+        }
+        if posture.is_some() {
+            export.posture = posture;
+        }
+        if let Some(path) = self.environment {
+            export.environment = Some(read_environment(&path)?);
+        }
+        Ok(export)
     }
 }
 
@@ -152,6 +181,8 @@ pub(in crate::commands) struct TemplateExport {
     pub provenance: Option<BuildProvenance>,
     /// The signed environment descriptor to seal beside the artifacts.
     pub environment: Option<EnvironmentDescriptor>,
+    /// Whether the host signer must mark this archive as local build output.
+    pub local_build: bool,
     /// Owned verified producer closure, shared with the preceding health call.
     pub portable_boot_assets:
         Option<std::sync::Arc<mvm_client::portable_boot_assets::PreparedPortableBootAssets>>,
@@ -167,35 +198,15 @@ impl TemplateExport {
             resources: None,
             provenance: None,
             environment: None,
+            local_build: false,
             portable_boot_assets: None,
         }
     }
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let cmdline = args
-        .cmdline
-        .as_deref()
-        .map(|path| {
-            std::fs::read_to_string(path)
-                .with_context(|| format!("reading kernel command line at {}", path.display()))
-        })
-        .transpose()?;
-    let environment = args
-        .environment
-        .as_deref()
-        .map(read_environment)
-        .transpose()?;
-    let exported = export_template(
-        &args.template,
-        TemplateExport {
-            label: args.label.clone(),
-            cmdline,
-            posture: args.posture_inputs(),
-            environment,
-            ..TemplateExport::new(args.out.clone())
-        },
-    )?;
+    let export = args.options.apply(TemplateExport::new(args.out))?;
+    let exported = export_template(&args.template, export)?;
     println!(
         "Exported bundle to {} ({} bytes, key_id={})",
         exported.path.display(),
@@ -310,6 +321,7 @@ pub(in crate::commands) fn stage_template(
         posture: export.posture,
         provenance,
         environment: export.environment,
+        local_build: export.local_build,
         boot_assets: None,
         cli_boot_assets: None,
         canonical_linux_proof: None,
@@ -341,13 +353,14 @@ mod tests {
 
     #[test]
     fn no_posture_flag_declares_no_posture() {
-        assert_eq!(parse(&[]).unwrap().posture_inputs(), None);
+        assert_eq!(parse(&[]).unwrap().options.posture_inputs(), None);
     }
 
     #[test]
     fn a_posture_starts_closed() {
         let posture = parse(&["--posture", "sealed-prod"])
             .unwrap()
+            .options
             .posture_inputs()
             .unwrap();
         assert_eq!(posture, PostureInputs::new(AgentProfile::SealedProd));
@@ -362,6 +375,7 @@ mod tests {
             "--allow-unauthenticated",
         ])
         .unwrap()
+        .options
         .posture_inputs()
         .unwrap();
         assert!(posture.allows_egress);
@@ -379,8 +393,8 @@ mod tests {
     #[test]
     fn environment_flag_names_a_file() {
         let args = parse(&["--environment", "env.json"]).unwrap();
-        assert_eq!(args.environment, Some(PathBuf::from("env.json")));
-        assert_eq!(parse(&[]).unwrap().environment, None);
+        assert_eq!(args.options.environment, Some(PathBuf::from("env.json")));
+        assert_eq!(parse(&[]).unwrap().options.environment, None);
     }
 
     #[test]

@@ -149,8 +149,8 @@ ci: lint test (tests::doc) (bdd::run)
 
 # Build the optimized release mvmctl with the release workflow's feature set
 release-build:
-    cargo build --release --features host,user,template-registry-s3,release-artifact-bootstrap,embed-host-bins
+    cargo build --release --features host,user,release-artifact-bootstrap,embed-host-bins
 
-# Build the documentation site (stages the /demo wasm assets first if missing)
+# Show documentation site subcommands; build explicitly with `just site::build`
 docs:
-    @just site::build
+    @just --list site

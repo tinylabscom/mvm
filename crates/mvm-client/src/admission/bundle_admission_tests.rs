@@ -8,7 +8,9 @@ use ed25519_dalek::SigningKey;
 use mvm_core::util::test_env::TestEnv;
 
 use super::admit_plan_tests::{pinning_params, write_rootfs};
-use super::policy::bundle_pin_tests::{make_bundle_for_pin, make_bundle_for_pin_with};
+use super::policy::bundle_pin_tests::{
+    make_bundle_for_pin, make_bundle_for_pin_with, make_local_bundle_for_pin,
+};
 use super::*;
 
 /// Enrol the publisher of `sk` in `<MVM_HOME>/trusted-publishers/`, the
@@ -65,6 +67,59 @@ fn a_bundle_without_an_image_set_admits_before_a_backend_is_chosen() {
         .expect("the signed plan carries the bundle pin");
     assert_eq!(pin.bundle_sha256, mvm_core::plan::bundle_sha256(&archive));
     assert_eq!(pin.key_id, key_id);
+}
+
+#[test]
+fn a_host_signed_local_build_is_audited_with_its_origin_and_digest() {
+    let home = tempfile::tempdir().expect("mvm home");
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let keys_dir = home.path().join("keys");
+    let host = mvm_hostd::audit::host_keypair::load_or_init_at(&keys_dir).expect("host signer");
+    let (archive, _) = make_local_bundle_for_pin(&host.signing);
+    let bundle_path = home.path().join("local.mvmpkg");
+    std::fs::write(&bundle_path, &archive).expect("write local bundle");
+    let rootfs = write_rootfs(home.path(), b"rootfs-bytes");
+    let audit_dir = home.path().join("audit");
+    let ledger = InMemoryNonceLedger::new();
+    let mut params = pinning_params(&rootfs, &ledger);
+    params.keys_dir = Some(&keys_dir);
+    params.audit_dir = Some(&audit_dir);
+    params.bundle_pin = Some(BundlePin::boots(&bundle_path));
+
+    let ctx = admit_plan_for_boot(params).expect("this host's local build admits in development");
+
+    assert_eq!(ctx.admitted.plan().audit_labels["origin"], "local-build");
+    assert_eq!(
+        ctx.admitted.plan().audit_labels["bundle_sha256"],
+        mvm_core::plan::bundle_sha256(&archive)
+    );
+    let chain = audit_chain(&audit_dir);
+    assert!(chain.contains("local-build"), "{chain}");
+}
+
+#[test]
+fn a_host_signed_local_build_is_refused_by_production_admission() {
+    let home = tempfile::tempdir().expect("mvm home");
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let keys_dir = home.path().join("keys");
+    let host = mvm_hostd::audit::host_keypair::load_or_init_at(&keys_dir).expect("host signer");
+    let (archive, _) = make_local_bundle_for_pin(&host.signing);
+    let bundle_path = home.path().join("local.mvmpkg");
+    std::fs::write(&bundle_path, archive).expect("write local bundle");
+    let rootfs = write_rootfs(home.path(), b"rootfs-bytes");
+    let ledger = InMemoryNonceLedger::new();
+    let mut params = pinning_params(&rootfs, &ledger);
+    params.keys_dir = Some(&keys_dir);
+    params.bundle_pin = Some(BundlePin::boots_for_production(&bundle_path));
+
+    let error = admit_plan_for_boot(params).expect_err("production admission rejects local builds");
+
+    assert!(
+        format!("{error:#}").contains("not release-verified"),
+        "{error:#}"
+    );
 }
 
 /// A bundle installed into the registry under the isolated `MVM_HOME`, the way
@@ -584,6 +639,65 @@ fn slot_environment() -> mvm_core::plan::EnvironmentDescriptor {
         "secret_slots": [{ "name": "AGENT_TOKEN", "required": true }],
     }))
     .expect("environment fixture")
+}
+
+#[test]
+fn signed_environment_policy_refuses_missing_or_wider_runtime_and_audits() {
+    use mvm_core::network_policy::NetworkPolicy;
+    for supply_runtime in [false, true] {
+        let mut environment = slot_environment();
+        environment.secret_slots.clear();
+        environment.policy = Some(mvm_core::plan::EnvironmentPolicy {
+            allow_hosts: vec!["api.anthropic.com:443".into()],
+        });
+        let fixture =
+            InstalledFixture::with_members(vec![mvm_core::plan::BundleMember::Environment(
+                environment,
+            )]);
+        let (_, kernel, _, rootfs, _) =
+            mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(&fixture.sha256)
+                .expect("installed bundle resolves");
+        let archive =
+            mvm_runtime::vm::template::lifecycle::installed_bundle_archive(&fixture.sha256)
+                .expect("registry")
+                .expect("installed archive");
+        let (rootfs, kernel) = (
+            std::path::PathBuf::from(rootfs),
+            std::path::PathBuf::from(kernel),
+        );
+        let keys_dir = fixture.home.path().join("keys");
+        let audit_dir = fixture.audit_dir();
+        let ledger = InMemoryNonceLedger::new();
+        let runtime = mvm_core::vm_backend::VmStartConfig {
+            network_policy: NetworkPolicy::unrestricted(),
+            ..Default::default()
+        };
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.kernel_path = Some(&kernel);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        params.bundle_pin = Some(BundlePin::boots(&archive));
+        params.entrypoint = ResolvedEntrypoint::Known {
+            argv: vec!["/usr/bin/agent".into()],
+            shebang: None,
+        };
+        // The advertised launch policy is narrow; the actual runtime must
+        // independently be present and narrow too.
+        params.network_policy = NetworkPolicy::deny_all();
+        params.runtime_config = supply_runtime.then_some(&runtime);
+        let error = admit_plan_for_boot(params).expect_err("missing or wider runtime must refuse");
+        assert!(
+            format!("{error:#}").contains("actual launch network"),
+            "{error:#}"
+        );
+        let chain = fixture.chain();
+        assert!(chain.contains("plan.failed"), "{chain}");
+        assert!(
+            chain.contains(super::audit::BUNDLE_ENVIRONMENT_REFUSED_CLASS),
+            "{chain}"
+        );
+        assert!(!chain.contains("plan.admitted"), "{chain}");
+    }
 }
 
 /// A pinned bundle whose signed environment requires a secret slot the launch

@@ -5,9 +5,9 @@ use super::SubstitutionService;
 use super::prepare::{PreparedFlow, SubstitutedSecret, destination_host};
 use crate::supervisor::redactor::RedactionHits;
 use crate::supervisor::secret_audit::{
-    ForwardOutcome, emit_rewrite_proof, emit_secret_flow_refused, emit_secret_forward_outcome,
-    emit_secret_placeholder_dropped, emit_secret_redacted, emit_secret_reflection_scrubbed,
-    emit_secret_substituted,
+    ForwardOutcome, ForwardPath, emit_rewrite_proof, emit_secret_flow_refused,
+    emit_secret_forward_outcome, emit_secret_placeholder_dropped, emit_secret_redacted,
+    emit_secret_reflection_scrubbed, emit_secret_substituted,
 };
 
 /// The sorted, de-duplicated category list a `secret.redacted` entry carries.
@@ -85,9 +85,44 @@ impl SubstitutionService {
         let (Some(recorder), Some(dest)) = (&self.recorder, flow.destination.as_deref()) else {
             return;
         };
-        if let Err(e) = emit_secret_forward_outcome(recorder, dest, outcome).await {
+        let path = self.forward_path(dest);
+        if let Err(e) = emit_secret_forward_outcome(recorder, dest, outcome, path).await {
             tracing::warn!(error = %e, "secret.forward_outcome audit emit failed");
         }
+    }
+
+    /// `Proxy` when the configured upstream proxy would carry `destination`
+    /// for either scheme. The scheme is not known here, so a host proxied for
+    /// only one of them is reported as proxied: the label may over-report, and
+    /// never lets a proxied leg read as direct. A destination the proxy's
+    /// `NO_PROXY` list excepts is a bypass either way, so that label is exact.
+    fn forward_path(&self, destination: &str) -> ForwardPath {
+        self.forward_path_for(destination, None)
+            .unwrap_or(ForwardPath::Direct)
+    }
+
+    /// How the forward leg would reach `host`, or `None` when the endpoint
+    /// holds no upstream-proxy configuration at all — in which case a caller
+    /// writing a flow entry records no label, so a chain written on an
+    /// unproxied host keeps the bytes it had before the label existed.
+    ///
+    /// `tls` names the scheme the leg will speak; `None` (the scheme is not
+    /// known where the entry is written) reports `Proxy` when either scheme
+    /// would be proxied — it may over-report, never under-report.
+    pub(crate) fn forward_path_for(&self, host: &str, tls: Option<bool>) -> Option<ForwardPath> {
+        let proxy = self.proxy.as_ref()?;
+        if proxy.no_proxy.bypasses(host) {
+            return Some(ForwardPath::NoProxyBypass);
+        }
+        let proxied = match tls {
+            Some(tls) => proxy.select(host, tls).is_some(),
+            None => proxy.select(host, true).is_some() || proxy.select(host, false).is_some(),
+        };
+        Some(if proxied {
+            ForwardPath::Proxy
+        } else {
+            ForwardPath::Direct
+        })
     }
 
     pub(super) async fn audit_completed_flow(
@@ -325,6 +360,98 @@ mod redaction_category_tests {
 }
 
 #[cfg(test)]
+mod forward_path_tests {
+    use crate::supervisor::network_endpoint_proxy::SubstitutionService;
+    use crate::supervisor::network_endpoint_proxy::test_support::service_with;
+    use crate::supervisor::secret_audit::ForwardPath;
+    use std::sync::Arc;
+
+    fn service_with_proxy(proxy: Option<mvm_http::ProxyConfig>) -> SubstitutionService {
+        let (service, _placeholder, _forwarder, _dir) =
+            service_with("secret-value", &["api.example.com"]);
+        Arc::try_unwrap(service)
+            .ok()
+            .expect("single service owner")
+            .with_proxy_config(proxy)
+    }
+
+    /// With no proxy configured the decision is `None`, and a caller writing a
+    /// flow entry records no label — the entry keeps the bytes it had before
+    /// the label existed.
+    #[test]
+    fn no_proxy_configured_decides_nothing() {
+        let service = service_with_proxy(None);
+        assert_eq!(
+            service.forward_path_for("api.example.com", Some(true)),
+            None
+        );
+        assert_eq!(
+            service.forward_path_for("api.example.com", Some(false)),
+            None
+        );
+        assert_eq!(service.forward_path_for("api.example.com", None), None);
+    }
+
+    #[test]
+    fn a_proxied_destination_reports_proxy_for_either_scheme() {
+        let service = service_with_proxy(Some(mvm_http::ProxyConfig::all(
+            mvm_http::Proxy::parse("http://proxy.corp:3128").unwrap(),
+        )));
+        for tls in [Some(true), Some(false), None] {
+            assert_eq!(
+                service.forward_path_for("api.example.com", tls),
+                Some(ForwardPath::Proxy),
+                "{tls:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_no_proxy_bypass_reports_the_bypass_for_either_scheme() {
+        let service = service_with_proxy(Some(
+            mvm_http::ProxyConfig::all(mvm_http::Proxy::parse("http://proxy.corp:3128").unwrap())
+                .with_no_proxy(mvm_http::NoProxy::parse("internal.example")),
+        ));
+        for tls in [Some(true), Some(false), None] {
+            assert_eq!(
+                service.forward_path_for("internal.example", tls),
+                Some(ForwardPath::NoProxyBypass),
+                "{tls:?}"
+            );
+        }
+        // The bypass names its own host only; everything else still proxies.
+        assert_eq!(
+            service.forward_path_for("api.example.com", Some(true)),
+            Some(ForwardPath::Proxy)
+        );
+    }
+
+    /// With the scheme known, a destination the proxy does not cover reports
+    /// `Direct`. With the scheme unknown, the same host reports `Proxy`: the
+    /// read may over-report, and never lets a proxied leg read as direct.
+    #[test]
+    fn a_scheme_the_proxy_does_not_cover_is_direct_only_when_the_scheme_is_known() {
+        let service = service_with_proxy(Some(mvm_http::ProxyConfig {
+            https: None,
+            http: Some(mvm_http::Proxy::parse("http://plain.corp:8080").unwrap()),
+            no_proxy: mvm_http::NoProxy::default(),
+        }));
+        assert_eq!(
+            service.forward_path_for("api.example.com", Some(true)),
+            Some(ForwardPath::Direct)
+        );
+        assert_eq!(
+            service.forward_path_for("api.example.com", Some(false)),
+            Some(ForwardPath::Proxy)
+        );
+        assert_eq!(
+            service.forward_path_for("api.example.com", None),
+            Some(ForwardPath::Proxy)
+        );
+    }
+}
+
+#[cfg(test)]
 mod server_tests {
     use crate::framing::{read_json_frame, write_json_frame};
     use crate::keyholder::{LocalResolver, SecretResolver, SubstitutionRegistry};
@@ -478,6 +605,86 @@ mod server_tests {
         assert!(logged[outcome..].contains("response_failed"), "{logged}");
         assert!(!logged.contains("connection reset"), "{logged}");
         assert!(!logged.contains("sk-live-zzz"), "{logged}");
+    }
+
+    /// Drive one substituted request that fails mid-body and return the chain
+    /// text from the `secret.forward_outcome` entry on.
+    async fn forward_outcome_entry(proxy: Option<mvm_http::ProxyConfig>) -> String {
+        let dir = tempdir().unwrap();
+        let (mut service, ph, chain) = recorded_service_with(
+            dir.path(),
+            gate_admitting(&[("api.openai.com", 443)]),
+            Arc::new(MidBodyFailure),
+        );
+        Arc::get_mut(&mut service).expect("sole owner").proxy = proxy.map(Arc::new);
+        let mut response = service
+            .process_stream(
+                WireRequest {
+                    method: "POST".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                    body_b64: String::new(),
+                },
+                &Default::default(),
+            )
+            .await
+            .expect("the response head arrived");
+        while response.body.recv().await.is_some() {}
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        let at = logged
+            .find("secret.forward_outcome")
+            .expect("outcome entry");
+        logged[at..].to_string()
+    }
+
+    #[tokio::test]
+    async fn a_direct_forward_is_recorded_as_direct() {
+        let entry = forward_outcome_entry(None).await;
+        assert!(entry.contains("direct"), "{entry}");
+        assert!(!entry.contains("proxy"), "{entry}");
+    }
+
+    #[tokio::test]
+    async fn a_forward_through_the_upstream_proxy_is_recorded_as_proxied() {
+        let proxy = mvm_http::ProxyConfig::from_lookup(|key| {
+            (key == "HTTPS_PROXY").then(|| "http://proxy.corp:3128".to_string())
+        })
+        .expect("proxy environment parses")
+        .expect("a proxy is configured");
+        let entry = forward_outcome_entry(Some(proxy)).await;
+        assert!(entry.contains("proxy"), "{entry}");
+        assert!(!entry.contains("direct"), "{entry}");
+    }
+
+    #[tokio::test]
+    async fn a_destination_in_no_proxy_is_recorded_as_a_bypass() {
+        let proxy = mvm_http::ProxyConfig::from_lookup(|key| match key {
+            "HTTPS_PROXY" => Some("http://proxy.corp:3128".to_string()),
+            "NO_PROXY" => Some("openai.com".to_string()),
+            _ => None,
+        })
+        .expect("proxy environment parses")
+        .expect("a proxy is configured");
+        let entry = forward_outcome_entry(Some(proxy)).await;
+        assert!(entry.contains("no_proxy"), "{entry}");
+        assert!(
+            !entry.contains(r#""via":"direct""#),
+            "a bypass must not read as an unproxied leg: {entry}"
+        );
+    }
+
+    /// The outcome entry is written where the scheme is no longer known, so a
+    /// host proxied for only one scheme is named proxied: the label may
+    /// over-report, and never lets a proxied leg read as direct.
+    #[tokio::test]
+    async fn a_host_proxied_for_one_scheme_is_recorded_as_proxied() {
+        let proxy = mvm_http::ProxyConfig {
+            https: None,
+            http: Some(mvm_http::Proxy::parse("http://plain.corp:8080").unwrap()),
+            no_proxy: mvm_http::NoProxy::default(),
+        };
+        let entry = forward_outcome_entry(Some(proxy)).await;
+        assert!(entry.contains(r#""via":"proxy""#), "{entry}");
     }
 
     /// A placeholder in the body is refused before anything is forwarded,
@@ -755,6 +962,47 @@ mod server_tests {
                 !logged.contains(marker),
                 "request content `{marker}` reached the chain: {logged}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_denied_destination_stays_denied_with_proxy_and_no_proxy_configured() {
+        for no_proxy in ["", "*", "api.openai.com"] {
+            let dir = tempdir().unwrap();
+            let forwarder = Arc::new(MockForwarder {
+                seen: Mutex::new(None),
+            });
+            let (mut service, ph, chain) = recorded_service_with(
+                dir.path(),
+                gate_admitting(&[("other.example", 443)]),
+                forwarder.clone(),
+            );
+            let proxy = mvm_http::ProxyConfig::from_lookup(|key| match key {
+                "https_proxy" => Some("http://proxy.corp:3128".into()),
+                "no_proxy" => Some(no_proxy.into()),
+                _ => None,
+            })
+            .unwrap()
+            .unwrap();
+            Arc::get_mut(&mut service).expect("sole owner").proxy = Some(Arc::new(proxy));
+            let response = service
+                .process(WireRequest {
+                    method: "GET".into(),
+                    url: "https://api.openai.com/v1/models".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                    body_b64: String::new(),
+                })
+                .await;
+            assert!(
+                matches!(&response, WireResponse::Refused { message } if message.contains("claim-10")),
+                "{response:?}"
+            );
+            assert!(forwarder.seen.lock().unwrap().is_none());
+            let logged = std::fs::read_to_string(&chain).unwrap();
+            assert!(logged.contains("policy_denied"));
+            assert!(!logged.contains("secret.forward_outcome"));
+            let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+            crate::supervisor::audit_file::verify_audit_chain(&chain, &key).unwrap();
         }
     }
 

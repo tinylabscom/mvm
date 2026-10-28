@@ -10,7 +10,7 @@ microVM, depending on the active mode.
 Two modes are live:
 
 - ``MVM_SDK_MODE=record`` (the default): every ``Sandbox`` call appends to an
-  in-process recording. The host's ``mvmctl build compile`` /
+  in-process recording. The host's ``mvmctl dev compile`` /
   ``mvmctl run --mode plan`` verbs lower the recording via
   ``compile_recording``.
 - ``MVM_SDK_MODE=live``: every ``Sandbox`` call goes to the host library,
@@ -1172,7 +1172,7 @@ class Sandbox:
 
         ``workload_id`` defaults to the resolved template (the CLI
         overrides with the script's basename when invoked via
-        ``mvmctl build compile``)."""
+        ``mvmctl dev compile``)."""
         mode = _resolve_mode()  # raises if MVM_SDK_MODE is invalid
         global _recording
         if _recording is not None or _live_sandbox_active():

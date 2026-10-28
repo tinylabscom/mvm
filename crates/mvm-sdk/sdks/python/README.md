@@ -11,6 +11,19 @@ pip install mvm
 `mvmctl` (the Rust host CLI) is distributed separately and does the building,
 booting, and signing. This package is the **authoring** surface it reads.
 
+## Read the local checkpoint catalog
+
+`mvm.checkpoint.list()` calls the client-owned `checkpoint.list` host-library
+method (ABI 1.10); it never runs `mvmctl` or boots a VM. It returns complete
+metadata dictionaries in checkpoint-ID order, with legacy omitted fields left
+omitted. A missing catalog is empty. Invalid metadata, mismatched IDs, unsafe
+metadata paths, non-regular metadata files, and metadata over 16 MiB fail the
+whole operation with a host-library error, not a partial list. Staging,
+non-directory entries and directories without metadata are ignored.
+
+This is the same data as `mvmctl machine checkpoint ls --json`. Listing neither
+opens checkpoint content nor authenticates lineage or grants restore authority.
+
 ## Quick start
 
 ```python
@@ -23,7 +36,7 @@ def add(a: int, b: int) -> int:
 ```
 
 ```sh
-mvmctl build compile app.py   # parse the script (no execution) → flake.nix + launch plan
+mvmctl dev compile app.py   # parse the script (no execution) → flake.nix + launch plan
 mvmctl machine run --flake .     # build the image and boot the microVM
 ```
 
@@ -51,7 +64,7 @@ def main(name: str) -> str:
 
 ## How it builds
 
-`mvmctl build compile` reads your file **statically** — the decorator and the
+`mvmctl dev compile` reads your file **statically** — the decorator and the
 `import mvm` line are parsed as data, never executed, so nothing in your module
 runs on the host. At image-build time the decorator and the `import mvm` line
 are **stripped** from the bundled source, so the guest runs your plain function
@@ -185,7 +198,7 @@ microVM through `entrypoint.call`, admitted under a signed plan and audited
 exactly as `mvmctl machine run --entrypoint` is; `mv.session(...)` holds one
 warm microVM across calls (`session.start`, `session.call`, `session.stop`).
 The workload is found among the images built on this host by the name it was
-declared with; build it first (`mvmctl build compile`, then
+declared with; build it first (`mvmctl dev compile`, then
 `mvmctl machine build --flake <dir>`). An error the function raised arrives as
 the generated `RemoteError` with its kind and id; a failure with no such
 envelope is `MvmTransportError` with the exit code and the end of stderr. A
@@ -247,7 +260,7 @@ from mvm.packs import pack
 ```
 
 `mvmctl pack lock pack.json --mvm-revision <commit>` freezes it, and
-`mvmctl pack build pack.json --out hello.mvmpkg` compiles, builds, health-boots
+`mvmctl build pack.json --out hello.mvmpkg` compiles, builds, health-boots
 and signs it. The bytes are the canonical bytes every language SDK writes for
 the same spec, and a mistake raises `PackSpecError` with
 the same `code` in every language.

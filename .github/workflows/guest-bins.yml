@@ -34,7 +34,8 @@ jobs:
     outputs:
       unsigned_artifact_id: ${{ steps.upload.outputs.artifact-id }}
       unsigned_artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     # A cold debug build of mvmctl plus every guest cross-compile for both
     # arches: two overlay builds, the OCI set, setpriv, the initramfs agent and
     # eight shared objects per arch.
@@ -51,7 +52,7 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Build the guest-bins artifact
-        run: cargo run --locked -p mvmctl -- build guest-bins --out dist
+        run: cargo run --locked -p mvmctl -- dev guest-bins --out dist
 
       - name: Retain the already-built canonical reader for pre-signing checks
         shell: bash

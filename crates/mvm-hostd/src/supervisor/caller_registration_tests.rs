@@ -7,6 +7,15 @@ use crate::plan_admission::{InMemoryNonceLedger, RunPosture, admit_plan_for_run}
 use crate::stream::protected::{CaptureAuthority, CaptureOwner, CaptureParams};
 
 #[test]
+fn caller_image_reopen_requires_an_authenticated_registry_boot_identity() {
+    let plan = PlanFixture::new().build();
+    let file = tempfile::tempfile().unwrap();
+    let projection = mvm_core::vm_backend::VmStartConfig::default();
+    let error = reopen_caller_image(&plan, "caller-reopen", &projection, &file).unwrap_err();
+    assert!(error.to_string().contains("no authenticated boot image"));
+}
+
+#[test]
 fn startup_preflight_refuses_collisions_aliases_linked_and_writable_without_closing_inputs() {
     use std::os::fd::AsRawFd;
     let dir = tempfile::tempdir().unwrap();
@@ -122,6 +131,16 @@ fn startup_adopts_distinct_untrusted_files_once_with_cloexec() {
         })
         .collect::<Vec<_>>();
     let fds = files.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>();
+    // Pin each unlinked inode with a second descriptor so a concurrent test
+    // cannot be handed the freed inode (and descriptor number) while the
+    // post-drop identity check runs.
+    let pins = files
+        .iter()
+        .map(|file| file.try_clone().unwrap())
+        .collect::<Vec<_>>();
+    for pin in &pins {
+        assert!(!fds.contains(&pin.as_raw_fd()), "pin aliases an adopted fd");
+    }
     validate_startup_descriptors(&fds).unwrap();
     let cfg = serde_json::from_value(serde_json::json!({
         "console_capture":"encrypted", "vm_name":"fd-mechanics", "kernel":"/unused",

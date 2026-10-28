@@ -48,6 +48,8 @@ pub struct EntrypointAdmission {
     network_policy: NetworkPolicy,
     stream_stdin: bool,
     producer_identity: Option<ProducerIdentity>,
+    assets: Vec<crate::admission::AssetSpec>,
+    bundle_posture: Option<mvm_core::plan::BundleSecurityPosture>,
 }
 
 /// An admitted entrypoint boot: the context the audit narrative binds to, and
@@ -76,6 +78,8 @@ impl EntrypointAdmission {
             network_policy: NetworkPolicy::deny_all(),
             stream_stdin: false,
             producer_identity: None,
+            assets: Vec::new(),
+            bundle_posture: None,
         })
     }
 
@@ -167,10 +171,10 @@ impl EntrypointAdmission {
             audit_dir: None,
             policy_dir: None,
             bundle_pin: bundle_archive.map(crate::admission::BundlePin::boots),
-            bundle_posture: None,
+            bundle_posture: self.bundle_posture,
             deps_volume: None,
             shares: mvm_hostd::run::shares_from_vm_volumes(volumes),
-            assets: assets.to_vec(),
+            assets: assets.iter().chain(&self.assets).cloned().collect(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             tools: Default::default(),
             network_policy: self.network_policy.clone(),
@@ -196,7 +200,10 @@ impl EntrypointAdmission {
             // An entrypoint boot admits the built workload's own launch and
             // authors no grant of its own.
             grants: None,
-            backend_kind: None,
+            backend_kind: self
+                .producer_identity
+                .as_ref()
+                .map(|_| mvm_core::vm_backend::BackendKind::Hvf),
         })?;
 
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
@@ -270,6 +277,23 @@ impl EntrypointAdmission {
 pub struct EntrypointAdmissionBuilder(EntrypointAdmission);
 
 impl EntrypointAdmissionBuilder {
+    /// Bind internally selected descriptor identities into the signed plan.
+    #[must_use]
+    pub fn assets(mut self, assets: Vec<crate::admission::AssetSpec>) -> Self {
+        self.0.assets = assets;
+        self
+    }
+
+    /// Bound the requested launch by the independently verified bundle posture.
+    #[must_use]
+    pub fn bundle_posture(
+        mut self,
+        posture: Option<mvm_core::plan::BundleSecurityPosture>,
+    ) -> Self {
+        self.0.bundle_posture = posture;
+        self
+    }
+
     /// Opt into immutable caller registration on a cold macOS HVF launch with
     /// the `native-caller-identity` build feature. Enrollment is explicit and
     /// must already exist in native custody at this exact pin.
@@ -403,6 +427,35 @@ mod tests {
             .expect("a default admission builds");
         assert!(!admission.streams_stdin());
         assert!(admission.with_stream_stdin(true).streams_stdin());
+    }
+
+    #[test]
+    fn entrypoint_builder_retains_descriptor_assets_and_signed_posture() {
+        let pin = mvm_core::registry_pack::PackPin::new(
+            "agent/claude@2.0.0".parse().unwrap(),
+            mvm_core::packs::Sha256Hex::new("a".repeat(64)).unwrap(),
+        )
+        .unwrap();
+        let assets = vec![crate::admission::AssetSpec::RegistryPack(pin)];
+        let posture = mvm_core::plan::BundleSecurityPosture {
+            profile: mvm_core::security::AgentProfile::SealedProd,
+            verity_protected: true,
+            requires_auth: true,
+            allows_volumes: false,
+            allows_egress: true,
+        };
+        let admission = EntrypointAdmission::builder("firecracker")
+            .assets(assets.clone())
+            .bundle_posture(Some(posture))
+            .build()
+            .unwrap()
+            .with_stream_stdin(true);
+        assert_eq!(admission.assets, assets);
+        assert_eq!(admission.bundle_posture, Some(posture));
+        assert!(!admission.dev);
+        let defaults = EntrypointAdmission::builder("mock").build().unwrap();
+        assert!(defaults.assets.is_empty());
+        assert!(defaults.bundle_posture.is_none());
     }
 
     #[test]

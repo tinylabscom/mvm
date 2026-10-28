@@ -112,7 +112,7 @@ impl TrustStore for OneKey {
     }
 }
 
-/// A built template's artifact directory, as `mvmctl bundle export` finds it.
+/// A built template's artifact directory, as `mvmctl build` finds it.
 struct Slot {
     dir: tempfile::TempDir,
 }

@@ -20,7 +20,7 @@ pub use qemu::QemuDriver;
 /// The private directory is removed with its owner; the process environment
 /// and production socket namespace are never changed.
 #[cfg(test)]
-fn socket_tempdir() -> tempfile::TempDir {
+pub(crate) fn socket_tempdir() -> tempfile::TempDir {
     use std::os::unix::fs::PermissionsExt;
 
     tempfile::Builder::new()

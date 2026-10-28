@@ -58,6 +58,11 @@ pub const MAX_TCP_FLOWS: usize = 4096;
 /// Ceiling on concurrent UDP associations per VM.
 pub const MAX_UDP_ASSOCIATIONS: usize = 256;
 
+/// Ceiling on live host-owned DNS bindings per VM, carried forward from the
+/// signed plan's existing `max_dns_bindings` default so the plan type and the
+/// protocol ceiling share one source of truth.
+pub const MAX_DNS_BINDINGS: usize = 1024;
+
 /// Ceiling on declared ingress listeners per VM, carried forward from the
 /// userspace datapath's existing bound.
 pub const MAX_INGRESS_LISTENERS: usize = 16;
@@ -127,6 +132,7 @@ mod tests {
     fn the_flow_ceilings_match_what_the_signed_plan_already_allowed() {
         assert_eq!(MAX_TCP_FLOWS, 4096);
         assert_eq!(MAX_UDP_ASSOCIATIONS, 256);
+        assert_eq!(MAX_DNS_BINDINGS, 1024);
         assert_eq!(MAX_INGRESS_LISTENERS, 16);
     }
 

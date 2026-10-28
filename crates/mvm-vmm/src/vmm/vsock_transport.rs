@@ -26,6 +26,15 @@ pub(crate) const HOST_BUF_ALLOC: u32 = 256 * 1024;
 /// device. A guest can choose the source port, so this is a host resource
 /// boundary rather than a protocol limit.
 pub(crate) const MAX_CONNECTIONS: usize = 256;
+/// The most bytes one transmit chain may carry: a header plus a payload no larger
+/// than the buffer the host advertises. The lengths come from the guest, and a
+/// chain of descriptors that each name all of guest RAM would otherwise make the
+/// host gather many times the guest's memory in one notify.
+const MAX_TX_PACKET_BYTES: usize = HDR_LEN + HOST_BUF_ALLOC as usize;
+/// The most control replies held for a guest that is not posting receive
+/// buffers. Beyond it a reply is dropped; the connection it answered is
+/// already unusable to a guest that never drains its queue.
+const MAX_PENDING_REPLIES: usize = 4096;
 pub(crate) const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) const OP_REQUEST: u16 = 1;
@@ -260,12 +269,18 @@ impl VsockTransportCore {
             for chain in avail {
                 let head = chain.head_index();
                 let mut buf = Vec::new();
+                let mut oversize = false;
                 for desc in chain.readable() {
                     // Gather buffer bytes through the same bounds-checked `GuestMem`
                     // (out-of-range → zero bytes), byte-identical to the old walk.
-                    buf.extend_from_slice(&self.mem.read_bytes(desc.addr().0, desc.len() as usize));
+                    let len = desc.len() as usize;
+                    if buf.len().saturating_add(len) > MAX_TX_PACKET_BYTES {
+                        oversize = true;
+                        break;
+                    }
+                    buf.extend_from_slice(&self.mem.read_bytes(desc.addr().0, len));
                 }
-                if buf.len() >= HDR_LEN {
+                if !oversize && buf.len() >= HDR_LEN {
                     let hdr = VsockHdr::from_bytes(&buf[..HDR_LEN]);
                     packets.push((hdr, buf[HDR_LEN..].to_vec()));
                 }
@@ -460,6 +475,9 @@ impl VsockTransportCore {
     }
 
     pub(crate) fn queue_reply(&mut self, inbound: &VsockHdr, op: u16, payload: &[u8]) {
+        if self.pending_rx.len() >= MAX_PENDING_REPLIES {
+            return;
+        }
         let reply = VsockHdr {
             src_cid: HOST_CID,
             dst_cid: GUEST_CID,
@@ -1407,6 +1425,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_oversize_tx_chain_is_dropped_without_gathering_it() {
+        let base = 0x4000_0000u64;
+        let qsz = 8u16;
+        let mut core = transport_with_ram(0x80000);
+        let too_big = vec![0xAB; MAX_TX_PACKET_BYTES];
+        let chains = vec![single_chain(1000, &too_big), single_chain(1001, b"ok")];
+        program_tx_queue(&mut core, base, qsz, &chains);
+        let packets = core.take_tx_packets();
+        assert_eq!(packets.len(), 1, "only the in-bounds packet is delivered");
+        assert_eq!(packets[0].0.src_port, 1001);
+        assert_eq!(packets[0].1, b"ok");
+        assert_eq!(
+            core.queues[TX].next_used, 2,
+            "the oversize chain is still completed"
+        );
+    }
+
+    #[test]
+    fn a_tx_packet_at_the_advertised_buffer_size_still_passes() {
+        let base = 0x4000_0000u64;
+        let mut core = transport_with_ram(0x80000);
+        let payload = vec![0x5A; HOST_BUF_ALLOC as usize];
+        program_tx_queue(&mut core, base, 8, &[single_chain(1000, &payload)]);
+        let packets = core.take_tx_packets();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].1.len(), HOST_BUF_ALLOC as usize);
+    }
+
+    #[test]
+    fn control_replies_to_a_guest_that_never_drains_are_bounded() {
+        let mut core = transport_with_ram(0x10000);
+        let inbound = tx_hdr(1000, 0);
+        for _ in 0..(MAX_PENDING_REPLIES * 3) {
+            core.queue_reply(&inbound, OP_RST, &[]);
+        }
+        assert_eq!(core.pending_rx.len(), MAX_PENDING_REPLIES);
     }
 
     #[test]

@@ -429,6 +429,29 @@ fn execute_in(
 /// between a tier that reflects the CLI and one that reflects the fixture set.
 fn stage_fixture(name: &str, dir: &Path, home: &Path) {
     match name {
+        // `show` reads only public metadata. This fixture does not enroll or
+        // claim that a matching native credential exists.
+        "caller-public-pin-only" => {
+            let config_dir = mvm_core::config::mvm_config_dir_at(home);
+            mvm_core::private_fs::ensure_private_dir(&config_dir)
+                .expect("create private public-pin fixture directory");
+            let public_key = ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+                .verifying_key()
+                .to_bytes();
+            let record: mvm_client::caller_identity::Record =
+                serde_json::from_value(serde_json::json!({
+                    "version": 1,
+                    "installation": "9334301d-9322-4ab5-9232-73983aff8e28",
+                    "state": { "kind": "enrolled", "public_key": public_key }
+                }))
+                .expect("valid public caller identity fixture");
+            mvm_core::atomic_io::atomic_write_new(
+                &config_dir.join("caller-identity.json"),
+                &serde_json::to_vec(&record).expect("serialize public caller pin"),
+            )
+            .expect("write private public-pin record");
+            mvm_client::caller_identity::show_at(home).expect("validate public-only fixture");
+        }
         "app-layer" => {
             let root = dir.join("staged-root/bin");
             std::fs::create_dir_all(&root).expect("create staged application tree");
@@ -1582,7 +1605,7 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // paths are exercised by tests/cli.rs against a file:// registry. Image
 // `dev ensure` likewise needs a signed release endpoint; its selection and
 // verification have focused tests in `mvm-build`.
-// `build guest-bins` cross-compiles every guest binary for both guest
+// `dev guest-bins` cross-compiles every guest binary for both guest
 // architectures; its archive and verification logic have unit tests.
 // `secret login` waits for a human to consent in a browser at a real OAuth
 // provider; its flow is tested in-process against a loopback provider.
@@ -1596,7 +1619,7 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // signed runtime-archive fixture to execute that against, so the documented
 // example is parse-tier while the verifier's positive and refusal paths are
 // covered by its unit tests.
-const PARSE_TIER_PIN: usize = 85;
+const PARSE_TIER_PIN: usize = 86;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {

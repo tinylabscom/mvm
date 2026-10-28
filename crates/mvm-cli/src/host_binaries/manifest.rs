@@ -17,12 +17,8 @@ pub use mvm_build::host_payload_manifest::{
 pub enum PerVmScope {
     /// Every target `mvmctl` ships for.
     Always,
-    /// macOS on Apple Silicon — the raw-HVF VMM supervisor.
+    /// macOS on Apple Silicon.
     MacOsAarch64,
-    /// Only where libkrun headers exist to link against. Deliberately not
-    /// a Linux target: the released Linux `mvmctl` does not link libkrun,
-    /// so the supervisor is neither buildable nor needed there.
-    RequiresLibkrun,
 }
 
 /// A per-VM host process `mvmctl` spawns at runtime, one process per guest.
@@ -107,10 +103,13 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
         features: "",
         scope: PerVmScope::MacOsAarch64,
     },
+    // Which macOS tier stages this supervisor is a component-table question
+    // (`backend_components::BACKEND_COMPONENT_TABLE`); the scope here only
+    // says the release builds and packages it for the Apple Silicon target.
     PerVmBinary {
         package: "mvm-hostd",
         name: "mvm-libkrun-supervisor",
         features: "libkrun-sys",
-        scope: PerVmScope::RequiresLibkrun,
+        scope: PerVmScope::MacOsAarch64,
     },
 ];

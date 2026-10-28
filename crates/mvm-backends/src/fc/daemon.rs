@@ -90,8 +90,21 @@ pub(crate) fn spawn_scope_prefix(
 /// launch can fail if the service manager never creates the scope.
 const SCOPE_LAUNCHER_PID_FILE: &str = "scope-launcher.pid";
 
+/// Make the VM's socket directory ours before a root Firecracker binds in it.
+///
+/// A deep state directory moves the sockets to a short `/tmp` name another
+/// local user can compute. The launch script `rm`s a socket there and later
+/// `chown`s the one Firecracker binds, so a directory someone else created
+/// would let them redirect that `chown`; refuse a directory the invoking user
+/// does not own.
+fn secure_socket_dir(abs_dir: &str) -> Result<()> {
+    mvm_core::config::secure_fallback_socket_dir_at(std::path::Path::new(abs_dir))
+        .context("securing the Firecracker socket directory")
+}
+
 fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
     ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
     ui::info("Starting Firecracker...");
     // A process started here serves the socket its own command line names, so
     // any record that this dir's VMM came from the idle pool is now stale.
@@ -112,6 +125,7 @@ fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> R
 /// inside the scope `scope` names, without the progress lines a launch prints.
 pub(crate) fn start_idle_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
     ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
     let identity = std::path::Path::new(abs_dir).join(super::idle_pool::FC_IDENTITY_FILE);
     let output = mvm_vmm::host::shell::run_in_vm(&idle_firecracker_launch_script(
         abs_dir,
@@ -309,15 +323,41 @@ fn launch_script(
             shell_quote(&format!("{abs_dir}/{SCOPE_LAUNCHER_PID_FILE}"))
         )
     };
+    let marker_mode = if euid == 0 { "600" } else { "644" };
+    // Publish identity markers with a same-directory rename so readers cannot
+    // observe a truncated or empty pid while the detached process starts.
+    let write_marker = r#"write_marker() {
+            marker_path=$1
+            marker_value=$2
+            marker_mode=$3
+            marker_tmp=$(mktemp "${marker_path}.tmp.XXXXXXXXXX") || return 1
+            if ! printf "%s\n" "$marker_value" > "$marker_tmp"; then
+                rm -f "$marker_tmp"
+                return 1
+            fi
+            if ! chmod "$marker_mode" "$marker_tmp"; then
+                rm -f "$marker_tmp"
+                return 1
+            fi
+            if ! mv -f "$marker_tmp" "$marker_path"; then
+                rm -f "$marker_tmp"
+                return 1
+            fi
+        }"#;
     let payload = match identity_file {
-        None => format!(r#"'echo $$ > "$0"; exec firecracker --api-sock "$1"' {q_pid} {q_socket}"#),
+        None => format!(
+            "'{write_marker}; write_marker \"$0\" \"$$\" \"{marker_mode}\" && exec firecracker --api-sock \"$1\"' {q_pid} {q_socket}"
+        ),
         Some(identity) => {
             // A root caller can read owner-only files; a sudo-elevated
             // process must leave its records readable to the invoking user,
             // inside the pool's owner-only directory.
             let umask = if euid == 0 { "umask 077; " } else { "" };
             format!(
-                r#"'{umask}s=$(sed "s/^.*) //" /proc/$$/stat | cut -d" " -f20); echo "$$ $s" > "$2"; echo $$ > "$0"; exec firecracker --api-sock "$1"' {q_pid} {q_socket} {q_identity}"#,
+                "'{umask}{write_marker}; s=$(sed \"s/^.*) //\" /proc/$$/stat | cut -d\" \" -f20); \
+                 write_marker \"$2\" \"$$ $s\" \"{marker_mode}\" && \
+                 write_marker \"$0\" \"$$\" \"{marker_mode}\" && \
+                 exec firecracker --api-sock \"$1\"' {q_pid} {q_socket} {q_identity}",
                 q_identity = shell_quote(identity),
             )
         }
@@ -375,7 +415,7 @@ fn wait_for_api_socket(socket: &std::path::Path, timeout: std::time::Duration) -
 /// at the path is not the API socket appearing.
 fn is_unix_socket(path: &std::path::Path) -> bool {
     use std::os::unix::fs::FileTypeExt as _;
-    std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket())
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket())
 }
 
 /// Send an API PUT to a specific Firecracker socket.
@@ -434,7 +474,7 @@ fn secure_socket_for_caller_as(socket: &str, euid: u32) -> Result<()> {
 
     let quoted = shell_quote(socket);
     run_in_vm_visible(&format!(
-        "set -eu\nsudo chown -- \"$(id -u):$(id -g)\" {quoted}\nchmod 0600 {quoted}"
+        "set -eu\nsudo chown -h -- \"$(id -u):$(id -g)\" {quoted}\nchmod 0600 {quoted}"
     ))
 }
 
@@ -505,10 +545,13 @@ pub fn read_firecracker_pid(abs_dir: &str) -> Result<u32> {
     let path = std::path::Path::new(abs_dir).join("fc.pid");
     let output =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    output
-        .trim()
-        .parse::<u32>()
-        .with_context(|| format!("parse Firecracker pid from {}", path.display()))
+    output.trim().parse::<u32>().with_context(|| {
+        format!(
+            "parse Firecracker pid from {} (marker contents: {:?})",
+            path.display(),
+            output.trim()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -526,7 +569,7 @@ mod tests {
             0,
             Some("/p/idle-1/fc.identity"),
         );
-        assert!(idle.contains(r#"echo "$$ $s" > "$2""#), "{idle}");
+        assert!(idle.contains(r#"write_marker "$2" "$$ $s""#), "{idle}");
         assert!(idle.contains("/proc/$$/stat"), "{idle}");
         assert!(idle.contains("'/p/idle-1/fc.identity'"), "{idle}");
         assert!(
@@ -536,13 +579,16 @@ mod tests {
         // Every launch line creates its log files owner-only; only root's
         // payload also narrows the identity record it writes under sudo.
         let as_user = launch_script("/p/i", "/p/i/fc.socket", "", 1000, Some("/p/i/id"));
-        assert!(idle.contains("'umask 077; s=$("), "{idle}");
-        assert!(!as_user.contains("'umask 077; s=$("), "{as_user}");
+        assert!(idle.contains("umask 077; write_marker() {"), "{idle}");
+        assert!(
+            !as_user.contains("umask 077; write_marker() {"),
+            "{as_user}"
+        );
         assert!(as_user.contains("(umask 077 && rm -f"), "{as_user}");
         let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 0);
         assert!(!vm.contains("/proc/$$/stat"), "{vm}");
         assert!(
-            vm.contains(r#"'echo $$ > "$0"; exec firecracker --api-sock "$1"'"#),
+            vm.contains(r#"write_marker "$0" "$$" "600" && exec firecracker --api-sock "$1""#),
             "{vm}"
         );
     }
@@ -756,7 +802,7 @@ mod tests {
 
         let scripts = scripts.lock().unwrap();
         assert_eq!(scripts.len(), 1);
-        assert!(scripts[0].contains("sudo chown -- \"$(id -u):$(id -g)\""));
+        assert!(scripts[0].contains("sudo chown -h -- \"$(id -u):$(id -g)\""));
         assert!(scripts[0].contains("chmod 0600"));
         assert!(scripts[0].contains("'/tmp/vm with quote'\\''/runtime/v.sock'"));
         assert!(!scripts[0].contains("chmod 0666"));
@@ -954,18 +1000,106 @@ mod tests {
             "$! does not survive a forking sudo/setsid: {script}"
         );
         assert!(
-            script.contains(r#"echo $$ > "$0""#),
+            script.contains(r#"write_marker "$0" "$$" "644""#),
             "the pid must come from the process that becomes Firecracker: {script}"
         );
 
         // Written before the exec, so the marker is in place by the time the
         // API socket exists and the caller starts probing liveness.
-        let write_at = script.find("echo $$").expect("pid write present");
+        let write_at = script
+            .find(r#"write_marker "$0" "$$" "644""#)
+            .expect("pid write present");
         let exec_at = script.find("exec firecracker").expect("exec present");
         assert!(write_at < exec_at, "{script}");
 
         // And it names the path the rest of the tree reads.
         assert!(script.contains("/tmp/vm/fc.pid"), "{script}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detached_launch_atomically_publishes_a_parseable_pid_before_exec() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temporary launch root");
+        let bin = root.path().join("bin");
+        let vm_dir = root.path().join("vm");
+        std::fs::create_dir_all(&bin).expect("fake command directory");
+        std::fs::create_dir_all(&vm_dir).expect("VM directory");
+
+        let make_executable = |path: &std::path::Path, contents: &str| {
+            std::fs::write(path, contents).expect("write fake command");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+                .expect("make fake command executable");
+        };
+        make_executable(
+            &bin.join("sudo"),
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$MVM_TEST_SUDO_PID_FILE\"\n\"$@\" &\nchild=$!\nwait \"$child\"\n",
+        );
+        make_executable(&bin.join("setsid"), "#!/bin/sh\nexec \"$@\"\n");
+        make_executable(&bin.join("nohup"), "#!/bin/sh\nexec \"$@\"\n");
+
+        let invoked = root.path().join("firecracker-invoked");
+        let sudo_pid_file = root.path().join("sudo.pid");
+        make_executable(
+            &bin.join("firecracker"),
+            "#!/bin/sh\n: > \"$MVM_TEST_FIRECRACKER_INVOKED\"\n",
+        );
+
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH is set"),
+        )))
+        .expect("construct test PATH");
+        let dir = vm_dir.to_string_lossy();
+        let socket = vm_dir.join("fc.socket");
+        let script = firecracker_launch_script_as(&dir, &socket.to_string_lossy(), "", 1000);
+        let output = std::process::Command::new("bash")
+            .args(["-c", &script])
+            .env("PATH", path)
+            .env("MVM_TEST_FIRECRACKER_INVOKED", &invoked)
+            .env("MVM_TEST_SUDO_PID_FILE", &sudo_pid_file)
+            .output()
+            .expect("run detached launch script");
+        assert!(
+            output.status.success(),
+            "launch script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !invoked.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fake Firecracker was not invoked"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let pid = read_firecracker_pid(&dir).expect("launch must publish a parseable pid");
+        let marker = std::fs::read_to_string(vm_dir.join("fc.pid")).expect("read pid marker");
+        assert_eq!(marker, format!("{pid}\n"));
+        let marker_mode = std::fs::metadata(vm_dir.join("fc.pid"))
+            .expect("stat pid marker")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(marker_mode, 0o644, "sudo-launched marker stays readable");
+        let sudo_pid = std::fs::read_to_string(sudo_pid_file).expect("read fake sudo pid");
+        assert_ne!(pid.to_string(), sudo_pid.trim());
+    }
+
+    #[test]
+    fn malformed_pid_error_includes_marker_contents() {
+        let dir = tempfile::tempdir().expect("temporary VM directory");
+        std::fs::write(dir.path().join("fc.pid"), "$\n").expect("write malformed marker");
+
+        let error = read_firecracker_pid(&dir.path().to_string_lossy())
+            .expect_err("a nonnumeric pid marker must be rejected")
+            .to_string();
+        assert!(
+            error.contains("marker contents: \"$\""),
+            "malformed marker should be visible in the error: {error}"
+        );
     }
 
     #[test]
@@ -1023,7 +1157,7 @@ mod sudo_elision_tests {
         for euid in [0, 1000] {
             let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", euid);
             assert!(
-                script.contains(r#"echo $$ > "$0""#),
+                script.contains(r#"write_marker "$0" "$$""#),
                 "euid {euid} must write the pid from inside: {script}"
             );
             assert!(

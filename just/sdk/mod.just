@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list sdk
+
 # Usage: just sdk::build [lang]
 #   lang: sdk name (python, typescript) or "all" (default)
 

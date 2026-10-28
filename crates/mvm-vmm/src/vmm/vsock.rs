@@ -396,6 +396,10 @@ impl VsockShared {
         self.handlers.poll_fds()
     }
 
+    pub(super) fn readiness_timeout(&self) -> Option<std::time::Duration> {
+        self.handlers.readiness_timeout()
+    }
+
     /// Whether guest bytes are queued for a host socket that could not take
     /// them yet. Readiness alone cannot wake the host-I/O loop for these — the
     /// sockets are watched for reading — so the loop polls on a timer instead.
@@ -693,7 +697,7 @@ impl VirtioVsock {
             )
         })?;
         let parent = std::fs::canonicalize(parent)?;
-        if !parent.starts_with(&root) {
+        if !parent.starts_with(&root) && !mvm_core::config::is_owned_fallback_socket_dir(&parent) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "handoff socket is outside the trusted VM root",
@@ -2708,6 +2712,109 @@ mod tests {
     }
 
     #[test]
+    fn cold_readiness_packet_reset_retries_on_poll_timer_then_establishes_same_stream() {
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("agent.sock");
+        let mut d = dev();
+        if let Err(err) = d.set_agent_socket(&sock) {
+            if error_chain_has_permission_denied(&err) {
+                return;
+            }
+            panic!("agent socket setup failed: {err}");
+        }
+        let mut client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        d.service_host_io();
+        let (request, payload) = d.transport.pending_rx.pop_front().unwrap();
+        assert_eq!(request.op, OP_REQUEST);
+        assert!(payload.is_empty());
+        let id = request.src_port;
+        let fd = d.handlers.agent_stream_fd(id).unwrap();
+        let inbound = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: mvm_agentd::vsock::GUEST_AGENT_PORT,
+            dst_port: id,
+            typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
+            op: OP_RST,
+            ..Default::default()
+        };
+        // Exercise actual dispatch and AgentVsockHandler::on_packet. Neither
+        // side supplies more I/O: only a mio timeout can drive the next request.
+        d.handle_packet(inbound, &[]);
+        assert_eq!(d.handlers.agent_stream_fd(id), Some(fd));
+        assert!(d.transport.pending_rx.is_empty(), "early RST is not echoed");
+        let mut poll = mio::Poll::new().unwrap();
+        let mut events = mio::Events::with_capacity(4);
+        let until = Instant::now() + Duration::from_secs(1);
+        loop {
+            let timeout = d.readiness_timeout().expect("pending cold timer");
+            assert!(timeout <= Duration::from_millis(250));
+            poll.poll(&mut events, Some(timeout)).unwrap();
+            assert!(events.is_empty(), "progress must not depend on readiness");
+            d.service_host_io();
+            if !d.transport.pending_rx.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < until, "timer failed to reissue request");
+        }
+        let (retry, bytes) = d.transport.pending_rx.pop_front().unwrap();
+        assert_eq!(retry.op, OP_REQUEST);
+        assert_eq!(retry.src_port, id);
+        assert_eq!(retry.dst_port, request.dst_port);
+        assert!(bytes.is_empty());
+        assert_eq!(d.handlers.agent_stream_fd(id), Some(fd));
+        assert!(d.transport.pending_rx.is_empty());
+
+        // Bytes written before the response stay on the original socket.
+        client.write_all(b"original handshake").unwrap();
+        d.handle_packet(
+            VsockHdr {
+                op: OP_RESPONSE,
+                ..inbound
+            },
+            &[],
+        );
+        assert_eq!(d.readiness_timeout(), None);
+        d.service_host_io();
+        let (data, bytes) = d.transport.pending_rx.pop_front().unwrap();
+        assert_eq!((data.op, data.src_port), (OP_RW, id));
+        assert_eq!(bytes, b"original handshake");
+        d.handle_packet(
+            VsockHdr {
+                op: OP_RW,
+                len: 5,
+                ..inbound
+            },
+            b"world",
+        );
+        let mut reply = [0; 5];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"world");
+        let (credit, _) = d.transport.pending_rx.pop_front().unwrap();
+        assert_eq!(credit.op, OP_CREDIT_UPDATE);
+        assert_eq!(credit.fwd_cnt, 5);
+        assert_eq!(d.handlers.agent_stream_fd(id), Some(fd));
+
+        // An established reset takes the terminal match arm and clears credit.
+        d.handle_packet(inbound, &[]);
+        assert!(!d.handlers.is_agent_stream(id));
+        assert_eq!(d.handlers.agent_stream_fd(id), None);
+        assert_eq!(d.readiness_timeout(), None);
+        assert_eq!(d.transport.tx_credit_available(id, inbound.src_port), 0);
+        assert_eq!(d.transport.pending_rx.pop_front().unwrap().0.op, OP_RST);
+        d.service_host_io();
+        assert!(d.transport.pending_rx.is_empty(), "no post-session retry");
+        assert_eq!(client.read(&mut reply).unwrap(), 0);
+    }
+
+    #[test]
     fn host_console_connection_frames_op_request_on_the_console_port() {
         use std::io::{Read, Write};
         let dir = tempfile::tempdir().unwrap();
@@ -2951,6 +3058,51 @@ mod tests {
             stop,
             device,
         })
+    }
+
+    /// A deep state dir moves the parent's sockets to the short `/tmp`
+    /// namespace; the handoff socket must be bindable there, but nowhere else
+    /// outside the trusted root.
+    #[test]
+    fn handoff_control_binds_in_the_fallback_socket_dir_and_nowhere_else_outside_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        let key = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let bind_in = |dir: &Path| {
+            virtio_dev().set_handoff_control(
+                Some(&dir.join("hvf-handoff.sock")),
+                Some(root.path()),
+                Some(&key),
+                stop,
+            )
+        };
+        let fallback = tempfile::Builder::new()
+            .prefix("mvm-sock-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        mvm_core::private_fs::set_mode(fallback.path(), 0o700).unwrap();
+        if let Err(error) = bind_in(fallback.path()) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "unexpected failure binding in the fallback dir: {error}"
+            );
+            assert!(
+                !error.to_string().contains("outside the trusted VM root"),
+                "the fallback dir must be accepted: {error}"
+            );
+            return; // sandbox forbids binding unix sockets here
+        }
+        let stray = tempfile::Builder::new()
+            .prefix("vsk")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let error = bind_in(stray.path()).expect_err("outside the root and not a fallback dir");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     struct ProtectedProbe {

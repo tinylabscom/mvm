@@ -134,6 +134,7 @@ impl VerifiedRuntimeManifest {
 
 /// Shared byte ownership mechanism; the caller supplies already checked
 /// declarations, with release authentication or explicit developer trust.
+#[tracing::instrument(skip_all)]
 pub(super) fn snapshot_declared_artifacts(
     digest: &str,
     declaration: &RuntimeAssembly,

@@ -600,10 +600,29 @@ mod tests {
             root(Some(b"1\n"), 0o444),
         )
         .unwrap();
+        let images_root = fixture.temp.path().join("images");
+        let repository = gix::init(&images_root).unwrap();
+        let tree = repository.empty_tree();
+        let tree_id = tree.id;
+        let signature =
+            gix::actor::SignatureRef::from_bytes(b"Test <test@example.com> 1 +0000").unwrap();
+        repository
+            .commit_as(
+                signature,
+                signature,
+                "HEAD",
+                "fixture",
+                tree_id,
+                std::iter::empty::<gix::ObjectId>(),
+            )
+            .unwrap();
+        let mut index = repository.index_from_tree(&tree_id).unwrap();
+        index.write(gix::index::write::Options::default()).unwrap();
+
         let mut calls = 0;
         let result = emit_observed(
             &EmitRequest {
-                images_root: &fixture.temp.path().join("images"),
+                images_root: &images_root,
                 legacy_mvm_root: None,
                 arch: GuestArch::Aarch64,
                 builder_cache_contract: 1,
@@ -613,15 +632,18 @@ mod tests {
             },
             || {
                 calls += 1;
-                let mut identity = identity();
-                if calls == 2 {
-                    identity.commit = GitCommit::new("b".repeat(40)).unwrap();
-                }
-                Ok(identity)
+                crate::image_source::git::probe_identity(&images_root)
             },
-            |_, _| {},
+            |_, _| {
+                std::fs::write(
+                    images_root.join("images/builder-vm/boot-abi.nix"),
+                    "mutated\n",
+                )
+                .unwrap();
+            },
         );
         assert!(result.unwrap_err().to_string().contains("checkout changed"));
+        assert_eq!(calls, 2);
         fixture.assert_cleaned();
     }
 }

@@ -162,6 +162,18 @@ fn scratch_working_directory(world: &mut CliWorld) {
     world.scratch_dir = Some(tempfile::tempdir().expect("create scratch working directory"));
 }
 
+#[given(expr = "the scratch directory contains ambiguous manifest and flake sources")]
+fn scratch_directory_contains_ambiguous_build_sources(world: &mut CliWorld) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("`Given a scratch working directory` must run before this step");
+    fs::write(scratch.path().join("mvm.toml"), "schema_version = 1\n")
+        .expect("write scratch manifest marker");
+    fs::write(scratch.path().join("flake.nix"), "{ outputs = _: {}; }\n")
+        .expect("write scratch flake marker");
+}
+
 /// Seed the isolated home with the live suite's verified kernel and source-built
 /// guest runtime, so a verb that needs the runtime reads it from the home
 /// instead of fetching a release asset a development build has no release for.
@@ -1533,11 +1545,11 @@ fn seal_live_build(world: &mut CliWorld) {
     let bundle = dir.path().join("build.mvmpkg");
     let output = mvmctl_command()
         .current_dir(workspace_root())
-        .args(["bundle", "export", &slot, "--out"])
+        .args(["dev", "export-template", &slot, "--out"])
         .arg(&bundle)
         .isolated_home(&home)
         .output()
-        .expect("failed to spawn mvmctl bundle export");
+        .expect("failed to spawn internal template exporter");
     if output.status.success() {
         fs::copy(
             home.join("keys/host-signer.pub"),

@@ -171,6 +171,98 @@ impl Fixture {
 }
 
 #[test]
+fn raw_root_hash_export_signs_exact_bytes_and_manifest_agreement() {
+    // Archive-byte evidence only, not a canonical-kernel launch.
+    let f = Fixture::new(b"kernel");
+    let signer = f.signer();
+    let hash = "a".repeat(64);
+    let inputs = f.inputs().verity(b"synthetic verity", &hash);
+    let exported = export_bundle_at(&inputs, &signer, clock()).unwrap();
+    let bytes = std::fs::read(&exported.path).unwrap();
+    let verified = mvm_core::plan::bundle::read_and_verify_bundle(&bytes, &signer).unwrap();
+    let member = verified.manifest.find_by_name("rootfs.roothash").unwrap();
+    let expected = format!("{hash}\n").into_bytes();
+    assert_eq!(member.role, ArtifactRole::Other);
+    assert_eq!(member.path, "artifacts/rootfs.roothash");
+    assert_eq!(member.size_bytes, 65);
+    assert_eq!(member.sha256, sha256_hex(&expected));
+    assert_eq!(verified.artifacts[&member.path], expected);
+    assert_eq!(verified.manifest.verity.as_ref().unwrap().roothash, hash);
+    assert_eq!(exported.size_bytes, bytes.len() as u64);
+}
+
+#[test]
+fn raw_root_hash_encoding_refuses_noncanonical_values_before_signing() {
+    let f = Fixture::new(b"kernel");
+    for invalid in [
+        "A".repeat(64),
+        "g".repeat(64),
+        "a".repeat(63),
+        format!("{}\n", "a".repeat(64)),
+        format!(" {}", "a".repeat(64)),
+    ] {
+        let signer = f.signer();
+        let inputs = f.inputs().verity(b"synthetic verity", &invalid);
+        assert!(export_bundle_at(&inputs, &signer, clock()).is_err());
+        assert_eq!(signer.calls.get(), 0);
+        assert!(!f.out.exists());
+    }
+}
+
+#[test]
+fn raw_root_hash_export_preserves_no_clobber_and_explicit_abort() {
+    let f = Fixture::new(b"kernel");
+    let signer = f.signer();
+    let hash = "a".repeat(64);
+    let inputs = f.inputs().verity(b"synthetic verity", &hash);
+    let staged = stage_bundle_at(&inputs, &signer, clock()).unwrap();
+    std::fs::write(&f.out, b"preexisting destination").unwrap();
+    assert!(staged.publish().is_err());
+    assert_eq!(std::fs::read(&f.out).unwrap(), b"preexisting destination");
+    std::fs::remove_file(&f.out).unwrap();
+    let before: std::collections::BTreeSet<_> = std::fs::read_dir(f.directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    let staged = stage_bundle_at(&inputs, &signer, clock()).unwrap();
+    let error = staged.abort(anyhow::anyhow!("post-seal producer refusal"));
+    assert!(format!("{error:#}").contains("post-seal producer refusal"));
+    assert!(!f.out.exists());
+    let after: std::collections::BTreeSet<_> = std::fs::read_dir(f.directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn raw_root_hash_reserved_member_refuses_duplicate_names_and_paths() {
+    let raw = format!("{}\n", "a".repeat(64)).into_bytes();
+    let mut contents = BundleContents::default();
+    contents
+        .push("rootfs.roothash", ArtifactRole::Other, raw.clone())
+        .unwrap();
+    assert!(
+        contents
+            .push("rootfs.roothash", ArtifactRole::Other, raw.clone())
+            .is_err()
+    );
+    let mut contents = BundleContents::default();
+    contents.artifacts.push(BundleArtifact {
+        name: "path-alias".into(),
+        role: ArtifactRole::Other,
+        path: "artifacts/rootfs.roothash".into(),
+        sha256: sha256_hex(&raw),
+        size_bytes: 65,
+    });
+    assert!(
+        contents
+            .push_verity(Some(b"synthetic verity"), Some(&"a".repeat(64)))
+            .is_err()
+    );
+}
+
+#[test]
 fn omitted_or_mixed_closure_refuses_before_any_signer_call() {
     let f = Fixture::new(b"kernel");
     let signer = f.signer();

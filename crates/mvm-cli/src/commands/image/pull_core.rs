@@ -1216,6 +1216,92 @@ mod tests {
         assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
     }
 
+    /// An orphan planted before a launch that may spawn a builder VM is gone
+    /// once the pre-spawn sweep has run.
+    #[cfg(unix)]
+    #[test]
+    fn the_pre_builder_sweep_kills_a_planted_orphan() {
+        if !crate::test_boot_payload::in_fresh_test_process(
+            module_path!(),
+            "the_pre_builder_sweep_kills_a_planted_orphan",
+        ) {
+            return;
+        }
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+
+        let name = "mvm-workload-plantedorphan-5d1e-stopped";
+        let vm = mvm_core::config::vms_dir().join(name);
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("libkrun.pid"), format!("{}\n", i32::MAX)).expect("dead owner");
+
+        // The inner shell is detached so init adopts it; the trailing `: name`
+        // keeps the shell from exec-ing sleep and dropping the dir name from
+        // its command line.
+        let pid_file = home.path().join("orphan.pid");
+        let script = format!(
+            "(sh -c 'echo $$ > {}; sleep 60; : {name}' >/dev/null 2>&1 &)",
+            pid_file.display()
+        );
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .status()
+            .expect("plant orphan");
+        assert!(status.success());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            assert!(std::time::Instant::now() < deadline, "orphan never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let reparented = |pid: i32| {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "ppid=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout).trim() == "1"
+        };
+        while !reparented(pid) {
+            if std::time::Instant::now() > deadline {
+                // A subreaper (user session manager) adopted it; the reaper
+                // only recognises init-parented orphans, so nothing to witness.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        sweep_before_builder_vm();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let gone = loop {
+            // Signal 0 still succeeds on an unreaped zombie, so read the state.
+            let out = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps");
+            let stat = String::from_utf8_lossy(&out.stdout);
+            if stat.trim().is_empty() || stat.trim().starts_with('Z') {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        if !gone {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(gone, "the planted orphan survived the pre-spawn sweep");
+    }
+
     #[test]
     fn a_prior_parent_sweep_does_not_contaminate_the_cold_sweep_witness() {
         let home = tempfile::tempdir().expect("tempdir");
@@ -1755,6 +1841,93 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
             .write_to_dir(&cache_root.join(dir))
             .expect("publish the sidecar that marks the set complete");
         rel
+    }
+
+    #[test]
+    fn inspect_digest_reference_resolves_tag_preparation_without_acquisition_or_alias_writes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let relative = seed_current_dev_image(tmp.path(), PINNED_DIGEST);
+        let index_path = tmp.path().join(super::super::oci_types::INDEX_FILE);
+        let before = fs::read(&index_path).unwrap();
+        let inspected = super::super::cache::inspect_image(tmp.path(), "alpine:3.20")
+            .expect("inspect the canonical preparation through its short tag");
+        let reference = inspected.image.digest_reference().unwrap();
+        assert_eq!(reference, PINNED);
+        let resolved = resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            refusing_runtime_materialize,
+            &RejectingVerifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect("the printed pin reuses the tag's prepared rootfs");
+        assert!(!resolved.pulled);
+        assert_eq!(resolved.rootfs_path, tmp.path().join(relative));
+        assert_eq!(fs::read(&index_path).unwrap(), before);
+        for invalid in [
+            reference.replace("docker.io", "evil.example"),
+            reference.replace("library/alpine", "library/other"),
+        ] {
+            let error = resolve_run_image_with(
+                tmp.path(),
+                &invalid,
+                false,
+                refusing_runtime_materialize,
+                &RejectingVerifier,
+                RunImageAcquisition::PreparedOnly,
+            )
+            .expect_err("a different repository or registry is not prepared");
+            assert!(error.to_string().contains("image pull"), "{error:#}");
+        }
+        assert_eq!(fs::read(&index_path).unwrap(), before);
+    }
+
+    #[test]
+    fn inspect_digest_reference_reuses_index_pin_without_introducing_a_child_alias() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let relative = seed_current_dev_image(tmp.path(), PINNED_DIGEST);
+        let index_path = tmp.path().join(super::super::oci_types::INDEX_FILE);
+        let index_digest = format!("sha256:{}", "b".repeat(64));
+        let original = format!("docker.io/library/alpine:3.20@{index_digest}");
+        let mut index = super::super::cache::load_index(tmp.path()).unwrap();
+        index.images[0].reference = original.clone();
+        super::super::cache::save_index(tmp.path(), &index).unwrap();
+        let before = fs::read(&index_path).unwrap();
+        let inspected = super::super::cache::inspect_image(tmp.path(), &original).unwrap();
+        let reference = inspected.image.digest_reference().unwrap();
+        assert_eq!(
+            reference,
+            format!("docker.io/library/alpine@{index_digest}")
+        );
+        let resolved = resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            refusing_runtime_materialize,
+            &RejectingVerifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect("the original immutable index pin reuses its prepared child");
+        assert!(!resolved.pulled);
+        assert_eq!(resolved.rootfs_path, tmp.path().join(relative));
+        for invalid in [
+            PINNED.to_string(),
+            reference.replace("docker.io", "evil.example"),
+            reference.replace("library/alpine", "library/other"),
+        ] {
+            let error = resolve_run_image_with(
+                tmp.path(),
+                &invalid,
+                false,
+                refusing_runtime_materialize,
+                &RejectingVerifier,
+                RunImageAcquisition::PreparedOnly,
+            )
+            .expect_err("no unproven child alias or cross-source alias is introduced");
+            assert!(error.to_string().contains("image pull"), "{error:#}");
+        }
+        assert_eq!(fs::read(&index_path).unwrap(), before);
     }
 
     /// A local archive or stdin is read only by an explicit pull. A launch

@@ -11,7 +11,10 @@ use anyhow::{Context, Result, bail};
 
 use crate::commands::image::OciRegistryAuthDecision;
 use mvm_contract::plan::bundle::{BUNDLE_ARTIFACT_TYPE, BUNDLE_LAYER_MEDIA_TYPE};
-use mvm_core::plan::bundle::{TrustStore, VerifiedBundle, read_and_verify_bundle};
+use mvm_core::plan::bundle::{
+    KeyId, TrustStore, VerifiedBundle, inspect_bundle_manifest_for_refusal,
+    is_registry_forbidden_local_build, read_and_verify_bundle,
+};
 use mvm_fs::oci::{
     ArtifactKind, ArtifactLimits, ClientConfig, ClientProtocol, ImageReference, OciArtifactClient,
     PushedArtifact, RegistryAuthConfig,
@@ -186,13 +189,33 @@ pub(super) fn publish_bundle(
     reference: &ImageReference,
     transport: &RegistryTransport,
     trust: &dyn TrustStore,
+    host_key_id: &KeyId,
 ) -> Result<(VerifiedBundle, PushedArtifact)> {
+    refuse_local_build_registry_transfer(archive, host_key_id, "publish")?;
     let verified = read_and_verify_bundle(archive, trust)
         .context("refusing to push a bundle that does not verify against the local trust store")?;
     let pushed = runtime()?
         .block_on(transport.client().push(reference, BUNDLE_KIND, archive))
         .with_context(|| format!("pushing bundle to {}", display_reference(reference)))?;
     Ok((verified, pushed))
+}
+
+/// Refuse a host-local archive before consulting publisher trust. The manifest
+/// is intentionally inspected without trusting it: this helper can only deny,
+/// and successful transfer still takes the normal verification path.
+pub(super) fn refuse_local_build_registry_transfer(
+    archive: &[u8],
+    host_key_id: &KeyId,
+    action: &str,
+) -> Result<()> {
+    let manifest = inspect_bundle_manifest_for_refusal(std::io::Cursor::new(archive))
+        .context("inspecting bundle origin before registry transfer")?;
+    if is_registry_forbidden_local_build(&manifest, host_key_id) {
+        bail!(
+            "refusing to {action} a local build: local builds are never published or accepted from a registry"
+        );
+    }
+    Ok(())
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {

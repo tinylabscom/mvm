@@ -64,6 +64,52 @@ pub struct VerifiedApplicationBundle {
 }
 
 impl VerifiedApplicationBundle {
+    /// Read only the producer's bounded, declared root-hash member. No caller
+    /// reader, manifest, callback or snapshot pathname crosses this boundary.
+    pub(crate) fn application_root_hash_member(&self) -> Result<Vec<u8>, BundleVerifyError> {
+        use crate::plan::bundle::ArtifactRole;
+        let name = crate::registry_pack_boot::APPLICATION_ROOT_HASH_MEMBER_NAME;
+        let mut members = self
+            .bundle
+            .manifest
+            .artifacts
+            .iter()
+            .filter(|member| member.name == name);
+        let member = members
+            .next()
+            .ok_or_else(|| BundleVerifyError::ArtifactMissing {
+                name: name.to_owned(),
+            })?;
+        if members.next().is_some() || member.role != ArtifactRole::Other {
+            return Err(BundleVerifyError::ManifestParse(
+                "application root hash member is ambiguous or has the wrong role".into(),
+            ));
+        }
+        if member.size_bytes != 65 {
+            return Err(BundleVerifyError::ManifestParse(
+                "application root hash member must declare exactly 65 bytes".into(),
+            ));
+        }
+        // Reopen checks identity and obtains an independent cursor. Cloning a
+        // File and seeking would race other readers behind this shared borrow.
+        let archive = self.snapshot.reopen().map_err(|error| {
+            BundleVerifyError::ManifestParse(format!("reopening retained snapshot: {error}"))
+        })?;
+        if archive
+            .metadata()
+            .map_err(|error| {
+                BundleVerifyError::ManifestParse(format!("retained snapshot metadata: {error}"))
+            })?
+            .len()
+            != self.application.manifest().application.bundle.archive_size
+        {
+            return Err(BundleVerifyError::ManifestParse(
+                "retained snapshot size changed".into(),
+            ));
+        }
+        self.bundle.read_small_verified_member(archive, name, 65)
+    }
+
     pub fn application(&self) -> &VerifiedRegistryApplication {
         &self.application
     }

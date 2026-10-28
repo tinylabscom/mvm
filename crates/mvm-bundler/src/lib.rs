@@ -8,7 +8,7 @@
 //!
 //! The format — manifest, signature, archive layout — belongs to
 //! `mvm_core::plan::bundle`. What this crate owns is the decision about what
-//! an exported bundle contains, so `mvmctl bundle export` and a library
+//! an exported bundle contains, so `mvmctl build` and a library
 //! caller cannot disagree about it.
 //!
 //! ```no_run

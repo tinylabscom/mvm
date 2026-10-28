@@ -298,6 +298,8 @@ impl Forwarder for HardenedForwarder {
 #[cfg(test)]
 mod response_body_tests {
     use super::*;
+    use std::net::SocketAddr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn declared_response_length_is_checked_before_reading() {
@@ -308,5 +310,137 @@ mod response_body_tests {
         assert!(err.to_string().contains("response body exceeds"));
         check_forward_response_length(None)
             .expect("chunked or close-delimited bodies are streamed");
+    }
+
+    /// A raw loopback upstream: read the request head, answer with `head`,
+    /// then write `wire_body_bytes` of payload — however that compares to
+    /// what the head declared — and close. A client that hangs up early (as
+    /// it does once the cap trips) just ends the reply.
+    async fn serve_raw_response(head: String, wire_body_bytes: usize) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the upstream");
+        let addr = listener.local_addr().expect("upstream address");
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut seen = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                seen.extend_from_slice(&chunk[..n]);
+                if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            if socket.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let block = [0u8; 64 * 1024];
+            let mut left = wire_body_bytes;
+            while left > 0 {
+                let n = left.min(block.len());
+                if socket.write_all(&block[..n]).await.is_err() {
+                    return;
+                }
+                left -= n;
+            }
+            let _ = socket.shutdown().await;
+        });
+        addr
+    }
+
+    /// The production forwarder with name resolution pinned to `addr`, so a
+    /// loopback upstream stands in for the real destination. Certificate
+    /// verification itself is untouched; these fixtures speak plain HTTP.
+    fn forwarder_to(addr: SocketAddr) -> HardenedForwarder {
+        let resolver = mvm_http::PinnedResolver::new().with("upstream.test", vec![addr]);
+        HardenedForwarder::new(30)
+            .expect("forwarder")
+            .with_test_transport(TestTransport {
+                resolver: std::sync::Arc::new(resolver),
+                roots: rustls::RootCertStore::empty(),
+            })
+    }
+
+    fn get_request(addr: SocketAddr) -> PreparedRequest {
+        PreparedRequest {
+            method: "GET".into(),
+            url: format!("http://upstream.test:{}/", addr.port()),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lying_content_length_does_not_defeat_the_forward_response_cap() {
+        // The head declares 10 bytes while the wire carries more than the
+        // cap. The declaration frames the body, so the forwarder reads
+        // exactly what was declared and the oversized remainder never becomes
+        // response body.
+        let addr = serve_raw_response(
+            "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n".to_string(),
+            MAX_FORWARD_RESPONSE_BYTES + 1,
+        )
+        .await;
+        let response = forwarder_to(addr)
+            .forward(get_request(addr))
+            .await
+            .expect("the declared 10 bytes are a complete response");
+        assert_eq!(response.body, vec![0u8; 10]);
+    }
+
+    #[tokio::test]
+    async fn an_absent_content_length_does_not_defeat_the_forward_response_cap() {
+        // With no declared length the body is read until close, so the
+        // reader's cumulative cap is the only bound: the forwarder must
+        // refuse rather than accumulate and deliver the stream.
+        let addr = serve_raw_response(
+            "HTTP/1.1 200 OK\r\n\r\n".to_string(),
+            MAX_FORWARD_RESPONSE_BYTES + 1,
+        )
+        .await;
+        let err = forwarder_to(addr)
+            .forward(get_request(addr))
+            .await
+            .err()
+            .expect("a body past the cap must be refused, not delivered");
+        assert!(
+            err.to_string().contains(&format!(
+                "exceeded the {} byte limit",
+                MAX_FORWARD_RESPONSE_BYTES
+            )),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_length_past_the_cap_is_refused_before_the_body_is_read() {
+        // The declaration alone convicts the body, and the refusal must come
+        // from the pre-read check: the upstream closes without sending one
+        // body byte, so a read-time failure would surface as an incomplete
+        // body instead.
+        let declared = MAX_FORWARD_RESPONSE_BYTES as u64 + 1;
+        let addr = serve_raw_response(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\n\r\n"),
+            0,
+        )
+        .await;
+        let err = forwarder_to(addr)
+            .forward(get_request(addr))
+            .await
+            .err()
+            .expect("an oversized declaration must be refused before reading");
+        assert!(
+            err.to_string().contains(&format!(
+                "exceeds the {} byte limit",
+                MAX_FORWARD_RESPONSE_BYTES
+            )),
+            "{err}"
+        );
     }
 }

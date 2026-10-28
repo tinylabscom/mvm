@@ -178,7 +178,9 @@ fn persistent_review_source(launch: ReviewSource, booted: bool) -> ReviewSource 
 
 fn check_pack_entrypoint(args: &MachineRunArgs) -> Result<()> {
     anyhow::ensure!(
-        !args.entrypoint || args.run.registry_pack_image.is_none(),
+        !args.entrypoint
+            || args.run.registry_pack_image.is_none()
+            || args.run.resolved_application.is_some(),
         "machine run --entrypoint cannot carry a signed pack identity through its \
          separate boot path; run the pack without --entrypoint"
     );
@@ -257,7 +259,7 @@ fn run_persistent_post_start(
         denials.finish()?;
         let code = outcome?;
         if code != 0 {
-            mvm_observability::exit(code);
+            crate::observability::exit(code);
         }
         return Ok(());
     }
@@ -478,6 +480,7 @@ fn run_entrypoint_action(
     resolved_flake_slot: Option<String>,
     review_source: ReviewSource,
 ) -> Result<()> {
+    crate::commands::vm::exec::application_source::require_entrypoint_request(&args.run)?;
     if !args.run.outputs.is_empty() {
         anyhow::bail!(
             "machine run --entrypoint does not accept --output; collect outputs from a \
@@ -549,6 +552,9 @@ fn run_entrypoint_action(
         hypervisor: args.run.hypervisor.clone(),
         portable_boot_assets: None,
     };
+    if let Some(application) = args.run.resolved_application {
+        return invoke::run_application_entrypoint(call, application);
+    }
     if !call.attach {
         return invoke::run_entrypoint(call);
     }
@@ -559,7 +565,7 @@ fn run_entrypoint_action(
     let exit_code = invoke::dispatch_attached(call)?;
     workspace_apply::offer_at_exit(&machine, exit_apply)?;
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }
@@ -621,6 +627,25 @@ fn resolve_entrypoint_stdin_with(
     }
 }
 
+fn select_application_action(args: &mut MachineRunArgs) -> Result<()> {
+    if args.run.resolved_application.is_none() {
+        return Ok(());
+    }
+    if args.run.argv.is_empty() {
+        anyhow::ensure!(
+            !args.interactive(),
+            "an application entrypoint cannot be combined with --tty or --interactive; \
+             provide an explicit command after -- instead"
+        );
+        args.entrypoint = true;
+    }
+    anyhow::ensure!(
+        !args.entrypoint || args.run.argv.is_empty(),
+        "an application entrypoint cannot be combined with a command after --"
+    );
+    Ok(())
+}
+
 pub(in crate::commands) fn run_dispatch(
     cli: &Cli,
     mut args: MachineRunArgs,
@@ -640,6 +665,17 @@ pub(in crate::commands) fn run_dispatch(
     // a positional image reference is one. An artifact is verified and
     // installed here, and refused under `--prod` before it is.
     crate::commands::vm::exec::application_source::apply_application_source(&mut args.run)?;
+    crate::commands::vm::exec::application_source::require_bound_route(
+        args.run.resolved_application.as_ref(),
+        args.persistent(),
+        args.attach,
+    )?;
+    select_application_action(&mut args)?;
+    if args.entrypoint {
+        crate::commands::vm::exec::application_source::apply_entrypoint_resource_defaults(
+            &mut args.run,
+        )?;
+    }
     crate::commands::vm::exec::positional_source::apply_positional_source(&mut args.run)?;
     args.refuse_unsupported_prod()?;
     args.refuse_unsupported_persistent_env()?;
@@ -661,10 +697,19 @@ pub(in crate::commands) fn run_dispatch(
     // flag or as the positional source) becomes the installed bundle's sha256
     // here, so nothing downstream parses the archive as an `mvm.toml` and the
     // boot is a plain `--manifest <bundle-sha256>`.
-    crate::commands::bundle::settle_manifest_archive(&mut args.run.manifest, args.run.dry_run)?;
+    crate::commands::bundle::settle_manifest_archive(
+        &mut args.run.manifest,
+        args.run.dry_run,
+        args.run.prod,
+    )?;
     // Before the flake is built into a slot below: the project's `[policy]`
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
+    if args.entrypoint {
+        crate::commands::vm::exec::application_source::apply_entrypoint_secret_defaults(
+            &mut args.run,
+        )?;
+    }
     // The manifest that policy came from, for reviewing the run's refusals.
     // Read now, while the arguments still name the flake directory; the
     // transient lanes carry it on the run arguments.
@@ -813,6 +858,61 @@ pub(in crate::commands) fn boot_persistent_by_name(
 #[cfg(test)]
 mod entrypoint_stdin_tests {
     use super::*;
+
+    fn application_args() -> MachineRunArgs {
+        MachineRunArgs {
+            run: RunArgs {
+                resolved_application: Some(
+                    mvm_core::registry_pack::application_bundle::ResolvedApplication {
+                        reference: "agent/claude@2.0.0".parse().unwrap(),
+                        descriptor_sha256: "a".repeat(64),
+                        bundle_sha256: "b".repeat(64),
+                    },
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn installed_application_defaults_to_entrypoint_with_one_shot_joke_stdin() {
+        let mut args = application_args();
+        select_application_action(&mut args).unwrap();
+        assert!(args.entrypoint);
+        assert!(args.run.argv.is_empty());
+        let stdin = resolve_entrypoint_stdin_with(args.stdin.as_deref(), || {
+            Ok(b"tell me a joke\n".to_vec())
+        })
+        .unwrap();
+        assert!(
+            matches!(stdin, invoke::EntrypointStdin::OneShot(bytes) if bytes == b"tell me a joke\n")
+        );
+    }
+
+    #[test]
+    fn explicit_commands_and_ordinary_sources_keep_their_route() {
+        let mut args = application_args();
+        args.run.argv = vec!["echo".into(), "hello".into()];
+        select_application_action(&mut args).unwrap();
+        assert!(!args.entrypoint);
+        assert_eq!(args.run.argv, ["echo", "hello"]);
+        let mut ordinary = MachineRunArgs::default();
+        select_application_action(&mut ordinary).unwrap();
+        assert!(!ordinary.entrypoint);
+    }
+
+    #[test]
+    fn application_action_refuses_conflicts_without_dropping_commands() {
+        let mut args = application_args();
+        args.tty = true;
+        assert!(select_application_action(&mut args).is_err());
+        args.tty = false;
+        args.entrypoint = true;
+        args.run.argv = vec!["echo".into()];
+        assert!(select_application_action(&mut args).is_err());
+        assert_eq!(args.run.argv, ["echo"]);
+    }
 
     #[test]
     fn a_pack_image_refuses_the_separate_entrypoint_boot_path() {

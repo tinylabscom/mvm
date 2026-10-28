@@ -18,6 +18,8 @@ pub mod security_profile;
 pub mod projection_fs_env;
 pub mod resolver;
 pub mod signing;
+// TOML policy-bundle loading happens where host tooling reads user files.
+#[cfg(feature = "host-state")]
 pub mod toml_loader;
 
 // `security`, `reversible_replacement`, `policies`, `redaction`, and
