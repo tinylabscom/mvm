@@ -80,13 +80,10 @@ pub fn bind(vm: &str) -> Result<UnixListener> {
     mvm_core::config::create_private_dir(&dir)?;
     let path = socket_path(vm)?;
     let socket_dir = path.parent().context("HVF socket directory missing")?;
-    match std::fs::symlink_metadata(socket_dir) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            mvm_core::config::create_private_dir(socket_dir)?;
-        }
-        Err(error) => return Err(error.into()),
-    }
+    // The short namespace is created by whichever launch step binds first, at
+    // the umask's mode; this tightens one this user owns and refuses one it
+    // does not, instead of dying on the mode check below.
+    mvm_core::config::secure_fallback_socket_dir_at(&dir)?;
     let metadata = std::fs::symlink_metadata(socket_dir)?;
     // SAFETY: geteuid only reads this process's effective user identity.
     let uid = unsafe { libc::geteuid() };
@@ -190,6 +187,27 @@ mod tests {
         assert!(mvm_core::config::fits_unix_socket_path(&socket));
         assert!(!socket.starts_with(state));
         assert!(!socket.exists(), "path derivation must not create anything");
+    }
+
+    #[test]
+    fn binding_in_a_short_namespace_another_launch_step_left_wide_tightens_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let root = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(root.path().join("deep".repeat(40)));
+        let socket = socket_path("wide-namespace").unwrap();
+        let namespace = socket.parent().unwrap();
+        assert!(namespace.starts_with("/tmp"));
+        let _ = std::fs::remove_dir_all(namespace);
+        std::fs::create_dir(namespace).unwrap();
+        std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let listener = bind("wide-namespace");
+        let mode = std::fs::metadata(namespace).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir_all(namespace);
+        listener.expect("an owned wide namespace is tightened, not refused");
+        assert_eq!(mode, 0o700);
     }
 
     #[test]
