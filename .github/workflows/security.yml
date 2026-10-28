@@ -23,6 +23,9 @@ on:
     tags: ["v*"]
   schedule:
     - cron: "17 4 * * *"
+    # One-off: fixed day and month, so the freshness gate ignores it and it
+    # never fires again. Remove once the run it schedules has been used.
+    - cron: "0 6 28 10 *"
   workflow_dispatch:
 
 # There is no `pull_request` trigger here, so there is no check panel to keep

@@ -4,7 +4,7 @@
 # Usage: job-cleanup.sh <isolated-base>
 #
 # <isolated-base> is the per-job directory the workflow pointed HOME, MVM_HOME
-# and TMPDIR at ($RUNNER_TEMP/mvm-w-<run>-<attempt>-<shard>). Every workflow job that
+# and TMPDIR at (/tmp/mvm-w-<run>-<attempt>-<shard> or under RUNNER_TEMP). Every workflow job that
 # can run on the KVM pool calls this from an `if: always()` final step;
 # tests/github_actions_self_hosted_runner.rs fails the build when one does not.
 #
