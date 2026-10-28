@@ -44,6 +44,35 @@ A queued/offline runner, failed preflight, recorded-local-evidence fallback,
 missing summary, skipped prompt scenario or failed shard is not a new live HVF
 prompt/replay witness. This wiring alone does not complete #4096.
 
+## Linux documented-surface evidence
+
+After review and landing on `main`, an authorized maintainer can collect the
+Linux Firecracker evidence for #4764 without Release or draft assets:
+
+```bash
+gh workflow run e2e-docs-linux-evidence.yml --repo tinylabscom/mvm --ref main
+gh run list --repo tinylabscom/mvm --workflow e2e-docs-linux-evidence.yml --limit 5
+```
+
+Like the macOS entrypoint, this admits only this repository's `main`, has only
+`contents: read`, inherits no secrets, accepts no ref or command inputs, and
+does not publish or deploy. The local reusable workflow and checkout use the
+event SHA; record it with `gh run view RUN_ID --repo tinylabscom/mvm --json headSha,url`.
+It runs the full existing Linux suite, both `0/2` and `1/2` shards, with live,
+directory-share and strict-skip flags unchanged. Only `@runtime_candidate`
+scenarios may additionally report `needs-runtime-candidate`; Release defaults
+still require both operating systems and a signed candidate.
+
+Save both Linux shard job logs from the run page; this lane does not upload
+log artifacts. Retain the run URL, tested SHA, both scenario summaries and their
+“did NOT run” tallies, and the witness output. The scenario
+`restarting refreshes a registered host directory snapshot` in
+`features/suites/s26_volumes/volume_lifecycle.feature` must actually pass,
+including the initial marker and the refreshed marker after stop/start. It is
+not runtime-candidate tagged and must not be accepted as skipped. A failed
+shard, missing summary or skipped witness is not Linux live evidence for the
+socket-custody fix in #4808. This entrypoint alone does not complete #4764.
+
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)

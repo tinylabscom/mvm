@@ -277,6 +277,14 @@ fn arm_suite_builds_only_after_its_final_environment_is_set() {
 }
 
 #[test]
+fn isolation_preserves_toolchain_homes_when_runner_home_is_unset() {
+    let workflow = fs::read_to_string(".github/workflows/ci-main.yml").unwrap();
+    assert!(workflow.contains("runner_home=\"$(getent passwd \"$(id -u)\" | cut -d: -f6)\""));
+    assert!(workflow.contains("${CARGO_HOME:-$runner_home/.cargo}"));
+    assert!(workflow.contains("rustup_home=\"${RUSTUP_HOME:-$(rustup show home)}\""));
+}
+
+#[test]
 fn workspace_shards_keep_mutable_state_per_worker_run() {
     let worker = fs::read_to_string(".github/workflows/workspace-shard.yml")
         .expect("read workspace shard workflow");
