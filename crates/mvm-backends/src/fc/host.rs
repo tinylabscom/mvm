@@ -832,9 +832,12 @@ impl FcForkRestorer {
         mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
             format!("FC warm-restore for forked child '{child_vm_name}' failed")
         })?;
-        if let Err(error) = super::runtime_artifacts::verify_restored_layout(&io, expected) {
-            let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
-            return Err(error);
+        match super::runtime_artifacts::verify_restored_layout(&io, expected) {
+            Ok(accepted) => super::runtime_artifacts::seal_accepted_digests(&accepted),
+            Err(error) => {
+                let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -931,7 +934,7 @@ pub(crate) fn resume_preloaded_fork_child(
             },
         )?;
         mvm_vmm::agent_debug::phase("fc-resume-verify", started, "phase=capture_authenticated");
-        super::runtime_artifacts::verify_restored_layout(io, expected)
+        super::runtime_artifacts::verify_restored_layout(io, expected).map(|_| ())
     })();
     if let Err(error) = verified {
         let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(io);
@@ -1000,7 +1003,7 @@ impl FcForkRestorer {
             format!("FC warm-restore for forked child '{child_vm_name}' failed")
         })?;
         let resumed = super::runtime_artifacts::verify_restored_layout(&io, expected)
-            .and_then(|()| mvm_vmm::snapshot::SnapshotIO::resume(&io));
+            .and_then(|_| mvm_vmm::snapshot::SnapshotIO::resume(&io));
         if resumed.is_err() {
             let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
         }

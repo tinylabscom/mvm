@@ -389,13 +389,59 @@ fn sha256_file_cached_with_key(
     }
 
     let hex = sha256_file(path)?;
-    // Seal only a digest of a file that did not change while it was read.
-    if let Some((key, identity)) = &sealed
-        && fs::metadata(path).ok().and_then(|m| FileIdentity::of(&m)) == Some(*identity)
-    {
-        let _ = write_sha256_sidecar(&sidecar, &hex, &key.seal(identity, &hex));
+    if let Some(sealed) = &sealed {
+        seal_if_unchanged_and_settled(path, sealed, &hex);
     }
     Ok((hex, DigestSource::Hashed(size)))
+}
+
+/// Seal `hex` as `path`'s digest when it is safe to: the file must be the one
+/// that was hashed (its identity is unchanged since before the read) and must
+/// have settled, so a write in the same timestamp tick as this `stat` cannot
+/// leave a seal that still verifies. Best-effort; a write failure only means
+/// the next call hashes. Returns whether a sidecar was written.
+fn seal_if_unchanged_and_settled(
+    path: &Path,
+    (key, identity): &(
+        &super::digest_cache::CacheKey,
+        super::digest_cache::FileIdentity,
+    ),
+    hex: &str,
+) -> bool {
+    use super::digest_cache::FileIdentity;
+
+    fs::metadata(path).ok().and_then(|m| FileIdentity::of(&m)) == Some(*identity)
+        && identity.settled(
+            std::time::SystemTime::now(),
+            super::verified_digest::RACY_WINDOW,
+        )
+        && write_sha256_sidecar(&sha256_cache_path(path), hex, &key.seal(identity, hex)).is_ok()
+}
+
+/// Seal `accepted` as `path`'s digest, only if the file still hashes to exactly
+/// that value. For a caller that already verified `accepted` against an
+/// authenticated expectation and wants later processes to reuse it: nothing it
+/// seals is a digest that verification did not accept. Returns whether a
+/// sidecar was written; `false` is not an error (no key, a file that has not
+/// settled, an unwritable directory, or bytes that no longer match).
+pub fn seal_digest_if_matches(path: &Path, accepted: &str) -> io::Result<bool> {
+    seal_digest_if_matches_with_key(path, accepted, super::digest_cache::process_key())
+}
+
+fn seal_digest_if_matches_with_key(
+    path: &Path,
+    accepted: &str,
+    key: Option<&super::digest_cache::CacheKey>,
+) -> io::Result<bool> {
+    use super::digest_cache::FileIdentity;
+
+    let Some(sealed) = key.zip(FileIdentity::of(&fs::metadata(path)?)) else {
+        return Ok(false);
+    };
+    if sha256_file(path)? != accepted {
+        return Ok(false);
+    }
+    Ok(seal_if_unchanged_and_settled(path, &sealed, accepted))
 }
 
 /// Where [`sha256_file_cached`] keeps `path`'s digest.
@@ -466,6 +512,65 @@ mod tests {
         super::super::digest_cache::CacheKey::from_bytes([seed; 32])
     }
 
+    /// Wait until a file written now would count as settled.
+    fn settle() {
+        std::thread::sleep(
+            super::super::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+        );
+    }
+
+    #[test]
+    fn a_digest_is_not_sealed_for_a_file_that_has_not_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = artifact(&dir, "fresh", b"just written");
+        let key = test_key(1);
+        let (_, source) = sha256_file_cached_with_key(&path, Some(&key)).unwrap();
+        assert!(matches!(source, DigestSource::Hashed(_)));
+        assert!(!sha256_cache_path(&path).exists(), "nothing was sealed");
+    }
+
+    #[test]
+    fn a_settled_file_is_sealed_and_then_served_from_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = artifact(&dir, "settled", b"old enough");
+        settle();
+        let key = test_key(1);
+        let (hex, first) = sha256_file_cached_with_key(&path, Some(&key)).unwrap();
+        assert!(matches!(first, DigestSource::Hashed(_)));
+        let (again, second) = sha256_file_cached_with_key(&path, Some(&key)).unwrap();
+        assert_eq!((again, second), (hex, DigestSource::Sidecar));
+    }
+
+    #[test]
+    fn only_the_accepted_digest_is_sealed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = artifact(&dir, "accepted", b"verified bytes");
+        settle();
+        let key = test_key(1);
+        let accepted = sha256_file(&path).unwrap();
+
+        let wrong = "0".repeat(64);
+        assert!(!seal_digest_if_matches_with_key(&path, &wrong, Some(&key)).unwrap());
+        assert!(
+            !sha256_cache_path(&path).exists(),
+            "a mismatch seals nothing"
+        );
+
+        assert!(seal_digest_if_matches_with_key(&path, &accepted, Some(&key)).unwrap());
+        let (hex, source) = sha256_file_cached_with_key(&path, Some(&key)).unwrap();
+        assert_eq!((hex, source), (accepted, DigestSource::Sidecar));
+    }
+
+    #[test]
+    fn nothing_is_sealed_without_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = artifact(&dir, "keyless", b"bytes");
+        settle();
+        let accepted = sha256_file(&path).unwrap();
+        assert!(!seal_digest_if_matches_with_key(&path, &accepted, None).unwrap());
+        assert!(!sha256_cache_path(&path).exists());
+    }
+
     /// A file in a fresh directory, so no other test shares its inode.
     fn artifact(dir: &tempfile::TempDir, name: &str, body: &[u8]) -> std::path::PathBuf {
         let path = dir.path().join(name);
@@ -484,6 +589,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let key = test_key(1);
         let p = artifact(&dir, "blob", b"hello");
+        settle();
         let sidecar = sha256_cache_path(&p);
 
         let direct = sha256_file(&p).expect("direct hash");
@@ -530,6 +636,7 @@ mod tests {
         let key = test_key(2);
         let body = b"the quick brown fox";
         let p = artifact(&dir, "blob", body);
+        settle();
 
         let (miss, miss_source) = sha256_file_cached_with_key(&p, Some(&key)).expect("miss");
         assert_eq!(
@@ -595,6 +702,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let key = test_key(4);
         let good = artifact(&dir, "good", b"trusted image bytes");
+        settle();
         let trusted = sha256_file_cached_with_key(&good, Some(&key))
             .expect("seal")
             .0;

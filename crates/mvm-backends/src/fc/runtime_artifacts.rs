@@ -271,12 +271,51 @@ pub(crate) fn authenticated_fork_capture(
 pub(crate) fn verify_restored_layout(
     io: &super::io::FirecrackerIO,
     expected: RuntimeArtifacts,
-) -> Result<()> {
+) -> Result<RuntimeArtifacts> {
     let devices = io
         .fork_devices()
         .context("a restored fork's layout is checked against the child's own devices")?;
     let actual = query(&io.socket_path)?;
-    compare_restored_layout(&actual, &devices.as_child_capture(expected))
+    compare_restored_layout(&actual, &devices.as_child_capture(expected))?;
+    Ok(actual)
+}
+
+/// Let later processes reuse the digests a layout verification just accepted.
+///
+/// Called at refill, never on a claim: it creates the digest-cache key if this
+/// is the first use, waits out the settle window so a file written moments ago
+/// can be sealed, and re-reads each file once. Only a digest equal to the one
+/// the verification accepted is sealed, so the claim that later finds it still
+/// compares it with the authenticated expectation exactly as before. Any doubt
+/// seals nothing and the claim hashes.
+pub(crate) fn seal_accepted_digests(accepted: &RuntimeArtifacts) {
+    use mvm_core::crypto::digest_cache::FileIdentity;
+    use mvm_core::crypto::verified_digest::RACY_WINDOW;
+
+    if mvm_core::crypto::digest_cache::process_key().is_none() {
+        return;
+    }
+    let artifacts: Vec<&RuntimeArtifact> = accepted
+        .kernel
+        .iter()
+        .chain(accepted.initramfs.iter())
+        .chain(accepted.disks.iter())
+        .collect();
+    let unsettled = artifacts.iter().any(|artifact| {
+        std::fs::metadata(&artifact.path)
+            .ok()
+            .and_then(|meta| FileIdentity::of(&meta))
+            .is_none_or(|id| !id.settled(std::time::SystemTime::now(), RACY_WINDOW))
+    });
+    if unsettled {
+        std::thread::sleep(RACY_WINDOW + std::time::Duration::from_millis(10));
+    }
+    for artifact in artifacts {
+        let _ = mvm_core::crypto::image_verify::seal_digest_if_matches(
+            &artifact.path,
+            &artifact.sha256,
+        );
+    }
 }
 
 fn compare_restored_layout(actual: &RuntimeArtifacts, expected: &RuntimeArtifacts) -> Result<()> {
