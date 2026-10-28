@@ -27,7 +27,7 @@ fn host_agent_daemon_summary(root: &std::path::Path) -> String {
         let pid = std::fs::read_to_string(&pid_file)
             .ok()
             .and_then(|s| s.trim().parse::<libc::pid_t>().ok());
-        let sock = dir.join("control.sock").exists();
+        let sock = mvm_core::config::host_agent_control_socket_in(&dir).exists();
         if let Some(p) = pid.filter(|p| pid_is_alive(*p))
             && sock
         {

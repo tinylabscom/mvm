@@ -136,6 +136,8 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create host-agent dir {}", dir.display()))?;
     warm_claim_debug("daemon_dir_ready");
+    mvm_core::config::secure_host_agent_socket_dir(tenant)
+        .with_context(|| format!("secure host-agent socket dir for tenant {tenant}"))?;
     let control_socket = mvm_core::config::host_agent_control_socket(tenant);
 
     // Serialise spawn decisions per tenant.

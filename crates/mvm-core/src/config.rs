@@ -738,10 +738,45 @@ pub fn host_agent_dir_at(
     host_agent_root_at(mvm_home).join(tenant)
 }
 
+/// Directory that holds a tenant's host-agent Unix sockets, given the tenant
+/// directory ([`host_agent_dir_at`]). That directory itself when both sockets
+/// fit the Unix-domain path budget; otherwise the same short private `/tmp`
+/// namespace deep VM state dirs use ([`vm_socket_dir_at`]), so a worktree-local
+/// `MVM_HOME` cannot stop the daemon binding. Pid file and spawn lock stay in
+/// the tenant directory.
+pub fn host_agent_socket_dir_in(tenant_dir: &std::path::Path) -> std::path::PathBuf {
+    if fits_unix_socket_path(&tenant_dir.join(HOST_AGENT_SIGNER_HELPER_SOCKET))
+        && fits_unix_socket_path(&tenant_dir.join(HOST_AGENT_CONTROL_SOCKET))
+    {
+        tenant_dir.to_path_buf()
+    } else {
+        short_vm_socket_dir_at(tenant_dir)
+    }
+}
+
+/// Create the short socket directory a deep tenant dir falls back to, owned and
+/// private, or refuse. Does nothing when the sockets live in the tenant dir.
+pub fn secure_host_agent_socket_dir(tenant: &str) -> std::io::Result<()> {
+    let tenant_dir = host_agent_dir(tenant);
+    let socket_dir = host_agent_socket_dir_in(&tenant_dir);
+    if socket_dir == tenant_dir {
+        return Ok(());
+    }
+    crate::private_fs::create_owned_private_dir(&socket_dir)
+}
+
+const HOST_AGENT_CONTROL_SOCKET: &str = "control.sock";
+const HOST_AGENT_SIGNER_HELPER_SOCKET: &str = "signer-helper.sock";
+
+/// The host-agent control UDS inside a tenant directory.
+pub fn host_agent_control_socket_in(tenant_dir: &std::path::Path) -> std::path::PathBuf {
+    host_agent_socket_dir_in(tenant_dir).join(HOST_AGENT_CONTROL_SOCKET)
+}
+
 /// The per-tenant host-agent control UDS the daemon binds (mode 0700) and the
 /// backend registers VMs over.
 pub fn host_agent_control_socket(tenant: &str) -> std::path::PathBuf {
-    host_agent_dir(tenant).join("control.sock")
+    host_agent_control_socket_in(&host_agent_dir(tenant))
 }
 
 /// The per-tenant host-agent worker pid file used by restart recovery.
@@ -753,7 +788,8 @@ pub fn host_agent_worker_pid(tenant: &str) -> std::path::PathBuf {
 /// helper is a child of the host-agent and owns the tenant's signing keys plus
 /// per-VM workload chain heads.
 pub fn host_agent_signer_helper_socket(tenant: &str) -> std::path::PathBuf {
-    host_agent_dir(tenant).join("signer-helper.sock")
+    let tenant_dir = host_agent_dir(tenant);
+    host_agent_socket_dir_in(&tenant_dir).join(HOST_AGENT_SIGNER_HELPER_SOCKET)
 }
 
 /// `<mvm_home>/pool/` — the supervisor standby pool root.
@@ -2374,6 +2410,37 @@ mod tests {
             host_agent_dir_at(root, "acme"),
             std::path::PathBuf::from("/isolated/mvm/host-agent/acme")
         );
+    }
+
+    /// The CI e2e home that produced a 105-byte control socket path.
+    #[test]
+    fn deep_home_host_agent_sockets_fit_and_are_private() {
+        let deep = std::path::Path::new(
+            "/Users/gha-runner/src/actions-runner/_work/mvm/mvm/.mvm-e2e-40387241526-1-0",
+        );
+        let dir = host_agent_dir_at(deep, "local");
+        assert!(!fits_unix_socket_path(&dir.join("control.sock")));
+        let control = host_agent_control_socket_in(&dir);
+        assert!(fits_unix_socket_path(&control), "{}", control.display());
+        assert_eq!(control.file_name().unwrap(), "control.sock");
+        let other = host_agent_control_socket_in(&host_agent_dir_at(deep, "acme"));
+        assert_ne!(control.parent(), other.parent());
+        assert_eq!(control, host_agent_control_socket_in(&dir));
+        let sock_dir = host_agent_socket_dir_in(&dir);
+        assert!(fits_unix_socket_path(&sock_dir.join("signer-helper.sock")));
+        crate::private_fs::create_owned_private_dir(&sock_dir).unwrap();
+        assert!(is_owned_fallback_socket_dir(&sock_dir));
+        std::fs::remove_dir(&sock_dir).unwrap();
+    }
+
+    #[test]
+    fn short_home_host_agent_sockets_stay_in_the_tenant_dir() {
+        let dir = host_agent_dir_at("/isolated/mvm", "acme");
+        assert_eq!(
+            host_agent_control_socket_in(&dir),
+            std::path::PathBuf::from("/isolated/mvm/host-agent/acme/control.sock")
+        );
+        assert_eq!(host_agent_socket_dir_in(&dir), dir);
     }
 
     #[test]
