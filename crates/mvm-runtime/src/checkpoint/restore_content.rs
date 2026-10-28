@@ -118,3 +118,109 @@ pub(super) fn validate_fork_verity_binding(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+    use std::path::PathBuf;
+
+    fn parent(blobs: &[&str]) -> CheckpointMeta {
+        CheckpointMeta::builder(CheckpointId::new("parent"), CheckpointClass::VmFull, "vm")
+            .content(
+                blobs
+                    .iter()
+                    .map(|name| ContentBlob {
+                        name: (*name).into(),
+                        sha256: "h".into(),
+                    })
+                    .collect(),
+            )
+            .supervisor_config_digest("d")
+            .created_unix(1)
+            .build()
+    }
+
+    /// A child dir carrying the given sidecar files and anchors that name a
+    /// verity device or not.
+    fn child(files: &[&str], anchors_verity: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for name in files {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let anchors = DeviceAnchors {
+            rootfs: PathBuf::from("/rootfs"),
+            rootfs_verity: anchors_verity.then(|| PathBuf::from("/rootfs.verity")),
+            config: None,
+            secrets: None,
+            identity: None,
+            vsock: PathBuf::from("/v.sock"),
+        };
+        std::fs::write(
+            dir.path().join("device-anchors.json"),
+            serde_json::to_vec(&anchors).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn refusal(parent: &CheckpointMeta, dir: &tempfile::TempDir) -> String {
+        format!(
+            "{:#}",
+            validate_fork_verity_binding(parent, dir.path()).expect_err("must refuse")
+        )
+    }
+
+    #[test]
+    fn a_complete_verity_binding_is_kept() {
+        let dir = child(&["rootfs.verity", "rootfs.roothash"], true);
+        validate_fork_verity_binding(&parent(&["rootfs.verity", "rootfs.roothash"]), dir.path())
+            .expect("complete binding");
+    }
+
+    #[test]
+    fn a_checkpoint_without_verity_forks_without_it() {
+        let dir = child(&[], false);
+        validate_fork_verity_binding(&parent(&["rootfs.ext4"]), dir.path()).expect("no verity");
+    }
+
+    #[test]
+    fn a_fork_that_would_drop_the_verity_sidecars_is_refused() {
+        let dir = child(&["rootfs.verity"], true);
+        let reason = refusal(&parent(&["rootfs.verity", "rootfs.roothash"]), &dir);
+        assert!(
+            reason.contains("would drop its dm-verity binding"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_fork_whose_anchors_drop_the_verity_device_is_refused() {
+        let dir = child(&["rootfs.verity", "rootfs.roothash"], false);
+        let reason = refusal(&parent(&["rootfs.verity", "rootfs.roothash"]), &dir);
+        assert!(
+            reason.contains("would drop its dm-verity binding"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_with_half_a_verity_sidecar_set_is_refused() {
+        let dir = child(&["rootfs.verity"], true);
+        let reason = refusal(&parent(&["rootfs.verity"]), &dir);
+        assert!(
+            reason.contains("incomplete dm-verity sidecar set"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_verity_anchor_without_sidecars_is_refused() {
+        let dir = child(&[], true);
+        let reason = refusal(&parent(&["rootfs.ext4"]), &dir);
+        assert!(
+            reason.contains("verity device anchor without sidecars"),
+            "{reason}"
+        );
+    }
+}
