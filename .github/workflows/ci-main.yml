@@ -716,6 +716,32 @@ jobs:
         with:
           packages: lld
 
+      # bpf-linker's LLVM backing. Up to 0.10.4 it borrowed rustc's bundled
+      # LLVM through `aya-rustc-llvm-proxy` and needed nothing from the
+      # runner image. 0.11.0 dropped the proxy, so from 0.11.0 on the LLVM is
+      # a first-class `llvm-<major>` feature and the linker links against a
+      # system LLVM. The feature and the apt suite that provides it have to
+      # name the same LLVM: `llvm-sys` declares the LLVM 23.1 C API, so a
+      # linker built against 22.x cannot link a 23.x library.
+      #
+      # The suite is pinned, the patch version inside it is not: apt.llvm.org
+      # publishes `23.1.<patch>` as an expiring `exp1` package, so pinning the
+      # exact version would break the lane when that package ages out.
+      - name: Add the apt.llvm.org repository
+        run: |
+          set -euo pipefail
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-23 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm23.list >/dev/null
+
+      # `llvm-23-dev` carries `llvm-config` and the unversioned `libLLVM.so`
+      # link name that bpf-linker's build script resolves against; the
+      # `llvm-23` suite it depends on carries the matching shared library.
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: llvm-23-dev
+
       # This lane compiles a different crate set from the shared workspace key
       # and builds bpf-linker from source, so it gets its own entry rather than
       # diluting the one every other lane restores.
@@ -723,14 +749,54 @@ jobs:
         with:
           key: ebpf
 
-      # Pinned deliberately. `--locked` only honors the crate's own bundled
-      # lockfile; it does not pin which version gets installed, so an upstream
-      # release silently changes this lane's toolchain. 0.11.0 did exactly that
-      # on 2026-08-12, requiring an LLVM newer than the runner image ships and
-      # breaking the build script. This version must move together with the
-      # `aya` version in Cargo.lock.
+      # The pairing this lane pins, and the reason it is checked rather than
+      # assumed. bpf-linker links LLVM bitcode, and bitcode is versioned: the
+      # LLVM that produced it has to be the LLVM that reads it. The nightly
+      # above is floating on purpose, so its bundled LLVM moves on rustc's
+      # schedule rather than on this repository's. When it moves, the pinned
+      # `llvm-23` feature stops matching the bitcode `rustc +nightly` emits,
+      # and bpf-linker fails deep inside its own build script with an
+      # unhelpful message. Check it here instead, where the fix is one line:
+      # bump the apt suite, the `--features` flag and the expected version
+      # together.
+      - name: Check the nightly's LLVM against the pinned one
+        run: |
+          set -euo pipefail
+          llvm="$(rustc +nightly --version --verbose | sed -n 's/^LLVM version: //p')"
+          case "$llvm" in
+            23.1.*)
+              echo "nightly ships LLVM $llvm, which the pinned llvm-23 feature expects"
+              ;;
+            *)
+              echo "::error::nightly ships LLVM $llvm, but this lane pins LLVM 23.1 for bpf-linker." >&2
+              echo "Bump the apt.llvm.org suite, the --features llvm-NN flag and the version checked here in one change." >&2
+              exit 1
+              ;;
+          esac
+
+      # Pinned deliberately, in two halves that have to agree with each other.
+      #
+      # `--locked` only honors the crate's own bundled lockfile; it does not
+      # pin which version gets installed, so an upstream release silently
+      # changes this lane's toolchain. 0.11.0 did exactly that on 2026-08-12,
+      # requiring an LLVM newer than the runner image ships and breaking the
+      # build script.
+      #
+      # `--no-default-features --features llvm-23` is the other half: it names
+      # the LLVM the linker is built against instead of taking the crate's
+      # default, so the LLVM this lane provisions is the LLVM the linker
+      # expects. The default of 0.11.1 happens to be `llvm-23` as well, but
+      # relying on a default is how the pairing drifts apart silently.
+      #
+      # The bpf-linker version moves together with the `aya` version in
+      # Cargo.lock: bpf-linker writes the BPF ELF and `aya` reads it, and
+      # 0.12.0 changes what it writes.
       - name: Install bpf-linker
-        run: cargo +nightly install --locked --version 0.10.4 bpf-linker
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/llvm-23/bin:$PATH"
+          cargo +nightly install --locked --version 0.11.1 \
+            --no-default-features --features llvm-23 bpf-linker
 
       - name: Install just
         uses: taiki-e/install-action@v2
