@@ -215,6 +215,9 @@ pub struct RestoredChild<'a> {
     /// Digest captured immediately after minting this child's fresh identity.
     /// Absent for an inherited identity or a checkpoint with no identity drive.
     pub reseeded_identity_sha256: Option<&'a str>,
+    /// The child's own admitted plan, validated by this fork before the
+    /// restorer runs. Never the parent's.
+    pub plan_json: Option<&'a str>,
 }
 
 /// Stages a forked child's snapshot into position and starts the VM. Taken as a
@@ -386,6 +389,7 @@ pub fn fork_vm_full(
     };
     restore.restore(&RestoredChild {
         reseeded_identity_sha256: reseeded_identity_sha256.as_deref(),
+        plan_json: params.child_plan_json.as_deref(),
         vm_name: &params.child_vm_name,
         state_dir: &params.dest_dir,
         cpu_grant: child_grants.as_ref().and_then(|grants| grants.cpu),

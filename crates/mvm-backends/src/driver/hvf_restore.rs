@@ -59,6 +59,11 @@ pub struct HvfRestoreRequest<'a> {
     /// bytes the supervisor loads, which is why the checkpoint layer does not
     /// hash those two blobs itself.
     pub content: &'a [ContentBlob],
+    /// The child's own admitted, signed plan, already verified by admission.
+    /// The supervisor takes its capture authority, wall-clock bound and audit
+    /// identity from it. `None` for a same-identity resume, which admits no
+    /// plan of its own.
+    pub plan_json: Option<&'a str>,
 }
 
 /// The blobs [`restore_hvf_vm`] verifies itself, on the bytes it loads.
@@ -238,6 +243,14 @@ pub fn hvf_child_restore_config(
         .map(|disk| remap_disk(disk, anchors, req.state_dir))
         .collect::<Result<Vec<_>>>()?;
 
+    let binding = match req.plan_json {
+        Some(json) => Some(
+            mvm_vmm::host::spec_map::plan_binding_for(json)
+                .ok_or_else(|| anyhow!("the restored child's plan is not valid JSON"))?,
+        ),
+        None => None,
+    };
+
     Ok(HvfSupervisorConfig {
         console_capture: parent.console_capture,
         vm_name: req.vm_name.to_string(),
@@ -272,15 +285,12 @@ pub fn hvf_child_restore_config(
         restore_frame: Some(restore_frame),
         restore_fds: None,
         timeout_secs: parent.timeout_secs,
-        // A restored child does not re-arm the wall-clock timer. Inheriting the
-        // parent's plan would audit the child's kill against the parent's
-        // identity — a wrong entry in the chain is worse than a missing one.
-        // The child is still admission-bounded; this mirrors the host-side CPU
-        // control, which a restore does not re-arm either.
-        plan: None,
+        // The child's OWN admitted plan, never the parent's: inheriting the
+        // parent's would audit the child's kill against the parent's identity.
+        plan: binding.as_ref().map(|b| b.plan_json.clone()),
         caller_registration: None,
-        audit_dir: None,
-        signing_key_path: None,
+        audit_dir: binding.as_ref().map(|b| b.audit_dir.clone()),
+        signing_key_path: binding.as_ref().map(|b| b.signing_key_path.clone()),
         agent_socket: Some(mvm_core::config::vm_hvf_agent_socket_at(req.state_dir)),
         // Authority-bearing relays never survive a restore: the child reaches
         // the network, the broker and an interactive console only through
@@ -640,7 +650,26 @@ mod tests {
             state_dir: dir,
             cpu_grant: None,
             content: &[],
+            plan_json: None,
         }
+    }
+
+    #[test]
+    fn a_restored_child_carries_its_own_plan_and_never_the_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchors = materialized(dir.path());
+        let mut parent = parent_config(dir.path(), vec![]);
+        parent.plan = Some(serde_json::json!({"parent": "plan"}));
+        let child_plan = r#"{"child":"plan"}"#;
+        let mut req = request("child", dir.path());
+        req.plan_json = Some(child_plan);
+        let cfg = hvf_child_restore_config(&parent, &anchors, &req).unwrap();
+        assert_eq!(cfg.plan, Some(serde_json::json!({"child": "plan"})));
+        assert!(cfg.audit_dir.is_some() && cfg.signing_key_path.is_some());
+
+        let planless =
+            hvf_child_restore_config(&parent, &anchors, &request("child", dir.path())).unwrap();
+        assert!(planless.plan.is_none() && planless.audit_dir.is_none());
     }
 
     #[test]
@@ -1012,6 +1041,7 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
                 content: &[],
+                plan_json: None,
             },
             1024,
             &[],
@@ -1055,6 +1085,7 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
                 content: &[],
+                plan_json: None,
             },
             1024,
             &[],
@@ -1098,6 +1129,7 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: None,
                 content: &[],
+                plan_json: None,
             },
             1024,
             &[],
@@ -1129,6 +1161,7 @@ mod tests {
             state_dir: &state,
             cpu_grant: None,
             content: &[],
+            plan_json: None,
         };
         let supervisor = Path::new("/usr/bin/mvm-hvf-supervisor");
 
@@ -1250,6 +1283,7 @@ mod tests {
             state_dir: dir,
             cpu_grant: None,
             content,
+            plan_json: None,
         }
     }
 

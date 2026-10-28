@@ -36,6 +36,7 @@ impl crate::checkpoint::ForkRestorer for HvfForkRestorer {
             state_dir: child.state_dir,
             cpu_grant: child.cpu_grant,
             content: child.content,
+            plan_json: child.plan_json,
         })
         .with_context(|| format!("HVF warm-restore for forked child '{}'", child.vm_name))?;
         Ok(())
@@ -79,6 +80,7 @@ impl crate::checkpoint::VmFullRestore for HvfVmFullRestore {
             // nobody signed for this run.
             cpu_grant: None,
             content,
+            plan_json: None,
         })
         .with_context(|| format!("HVF restore of '{target_vm}'"))?;
         Ok(())
