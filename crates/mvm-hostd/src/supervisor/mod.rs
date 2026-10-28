@@ -127,6 +127,9 @@ pub mod caller_registration;
 /// Arming a warm-claimed child's bounds in the standby supervisor it inherits.
 pub mod claimed_child;
 pub mod protected_handoff;
+/// The supervisor-side wall-clock timer — the mechanism behind
+/// `WallClockControl::SupervisorTimer`.
+pub mod restored_plan;
 pub mod services;
 /// Session idle-timeout enforcement: the shared reap decision and the
 /// supervisor-side watcher.
@@ -134,8 +137,6 @@ pub mod session_expiry;
 pub mod ssrf_guard;
 pub mod state;
 pub mod tools;
-/// The supervisor-side wall-clock timer — the mechanism behind
-/// `WallClockControl::SupervisorTimer`.
 pub mod wall_clock;
 
 pub use aggregate::{

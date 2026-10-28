@@ -853,27 +853,33 @@ fn run() -> anyhow::Result<()> {
     // supervisor only wires the relay socket paths through.
     diagnostics.stage(StartupStage::CapturePolicy);
     use mvm_hostd::stream::protected::{CaptureAuthority, CaptureParams};
-    let admitted_plan = cfg
-        .plan
-        .as_ref()
-        .map(mvm_hostd::supervisor::wall_clock::decode_admitted_plan)
-        .transpose()
-        .map_err(|_| anyhow::anyhow!("invalid admitted capture policy"))?;
+    // A restored child's plan arrives over the spawn pipe, so it is verified
+    // here against the host key and this child's identity before it becomes
+    // capture authority.
+    let admitted_plan = match (cfg.plan.as_ref(), restore.is_some()) {
+        (Some(plan), true) => Some(
+            mvm_hostd::supervisor::restored_plan::verify_restored_plan(
+                plan,
+                &cfg.vm_name,
+                cfg.signing_key_path.as_deref(),
+            )
+            .map_err(|_| anyhow::anyhow!("restored child plan failed verification"))?,
+        ),
+        (Some(plan), false) => Some(
+            mvm_hostd::supervisor::wall_clock::decode_admitted_plan(plan)
+                .map_err(|_| anyhow::anyhow!("invalid admitted capture policy"))?,
+        ),
+        (None, _) => None,
+    };
     let redaction = admitted_plan
         .as_ref()
         .map(|plan| plan.redaction.clone())
         .unwrap_or_default();
-    let authority = if let Some(launch) = registered_launch {
-        CaptureAuthority::CallerRegistered(launch)
-    } else {
-        match admitted_plan.as_ref() {
-            Some(plan) => CaptureAuthority::Admitted(plan),
-            None if cfg.trusted_builder_egress || cfg.handoff_socket.is_some() => {
-                CaptureAuthority::OperationalLiveOnly
-            }
-            None => anyhow::bail!("workload protected capture requires an admitted plan"),
-        }
-    };
+    let authority = CaptureAuthority::select(
+        registered_launch,
+        admitted_plan.as_ref(),
+        cfg.trusted_builder_egress || cfg.handoff_socket.is_some(),
+    )?;
     diagnostics.stage(StartupStage::CaptureSetup);
     let (capture_owner, console_sink) =
         match mvm_hostd::stream::protected::CaptureOwner::start(CaptureParams {

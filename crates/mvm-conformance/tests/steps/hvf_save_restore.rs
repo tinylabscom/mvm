@@ -169,6 +169,7 @@ fn rewrite_for_child(world: &mut CliWorld) {
             state_dir: &dir,
             cpu_grant: None,
             content: &[],
+            plan_json: None,
         },
     )
     .expect("rewrite the captured config for a restored child");

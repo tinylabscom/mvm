@@ -314,9 +314,13 @@ not paraphrase this row without them.
    `mvm-hvf-supervisor`. The dividing line is structural rather than
    incidental: those are the VMM tiers with a process of ours that outlives
    the workload *and* is handed the admitted plan to read a bound from. A
-   restore is deliberately not covered — a child does not inherit its parent's
-   plan, because auditing a child's kill under the parent's identity would
-   write a wrong entry rather than a missing one.
+   restore never inherits its parent's plan, because auditing a child's kill
+   under the parent's identity would write a wrong entry rather than a
+   missing one. An HVF `vm_full` fork child carries its OWN admitted plan to
+   its supervisor, which verifies the signature under the host key, the
+   validity window and that the plan names this child (no nonce is re-spent;
+   admission spent it), then arms the wall clock from the restore, audited
+   under the child's identity. Firecracker restores are not covered.
    `ResourceControls::for_backend` answers `WallClockControl::None` for
    Firecracker, QEMU and Mock, so a wall-clock grant on those tiers is refused
    under `--prod` and warned under dev rather than admitted against nothing.
@@ -369,8 +373,9 @@ not paraphrase this row without them.
    process born grant-less as shared pool capacity, which binding now would
    bind the pool rather than the claim. `bind_spawn` wraps a `Command` and
    this tree has no post-spawn attach, so on those two paths a claimed child's
-   CPU bound is a ledger entry and not a `cpu.max`. Wall clock is likewise not
-   re-armed on a restored child, per limit 2. A claimed child is different: it
+   CPU bound is a ledger entry and not a `cpu.max`. Wall clock is re-armed on an HVF
+   forked child from its own plan, per limit 2; it is not on a Firecracker
+   restore. A claimed child is different: it
    has an admitted plan of its own, and on HVF the resident handoff carries
    that plan, bound into the handoff signature, to the supervisor the child
    inherits. That supervisor arms the plan's wall-clock bound and session idle

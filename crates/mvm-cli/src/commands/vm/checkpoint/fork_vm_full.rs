@@ -370,7 +370,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             // not the parent's: a child admitted under an environment it did
             // not itself load would record a pin nothing here verified.
             kernel_path: None,
-            precomputed_image_sha256: Some(recorded_sha),
+            precomputed_image_sha256: Some(recorded_sha.clone()),
             boot_artifact_identity: None,
             runtime_config: inherited_runtime.as_ref(),
             cpus: user_cfg.default_cpus,
@@ -422,6 +422,9 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     let child_plan_json = serde_json::to_string(admission.admitted.signed())
         .expect("admitted plan is always serializable");
     let child_tenant_id = admission.admitted.plan().tenant.0.clone();
+    // Admission just signed this plan; confirm it names this child and the
+    // rootfs being restored before it can become the child's authority.
+    verify_child_plan_binds_restore(admission.admitted.signed(), p.child_vm_name, &recorded_sha)?;
 
     let mint_cfg = mvm_core::vm_backend::VmStartConfig {
         name: p.child_vm_name.to_string(),
@@ -435,6 +438,27 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         child_plan_json,
         child_tenant_id,
     })
+}
+
+fn verify_child_plan_binds_restore(
+    signed: &mvm_core::plan::SignedExecutionPlan,
+    child_vm_name: &str,
+    image_sha256: &str,
+) -> Result<()> {
+    let trusted = mvm_hostd::audit::host_keypair::load_or_init()
+        .context("loading the host signer to verify the child plan")?
+        .verifying_key();
+    mvm_core::plan::verify_restored_child_plan(
+        signed,
+        &trusted,
+        &mvm_core::plan::RestoredChildBinding {
+            vm_name: child_vm_name,
+            image_sha256: Some(image_sha256),
+            now: chrono::Utc::now(),
+        },
+    )
+    .context("the admitted child plan does not bind the restore")?;
+    Ok(())
 }
 
 fn inherited_runtime_config(
