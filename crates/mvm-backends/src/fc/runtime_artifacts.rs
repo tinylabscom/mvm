@@ -301,14 +301,17 @@ pub(crate) fn seal_accepted_digests(accepted: &RuntimeArtifacts) {
         .chain(accepted.initramfs.iter())
         .chain(accepted.disks.iter())
         .collect();
-    let unsettled = artifacts.iter().any(|artifact| {
-        std::fs::metadata(&artifact.path)
-            .ok()
-            .and_then(|meta| FileIdentity::of(&meta))
-            .is_none_or(|id| !id.settled(std::time::SystemTime::now(), RACY_WINDOW))
-    });
-    if unsettled {
-        std::thread::sleep(RACY_WINDOW + std::time::Duration::from_millis(10));
+    let now = std::time::SystemTime::now();
+    let delay = artifacts
+        .iter()
+        .filter_map(|artifact| {
+            let meta = std::fs::metadata(&artifact.path).ok()?;
+            FileIdentity::of(&meta)?.settle_delay(now, RACY_WINDOW)
+        })
+        .max()
+        .unwrap_or_default();
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
     }
     for artifact in artifacts {
         let _ = mvm_core::crypto::image_verify::seal_digest_if_matches(

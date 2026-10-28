@@ -19,8 +19,8 @@
 //!
 //! The seal is a claim only this host's key can make; it does not stop a process
 //! of the same user that can read the key file, which can mint a seal for any
-//! bytes. ADR-001 puts a malicious host out of scope, so that is the line this
-//! cache holds, not a stronger one.
+//! bytes. A malicious host is out of scope, so that is the line this cache
+//! holds, not a stronger one.
 //!
 //! A digest is sealed only for a file that has [`settled`](FileIdentity::settled):
 //! a write in the same timestamp tick as the sealing `stat` leaves size, mtime
@@ -90,14 +90,32 @@ impl FileIdentity {
     /// tick) are all unsettled.
     #[must_use]
     pub fn settled(&self, now: std::time::SystemTime, window: std::time::Duration) -> bool {
+        self.settle_delay(now, window) == Some(std::time::Duration::ZERO)
+    }
+
+    /// Time remaining before this identity can settle; `None` means waiting
+    /// cannot help (coarse timestamps, a future timestamp, or a pre-epoch clock).
+    #[must_use]
+    pub fn settle_delay(
+        &self,
+        now: std::time::SystemTime,
+        window: std::time::Duration,
+    ) -> Option<std::time::Duration> {
         const SECOND: i128 = 1_000_000_000;
-        let Ok(now) = now.duration_since(std::time::UNIX_EPOCH) else {
-            return false;
-        };
+        let now = now.duration_since(std::time::UNIX_EPOCH).ok()?;
         let newest = self.mtime_nanos.max(self.ctime_nanos);
         let age = i128::try_from(now.as_nanos()).unwrap_or(i128::MAX) - newest;
-        self.ctime_nanos.rem_euclid(SECOND) != 0
-            && age >= i128::try_from(window.as_nanos()).unwrap_or(i128::MAX)
+        if self.ctime_nanos.rem_euclid(SECOND) == 0 || age < 0 {
+            return None;
+        }
+        if age >= i128::try_from(window.as_nanos()).unwrap_or(i128::MAX) {
+            return Some(std::time::Duration::ZERO);
+        }
+        let age = std::time::Duration::new(
+            u64::try_from(age / SECOND).ok()?,
+            u32::try_from(age % SECOND).ok()?,
+        );
+        Some(window.saturating_sub(age))
     }
 }
 
@@ -285,6 +303,33 @@ mod tests {
     fn a_clock_before_the_epoch_settles_nothing() {
         let before = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
         assert!(!stamped(5_000_000_123, 5_000_000_123).settled(before, WINDOW));
+    }
+
+    #[test]
+    fn settle_delay_only_waits_for_identities_that_can_settle() {
+        use std::time::Duration;
+        let stamp = 5_000_000_123;
+        let id = stamped(stamp, stamp);
+        let read_started = at(stamp + 100_000_000);
+        assert_eq!(
+            id.settle_delay(read_started, WINDOW),
+            Some(Duration::from_millis(150))
+        );
+        assert!(!id.settled(read_started, WINDOW));
+        assert!(id.settled(read_started + Duration::from_millis(300), WINDOW));
+        assert_eq!(
+            id.settle_delay(at(stamp + 250_000_000), WINDOW),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(id.settle_delay(at(stamp - 1), WINDOW), None);
+        assert_eq!(
+            stamped(stamp, 5_000_000_000).settle_delay(at(stamp), WINDOW),
+            None
+        );
+        assert_eq!(
+            id.settle_delay(std::time::UNIX_EPOCH - Duration::from_secs(1), WINDOW),
+            None
+        );
     }
 
     #[test]

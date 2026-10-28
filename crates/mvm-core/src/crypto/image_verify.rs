@@ -376,6 +376,7 @@ fn sha256_file_cached_with_key(
 ) -> io::Result<(String, DigestSource)> {
     use super::digest_cache::FileIdentity;
 
+    let read_started = std::time::SystemTime::now();
     let meta = fs::metadata(path)?;
     let size = meta.len();
     let sealed = key.zip(FileIdentity::of(&meta));
@@ -390,14 +391,14 @@ fn sha256_file_cached_with_key(
 
     let hex = sha256_file(path)?;
     if let Some(sealed) = &sealed {
-        seal_if_unchanged_and_settled(path, sealed, &hex);
+        seal_if_unchanged_and_settled(path, sealed, &hex, read_started);
     }
     Ok((hex, DigestSource::Hashed(size)))
 }
 
 /// Seal `hex` as `path`'s digest when it is safe to: the file must be the one
 /// that was hashed (its identity is unchanged since before the read) and must
-/// have settled, so a write in the same timestamp tick as this `stat` cannot
+/// have settled before the read, so a write in the same timestamp tick cannot
 /// leave a seal that still verifies. Best-effort; a write failure only means
 /// the next call hashes. Returns whether a sidecar was written.
 fn seal_if_unchanged_and_settled(
@@ -407,14 +408,12 @@ fn seal_if_unchanged_and_settled(
         super::digest_cache::FileIdentity,
     ),
     hex: &str,
+    read_started: std::time::SystemTime,
 ) -> bool {
     use super::digest_cache::FileIdentity;
 
     fs::metadata(path).ok().and_then(|m| FileIdentity::of(&m)) == Some(*identity)
-        && identity.settled(
-            std::time::SystemTime::now(),
-            super::verified_digest::RACY_WINDOW,
-        )
+        && identity.settled(read_started, super::verified_digest::RACY_WINDOW)
         && write_sha256_sidecar(&sha256_cache_path(path), hex, &key.seal(identity, hex)).is_ok()
 }
 
@@ -435,13 +434,19 @@ fn seal_digest_if_matches_with_key(
 ) -> io::Result<bool> {
     use super::digest_cache::FileIdentity;
 
+    let read_started = std::time::SystemTime::now();
     let Some(sealed) = key.zip(FileIdentity::of(&fs::metadata(path)?)) else {
         return Ok(false);
     };
     if sha256_file(path)? != accepted {
         return Ok(false);
     }
-    Ok(seal_if_unchanged_and_settled(path, &sealed, accepted))
+    Ok(seal_if_unchanged_and_settled(
+        path,
+        &sealed,
+        accepted,
+        read_started,
+    ))
 }
 
 /// Where [`sha256_file_cached`] keeps `path`'s digest.
@@ -527,6 +532,35 @@ mod tests {
         let (_, source) = sha256_file_cached_with_key(&path, Some(&key)).unwrap();
         assert!(matches!(source, DigestSource::Hashed(_)));
         assert!(!sha256_cache_path(&path).exists(), "nothing was sealed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_read_does_not_age_a_fresh_identity_into_a_seal() {
+        use super::super::digest_cache::FileIdentity;
+        use std::os::unix::fs::MetadataExt as _;
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = artifact(&dir, "slow-read", b"verified bytes");
+        let meta = fs::metadata(&path).unwrap();
+        let identity = FileIdentity::of(&meta).unwrap();
+        let newest = (meta.mtime(), meta.mtime_nsec()).max((meta.ctime(), meta.ctime_nsec()));
+        let stamped =
+            UNIX_EPOCH + Duration::new(newest.0.try_into().unwrap(), newest.1.try_into().unwrap());
+        let read_started = stamped + Duration::from_millis(100);
+        let seal_at = read_started + Duration::from_millis(300);
+        assert!(!identity.settled(read_started, super::super::verified_digest::RACY_WINDOW));
+        assert!(identity.settled(seal_at, super::super::verified_digest::RACY_WINDOW));
+        let key = test_key(1);
+        let digest = sha256_file(&path).unwrap();
+        assert!(!seal_if_unchanged_and_settled(
+            &path,
+            &(&key, identity),
+            &digest,
+            read_started,
+        ));
+        assert!(!sha256_cache_path(&path).exists());
     }
 
     #[test]
