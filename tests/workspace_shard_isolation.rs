@@ -105,18 +105,12 @@ fn arm_suite_builds_only_after_its_final_environment_is_set() {
 
 #[test]
 fn isolation_preserves_toolchain_homes_when_runner_home_is_unset() {
-    for path in [
-        ".github/workflows/workspace-shard.yml",
-        ".github/workflows/ci-main.yml",
-    ] {
-        let workflow = fs::read_to_string(path).unwrap();
-        assert!(
-            workflow
-                .contains("original_home=\"${HOME:-$(getent passwd \"$(id -u)\" | cut -d: -f6)}\"")
-        );
-        assert!(workflow.contains("${CARGO_HOME:-$original_home/.cargo}"));
-        assert!(workflow.contains("${RUSTUP_HOME:-$original_home/.rustup}"));
-    }
+    let workflow = fs::read_to_string(".github/workflows/ci-main.yml").unwrap();
+    assert!(
+        workflow.contains("original_home=\"${HOME:-$(getent passwd \"$(id -u)\" | cut -d: -f6)}\"")
+    );
+    assert!(workflow.contains("${CARGO_HOME:-$original_home/.cargo}"));
+    assert!(workflow.contains("${RUSTUP_HOME:-$original_home/.rustup}"));
 }
 
 #[test]
@@ -125,20 +119,21 @@ fn workspace_shards_keep_mutable_state_per_worker_run() {
         .expect("read workspace shard workflow");
 
     assert!(
-        worker.contains(
-            "base=\"${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
-        ),
+        worker.contains("base=\"/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""),
         "the persistent runner must not reuse another job's mutable state"
     );
     assert!(worker.contains("mkdir -m 700 -- \"$base\""));
     assert!(worker.contains("mkdir -m 700 -- \"$base/home\" \"$base/mvm\" \"$base/tmp\""));
+    assert!(worker.contains("runner_home=\"${HOME:-}\""));
+    assert!(worker.contains("getent passwd \"$(id -u)\""));
+    assert!(worker.contains("cannot determine the runner home directory"));
     assert!(worker.contains("CARGO_HOME=%s\\nRUSTUP_HOME=%s\\n"));
     assert!(worker.contains("\"$base/home\" \"$base/mvm\" \"$base/tmp\""));
     assert!(worker.contains(">> \"$GITHUB_ENV\""));
     assert!(worker.contains("if: always()"));
     assert!(
         worker.contains(
-            "bash nix/ops/hetzner/job-cleanup.sh \"${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
+            "bash nix/ops/hetzner/job-cleanup.sh \"/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
         ),
         "the always-run last step must hand the same base to the cleanup script"
     );
