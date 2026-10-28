@@ -105,4 +105,24 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn host_agent_daemon_summary_finds_a_relocated_control_socket() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let home = directory.path().join("long-home-".repeat(12));
+        let state = mvm_core::config::host_agent_dir_at(&home, "local");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("daemon.pid"), std::process::id().to_string()).unwrap();
+        let socket = mvm_core::config::host_agent_control_socket_in(&state);
+        assert_ne!(socket, state.join("control.sock"));
+        let socket_dir = socket.parent().unwrap();
+        mvm_core::private_fs::create_owned_private_dir(socket_dir).unwrap();
+        std::fs::write(&socket, "").unwrap();
+
+        let summary = host_agent_daemon_summary(&mvm_core::config::host_agent_root_at(&home));
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::remove_dir(socket_dir).unwrap();
+        assert!(summary.contains("local: running"), "got {summary:?}");
+        assert!(!summary.contains("stale:"), "got {summary:?}");
+    }
 }
