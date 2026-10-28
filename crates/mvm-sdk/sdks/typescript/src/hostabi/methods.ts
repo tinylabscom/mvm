@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 9;
+export const ABI_MINOR = 10;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -17,6 +17,12 @@ export interface HostAbiMethod {
   classification: Classification;
   summary: string;
 }
+
+/**
+ * Lists complete local checkpoint metadata in deterministic ID
+ * order.
+ */
+export const CHECKPOINT_LIST = "checkpoint.list";
 
 /**
  * Export a host-signed v0 identity report, not measured-boot
@@ -199,6 +205,7 @@ export const TELEMETRY_RECORDS = "telemetry.records";
 export const TELEMETRY_STATUS = "telemetry.status";
 
 export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
+  "checkpoint.list": { key: "checkpoint_list", classification: "prod_safe", summary: "Lists complete local checkpoint metadata in deterministic ID order." },
   "attestation.export": { key: "attestation_export", classification: "prod_safe", summary: "Export a host-signed v0 identity report, not measured-boot evidence." },
   "attestation.verify": { key: "attestation_verify", classification: "prod_safe", summary: "Verify a bounded report file under explicitly selected trust." },
   "attestation.status": { key: "attestation_status", classification: "prod_safe", summary: "Inspect public identity metadata, initializing identity if needed." },

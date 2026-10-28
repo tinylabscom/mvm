@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 9
+ABI_MINOR: Final = 10
 
 
 class Classification(str, Enum):
@@ -28,6 +28,11 @@ class Method:
     key: str
     classification: Classification
     summary: str
+
+
+#: Lists complete local checkpoint metadata in deterministic ID
+#: order.
+CHECKPOINT_LIST: Final = "checkpoint.list"
 
 
 #: Export a host-signed v0 identity report, not measured-boot
@@ -244,6 +249,7 @@ TELEMETRY_STATUS: Final = "telemetry.status"
 
 
 METHODS: dict[str, Method] = {
+    "checkpoint.list": Method(key="checkpoint_list", classification=Classification.PROD_SAFE, summary="Lists complete local checkpoint metadata in deterministic ID order."),
     "attestation.export": Method(key="attestation_export", classification=Classification.PROD_SAFE, summary="Export a host-signed v0 identity report, not measured-boot evidence."),
     "attestation.verify": Method(key="attestation_verify", classification=Classification.PROD_SAFE, summary="Verify a bounded report file under explicitly selected trust."),
     "attestation.status": Method(key="attestation_status", classification=Classification.PROD_SAFE, summary="Inspect public identity metadata, initializing identity if needed."),
@@ -298,6 +304,7 @@ METHODS: dict[str, Method] = {
 }
 
 __all__ = [
+    "CHECKPOINT_LIST",
     "ATTESTATION_EXPORT",
     "ATTESTATION_VERIFY",
     "ATTESTATION_STATUS",
