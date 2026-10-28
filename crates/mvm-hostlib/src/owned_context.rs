@@ -406,8 +406,7 @@ pub unsafe extern "C" fn mvm_hostlib_context_create(
     unsafe {
         *slot = std::ptr::null_mut();
     }
-    if major != crate::MVM_HOSTLIB_ABI_MAJOR || !(9..=crate::MVM_HOSTLIB_ABI_MINOR).contains(&minor)
-    {
+    if major != crate::MVM_HOSTLIB_ABI_MAJOR || minor < 9 || minor > crate::MVM_HOSTLIB_ABI_MINOR {
         return MVM_HOSTLIB_ABI_NOT_NEGOTIATED;
     }
     let context = Box::new(ContextOwner {

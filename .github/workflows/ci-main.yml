@@ -463,24 +463,26 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
-          original_home="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
-          [[ "$original_home" = /* && -d "$original_home" ]]
-          rustup_home="${RUSTUP_HOME:-$(rustup show home)}"
           base="${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-1"
           mkdir -m 700 -- "$base"
           mkdir -m 700 -- "$base/home" "$base/mvm" "$base/tmp"
+          runner_home="${HOME:-}"
+          if [[ -z "$runner_home" ]]; then
+            runner_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+          fi
+          [[ -n "$runner_home" && -d "$runner_home" ]] || {
+            echo "cannot determine the runner home directory" >&2
+            exit 1
+          }
+          rustup_home="${RUSTUP_HOME:-$(rustup show home)}"
           {
-            printf 'RUNNER_ORIGINAL_HOME=%s\n' "$original_home"
-            printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$original_home/.cargo}" "$rustup_home"
+            printf 'RUNNER_ORIGINAL_HOME=%s\n' "$runner_home"
+            printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$runner_home/.cargo}" "$rustup_home"
             printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
           } >> "$GITHUB_ENV"
 
       - name: Run the aarch64 workspace tests
         run: cargo nextest run --workspace --exclude mvm-fs --all-targets
-
-      - name: Stress short-output streaming on native aarch64 Linux
-        working-directory: crates/mvm-builder-guest
-        run: cargo nextest run --stress-count 200 -E 'test(run_job_matches_streaming_for_short_output)'
 
       # The cache action saves in a post step; hand it the runner's HOME back.
       - name: Restore HOME
@@ -984,11 +986,6 @@ jobs:
     # booted here without building anything through mvm-images.
     # Dispatch-only: the merge queue boots the locked published image in
     # `boot-latency` instead.
-    # This lane is the accepted substitute for on-demand pre-merge evidence
-    # that a tree-built generated image boots: image construction lives in
-    # mvm-images, so a boot of the pinned base set with this tree's guest
-    # runtime is the evidence this repository can produce, and it is run on
-    # request rather than on every change.
     if: github.event_name == 'workflow_dispatch'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04

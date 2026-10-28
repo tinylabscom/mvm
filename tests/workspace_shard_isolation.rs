@@ -1,99 +1,175 @@
 use std::fs;
 
-#[cfg(unix)]
 #[test]
-fn test_state_isolation_handles_missing_home_and_preserves_toolchain_locations() {
-    use std::os::unix::fs::PermissionsExt;
-    use std::process::Command;
-
+fn workspace_isolation_resolves_runner_home_and_refuses_missing_accounts() {
     for workflow in [
         ".github/workflows/workspace-shard.yml",
         ".github/workflows/ci-main.yml",
     ] {
-        let text = fs::read_to_string(workflow).unwrap();
-        let step = text
-            .split("      - name: Isolate test state\n")
-            .nth(1)
-            .unwrap();
-        let script = step
-            .split("        run: |\n")
-            .nth(1)
-            .unwrap()
-            .lines()
-            .take_while(|line| line.is_empty() || line.starts_with("          "))
-            .map(|line| line.strip_prefix("          ").unwrap_or(""))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for home_state in ["unset", "empty", "present"] {
-            let scratch = tempfile::tempdir().unwrap();
-            let original_home = scratch.path().join("original home");
-            let bin = scratch.path().join("bin");
-            fs::create_dir(&original_home).unwrap();
-            fs::create_dir(&bin).unwrap();
-            for (name, contents) in [
-                (
-                    "getent",
-                    "#!/bin/sh\nprintf 'runner:x:1000:1000:runner:%s:/bin/sh\\n' \"$EXPECTED_HOME\"\n",
-                ),
-                (
-                    "rustup",
-                    "#!/bin/sh\n[ \"$1 $2\" = 'show home' ] || exit 2\nprintf '%s\\n' \"$EXPECTED_RUSTUP\"\n",
-                ),
+        check_isolation(workflow);
+    }
+}
+
+fn check_isolation(workflow: &str) {
+    let worker = fs::read_to_string(workflow).unwrap();
+    let script = worker
+        .split("- name: Isolate test state\n")
+        .nth(1)
+        .unwrap()
+        .split("        run: |\n")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .take_while(|line| line.is_empty() || line.starts_with("          "))
+        .map(|line| line.strip_prefix("          ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Mock account/toolchain discovery so the Linux setup is testable on macOS.
+    let script = format!(
+        r#"
+id() {{ [[ "$*" == "-u" ]] || return 1; printf '1234\n'; }}
+rustup() {{
+  [[ "$*" == "show home" && "$ACCOUNT" != "cache-overrides" ]] || return 1
+  printf '/installed/rustup\n'
+}}
+mkdir() {{
+  command mkdir "$@" || return
+  shift 3
+  printf '%s\n' "$@" >> "$OWNED_DIRS"
+}}
+getent() {{
+  [[ "$*" == "passwd 1234" ]] || return 1
+  case "$ACCOUNT" in
+    missing) return 0 ;;
+    failed) return 2 ;;
+    *) printf 'runner:x:1234:1234::%s:/bin/bash\n' "$ACCOUNT_HOME" ;;
+  esac
+}}
+{script}
+"#
+    );
+    for case in [
+        "missing-home",
+        "empty-home",
+        "explicit-home",
+        "cache-overrides",
+        "missing",
+        "failed",
+        "nonexistent-home",
+    ] {
+        let temp =
+            std::env::temp_dir().join(format!("mvm-isolation-{}-{case}", std::process::id()));
+        fs::create_dir(&temp).unwrap();
+        let account_home = temp.join("account home");
+        let explicit_home = temp.join("explicit home");
+        fs::create_dir(&account_home).unwrap();
+        fs::create_dir(&explicit_home).unwrap();
+        let env_file = temp.join("env");
+        let owned_dirs = temp.join("owned-dirs");
+        let run_id = format!(
+            "{}{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        );
+        let base = if workflow.ends_with("workspace-shard.yml") {
+            std::path::PathBuf::from(format!("/tmp/mvm-w-{run_id}-1-1"))
+        } else {
+            temp.join(format!("mvm-w-{run_id}-1-1"))
+        };
+        let mut command = std::process::Command::new("bash");
+        command
+            .args(["--noprofile", "--norc", "-c", &script])
+            .env_remove("HOME")
+            .env_remove("CARGO_HOME")
+            .env_remove("RUSTUP_HOME")
+            .env("ACCOUNT", case)
+            .env("ACCOUNT_HOME", &account_home)
+            .env("OWNED_DIRS", &owned_dirs)
+            .env("RUNNER_TEMP", &temp)
+            .env("GITHUB_ENV", &env_file)
+            .env("GITHUB_RUN_ID", &run_id)
+            .env("GITHUB_RUN_ATTEMPT", "1")
+            .env("SHARD", "1");
+        match case {
+            "empty-home" => {
+                command.env("HOME", "");
+            }
+            "explicit-home" => {
+                command.env("HOME", &explicit_home);
+            }
+            "cache-overrides" => {
+                command
+                    .env("CARGO_HOME", "/cache cargo")
+                    .env("RUSTUP_HOME", "/cache rustup");
+            }
+            "nonexistent-home" => {
+                command.env("ACCOUNT_HOME", temp.join("absent"));
+            }
+            _ => {}
+        }
+        let output = command.output().unwrap();
+        // Only remove directories whose successful creation this invocation recorded.
+        let created = fs::read_to_string(&owned_dirs).unwrap();
+        assert_eq!(created.lines().next().unwrap(), base.to_str().unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [
+                &base,
+                &base.join("home"),
+                &base.join("mvm"),
+                &base.join("tmp"),
             ] {
-                let path = bin.join(name);
-                fs::write(&path, contents).unwrap();
-                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            let github_env = scratch.path().join("github-env");
-            let mut command = Command::new("bash");
-            command
-                .args(["-c", &script])
-                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-                .env("EXPECTED_HOME", &original_home)
-                .env("EXPECTED_RUSTUP", "/installed/rustup")
-                .env("CARGO_HOME", "/installed/cargo")
-                .env_remove("RUSTUP_HOME")
-                .env("RUNNER_TEMP", scratch.path())
-                .env("GITHUB_RUN_ID", "123")
-                .env("GITHUB_RUN_ATTEMPT", "1")
-                .env("SHARD", "1")
-                .env("GITHUB_ENV", &github_env);
-            match home_state {
-                "unset" => {
-                    command.env_remove("HOME");
-                }
-                "empty" => {
-                    command.env("HOME", "");
-                }
-                _ => {
-                    command
-                        .env("HOME", &original_home)
-                        .env("RUSTUP_HOME", "/installed/rustup");
-                }
-            }
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{workflow}, HOME {home_state}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let exported = fs::read_to_string(github_env).unwrap();
-            assert!(exported.contains(&format!(
-                "RUNNER_ORIGINAL_HOME={}\n",
-                original_home.display()
-            )));
-            assert!(exported.contains("CARGO_HOME=/installed/cargo\n"));
-            assert!(exported.contains("RUSTUP_HOME=/installed/rustup\n"));
-            let base = scratch.path().join("mvm-w-123-1-1");
-            for (name, variable) in [("home", "HOME"), ("mvm", "MVM_HOME"), ("tmp", "TMPDIR")] {
-                let path = base.join(name);
-                assert!(exported.contains(&format!("{variable}={}\n", path.display())));
                 assert_eq!(
-                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777,
                     0o700
                 );
             }
         }
+        if matches!(case, "missing" | "failed" | "nonexistent-home") {
+            assert!(!output.status.success(), "{case} must refuse isolation");
+            assert!(!env_file.exists(), "{case} must not export partial state");
+            if case != "failed" {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("cannot determine the runner home directory")
+                );
+            }
+            fs::remove_dir_all(&base).unwrap();
+            fs::remove_dir_all(&temp).unwrap();
+            continue;
+        }
+        assert!(
+            output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let vars = fs::read_to_string(&env_file).unwrap();
+        let original = vars
+            .lines()
+            .find_map(|line| line.strip_prefix("RUNNER_ORIGINAL_HOME="))
+            .unwrap();
+        let expected_home = if case == "explicit-home" {
+            &explicit_home
+        } else {
+            &account_home
+        };
+        assert_eq!(original, expected_home.to_str().unwrap());
+        if case == "cache-overrides" {
+            assert!(vars.contains("CARGO_HOME=/cache cargo\n"));
+            assert!(vars.contains("RUSTUP_HOME=/cache rustup\n"));
+        } else {
+            assert!(vars.contains(&format!("CARGO_HOME={original}/.cargo\n")));
+            assert!(vars.contains("RUSTUP_HOME=/installed/rustup\n"));
+        }
+        assert!(vars.contains(&format!("HOME={}/home\n", base.display())));
+        assert!(vars.contains(&format!("MVM_HOME={}/mvm\n", base.display())));
+        assert!(vars.contains(&format!("TMPDIR={}/tmp\n", base.display())));
+        fs::remove_dir_all(&base).unwrap();
+        fs::remove_dir_all(&temp).unwrap();
     }
 }
 
@@ -206,20 +282,21 @@ fn workspace_shards_keep_mutable_state_per_worker_run() {
         .expect("read workspace shard workflow");
 
     assert!(
-        worker.contains(
-            "base=\"${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
-        ),
+        worker.contains("base=\"/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""),
         "the persistent runner must not reuse another job's mutable state"
     );
     assert!(worker.contains("mkdir -m 700 -- \"$base\""));
     assert!(worker.contains("mkdir -m 700 -- \"$base/home\" \"$base/mvm\" \"$base/tmp\""));
+    assert!(worker.contains("runner_home=\"${HOME:-}\""));
+    assert!(worker.contains("getent passwd \"$(id -u)\""));
+    assert!(worker.contains("cannot determine the runner home directory"));
     assert!(worker.contains("CARGO_HOME=%s\\nRUSTUP_HOME=%s\\n"));
     assert!(worker.contains("\"$base/home\" \"$base/mvm\" \"$base/tmp\""));
     assert!(worker.contains(">> \"$GITHUB_ENV\""));
     assert!(worker.contains("if: always()"));
     assert!(
         worker.contains(
-            "bash nix/ops/hetzner/job-cleanup.sh \"${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
+            "bash nix/ops/hetzner/job-cleanup.sh \"/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
         ),
         "the always-run last step must hand the same base to the cleanup script"
     );

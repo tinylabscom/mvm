@@ -187,15 +187,21 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[1-9]$ ]]
-          original_home="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
-          [[ "$original_home" = /* && -d "$original_home" ]]
-          rustup_home="${RUSTUP_HOME:-$(rustup show home)}"
-          base="${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
+          base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
           mkdir -m 700 -- "$base"
           mkdir -m 700 -- "$base/home" "$base/mvm" "$base/tmp"
+          runner_home="${HOME:-}"
+          if [[ -z "$runner_home" ]]; then
+            runner_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+          fi
+          [[ -n "$runner_home" && -d "$runner_home" ]] || {
+            echo "cannot determine the runner home directory" >&2
+            exit 1
+          }
+          rustup_home="${RUSTUP_HOME:-$(rustup show home)}"
           {
-            printf 'RUNNER_ORIGINAL_HOME=%s\n' "$original_home"
-            printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$original_home/.cargo}" "$rustup_home"
+            printf 'RUNNER_ORIGINAL_HOME=%s\n' "$runner_home"
+            printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$runner_home/.cargo}" "$rustup_home"
             printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
           } >> "$GITHUB_ENV"
 
@@ -285,4 +291,4 @@ jobs:
           if [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]]; then
             export ARCHIVE_ROOT="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           fi
-          bash nix/ops/hetzner/job-cleanup.sh "${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
+          bash nix/ops/hetzner/job-cleanup.sh "/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
