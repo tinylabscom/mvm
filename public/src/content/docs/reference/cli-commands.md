@@ -332,6 +332,61 @@ The signature option is forwarded to the shared refusal, never ignored.
 | `mvmctl ops config edit`              | Open the config file in $EDITOR (falls back to nano)                 |
 | `mvmctl ops config set <key> <value>` | Set a single config key (e.g. `mvmctl ops config set dev_vm_cpus 4`) |
 
+### Host egress upstream proxy
+
+The host forward leg supports HTTP CONNECT and SOCKS5 upstream proxies. This is
+operator transport configuration, not a guest egress grant: policy still
+authorizes the real destination before choosing a proxy, and `NO_PROXY` cannot
+make a denied destination reachable.
+
+Set the override in `$MVM_HOME/config/config.toml` (by default,
+`~/.mvm/config/config.toml`) with `mvmctl ops config edit`:
+
+```toml
+[egress_proxy]
+https = "http://proxy.corp:3128"
+http = "socks5h://proxy.corp:1080"
+no_proxy = "localhost,.internal.example"
+```
+
+Precedence is a complete configuration replacement, not a per-key merge:
+
+1. An explicit endpoint spawn-builder `egress_proxy` value takes precedence.
+2. If the host config contains `[egress_proxy]`, only that table applies.
+   Omitted, empty, or whitespace-only `https`/`http` values select direct
+   transport for that scheme. Omitted or empty `no_proxy` means no bypasses.
+   An empty `[egress_proxy]` table explicitly disables ambient proxying.
+3. Without that table, the host process inherits `https_proxy`/`HTTPS_PROXY`
+   and `http_proxy`/`HTTP_PROXY`, with `all_proxy`/`ALL_PROXY` as the fallback
+   for either scheme, and `no_proxy`/`NO_PROXY` for bypasses. Lowercase wins;
+   empty or whitespace-only values count as unset (an empty scheme value
+   still permits the `ALL_PROXY` fallback).
+
+Proxy URLs accept `http`, `socks5`, and `socks5h`. `https://` proxy URLs are
+rejected until TLS-to-proxy is supported; use an ordinary `http://` CONNECT
+proxy for HTTPS destinations (destination TLS remains supported). HTTP proxy
+authentication is sent to the proxy over plaintext, so use it only on a trusted
+network. `mvmctl ops config show` redacts the proxy table's populated values without
+changing the saved configuration. SOCKS5 resolves the
+destination through the proxy. Bypasses match exact hosts or domain suffixes
+(case-insensitive, ignoring a leading dot); `*` bypasses every proxy.
+CIDR notation is not interpreted. The proxy is trusted host infrastructure:
+it resolves proxied destinations outside the direct dialer's address guard.
+It does not expand the admitted plan's destination allow-list.
+
+Malformed proxy URLs, invalid table keys/types, unreadable host config, and
+malformed TOML refuse endpoint launch rather than falling back to ambient
+variables or direct transport. This strict read does not create a config file.
+`mvmctl doctor` reports the same resolved transport posture with proxy
+userinfo omitted; malformed values also produce credential-free diagnostics.
+The override applies to workload and builder endpoint launches.
+
+Keep credential-bearing config private and out of version control; do not put
+credentials in shell command arguments or diagnostic captures. The example
+intentionally uses no authentication. Flow audit routing remains unchanged:
+it attributes the real destination and distinguishes proxy, bypass, and direct
+forward legs.
+
 ## Audit
 
 | Command                                                                                                  | Description                                                                                                                                                                                                                                                                                                                                                             |
@@ -1828,6 +1883,16 @@ silently selecting a weaker tier.
 
 Checkpoint blobs are stored under the configured checkpoint store (`MVM_HOME` / `~/.mvm` via the core path helpers). The audit chain records `checkpoint.created`, `checkpoint.restored`, and `checkpoint.forked` entries with content hashes; restore and fork refuse tampered checkpoint content before booting.
 
+`machine checkpoint ls` delegates catalog reads to the client. `--json` returns
+complete checkpoint metadata in ID order, matching `checkpoint.list` in hostlib
+ABI 1.10 and `mvm.checkpoint.list()` in Python and TypeScript. Legacy omitted
+fields remain omitted. A missing store is empty; staging, non-directory entries,
+and directories without `meta.json` are ignored. Invalid metadata or IDs,
+metadata/directory ID mismatches, symlinked metadata, non-regular metadata files,
+and metadata exceeding 16 MiB refuse the entire listing. Catalog reads use held
+directory handles and do not open checkpoint content, verify lineage, or grant
+permission to restore.
+
 The rootfs and memory image are stored as 1 MiB chunks shared, by hard link, with every other checkpoint of the same tenant that holds the same bytes; each blob's recorded hash is the digest of its chunk index. A checkpoint from a pre-release that stored those images as whole files is refused by restore and fork, with a message naming it. Remove it with `mvmctl machine checkpoint rm <checkpoint>` and capture the machine again; there is no migration.
 
 ## Durable Agent Sessions
@@ -2024,7 +2089,10 @@ mvmctl run --launch-plan ./launch.json                # launch-plan entrypoint
 
 `--launch-plan` accepts either of two JSON shapes — the shape is
 auto-detected. Only the entrypoint is consumed (image selection
-still comes from `--manifest` or the bundled default in v1). Both
+still comes from `--manifest` or the bundled default in v1). A launch
+plan never names or fetches artifacts: its `image` and `source` fields
+are ignored, and any artifact a workload needs arrives through signed
+bundle admission or a pack, so a plan runs with no pack at all. Both
 shapes were historically produced by the `mvmforge` toolchain
 ([migration guide](/guides/mvmforge-migration/)); `mvmctl dev compile`
 is the canonical producer today.

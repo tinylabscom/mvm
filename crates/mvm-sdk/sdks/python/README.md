@@ -11,6 +11,19 @@ pip install mvm
 `mvmctl` (the Rust host CLI) is distributed separately and does the building,
 booting, and signing. This package is the **authoring** surface it reads.
 
+## Read the local checkpoint catalog
+
+`mvm.checkpoint.list()` calls the client-owned `checkpoint.list` host-library
+method (ABI 1.10); it never runs `mvmctl` or boots a VM. It returns complete
+metadata dictionaries in checkpoint-ID order, with legacy omitted fields left
+omitted. A missing catalog is empty. Invalid metadata, mismatched IDs, unsafe
+metadata paths, non-regular metadata files, and metadata over 16 MiB fail the
+whole operation with a host-library error, not a partial list. Staging,
+non-directory entries and directories without metadata are ignored.
+
+This is the same data as `mvmctl machine checkpoint ls --json`. Listing neither
+opens checkpoint content nor authenticates lineage or grants restore authority.
+
 ## Quick start
 
 ```python

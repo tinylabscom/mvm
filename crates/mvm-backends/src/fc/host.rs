@@ -917,6 +917,7 @@ pub(crate) fn resume_preloaded_fork_child(
     late_volumes: &[mvm_vmm::driver::traits::LateVolumeAttach],
 ) -> anyhow::Result<()> {
     use anyhow::Context as _;
+    let started = std::time::Instant::now();
     let verified = (|| -> anyhow::Result<()> {
         let expected = super::runtime_artifacts::authenticated_fork_capture(
             child_dir,
@@ -929,14 +930,19 @@ pub(crate) fn resume_preloaded_fork_child(
                 reseeded_identity_sha256: None,
             },
         )?;
+        mvm_vmm::agent_debug::phase("fc-resume-verify", started, "phase=capture_authenticated");
         super::runtime_artifacts::verify_restored_layout(io, expected)
     })();
     if let Err(error) = verified {
         let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(io);
         return Err(error.context("prepared runtime verification"));
     }
+    mvm_vmm::agent_debug::phase("fc-resume-verify", started, "phase=layout_verified");
     attach_late_volumes(io, late_volumes)?;
-    mvm_vmm::snapshot::resume_verified_or_teardown(io)
+    mvm_vmm::agent_debug::phase("fc-resume-verify", started, "phase=volumes_attached");
+    let resumed = mvm_vmm::snapshot::resume_verified_or_teardown(io);
+    mvm_vmm::agent_debug::phase("fc-resume-verify", started, "phase=resumed");
+    resumed
 }
 
 impl FcForkRestorer {

@@ -177,8 +177,16 @@ fn the_macos_host_gate_defaults_to_blocking() {
         inputs.contains("macos_blocks_on_unusable_host:"),
         "the shared workflow must declare the macOS host gate as an input"
     );
+    let macos_gate = inputs
+        .split("      macos_blocks_on_unusable_host:")
+        .nth(1)
+        .expect("macOS host gate input")
+        .lines()
+        .take_while(|line| line.trim().is_empty() || line.starts_with("        "))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        inputs.contains("default: true"),
+        macos_gate.contains("default: true"),
         "the macOS host gate must default to blocking, so a caller that says \
          nothing gets the release-safe behaviour"
     );
@@ -209,9 +217,11 @@ fn the_macos_lane_runs_whenever_the_host_probe_says_the_host_can_boot() {
         "the macOS lane must wait on the host check"
     );
     assert!(
-        macos.contains("if: needs.e2e-docs-macos-host-check.outputs.supported == 'true'"),
-        "the macOS lane must run exactly when the host probe says the host can \
-         boot a guest"
+        macos.contains(
+            "if: inputs.run_macos && needs.e2e-docs-macos-host-check.outputs.supported == 'true'"
+        ),
+        "a selected macOS lane must run exactly when the host probe says the \
+         host can boot a guest"
     );
 }
 

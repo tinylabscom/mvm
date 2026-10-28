@@ -11,6 +11,7 @@ use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
 use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 
 mod capture_custody;
+mod catalog;
 mod chunks;
 mod custody;
 mod diff;
@@ -148,25 +149,7 @@ impl CheckpointStore {
     }
 
     pub fn list(&self) -> Result<Vec<CheckpointMeta>> {
-        let mut out = Vec::new();
-        let entries = match std::fs::read_dir(&self.root) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(e).context("reading checkpoints dir"),
-        };
-        for entry in entries {
-            let entry = entry?;
-            // A dot-named directory is the staging area, never a checkpoint.
-            if !entry.file_type()?.is_dir() || entry.file_name().to_string_lossy().starts_with('.')
-            {
-                continue;
-            }
-            let id = CheckpointId::new(entry.file_name().to_string_lossy().into_owned());
-            if self.meta_path(&id).exists() {
-                out.push(self.read_meta(&id)?);
-            }
-        }
-        Ok(out)
+        catalog::list(self)
     }
 
     pub fn by_tag(&self, tag: &str) -> Result<Vec<CheckpointMeta>> {

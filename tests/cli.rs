@@ -4,6 +4,35 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn ops_config_show_redacts_proxy_credentials_without_rewriting_config() {
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let path = config_dir.join("config.toml");
+    let raw = "[egress_proxy]\nhttps = 'http://username-token:password-token@proxy.corp:3128'\nhttp = 'invalid username-token:password-token'\n";
+    std::fs::write(&path, raw).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .args(["ops", "config", "show"])
+        .output()
+        .expect("show isolated config");
+    assert!(out.status.success());
+    for bytes in [&out.stdout, &out.stderr] {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains("username-token"));
+        assert!(!text.contains("password-token"));
+    }
+    let shown: mvm_core::user_config::MvmConfig =
+        toml::from_str(std::str::from_utf8(&out.stdout).unwrap()).unwrap();
+    assert_eq!(
+        shown.egress_proxy.unwrap().https.as_deref(),
+        Some("<redacted>")
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+}
+
+#[test]
 fn caller_identity_help_exposes_explicit_enrollment_and_read_only_show() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["env", "caller-identity", "--help"])
@@ -424,6 +453,45 @@ fn machine_create_readme_form_persists_the_named_spec() {
     assert_eq!(spec["image"], "nginx");
     assert_eq!(spec["cpus"], 2);
     assert_eq!(spec["memory"], "512M");
+}
+
+#[test]
+fn checkpoint_ls_json_preserves_complete_and_legacy_catalog_metadata() {
+    let home = tempfile::tempdir().expect("isolated checkpoint home");
+    let list = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .env("MVM_HOME", home.path())
+            .env("HOME", home.path())
+            .env("MVM_NO_AUTO_DEV", "1")
+            .args(["machine", "checkpoint", "ls", "--json"])
+            .output()
+            .expect("run documented checkpoint ls command");
+        assert!(
+            output.status.success(),
+            "checkpoint ls --json failed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("checkpoint ls --json emits only catalog JSON")
+    };
+    assert_eq!(list(), serde_json::json!([]), "missing catalog is empty");
+
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/checkpoint/catalog.json"))
+            .expect("shared checkpoint catalog fixture");
+    for record in fixture.as_array().expect("catalog records").iter().rev() {
+        let directory = home
+            .path()
+            .join("checkpoints")
+            .join(record["id"].as_str().expect("checkpoint id"));
+        std::fs::create_dir_all(&directory).expect("checkpoint directory");
+        std::fs::write(
+            directory.join("meta.json"),
+            serde_json::to_vec(record).expect("serialize fixture metadata"),
+        )
+        .expect("write fixture metadata");
+    }
+    assert_eq!(list(), fixture);
 }
 
 /// `deployments ls` inventories the local-first deploy store
