@@ -32,9 +32,19 @@ const WORKSPACE_SNAPSHOT_SKIP: &[&str] = &[
 
 /// Copy a source tree, pruning local state at every depth.
 ///
+/// The active mvm home is pruned too, wherever it sits. A home kept inside the
+/// checkout (a worktree-local or per-run one) holds every cached image and the
+/// running builder's own disks, and staging it would pack gigabytes into the
+/// guest's input disk before the build starts.
+///
 /// Links are preserved on Unix, never dereferenced. Other hosts refuse links
 /// rather than requiring link-creation privileges or reading host targets.
 pub(crate) fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let home = std::fs::canonicalize(mvm_core::config::mvm_home()).ok();
+    copy_pruned(src, dst, home.as_deref())
+}
+
+fn copy_pruned(src: &Path, dst: &Path, home: Option<&Path>) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -49,7 +59,10 @@ pub(crate) fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
         if file_type.is_symlink() {
             copy_link(&from, &to)?;
         } else if file_type.is_dir() {
-            copy_dir_filtered(&from, &to)?;
+            if home.is_some_and(|home| std::fs::canonicalize(&from).is_ok_and(|dir| dir == home)) {
+                continue;
+            }
+            copy_pruned(&from, &to, home)?;
         } else {
             std::fs::copy(&from, &to)?;
         }
@@ -99,6 +112,23 @@ mod tests {
         for path in ["nested/target", ".git", "result-build"] {
             assert!(!destination.path().join(path).exists());
         }
+    }
+
+    #[test]
+    fn the_active_mvm_home_inside_the_tree_is_not_staged() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let home = source.path().join(".mvm-e2e-1-1-0");
+        std::fs::create_dir_all(home.join("vms")).unwrap();
+        std::fs::write(home.join("vms/disk.img"), b"gigabytes").unwrap();
+        std::fs::write(source.path().join("flake.nix"), b"source").unwrap();
+        env.set("MVM_HOME", &home);
+
+        copy_dir_filtered(source.path(), destination.path()).unwrap();
+
+        assert!(destination.path().join("flake.nix").exists());
+        assert!(!destination.path().join(".mvm-e2e-1-1-0").exists());
     }
 
     #[test]
