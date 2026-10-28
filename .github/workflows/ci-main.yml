@@ -484,6 +484,10 @@ jobs:
       - name: Run the aarch64 workspace tests
         run: cargo nextest run --workspace --exclude mvm-fs --all-targets
 
+      - name: Stress short-output streaming on native aarch64 Linux
+        working-directory: crates/mvm-builder-guest
+        run: cargo nextest run --stress-count 200 -E 'test(run_job_matches_streaming_for_short_output)'
+
       # The cache action saves in a post step; hand it the runner's HOME back.
       - name: Restore HOME
         if: always()
