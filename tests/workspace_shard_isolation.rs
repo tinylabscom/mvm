@@ -1,5 +1,102 @@
 use std::fs;
 
+#[cfg(unix)]
+#[test]
+fn test_state_isolation_handles_missing_home_and_preserves_toolchain_locations() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    for workflow in [
+        ".github/workflows/workspace-shard.yml",
+        ".github/workflows/ci-main.yml",
+    ] {
+        let text = fs::read_to_string(workflow).unwrap();
+        let step = text
+            .split("      - name: Isolate test state\n")
+            .nth(1)
+            .unwrap();
+        let script = step
+            .split("        run: |\n")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .take_while(|line| line.is_empty() || line.starts_with("          "))
+            .map(|line| line.strip_prefix("          ").unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for home_state in ["unset", "empty", "present"] {
+            let scratch = tempfile::tempdir().unwrap();
+            let original_home = scratch.path().join("original home");
+            let bin = scratch.path().join("bin");
+            fs::create_dir(&original_home).unwrap();
+            fs::create_dir(&bin).unwrap();
+            for (name, contents) in [
+                (
+                    "getent",
+                    "#!/bin/sh\nprintf 'runner:x:1000:1000:runner:%s:/bin/sh\\n' \"$EXPECTED_HOME\"\n",
+                ),
+                (
+                    "rustup",
+                    "#!/bin/sh\n[ \"$1 $2\" = 'show home' ] || exit 2\nprintf '%s\\n' \"$EXPECTED_RUSTUP\"\n",
+                ),
+            ] {
+                let path = bin.join(name);
+                fs::write(&path, contents).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let github_env = scratch.path().join("github-env");
+            let mut command = Command::new("bash");
+            command
+                .args(["-c", &script])
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("EXPECTED_HOME", &original_home)
+                .env("EXPECTED_RUSTUP", "/installed/rustup")
+                .env("CARGO_HOME", "/installed/cargo")
+                .env_remove("RUSTUP_HOME")
+                .env("RUNNER_TEMP", scratch.path())
+                .env("GITHUB_RUN_ID", "123")
+                .env("GITHUB_RUN_ATTEMPT", "1")
+                .env("SHARD", "1")
+                .env("GITHUB_ENV", &github_env);
+            match home_state {
+                "unset" => {
+                    command.env_remove("HOME");
+                }
+                "empty" => {
+                    command.env("HOME", "");
+                }
+                _ => {
+                    command
+                        .env("HOME", &original_home)
+                        .env("RUSTUP_HOME", "/installed/rustup");
+                }
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{workflow}, HOME {home_state}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let exported = fs::read_to_string(github_env).unwrap();
+            assert!(exported.contains(&format!(
+                "RUNNER_ORIGINAL_HOME={}\n",
+                original_home.display()
+            )));
+            assert!(exported.contains("CARGO_HOME=/installed/cargo\n"));
+            assert!(exported.contains("RUSTUP_HOME=/installed/rustup\n"));
+            let base = scratch.path().join("mvm-w-123-1-1");
+            for (name, variable) in [("home", "HOME"), ("mvm", "MVM_HOME"), ("tmp", "TMPDIR")] {
+                let path = base.join(name);
+                assert!(exported.contains(&format!("{variable}={}\n", path.display())));
+                assert_eq!(
+                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn dedicated_linux_runners_use_their_cpus_without_changing_shared_host_limits() {
     let cache = fs::read_to_string(".github/actions/rust-cache/action.yml").unwrap();
