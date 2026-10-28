@@ -554,6 +554,9 @@ jobs:
       - name: Dev-run guard tests
         run: bash scripts/dev-run-guard.test.sh
 
+      - name: Zig bootstrap tests
+        run: python3 scripts/test_install_zigbuild.py
+
       - name: ShellCheck added scripts
         if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'
         env:
