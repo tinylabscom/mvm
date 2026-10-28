@@ -130,6 +130,29 @@ async fn exercise_https_connect(cert_name: &str, trust_origin: bool, expect_succ
     .expect("HTTPS-over-CONNECT test must finish within its deadline");
 }
 
+#[tokio::test]
+async fn https_proxy_scheme_is_rejected_before_any_dial() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let result = async {
+        let proxy = Proxy::parse(&format!("https://username-token:password-token@{addr}"))?;
+        let _client = Client::builder().proxy(ProxyConfig::all(proxy)).build();
+        Ok::<_, mvm_http::ProxyError>(())
+    }
+    .await;
+    let err = result.unwrap_err();
+    assert!(matches!(err, mvm_http::ProxyError::Scheme));
+    for diagnostic in [err.to_string(), format!("{err:?}")] {
+        assert!(!diagnostic.contains("username-token"));
+        assert!(!diagnostic.contains("password-token"));
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
 /// An HTTP proxy that records the request line it was given and answers it
 /// itself, standing in for the origin.
 async fn http_proxy_recording_request_line() -> (u16, tokio::task::JoinHandle<String>) {

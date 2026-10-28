@@ -376,6 +376,64 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn control_frame_timeout_after_partial_read_is_not_retryable() {
+        struct PartialTimeout {
+            bytes: std::io::Cursor<Vec<u8>>,
+            kind: std::io::ErrorKind,
+        }
+
+        impl Read for PartialTimeout {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.bytes.position() < u64::try_from(self.bytes.get_ref().len()).unwrap() {
+                    self.bytes.read(buf)
+                } else {
+                    Err(self.kind.into())
+                }
+            }
+        }
+
+        // Both an incomplete prefix and an incomplete body have consumed wire
+        // bytes that a fresh read cannot safely interpret as another prefix.
+        for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::TimedOut] {
+            for bytes in [
+                vec![0],
+                vec![0, 0],
+                vec![0, 0, 0, 4],
+                vec![0, 0, 0, 4, 1, 2],
+            ] {
+                let error = read_sealed_frame(
+                    &mut PartialTimeout {
+                        bytes: std::io::Cursor::new(bytes),
+                        kind,
+                    },
+                    MAX_SEALED_FRAME_SIZE,
+                )
+                .expect_err("partial frame must fail closed");
+                assert!(
+                    matches!(error, SessionError::InvalidHandshake(_)),
+                    "partial frame must not look like an idle-stream timeout: {error}"
+                );
+            }
+            let error = read_sealed_frame(
+                &mut PartialTimeout {
+                    bytes: std::io::Cursor::new(Vec::new()),
+                    kind,
+                },
+                MAX_SEALED_FRAME_SIZE,
+            )
+            .expect_err("idle stream times out");
+            assert!(matches!(error, SessionError::Io(ref io) if io.kind() == kind));
+        }
+        for bytes in [vec![], vec![0], vec![0, 0, 0, 4, 1, 2]] {
+            let error = read_sealed_frame(&mut bytes.as_slice(), MAX_SEALED_FRAME_SIZE)
+                .expect_err("EOF remains a transport hangup");
+            assert!(
+                matches!(error, SessionError::Io(ref io) if io.kind() == std::io::ErrorKind::UnexpectedEof)
+            );
+        }
+    }
+
     // ========================================================================
     // Handshake tests
     // ========================================================================

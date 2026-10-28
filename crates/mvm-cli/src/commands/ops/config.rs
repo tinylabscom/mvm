@@ -37,9 +37,21 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 fn config_show() -> Result<()> {
-    let cfg = mvm_core::user_config::load(None);
+    config_show_to(&mut std::io::stdout())
+}
+
+fn config_show_to(out: &mut impl std::io::Write) -> Result<()> {
+    let mut cfg = mvm_core::user_config::load(None);
+    // Redact only this display copy, never the persisted or endpoint wire config.
+    if let Some(proxy) = cfg.egress_proxy.as_mut() {
+        for value in [&mut proxy.https, &mut proxy.http, &mut proxy.no_proxy] {
+            if value.is_some() {
+                *value = Some("<redacted>".to_string());
+            }
+        }
+    }
     let text = toml::to_string_pretty(&cfg).context("Failed to serialize config")?;
-    print!("{}", text);
+    out.write_all(text.as_bytes())?;
     Ok(())
 }
 
@@ -70,4 +82,36 @@ fn config_set(key: &str, value: &str) -> Result<()> {
     // fact record of what changed.
     mvm_core::audit_emit!(ConfigChange, "key={key} value={value}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_output_redacts_proxy_without_changing_persistence() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let path = mvm_core::user_config::config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let raw = "[egress_proxy]\nhttps = 'http://username-token:password-token@proxy.corp:3128'\nhttp = 'malformed username-token:password-token'\nno_proxy = 'internal.example'\n";
+        std::fs::write(&path, raw).unwrap();
+        let mut output = Vec::new();
+        config_show_to(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains("username-token"));
+        assert!(!output.contains("password-token"));
+        let shown: MvmConfig = toml::from_str(&output).unwrap();
+        assert_eq!(
+            shown.egress_proxy.unwrap().https.as_deref(),
+            Some("<redacted>")
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+        assert!(
+            toml::to_string(&mvm_core::user_config::load(None))
+                .unwrap()
+                .contains("password-token")
+        );
+    }
 }

@@ -2,6 +2,7 @@
 title: "No CVE, no patch, no warning: the malicious models on Hugging Face"
 description: "The ~100 backdoored models JFrog found on Hugging Face weren't a library bug — they were the model format doing what it was designed to do: run code the moment you load it. Here's the attack, and how MVM scans the model and contains what runs."
 date: 2026-09-16
+shareHook: "A model file can run code before you read the first weight. Why malicious models need more than a patch."
 tags:
   - security
   - supply-chain

@@ -83,7 +83,7 @@ impl ConfigWatcher {
                                 continue;
                             }
                             let reload = match std::fs::read_to_string(&watch_file) {
-                                Ok(text) => match toml::from_str::<MvmConfig>(&text) {
+                                Ok(text) => match mvm_core::user_config::parse(&text) {
                                     Ok(cfg) => ConfigReloadEvent::Reloaded(Box::new(cfg)),
                                     Err(e) => ConfigReloadEvent::ParseError(e.to_string()),
                                 },

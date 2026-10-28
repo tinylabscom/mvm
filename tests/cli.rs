@@ -4,6 +4,35 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn ops_config_show_redacts_proxy_credentials_without_rewriting_config() {
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let path = config_dir.join("config.toml");
+    let raw = "[egress_proxy]\nhttps = 'http://username-token:password-token@proxy.corp:3128'\nhttp = 'invalid username-token:password-token'\n";
+    std::fs::write(&path, raw).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .args(["ops", "config", "show"])
+        .output()
+        .expect("show isolated config");
+    assert!(out.status.success());
+    for bytes in [&out.stdout, &out.stderr] {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains("username-token"));
+        assert!(!text.contains("password-token"));
+    }
+    let shown: mvm_core::user_config::MvmConfig =
+        toml::from_str(std::str::from_utf8(&out.stdout).unwrap()).unwrap();
+    assert_eq!(
+        shown.egress_proxy.unwrap().https.as_deref(),
+        Some("<redacted>")
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+}
+
+#[test]
 fn caller_identity_help_exposes_explicit_enrollment_and_read_only_show() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["env", "caller-identity", "--help"])

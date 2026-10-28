@@ -4291,6 +4291,7 @@ dependencies = [
  "mvm-contract",
  "mvm-core",
  "mvm-fs",
+ "mvm-http",
  "mvm-macho-sign",
  "mvm-net",
  "plist",
