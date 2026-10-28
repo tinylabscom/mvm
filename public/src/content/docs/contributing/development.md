@@ -8,6 +8,42 @@ Working with an AI coding agent on this repo? Read the
 it covers claiming issues, the mandatory worktree flow, the Graft/Serena tooling
 split, the fast feedback ladder, and what CI does and does not gate.
 
+## macOS documented-surface evidence
+
+After the change under test has landed on `main`, an authorized maintainer can
+collect evidence without running the Release workflow:
+
+```bash
+gh workflow run e2e-docs-macos-evidence.yml --repo tinylabscom/mvm --ref main
+gh run list --repo tinylabscom/mvm --workflow e2e-docs-macos-evidence.yml --limit 5
+```
+
+The dispatch admits only this repository's `main`, has `contents: read` only,
+inherits no secrets, and neither publishes nor deploys. The run's `headSha`
+(`gh run view --repo tinylabscom/mvm --json headSha,url`) identifies the tested
+commit: the local reusable workflow and default checkout both use that event
+SHA, not a later moving `main`. There is no arbitrary ref or command input.
+
+This runs the complete existing macOS HVF suite on the self-hosted Apple Silicon
+runner, including both `0/2` and `1/2` shards, live and snapshot coverage, and
+strict skip accounting. No runtime candidate is supplied; only scenarios tagged
+`@runtime_candidate` may additionally report `needs-runtime-candidate`.
+Release defaults still require both operating systems and a signed candidate.
+
+Download both `e2e-docs-macos-logs-RUN_ID-RUN_ATTEMPT-JOB_INDEX` artifacts from
+the run page within 14 days. Read each `e2e-docs.log` summary and its “did NOT
+run” tally, not just the job status. For issue #4096, the scenario
+`recorded prompts replay onto a fork of the session's base` in
+`features/suites/s32_documented_surface/agent_prompt.feature` must actually pass:
+turns one and two, replay onto a fork, turn three, replay the fork's session,
+and turn four, with no step-checkpoint failure. It is not runtime-candidate
+tagged and must not be accepted as skipped. Retain the run URL, tested SHA,
+both shard summaries and witness output with the issue evidence.
+
+A queued/offline runner, failed preflight, recorded-local-evidence fallback,
+missing summary, skipped prompt scenario or failed shard is not a new live HVF
+prompt/replay witness. This wiring alone does not complete #4096.
+
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)

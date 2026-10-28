@@ -17,6 +17,14 @@ name: Documented surface e2e
 on:
   workflow_call:
     inputs:
+      run_linux:
+        description: Run the full Linux documented surface
+        type: boolean
+        default: true
+      run_macos:
+        description: Run the full macOS documented surface
+        type: boolean
+        default: true
       runtime_candidate_artifact_id:
         description: Current release candidate upload ID; empty for ordinary contributor coverage
         type: string
@@ -43,7 +51,7 @@ on:
         default: ""
       allow_runtime_candidate_skip:
         description: >-
-          Allow the unreleased main nightly to report portable-creation
+          Allow unreleased main coverage to report portable-creation
           scenarios as named skips when no signed runtime candidate is supplied.
           Release workflows must leave this false.
         type: boolean
@@ -67,6 +75,7 @@ env:
 jobs:
   e2e-docs-linux:
     name: Documented surface e2e (Linux, Firecracker, shard ${{ matrix.shard }})
+    if: inputs.run_linux
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
     # Both required matrix jobs partition the complete scenario inventory;
@@ -220,6 +229,7 @@ jobs:
   # decided by `macos_blocks_on_unusable_host` in the evidence job below.
   e2e-docs-macos-host-check:
     name: Documented surface e2e (macOS, host check)
+    if: inputs.run_macos
     # The self-hosted Apple Silicon runner (issue #3011). While it is offline
     # this job waits in the queue rather than falling back to the evidence job
     # below — a release blocks until the runner is back, which is the intended
@@ -275,7 +285,7 @@ jobs:
     name: Documented surface e2e (macOS, recorded local run)
     needs: e2e-docs-macos-host-check
     if: >-
-      inputs.macos_blocks_on_unusable_host &&
+      inputs.run_macos && inputs.macos_blocks_on_unusable_host &&
       needs.e2e-docs-macos-host-check.outputs.supported != 'true'
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
@@ -301,7 +311,7 @@ jobs:
   e2e-docs-macos:
     name: Documented surface e2e (macOS, HVF)
     needs: e2e-docs-macos-host-check
-    if: needs.e2e-docs-macos-host-check.outputs.supported == 'true'
+    if: inputs.run_macos && needs.e2e-docs-macos-host-check.outputs.supported == 'true'
     # The macOS default backend is HVF, and every guest-booting BDD scenario
     # before this one carried `@firecracker` — so the backend most users run
     # had no lane that booted anything. This is that lane.
