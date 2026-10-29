@@ -22,6 +22,7 @@ pub mod host_signer;
 pub mod host_time;
 pub mod host_tool;
 pub mod hvf_control;
+pub mod hvf_owner;
 /// Capability-bound, transport-neutral mailbox identities and wire DTOs.
 pub mod mailbox;
 /// Bounded, flow-aware guest/host networking wire contract: framing,
