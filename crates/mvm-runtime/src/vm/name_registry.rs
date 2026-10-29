@@ -83,13 +83,19 @@ fn default_auto_resume() -> bool {
 
 impl VmNameRegistry {
     /// Load the registry from disk. Returns an empty registry if the file
-    /// doesn't exist yet.
+    /// doesn't exist yet; other read errors are propagated.
     pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read VM name registry: {}", path.display()))?;
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Failed to read VM name registry: {}", path.display())
+                });
+            }
+        };
         let registry: Self = serde_json::from_str(&text)
             .with_context(|| format!("Failed to parse VM name registry: {}", path.display()))?;
         Ok(registry)
@@ -629,9 +635,87 @@ mod tests {
 
     #[test]
     fn test_load_nonexistent_returns_empty() {
-        let path = PathBuf::from("/nonexistent/vm-names.json");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing/vm-names.json");
         let reg = VmNameRegistry::load(&path).unwrap();
         assert!(reg.is_empty());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_load_corrupt_json_returns_parse_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vm-names.json");
+        std::fs::write(&path, r#"{"vms":"private-registry-content"}"#).unwrap();
+
+        let error = VmNameRegistry::load(&path).unwrap_err();
+        assert!(error.downcast_ref::<serde_json::Error>().is_some());
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to parse VM name registry")
+        );
+        assert!(!error.to_string().contains("private-registry-content"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_load_non_directory_ancestor_returns_read_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("not-a-directory");
+        std::fs::write(&parent, b"regular file").unwrap();
+        let path = parent.join("vm-names.json");
+
+        let error = VmNameRegistry::load(&path).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotADirectory
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to read VM name registry")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_load_non_searchable_ancestor_returns_permission_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // SAFETY: geteuid only observes this process's effective user ID.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("permission-denial witness skipped: root can bypass directory permissions");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("private");
+        std::fs::create_dir(&parent).unwrap();
+        let path = parent.join("vm-names.json");
+        VmNameRegistry::default().save(&path).unwrap();
+        let permissions = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let metadata = std::fs::metadata(&path);
+        let result = VmNameRegistry::load(&path);
+        // Restore search access before any assertion can panic or TempDir cleans up.
+        std::fs::set_permissions(&parent, permissions).unwrap();
+
+        assert_eq!(
+            metadata.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to read VM name registry")
+        );
+        assert!(VmNameRegistry::load(&path).unwrap().is_empty());
     }
 
     #[test]
