@@ -109,7 +109,8 @@ class DocumentedCleanupTests(unittest.TestCase):
             "CLEANUP_BLOCKED=0\nREAPED_NAMES=''\n"
             + functions
             + "\nstop_watcher() { :; }\n"
-            "e2e_phase_summary() { :; }\n"
+            'e2e_phase_summary() { printf "%s\\n" "$1" > "$TEST_PHASE_SUMMARY"; '
+            '[[ "${FAIL_TIMINGS:-0}" == 0 ]]; }\n'
             "release_lock() { :; }\n"
             + function(source, "on_exit")
             + "\ntrap on_exit EXIT\n"
@@ -117,7 +118,12 @@ class DocumentedCleanupTests(unittest.TestCase):
         )
         return subprocess.run(
             ["bash", "-c", shell],
-            env=self.env | {"TEST_CLI": str(self.cli)} | overrides,
+            env=self.env
+            | {
+                "TEST_CLI": str(self.cli),
+                "TEST_PHASE_SUMMARY": str(self.root / "phase-summary"),
+            }
+            | overrides,
             capture_output=True,
             text=True,
             timeout=15,
@@ -212,6 +218,23 @@ class DocumentedCleanupTests(unittest.TestCase):
         self.assertFalse(self.evidence.exists())
         self.assertTrue(self.existing.exists())
         self.assertEqual(self.calls("rm"), [["machine", "rm", self.name, "--yes"]])
+
+    def test_failed_suite_still_reports_timings(self):
+        result = self.exit_seam("exit 7\n", FAIL_STOP="1")
+        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+        self.assertIn(
+            "Documented surface phase timings",
+            (self.root / "phase-summary").read_text(),
+        )
+        self.assert_retained()
+
+    def test_timing_failure_does_not_skip_cleanup(self):
+        result = self.exit_seam("exit 0\n", FAIL_TIMINGS="1")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls("stop")), 1)
+        self.assertEqual(len(self.calls("rm")), 1)
+        self.assertFalse(self.evidence.exists())
+        self.assertTrue(self.existing.exists())
 
     def test_unrelated_same_name_process_survives_clean_only(self):
         child = subprocess.Popen(

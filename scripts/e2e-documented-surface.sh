@@ -230,9 +230,9 @@ on_exit() {
   trap - EXIT
   stop_watcher
   echo
-  if ! e2e_phase_summary "Documented surface phase timings ($(uname -s))"; then
+  e2e_phase_summary "Documented surface phase timings ($(uname -s))" || {
     [[ "$status" != 0 ]] || status=1
-  fi
+  }
   if ! reap "post-run"; then
     [[ "$status" != 0 ]] || status=1
   fi
