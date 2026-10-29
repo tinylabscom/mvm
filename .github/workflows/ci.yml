@@ -576,8 +576,8 @@ jobs:
           fi
           mapfile -d '' scripts <"$changed"
           if [ "${#scripts[@]}" -gt 0 ]; then
-            printf 'shellcheck %s\n' "${scripts[@]}"
-            shellcheck "${scripts[@]}"
+            printf 'shellcheck -x %s\n' "${scripts[@]}"
+            shellcheck -x "${scripts[@]}"
           else
             echo "No added shell scripts."
           fi

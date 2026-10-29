@@ -1230,7 +1230,7 @@ mod tests {
         );
         for expected in [
             "github.event_name == 'pull_request'",
-            "shellcheck \"${scripts[@]}\"",
+            "shellcheck -x \"${scripts[@]}\"",
             "rustc +1.97.1 --edition=2024 -D warnings --test",
             "git merge-base \"$BASE_SHA\" \"$HEAD_SHA\"",
             "git diff --name-only --diff-filter=A",
