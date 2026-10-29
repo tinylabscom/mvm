@@ -434,6 +434,7 @@ pub struct VirtioVsock {
     /// vCPU of an SMP machine and each one that parks calls the snapshot hooks,
     /// so this is what makes the transition happen once per pause rather than
     /// once per vCPU.
+    /// It records this device's hook state, not proof that every vCPU is paused.
     snapshot_parked: bool,
     protected_handoff: Option<ProtectedHandoff>,
     pending_handoff: Option<PendingHandoff>,
@@ -1222,7 +1223,7 @@ impl VirtioVsock {
 }
 
 impl VsockShared {
-    fn reject_snapshot_if_live(&self) -> Result<(), DeviceStateError> {
+    fn reject_snapshot_if_live(&self, allow_parent_history: bool) -> Result<(), DeviceStateError> {
         let kind = DeviceKind::VirtioVsock;
         if self.handlers.has_host_bindings() {
             return Err(DeviceStateError::InvalidValue {
@@ -1254,7 +1255,9 @@ impl VsockShared {
                 field: "pending_rx_packets",
             });
         }
-        if !self.lifecycle.received.is_empty() {
+        // Prepared capture leaves host observations in the original parent.
+        // Restore and unprepared capture must still refuse that history.
+        if !allow_parent_history && !self.lifecycle.received.is_empty() {
             return Err(DeviceStateError::InvalidValue {
                 kind,
                 field: "lifecycle_transcript",
@@ -1283,7 +1286,7 @@ impl SnapshotDeviceState for VirtioVsock {
             });
         }
         let mut shared = self.lock();
-        shared.reject_snapshot_if_live()?;
+        shared.reject_snapshot_if_live(self.snapshot_parked)?;
         let cursor = shared.handlers.host_port_cursor();
         let mut writer = StateWriter::new(1);
         writer.u32(shared.transport.device_features_sel);
@@ -1376,7 +1379,7 @@ impl SnapshotDeviceState for VirtioVsock {
         }
 
         let mut shared = self.lock();
-        shared.reject_snapshot_if_live()?;
+        shared.reject_snapshot_if_live(false)?;
         shared.transport.device_features_sel = device_features_sel;
         shared.transport.status = status;
         shared.transport.queue_sel = queue_sel;
@@ -1479,6 +1482,281 @@ mod tests {
 
     impl IrqLine for TestIrqLine {
         fn signal(&self, _spi: u32) {}
+    }
+
+    fn record_lifecycle_payload(device: &VirtioVsock, payload: &[u8]) {
+        device.lock().handle_packet(
+            VsockHdr {
+                src_cid: GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: 1000,
+                dst_port: 2000,
+                len: u32::try_from(payload.len()).unwrap(),
+                op: OP_RW,
+                typ: TYPE_STREAM,
+                buf_alloc: HOST_BUF_ALLOC,
+                ..Default::default()
+            },
+            payload,
+        );
+    }
+
+    fn transport_snapshot_view(
+        device: &VirtioVsock,
+    ) -> ([u32; 4], [Queue; NUM_QUEUES], HostPortCursor) {
+        let mut shared = device.lock();
+        (
+            [
+                shared.transport.device_features_sel,
+                shared.transport.status,
+                shared.transport.queue_sel,
+                shared.transport.interrupt_status,
+            ],
+            shared.transport.queues,
+            shared.handlers.host_port_cursor(),
+        )
+    }
+
+    #[test]
+    fn prepared_snapshot_preserves_parent_lifecycle_history_without_copying_it_to_child() {
+        let mut parent = virtio_dev();
+        let mut empty = virtio_dev();
+        for device in [&parent, &empty] {
+            let mut shared = device.lock();
+            shared.transport.device_features_sel = 1;
+            shared.transport.status = 15;
+            shared.transport.queue_sel = 1;
+            shared.transport.interrupt_status = 1;
+            shared.transport.queues[0] = Queue {
+                num: 8,
+                desc: 0x4000_0100,
+                avail: 0x4000_0200,
+                used: 0x4000_0300,
+                last_avail: 3,
+                next_used: 2,
+                ..Default::default()
+            };
+            let cursor = shared.handlers.host_port_cursor();
+            shared.handlers.continue_host_ports(HostPortCursor {
+                agent: cursor.agent.checked_add(3).unwrap(),
+                host_dial: cursor.host_dial.checked_add(4).unwrap(),
+            });
+        }
+        let before = b"parent lifecycle before pause\n";
+        record_lifecycle_payload(&parent, before);
+        parent.prepare_snapshot();
+        parent.prepare_snapshot();
+        assert_eq!(parent.received(), before);
+
+        let snapshot = parent
+            .snapshot_state()
+            .expect("quiesced host history must not prevent a prepared snapshot");
+        assert_eq!(
+            StateReader::new(&snapshot)
+                .version(DeviceKind::VirtioVsock)
+                .unwrap(),
+            1
+        );
+        assert_eq!(parent.snapshot_state().unwrap(), snapshot);
+        empty.prepare_snapshot();
+        assert_eq!(
+            snapshot,
+            empty.snapshot_state().unwrap(),
+            "host lifecycle history must not enter the device frame"
+        );
+        let mut child = virtio_dev();
+        child.restore_state(&snapshot).unwrap();
+        assert!(child.received().is_empty());
+        assert_eq!(
+            transport_snapshot_view(&child),
+            transport_snapshot_view(&parent)
+        );
+        assert_eq!(child.snapshot_state().unwrap(), snapshot);
+        assert_eq!(parent.received(), before);
+
+        parent.resume_after_snapshot();
+        assert_eq!(parent.received(), before);
+        parent.shutdown();
+        assert!(!parent.snapshot_parked);
+        assert!(matches!(
+            parent.snapshot_state(),
+            Err(DeviceStateError::InvalidValue {
+                field: "lifecycle_transcript",
+                ..
+            })
+        ));
+        let after = b"parent lifecycle after resume\n";
+        record_lifecycle_payload(&parent, after);
+        let expected = [before.as_slice(), after.as_slice()].concat();
+        assert_eq!(parent.received(), expected);
+        parent.prepare_snapshot();
+        assert_eq!(parent.snapshot_state().unwrap(), snapshot);
+        assert_eq!(parent.received(), expected);
+        assert!(child.received().is_empty());
+    }
+
+    #[test]
+    fn lifecycle_history_still_blocks_unprepared_snapshot_and_restore() {
+        let mut parent = virtio_dev();
+        let history = b"retained parent lifecycle\n";
+        record_lifecycle_payload(&parent, history);
+        parent.shutdown();
+        assert!(!parent.snapshot_parked);
+        assert!(matches!(
+            parent.snapshot_state(),
+            Err(DeviceStateError::InvalidValue {
+                field: "lifecycle_transcript",
+                ..
+            })
+        ));
+        let donor = virtio_dev();
+        {
+            let mut shared = donor.lock();
+            let cursor = shared.handlers.host_port_cursor();
+            shared.handlers.continue_host_ports(HostPortCursor {
+                agent: cursor.agent.checked_add(7).unwrap(),
+                host_dial: cursor.host_dial.checked_add(9).unwrap(),
+            });
+        }
+        let frame = donor.snapshot_state().unwrap();
+        parent.lock().transport.status = 15;
+        parent.lock().transport.queues[0].num = 8;
+        for prepared in [false, true] {
+            if prepared {
+                parent.prepare_snapshot();
+            }
+            let previous = transport_snapshot_view(&parent);
+            assert!(matches!(
+                parent.restore_state(&frame),
+                Err(DeviceStateError::InvalidValue {
+                    field: "lifecycle_transcript",
+                    ..
+                })
+            ));
+            assert_eq!(transport_snapshot_view(&parent), previous);
+            assert_eq!(parent.received(), history);
+            assert_eq!(parent.snapshot_parked, prepared);
+        }
+    }
+
+    #[test]
+    fn prepared_history_does_not_allow_terminal_or_new_transport_state() {
+        let mut parent = virtio_dev();
+        record_lifecycle_payload(&parent, b"retained lifecycle\n");
+        parent.prepare_snapshot();
+        parent.lock().lifecycle.workload_exit_code = Some(0);
+        assert!(matches!(
+            parent.snapshot_state(),
+            Err(DeviceStateError::InvalidValue {
+                field: "workload_exit",
+                ..
+            })
+        ));
+        parent.lock().lifecycle.workload_exit_code = None;
+        record_lifecycle_payload(&parent, b"late transport activity\n");
+        assert!(
+            parent.snapshot_state().is_err(),
+            "preparation cannot excuse new transport activity"
+        );
+        assert_eq!(
+            parent.received(),
+            b"retained lifecycle\nlate transport activity\n"
+        );
+    }
+
+    struct PollFdOnlyHandler {
+        stream: UnixStream,
+        _peer: UnixStream,
+    }
+
+    impl crate::vmm::vsock_handlers::GuestPortHandler for PollFdOnlyHandler {
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+
+        fn on_packet(&mut self, _: &mut VsockHandlerContext<'_>, _: VsockHdr, _: &[u8]) {}
+
+        fn poll_fds(&self) -> Vec<std::os::fd::RawFd> {
+            use std::os::fd::AsRawFd as _;
+            vec![self.stream.as_raw_fd()]
+        }
+    }
+
+    #[test]
+    fn every_live_guard_refuses_prepared_history_without_changing_it() {
+        type Seed = fn(&mut VirtioVsock);
+        let cases: [(&str, Seed); 7] = [
+            ("host_io_active", |device| {
+                device.start_io(Arc::new(TestIrqLine));
+            }),
+            ("host_endpoints_bound", |device| {
+                device
+                    .lock()
+                    .handlers
+                    .set_network_endpoint(Path::new("unused-test-endpoint"));
+            }),
+            ("host_io_fds", |device| {
+                let (stream, peer) = UnixStream::pair().unwrap();
+                device.lock().handlers.insert_test_guest_handler(
+                    u32::MAX,
+                    Box::new(PollFdOnlyHandler {
+                        stream,
+                        _peer: peer,
+                    }),
+                );
+            }),
+            ("receive_credit_sessions", |device| {
+                assert!(
+                    device
+                        .lock()
+                        .transport
+                        .try_add_recv(&VsockHdr::default(), 1)
+                );
+            }),
+            ("transmit_credit_sessions", |device| {
+                assert!(
+                    device
+                        .lock()
+                        .transport
+                        .record_tx_credit(&VsockHdr::default())
+                );
+            }),
+            ("pending_rx_packets", |device| {
+                device
+                    .lock()
+                    .transport
+                    .queue_host_packet(1000, 2000, OP_RW, b"pending");
+            }),
+            ("workload_exit", |device| {
+                device.lock().lifecycle.workload_exit_code = Some(17);
+            }),
+        ];
+        for (field, seed) in cases {
+            let mut parent = virtio_dev();
+            let history = b"host observations retained across refusal\n";
+            record_lifecycle_payload(&parent, history);
+            parent.prepare_snapshot();
+            // Seed after preparation: its cancellation must not erase the
+            // condition this case is intended to prove is still refused.
+            seed(&mut parent);
+            let previous = transport_snapshot_view(&parent);
+            assert!(
+                matches!(
+                    parent.snapshot_state(),
+                    Err(DeviceStateError::InvalidValue {
+                        kind: DeviceKind::VirtioVsock,
+                        field: actual,
+                    }) if actual == field
+                ),
+                "guard {field} did not refuse capture"
+            );
+            assert_eq!(transport_snapshot_view(&parent), previous);
+            assert_eq!(parent.received(), history);
+            parent.resume_after_snapshot();
+            parent.shutdown();
+            assert!(!parent.snapshot_parked);
+            assert_eq!(parent.received(), history);
+        }
     }
 
     /// Wait for the device to pick up a host connection and return the host
