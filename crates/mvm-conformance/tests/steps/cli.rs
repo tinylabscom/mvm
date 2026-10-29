@@ -162,6 +162,120 @@ fn scratch_working_directory(world: &mut CliWorld) {
     world.scratch_dir = Some(tempfile::tempdir().expect("create scratch working directory"));
 }
 
+#[given(expr = "a command launch plan in the scratch directory")]
+fn command_launch_plan_in_scratch(world: &mut CliWorld) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("scratch working directory");
+    let working_dir = scratch.path().join("workdir");
+    fs::create_dir(&working_dir).expect("create workload directory");
+    let plan = serde_json::json!({
+        "artifact_format_version": "1.1",
+        "entrypoint": {
+            "kind": "command",
+            "command": ["/bin/sh", "-c", "printf 'PORT=%s\\nAPP_ONLY=%s\\nENTRY_ONLY=%s\\n' \"$PORT\" \"$APP_ONLY\" \"$ENTRY_ONLY\"; pwd"],
+            "working_dir": working_dir,
+            "env": {
+                "PORT": {"kind": "literal", "value": "8081"},
+                "ENTRY_ONLY": {"kind": "literal", "value": "entrypoint"}
+            }
+        },
+        "env": {
+            "PORT": {"kind": "literal", "value": "8080"},
+            "APP_ONLY": {"kind": "literal", "value": "application"}
+        }
+    });
+    fs::write(
+        scratch.path().join("launch.json"),
+        serde_json::to_vec(&plan).expect("serialize launch plan"),
+    )
+    .expect("write command launch plan");
+}
+
+/// Execute only the generated wrapper, with controlled inputs and an empty
+/// host environment. This witnesses execution direction without booting a VM.
+#[when(expr = "I execute the guest wrapper for {string}")]
+fn execute_launch_plan_wrapper(world: &mut CliWorld, args: String) {
+    use mvm_cli::exec::{ExecRequest, ExecTarget, ImageSource};
+
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("scratch working directory");
+    let argv =
+        std::iter::once("mvmctl".to_string()).chain(mvm_conformance::doc_examples::tokenize(&args));
+    let matches = mvm_cli::commands::cli_command()
+        .try_get_matches_from(argv)
+        .expect("documented launch-plan command parses");
+    let run = matches.subcommand_matches("run").expect("run command");
+    let manifest = run.get_one::<String>("manifest").expect("explicit image");
+    let plan = run.get_one::<String>("launch_plan").expect("launch plan");
+    let entrypoint = mvm_cli::exec::load_launch_plan(&scratch.path().join(plan))
+        .expect("load the command launch plan");
+    let env = run
+        .get_many::<String>("env")
+        .into_iter()
+        .flatten()
+        .map(|value| {
+            let (key, value) = value.split_once('=').expect("fixture env assignment");
+            (key.to_owned(), value.to_owned())
+        })
+        .collect();
+    let request = ExecRequest {
+        name: None,
+        image: ImageSource::Template(manifest.clone()),
+        cpus: 1,
+        memory_mib: 256,
+        mem_initial_mib: None,
+        dir_shares: Vec::new(),
+        assets: Vec::new(),
+        disk_volumes: Vec::new(),
+        env,
+        target: ExecTarget::LaunchPlan { entrypoint },
+        timeout_secs: None,
+        pty: false,
+        network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        warm_pool_size: 0,
+        standby_refill: None,
+        stdin: Vec::new(),
+        healthcheck: None,
+        sdk_host_services: Vec::new(),
+        declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
+        hypervisor: None,
+        gpu: false,
+        gpu_device: None,
+    };
+    assert!(
+        matches!(&request.image, ImageSource::Template(name) if name == "minimal"),
+        "the launch plan must not replace the explicitly selected image"
+    );
+    world.last_run = Some(
+        Command::new("/bin/sh")
+            .args(["-c", &mvm_cli::exec::build_guest_wrapper(&request)])
+            .current_dir(scratch.path())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("execute the fixture's guest wrapper"),
+    );
+}
+
+#[then(expr = "the guest wrapper used the launch plan working directory")]
+fn guest_wrapper_used_plan_directory(world: &mut CliWorld) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("scratch working directory");
+    let directory = fs::canonicalize(scratch.path().join("workdir")).expect("workload directory");
+    let output = &world.last_run.as_ref().expect("wrapper output").stdout;
+    assert!(
+        String::from_utf8_lossy(output)
+            .lines()
+            .any(|line| Path::new(line) == directory)
+    );
+}
+
 #[given(expr = "the scratch directory contains ambiguous manifest and flake sources")]
 fn scratch_directory_contains_ambiguous_build_sources(world: &mut CliWorld) {
     let scratch = world
