@@ -10,6 +10,7 @@
 //! OCI image reference or a `.mvmpkg` path goes where it always went.
 
 use anyhow::{Context, Result};
+use mvm_client::policy_profiles::environment::with_request_ceiling;
 use mvm_core::registry_pack::PackReference;
 use mvm_core::registry_pack::application_bundle::{
     ApplicationInstallStore, ApplicationLaunchError, ResolvedApplication,
@@ -85,25 +86,14 @@ pub(in crate::commands) fn apply_entrypoint_resource_defaults(args: &mut RunArgs
 pub(in crate::commands) fn ai_policy(
     args: &RunArgs,
 ) -> Result<Option<mvm_core::network_policy::AiPolicy>> {
+    if let Some(ai) = &args.applied_ai_policy {
+        return Ok(Some(ai.clone()));
+    }
     let ai = crate::commands::shared::resolve_ai_policy(args.ai_token_budget);
     let ceiling = environment(args)?
         .and_then(|env| env.policy)
         .and_then(|policy| policy.request_budget);
-    with_request_ceiling(ai, ceiling)
-}
-
-fn with_request_ceiling(
-    mut ai: Option<mvm_core::network_policy::AiPolicy>,
-    ceiling: Option<mvm_core::network_policy::AiRequestBudget>,
-) -> Result<Option<mvm_core::network_policy::AiPolicy>> {
-    if let Some(ceiling) = ceiling {
-        let ai = ai.get_or_insert_with(mvm_core::network_policy::AiPolicy::metered);
-        ai.request_budget = Some(match ai.request_budget {
-            Some(current) => current.intersect(ceiling).map_err(anyhow::Error::msg)?,
-            None => ceiling,
-        });
-    }
-    Ok(ai)
+    with_request_ceiling(ai, ceiling).map_err(Into::into)
 }
 
 /// Fill only slots not already satisfied by the operator's folded selections.
