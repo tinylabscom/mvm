@@ -1004,11 +1004,12 @@ fn a_digest_sidecar_beside_any_file_of_the_set_is_tolerated() {
         LOCAL_SET_MANIFEST_NAME.to_string(),
         ENTRY_RECORD_NAME.to_string(),
     ] {
-        std::fs::write(
-            mvm_core::crypto::image_verify::sha256_cache_path(&dir.join(member)),
-            b"not even a digest\n",
-        )
-        .unwrap();
+        let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(&dir.join(member));
+        #[cfg(unix)]
+        if sidecar.exists() {
+            make_writable(&sidecar);
+        }
+        std::fs::write(sidecar, b"not even a digest\n").unwrap();
     }
 
     expect_hit(fx.lookup(&key));
@@ -1083,6 +1084,9 @@ fn a_tampered_member_with_a_forged_sidecar_is_evicted_sidecars_and_all() {
         .unwrap()
         .as_nanos();
     let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(&kernel);
+    if sidecar.exists() {
+        make_writable(&sidecar);
+    }
     let vouched = Sha256Hex::from_bytes(KERNEL);
     std::fs::write(
         &sidecar,
