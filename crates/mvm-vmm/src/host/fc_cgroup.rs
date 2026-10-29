@@ -91,6 +91,18 @@ struct OpenHow {
     resolve: u64,
 }
 
+// UAPI __u64 uses natural integer alignment: 8 on x86_64/aarch64, 4 on i386.
+// The C header fixes the size and offsets independently of that alignment.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<OpenHow>() == 24);
+    assert!(align_of::<OpenHow>() == align_of::<u64>());
+    assert!(offset_of!(OpenHow, flags) == 0);
+    assert!(offset_of!(OpenHow, mode) == 8);
+    assert!(offset_of!(OpenHow, resolve) == 16);
+};
+
 fn control_open_how() -> io::Result<OpenHow> {
     // Linux UAPI: NO_XDEV also rejects bind mounts of another cgroup's files.
     const RESOLVE_NO_XDEV: u64 = 0x01;
