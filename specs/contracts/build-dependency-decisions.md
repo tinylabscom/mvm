@@ -24,6 +24,103 @@ declined; the reasons are recorded so they are not re-derived.
 | [#4713](https://github.com/tinylabscom/mvm/issues/4713) phase 1 — gate host-only `mvm-core` modules out of guest binaries | Add an off-by-default `mvm-core/host-state` feature owning `bs58`, `unicode-normalization`, `aho-corasick` and `tar` as optional deps; gate `did_key`, `workload_address`, `crypto::{command_gate, threat_classifier, secret_store}` (all of `keystore` except the pure `validate_shell_id`), `pii`, `receipt`/`receipt_archive`, `stream_client`, the `registry_pack*` family, `policy::toml_loader`, `image_set::train_lock` and the tar half of `plan::bundle` behind it; host crates opt in | The musl guest closure (`cargo tree -p mvm-builder-guest --target aarch64-unknown-linux-musl -e normal,build --prefix none`, repeat-marker `(*)` stripped before `sort -u`) goes from 104 to 100 unique crates: `bs58`, `unicode-normalization`, `tinyvec` and `tinyvec_macros` leave, and the direct `mvm-core` edges to `aho-corasick` and `tar` are gone. The issue's 96 target is not reachable by gating alone on this base: `aho-corasick` still enters through `regex`'s `perf-literal` feature (`regex` stays because guest-referenced `config` uses it), and `tar`/`filetime`/`xattr` stay because `mvm-builder-guest` declares its own `tar` edge for `builder_disk_transport`, used by the `stage0-init` guest binary — neither is an `mvm-core` edge, so no `mvm-core` feature can remove them. `keyring` and `log` were already out via `os-keyring`. The `mvmctl` host closure is byte-identical at 351 crates; `toml` and `regex` stay (guest-referenced `domain::manifest`/`user_config`/`config`). `xtask check-guest-agent-runtime-free` now scans all three guest packages, bans `bs58`/`unicode-normalization`/`keyring` by name, and fails if any non-dev feature edge enables `mvm-core/host-state` in a guest package's graph. | A guest-side replacement for `builder_disk_transport`'s tar use, or a decision to narrow `regex`'s `perf-literal` feature workspace-wide; either removes the last four crates the issue counted. |
 | [#4713](https://github.com/tinylabscom/mvm/issues/4713) phase 2 — gate `toml` and `regex` out of the guest closure | Make `toml` and `regex` optional `mvm-core` deps owned by `host-state`; gate `domain::manifest`, `user_config` and `config::{normalize_fc_version, fc_version}` behind it (`FC_VERSION_DEFAULT`, `FC_CI_ASSETS_VERSION` and `ARCH` stay ungated; the version normalizer is not rewritten) | No guest crate names the gated modules, and `regex` enters every guest closure only through `mvm-core`. The musl guest closure (same command as phase 1) goes from 100 to 91 with the `toml` gate — `toml`, `toml_edit`, `toml_datetime`, `toml_write`, `serde_spanned`, `winnow` and their now-exclusive `equivalent`/`hashbrown`/`indexmap` edges leave — and from 91 to 87 with the `regex` gate: `regex`, `regex-automata`, `regex-syntax` and `aho-corasick` leave, the last because its only remaining guest edge was `regex`'s `perf-literal`. Phase 1 kept `regex` because the guest-referenced `config` module used it; gating just the two host-only functions leaves the guest-referenced path helpers in place. The `mvmctl` host closure is byte-identical at 351: all twelve host crates enable `host-state`. The `manifest_fixtures` integration test gains a `required-features` entry. `check-guest-agent-runtime-free` name-bans the `toml` and `regex` stacks and its module inventory names `domain::manifest`, `user_config` and `config::fc_version`; `tar` and `aho-corasick` stay unbanned because a direct guest edge to either remains legitimate. | A guest-side consumer of the workload manifest, the operator config or Firecracker version normalization — each would be a new host↔guest protocol surface, not a linked module. |
 
+## Unused test dependencies
+
+Remove `wait-timeout` from `mvm-vmm` and `assert_cmd` from
+`mvm-conformance`. Source inspection confirms neither crate uses those APIs.
+Keep conformance's `mvmctl` dependency: generated documentation examples use
+the library facade, so the dependency scanner's finding is not sufficient
+evidence for removal.
+
+On `aarch64-apple-darwin`, the normal/build closures are unchanged before
+and after: `mvmctl` has 509 distinct `cargo tree --prefix none` lines
+(351 entries after stripping repeat markers), and `mvm-builder-guest` has
+137 lines (105 entries). Commands:
+
+```sh
+cargo tree --locked -p mvmctl -e normal,build --prefix none | sort -u | wc -l
+cargo tree --locked -p mvm-builder-guest -e normal,build --prefix none | sort -u | wc -l
+```
+
+This removes two unused direct test edges, not two packages from the shipped
+binary. Both packages remain in the workspace lockfile for other consumers.
+No release-build speed or binary-size reduction is attributed to this change.
+
+## MCP package consolidation
+
+For #4839 and #4542, fold the unpublished `mvm-mcp` package into a private
+`mvm-cli::mcp` module. The CLI is its only production consumer and already
+requires its third-party closure. Retain the adapter, its protocol/error/gate
+tests, and the byte-identical tool-contract fixture; remove the separate manifest,
+redundant standalone example, and public package boundary. No machine operation,
+policy gate, drive grant, or protocol contract is removed.
+
+`cargo tree --locked -p mvmctl --target TRIPLE -e normal,build --prefix none`,
+counting unique package/version pairs, measures 351 → 350 on
+`aarch64-apple-darwin` and 354 → 353 on `x86_64-unknown-linux-gnu`.
+The only removed node is `mvm-mcp`; there are no added nodes. The separately
+measured `mvm-agentd` musl closure is identical before/after at 83 nodes.
+
+The post-change `mvm-builder-guest` and `mvm-host-services` closures on
+`aarch64-unknown-linux-musl` contain 87 and 84 nodes respectively. Their
+pre-change measurements were interrupted, so these are not before/after claims.
+The all-features Linux workspace closure measures 534 nodes; ratchet its
+previous 547-node ceiling to that measurement, without attributing the entire
+13-node difference to this one-package consolidation.
+
+No cold-build, release-size, or runtime speed improvement is claimed from these
+graph measurements. Re-extract a package only if a real non-CLI consumer needs
+this adapter without the CLI dependency closure.
+
+## Firecracker lifecycle prototype retirement
+
+For #4839, remove the unpublished `mvm-fc-lifecycle` manual-registration
+prototype rather than transplanting its privileged code. It had no workspace
+reverse dependency, default launch/cleanup integration, installer, service unit,
+embedded-helper entry or release-package entry. Source, tests, scripts, dynamic
+names and the attached ecosystem repositories supplied no consumer. The PS-06
+owner confirmed no consumer, reservation or funded use case in its
+client/runtime/backend work; its current-UID birth-in-owner proposal is not
+this root-operated preexisting-process registration design. Read-only comparison
+with public `main` at `330abfa19ee30c33d444f14918669362f0d51f93` found no
+consumer in its 35 changed files relative to the inherited base
+`592c0b8280d5b4d343269708ed70d237353fa4f9`.
+
+The removal deletes one first-party package, its library and executable,
+prototype-only tests and README, and its telemetry inventory entry. Cargo
+metadata workspace members fall from 33 to 32 (including the root package);
+explicit member paths fall from 32 to 31. Physical Rust lines fall by 2,123
+across 14 files: 1,983 in `src/` including inline tests, plus 140 in dedicated
+tests. Counting every repository `*.rs` outside `.git`, `.mvm-test`, `target`
+and `node_modules`, including vendored/generated code and tests, the isolated
+source snapshot falls from 2,807 files / 1,227,574 lines to 2,793 files /
+1,225,451 lines. These are physical lines (`bytes.splitlines()`), not executable
+SLOC or a release baseline; unrelated inherited cleanup is excluded from the
+delta.
+
+The lockfile loses only this package (729 → 728 entries). Its six normal
+third-party edges (`hex`, `libc`, `serde`, `serde_json`, `socket2`, `thiserror`),
+Linux-only `mvm-vmm` edge and test-only `tempfile` edge disappear with it;
+every dependency remains required by other packages. No third-party package,
+version, feature setting or dependency budget is removed or changed.
+`cargo metadata --offline --locked --no-deps --format-version 1` supplies the
+membership and declared-edge evidence. A feature-resolved
+`cargo tree --offline --locked -p mvm-fc-lifecycle -e normal,build --prefix none`
+measurement was unavailable because the isolated Cargo registry lacked
+`anyhow`; no parent cache was borrowed. Standalone prototype closure size is
+not a shipped-artifact saving. No clean/no-change build time, release size,
+compilation-unit count or runtime-speed improvement is claimed.
+
+The prototype emitted only two stderr diagnostics (disabled invocation and
+startup/termination refusal), with no tracing subscriber or tracing events.
+Those diagnostics and their uncertified runtime-gap inventory entry disappear
+with the executable, not through tracing suppression in retained code. Normal
+Firecracker and other backends, held-process identity checks, signed audit,
+host-held secrets, no-NIC/vsock enforcement and active lifecycle-owner work
+remain unchanged. The original plan stays as explicitly historical design.
+Any future privileged service needs its own demonstrated consumer and reviewed
+authority/deployment contract, not restoration of this unused prototype.
+
 ## Owner decisions
 
 - 2026-10-24, #4663: patch the Sigstore Rekor and timestamp crates locally so

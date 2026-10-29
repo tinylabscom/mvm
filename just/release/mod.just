@@ -19,8 +19,8 @@ pr VERSION="auto":
     #!/usr/bin/env bash
     set -euo pipefail
     cargo fmt --all
-    ./scripts/cargo-stable.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
-    ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
+    ./scripts/cargo.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
+    ./scripts/cargo.sh clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
     if [ "{{ VERSION }}" = "auto" ]; then
     echo "==> Preparing automatic release (PR-based)"

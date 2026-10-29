@@ -151,7 +151,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-08-25
+          toolchain: 1.97.1
 
       - uses: ./.github/actions/apt-deps
         if: inputs.runner_kind == 'github'

@@ -11,7 +11,7 @@ default:
 
 # Type-check without codegen
 check:
-    ./scripts/cargo-fast.sh check --workspace --all-targets
+    ./scripts/cargo.sh check --workspace --all-targets
 
 # Cross-compile every crate's lib for Linux (glibc) via zig — no Docker — so
 # cfg(target_os="linux") code a macOS host never compiles is caught locally.
@@ -24,7 +24,7 @@ check:
 
 # Cross-compile every crate's lib for Linux via zig
 linux TARGET="x86_64-unknown-linux-gnu":
-    ./scripts/cargo-stable.sh zigbuild --target {{ TARGET }} --workspace --lib --all-features
+    ./scripts/cargo.sh zigbuild --target {{ TARGET }} --workspace --lib --all-features
 
 # Type-check the targets `just check::check` cannot see. Two blind spots, both of which
 # have shipped a red CI run that named neither:
@@ -50,8 +50,8 @@ linux TARGET="x86_64-unknown-linux-gnu":
 
 # Type-check the linux-gated and feature-gated targets `just check::check` cannot see
 gated TARGET="x86_64-unknown-linux-gnu":
-    ./scripts/cargo-stable.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets
-    ./scripts/cargo-stable.sh check -p mvm-conformance --all-targets --features bdd
+    ./scripts/cargo.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets
+    ./scripts/cargo.sh check -p mvm-conformance --all-targets --features bdd
 
 # A `-none-elf` target exposes only core + alloc with no std to leak into, so
 # this is a stricter no_std check than the wasm32 gate. riscv32imac is the
@@ -67,15 +67,12 @@ embedded TARGET="riscv32imac-unknown-none-elf":
 
 # Run mvmctl with arguments
 run *ARGS:
-    ./scripts/cargo-fast.sh run -- {{ ARGS }}
+    ./scripts/cargo.sh run -- {{ ARGS }}
 
 
-# The release and MSRV lanes build with the stable-compatible configuration;
-# the nightly fast path must stay pinned and must not leak into it.
-
-# Verify the nightly fast path stays pinned and isolated from stable builds
-fast-cargo:
-    ./scripts/check-fast-cargo.sh
+# Verify ordinary builds use the pinned stable compiler
+toolchain:
+    ./scripts/check-cargo-toolchain.sh
 
 # Requires nightly Rust and `cargo install bpf-linker`.
 

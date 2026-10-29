@@ -1,8 +1,12 @@
 //! A bounded, stdio-only Model Context Protocol adapter over [`MvmClient`].
 //!
-//! This crate owns JSON-RPC framing and DTO translation only. It performs no
-//! lifecycle, admission, or authorization work: every advertised machine
-//! operation delegates to the selected client facade.
+//! Machine operations delegate to the client facade; the embedding command
+//! supplies the resolved tool-policy gate.
+
+#[cfg(test)]
+mod error_codes;
+#[cfg(test)]
+mod protocol;
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
@@ -100,6 +104,7 @@ impl Default for ServerLimits {
 impl ServerLimits {
     /// Set the maximum request-frame size. Values below one byte are clamped
     /// to one so the bound remains meaningful.
+    #[cfg(test)]
     #[must_use]
     pub fn max_frame_bytes(mut self, bytes: usize) -> Self {
         self.max_frame_bytes = bytes.max(1);
@@ -108,6 +113,7 @@ impl ServerLimits {
 
     /// Set the maximum successful tool-result payload size. Protocol errors
     /// have a small fixed envelope and remain available when this cap trips.
+    #[cfg(test)]
     #[must_use]
     pub fn max_output_bytes(mut self, bytes: usize) -> Self {
         self.max_output_bytes = bytes.max(1);
@@ -142,11 +148,8 @@ impl ToolGateDenial {
 
 /// A policy gate consulted before every `tools/call`.
 ///
-/// The server deliberately holds no policy: this crate owns JSON-RPC framing
-/// and DTO translation only. The embedding surface supplies a gate built
-/// from the resolved workload policy, and the gate resolves allow/deny/ask
-/// itself, failing closed. An unlisted tool the gate does not explicitly
-/// allow is the gate's denial to issue.
+/// The embedding command resolves the workload policy; the gate must deny
+/// any tool it does not explicitly allow.
 #[async_trait::async_trait]
 pub trait ToolCallGate: Send + Sync {
     /// Decide one call before backend work. The server serializes calls, so
@@ -317,10 +320,10 @@ impl McpServer {
                 if !tool_enabled(&call.name, &report.operations, self.drive.is_some()) {
                     return response_error(id, -32602, "unknown or unavailable tool");
                 }
-                if let Some(gate) = &self.tool_gate {
-                    if let Err(denial) = gate.authorize(&call.name, &call.arguments).await {
-                        return response_result(id, ToolFailure::Gate(denial).into_tool_result());
-                    }
+                if let Some(gate) = &self.tool_gate
+                    && let Err(denial) = gate.authorize(&call.name, &call.arguments).await
+                {
+                    return response_result(id, ToolFailure::Gate(denial).into_tool_result());
                 }
                 match self.call_tool(&call.name, call.arguments, report).await {
                     Ok(value) => response_result(id, self.tool_success(value)),

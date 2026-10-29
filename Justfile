@@ -34,7 +34,7 @@ default:
 
 # Build all crates (debug), including the per-VM host helpers `mvmctl` spawns
 build:
-    ./scripts/cargo-fast.sh build --workspace
+    ./scripts/cargo.sh build --workspace
 
 
 # ── Testing (nextest) ────────────────────────────────────────────────────
@@ -62,9 +62,9 @@ test FILTER="":
     ./scripts/require-nextest.sh
     mkdir -p target/nextest
     if [ -n "{{ FILTER }}" ]; then
-    ./scripts/cargo-fast.sh nextest run --workspace -E 'test({{ FILTER }})' 2>&1 | tee target/nextest/last-run.log
+    ./scripts/cargo.sh nextest run --workspace -E 'test({{ FILTER }})' 2>&1 | tee target/nextest/last-run.log
     else
-    ./scripts/cargo-fast.sh nextest run --workspace 2>&1 | tee target/nextest/last-run.log
+    ./scripts/cargo.sh nextest run --workspace 2>&1 | tee target/nextest/last-run.log
     fi
 
 
@@ -91,24 +91,18 @@ embed *ARGS:
     # building one does not cause Cargo to build the others. Forward the same
     # profile arguments (`--release`, `--profile ...`) so runtime's adjacent-
     # executable lookup always finds the helper matching the selected mvmctl.
-    ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
-    ./scripts/cargo-fast.sh build -p mvm-gpu --bin mvm-gpu-endpoint {{ARGS}}
+    ./scripts/cargo.sh build -p mvm-hostd --bins {{ARGS}}
+    ./scripts/cargo.sh build -p mvm-gpu --bin mvm-gpu-endpoint {{ARGS}}
     # The default embeds the host binaries into the default surface, which
     # carries the image-set signature verifier. bin/dev overrides this to
     # "embed-host-bins,dev" so the binary it runs carries the contributor
-    # surface. The default surface links on the fast-codegen wrapper because
-    # .cargo/fast.toml compiles the aws-lc callers with LLVM; `dev` and `user`
-    # keep plain cargo, the path they were validated on.
+    # surface.
     FEATURES="${MVM_EMBED_FEATURES:-embed-host-bins}"
-    case ",$FEATURES," in
-      *,dev,*|*,user,*) CARGO=(cargo) ;;
-      *) CARGO=(./scripts/cargo-fast.sh) ;;
-    esac
-    "${CARGO[@]}" build --features "$FEATURES" {{ARGS}}
+    ./scripts/cargo.sh build --features "$FEATURES" {{ARGS}}
 
 
 # SUBSET picks one group: fmt, clippy, clippy-bdd, model, or all (the default).
-# `all` also runs `check::fast-cargo`, the fast/stable toolchain-split check CI
+# `all` also runs `check::toolchain`, the compiler-pin check CI
 # runs. The body must stay a shebang script: a recipe without one runs each
 # line in its own shell, and no shell can parse half of a `case`.
 
@@ -126,7 +120,7 @@ lint SUBSET="all":
         just lints::clippy
         just lints::clippy-bdd
         just lints::model
-        just check::fast-cargo
+        just check::toolchain
         ;;
       *)
         echo "Unknown lint subset: {{ SUBSET }}" >&2

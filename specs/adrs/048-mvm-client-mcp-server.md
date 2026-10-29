@@ -1,7 +1,7 @@
 # ADR-048 — MvmClient-backed local MCP server
 
 Backing: shipped-source
-Validation: `cargo test -p mvm-mcp`
+Validation: `cargo test -p mvm-cli --lib mcp::`
 
 **Status:** Accepted
 **Date:** 2026-08-19
@@ -24,10 +24,15 @@ still in use perform the `initialize` handshake, at 2025-11-25 or 2025-06-18.
 
 ## Decision
 
-`mvm-mcp` is a small, hand-written JSON-RPC adapter over `Arc<dyn MvmClient>`.
+`mvm-cli::mcp` is a private JSON-RPC adapter over `Arc<dyn MvmClient>`.
 It contains no backend selection, admission, lifecycle, session, credential,
 or audit policy. Every machine tool translates strict JSON arguments into an
 existing facade DTO and invokes exactly one facade operation.
+
+The adapter is a module, not a separate package: the CLI is its only production
+consumer and already needs its dependency closure. This preserves the protocol
+boundary without a public Rust API or another workspace crate. The stdio command
+binds the resolved tool-policy gate and any signed-plan-backed drive grant.
 
 The catalog is derived from `BackendCapabilityReport.operations`. Those
 operation capabilities are a serialized deny-all-by-default field, distinct
@@ -65,3 +70,19 @@ method does not silently add a tool: the client must report the operation and
 the adapter must define and test its strict mapping. MCP version changes remain
 an audited in-house maintenance responsibility, but add no third-party protocol
 dependency to the supply chain.
+
+## Protocol regression coverage
+
+The tests live beside the adapter in `crates/mvm-cli/src/mcp/`. The advertised
+tool names, descriptions, schemas, and gating operations are pinned in
+`fixtures/tool-contract.json`. An intentional contract change requires reviewing
+the fixture diff after:
+
+```sh
+MVM_UPDATE_MCP_TOOL_CONTRACT=1 cargo test -p mvm-cli --lib mcp::protocol::tool_surface_matches_the_pinned_contract
+```
+
+Tool failures retain the client's stable `code` and `retryable` classification in
+`_meta`; capability failures use JSON-RPC error `data`. Protocol errors retain
+their JSON-RPC codes. Frame/output limits, malformed inputs, discovery, drive
+grants, and policy refusal are tested without booting a VM.

@@ -1,64 +1,56 @@
-# ADR-009: Cross-platform strategy — Linux and macOS native, Windows via the studio app
+# ADR-009: Cross-platform strategy — current native hosts and future Windows support
 
 ## Status
 
-Accepted.
+Accepted. The permanent exclusion of native Windows execution is superseded by
+the future libkrun/WHP direction in [#3553](https://github.com/tinylabscom/mvm/issues/3553)
+and the owner's protected backend goals in
+[#4839](https://github.com/tinylabscom/mvm/issues/4839).
+This does not promote Windows to a supported or witnessed execution tier.
 
 ## Context
 
-mvm runs directly on the two host classes that expose a real hypervisor
-primitive its backends can drive: Linux (`/dev/kvm`) and macOS
-(Hypervisor.framework). Windows exposes no equivalent primitive any
-`VmBackend` implementation targets, and CI cannot assert live-microVM
-behavior on a Windows runner the way it can on Linux and macOS.
+mvm's current native execution hosts are Linux and macOS. Native Windows
+execution is a future goal through libkrun's Windows Hypervisor Platform
+support, not a new in-house WHP supervisor or userspace device stack.
 
-mvm's non-CLI consumers already reach the runtime through one stable,
-backend-agnostic trait (`mvm-client`'s `MvmClient`) regardless of whether
-the target is in-process or remote. That seam is exactly what a
-Windows-native GUI needs: it never has to run a `VmBackend` itself.
+Non-CLI consumers use `mvm-client` library APIs. A frontend must not compensate
+for a missing platform capability by launching `mvmctl`, changing backend tier
+silently, or presenting remote execution as local execution.
 
 ## Decision
 
-Linux and macOS are the two native execution hosts. Every `VmBackend`
-implementation (Firecracker, libkrun, HVF, QEMU) runs only on these two;
-none targets Windows.
+### Current support and capability reporting
 
-Windows is not a native execution host and never gets a `VmBackend`
-implementation. The supported Windows path is the **studio** desktop app
-(a Tauri shell): it links `mvm-client` and, by default, talks to a remote
-fleet or sidecar over `GatewayBackend` — no local hypervisor requirement
-on Windows at all. An in-process `LocalBackend` build (`--features local`)
-is available for a Windows host with a working libkrun path, but it is
-not the default and is not asserted by CI.
+Preserve the Linux/macOS backend contracts and admission-visible capability
+tiers. A compiled package, mock test, or another operating system's boot does
+not establish a supported Windows tier. Library and doctor capability reports
+must distinguish unavailable, preview, and supported behavior.
 
-CI mirrors this split exactly:
+Studio's local/remote scope is governed by its own current ADRs. This ADR does
+not require a legacy fleet sidecar or make a working Windows Studio release a
+substitute for native Windows VM execution evidence.
 
-- `ci.yml` (every push) and `ci-full.yml` (the full platform matrix) build
-  and test Linux and macOS.
-- `windows.yml` runs a **non-blocking, informational** Windows lane —
-  `cargo check --workspace` (`continue-on-error: true`) plus a build and
-  test of `mvm-core` alone, the one crate required to compile everywhere
-  (no shell-out, no vsock, no platform-specific VMM binding) — triggered
-  only at release tags or by manual dispatch, never gating a push or a
-  merge.
+### Windows promotion gate
 
-No code path assumes a Windows-native hypervisor. Crates that shell out,
-open a vsock socket, or link a platform VMM (`mvm-backend`, `mvm-build`,
-`mvm-guest`, `mvm-hostd`, `mvm-vm-host`) are not asserted to build on
-Windows and are outside the informational lane's scope.
+The first planned Windows path is the existing libkrun backend on x86_64/WHP.
+Before promotion, the owning issue requires:
+
+- a qualified Windows host and an archived end-to-end boot witness;
+- correct private-state ACLs and preservation of admission, audit, secret
+  custody, and the canonical guest/host transport contract;
+- named refusal on hosts without usable WHP or on unsupported architectures,
+  without a silent backend fallback;
+- platform documentation and doctor capability output that agree;
+- a recorded Windows artifact signing/integrity posture.
+
+Compile-only or informational CI remains compile evidence, not a lifecycle or
+security witness. Future backends may satisfy the same platform and `VmBackend`
+contracts; this decision does not require implementing them speculatively.
 
 ## Consequences
 
-No Windows-specific VMM code, no Windows-specific integration-test
-surface, and no long-tail Windows bug queue competing with Linux/macOS
-engineering time. The studio app is the one place Windows-specific UX
-work happens, and it already exercises the same `MvmClient` trait every
-other consumer uses — Windows support work and runtime-library work stay
-decoupled.
-
-A Windows user who wants a bare terminal `mvmctl` workflow with a local
-backend gets an unverified, best-effort path, not a first-class one.
-
-The Windows CI lane exists purely to catch a `mvm-core`-level compile
-break early; it asserts nothing about VM lifecycle behavior and is not a
-required check.
+Cleanup must preserve the future Windows direction without claiming it is
+already delivered. No new WHP driver, GPU promise, compatibility shim, or
+platform-tier bypass follows from this ADR. Linux/macOS validation and existing
+security boundaries remain required while the Windows evidence is outstanding.

@@ -21,6 +21,15 @@ pub(crate) fn ensure_default_microvm_image(
 }
 
 pub(crate) fn ensure_workload_kernel() -> Result<String> {
+    ensure_workload_kernel_with(super::local_pair::pair_workload_kernel_fingerprint)
+}
+
+fn ensure_workload_kernel_with(
+    pair_fingerprint: impl FnOnce(
+        &mvm_build::image_source::LocalImageCheckout,
+        WorkloadImageProfile,
+    ) -> Result<String>,
+) -> Result<String> {
     use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel, workload_kernel_label};
 
     let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
@@ -32,10 +41,7 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     }
     let source_checkout = super::images_built_from_source();
     if let Some(checkout) = super::bootstrap::selected_local_checkout()? {
-        let expected = super::local_pair::pair_workload_kernel_fingerprint(
-            &checkout,
-            WorkloadImageProfile::DefaultTenant,
-        )?;
+        let expected = pair_fingerprint(&checkout, WorkloadImageProfile::DefaultTenant)?;
         let kernel = mvm_build::kernel_fetch::cached_kernel_path(&cache, arch, "workload");
         let recorded = std::fs::read_to_string(kernel.with_file_name("local-pair-fingerprint"))
             .unwrap_or_default();
@@ -58,6 +64,16 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
 }
 
 pub(crate) fn prepare_workload_kernel() -> Result<String> {
+    prepare_workload_kernel_with(
+        super::local_pair::seed_pair_workload_kernel_cache,
+        ensure_workload_kernel,
+    )
+}
+
+fn prepare_workload_kernel_with(
+    seed_pair: impl FnOnce() -> Result<()>,
+    resolve_prepared: impl FnOnce() -> Result<String>,
+) -> Result<String> {
     use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel, workload_kernel_label};
 
     let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
@@ -80,8 +96,8 @@ pub(crate) fn prepare_workload_kernel() -> Result<String> {
     // checkout it names. An unusable configured path is an error here,
     // never a quiet fall-through to a download.
     if super::bootstrap::selected_local_checkout()?.is_some() {
-        super::local_pair::seed_pair_workload_kernel_cache()?;
-        let path = ensure_workload_kernel()?;
+        seed_pair()?;
+        let path = resolve_prepared()?;
         ui::info(&format!("Workload kernel: pair-built at {path}"));
         return Ok(path);
     }
@@ -456,13 +472,39 @@ fn ensure_pair_workload_image(
     variant: DefaultMicrovmVariant,
     profile: WorkloadImageProfile,
 ) -> Result<(String, String)> {
+    let mvm_root = mvm_build::image_source::mvm_source_checkout(
+        mvm_build::artifact_acquisition::compiled_channel(),
+    )
+    .context(
+        "a local image set is built against the mvm checkout this binary was compiled              from, and that checkout is no longer on disk",
+    )?;
+    ensure_pair_workload_image_with(
+        checkout,
+        &mvm_root,
+        cache_dir,
+        variant,
+        profile,
+        &mut |target| super::local_pair::ensure_pair_built(checkout, target),
+    )
+}
+
+fn ensure_pair_workload_image_with(
+    checkout: &mvm_build::image_source::LocalImageCheckout,
+    mvm_root: &std::path::Path,
+    cache_dir: &str,
+    variant: DefaultMicrovmVariant,
+    profile: WorkloadImageProfile,
+    build: &mut dyn FnMut(
+        mvm_build::image_source::ImageBuildTarget,
+    ) -> Result<mvm_build::image_source::PairBuild>,
+) -> Result<(String, String)> {
     use mvm_build::image_source::{FlakeAttr, ImageBuildRole, ImageBuildTarget};
     let target = ImageBuildTarget {
         role: ImageBuildRole::for_workload_profile(profile),
         attr: FlakeAttr::new(variant.attr())
             .expect("a variant attribute is a valid flake attribute"),
     };
-    let key = super::local_pair::derive_pair_key(checkout, &target)?;
+    let key = super::local_pair::derive_pair_key_from(checkout, &target, mvm_root)?;
     let fingerprint = super::local_pair::pair_fingerprint(&key);
     let contract = mvm_build::image_source::contract_for(&target)?;
     let kernel_path = format!("{cache_dir}/vmlinux");
@@ -474,14 +516,10 @@ fn ensure_pair_workload_image(
         && installed_pair_fingerprint(std::path::Path::new(cache_dir)).as_deref()
             == Some(fingerprint.as_str())
     {
-        let mvm_root = mvm_build::image_source::mvm_source_checkout(
-            mvm_build::artifact_acquisition::compiled_channel(),
-        )
-        .context("the paired mvm checkout is no longer on disk")?;
         let cache = mvm_build::image_source::LocalImageCache::open_default();
         let context = mvm_build::image_source::EntryContext {
             images: checkout,
-            mvm_checkout: &mvm_root,
+            mvm_checkout: mvm_root,
             roles: contract.set_roles,
         };
         let proof_path = mvm_build::published_image_set::local_workload_proof_path(
@@ -502,7 +540,7 @@ fn ensure_pair_workload_image(
         }
         mvm_build::published_image_set::verify_local_workload_proof(
             checkout,
-            &mvm_root,
+            mvm_root,
             &key,
             std::path::Path::new(cache_dir),
             profile,
@@ -510,7 +548,7 @@ fn ensure_pair_workload_image(
         return Ok((kernel_path, rootfs_path));
     }
 
-    let build = super::local_pair::ensure_pair_built(checkout, target)?;
+    let build = build(target)?;
     let fingerprint = super::local_pair::pair_fingerprint(&build.key);
     std::fs::create_dir_all(cache_dir)
         .with_context(|| format!("creating default-image cache dir {cache_dir}"))?;
@@ -551,13 +589,9 @@ fn ensure_pair_workload_image(
         &build.entry,
         std::path::Path::new(cache_dir),
     )?;
-    let mvm_root = mvm_build::image_source::mvm_source_checkout(
-        mvm_build::artifact_acquisition::compiled_channel(),
-    )
-    .context("the paired mvm checkout is no longer on disk")?;
     mvm_build::published_image_set::verify_local_workload_proof(
         checkout,
-        &mvm_root,
+        mvm_root,
         &build.key,
         std::path::Path::new(cache_dir),
         profile,
@@ -644,6 +678,22 @@ mod pair_default_image_tests {
         crate::test_boot_payload::in_payload_capable_test_process(module_path!(), name)
     }
 
+    fn ensure_synthetic_pair_image(
+        pair: &Pair,
+        cache_dir: &str,
+        variant: DefaultMicrovmVariant,
+        profile: WorkloadImageProfile,
+    ) -> Result<(String, String)> {
+        ensure_pair_workload_image_with(
+            &pair.images,
+            &pair.mvm,
+            cache_dir,
+            variant,
+            profile,
+            &mut |target| pair.build(&pair.images, target),
+        )
+    }
+
     #[test]
     fn launch_kernel_resolution_refuses_an_unprepared_cache() {
         let mut env = TestEnv::new();
@@ -690,11 +740,17 @@ mod pair_default_image_tests {
         let pair = Pair::new();
         env.set("MVM_HOME", pair.tmp.path().join("home"));
         std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
-        let _entry = pair.publish_default_tenant();
+        let entry =
+            pair.publish_workload_profile_from(WorkloadImageProfile::DefaultTenant, &pair.mvm);
+        let expected_key = pair.key(ImageBuildRole::DefaultTenant, "default");
+        assert_eq!(
+            entry.key, expected_key,
+            "publication must use the synthetic mvm checkout, not the compiled source"
+        );
         let cache_dir = pair.tmp.path().join("default-image");
 
-        let (kernel, rootfs) = ensure_pair_workload_image(
-            &pair.images,
+        let (kernel, rootfs) = ensure_synthetic_pair_image(
+            &pair,
             &cache_dir.display().to_string(),
             DefaultMicrovmVariant::Prod,
             WorkloadImageProfile::DefaultTenant,
@@ -708,13 +764,7 @@ mod pair_default_image_tests {
                 "installed default image must carry {label}"
             );
         }
-        let fingerprint = crate::commands::env::builder_vm::local_pair::pair_fingerprint(
-            &crate::commands::env::builder_vm::local_pair::derive_pair_key(
-                &pair.images,
-                &Pair::target(ImageBuildRole::DefaultTenant, "default"),
-            )
-            .unwrap(),
-        );
+        let fingerprint = super::super::local_pair::pair_fingerprint(&expected_key);
         assert_eq!(
             installed_pair_fingerprint(&cache_dir).as_deref(),
             Some(fingerprint.as_str()),
@@ -725,8 +775,8 @@ mod pair_default_image_tests {
         // consults the install must still succeed.
         std::fs::remove_dir_all(mvm_build::image_source::LocalImageCache::open_default().root())
             .unwrap();
-        let (again_kernel, again_rootfs) = ensure_pair_workload_image(
-            &pair.images,
+        let (again_kernel, again_rootfs) = ensure_synthetic_pair_image(
+            &pair,
             &cache_dir.display().to_string(),
             DefaultMicrovmVariant::Prod,
             WorkloadImageProfile::DefaultTenant,
@@ -751,8 +801,8 @@ mod pair_default_image_tests {
             let _entry = pair.publish_linux_workload(variant.attr());
             let cache = pair.tmp.path().join("installed");
             let ensure = || {
-                ensure_pair_workload_image(
-                    &pair.images,
+                ensure_synthetic_pair_image(
+                    &pair,
                     &cache.display().to_string(),
                     variant,
                     WorkloadImageProfile::DefaultTenant,
@@ -824,8 +874,8 @@ mod pair_default_image_tests {
             let source = pair.tmp.path().join("source");
             let destination = pair.tmp.path().join("destination");
             let ensure = |directory: &std::path::Path, mode| {
-                ensure_pair_workload_image(
-                    &pair.images,
+                ensure_synthetic_pair_image(
+                    &pair,
                     &directory.display().to_string(),
                     mode,
                     WorkloadImageProfile::DefaultTenant,
@@ -925,8 +975,8 @@ mod pair_default_image_tests {
         let _entry = pair.publish_linux_workload("default");
         let cache = pair.tmp.path().join("installed");
         let ensure = || {
-            ensure_pair_workload_image(
-                &pair.images,
+            ensure_synthetic_pair_image(
+                &pair,
                 &cache.display().to_string(),
                 DefaultMicrovmVariant::Prod,
                 WorkloadImageProfile::DefaultTenant,
@@ -957,11 +1007,12 @@ mod pair_default_image_tests {
         let pair = Pair::new();
         env.set("MVM_HOME", pair.tmp.path().join("home"));
         std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
-        let entry = pair.publish_workload_profile(WorkloadImageProfile::RootlessTenant);
+        let entry =
+            pair.publish_workload_profile_from(WorkloadImageProfile::RootlessTenant, &pair.mvm);
         let cache_dir = pair.tmp.path().join("rootless-image");
 
-        let (kernel, rootfs) = ensure_pair_workload_image(
-            &pair.images,
+        let (kernel, rootfs) = ensure_synthetic_pair_image(
+            &pair,
             &cache_dir.display().to_string(),
             DefaultMicrovmVariant::Prod,
             WorkloadImageProfile::RootlessTenant,
@@ -987,11 +1038,9 @@ mod pair_default_image_tests {
         env.set("MVM_HOME", pair.tmp.path().join("home"));
         std::fs::create_dir_all(pair.tmp.path().join("home")).unwrap();
         let entry = pair.publish_default_tenant();
-        let kernel = super::super::local_pair::ensure_pair_workload_kernel(
-            &pair.images,
-            WorkloadImageProfile::DefaultTenant,
-        )
-        .expect("the pair resolves a workload kernel");
+        let kernel = pair
+            .workload_kernel(&pair.images, WorkloadImageProfile::DefaultTenant)
+            .expect("the pair resolves a workload kernel");
         let artifact = entry
             .set
             .artifacts
@@ -1020,13 +1069,25 @@ mod pair_default_image_tests {
             pair.images.root(),
         );
         pair.publish_default_tenant();
-        let path = prepare_workload_kernel().expect("prepare the pair kernel");
-        let launch_path =
-            ensure_workload_kernel().expect("launch resolves the prepared pair kernel");
+        let resolve = || {
+            ensure_workload_kernel_with(|checkout, profile| {
+                pair.kernel_fingerprint(checkout, profile)
+            })
+        };
+        let path = prepare_workload_kernel_with(|| pair.seed_workload_kernel(), resolve)
+            .expect("prepare the pair kernel");
+        let launch_path = resolve().expect("launch resolves the prepared pair kernel");
         assert_eq!(path, launch_path);
         assert!(
             path.ends_with("vmlinux"),
             "the pair kernel path names the kernel artifact: {path}"
+        );
+
+        std::fs::write(pair.mvm.join("changed-source.txt"), b"changed source\n").unwrap();
+        let error = resolve().expect_err("a changed synthetic mvm checkout invalidates the seed");
+        assert!(
+            error.to_string().contains("not prepared"),
+            "source drift must refuse the prepared kernel: {error:#}"
         );
     }
 

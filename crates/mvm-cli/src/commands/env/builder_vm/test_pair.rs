@@ -155,19 +155,74 @@ impl Pair {
         .expect("key derives from the synthetic pair")
     }
 
+    pub(crate) fn build(
+        &self,
+        checkout: &mvm_build::image_source::LocalImageCheckout,
+        target: ImageBuildTarget,
+    ) -> anyhow::Result<mvm_build::image_source::PairBuild> {
+        use mvm_build::image_source::{
+            LocalImageCache, PairBuildHooks, build_target_for_pair_with,
+        };
+
+        build_target_for_pair_with(
+            checkout,
+            &self.mvm,
+            target,
+            GuestArch::host(),
+            &LocalImageCache::open_default(),
+            PairBuildHooks {
+                admit: &mut |_, _| panic!("unit fixture must answer from its pair cache"),
+                prepare_builder: &mut || panic!("unit fixture must not prepare a VM"),
+                run_job: &mut |_| panic!("unit fixture must not run a builder job"),
+            },
+        )
+        .map_err(anyhow::Error::from)
+    }
+
+    pub(crate) fn workload_kernel(
+        &self,
+        checkout: &mvm_build::image_source::LocalImageCheckout,
+        profile: WorkloadImageProfile,
+    ) -> anyhow::Result<PathBuf> {
+        super::local_pair::ensure_pair_workload_kernel_with(
+            checkout,
+            profile,
+            |checkout, target| self.build(checkout, target),
+        )
+    }
+
+    pub(crate) fn kernel_fingerprint(
+        &self,
+        checkout: &mvm_build::image_source::LocalImageCheckout,
+        profile: WorkloadImageProfile,
+    ) -> anyhow::Result<String> {
+        let key = super::local_pair::derive_pair_key_from(
+            checkout,
+            &Self::target(ImageBuildRole::for_workload_profile(profile), "default"),
+            &self.mvm,
+        )?;
+        Ok(super::local_pair::pair_fingerprint(&key))
+    }
+
+    pub(crate) fn seed_workload_kernel(&self) -> anyhow::Result<()> {
+        let profile = WorkloadImageProfile::DefaultTenant;
+        let fingerprint = self.kernel_fingerprint(&self.images, profile)?;
+        let kernel = self.workload_kernel(&self.images, profile)?;
+        super::local_pair::install_pair_workload_kernel(&kernel, &fingerprint)
+    }
+
     /// Publish this pair's `default-tenant.default` set into the current
     /// `MVM_HOME`'s local image cache (set `MVM_HOME` before calling). The
     /// five artifacts are the default-tenant contract; the sidecar is a
     /// producer-shaped `mvm-meta.json`.
     pub(crate) fn publish_default_tenant(&self) -> mvm_build::image_source::CachedImageSet {
-        self.publish_workload_profile(WorkloadImageProfile::DefaultTenant)
+        self.publish_workload_profile_from(WorkloadImageProfile::DefaultTenant, &self.mvm)
     }
 
-    /// Publish either generic workload profile with the same artifact layout
-    /// but distinct profile-qualified manifest roles and cache identity.
-    pub(crate) fn publish_workload_profile(
+    pub(crate) fn publish_workload_profile_from(
         &self,
         profile: WorkloadImageProfile,
+        mvm_root: &Path,
     ) -> mvm_build::image_source::CachedImageSet {
         const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
         let mut vmlinux = vec![0x7fu8; 1024 * 1024 + 1];
@@ -218,20 +273,20 @@ impl Pair {
                     &["virtio_blk", "dm_verity"],
                 ),
             ],
+            mvm_root,
         )
     }
 
     /// Publish a set for any target into the current `MVM_HOME`'s local
-    /// image cache (set `MVM_HOME` before calling). The set is keyed on the
-    /// mvm checkout the test binary was compiled from, the same input the
-    /// build path derives, so a later lookup hits.
-    pub(crate) fn publish(
+    /// image cache, keyed on the supplied mvm checkout.
+    fn publish(
         &self,
         role: mvm_build::image_source::ImageBuildRole,
         attr: &str,
         members: &[TestMember],
+        mvm_root: &Path,
     ) -> mvm_build::image_source::CachedImageSet {
-        self.publish_with_base_contract(role, attr, members, None)
+        self.publish_with_base_contract(role, attr, members, None, mvm_root)
     }
 
     pub(crate) fn publish_linux_workload(
@@ -319,6 +374,7 @@ impl Pair {
                 ),
             ],
             Some(1),
+            &self.mvm,
         )
     }
 
@@ -328,16 +384,13 @@ impl Pair {
         attr: &str,
         members: &[TestMember],
         base_contract: Option<u32>,
+        mvm_root: &Path,
     ) -> mvm_build::image_source::CachedImageSet {
         let target = Self::target(role, attr);
-        let mvm_root = mvm_build::image_source::mvm_source_checkout(
-            mvm_build::artifact_acquisition::compiled_channel(),
-        )
-        .expect("the compiled-from mvm checkout is on disk");
         let key = mvm_build::image_source::LocalImageCacheKey::derive(
             &mvm_build::image_source::KeyInputs {
                 images: &self.images,
-                mvm_checkout: &mvm_root,
+                mvm_checkout: mvm_root,
                 target: &target,
                 arch: GuestArch::host(),
             },
@@ -348,13 +401,13 @@ impl Pair {
             mvm_build::image_source::contract_for(&target).expect("contract for the role");
         let ctx = mvm_build::image_source::EntryContext {
             images: &self.images,
-            mvm_checkout: &mvm_root,
+            mvm_checkout: mvm_root,
             roles: contract.set_roles,
         };
         let staged = cache.stage(&key).expect("stage");
         let checkouts = self
             .images
-            .current_checkouts(&mvm_root)
+            .current_checkouts(mvm_root)
             .expect("the pair's checkouts read");
         Self::emit_set(staged.dir(), &checkouts, key.arch, members);
         if let Some(version) = base_contract {

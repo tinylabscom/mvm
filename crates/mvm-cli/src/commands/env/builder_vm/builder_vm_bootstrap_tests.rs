@@ -297,6 +297,12 @@ fn stage0_lock_creates_missing_cache_parent() {
 /// shared Stage 0 lock is actually held.
 #[test]
 fn stage0_in_flight_tracks_the_lock() {
+    if !crate::test_boot_payload::in_fresh_test_process(
+        module_path!(),
+        "stage0_in_flight_tracks_the_lock",
+    ) {
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tempdir");
     let builder_vm = tmp.path().join("builder-vm");
 

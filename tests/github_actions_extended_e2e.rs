@@ -1474,26 +1474,14 @@ fn macos_documented_surface_job_installs_the_embedded_cross_toolchain() {
 }
 
 #[test]
-fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
+fn documented_surface_build_preserves_requested_features_and_payload() {
     let script = documented_surface_script();
 
     assert!(
         script.contains(
             "cargo build --profile \"$E2E_PROFILE\" --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\""
         ),
-        "the aws-lc-backed user build must use Cargo's standard compiler and linker path"
-    );
-    // Checks that `cargo-fast.sh` is never handed `$E2E_FEATURES`, not that it
-    // is never handed any feature at all. The blunt form of this assertion —
-    // "cargo-fast.sh is not invoked with `--features`" — held only while the
-    // featureless arm passed no features, and broke the moment
-    // `embed-host-bins` was added to both arms. That flag pulls no aws-lc, so
-    // it is fine on the fast path; `$E2E_FEATURES` is the one that is not.
-    assert!(
-        !script
-            .lines()
-            .any(|line| line.contains("cargo-fast.sh build") && line.contains("$E2E_FEATURES")),
-        "the fast codegen wrapper leaves aws-lc native symbols unresolved"
+        "the suite binary must retain the requested product features and embedded payload"
     );
 }
 
@@ -1546,7 +1534,7 @@ fn the_ceiling_enforcing_macos_lane_builds_every_binary_under_test_optimized() {
     assert!(script.contains("build_sdk_hostlib \"$MVMCTL\" \"$E2E_PROFILE\""));
     for line in script.lines().filter(|line| {
         let line = line.trim_start();
-        (line.starts_with("cargo build") || line.starts_with("./scripts/cargo-fast.sh build"))
+        (line.starts_with("cargo build") || line.starts_with("./scripts/cargo.sh build"))
             && line.contains("--bin mvmctl")
     }) {
         assert!(

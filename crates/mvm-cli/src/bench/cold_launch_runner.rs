@@ -744,6 +744,7 @@ tmpfs /tmp tmpfs rw 0 0
     #[cfg(unix)]
     #[test]
     fn a_warm_shape_lane_awaits_an_idle_standby_and_gates_on_shape_evidence() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let mut sample = sample_for(148.0);
         sample.launch_mode = LaunchMode::Warm;
@@ -800,6 +801,7 @@ tmpfs /tmp tmpfs rw 0 0
     #[cfg(unix)]
     #[test]
     fn a_warm_shape_lane_refuses_a_claim_of_the_wrong_shape() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let mut sample = sample_for(148.0);
         sample.launch_mode = LaunchMode::Warm;

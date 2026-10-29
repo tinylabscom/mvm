@@ -18,6 +18,7 @@ pub mod http;
 pub(crate) mod install_layout;
 pub mod json_out;
 pub mod logging;
+mod mcp;
 pub mod metrics_server;
 pub(crate) mod mount_cache;
 pub mod observability;

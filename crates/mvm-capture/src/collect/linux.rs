@@ -194,3 +194,35 @@ fn record_trace_events(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_package_managers_leave_observations_unchanged() {
+        let mut report = CaptureReportV1::new("test");
+        for manager in ["rpm", "pacman", "apk", "unknown"] {
+            report.observations.push(Observation {
+                id: manager.to_owned(),
+                kind: ObservationKind::NativePackage,
+                path: None,
+                source: "test".to_owned(),
+                evidence: Evidence {
+                    package_manager: Some(manager.to_owned()),
+                    package_name: Some("example".to_owned()),
+                    ..Default::default()
+                },
+                confidence: Confidence::Observed,
+                warnings: vec![],
+                provenance: vec![],
+            });
+        }
+        let before = serde_json::to_value(&report).expect("serialize report");
+        collect_packages(&mut report).expect("unsupported managers are not errors");
+        assert_eq!(
+            serde_json::to_value(&report).expect("serialize report"),
+            before
+        );
+    }
+}
