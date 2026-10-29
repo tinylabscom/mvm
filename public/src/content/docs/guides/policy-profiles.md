@@ -53,7 +53,13 @@ exists applies the same check at registration, so a `restrictive` machine
 refuses the registration rather than the next start. A read-only managed
 volume is accepted under every profile.
 
-The default is `standard`. Use `restrictive` when the workload does not need
+The default on both `run` and `machine run` is `dev`. Use `--profile standard`
+to select the narrower profile explicitly. Signed package ceilings still apply:
+the default does not authorize interactive access to a sealed package or widen
+its signed grants. Use `--prod --profile standard` for a sealed image run;
+`--prod` continues to refuse the development profile.
+
+Use `restrictive` when the workload does not need
 host files or host-provided environment values:
 
 ```sh

@@ -4,6 +4,18 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn run_help_advertises_installed_package_selection() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["run", "--help"])
+        .output()
+        .expect("run help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("installed package"), "{stdout}");
+    assert!(stdout.contains("--policy"), "{stdout}");
+}
+
+#[test]
 fn build_compile_help_advertises_pinned_publication_input() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["build", "compile", "--help"])
@@ -71,6 +83,8 @@ fn artifact_pack_takes_the_arguments_of_bundle_export() {
         "--allow-egress",
         "--allow-volumes",
         "--allow-unauthenticated",
+        "--application-policy",
+        "--boot-assets",
     ] {
         assert!(
             pack.contains(flag),

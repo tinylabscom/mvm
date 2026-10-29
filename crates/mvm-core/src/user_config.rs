@@ -24,6 +24,8 @@ pub struct MvmConfig {
     pub default_cpus: u32,
     /// Default memory in MiB for `mvmctl run` (default: 512)
     pub default_memory_mib: u32,
+    /// Ordered local policies used when flags and the project select none.
+    pub default_policy: Vec<String>,
     /// Log format: "human" or "json". None means human.
     pub log_format: Option<String>,
     /// Port for the Prometheus metrics endpoint. None means disabled.
@@ -234,6 +236,7 @@ impl Default for MvmConfig {
             dev_vm_mem_gib: 16,
             default_cpus: 2,
             default_memory_mib: 512,
+            default_policy: Vec::new(),
             log_format: None,
             metrics_port: None,
             catalog_url: None,
@@ -310,6 +313,23 @@ pub fn load(override_dir: Option<&Path>) -> MvmConfig {
             MvmConfig::default()
         }
     }
+}
+
+/// Read configuration without creating it or falling back on malformed contents.
+///
+/// A missing file uses defaults; other read errors and parse errors are returned.
+pub fn load_strict(override_dir: Option<&Path>) -> Result<MvmConfig> {
+    let path = config_path_at(&config_dir(override_dir));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(MvmConfig::default());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to read {}", path.display()));
+        }
+    };
+    toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))
 }
 
 /// Save `MvmConfig` to `<mvm_config_dir>/config.toml` (or `override_dir/config.toml` in tests).
@@ -433,6 +453,7 @@ mod tests {
     #[test]
     fn test_default_values() {
         let cfg = MvmConfig::default();
+        assert!(cfg.default_policy.is_empty());
         assert_eq!(cfg.dev_vm_cpus, 8);
         assert_eq!(cfg.dev_vm_mem_gib, 16);
         assert_eq!(cfg.default_cpus, 2);
@@ -453,6 +474,7 @@ mod tests {
             default_memory_mib = 512
         "#;
         let cfg: MvmConfig = toml::from_str(partial).unwrap();
+        assert!(cfg.default_policy.is_empty());
         assert_eq!(cfg.dev_vm_cpus, 4);
         assert!(cfg.metrics_port.is_none());
     }
@@ -478,6 +500,7 @@ mod tests {
             },
             dev_vm_cpus: 4,
             metrics_port: Some(9091),
+            default_policy: vec!["agent-apis".into(), "/etc/policy/team.toml".into()],
             ..MvmConfig::default()
         };
 
@@ -485,8 +508,26 @@ mod tests {
         let parsed: MvmConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed.dev_vm_cpus, 4);
         assert_eq!(parsed.metrics_port, Some(9091));
+        assert_eq!(parsed.default_policy, cfg.default_policy);
         assert_eq!(parsed.dev_vm_mem_gib, 16);
         assert_eq!(parsed.tenant.name, "tenant-a");
+    }
+
+    #[test]
+    fn strict_config_loading_defaults_only_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            load_strict(Some(dir.path()))
+                .unwrap()
+                .default_policy
+                .is_empty()
+        );
+        assert!(!dir.path().join("config.toml").exists());
+        std::fs::write(dir.path().join("config.toml"), "default_policy = 1").unwrap();
+        assert!(load_strict(Some(dir.path())).is_err());
+        std::fs::remove_file(dir.path().join("config.toml")).unwrap();
+        std::fs::create_dir(dir.path().join("config.toml")).unwrap();
+        assert!(load_strict(Some(dir.path())).is_err());
     }
 
     #[test]

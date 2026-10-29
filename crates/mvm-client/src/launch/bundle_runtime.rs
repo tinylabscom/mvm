@@ -10,8 +10,8 @@ use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{BackendImageSupport, ImageSetMember};
 use mvm_core::plan::FsTrustStore;
 use mvm_core::plan::bundle::{
-    ArtifactRole, BundleRegistry, VerifiedEmbeddedImageSet, select_boot_asset_members,
-    verify_bundle_file,
+    ArtifactRole, BundleArtifact, BundleRegistry, VerifiedBootAssets, VerifiedBundleFile,
+    VerifiedEmbeddedImageSet, select_boot_asset_members, verify_bundle_file,
 };
 use mvm_core::vm_backend::{BackendKind, BundleBootAssetsPin, VmStartConfig};
 
@@ -74,47 +74,9 @@ pub fn attach_if_installed_bundle(config: &mut VmStartConfig, backend: &str) -> 
         .manifest
         .find_by_role(&ArtifactRole::Initrd)
         .context("bundle boot assets require a signed initrd")?;
-    let set = mvm_build::published_image_set::SetMemberCache::for_root(
-        boot.image_set.manifest_sha256.clone(),
-    );
     let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let staging = tempfile::tempdir()?;
-    let [overlay_member, initramfs_member] =
-        select_boot_asset_members(&boot.image_set.manifest, boot.arch)?;
-    let overlay_archive = authenticated_copy(
-        overlay_member,
-        &boot.image_set,
-        &installed.root,
-        staging.path(),
-    )?;
-    let initramfs_archive = authenticated_copy(
-        initramfs_member,
-        &boot.image_set,
-        &installed.root,
-        staging.path(),
-    )?;
-    mvm_build::runtime_overlay::install_image_set_runtime_overlay_archive(
-        &overlay_archive,
-        &set,
-        boot.image_set.manifest_sha256.as_str(),
-        boot.arch,
-        &cache,
-    )?;
-    mvm_build::initramfs::install_image_set_initramfs_archive(
-        &initramfs_archive,
-        &set,
-        boot.arch,
-        &cache,
-    )?;
-    let overlay =
-        mvm_build::runtime_overlay::resolve_image_set_runtime_overlay(&cache, &set, boot.arch)?;
-    let ramdisk = mvm_build::initramfs::resolve_image_set_initramfs(&cache, &set, boot.arch)?;
-    let initrd_sha256 = mvm_core::crypto::image_verify::sha256_file(&ramdisk.image_path)?;
-    ensure!(
-        std::fs::metadata(&ramdisk.image_path)?.len() == initrd.size_bytes
-            && initrd_sha256 == initrd.sha256,
-        "bundle member initrd differs from the signed boot initrd"
-    );
+    let (overlay, ramdisk, initrd_sha256) =
+        prepare_payloads(boot, &installed.root, initrd, &cache)?;
     config.runtime_overlay_path = Some(overlay.overlay_ext4.display().to_string());
     config.runtime_overlay_verity_path = Some(overlay.sidecar.display().to_string());
     config.runtime_overlay_roothash = Some(overlay.roothash);
@@ -126,6 +88,56 @@ pub fn attach_if_installed_bundle(config: &mut VmStartConfig, backend: &str) -> 
         initrd_sha256: mvm_core::packs::Sha256Hex::new(initrd_sha256)?,
     });
     Ok(true)
+}
+
+/// Check packaged runtime payloads before an application install is published.
+/// Only runtime archives are copied into private scratch space; no application
+/// image is installed, and nothing is downloaded or built. The caller checks
+/// signature and host protocol compatibility before entering this payload step.
+pub fn validate_payloads(root: &Path, verified: &VerifiedBundleFile) -> Result<()> {
+    let boot = verified
+        .boot_assets
+        .as_ref()
+        .context("bundle boot assets missing")?;
+    let initrd = verified
+        .manifest
+        .find_by_role(&ArtifactRole::Initrd)
+        .context("bundle boot assets require a signed initrd")?;
+    let cache = tempfile::tempdir()?;
+    prepare_payloads(boot, root, initrd, cache.path()).map(|_| ())
+}
+
+fn prepare_payloads(
+    boot: &VerifiedBootAssets,
+    root: &Path,
+    initrd: &BundleArtifact,
+    cache: &Path,
+) -> Result<(
+    mvm_build::runtime_overlay::RuntimeOverlayArtifact,
+    mvm_fs::initramfs::InitramfsArtifact,
+    String,
+)> {
+    let staging = tempfile::tempdir()?;
+    let [overlay_member, initramfs_member] =
+        select_boot_asset_members(&boot.image_set.manifest, boot.arch)?;
+    let overlay_archive =
+        authenticated_copy(overlay_member, &boot.image_set, root, staging.path())?;
+    let initramfs_archive =
+        authenticated_copy(initramfs_member, &boot.image_set, root, staging.path())?;
+    let (overlay, ramdisk) = mvm_build::published_image_set::install_boot_archives(
+        &overlay_archive,
+        &initramfs_archive,
+        &boot.image_set.manifest_sha256,
+        boot.arch,
+        cache,
+    )?;
+    let initrd_sha256 = mvm_core::crypto::image_verify::sha256_file(&ramdisk.image_path)?;
+    ensure!(
+        std::fs::metadata(&ramdisk.image_path)?.len() == initrd.size_bytes
+            && initrd_sha256 == initrd.sha256,
+        "bundle member initrd differs from the signed boot initrd"
+    );
+    Ok((overlay, ramdisk, initrd_sha256))
 }
 
 fn attach_workload_verity(
@@ -257,6 +269,47 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an explicitly supplied incompatible signed bundle and its public key"]
+    fn incompatible_signed_payload_is_refused_before_installation() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let archive =
+            std::env::var("MVM_RUNTIME_TEST_BUNDLE").expect("set MVM_RUNTIME_TEST_BUNDLE");
+        let public =
+            std::env::var("MVM_RUNTIME_TEST_PUBLIC_KEY").expect("set MVM_RUNTIME_TEST_PUBLIC_KEY");
+        let bytes: [u8; 32] = std::fs::read(public)
+            .unwrap()
+            .try_into()
+            .ok()
+            .expect("public key must contain 32 bytes");
+        let key = VerifyingKey::from_bytes(&bytes).unwrap();
+        let trust = FsTrustStore::new(home.path().join("publishers"));
+        std::fs::create_dir_all(trust.root()).unwrap();
+        std::fs::write(
+            trust.root().join(format!(
+                "{}.pub",
+                mvm_core::plan::bundle::key_id_from_pubkey(&key).0
+            )),
+            bytes,
+        )
+        .unwrap();
+        let archive = Path::new(&archive);
+        let verified = verify_bundle_file(archive, &trust).unwrap();
+        let registry = BundleRegistry::new(home.path().join("registry"));
+        let error = registry
+            .install_file_with_preflight(archive, &trust, false, |root, manifest, sha| {
+                ensure!(manifest == &verified.manifest);
+                ensure!(sha == verified.bundle_sha256.as_str());
+                validate_payloads(root, &verified)
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("/tool-shim"), "{error:#}");
+        assert!(registry.find(&verified.bundle_sha256).unwrap().is_none());
+        assert!(!registry.archive_path(&verified.bundle_sha256).exists());
+    }
+
+    #[test]
     fn signed_boot_assets_attach_offline_and_refuse_missing_or_corrupt_members() {
         let home = tempfile::tempdir().unwrap();
         let producer = tempfile::tempdir().unwrap();
@@ -348,6 +401,8 @@ mod tests {
         let installed = registry.install_file(&archive, &trust, false).unwrap();
         assert_eq!(installed.manifest.schema_version, 4);
         let verified = verify_bundle_file(&archive, &trust).unwrap();
+        validate_payloads(&installed.root, &verified).unwrap();
+        assert!(!Path::new(&mvm_core::config::mvm_cache_dir()).exists());
         let boot = verified.boot_assets.unwrap();
         let config = VmStartConfig {
             rootfs_path: installed

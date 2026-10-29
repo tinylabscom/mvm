@@ -168,9 +168,11 @@ fn boot_export_binds_original_bytes_and_refuses_bad_inputs_before_signing() {
     let rootfs = dir.path().join("rootfs.ext4");
     let overlay = dir.path().join("overlay");
     let initramfs = dir.path().join("initramfs");
+    let boot_initrd = dir.path().join("initrd");
     let out = dir.path().join("bundle.mvmpkg");
     std::fs::write(&kernel, b"kernel").unwrap();
     std::fs::write(&rootfs, b"rootfs").unwrap();
+    std::fs::write(&boot_initrd, b"runtime initrd").unwrap();
     std::fs::write(dir.path().join("mvm-meta.json"), b"{}").unwrap();
     let original = manifest();
     let selected = select_boot_asset_members(&original, GuestArch::Aarch64).unwrap();
@@ -197,6 +199,7 @@ fn boot_export_binds_original_bytes_and_refuses_bad_inputs_before_signing() {
         "aarch64",
         &out,
     );
+    inputs.initrd = Some(boot_initrd.to_str().unwrap());
     inputs.boot_assets = Some(BootAssetsInputs {
         manifest_bytes: &bytes,
         manifest_sha256: &pin,
@@ -209,6 +212,7 @@ fn boot_export_binds_original_bytes_and_refuses_bad_inputs_before_signing() {
     let boot = verified.boot_assets.unwrap();
     assert_eq!(boot.image_set.manifest_sha256, pin);
     assert_eq!(verified.artifacts["artifacts/boot-image-set.json"], bytes);
+    assert_eq!(verified.artifacts["artifacts/initrd"], b"runtime initrd");
     assert!(verified.embedded_image_sets.is_empty());
     assert_eq!(boot.image_set.artifact_paths.len(), 2);
     let calls = publisher.calls.get();

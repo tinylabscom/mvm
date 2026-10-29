@@ -669,7 +669,7 @@ fn run_defaults_match_the_lower_level_runner() {
     assert_eq!(args.run.memory, "512M");
     assert_eq!(
         args.run.profile,
-        RunProfile::Standard,
+        RunProfile::Dev,
         "`machine run` and `mvmctl run` share one default"
     );
     assert!(!args.run.json);
@@ -1042,6 +1042,68 @@ fn resolve_mode_accepts_materialized_flake_slot_after_build() {
         .expect("materialized flake is a source");
 
     assert_eq!(mode, MachineRunMode::Transient);
+}
+
+#[test]
+fn an_installed_application_runs_without_a_caller_command() {
+    let mut args = parse_run(&["run", "--manifest", &"a".repeat(64)]).expect("parse");
+    args.run.application_policy = Some("agent/environment@1.0.0".into());
+    assert_eq!(
+        args.resolve_mode(false).expect("declared entrypoint"),
+        MachineRunMode::Transient
+    );
+}
+
+#[test]
+fn a_development_application_terminal_needs_explicit_development_selection() {
+    let environment = serde_json::from_value(serde_json::json!({
+        "descriptor_version": 1,
+        "target": "aarch64-linux",
+        "entrypoint": {"argv": ["/usr/bin/agent"]},
+    }))
+    .unwrap();
+    let mut posture = mvm_core::plan::BundleSecurityPosture {
+        profile: mvm_core::security::AgentProfile::Dev,
+        verity_protected: true,
+        requires_auth: true,
+        allows_volumes: false,
+        allows_egress: false,
+    };
+    let mut standard = parse_run(&[
+        "run",
+        "--profile",
+        "standard",
+        "--manifest",
+        &"a".repeat(64),
+    ])
+    .unwrap();
+    assert!(
+        runtime::prepare_application_run(&mut standard, &posture, &environment)
+            .unwrap_err()
+            .to_string()
+            .contains("--profile dev")
+    );
+    let mut development = parse_run(&[
+        "run",
+        "--profile",
+        "dev",
+        "-it",
+        "--manifest",
+        &"a".repeat(64),
+    ])
+    .unwrap();
+    runtime::prepare_application_run(&mut development, &posture, &environment).unwrap();
+    assert_eq!(development.run.argv, vec!["/usr/bin/agent"]);
+    assert!(development.run.pty);
+    posture.profile = mvm_core::security::AgentProfile::SealedProd;
+    let mut sealed = parse_run(&["run", "-it", "--manifest", &"a".repeat(64)]).unwrap();
+    assert_eq!(sealed.run.profile, RunProfile::Dev);
+    assert!(
+        runtime::prepare_application_run(&mut sealed, &posture, &environment)
+            .unwrap_err()
+            .to_string()
+            .contains("sealed")
+    );
 }
 
 #[test]
@@ -1483,7 +1545,7 @@ fn run_directory_volume_is_refused_under_every_profile() {
 }
 
 /// A persistent `machine run` spec for `--volume <volume>` under `profile`.
-/// `None` leaves the flag off, which is the default (`standard`) profile.
+/// `None` leaves the flag off, which is the default (`dev`) profile.
 fn machine_run_spec_with_volume(profile: Option<&str>, volume: &str) -> Result<MachineSpec> {
     let mut argv = vec!["run", "--image", "x", "--name", "web"];
     if let Some(profile) = profile {

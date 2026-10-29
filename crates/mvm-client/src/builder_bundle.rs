@@ -160,6 +160,7 @@ pub fn export_builder_result(
             posture: None,
             provenance: Some(request.provenance(verified.build())),
             environment: None,
+            application_policy: None,
             boot_assets: None,
             out: &request.bundle_out,
             debug_out: request.debug_out.clone(),

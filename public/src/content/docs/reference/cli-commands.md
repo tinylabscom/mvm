@@ -72,7 +72,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --caller-commitment HEX`                                                                            | Bind opaque caller data to the admitted execution and its audit trail. `HEX` must encode exactly 32 bytes as 64 lowercase hexadecimal characters. MVM assigns the bytes no meaning; it includes them in the signed plan identity and copies the typed value into every chain-signed plan audit entry. The same option is available on `mvmctl run`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `mvmctl machine run -e KEY=VALUE`                                                                                       | Inject an environment variable (repeatable; gated by `--profile`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `mvmctl machine run --volume host:/guest[:mode]`                                                                        | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `mvmctl machine run --profile <p>`                                                                                      | Security posture: `restrictive`, `standard` (default), `dev`, `permissive`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `mvmctl machine run --profile <p>` | Security posture: `restrictive`, `standard`, `dev` (default), `permissive` |
 | `mvmctl machine run --net`                                                                                              | Enable broad dev-tier outbound egress (default is deny-all)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `mvmctl machine run --allow-host HOST[:PORT]`                                                                           | Allow egress only to these hosts (repeatable; PORT defaults to 443; wins over `--net`). A refused destination prints `egress blocked: …` on stderr while a foreground run is on screen, naming this flag with the exact value when a grant can admit it and nothing when none can (cloud metadata, loopback, the SSH port); the run ends with a summary of every refusal and its count. A run with no network grant at all that exits nonzero ends with one line saying it had no network access                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `mvmctl machine run --hypervisor <backend>`                                                                             | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `libkrun` (explicit development integration only), `qemu` (dev/test)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -614,9 +614,91 @@ mvmctl run ./app.mvmpkg -- python app.py   # a signed bundle
 mvmctl run -- npm test                     # infer the runtime from the command
 ```
 
-The positional source is classified by its shape, never by what exists on
-disk. A path ending in `.mvmpkg` is a signed bundle, and anything else is an
-image reference, as `--image` takes it. A bundle is verified against the trust
+An installed runnable package can also be named as the positional source.
+Its coordinate resolves through the local signed pack lock before image
+classification. It must declare `pack/application.json`; a policy-only pack
+does not become an application. Pull selects the host architecture and verifies
+the separate `.mvmpkg` publisher signature as well as the registry signature.
+Run-by-name re-verifies the installed bytes and runs only the declared entrypoint:
+no trailing command or `--launch-plan` override is accepted, and cold builds are
+refused. The consumer needs the supported runtime bootstrap prerequisites, not
+the author's source or application build tools. The interactive CLI defaults to
+`--profile dev`. With a development-signed package, `-it` opens the existing
+development terminal on its declared
+entrypoint; it never selects a shell or a different caller command. A sealed
+package still refuses terminal access, even with `--profile dev`. This is a
+demo/development path, not production terminal support or release evidence.
+The development terminal path refuses a descriptor with an explicit working
+directory rather than silently launching it in a different directory.
+
+Package policy loads automatically. Its requested capabilities must be approved
+independently by the selected local `--policy`; they are not automatic grants.
+An absent local grant, deny, blocked network, or incompatible requirement refuses
+launch with a diagnostic. Compatible restrictions use the existing composition
+engine, including deny precedence and minimum resource ceilings. The signed
+policy files are not modified.
+
+Policy selection is repeatable and can be configured in
+`$MVM_HOME/config/config.toml`:
+
+```toml
+default_policy = ["agent-apis"]
+```
+
+Configured entries compose in order. Explicit `--policy` selections replace
+the configured selection; a project's explicit `[policy]` selection also takes
+precedence over defaults. Profiles can compose other files through `extends`
+and included groups. An explicit `--plan` supplies local policy instead.
+Package requirements always compose afterward, and cannot grant themselves
+capabilities. These configurable defaults are not immutable host ceilings.
+Malformed or unreadable local configuration refuses launch rather than
+silently dropping configured policy.
+
+Archive producers can use `bundle export --environment FILE.json
+--application-policy FILE` to carry the exact profile as the signed artifact
+`artifacts/policy/profile.toml`. The environment must identify the package.
+The registry declaration binds the same profile bytes and the final archive;
+the registry signature never substitutes for the archive publisher signature.
+`--signing-keys DIR` selects a dedicated private directory through the existing
+archive signer instead of reusing the runtime state's host key. The public key
+still needs independent consumer approval; selecting it grants no trust.
+`--boot-assets DIR` embeds the architecture-matched runtime overlay and
+initramfs after authenticating `image-set.json` and `image-set.json.bundle`
+against the compiled image lock, checking host protocol compatibility,
+verifying the selected archive bytes, and applying current image-set
+revocations. Missing or stale revocation data refuses export before signing.
+The selected overlay and initramfs also pass the normal launch payload
+validators before signing. The extracted initramfs is bound as the primary
+signed `initrd`; a template carrying a different initrd is refused.
+
+`mvmctl pack prepare` freezes an already acquired native archive through the
+shared Rust compiler. It accepts `--spec`, `--inputs`, `--archive`,
+`--launcher`, `--policy`, `--environment`, `--mvm-revision`, and `--out`.
+The archive and executable digests, architecture and loader are checked before
+the existing local-source `PackSpec` is locked and compiled. It downloads
+nothing, executes no application code, and never replaces an existing output
+directory. It prepares author build inputs; it is not a consumer startup path.
+
+`mvmctl pack build SPEC.json --out DIR [--lock FILE] [--profile default|dev]`
+rechecks the frozen lock, compiles into `DIR`, and invokes the existing
+builder-VM materializer. It prints the resulting image slot for `bundle export`;
+it does not launch the application or sign an archive. The guest target must
+match the builder architecture. `default` retains the sealed guest output;
+`dev` explicitly selects the development image needed for the terminal demo.
+Both variants receive an integrity hash tree through the existing verity
+writer before export. That binding does not change the development sidecar
+into a production profile or enable terminals in sealed images.
+Frozen artifacts carry `pack.lock.json`; their locked source input is retained
+even when the client runs from a contributor checkout. The source workspace
+input uses that same revision. Ordinary contributor flakes retain their local
+override behavior. Frozen evaluation does not inherit the contributor workspace
+or host-binary environment.
+Neither this command nor author source is needed for installed run-by-name.
+
+For sources that do not name a locked package, classification is by shape,
+never by what exists in the working directory. A path ending in `.mvmpkg` is a
+signed bundle, and anything else is an image reference, as `--image` takes it.
+A bundle is verified against the trust
 store every time it runs and installed into the content-addressed bundle
 registry on first use, then booted the way `--manifest <bundle-sha256>` boots an
 installed bundle; it is the same run as `--manifest ./app.mvmpkg`. Any other path is refused with a pointer to `--manifest` or
@@ -673,8 +755,8 @@ never served from a standby and always boots cold.
 | `mvmctl run --image <ref> -- <cmd>...`                              | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its prepared OCI rootfs (read-only virtiofs-root on capable dev-tier backends, otherwise block `rootfs.ext4`), run `<cmd>`, exit                                                                                                                                                    |
 | `mvmctl run --prod --image <ref@sha256:...>`                        | Require the digest-pinned reference to satisfy the OCI policy, boot its sealed rootfs, and run the image's declared Entrypoint/Cmd via the ProdSafe `RunEntrypoint` verb under the signed plan. The plan must grant `run-entrypoint`; the guest refuses the dispatch without it. A trailing command, `--launch-plan`, and `--profile dev` remain refused before anything is pulled because they require DevOnly behavior. The base image must also carry a pull-time OSV CVE scan bound to its digest with no high/critical finding; a missing scan or a high/critical finding refuses admission                                                                                                                                |
 | `mvmctl image pull --prod <ref@sha256:...>`                         | Verify the digest-pinned image against the OCI policy, scan the base image against OSV (refusing when the scan cannot run), and build/cache its sealed rootfs without running it                                                                                                                                                                                                                                                                                                                          |
-| `mvmctl run --profile standard -- <cmd>`                            | Default profile on both `run` and `machine run`: explicit env is allowed; host shares must be read-only                                                                                                                                                                                                                                                                               |
-| `mvmctl run --profile dev -- <cmd>`                                 | Dev tier: as standard, plus a writable (`:rw`) host share on a persistent machine and the dev guest profile for a sealed-image entrypoint run                                                                                                                                                                                                                                         |
+| `mvmctl run --profile standard -- <cmd>`                            | Explicit override: explicit env is allowed; host shares must be read-only |
+| `mvmctl run --profile dev -- <cmd>`                                 | Default profile on both `run` and `machine run`: development access, subject to signed package ceilings |
 | `mvmctl run --profile restrictive -- <cmd>`                         | No env injection and no host directory shares                                                                                                                                                                                                                                                                                                                                         |
 | `mvmctl run --mount .:/work:ro -- <cmd>`                            | Attach a read-only host directory, materialized into an ext4 image at boot (a snapshot, not a live share)                                                                                                                                                                                                                                                                             |
 | `mvmctl run --profile permissive -- <cmd>`                          | Escape hatch; requires `MVM_ACK_PERMISSIVE_RUN=1`                                                                                                                                                                                                                                                                                                                                     |
@@ -768,8 +850,12 @@ run never boots an image you did not choose without saying so. `--json` stdout
 is unaffected.
 
 Detection picks a **source**, never a posture. An inferred run admits through
-the same signed `ExecutionPlan`, with the same `--profile standard` default and
+the same signed `ExecutionPlan`, with the same `--profile dev` default and
 the same deny-all egress, as one that named its image.
+
+The default never widens a signed package's ceiling or authorizes a sealed
+package's interactive console. `--prod` still refuses the development profile;
+select `--prod --profile standard` explicitly for a sealed image run.
 
 **A persistent run does not infer.** Steps 5 and 6 are skipped for `-d`,
 `--ttl`, `--port`, `--healthcheck` and `--up-json`, on either verb: a machine
@@ -913,7 +999,7 @@ guest, on any tier.
 | `mvmctl machine run --image <ref> --json -- <cmd>`                                             | Print a redacted JSON execution summary with `egress_denials` and optional `egress_review`; no review prompt opens                                                                                                                                                                                                                  |
 | `mvmctl machine run --image <ref> --receipt <path> -- <cmd>`                                   | Write a signed execution receipt                                                                                                                                                                                                                                                                                                     |
 | `mvmctl machine run -d --image <ref>`                                                          | Boot a **persistent** machine, auto-name it (printed), return                                                                                                                                                                                                                                                                        |
-| `mvmctl machine run -d --name <name> --image <ref>`                                            | Boot a **persistent** named machine and return. Add `--profile dev` at launch if later `machine shell` or ad-hoc `machine exec` is needed; the standard profile's signed verb grant does not authorize those operations.                                                                                                                    |
+| `mvmctl machine run -d --name <name> --image <ref>` | Boot a **persistent** named machine and return. The default is `dev`; signed package ceilings still refuse unauthorized interactive access. An explicit `--profile standard` does not grant `machine shell` or ad-hoc `machine exec`. |
 | `mvmctl machine run --healthcheck 'curl -fsS localhost/health' --image <ref>`                  | Boot a **persistent** machine in the foreground (registered, shows in `machine ps`); its presence alone promotes the lifecycle even without `-d`                                                                                                                                                                                     |
 | `mvmctl machine run -d --healthcheck 'curl -fsS localhost/health' --name <name> --image <ref>` | Same, detached — the usual way to run a long-lived service                                                                                                                                                                                                                                                                           |
 | `mvmctl machine run --name <name> --image <ref> -- <cmd>`                                      | Boot a named foreground transient machine, run `<cmd>`, tear down                                                                                                                                                                                                                                                                    |
@@ -1890,6 +1976,8 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; report its actual signer and manifest digest or fail closed |
 | `mvmctl pack lock SPEC.json --mvm-revision COMMIT [--out FILE \| --stdout]` | Resolve an authored `mvm.pack-spec/v1` document against its source tree and write the frozen `pack.lock.json` beside it: spec, source snapshot and lowered-workload digests, compiler version and the pinned mvm commit. The spec is read as data; no author code runs |
 | `mvmctl pack compile SPEC.json --out DIR [--lock FILE]` | Compile a pack spec into a flake artifact only when its lock still matches; a missing lock or any stale field (named in the error) is refused before anything is written |
+| `mvmctl pack prepare --help` | Show the pinned native-input preparation interface; verify and stage already acquired bytes through the shared frozen compiler without downloads or application execution |
+| `mvmctl pack build SPEC.json --out DIR [--lock FILE] [--profile default\|dev]` | Recheck the frozen lock, compile and materialize through the existing builder VM, then print an exportable image slot; no signing or application launch |
 | `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
 | `mvmctl pack pull ns/name[@version] [--json]`             | Fetch, verify, install, and pin a workload pack; same trust policy and behavior as `mvmctl pull`                                                                  |
 | `mvmctl pack registry ls`                                 | Compatibility spelling of `pack ls`                                                                                                                               |

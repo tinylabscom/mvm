@@ -573,6 +573,16 @@ export MVM_WORKSPACE_PATH=/work
 # the rootfs without a separate nix build.
 export MVM_HOST_BIN_DIR=/mvm-bins
 
+# A frozen pack resolves every source through its declared inputs. In
+# particular, /work is the application, not the runtime source workspace.
+# Ordinary contributor flakes retain their existing environment-based mode.
+NIX_EVAL_IMPURE=--impure
+FROZEN_FLAKE_PATH=${{FLAKE_REF#path:}}
+if [ -e "$FROZEN_FLAKE_PATH/{pack_lock_file}" ]; then
+    NIX_EVAL_IMPURE=
+    unset MVM_WORKSPACE_PATH MVM_HOST_BIN_DIR
+fi
+
 echo "mvm-builder-vm: filesystem space before nix build:" >&2
 df -h /nix /tmp >&2 || true
 
@@ -585,7 +595,7 @@ df -h /nix /tmp >&2 || true
 # can read the actual root cause when a deep dependency fails.
 set +e
 "$NIX_BIN" build "${{FLAKE_REF}}#${{ATTR_PATH}}"{override_flag} \
-    --no-link --print-out-paths --no-write-lock-file --impure \
+    --no-link --print-out-paths --no-write-lock-file $NIX_EVAL_IMPURE \
     --print-build-logs --keep-going \
     > /job/nix-stdout.log 2> /job/nix-stderr.log
 NIX_RC=$?
@@ -703,10 +713,10 @@ chmod 0644 /out/rootfs.ext4 2>/dev/null || true
 if [ -f "$NIX_OUT/mvm-meta.json" ]; then
     cp -L "$NIX_OUT/mvm-meta.json" /out/mvm-meta.json
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (image-published sidecar)" >&2
-elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" --impure{override_flag} \
+elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" $NIX_EVAL_IMPURE{override_flag} \
       > /out/mvm-meta.json 2> /job/sidecar-direct.log; then
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.mvm)" >&2
-elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.rootfs.passthru.mvm" --impure{override_flag} \
+elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.rootfs.passthru.mvm" $NIX_EVAL_IMPURE{override_flag} \
       > /out/mvm-meta.json 2> /job/sidecar-rootfs.log; then
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.rootfs.passthru.mvm)" >&2
 else
@@ -752,6 +762,7 @@ fi
 "#,
         flake_ref_assign = flake_ref_assign,
         override_flag = override_flag,
+        pack_lock_file = mvm_compiler::pack::LOCK_FILE,
         attr_path = shell_single_quote_escape(attr_path),
         gc_cap_kib = gc_cap_kib,
         seal_rootfs_journal_sh = seal_rootfs_journal_sh("\"/out/rootfs.ext4\""),
@@ -2334,6 +2345,60 @@ mod tests {
             warm_idx < gc_idx,
             "warm gcroot must be registered before the GC tail"
         );
+    }
+
+    #[test]
+    fn frozen_pack_evaluation_does_not_inherit_the_application_as_a_source_workspace() {
+        let body = render_flake_cmd_sh(".", "default", false);
+        assert!(body.contains(&format!(
+            "if [ -e \"$FROZEN_FLAKE_PATH/{}\" ]; then",
+            mvm_compiler::pack::LOCK_FILE
+        )));
+        assert!(body.contains("unset MVM_WORKSPACE_PATH MVM_HOST_BIN_DIR"));
+        assert!(body.contains("--no-write-lock-file $NIX_EVAL_IMPURE"));
+        assert!(body.contains(".passthru.mvm\" $NIX_EVAL_IMPURE"));
+    }
+
+    #[test]
+    fn frozen_evaluation_guard_handles_paths_and_path_uris() {
+        let body = render_flake_cmd_sh(".", "default", false);
+        let start = body.find("NIX_EVAL_IMPURE=--impure").unwrap();
+        let end = body[start..]
+            .find("\necho \"mvm-builder-vm: filesystem space")
+            .unwrap()
+            + start;
+        let script = format!(
+            "{}\nprintf '%s:%s:%s' \"$NIX_EVAL_IMPURE\" \"${{MVM_WORKSPACE_PATH-unset}}\" \"${{MVM_HOST_BIN_DIR-unset}}\"",
+            &body[start..end]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(mvm_compiler::pack::LOCK_FILE);
+        for frozen in [false, true] {
+            if frozen {
+                std::fs::write(&lock, b"frozen input").unwrap();
+            }
+            for reference in [
+                dir.path().display().to_string(),
+                format!("path:{}", dir.path().display()),
+            ] {
+                let output = std::process::Command::new("/bin/sh")
+                    .args(["-eu", "-c", &script])
+                    .env("FLAKE_REF", reference)
+                    .env("MVM_WORKSPACE_PATH", "ordinary")
+                    .env("MVM_HOST_BIN_DIR", "ordinary")
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap(),
+                    if frozen {
+                        ":unset:unset"
+                    } else {
+                        "--impure:ordinary:ordinary"
+                    }
+                );
+            }
+        }
     }
 
     #[test]

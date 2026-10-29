@@ -101,6 +101,8 @@ pub enum PackError {
     Source(SourceError),
     #[error("could not create snapshot staging: {0}")]
     Staging(#[source] io::Error),
+    #[error("could not write the frozen artifact lock: {0}")]
+    ArtifactLock(#[source] io::Error),
     #[error("could not digest the lowered workload: {0}")]
     Digest(#[source] serde_json::Error),
     #[error("pack lock is stale: {} no longer match", join(.fields))]

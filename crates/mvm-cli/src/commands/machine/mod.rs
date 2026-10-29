@@ -497,6 +497,7 @@ impl MachineRunArgs {
                 let carries_own_entrypoint = self.run.hypervisor.as_deref() == Some("wasm")
                     || self.run.launch_plan.is_some()
                     || self.run.flake.is_some()
+                    || self.run.application_policy.is_some()
                     || (self.run.prod && (self.run.image.is_some() || self.run.runtime.is_some()))
                     || image_supplies_entrypoint;
                 if self.run.argv.is_empty() && !carries_own_entrypoint {

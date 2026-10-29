@@ -484,6 +484,9 @@ fn persistent_routing_allowed(
 /// Resolve the in-repo mvm workspace to build a user
 /// flake against, or `None` to keep the flake's own `mvm` pin.
 ///
+/// Frozen compiler artifacts carry their pack lock. Their input is authoritative,
+/// including in a contributor checkout; a local override would invalidate it.
+///
 /// Returns the workspace root only when **both** hold:
 ///   (a) mvmctl was compiled from a source checkout whose `nix/flake.nix`
 ///       still exists on disk (walk up from the compile-time manifest dir),
@@ -493,6 +496,9 @@ fn persistent_routing_allowed(
 ///       has an input to replace and we're genuinely swapping a remote
 ///       fetch for the local checkout.
 fn local_mvm_workspace(user_flake: &std::path::Path) -> Option<std::path::PathBuf> {
+    if std::fs::symlink_metadata(user_flake.join(mvm_compiler::pack::LOCK_FILE)).is_ok() {
+        return None;
+    }
     let workspace = find_mvm_workspace_root(&std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
         .or_else(|| find_mvm_workspace_root(user_flake))?;
     let flake_nix = std::fs::read_to_string(user_flake.join("flake.nix")).ok()?;
@@ -993,6 +999,20 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
+
+    #[test]
+    fn frozen_pack_artifacts_never_replace_their_input_with_the_contributor_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("flake.nix"),
+            "inputs.mvm.url = \"github:tinylabscom/mvm/main?dir=nix\";",
+        )
+        .unwrap();
+        // A present lock suppresses the override even if it is damaged. The
+        // frozen compiler owns validating and replacing it, not this selector.
+        std::fs::write(dir.path().join(mvm_compiler::pack::LOCK_FILE), b"damaged").unwrap();
+        assert!(super::local_mvm_workspace(dir.path()).is_none());
+    }
 
     /// Mock ShellEnvironment for testing dev_build logic without a real VM.
     struct TestEnv {

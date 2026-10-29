@@ -236,7 +236,7 @@ pub(in crate::commands) struct RunArgs {
     #[arg(long, value_name = "ORDINAL")]
     pub gpu_device: Option<u32>,
     /// Select a security profile.
-    #[arg(long, value_enum, default_value = "standard")]
+    #[arg(long, value_enum, default_value = "dev")]
     pub profile: RunProfile,
     // One flag, two shapes, dispatched by `parse_volume_spec`:
     // `HOST:/GUEST[:ro]` materializes the directory into an ext4 image and
@@ -269,6 +269,9 @@ pub(in crate::commands) struct RunArgs {
     /// Internal signed pack identity selected as this run's image source.
     #[arg(skip)]
     pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
+    /// Internal signed package policy selected by installed application name.
+    #[arg(skip)]
+    pub application_policy: Option<String>,
     /// Collect a guest directory into HOST_DIR after exit (repeatable).
     //
     // HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]. The guest gets a fresh writable
@@ -327,7 +330,7 @@ pub(in crate::commands) struct RunArgs {
     /// Require production policy (digest-pinned, verified images).
     #[arg(long = "prod")]
     pub prod: bool,
-    /// Boot this OCI image or signed `.mvmpkg` artifact.
+    /// Boot an installed package, image, or signed archive.
     // Classified by shape, never by probing the filesystem: a path-shaped
     // `.mvmpkg` is an artifact, anything else an image reference. Under
     // `--mode` it names the script instead. See `positional_source`.
@@ -1640,6 +1643,46 @@ mod tests {
             timeout: Some(60),
             argv: vec!["/bin/true".to_string()],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn prod_requires_an_explicit_non_development_profile() {
+        use clap::Parser;
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV);
+        let image = format!("registry.example/worker@sha256:{}", "1".repeat(64));
+        for verb in [vec!["mvmctl", "run"], vec!["mvmctl", "machine", "run"]] {
+            for selection in [None, Some("standard")] {
+                let mut argv = verb.clone();
+                argv.extend(["--prod", "--image", &image]);
+                if let Some(selection) = selection {
+                    argv.extend(["--profile", selection]);
+                }
+                let parsed = crate::commands::Cli::try_parse_from(argv).expect("parse run");
+                let run = match parsed.command {
+                    crate::commands::Commands::Run(args) => args.machine.run,
+                    crate::commands::Commands::Machine(args) => {
+                        let crate::commands::machine::MachineAction::Run(args) = args.action else {
+                            panic!("expected machine run");
+                        };
+                        args.run
+                    }
+                    _ => panic!("expected run"),
+                };
+                let result = validate_run_profile(&run);
+                if selection.is_some() {
+                    result.expect("explicit standard reaches the existing safe preflight");
+                } else {
+                    assert!(
+                        result
+                            .expect_err("the development default must refuse --prod")
+                            .to_string()
+                            .contains("--profile dev")
+                    );
+                }
+            }
         }
     }
 

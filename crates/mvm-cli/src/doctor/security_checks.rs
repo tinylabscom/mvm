@@ -1417,13 +1417,6 @@ mod tests {
             "and describe what it grants: {}",
             c.info
         );
-        // The line claims both verbs agree. That was true only after they were
-        // reconciled, so it is worth holding.
-        assert_eq!(
-            profile,
-            crate::commands::RunProfile::Standard,
-            "if the default moves, this line's claim about both verbs needs re-checking"
-        );
     }
 
     #[test]

@@ -43,6 +43,10 @@ pub(in crate::commands) struct Args {
     /// exist; the file is overwritten if it already exists.
     #[arg(long, value_name = "PATH")]
     pub out: PathBuf,
+    /// Private directory for the existing archive signer. Defaults to the
+    /// current state's keys; use a separate directory for a publisher key.
+    #[arg(long, value_name = "DIR")]
+    pub signing_keys: Option<PathBuf>,
     /// Optional human-readable workload label baked into the
     /// manifest. Surfaced by `mvmctl bundle fetch` for diagnostics.
     #[arg(long)]
@@ -73,6 +77,117 @@ pub(in crate::commands) struct Args {
     /// permits them.
     #[arg(long, value_name = "FILE.json")]
     pub environment: Option<PathBuf>,
+    /// Seal the exact package policy profile beside its environment.
+    #[arg(long, value_name = "FILE", requires = "environment")]
+    pub application_policy: Option<PathBuf>,
+    /// Embed authenticated boot archives from a signed image-set directory.
+    #[arg(long, value_name = "DIR")]
+    pub boot_assets: Option<PathBuf>,
+}
+
+struct ExportBootAssets {
+    manifest_bytes: Vec<u8>,
+    manifest_sha256: mvm_core::packs::Sha256Hex,
+    runtime_overlay: PathBuf,
+    initramfs: PathBuf,
+    signed_initrd: PathBuf,
+    _cache: tempfile::TempDir,
+}
+
+impl ExportBootAssets {
+    fn read(directory: &std::path::Path, arch: &str) -> Result<Self> {
+        use mvm_core::image_set::{
+            ImageSetVerification, image_train_lock, verify_image_set_artifacts,
+            verify_image_set_root,
+        };
+        use mvm_core::plan::bundle::{
+            BOOT_ASSET_INITRAMFS_ROLE, BOOT_ASSET_OVERLAY_ROLE, select_boot_asset_members,
+        };
+        let manifest_bytes = std::fs::read(directory.join("image-set.json"))
+            .context("reading the boot image-set manifest")?;
+        let signature = std::fs::read(directory.join("image-set.json.bundle"))
+            .context("reading the boot image-set signature")?;
+        let host = mvm_build::stage0_kernel::current_image_set_protocol_support();
+        let revocations = mvm_core::image_set_revocation::load_image_set_revocations()
+            .context("loading current image-set revocations before export")?;
+        let request = ImageSetVerification::new(
+            &manifest_bytes,
+            &signature,
+            &image_train_lock().image_set,
+            directory,
+        )
+        .with_host_protocols(&host)
+        .with_revocations(&revocations);
+        let root = verify_image_set_root(&request).context("authenticating boot image-set root")?;
+        let arch = match arch {
+            "aarch64" => mvm_core::arch::GuestArch::Aarch64,
+            "x86_64" => mvm_core::arch::GuestArch::X86_64,
+            _ => anyhow::bail!("unsupported boot-assets architecture {arch}"),
+        };
+        let members = select_boot_asset_members(root.manifest(), arch)?;
+        let selected = members
+            .iter()
+            .flat_map(|member| &member.artifacts)
+            .map(|artifact| artifact.name.clone())
+            .collect::<Vec<_>>();
+        let verified = verify_image_set_artifacts(&request, &selected)
+            .context("verifying selected boot archive bytes")?;
+        let path = |role| {
+            verified
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.role == role)
+                .map(|artifact| artifact.path.clone())
+                .context("verified boot archive is missing")
+        };
+        let runtime_overlay = path(BOOT_ASSET_OVERLAY_ROLE)?;
+        let initramfs = path(BOOT_ASSET_INITRAMFS_ROLE)?;
+        let cache = tempfile::tempdir().context("staging verified boot initramfs")?;
+        let (_, ramdisk) = mvm_build::published_image_set::install_boot_archives(
+            &runtime_overlay,
+            &initramfs,
+            &verified.manifest_sha256,
+            arch,
+            cache.path(),
+        )
+        .context("validating the authenticated boot payloads before signing")?;
+        let signed_initrd = ramdisk.image_path;
+        Ok(Self {
+            manifest_bytes,
+            manifest_sha256: verified.manifest_sha256,
+            runtime_overlay,
+            initramfs,
+            signed_initrd,
+            _cache: cache,
+        })
+    }
+
+    fn inputs(&self) -> mvm_client::bundle::BootAssetsInputs<'_> {
+        mvm_client::bundle::BootAssetsInputs {
+            manifest_bytes: &self.manifest_bytes,
+            manifest_sha256: &self.manifest_sha256,
+            runtime_overlay: &self.runtime_overlay,
+            initramfs: &self.initramfs,
+        }
+    }
+}
+
+fn read_application_policy(path: &std::path::Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let limit = mvm_core::registry_pack::MAX_APPLICATION_POLICY_BYTES;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .with_context(|| format!("opening application policy at {}", path.display()))?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        !bytes.is_empty() && bytes.len() <= limit,
+        "application policy at {} must contain between 1 and {limit} bytes",
+        path.display()
+    );
+    let _: mvm_client::policy_profiles::ProfileFile = toml::from_str(std::str::from_utf8(&bytes)?)
+        .context("parsing application policy profile")?;
+    Ok(bytes)
 }
 
 /// Read and check the descriptor at `path` before any artifact is hashed, so
@@ -137,8 +252,8 @@ fn template_provenance(flake_ref: &str, is_installed_bundle: bool) -> Option<Bui
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     // ---- 1. Resolve the template's artifact paths ----
-    let (spec, vmlinux, initrd, rootfs, _rev) = tmpl::template_artifacts_dispatched(&args.template)
-        .with_context(|| {
+    let (spec, vmlinux, mut initrd, rootfs, _rev) =
+        tmpl::template_artifacts_dispatched(&args.template).with_context(|| {
             format!(
                 "loading template {:?} — does it exist? Try `mvmctl manifest ls`",
                 args.template
@@ -181,9 +296,37 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         .as_deref()
         .map(read_environment)
         .transpose()?;
+    let application_policy = args
+        .application_policy
+        .as_deref()
+        .map(read_application_policy)
+        .transpose()?;
+    let boot_assets = args
+        .boot_assets
+        .as_deref()
+        .map(|directory| ExportBootAssets::read(directory, &source_arch))
+        .transpose()?;
+    if let Some(boot) = &boot_assets {
+        if let Some(template_initrd) = &initrd {
+            anyhow::ensure!(
+                mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(template_initrd))?
+                    == mvm_core::crypto::image_verify::sha256_file(&boot.signed_initrd)?,
+                "template initrd differs from the authenticated boot initramfs"
+            );
+        }
+        initrd = Some(
+            boot.signed_initrd
+                .to_str()
+                .context("verified initrd path must be UTF-8")?
+                .to_owned(),
+        );
+    }
 
     // ---- 2. Seal, sign under the host key, and write the archive ----
-    let signer = HostBundleSigner::load()?;
+    let signer = match args.signing_keys.as_deref() {
+        Some(keys) => HostBundleSigner::load_at(keys)?,
+        None => HostBundleSigner::load()?,
+    };
     let exported = export_bundle_with_signer(
         &BundleExportInputs {
             vmlinux: &vmlinux,
@@ -205,7 +348,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             posture: args.posture_inputs(),
             provenance,
             environment,
-            boot_assets: None,
+            application_policy: application_policy.as_deref(),
+            boot_assets: boot_assets.as_ref().map(ExportBootAssets::inputs),
             out: &args.out,
             debug_out: None,
         },
@@ -245,6 +389,19 @@ mod tests {
     }
 
     #[test]
+    fn publisher_key_selection_does_not_grant_a_posture_or_capabilities() {
+        assert!(parse(&[]).unwrap().signing_keys.is_none());
+        let args = parse(&["--signing-keys", "/private/publisher-keys"]).unwrap();
+        assert_eq!(
+            args.signing_keys,
+            Some(PathBuf::from("/private/publisher-keys"))
+        );
+        assert_eq!(args.posture_inputs(), None);
+        assert!(!args.allow_egress);
+        assert!(!args.allow_volumes);
+    }
+
+    #[test]
     fn a_posture_starts_closed() {
         let posture = parse(&["--posture", "sealed-prod"])
             .unwrap()
@@ -281,6 +438,63 @@ mod tests {
         let args = parse(&["--environment", "env.json"]).unwrap();
         assert_eq!(args.environment, Some(PathBuf::from("env.json")));
         assert_eq!(parse(&[]).unwrap().environment, None);
+    }
+
+    #[test]
+    fn an_application_policy_requires_an_environment() {
+        assert!(parse(&["--application-policy", "profile.toml"]).is_err());
+        let args = parse(&[
+            "--environment",
+            "env.json",
+            "--application-policy",
+            "profile.toml",
+        ])
+        .unwrap();
+        assert_eq!(args.application_policy, Some(PathBuf::from("profile.toml")));
+    }
+
+    #[test]
+    fn boot_assets_are_an_explicit_directory_input() {
+        assert_eq!(parse(&[]).unwrap().boot_assets, None);
+        assert_eq!(
+            parse(&["--boot-assets", "/tmp/boot-assets"])
+                .unwrap()
+                .boot_assets,
+            Some(PathBuf::from("/tmp/boot-assets"))
+        );
+    }
+
+    #[test]
+    fn boot_assets_fail_closed_without_current_revocation_trust() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        std::fs::write(directory.path().join("image-set.json"), b"{}").unwrap();
+        std::fs::write(directory.path().join("image-set.json.bundle"), b"{}").unwrap();
+        let error = ExportBootAssets::read(directory.path(), "aarch64")
+            .err()
+            .expect("unconfigured trust must refuse export");
+        assert!(format!("{error:#}").contains("revocations"));
+    }
+
+    #[test]
+    fn application_profile_input_is_bounded_and_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile.toml");
+        let bytes = b"description = \"agent environment\"\n";
+        std::fs::write(&profile, bytes).unwrap();
+        assert_eq!(read_application_policy(&profile).unwrap(), bytes);
+        std::fs::write(&profile, b"").unwrap();
+        assert!(read_application_policy(&profile).is_err());
+        std::fs::write(&profile, b"unknown_field = true\n").unwrap();
+        assert!(read_application_policy(&profile).is_err());
+        std::fs::write(
+            &profile,
+            vec![b' '; mvm_core::registry_pack::MAX_APPLICATION_POLICY_BYTES + 1],
+        )
+        .unwrap();
+        assert!(read_application_policy(&profile).is_err());
     }
 
     #[test]

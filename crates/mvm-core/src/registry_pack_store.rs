@@ -77,7 +77,7 @@ struct RevocationTrustFile {
 /// Recheck an official pack against the built-in release root, or another
 /// pack against the operator's independently trusted feed when configured.
 /// Missing or stale official data always refuses the pack. Built-image packs
-/// outside `mvm/` also require an operator feed.
+/// and runnable application packs outside `mvm/` also require an operator feed.
 pub fn check_registry_pack_revocations_if_configured(
     verified: &VerifiedRegistryPack,
 ) -> Result<(), RegistryPackStoreError> {
@@ -232,7 +232,11 @@ where
         None if matches!(
             &verified.manifest().image,
             Some(RegistryPackImage::Built(_))
-        ) =>
+        ) || verified
+            .manifest()
+            .files
+            .iter()
+            .any(|file| file.path == crate::registry_pack::REGISTRY_APPLICATION_FILE) =>
         {
             return Err(RegistryPackStoreError::MissingRevocationTrust {
                 path: trust_path.display().to_string(),
@@ -1063,6 +1067,36 @@ mod tests {
             ),
             Err(RegistryPackStoreError::MissingRevocationTrust { path })
                 if path == trust_path.display().to_string()
+        ));
+    }
+
+    #[test]
+    fn an_application_requires_independent_revocation_trust() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let requested = reference("runtime/environment@1.2.3");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&manifest_bytes("runtime/environment@1.2.3")).unwrap();
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "path": crate::registry_pack::REGISTRY_APPLICATION_FILE,
+                "sha256": "a".repeat(64),
+                "size": 1,
+            }));
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let policy = publisher_policy();
+        let verified =
+            adopt_registry_pack_with(&adoption(&requested, &bytes, &policy), accept).unwrap();
+        let store = RegistryPackRevocationStore::new(home.path().join("cache"));
+        assert!(matches!(
+            check_registry_pack_revocations_at(
+                &verified,
+                &home.path().join("missing.toml"),
+                &store,
+                Utc::now(),
+            ),
+            Err(RegistryPackStoreError::MissingRevocationTrust { .. })
         ));
     }
 

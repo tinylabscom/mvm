@@ -124,8 +124,9 @@ mvmctl machine run --flake . --mount ./store.img:/data/store:1024:rw
 ```
 
 A writable disk image is accepted under every profile that allows volumes —
-the default `standard` and `--prod` included — because the guest writes into
-its own ext4 image file, never into the host filesystem. A host *directory* is
+`standard`, the default `dev`, and `--prod --profile standard` included —
+because the guest writes into its own ext4 image file, never into the host
+filesystem. A host *directory* is
 different: a *transient* run's directory share is read-only under every
 profile, and a persistent machine refuses a directory volume under every
 profile, because it cannot attach a live host directory. Register a snapshot

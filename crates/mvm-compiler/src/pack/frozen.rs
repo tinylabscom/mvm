@@ -45,7 +45,9 @@ pub fn compile_frozen(
         &resolved.manifest_dir,
         input.revision,
     )
-    .map_err(PackError::Compile)
+    .map_err(PackError::Compile)?;
+    let lock_bytes = serde_json::to_vec(locked).map_err(PackError::Digest)?;
+    std::fs::write(out.join(LOCK_FILE), lock_bytes).map_err(PackError::ArtifactLock)
 }
 
 /// A spec resolved against one snapshot of its source.
@@ -221,6 +223,13 @@ mod tests {
 
         let flake = fs::read_to_string(artifact.join("flake.nix")).unwrap();
         assert!(flake.contains(&revision().flake_url()));
+        assert!(flake.contains(&format!(
+            "inputs.mvm.inputs.mvm-workspace = {{ url = \"github:tinylabscom/mvm/{}\"; flake = false; }};",
+            revision().as_str()
+        )));
+        let carried: PackLock =
+            serde_json::from_slice(&fs::read(artifact.join(LOCK_FILE)).unwrap()).unwrap();
+        assert_eq!(carried, locked);
         let launch: serde_json::Value =
             serde_json::from_slice(&fs::read(artifact.join("launch.json")).unwrap()).unwrap();
         assert_eq!(launch["source"]["tree_hash"], locked.source_tree_sha256);
@@ -416,7 +425,7 @@ mod tests {
         let (a, b) = (out.path().join("a"), out.path().join("b"));
         compile_with(dir.path(), &locked, &a).unwrap();
         compile_with(dir.path(), &locked, &b).unwrap();
-        for file in ["flake.nix", "launch.json", "workload.json"] {
+        for file in ["flake.nix", "launch.json", "workload.json", LOCK_FILE] {
             assert_eq!(
                 fs::read(a.join(file)).unwrap(),
                 fs::read(b.join(file)).unwrap(),

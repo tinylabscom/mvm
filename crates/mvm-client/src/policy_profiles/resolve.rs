@@ -121,9 +121,33 @@ impl PolicySelection {
         cli: &[String],
         project: Option<ProjectPolicy>,
     ) -> Result<Option<Self>, PolicyError> {
-        let profiles = cli
+        Self::for_launch_with_defaults(cli, project, &[])
+    }
+
+    /// Select flags, otherwise a project's policy table, otherwise ordered defaults.
+    /// Project network hosts contribute regardless of the selected policy source.
+    ///
+    /// # Errors
+    ///
+    /// A selected flag or configured default is not a valid policy reference.
+    pub fn for_launch_with_defaults(
+        cli: &[String],
+        project: Option<ProjectPolicy>,
+        defaults: &[String],
+    ) -> Result<Option<Self>, PolicyError> {
+        let project_selects = project
+            .as_ref()
+            .is_some_and(|p| p.profile.is_some() || !p.include.is_empty());
+        let (selected, source) = if !cli.is_empty() {
+            (cli, "--policy")
+        } else if project_selects {
+            (&[][..], "project policy")
+        } else {
+            (defaults, "default_policy")
+        };
+        let profiles = selected
             .iter()
-            .map(|raw| PolicyRef::parse(raw).map_err(|reason| PolicyError::new("--policy", reason)))
+            .map(|raw| PolicyRef::parse(raw).map_err(|reason| PolicyError::new(source, reason)))
             .collect::<Result<Vec<_>, _>>()?;
         let project = project.filter(|p| !p.is_empty());
         if profiles.is_empty() && project.is_none() {

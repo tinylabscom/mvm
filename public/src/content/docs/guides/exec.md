@@ -71,9 +71,9 @@ mvmctl machine run --image alpine --mount /tmp:/data/host -- cat /data/host/foo 
 A sized disk image (`HOST.img:GUEST:SIZE:rw`) is an ext4 file mvm creates at
 `HOST` if it is absent and attaches as a block device. The guest writes into
 that image, never into the host filesystem, so every profile that accepts
-`--mount` accepts it writable — the default `standard`, and `--prod`, included.
-This is the way to keep data without `--profile dev`, which would also hand the
-guest the dev shell agent and the DevOnly verbs:
+`--mount` accepts it writable — `standard`, the default `dev`, and
+`--prod --profile standard` included. Select `--profile standard` to keep data
+without granting development access:
 
 ```bash
 mvmctl machine run --image alpine --mount ./state.img:/data/state:1G:rw \

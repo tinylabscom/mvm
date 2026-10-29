@@ -36,6 +36,34 @@ mod tests;
 /// byte it hands back is checked against the lock or the signed root.
 pub type Download = fn(&str, &Path) -> Result<()>;
 
+/// Install already-authenticated boot archives using the normal payload and
+/// integrity validators. Callers choose a private scratch cache for preflight
+/// or the runtime cache for launch. This performs no downloads or builds.
+pub fn install_boot_archives(
+    overlay: &Path,
+    initramfs: &Path,
+    root: &Sha256Hex,
+    arch: GuestArch,
+    cache: &Path,
+) -> Result<(
+    crate::runtime_overlay::RuntimeOverlayArtifact,
+    mvm_fs::initramfs::InitramfsArtifact,
+)> {
+    let set = SetMemberCache::for_root(root.clone());
+    crate::runtime_overlay::install_image_set_runtime_overlay_archive(
+        overlay,
+        &set,
+        root.as_str(),
+        arch,
+        cache,
+    )?;
+    crate::initramfs::install_image_set_initramfs_archive(initramfs, &set, arch, cache)?;
+    Ok((
+        crate::runtime_overlay::resolve_image_set_runtime_overlay(cache, &set, arch)?,
+        crate::initramfs::resolve_image_set_initramfs(cache, &set, arch)?,
+    ))
+}
+
 /// Base URL for GitHub release-asset downloads.
 ///
 /// Defaults to `https://github.com`. `MVM_UPDATE_DOWNLOAD_URL` overrides it for

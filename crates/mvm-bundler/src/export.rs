@@ -51,6 +51,10 @@ pub fn export_bundle_with_signer(
     signer: &dyn BundleSigner,
 ) -> Result<ExportedBundle> {
     refuse_summary_over_archive(inputs)?;
+    anyhow::ensure!(
+        inputs.boot_assets.is_none() || inputs.initrd.is_some(),
+        "embedded boot assets require a signed initrd"
+    );
 
     let mut contents = BundleContents::default();
     contents.push_file(KERNEL_NAME, ArtifactRole::Kernel, "kernel", inputs.vmlinux)?;
@@ -66,6 +70,27 @@ pub fn export_bundle_with_signer(
     )?;
     if let Some(boot) = &inputs.boot_assets {
         contents.push_boot_assets(boot, inputs.arch_label)?;
+    }
+    if let Some(profile) = inputs.application_policy {
+        anyhow::ensure!(
+            inputs
+                .environment
+                .as_ref()
+                .and_then(|env| env.pack.as_ref())
+                .is_some(),
+            "an application policy requires an environment descriptor with a package identity"
+        );
+        anyhow::ensure!(
+            !profile.is_empty()
+                && profile.len() <= mvm_core::registry_pack::MAX_APPLICATION_POLICY_BYTES,
+            "application policy must contain between 1 and {} bytes",
+            mvm_core::registry_pack::MAX_APPLICATION_POLICY_BYTES
+        );
+        contents.push(
+            mvm_core::registry_pack::REGISTRY_APPLICATION_POLICY_ARTIFACT,
+            ArtifactRole::Other,
+            profile.to_vec(),
+        )?;
     }
 
     let key_id = signer.key_id();

@@ -61,6 +61,9 @@ pub struct BundleExportInputs<'a> {
     /// `arch_label` or whose capabilities the posture does not permit, so a
     /// descriptor that needs a capability needs a posture beside it.
     pub environment: Option<EnvironmentDescriptor>,
+    /// Exact package profile bytes, sealed as an ordinary policy artifact.
+    /// Requires an environment descriptor identifying the package.
+    pub application_policy: Option<&'a [u8]>,
     /// Where the archive is written. Missing parent directories are created;
     /// an existing file is overwritten.
     pub out: &'a Path,
@@ -86,6 +89,7 @@ impl<'a> BundleExportInputs<'a> {
             posture: None,
             provenance: None,
             environment: None,
+            application_policy: None,
             out,
             debug_out: None,
         }
@@ -135,6 +139,11 @@ impl<'a> BundleExportInputs<'a> {
 
     pub fn environment(mut self, environment: EnvironmentDescriptor) -> Self {
         self.environment = Some(environment);
+        self
+    }
+
+    pub fn application_policy(mut self, profile: &'a [u8]) -> Self {
+        self.application_policy = Some(profile);
         self
     }
 

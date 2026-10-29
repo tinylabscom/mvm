@@ -159,6 +159,23 @@ fn export(inputs: &BundleExportInputs<'_>, signer: &TestSigner) -> ExportedBundl
 }
 
 #[test]
+fn boot_archives_without_a_signed_primary_initrd_are_refused() {
+    let slot = Slot::new();
+    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let root = mvm_core::packs::Sha256Hex::new("0".repeat(64)).unwrap();
+    let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+    inputs.boot_assets = Some(mvm_bundler::BootAssetsInputs {
+        manifest_bytes: b"unread because the boot contract is incomplete",
+        manifest_sha256: &root,
+        runtime_overlay: Path::new("unused-overlay"),
+        initramfs: Path::new("unused-initramfs"),
+    });
+    let error = export_bundle_with_signer(&inputs, &TestSigner::new(7)).unwrap_err();
+    assert!(error.to_string().contains("require a signed initrd"));
+    assert_nothing_written(&out);
+}
+
+#[test]
 fn an_exported_bundle_verifies_under_the_signers_key() {
     let slot = Slot::new();
     let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
@@ -628,6 +645,60 @@ fn an_environment_survives_export_and_stamps_schema_five() {
         manifest.environment(),
         Some(&environment_descriptor(&["egress"]))
     );
+}
+
+#[test]
+fn an_application_policy_survives_signed_export_and_installation() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(19);
+    let profile = b"description = \"agent environment\"\n[overrides.network]\nallow = [\"api.example.test:443\"]\n";
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out)
+        .environment(environment_descriptor(&[]))
+        .application_policy(profile);
+    export(&inputs, &signer);
+    let verified = verify(&out, &signer).unwrap();
+    assert_eq!(verified.artifacts["artifacts/policy/profile.toml"], profile);
+    let registry = mvm_core::plan::BundleRegistry::new(slot.dir.path().join("installed"));
+    let installed = registry
+        .install_file(&out, &OneKey(signer.verifying_key()), false)
+        .unwrap();
+    assert_eq!(
+        std::fs::read(installed.path_for_name("policy/profile.toml").unwrap()).unwrap(),
+        profile
+    );
+    assert_eq!(
+        installed.manifest.environment(),
+        Some(&environment_descriptor(&[]))
+    );
+}
+
+#[test]
+fn an_application_policy_without_a_package_identity_is_refused() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(19);
+    let mut environment = environment_descriptor(&[]);
+    environment.pack = None;
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out)
+        .environment(environment)
+        .application_policy(b"description = \"agent environment\"\n");
+    let error = export_bundle_with_signer(&inputs, &signer).unwrap_err();
+    assert!(error.to_string().contains("package identity"));
+    assert_nothing_written(&out);
+}
+
+#[test]
+fn an_oversized_application_policy_is_refused_before_signing() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(19);
+    let policy = vec![b' '; mvm_core::registry_pack::MAX_APPLICATION_POLICY_BYTES + 1];
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out)
+        .environment(environment_descriptor(&[]))
+        .application_policy(&policy);
+    assert!(export_bundle_with_signer(&inputs, &signer).is_err());
+    assert_nothing_written(&out);
 }
 
 #[test]

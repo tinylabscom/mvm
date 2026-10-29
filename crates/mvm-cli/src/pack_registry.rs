@@ -311,7 +311,12 @@ fn allowed_release_url(url: &str) -> bool {
     })
 }
 
-fn download_payload_file(url: &str, target: &Path, size: u64, release: bool) -> Result<()> {
+pub(crate) fn download_payload_file(
+    url: &str,
+    target: &Path,
+    size: u64,
+    release: bool,
+) -> Result<()> {
     use std::io::Read;
     let mut output = std::fs::OpenOptions::new()
         .write(true)
@@ -593,6 +598,8 @@ fn pull_one(
     with_built_image_verifier_preflight(verified.manifest().image.as_ref(), || {
         download_payload(config, &verified, fetched.staged_path())
     })?;
+    // A failed archive download or verification must not advance the name pin.
+    crate::application_package::install_declared(fetched.staged_path(), &verified)?;
 
     let installed = if pinned {
         // The pin already exists; install reuses or repairs the cache entry.

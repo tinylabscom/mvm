@@ -7,6 +7,38 @@ use clap::Parser;
 use std::path::Path;
 
 #[test]
+fn both_run_verbs_use_the_reported_default_and_allow_an_explicit_override() {
+    for verb in [vec!["mvmctl", "run"], vec!["mvmctl", "machine", "run"]] {
+        for selection in [None, Some("standard")] {
+            let mut argv = verb.clone();
+            if let Some(selection) = selection {
+                argv.extend(["--profile", selection]);
+            }
+            argv.extend(["--", "true"]);
+            let parsed = Cli::try_parse_from(argv).expect("parse run");
+            let run = match parsed.command {
+                Commands::Run(args) => args.machine.run,
+                Commands::Machine(args) => {
+                    let machine::MachineAction::Run(args) = args.action else {
+                        panic!("expected machine run");
+                    };
+                    args.run
+                }
+                _ => panic!("expected run"),
+            };
+            assert_eq!(
+                run.profile,
+                if selection.is_some() {
+                    RunProfile::Standard
+                } else {
+                    default_run_profile()
+                }
+            );
+        }
+    }
+}
+
+#[test]
 fn registry_revocation_update_requires_both_local_files() {
     assert!(
         Cli::try_parse_from([
@@ -2440,7 +2472,7 @@ fn test_run_command_is_recognized() {
                 run: exec::RunArgs { profile, argv, .. },
                 ..
             }) => {
-                assert_eq!(profile, exec::RunProfile::Standard);
+                assert_eq!(profile, exec::RunProfile::Dev);
                 assert_eq!(argv, vec!["/bin/true".to_string()]);
             }
             _ => panic!("Expected machine run"),
@@ -4175,7 +4207,7 @@ fn run_default_profile_argv_only() {
                 assert!(allow_host.is_empty());
                 assert_eq!(cpus, crate::commands::shared::default_vcpus());
                 assert_eq!(memory, "512M");
-                assert_eq!(profile, exec::RunProfile::Standard);
+                assert_eq!(profile, exec::RunProfile::Dev);
                 assert!(volume.is_empty());
                 assert!(env.is_empty());
                 assert_eq!(timeout, None);
@@ -4848,6 +4880,8 @@ fn direct_production_oci_run_accepts_the_baked_entrypoint() {
         "--image",
         "registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
         "--prod",
+        "--profile",
+        "standard",
         "--dry-run",
     ])
     .expect("parse a digest-pinned production image run");
@@ -6382,15 +6416,26 @@ fn up_json_reports_prod_when_the_launch_grant_is_prodsafe_only() {
     // SandboxDevOnly. The field has to answer the question it is asked: can
     // this launch use DevOnly verbs?
     //
-    // This is the exact argv the Python SDK's live transport shells: no tty, no
-    // trailing argv, no --profile dev. That is grant-eligible, so the launch
-    // carries the attenuated ProdSafe set.
-    let args = parse_machine_run(&["-d", "--up-json", "--name", "vm", "--image", "alpine"])
-        .expect("sdk-shaped run args parse");
+    // A restricted launch now selects its non-development profile explicitly.
+    // The interactive CLI default must not silently become a production grant.
+    let args = parse_machine_run(&[
+        "-d",
+        "--up-json",
+        "--name",
+        "vm",
+        "--image",
+        "alpine",
+        "--profile",
+        "standard",
+    ])
+    .expect("restricted run args parse");
     assert!(
         crate::commands::machine::runtime::launch_carries_restricted_grant(&args),
         "an SDK-shaped launch is grant-eligible and gets the ProdSafe-only set"
     );
+    let default = parse_machine_run(&["-d", "--up-json", "--name", "vm", "--image", "alpine"])
+        .expect("default run args parse");
+    assert!(!crate::commands::machine::runtime::launch_carries_restricted_grant(&default));
 }
 
 #[test]

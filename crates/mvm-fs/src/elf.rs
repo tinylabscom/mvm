@@ -41,9 +41,47 @@ const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
+const PT_INTERP: u32 = 3;
 const DT_NULL: u64 = 0;
 const DT_NEEDED: u64 = 1;
 const DT_STRTAB: u64 = 5;
+
+/// Read the ELF machine and optional interpreter through the shared header reader.
+pub fn loader(object: &[u8]) -> Result<(u16, Option<String>), ElfError> {
+    let headers = program_headers(object)?;
+    let machine = read_u16(object, 18)?;
+    let mut interpreters = headers.iter().filter(|header| header.kind == PT_INTERP);
+    let Some(header) = interpreters.next() else {
+        return Ok((machine, None));
+    };
+    if interpreters.next().is_some() || !(2..=512).contains(&header.filesz) {
+        return Err(ElfError::NotElf64Le {
+            reason: "expected one bounded interpreter segment".into(),
+        });
+    }
+    let start = usize::try_from(header.offset).map_err(|_| ElfError::OutOfBounds {
+        what: "interpreter offset".into(),
+    })?;
+    let end = header
+        .offset
+        .checked_add(header.filesz)
+        .and_then(|end| usize::try_from(end).ok())
+        .ok_or_else(|| ElfError::OutOfBounds {
+            what: "interpreter extent".into(),
+        })?;
+    let bytes = object
+        .get(start..end)
+        .ok_or_else(|| ElfError::OutOfBounds {
+            what: "interpreter bytes".into(),
+        })?;
+    let path = bytes.strip_suffix(&[0]).filter(|path| !path.contains(&0));
+    let path = path
+        .and_then(|path| std::str::from_utf8(path).ok())
+        .ok_or_else(|| ElfError::NotElf64Le {
+            reason: "interpreter must be one terminated string".into(),
+        })?;
+    Ok((machine, Some(path.to_string())))
+}
 
 /// One program header, in the two fields this module needs from each kind.
 #[derive(Debug, Clone, Copy)]
@@ -291,6 +329,34 @@ pub mod test_fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loader_reads_a_bounded_interpreter_and_rejects_truncation() {
+        let name = b"/lib/ld-linux-aarch64.so.1\0";
+        let mut object = vec![0; 120];
+        object[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        object[18..20].copy_from_slice(&183u16.to_le_bytes());
+        object[32..40].copy_from_slice(&64u64.to_le_bytes());
+        object[54..56].copy_from_slice(&56u16.to_le_bytes());
+        object[56..58].copy_from_slice(&1u16.to_le_bytes());
+        object[64..68].copy_from_slice(&PT_INTERP.to_le_bytes());
+        object[72..80].copy_from_slice(&120u64.to_le_bytes());
+        object[96..104].copy_from_slice(&(name.len() as u64).to_le_bytes());
+        object.extend_from_slice(name);
+        assert_eq!(
+            loader(&object).unwrap(),
+            (183, Some("/lib/ld-linux-aarch64.so.1".into()))
+        );
+        object.pop();
+        assert!(loader(&object).is_err());
+        assert!(loader(b"not an executable").is_err());
+        assert!(
+            loader(&test_fixture::shared_object(&[]))
+                .unwrap()
+                .1
+                .is_none()
+        );
+    }
 
     #[test]
     fn a_musl_object_records_the_musl_soname() {

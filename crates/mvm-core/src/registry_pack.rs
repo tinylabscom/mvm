@@ -26,6 +26,13 @@ pub const REGISTRY_PACK_MANIFEST_SCHEMA_VERSION: u32 = 1;
 /// Current publisher trust-policy schema.
 pub const REGISTRY_PACK_PUBLISHER_POLICY_SCHEMA_VERSION: u32 = 1;
 
+/// Signed payload declaration for a prebuilt application archive.
+pub const REGISTRY_APPLICATION_FILE: &str = "pack/application.json";
+/// Archive artifact containing the exact signed package profile bytes.
+pub const REGISTRY_APPLICATION_POLICY_ARTIFACT: &str = "policy/profile.toml";
+/// Maximum application policy document size.
+pub const MAX_APPLICATION_POLICY_BYTES: usize = 1024 * 1024;
+
 const REGISTRY_PAYLOAD_DIR_NAME: &str = "payload";
 const MAX_REGISTRY_PAYLOAD_FILES: usize = 4096;
 const MAX_REGISTRY_PAYLOAD_BYTES: u64 = 32 * 1024 * 1024 * 1024;

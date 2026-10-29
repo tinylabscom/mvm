@@ -683,6 +683,7 @@ fn command_allows_builder_auto_bootstrap(command: &Commands) -> bool {
     match command {
         Commands::Build(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => true,
         Commands::PersistentBuilder(_) => true,
+        Commands::Pack(args) => matches!(args.action, pack::PackAction::Build(_)),
         // `machine build` is `build` under its documented name.
         Commands::Machine(machine_args) => matches!(
             machine_args.action,
@@ -988,6 +989,20 @@ mod builder_bootstrap_policy_tests {
         ])));
         assert!(!command_allows_builder_auto_bootstrap(&command(&[
             "cache", "info",
+        ])));
+        assert!(command_allows_builder_auto_bootstrap(&command(&[
+            "pack",
+            "build",
+            "pack.json",
+            "--out",
+            "artifact",
+        ])));
+        assert!(!command_allows_builder_auto_bootstrap(&command(&[
+            "pack",
+            "compile",
+            "pack.json",
+            "--out",
+            "artifact",
         ])));
     }
 

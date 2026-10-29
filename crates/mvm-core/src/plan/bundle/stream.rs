@@ -337,6 +337,20 @@ impl BundleRegistry {
         trust: &dyn TrustStore,
         force: bool,
     ) -> Result<InstalledBundle, BundleInstallError> {
+        self.install_file_with_preflight(archive, trust, force, |_, _, _| Ok(()))
+    }
+
+    /// Apply additional consumer requirements after verified extraction, before
+    /// promoting a new installation or replacing an existing one. The check
+    /// must not mutate the staged members. An `AlreadyInstalled` result retains
+    /// the ordinary no-install behavior and does not invoke the check.
+    pub fn install_file_with_preflight(
+        &self,
+        archive: &Path,
+        trust: &dyn TrustStore,
+        force: bool,
+        preflight: impl FnOnce(&Path, &BundleManifest, &str) -> Result<()>,
+    ) -> Result<InstalledBundle, BundleInstallError> {
         let sha = archive_sha256(archive).map_err(BundleInstallError::Verify)?;
         let io_error = |reason: String| BundleInstallError::Io {
             bundle_sha256: sha.clone(),
@@ -385,6 +399,10 @@ impl BundleRegistry {
                 return Err(error);
             }
         };
+        if let Err(error) = preflight(&staging, &manifest, &sha) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(io_error(format!("bundle preflight refused: {error:#}")));
+        }
         install_embedded_image_set_cache(
             &ImageSetSource {
                 manifest: &manifest,
@@ -799,6 +817,58 @@ mod tests {
 
     fn trust() -> OneKey {
         OneKey(key().verifying_key())
+    }
+
+    #[test]
+    fn a_refused_preflight_publishes_nothing_and_preserves_an_existing_install() {
+        for existing in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = sealed_from_files(dir.path());
+            let registry = BundleRegistry::new(dir.path().join("registry"));
+            let sha = archive_sha256(&path).unwrap();
+            if existing {
+                registry.install_file(&path, &trust(), false).unwrap();
+            }
+            let error = registry
+                .install_file_with_preflight(&path, &trust(), true, |root, manifest, digest| {
+                    assert_eq!(digest, sha);
+                    assert_eq!(manifest.artifacts.len(), 2);
+                    assert_eq!(
+                        std::fs::read(root.join("artifacts/rootfs.ext4")).unwrap(),
+                        b"rootfs bytes"
+                    );
+                    anyhow::bail!("runtime compatibility refused")
+                })
+                .unwrap_err();
+            assert!(error.to_string().contains("runtime compatibility refused"));
+            assert_eq!(registry.find(&sha).unwrap().is_some(), existing);
+            assert_eq!(registry.archive_path(&sha).exists(), existing);
+            assert!(!registry.root.join(format!("{sha}.partial")).exists());
+        }
+    }
+
+    #[test]
+    fn tampered_members_never_reach_an_install_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = sealed_from_files(dir.path());
+        let mut bytes = std::fs::read(&path).unwrap();
+        let offset = bytes
+            .windows(b"rootfs bytes".len())
+            .position(|part| part == b"rootfs bytes")
+            .unwrap();
+        bytes[offset] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        let registry = BundleRegistry::new(dir.path().join("registry"));
+        let called = std::cell::Cell::new(false);
+        assert!(
+            registry
+                .install_file_with_preflight(&path, &trust(), false, |_, _, _| {
+                    called.set(true);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!called.get());
     }
 
     #[test]

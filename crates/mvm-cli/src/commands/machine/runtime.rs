@@ -584,6 +584,37 @@ fn resolve_entrypoint_stdin_with(
     }
 }
 
+pub(super) fn prepare_application_run(
+    args: &mut MachineRunArgs,
+    posture: &mvm_core::plan::BundleSecurityPosture,
+    environment: &mvm_core::plan::EnvironmentDescriptor,
+) -> Result<()> {
+    let development = posture.profile == mvm_core::security::AgentProfile::Dev;
+    anyhow::ensure!(
+        !development || args.run.profile == RunProfile::Dev,
+        "this application is signed for development access; explicitly select --profile dev"
+    );
+    if args.interactive() {
+        anyhow::ensure!(
+            development && args.run.profile == RunProfile::Dev,
+            "application terminal access requires both a development package and --profile dev; \
+             sealed application console access remains refused"
+        );
+        anyhow::ensure!(
+            args.run.argv.is_empty() && args.run.launch_plan.is_none(),
+            "application terminal access runs only the signed declared entrypoint"
+        );
+        anyhow::ensure!(
+            environment.entrypoint.working_dir.is_none(),
+            "the development terminal path cannot yet preserve a declared working directory; \
+             use the non-terminal entrypoint path"
+        );
+        args.run.argv = environment.entrypoint.argv.clone();
+        args.run.pty = true;
+    }
+    Ok(())
+}
+
 pub(in crate::commands) fn run_dispatch(
     cli: &Cli,
     mut args: MachineRunArgs,
@@ -603,6 +634,27 @@ pub(in crate::commands) fn run_dispatch(
     // a positional image reference is one. An artifact is verified and
     // installed here, and refused under `--prod` before it is.
     crate::commands::vm::exec::positional_source::apply_positional_source(&mut args.run)?;
+    if args.run.application_policy.is_some() {
+        let bundle = args
+            .run
+            .manifest
+            .as_deref()
+            .context("application bundle is missing")?;
+        let posture = mvm_runtime::vm::template::lifecycle::installed_bundle_posture(bundle)?
+            .context("application bundle has no signed security posture")?;
+        let environment =
+            mvm_client::admission::bundle_environment::installed_bundle_environment(bundle)?
+                .context("application bundle has no signed environment")?;
+        prepare_application_run(&mut args, &posture, &environment)?;
+        anyhow::ensure!(
+            !args.persistent() && !args.entrypoint,
+            "installed application names support only the foreground declared-entrypoint path; \
+             persistent machines and explicit --entrypoint are not supported"
+        );
+        mvm_core::cold_build::set_policy(mvm_core::cold_build::launch_policy(
+            mvm_core::cold_build::BuildFlag::NoBuild,
+        ));
+    }
     args.refuse_unsupported_prod()?;
     args.refuse_unsupported_persistent_env()?;
     // Syntax, policy, terminal, dry-run, and host-capability refusals must be
@@ -624,9 +676,15 @@ pub(in crate::commands) fn run_dispatch(
     // here, so nothing downstream parses the archive as an `mvm.toml` and the
     // boot is a plain `--manifest <bundle-sha256>`.
     crate::commands::bundle::settle_manifest_archive(&mut args.run.manifest, args.run.dry_run)?;
+    if args.run.application_policy.is_some() {
+        crate::commands::vm::exec::environment_defaults::apply_installed_bundle_defaults(
+            &mut args.run,
+        )?;
+    }
     // Before the flake is built into a slot below: the project's `[policy]`
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
+    crate::commands::vm::exec::environment_defaults::check_application_requirements(&args.run)?;
     // The manifest that policy came from, for reviewing the run's refusals.
     // Read now, while the arguments still name the flake directory; the
     // transient lanes carry it on the run arguments.

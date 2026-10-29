@@ -395,6 +395,55 @@ fn a_launch_selects_a_flag_the_project_or_nothing() {
 }
 
 #[test]
+fn configured_defaults_compose_in_order_with_denies_and_minimum_resources() {
+    let dir = Dir::new();
+    dir.profile(
+        "base",
+        "[overrides.network]\nallow = [\"a.test\"]\n[overrides.resources]\nwall_clock_secs = 20\n",
+    );
+    dir.profile("team", "[overrides.network]\nallow = [\"b.test\"]\ndeny = [\"a.test\"]\n[overrides.resources]\nwall_clock_secs = 60\n");
+    let selection = PolicySelection::for_launch_with_defaults(
+        &[],
+        Some(project(None, &[], &["project.test"])),
+        &cli(&["base", "team"]),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        selection.profiles,
+        vec![
+            PolicyRef::Name("base".into()),
+            PolicyRef::Name("team".into())
+        ]
+    );
+    let resolved = resolve(&dir.store, &selection, Platform::default()).unwrap();
+    assert_eq!(allow(&resolved), ["b.test:443", "project.test:443"]);
+    assert_eq!(resolved.policy.resources.wall_clock_secs, Some(20));
+}
+
+#[test]
+fn flags_and_project_policy_replace_configured_defaults_but_keep_project_hosts() {
+    let dir = Dir::new();
+    for (flags, profile, include) in [
+        (cli(&["agent-apis"]), None, vec![]),
+        (vec![], Some("agent-apis"), vec![]),
+        (vec![], None, vec!["llm-apis"]),
+    ] {
+        let selection = PolicySelection::for_launch_with_defaults(
+            &flags,
+            Some(project(profile, &include, &["project.test"])),
+            &cli(&["Bad Default"]),
+        )
+        .unwrap()
+        .unwrap();
+        let resolved = resolve(&dir.store, &selection, Platform::default()).unwrap();
+        assert!(allow(&resolved).contains(&"api.openai.com:443".into()));
+        assert!(allow(&resolved).contains(&"project.test:443".into()));
+    }
+    assert!(PolicySelection::for_launch_with_defaults(&[], None, &cli(&["Bad Default"])).is_err());
+}
+
+#[test]
 fn a_launch_selects_several_flags_in_order_and_the_last_wins_the_conflicts() {
     let dir = Dir::new();
     dir.profile("base", "[overrides.network]\nallow = [\"a.test\"]\n");
