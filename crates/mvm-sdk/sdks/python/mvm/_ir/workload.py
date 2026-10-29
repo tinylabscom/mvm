@@ -44,10 +44,18 @@ class AiBudget:
     max_total_tokens: Optional[int] = None
 
 
+class AiBudgetModel1(Enum):
+    claude_haiku_4_5_20251001 = 'claude-haiku-4-5-20251001'
+
+
+AiBudgetModel = AiBudgetModel1
+
+
 @dataclass
-class AiPolicy:
-    budget: Optional[AiBudget] = None
-    metering: Optional[bool] = False
+class AiRequestBudget:
+    max_requests: int
+    max_spend_microusd: int
+    model: AiBudgetModel
 
 
 class AuthType(Enum):
@@ -491,6 +499,13 @@ class AddonUse:
     alias: Optional[str] = None
     hooks: Optional[Hooks] = None
     params: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class AiPolicy:
+    budget: Optional[AiBudget] = None
+    metering: Optional[bool] = False
+    request_budget: Optional[AiRequestBudget] = None
 
 
 @dataclass

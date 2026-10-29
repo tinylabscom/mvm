@@ -228,6 +228,20 @@ describe("network()", () => {
     expect(n.ai?.budget?.max_total_tokens).toBe(12_000);
   });
 
+  it("preserves pre-forward limits independently of metering", () => {
+    const policy = mvm.aiPolicy({
+      metering: false,
+      requestBudget: {
+        max_requests: 1,
+        max_spend_microusd: 500000,
+        model: "claude-haiku-4-5-20251001",
+      },
+    });
+    expect(policy.metering).toBe(false);
+    expect(policy.request_budget?.max_requests).toBe(1);
+    expect(policy.request_budget?.max_spend_microusd).toBe(500000);
+  });
+
   it("rejects a preset combined with explicit egress", () => {
     expect(() => mvm.network({
       preset: "agent",

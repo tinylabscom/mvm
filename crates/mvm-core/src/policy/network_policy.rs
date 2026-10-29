@@ -9,9 +9,9 @@
 //! / `mvm_core::policy::network_policy::X` path keeps resolving unchanged.
 
 pub use mvm_contract::policy::network_policy::{
-    AiBudget, AiPolicy, BANNED_SSH_PORT, EgressMode, HostPort, MANDATORY_DENY_RANGES,
-    NetworkPolicy, NetworkPolicyParseError, NetworkPreset, is_banned_ssh_port, is_mandatory_deny,
-    mandatory_deny_ranges, unmap_v4_mapped,
+    AiBudget, AiBudgetModel, AiPolicy, AiRequestBudget, BANNED_SSH_PORT, EgressMode, HostPort,
+    MANDATORY_DENY_RANGES, NetworkPolicy, NetworkPolicyParseError, NetworkPreset,
+    is_banned_ssh_port, is_mandatory_deny, mandatory_deny_ranges, unmap_v4_mapped,
 };
 
 const SSH_BANNER_HEX_PREFIX: &str = "|5353482d|";

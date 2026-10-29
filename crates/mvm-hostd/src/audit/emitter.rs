@@ -70,6 +70,7 @@ use atomic_sync::{AtomicSyncBatch, PendingSync};
 mod atomic_write;
 pub(crate) use atomic_write::{write_atomic, write_atomic_batched, write_atomic_unsynced};
 
+mod native_completion;
 mod session_events;
 mod stream_input_refusal;
 use stream_input_refusal::input_refused_labels;

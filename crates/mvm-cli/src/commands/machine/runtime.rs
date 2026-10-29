@@ -523,7 +523,9 @@ fn run_entrypoint_action(
         &routes.with_allow_host(&args.run.allow_host),
         &[],
     )?
-    .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget))
+    .with_ai(crate::commands::vm::exec::application_source::ai_policy(
+        &args.run,
+    )?)
     .with_routes(routes.routes);
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
     let exit_apply = exit_apply_request(&args);

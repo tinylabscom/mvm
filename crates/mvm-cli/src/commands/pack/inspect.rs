@@ -198,6 +198,8 @@ struct ApplicationInfo {
     guest_arch: String,
     bundle: mvm_core::registry_pack::application::RegistryApplicationBundle,
     verification_scope: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle_manifest: Option<mvm_core::plan::bundle::BundleManifest>,
 }
 
 fn application_info(
@@ -215,6 +217,7 @@ fn application_info(
         guest_arch: manifest.application.guest_arch.clone(),
         bundle: manifest.application.bundle.clone(),
         verification_scope: "descriptor_and_bundle_archive",
+        bundle_manifest: None,
     }
 }
 
@@ -238,7 +241,7 @@ fn inspect_application(
     );
     // A descriptor is not proof that the archive exists or its independent
     // author is trusted. Keep the existing archive verifier as that boundary.
-    let _verified_archive =
+    let verified_archive =
         verify_application_bundle(application, &archive, &trust).with_context(|| {
             format!(
                 "reverifying local application bundle for {}; \
@@ -247,11 +250,12 @@ fn inspect_application(
                 application.reference(),
             )
         })?;
-    let info = application_info(
+    let mut info = application_info(
         application.manifest(),
         application.manifest_sha256(),
         application.signer(),
     );
+    info.bundle_manifest = Some(verified_archive.bundle().manifest.clone());
     if json {
         return crate::json_out::emit_json(&info);
     }

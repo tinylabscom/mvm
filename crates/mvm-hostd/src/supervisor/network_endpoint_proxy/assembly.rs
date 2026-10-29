@@ -283,15 +283,20 @@ impl SubstitutionService {
         self
     }
 
-    /// Attach a per-VM AI egress metering/budget policy. Metering is only
-    /// active when `policy.metering` is `true`.
+    /// Attach per-VM AI limits. Pre-forward ceilings do not depend on metering.
     pub fn with_ai_policy(
         mut self,
         policy: mvm_contract::policy::network_policy::AiPolicy,
     ) -> Self {
-        if policy.metering {
-            self.ai_tracker = Some(Arc::new(ai_meter::AiBudgetTracker::new(policy.budget)));
-        }
+        self.ai_tracker = if policy.metering || policy.request_budget.is_some() {
+            let mut tracker = ai_meter::AiBudgetTracker::new(policy.budget);
+            tracker.request_budget = policy
+                .request_budget
+                .map(ai_meter::request_budget::RequestBudgetTracker::new);
+            Some(Arc::new(tracker))
+        } else {
+            None
+        };
         self.ai_policy = Some(policy);
         self
     }
