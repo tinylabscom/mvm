@@ -1,10 +1,9 @@
 //! Tenant secret storage.
 //!
 //! Operators provision tenant-scoped secrets (API tokens, OAuth
-//! refresh tokens, webhook signing secrets, etc.) via `mvmctl
-//! secret put`. The supervisor surfaces them inside a workload's
-//! sandbox via `/run/mvm-secrets/<name>` at admission time (the
-//! `mvm-supervisor::keystore::SecretGrant`).
+//! refresh tokens, webhook signing secrets, etc.) through the host-side
+//! secret service. Workloads carry references; values remain host-held
+//! for authorized egress substitution.
 //!
 //! ## Storage backends
 //!
@@ -21,8 +20,12 @@
 //!
 //! [`default_secret_store`] auto-picks an aggregate backend when
 //! Keyring is reachable: writes prefer Keyring, while reads,
-//! listing, and deletion keep file-backed secrets visible. Set
-//! `MVM_SECRET_STORE_BACKEND=file` to pin the file backend
+//! listing, and deletion keep file-backed secrets visible.
+//! Keyring writes succeed only after a fresh entry reads the requested value;
+//! an entry-local cache is not persistence. Failed verification leaves the
+//! keyring name index unchanged: auto falls back to the encrypted file store,
+//! while a forced keyring store reports the error.
+//! Set `MVM_SECRET_STORE_BACKEND=file` to pin the file backend
 //! (escape hatch for hosts where the keyring's
 //! reachability probe lies — Linux CI runners with `libsecret`
 //! headers but no live `secret-service` daemon are the canonical
@@ -30,18 +33,16 @@
 //!
 //! ## Why two backends
 //!
-//! `KeyringSecretStore` stores values inside macOS Keychain / Linux
-//! Secret Service / Windows Credential Manager — the OS keystore
-//! is the strongest at-rest protection available on a non-attested
-//! host. But CI Linux runners typically have no D-Bus session;
-//! `FileSecretStore` is the dependable fallback that works
-//! everywhere, but values are still encrypted before touching disk.
+//! With a persistent OS backend configured, `KeyringSecretStore` stores values
+//! inside macOS Keychain / Linux Secret Service / Windows Credential Manager.
+//! `FileSecretStore` is the fallback when that backend is absent or unavailable;
+//! values are still encrypted before touching disk.
 //!
 //! ## What this module does NOT do
 //!
-//! - **Inject secrets into VMs.** That's the supervisor's
-//!   `KeystoreReleaser`. This module is the operator-facing CRUD
-//!   surface; the supervisor pulls from it at admission.
+//! - **Apply egress authorization or substitution.** Host-side keyholders
+//!   enforce secret references and destination bindings. This module is
+//!   the operator-facing storage CRUD surface.
 //! - **Multi-host replication.** Single-host only; mvmd's secret
 //!   service handles fleets.
 
@@ -406,10 +407,11 @@ impl SecretStore for KeyringSecretStore {
         entry
             .set_password(value.expose_secret())
             .with_context(|| format!("writing keyring entry for {tenant}:{name}"))?;
-        let stored = entry
-            .get_password()
+        // A fresh entry must see the value, not just the writer's entry-local cache.
+        let stored = self
+            .get(tenant, name)
             .with_context(|| format!("verifying keyring entry for {tenant}:{name}"))?;
-        if stored != value.expose_secret().as_str() {
+        if stored.expose_secret() != value.expose_secret() {
             anyhow::bail!("keyring entry for {tenant}:{name} failed read-after-write check");
         }
         // Update the index. Read-modify-write; if the entry write
@@ -595,6 +597,18 @@ mod tests {
         SecretBox::new(Box::new(s.to_string()))
     }
 
+    #[cfg(feature = "os-keyring")]
+    fn assert_mock_keyring(tenant: &str, name: &str) {
+        assert!(
+            keyring::default::default_credential_builder()
+                .as_any()
+                .is::<keyring::mock::MockCredentialBuilder>(),
+            "secret-store tests must not access a native credential backend"
+        );
+        let entry = KeyringSecretStore::entry(tenant, name).unwrap();
+        assert!(entry.get_credential().is::<keyring::mock::MockCredential>());
+    }
+
     // ──────────────────────────────────────────────────────────────
     // FileSecretStore — exercised on every host
     // ──────────────────────────────────────────────────────────────
@@ -687,6 +701,7 @@ mod tests {
     #[test]
     #[cfg(feature = "os-keyring")]
     fn auto_store_reads_file_backed_secret_when_keyring_misses() {
+        assert_mock_keyring("acme", "k");
         let tmp = tempfile::tempdir().unwrap();
         let file_dir = tmp.path().join("file");
         let store = AutoSecretStore {
@@ -708,6 +723,63 @@ mod tests {
         };
         store.file.put("acme", "k", &mk_value("v")).unwrap();
         assert_eq!(store.list("acme").unwrap(), vec!["k"]);
+    }
+
+    #[test]
+    #[cfg(feature = "os-keyring")]
+    fn persistence_keyring_put_refuses_entry_local_storage() {
+        assert_mock_keyring("test-persistence", "synthetic");
+        let tmp = tempfile::tempdir().unwrap();
+        let store = KeyringSecretStore::with_dir(tmp.path());
+        let value = mk_value("synthetic-keyring-value");
+
+        let err = store
+            .put("test-persistence", "synthetic", &value)
+            .expect_err("entry-local storage must not claim persistence");
+
+        assert!(err.to_string().contains("verifying keyring entry"));
+        assert!(!format!("{err:#}").contains(value.expose_secret()));
+        assert!(!store.index_path("test-persistence").unwrap().exists());
+        assert!(store.list("test-persistence").unwrap().is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "os-keyring")]
+    fn persistence_auto_put_survives_store_recreation() {
+        assert_mock_keyring("test-persistence", "synthetic");
+        let tmp = tempfile::tempdir().unwrap();
+        let file_dir = tmp.path().join("file");
+        let index_dir = tmp.path().join("index");
+        let value = mk_value("synthetic-fallback-value");
+        {
+            let store = AutoSecretStore {
+                keyring: KeyringSecretStore::with_dir(&index_dir),
+                file: FileSecretStore::with_dir(&file_dir),
+            };
+            store.put("test-persistence", "synthetic", &value).unwrap();
+            assert!(
+                !store
+                    .keyring
+                    .index_path("test-persistence")
+                    .unwrap()
+                    .exists()
+            );
+        }
+
+        let store = AutoSecretStore {
+            keyring: KeyringSecretStore::with_dir(index_dir),
+            file: FileSecretStore::with_dir(&file_dir),
+        };
+        let got = store.get("test-persistence", "synthetic").unwrap();
+        assert_eq!(got.expose_secret(), value.expose_secret());
+        assert_eq!(store.list("test-persistence").unwrap(), vec!["synthetic"]);
+
+        let file = FileSecretStore::with_dir(&file_dir);
+        let got = file.get("test-persistence", "synthetic").unwrap();
+        assert_eq!(got.expose_secret(), value.expose_secret());
+        let raw = fs::read(file_dir.join("test-persistence").join("synthetic")).unwrap();
+        assert!(raw.starts_with(FILE_SECRET_MAGIC));
+        assert!(!String::from_utf8_lossy(&raw).contains(value.expose_secret()));
     }
 
     #[test]
@@ -844,7 +916,9 @@ mod tests {
 
     #[test]
     fn default_secret_store_returns_some_impl() {
-        // Doesn't panic regardless of host keyring availability.
+        #[cfg(feature = "os-keyring")]
+        assert_mock_keyring("test-persistence", "factory-selection");
+        // Selecting the store does not read a credential value.
         let _store = default_secret_store();
     }
 
