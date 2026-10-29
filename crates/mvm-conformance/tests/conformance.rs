@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use cucumber::World as _;
 use cucumber::gherkin::{Feature, Rule, Scenario};
+use cucumber::tag::Ext as _;
 use mvm_conformance::sharding::ScenarioShard;
 use mvm_conformance::{
     RuntimeCaps, ScenarioGate, gate_selected_scenario_with_runtime_candidate, inherited_tags,
@@ -58,6 +59,12 @@ async fn main() {
 
     stop_launched_vms_when_interrupted();
 
+    // Cucumber's name/tag options replace its programmatic filter. Take them
+    // out of the options and compose them explicitly with the safety gates.
+    let mut options = cucumber::cli::Opts::<_, _, _, cucumber::cli::Empty>::parsed();
+    let name_filter = options.re_filter.take();
+    let tag_filter = options.tags_filter.take();
+
     // Warm-restore scenarios mutate the process `MVM_HOME` and call
     // in-process seal/verify helpers. Run all scenarios sequentially so
     // no other thread observes the environment mid-scenario.
@@ -66,9 +73,11 @@ async fn main() {
     // the skip tally can be printed. This reproduces its exit behaviour around
     // the report.
     let writer = CliWorld::cucumber()
+        .with_cli(options)
         .max_concurrent_scenarios(1)
         .before(|_, _, _, _| {
             Box::pin(async {
+                STARTED_SCENARIOS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 steps::launch_e2e::mark_scenario_start();
             })
         })
@@ -91,7 +100,18 @@ async fn main() {
             })
         })
         .filter_run(features_dir(), move |feature, rule, scenario| {
-            should_run(feature, rule, scenario, shard)
+            let selected = match (&name_filter, &tag_filter) {
+                (Some(name), _) => name.is_match(&scenario.name),
+                (None, Some(tags)) => tags.eval(
+                    feature
+                        .tags
+                        .iter()
+                        .chain(rule.iter().flat_map(|rule| &rule.tags))
+                        .chain(scenario.tags.iter()),
+                ),
+                (None, None) => true,
+            };
+            selected && should_run(feature, rule, scenario, shard)
         })
         .await;
 
@@ -103,10 +123,24 @@ async fn main() {
     // `execution_has_failed` comes from the `Stats` trait, which the concrete
     // writer only exposes when the trait is in scope.
     use cucumber::writer::Stats as _;
+    let selected = SELECTED_SCENARIOS.load(std::sync::atomic::Ordering::Relaxed);
+    if selected == 0 {
+        eprintln!(
+            "[bdd] zero scenarios selected; no validation performed. Check --name, \
+             --input, --tags, MVM_BDD_ONLY_TAG and MVM_BDD_SHARD."
+        );
+        std::process::exit(1);
+    }
     if writer.execution_has_failed()
         || shard.is_some_and(|_| SHARD_SELECTED.load(std::sync::atomic::Ordering::Relaxed) == 0)
     {
         std::process::exit(1);
+    }
+    if STARTED_SCENARIOS.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        eprintln!(
+            "[bdd] no scenarios executed / {selected} intentionally skipped; \
+             not passing execution evidence."
+        );
     }
     if !unexpected_skips.is_empty() {
         eprintln!();
@@ -306,6 +340,9 @@ fn should_run(
         only_tag.as_deref(),
         runtime_candidate_available(),
     );
+    if gate != ScenarioGate::OutsideSelectedTag {
+        SELECTED_SCENARIOS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     record_gate(gate);
     matches!(gate, ScenarioGate::Run)
 }
@@ -319,6 +356,8 @@ fn runtime_candidate_available() -> bool {
     })
 }
 
+static SELECTED_SCENARIOS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static STARTED_SCENARIOS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static SHARD_SELECTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static SHARD_EXCLUDED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
