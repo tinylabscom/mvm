@@ -269,10 +269,14 @@ fn guest_wrapper_used_plan_directory(world: &mut CliWorld) {
         .expect("scratch working directory");
     let directory = fs::canonicalize(scratch.path().join("workdir")).expect("workload directory");
     let output = &world.last_run.as_ref().expect("wrapper output").stdout;
-    assert!(
-        String::from_utf8_lossy(output)
-            .lines()
-            .any(|line| Path::new(line) == directory)
+    let stdout = String::from_utf8_lossy(output);
+    let actual = stdout
+        .lines()
+        .last()
+        .expect("wrapper printed its directory");
+    assert_eq!(
+        fs::canonicalize(actual).expect("resolve the printed working directory"),
+        directory
     );
 }
 
