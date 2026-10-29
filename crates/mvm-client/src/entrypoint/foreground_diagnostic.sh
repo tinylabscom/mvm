@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 set -euo pipefail
 umask 077
 # Bound guest-private diagnostics even if the client is unexpectedly noisy.
