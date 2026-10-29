@@ -29,6 +29,11 @@ requests and bind grants, registration, and readiness records. Stream helpers
 read captured workload output; the optional tracing bridge republishes it into
 a consumer's tracing subscriber.
 
+Local machine list and inspect return a backend error if the name registry cannot
+be read or parsed, rather than silently omitting stopped entries or metadata.
+A missing registry remains a valid empty initial registry. Bulk-stop target
+discovery stays best-effort and excludes registry-only entries.
+
 ## Main modules
 
 | Module | Responsibility |
