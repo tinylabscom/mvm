@@ -720,6 +720,14 @@ enum SessionBootResult {
     Owned(OwnedClientBoot),
 }
 
+fn require_native_owner(backend: mvm_core::vm_backend::BackendKind, has_owner: bool) -> Result<()> {
+    anyhow::ensure!(
+        backend != mvm_core::vm_backend::BackendKind::Hvf || has_owner,
+        "native session requires an owning host context; name-only return is unavailable before launch"
+    );
+    Ok(())
+}
+
 fn boot_session_core(
     boot: SessionBoot<'_>,
     admit: impl FnOnce(AdmitInputs<'_>) -> Result<BootAdmission>,
@@ -806,10 +814,7 @@ fn boot_session_core(
             (admitted.substrate, Some(admitted.context))
         }
     };
-    anyhow::ensure!(
-        backend.kind() != mvm_core::vm_backend::BackendKind::Hvf || context.is_some(),
-        "native session requires an owning host context; name-only return is unavailable before launch"
-    );
+    require_native_owner(backend.kind(), context.is_some())?;
     let built_pack_check = substrate.built_pack_check.take();
     substrate.apply_to(&mut start_config);
     let _built_runtime = built_pack_check
@@ -902,9 +907,23 @@ pub(crate) fn stop_session_vm(vm: &SessionVm) -> Result<()> {
     backend.stop(&VmId(vm.vm_name.clone())).map(|_| ())
 }
 
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[path = "caller_registration_live_hvf.rs"]
+mod caller_registration_live_hvf;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_hvf_refuses_before_launch_but_owned_hvf_passes_gate() {
+        use mvm_core::vm_backend::BackendKind;
+        let launched = std::cell::Cell::new(false);
+        let result = require_native_owner(BackendKind::Hvf, false).map(|()| launched.set(true));
+        assert!(result.is_err());
+        assert!(!launched.get());
+        require_native_owner(BackendKind::Hvf, true).unwrap();
+    }
 
     #[test]
     fn child_free_failure_audits_once_and_keeps_original_error_through_retry() {
