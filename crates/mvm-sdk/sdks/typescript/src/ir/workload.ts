@@ -200,6 +200,10 @@ config: unknown
 kind: "external"
 provider: string
 })
+/**
+ * Reviewed model/tariff combinations supported by pre-forward reservations.
+ */
+export type AiBudgetModel = "claude-haiku-4-5-20251001"
 export type NetworkDns = ({
 kind: "none"
 } | {
@@ -451,6 +455,10 @@ budget?: (AiBudget | null)
  * Whether to record AI token usage for this workload.
  */
 metering?: boolean
+/**
+ * Strict pre-forward request and USD reservation ceiling, independent of metering.
+ */
+request_budget?: (AiRequestBudget | null)
 }
 /**
  * Token budget for AI egress. A `None` field means no limit for that category.
@@ -459,6 +467,23 @@ export interface AiBudget {
 max_input_tokens?: (number | null)
 max_output_tokens?: (number | null)
 max_total_tokens?: (number | null)
+}
+/**
+ * Pre-forward limits for one endpoint lifetime. Reservations are never refunded.
+ */
+export interface AiRequestBudget {
+/**
+ * Maximum upstream attempts, including failed and cancelled attempts.
+ */
+max_requests: number
+/**
+ * USD ceiling in millionths of a dollar, excluding taxes and account charges.
+ */
+max_spend_microusd: number
+/**
+ * Exact model and conservative tariff revision; aliases are not accepted.
+ */
+model: AiBudgetModel
 }
 export interface NetworkEgress {
 /**

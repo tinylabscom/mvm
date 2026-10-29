@@ -39,6 +39,7 @@ import type {
   EnvValue,
   AiBudget,
   AiPolicy,
+  AiRequestBudget,
   HookCmd,
   Hooks,
   Image,
@@ -323,10 +324,12 @@ export function aiBudget(opts: {
 export function aiPolicy(opts: {
   metering?: boolean;
   budget?: AiBudget;
+  requestBudget?: AiRequestBudget;
 }): AiPolicy {
   return {
     metering: opts.metering ?? true,
     budget: opts.budget,
+    request_budget: opts.requestBudget,
   };
 }
 

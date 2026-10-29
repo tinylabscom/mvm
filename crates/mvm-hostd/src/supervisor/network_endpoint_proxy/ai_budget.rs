@@ -12,6 +12,8 @@ use super::SubstitutionService;
 use super::prepare::PreparedFlow;
 use crate::supervisor::ai_meter;
 use crate::supervisor::audit_recorder::Recorder;
+use mvm_contract::substitution::PreparedRequest;
+use mvm_core::substitution_wire::WireResponse;
 
 /// Minimal request metadata captured for AI metering so the streaming path
 /// doesn't need to own the whole prepared request after it has been handed
@@ -31,7 +33,92 @@ impl SubstitutionService {
         self.ai_tracker().map(|t| t.is_exceeded()).unwrap_or(false)
     }
 
+    pub(super) fn ai_request_budget_enabled(&self) -> bool {
+        self.ai_tracker()
+            .is_some_and(|tracker| tracker.request_budget.is_some())
+    }
+
+    pub(super) async fn admit_ai_request(
+        &self,
+        flow: &PreparedFlow,
+        request: &mut PreparedRequest,
+    ) -> Result<(), WireResponse> {
+        let checked = (|| {
+            if self.ai_budget_exceeded() && ai_meter::is_known_ai_provider(&request.url) {
+                return Err("ai_token_budget_exhausted");
+            }
+            let Some(tracker) = self
+                .ai_tracker()
+                .and_then(|tracker| tracker.request_budget.as_ref())
+            else {
+                return Ok(None);
+            };
+            if self.recorder.is_none() || self.instance_id.is_none() {
+                return Err("ai_budget_audit_identity_unavailable");
+            }
+            let (canonical, cost) = tracker.inspect(
+                &request.method,
+                &request.url,
+                &request.headers,
+                &request.body,
+            )?;
+            let reserved = tracker.reserve(cost)?;
+            request.body = canonical;
+            request.headers.retain(|(name, _)| {
+                !name.eq_ignore_ascii_case("content-length")
+                    && !name.eq_ignore_ascii_case("transfer-encoding")
+            });
+            Ok(Some(tracker.audit_labels(reserved)?))
+        })();
+        match checked {
+            Ok(reserved) => {
+                if let (Some(mut labels), Some(recorder)) = (reserved, &self.recorder) {
+                    labels.push(("vm".into(), self.instance_id.clone().unwrap_or_default()));
+                    let bindings: Vec<_> = flow
+                        .substituted
+                        .iter()
+                        .map(|binding| binding.name.as_str())
+                        .collect();
+                    let bindings =
+                        serde_json::to_string(&bindings).map_err(|_| WireResponse::Refused {
+                            message: "AI egress binding metadata encoding failed".into(),
+                        })?;
+                    labels.push(("secret_bindings".into(), bindings));
+                    if recorder
+                        .record_unbound(
+                            crate::supervisor::audit_recorder::EventCategory::Host,
+                            "host.ai.budget_reserved",
+                            labels,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        return Err(WireResponse::Refused {
+                            message: "AI egress budget reservation audit failed".into(),
+                        });
+                    }
+                }
+                Ok(())
+            }
+            Err(reason) => {
+                self.audit_fail_closed(flow.destination.as_deref(), reason)
+                    .await;
+                self.audit_ai_budget_exceeded(flow, &request.url).await;
+                Err(WireResponse::Refused {
+                    message: format!("AI egress budget refused: {reason}"),
+                })
+            }
+        }
+    }
+
     pub(super) async fn record_ai_usage(&self, meta: &AiRequestMeta, status: u16, body: &[u8]) {
+        if !self
+            .ai_policy
+            .as_ref()
+            .is_some_and(|policy| policy.metering)
+        {
+            return;
+        }
         let Some(tracker) = self.ai_tracker() else {
             return;
         };
@@ -42,7 +129,7 @@ impl SubstitutionService {
         self.update_ai_metrics(totals);
         if let Some(recorder) = &self.recorder {
             let record = self.build_ai_usage_record(meta, status, &usage, totals.exceeded);
-            if let Err(e) = recorder.record_ai_usage(&record).await {
+            if let Err(e) = self.record_ai_sample(recorder, &record).await {
                 tracing::warn!(error = %e, "ai.usage audit emit failed");
             }
             if totals.exceeded {
@@ -57,6 +144,13 @@ impl SubstitutionService {
         status: u16,
         body: &[u8],
     ) {
+        if !self
+            .ai_policy
+            .as_ref()
+            .is_some_and(|policy| policy.metering)
+        {
+            return;
+        }
         let Some(tracker) = self.ai_tracker() else {
             return;
         };
@@ -67,13 +161,37 @@ impl SubstitutionService {
         self.update_ai_metrics(totals);
         if let Some(recorder) = &self.recorder {
             let record = self.build_ai_usage_record(meta, status, &usage, totals.exceeded);
-            if let Err(e) = recorder.record_ai_usage(&record).await {
+            if let Err(e) = self.record_ai_sample(recorder, &record).await {
                 tracing::warn!(error = %e, "ai.usage audit emit failed");
             }
             if totals.exceeded {
                 emit_ai_budget_exceeded(recorder, &record).await;
             }
         }
+    }
+
+    async fn record_ai_sample(
+        &self,
+        recorder: &Recorder,
+        record: &AiUsageRecord,
+    ) -> Result<(), crate::supervisor::audit_recorder::RecorderError> {
+        let mut labels = record.to_labels();
+        if let Some(vm) = &self.instance_id {
+            labels.push(("vm".into(), vm.clone()));
+        }
+        if let Some(budget) = self
+            .ai_tracker()
+            .and_then(|tracker| tracker.request_budget.as_ref())
+        {
+            labels.push(("budget_id".into(), budget.lifetime_id().to_owned()));
+        }
+        recorder
+            .record_unbound(
+                crate::supervisor::audit_recorder::EventCategory::Host,
+                "host.ai.usage",
+                labels,
+            )
+            .await
     }
 
     pub(super) async fn audit_ai_budget_exceeded(&self, flow: &PreparedFlow, url: &str) {
@@ -274,20 +392,29 @@ mod ai_metering_tests {
         policy: AiPolicy,
     ) -> (Arc<SubstitutionService>, Arc<InstanceMetricsRegistry>) {
         let metrics = Arc::new(InstanceMetricsRegistry::new());
-        let service = Arc::new(
-            SubstitutionService::new(
-                Arc::new(SubstitutionRegistry::default()),
-                Arc::new(NullResolver),
-                forwarder,
-                // Every destination these tests send to, so a budget refusal
-                // can only be the budget's.
-                gate_admitting(&[("api.openai.com", 443), ("example.com", 443)]),
-            )
-            .with_instance_id("vm-1")
-            .with_ai_policy(policy)
-            .with_instance_metrics(Arc::clone(&metrics)),
-        );
-        (service, metrics)
+        let strict = policy.request_budget.is_some();
+        let mut service = SubstitutionService::new(
+            Arc::new(SubstitutionRegistry::default()),
+            Arc::new(NullResolver),
+            forwarder,
+            // Every destination these tests send to, so a budget refusal
+            // can only be the budget's.
+            gate_admitting(&[
+                ("api.openai.com", 443),
+                ("example.com", 443),
+                ("api.anthropic.com", 443),
+            ]),
+        )
+        .with_instance_id("vm-1")
+        .with_ai_policy(policy)
+        .with_instance_metrics(Arc::clone(&metrics));
+        if strict {
+            service = service.with_recorder(Recorder::new(
+                Arc::new(crate::supervisor::audit::CapturingAuditSigner::new()),
+                mvm_core::plan::TenantId("local".into()),
+            ));
+        }
+        (Arc::new(service), metrics)
     }
 
     #[tokio::test]
@@ -422,5 +549,357 @@ mod ai_metering_tests {
             .await;
         assert!(matches!(resp, WireResponse::Ok { status: 200, .. }));
         assert!(service.ai_tracker().is_none());
+    }
+
+    #[tokio::test]
+    async fn strict_budget_refuses_missing_audit_before_forwarding() {
+        let forwarder = Arc::new(CountForwarder {
+            calls: std::sync::atomic::AtomicU64::new(0),
+            fail: false,
+        });
+        let (service, _) = metered_service(forwarder.clone(), strict_policy());
+        let mut service = Arc::try_unwrap(service).ok().unwrap();
+        service.recorder = None;
+        let response = service.process(strict_request()).await;
+        assert!(matches!(response, WireResponse::Refused { message }
+            if message.contains("ai_budget_audit_identity_unavailable")));
+        assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_usage_and_reservation_share_the_endpoint_lifetime() {
+        let mut policy = strict_policy();
+        policy.metering = true;
+        let (service, _) = metered_service(Arc::new(TestForwarder::ok(
+            br#"{"model":"claude-haiku-4-5-20251001","usage":{"input_tokens":1,"output_tokens":5}}"#.to_vec()
+        )), policy);
+        let signer = Arc::new(crate::supervisor::audit::CapturingAuditSigner::new());
+        let recorder = Recorder::new(signer.clone(), mvm_core::plan::TenantId("local".into()));
+        let service = Arc::try_unwrap(service)
+            .ok()
+            .unwrap()
+            .with_recorder(recorder);
+        assert!(matches!(
+            service.process(strict_request()).await,
+            WireResponse::Ok { .. }
+        ));
+        let entries = signer.entries();
+        let reservation = entries
+            .iter()
+            .find(|e| e.event == "host.ai.budget_reserved")
+            .unwrap();
+        let usage = entries.iter().find(|e| e.event == "host.ai.usage").unwrap();
+        assert_eq!(reservation.labels["budget_id"], usage.labels["budget_id"]);
+        assert_eq!(reservation.labels["vm"], usage.labels["vm"]);
+        assert_eq!(reservation.labels["secret_bindings"], "[]");
+        assert_eq!(usage.labels["output_tokens"], "5");
+    }
+
+    struct CountForwarder {
+        calls: std::sync::atomic::AtomicU64,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl Forwarder for CountForwarder {
+        async fn forward(&self, _req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(ForwardError::Failed("synthetic failure".into()));
+            }
+            Ok(ForwardResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"{}".to_vec(),
+            })
+        }
+    }
+
+    fn strict_request() -> WireRequest {
+        let mut wire = wire_to("https://api.anthropic.com/v1/messages");
+        wire.body_b64 = B64
+            .encode(br#"{"model":"claude-haiku-4-5-20251001","max_tokens":20000,"messages":[]}"#);
+        wire
+    }
+
+    fn strict_policy() -> AiPolicy {
+        let mut policy = AiPolicy::disabled();
+        policy.request_budget = Some(mvm_contract::policy::network_policy::AiRequestBudget {
+            max_requests: 1,
+            max_spend_microusd: 500_000,
+            model: mvm_contract::policy::network_policy::AiBudgetModel::ClaudeHaiku45,
+        });
+        policy
+    }
+
+    #[tokio::test]
+    async fn strict_budget_is_shared_by_buffered_and_streaming_and_survives_failure() {
+        for fail in [false, true] {
+            let forwarder = Arc::new(CountForwarder {
+                calls: std::sync::atomic::AtomicU64::new(0),
+                fail,
+            });
+            let (service, _) = metered_service(forwarder.clone(), strict_policy());
+            let first = service.process(strict_request()).await;
+            assert_eq!(matches!(first, WireResponse::Ok { .. }), !fail);
+            assert!(
+                service
+                    .process_stream(strict_request(), &Default::default())
+                    .await
+                    .is_err()
+            );
+            assert!(matches!(
+                service.process(strict_request()).await,
+                WireResponse::Refused { .. }
+            ));
+            assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_reserves_before_the_forwarder_and_refuses_aliases() {
+        let forwarder = Arc::new(CountForwarder {
+            calls: std::sync::atomic::AtomicU64::new(0),
+            fail: false,
+        });
+        let (service, _) = metered_service(forwarder.clone(), strict_policy());
+        let mut alias = strict_request();
+        alias.body_b64 =
+            B64.encode(br#"{"model":"claude-haiku-4-5","max_tokens":1,"messages":[]}"#);
+        assert!(
+            service
+                .process_stream(alias, &Default::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(
+            service
+                .process_stream(strict_request(), &Default::default())
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            service.process(strict_request()).await,
+            WireResponse::Refused { .. }
+        ));
+        assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn streamed_request_body_cannot_bypass_the_shared_reservation() {
+        let forwarder = Arc::new(CountForwarder {
+            calls: std::sync::atomic::AtomicU64::new(0),
+            fail: false,
+        });
+        let (service, _) = metered_service(forwarder.clone(), strict_policy());
+        for expected_success in [true, false] {
+            let wire = strict_request();
+            let bytes = B64.decode(wire.body_b64).unwrap();
+            let head = mvm_core::substitution_wire::HttpFlowHead {
+                method: wire.method,
+                url: wire.url,
+                headers: wire.headers,
+                body_len: bytes.len() as u64,
+            };
+            let (sender, receiver) = tokio::sync::mpsc::channel(1);
+            sender.send(zeroize::Zeroizing::new(bytes)).await.unwrap();
+            drop(sender);
+            let result = service
+                .process_body_stream(head, receiver, &Default::default())
+                .await;
+            assert_eq!(result.is_ok(), expected_success);
+        }
+        assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn strict_stream_declared_size_is_refused_before_reading_a_body() {
+        let forwarder = Arc::new(CountForwarder {
+            calls: std::sync::atomic::AtomicU64::new(0),
+            fail: false,
+        });
+        let (service, _) = metered_service(forwarder.clone(), strict_policy());
+        let wire = strict_request();
+        let head = mvm_core::substitution_wire::HttpFlowHead {
+            method: wire.method,
+            url: wire.url,
+            headers: wire.headers,
+            body_len: 1024 * 1024 + 1,
+        };
+        let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.process_body_stream(head, receiver, &Default::default()),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(WireResponse::Refused { .. }))),
+            "oversized declaration must be refused without waiting for body bytes"
+        );
+        assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn strict_stream_fragment_overflow_is_refused_before_eof() {
+        let forwarder = Arc::new(CountForwarder {
+            calls: std::sync::atomic::AtomicU64::new(0),
+            fail: false,
+        });
+        let (service, _) = metered_service(forwarder.clone(), strict_policy());
+        let wire = strict_request();
+        let head = mvm_core::substitution_wire::HttpFlowHead {
+            method: wire.method,
+            url: wire.url,
+            headers: wire.headers,
+            body_len: 1024 * 1024,
+        };
+        let (sender, receiver) = tokio::sync::mpsc::channel(17);
+        for _ in 0..16 {
+            sender
+                .send(zeroize::Zeroizing::new(vec![b' '; 65536]))
+                .await
+                .unwrap();
+        }
+        sender
+            .send(zeroize::Zeroizing::new(vec![b' ']))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.process_body_stream(head, receiver, &Default::default()),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(WireResponse::Refused { .. }))),
+            "fragment accumulation must stop at the strict limit, without waiting for EOF"
+        );
+        assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(sender);
+    }
+
+    #[tokio::test]
+    async fn strict_stream_accepts_the_exact_size_boundary() {
+        let forwarder = Arc::new(CountForwarder {
+            calls: std::sync::atomic::AtomicU64::new(0),
+            fail: false,
+        });
+        let (service, _) = metered_service(forwarder.clone(), strict_policy());
+        let wire = strict_request();
+        let mut bytes = B64.decode(wire.body_b64).unwrap();
+        bytes.resize(1024 * 1024, b' ');
+        let head = mvm_core::substitution_wire::HttpFlowHead {
+            method: wire.method,
+            url: wire.url,
+            headers: wire.headers,
+            body_len: 1024 * 1024,
+        };
+        let (sender, receiver) = tokio::sync::mpsc::channel(16);
+        for chunk in bytes.chunks(65536) {
+            sender
+                .send(zeroize::Zeroizing::new(chunk.to_vec()))
+                .await
+                .unwrap();
+        }
+        drop(sender);
+        assert!(
+            service
+                .process_body_stream(head, receiver, &Default::default())
+                .await
+                .is_ok()
+        );
+        assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    struct PendingForwarder {
+        entered: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl Forwarder for PendingForwarder {
+        async fn forward(&self, _req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_upstream_attempt_does_not_refund_the_reservation() {
+        let forwarder = Arc::new(PendingForwarder {
+            entered: tokio::sync::Notify::new(),
+        });
+        let (service, _) = metered_service(forwarder.clone(), strict_policy());
+        let owner = Arc::clone(&service);
+        let call = tokio::spawn(async move { owner.process(strict_request()).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            forwarder.entered.notified(),
+        )
+        .await
+        .unwrap();
+        call.abort();
+        assert!(call.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            service.process(strict_request()).await,
+            WireResponse::Refused { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn reservation_audit_carries_only_identity_and_counters() {
+        let forwarder = Arc::new(CountForwarder {
+            calls: std::sync::atomic::AtomicU64::new(0),
+            fail: false,
+        });
+        let (service, _) = metered_service(forwarder, strict_policy());
+        let signer = Arc::new(crate::supervisor::audit::CapturingAuditSigner::new());
+        let recorder = Recorder::new(signer.clone(), mvm_core::plan::TenantId("local".into()));
+        let service = Arc::new(
+            Arc::try_unwrap(service)
+                .ok()
+                .unwrap()
+                .with_recorder(recorder),
+        );
+        assert!(matches!(
+            service.process(strict_request()).await,
+            WireResponse::Ok { .. }
+        ));
+        let entries = signer.entries();
+        let reservation = entries
+            .iter()
+            .find(|entry| entry.event == "host.ai.budget_reserved")
+            .unwrap();
+        assert_eq!(reservation.labels["vm"], "vm-1");
+        assert_eq!(reservation.labels["reserved_requests"], "1");
+        assert_eq!(reservation.labels["reserved_spend_microusd"], "500000");
+        assert!(
+            !serde_json::to_string(reservation)
+                .unwrap()
+                .contains("messages")
+        );
+    }
+
+    #[tokio::test]
+    async fn reservation_audit_failure_refuses_forwarding_without_a_refund() {
+        let forwarder = Arc::new(CountForwarder {
+            calls: std::sync::atomic::AtomicU64::new(0),
+            fail: false,
+        });
+        let (service, _) = metered_service(forwarder.clone(), strict_policy());
+        let recorder = Recorder::new(
+            Arc::new(crate::supervisor::audit::NoopAuditSigner),
+            mvm_core::plan::TenantId("local".into()),
+        );
+        let service = Arc::new(
+            Arc::try_unwrap(service)
+                .ok()
+                .unwrap()
+                .with_recorder(recorder),
+        );
+        assert!(matches!(service.process(strict_request()).await,
+            WireResponse::Refused { message } if message.contains("reservation audit failed")));
+        assert!(matches!(service.process(strict_request()).await,
+            WireResponse::Refused { message } if message.contains("ai_request_budget_exhausted")));
+        assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

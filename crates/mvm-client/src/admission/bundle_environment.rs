@@ -215,6 +215,7 @@ mod tests {
         let mut environment = environment();
         environment.policy = Some(mvm_core::plan::EnvironmentPolicy {
             allow_hosts: vec!["api.anthropic.com:443".into()],
+            request_budget: None,
         });
         let refused = environment_refusals(
             &environment,

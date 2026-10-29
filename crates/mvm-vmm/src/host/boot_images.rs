@@ -89,6 +89,11 @@ impl FrozenBootImageBytes {
     pub fn root_hash(&self) -> &str {
         self.expectations.root_hash()
     }
+
+    /// Digest captured from authenticated declarations, not a reopened pathname.
+    pub fn sha256(&self, role: BootImageAsset) -> &str {
+        self.expectations.expected_sha256(role).as_str()
+    }
 }
 
 fn role_index(role: BootImageAsset) -> usize {

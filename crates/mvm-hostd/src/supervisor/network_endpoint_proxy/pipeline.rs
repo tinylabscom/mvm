@@ -21,7 +21,7 @@ use super::prepare::{
 use super::reflection::{ScrubCounts, StreamingScrubber, body_is_readable, merge_counts};
 use crate::keyholder::resolver::CapturedOAuthToken;
 use crate::keyholder::{NetworkEndpoint, find_placeholder};
-use crate::supervisor::ai_meter;
+use crate::supervisor::ai_meter::request_budget::MAX_REQUEST_BODY_BYTES;
 use crate::supervisor::redactor::{RedactionHits, SensitiveDetectionError, StreamingRedactor};
 use crate::supervisor::reversible_replacement::StreamingReinjector;
 use crate::supervisor::secret_audit::ForwardOutcome;
@@ -123,15 +123,12 @@ impl SubstitutionService {
             Ok(flow) => flow,
             Err(refusal) => return refusal,
         };
-        let request = flow
+        let mut request = flow
             .request
             .take()
             .expect("a prepared flow owns exactly one request");
-        if self.ai_budget_exceeded() && ai_meter::is_known_ai_provider(&request.url) {
-            self.audit_ai_budget_exceeded(&flow, &request.url).await;
-            return WireResponse::Refused {
-                message: "AI egress budget exceeded".into(),
-            };
+        if let Err(refusal) = self.admit_ai_request(&flow, &mut request).await {
+            return refusal;
         }
         let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
             method: request.method.clone(),
@@ -177,16 +174,11 @@ impl SubstitutionService {
         attribution: &super::tool_scope::FlowAttribution,
     ) -> Result<ForwardStreamResponse, WireResponse> {
         let mut flow = self.prepare_flow(wire, attribution).await?;
-        let request = flow
+        let mut request = flow
             .request
             .take()
             .expect("a prepared flow owns exactly one request");
-        if self.ai_budget_exceeded() && ai_meter::is_known_ai_provider(&request.url) {
-            self.audit_ai_budget_exceeded(&flow, &request.url).await;
-            return Err(WireResponse::Refused {
-                message: "AI egress budget exceeded".into(),
-            });
-        }
+        self.admit_ai_request(&flow, &mut request).await?;
         let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
             method: request.method.clone(),
             url: request.url.clone(),
@@ -218,6 +210,21 @@ impl SubstitutionService {
         attribution: &super::tool_scope::FlowAttribution,
     ) -> Result<ForwardStreamResponse, WireResponse> {
         let destination = destination_host(&head.url).ok();
+        let strict_ai_budget = self.ai_request_budget_enabled();
+        let replay_limit = if strict_ai_budget {
+            MAX_REQUEST_BODY_BYTES
+        } else {
+            MAX_HTTP_STREAM_BODY_BYTES
+        };
+        if strict_ai_budget
+            && !usize::try_from(head.body_len).is_ok_and(|length| length <= replay_limit)
+        {
+            self.audit_fail_closed(destination.as_deref(), "request_body_limit_exceeded")
+                .await;
+            return Err(WireResponse::Refused {
+                message: format!("request body exceeds the {replay_limit} byte limit"),
+            });
+        }
         let replacement_action = destination
             .as_deref()
             .map(|dest| {
@@ -240,7 +247,7 @@ impl SubstitutionService {
         let replaces_body =
             replacement_action.replaces_on(mvm_core::policy::RewriteSurface::RequestBody);
 
-        if signs_body || replaces_body {
+        if signs_body || replaces_body || strict_ai_budget {
             let mut replay = Zeroizing::new(Vec::new());
             loop {
                 let next = match tokio::time::timeout(HTTP_REQUEST_IDLE_TIMEOUT, body.recv()).await
@@ -257,13 +264,11 @@ impl SubstitutionService {
                 let Some(chunk) = next else {
                     break;
                 };
-                if replay.len().saturating_add(chunk.len()) > MAX_HTTP_STREAM_BODY_BYTES {
+                if replay.len().saturating_add(chunk.len()) > replay_limit {
                     self.audit_fail_closed(destination.as_deref(), "request_body_limit_exceeded")
                         .await;
                     return Err(WireResponse::Refused {
-                        message: format!(
-                            "request body exceeds the {MAX_HTTP_STREAM_BODY_BYTES} byte limit"
-                        ),
+                        message: format!("request body exceeds the {replay_limit} byte limit"),
                     });
                 }
                 replay.extend_from_slice(&chunk);
@@ -295,16 +300,11 @@ impl SubstitutionService {
             body_b64: String::new(),
         };
         let mut flow = self.prepare_flow(wire, attribution).await?;
-        let request = flow
+        let mut request = flow
             .request
             .take()
             .expect("a prepared flow owns exactly one request");
-        if self.ai_budget_exceeded() && ai_meter::is_known_ai_provider(&request.url) {
-            self.audit_ai_budget_exceeded(&flow, &request.url).await;
-            return Err(WireResponse::Refused {
-                message: "AI egress budget exceeded".into(),
-            });
-        }
+        self.admit_ai_request(&flow, &mut request).await?;
         let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
             method: request.method.clone(),
             url: request.url.clone(),

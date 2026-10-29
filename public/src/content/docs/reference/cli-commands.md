@@ -985,6 +985,14 @@ the default image, start a VM, execute the command, or write a receipt.
 code, but the JSON does not include raw argv, env values, stdout, stderr, or host
 paths.
 
+Signed network AI policies may include `request_budget` to reserve upstream
+attempts and a conservative, exact-model USD bound before forwarding, independently
+of response-time token metering. A signed application environment can carry
+the subtractive ceiling as `policy.request_budget`; the application route applies
+it without a new `run` flag. Admission refuses omission or widening.
+See [strict pre-forward reservations](/guides/network-egress-policy/#strict-pre-forward-reservations)
+for supported request shapes, tariff assumptions and endpoint-lifetime limits.
+
 ### Runtime detection
 
 With no positional source and no `--image` / `--manifest` / `--flake` /

@@ -81,6 +81,31 @@ pub(in crate::commands) fn apply_entrypoint_resource_defaults(args: &mut RunArgs
     Ok(())
 }
 
+/// Apply a signed subtractive request ceiling while retaining token-accounting flags.
+pub(in crate::commands) fn ai_policy(
+    args: &RunArgs,
+) -> Result<Option<mvm_core::network_policy::AiPolicy>> {
+    let ai = crate::commands::shared::resolve_ai_policy(args.ai_token_budget);
+    let ceiling = environment(args)?
+        .and_then(|env| env.policy)
+        .and_then(|policy| policy.request_budget);
+    with_request_ceiling(ai, ceiling)
+}
+
+fn with_request_ceiling(
+    mut ai: Option<mvm_core::network_policy::AiPolicy>,
+    ceiling: Option<mvm_core::network_policy::AiRequestBudget>,
+) -> Result<Option<mvm_core::network_policy::AiPolicy>> {
+    if let Some(ceiling) = ceiling {
+        let ai = ai.get_or_insert_with(mvm_core::network_policy::AiPolicy::metered);
+        ai.request_budget = Some(match ai.request_budget {
+            Some(current) => current.intersect(ceiling).map_err(anyhow::Error::msg)?,
+            None => ceiling,
+        });
+    }
+    Ok(ai)
+}
+
 /// Fill only slots not already satisfied by the operator's folded selections.
 pub(in crate::commands) fn apply_entrypoint_secret_defaults(args: &mut RunArgs) -> Result<()> {
     let Some(environment) = environment(args)? else {
@@ -292,6 +317,34 @@ fn settle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_request_ceiling_defaults_without_flags_and_cannot_widen_operator_limits() {
+        use mvm_core::network_policy::{AiBudgetModel, AiPolicy, AiRequestBudget};
+        let ceiling = AiRequestBudget {
+            model: AiBudgetModel::ClaudeHaiku45,
+            max_requests: 1,
+            max_spend_microusd: 500_000,
+        };
+        let defaults = with_request_ceiling(None, Some(ceiling)).unwrap().unwrap();
+        assert_eq!(defaults.request_budget, Some(ceiling));
+        assert!(defaults.metering);
+        let mut operator = AiPolicy::metered().with_total_budget(100);
+        operator.request_budget = Some(AiRequestBudget {
+            max_spend_microusd: 400_000,
+            ..ceiling
+        });
+        let folded = with_request_ceiling(Some(operator.clone()), Some(ceiling))
+            .unwrap()
+            .unwrap();
+        assert_eq!(folded.request_budget.unwrap().max_spend_microusd, 400_000);
+        assert_eq!(folded.budget, operator.budget);
+        assert_eq!(
+            with_request_ceiling(Some(operator.clone()), None).unwrap(),
+            Some(operator)
+        );
+        assert_eq!(with_request_ceiling(None, None).unwrap(), None);
+    }
 
     const SHA: &str = "ab";
 

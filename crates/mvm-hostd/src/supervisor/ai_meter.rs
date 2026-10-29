@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use mvm_contract::policy::network_policy::AiBudget;
 use serde_json::Value;
 
+pub(super) mod request_budget;
+
 /// One AI API call's extracted token counts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtractedUsage {
@@ -214,6 +216,7 @@ pub struct UsageTotals {
 /// can be refused before forwarding.
 pub struct AiBudgetTracker {
     budget: Option<AiBudget>,
+    pub(super) request_budget: Option<request_budget::RequestBudgetTracker>,
     requests: AtomicU64,
     input_tokens: AtomicU64,
     output_tokens: AtomicU64,
@@ -227,6 +230,7 @@ impl AiBudgetTracker {
     pub fn new(budget: Option<AiBudget>) -> Self {
         Self {
             budget,
+            request_budget: None,
             requests: AtomicU64::new(0),
             input_tokens: AtomicU64::new(0),
             output_tokens: AtomicU64::new(0),

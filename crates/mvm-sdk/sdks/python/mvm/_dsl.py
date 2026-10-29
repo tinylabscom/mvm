@@ -762,13 +762,16 @@ def ai_policy(
     *,
     metering: bool = True,
     budget: _ir.AiBudget | None = None,
+    request_budget: _ir.AiRequestBudget | None = None,
 ) -> _ir.AiPolicy:
     """AI egress metering/budget policy for `mvm.network(...)`.
 
     `metering` enables per-VM token counting for known AI providers.
     `budget` optionally refuses further AI requests once exceeded.
+    `request_budget` reserves requests and conservative USD cost before forwarding,
+    independently of metering; reservations are not refunded.
     """
-    return _ir.AiPolicy(metering=metering, budget=budget)
+    return _ir.AiPolicy(metering=metering, budget=budget, request_budget=request_budget)
 
 
 def network(
