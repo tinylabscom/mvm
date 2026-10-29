@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn lifecycle_does_not_steal_existing_socket_and_cleans_own_endpoint() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
         let observer = Observer::bind(dir.path(), Some(evidence())).unwrap();
         assert!(Observer::bind(dir.path(), None).is_err());
         assert_eq!(

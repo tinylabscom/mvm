@@ -74,7 +74,7 @@ pub fn sha256_open_file_verified(file: &std::fs::File) -> io::Result<String> {
 #[cfg(unix)]
 mod imp {
     use super::VerifiedSource;
-    use crate::crypto::image_verify::{sha256_file, sha256_reader};
+    use crate::crypto::image_verify::{sha256_file, sha256_file_cached, sha256_reader};
     use std::collections::HashMap;
     use std::fs::{File, Metadata};
     use std::io::{self, Seek, SeekFrom};
@@ -189,7 +189,9 @@ mod imp {
         decide(
             before,
             window,
-            || sha256_file(path),
+            // A registry miss still asks the sealed sidecar before reading the
+            // file, so a digest an earlier process recorded is reused.
+            || sha256_file_cached(path),
             || {
                 std::fs::symlink_metadata(path)
                     .ok()

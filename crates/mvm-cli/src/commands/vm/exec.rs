@@ -100,6 +100,8 @@ pub(in crate::commands) struct Args {
     /// manifest from `mvmforge emit` (top-level `apps[]`). The resolved
     /// entrypoint (command, working_dir, env) is invoked instead of a
     /// trailing argv. Mutually exclusive with the trailing `<ARGV>...`.
+    /// Select an already-built image separately with `--manifest`; this
+    /// document does not build or select the microVM image.
     #[arg(long, value_name = "PATH", conflicts_with = "argv")]
     pub launch_plan: Option<String>,
     /// Argv to run inside the guest (use `--` to separate). Required unless

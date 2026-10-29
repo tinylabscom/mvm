@@ -292,6 +292,8 @@ mod tests {
             total_tokens: Some(15),
             status: 200,
             budget_exceeded: false,
+            request_bytes: None,
+            response_bytes: None,
         }
     }
 

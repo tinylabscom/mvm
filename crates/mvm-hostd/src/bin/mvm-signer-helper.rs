@@ -5,11 +5,9 @@
 //! appends by server-derived `vm_id`, and closes chains on `DeregisterVm`.
 
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
@@ -59,19 +57,7 @@ fn main() -> Result<()> {
         .context("mvm-signer-helper tokio runtime build failed")?;
 
     runtime.block_on(async move {
-        if let Some(parent) = cfg.uds_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create signer-helper dir {}", parent.display()))?;
-        }
-        let _ = std::fs::remove_file(&cfg.uds_path);
-        let listener = UnixListener::bind(&cfg.uds_path).with_context(|| {
-            format!(
-                "mvm-signer-helper UDS bind failed on {}",
-                cfg.uds_path.display()
-            )
-        })?;
-        std::fs::set_permissions(&cfg.uds_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", cfg.uds_path.display()))?;
+        let listener = mvm_hostd::broker::daemon::bind_host_agent_listener(&cfg.uds_path, 0o600)?;
         let helper = Arc::new(Mutex::new(SignerHelper::new(
             cfg.tenant_id,
             cfg.software_chain_key_path,

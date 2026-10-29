@@ -294,6 +294,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let installed = tmp.path().join("rootfs.ext4");
         std::fs::write(&installed, b"old bytes").unwrap();
+        std::thread::sleep(
+            mvm_core::crypto::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+        );
         mvm_core::crypto::image_verify::sha256_file_cached(&installed).unwrap();
         let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(&installed);
         assert!(sidecar.exists(), "the digest cache wrote its sidecar");

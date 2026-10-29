@@ -22,6 +22,8 @@ use mvm_core::substitution_wire::WireResponse;
 pub(super) struct AiRequestMeta {
     pub(super) method: String,
     pub(super) url: String,
+    /// Request body length in bytes, as sent upstream.
+    pub(super) request_bytes: u64,
 }
 
 impl SubstitutionService {
@@ -112,6 +114,7 @@ impl SubstitutionService {
     }
 
     pub(super) async fn record_ai_usage(&self, meta: &AiRequestMeta, status: u16, body: &[u8]) {
+        let response_bytes = body.len() as u64;
         if !self
             .ai_policy
             .as_ref()
@@ -128,7 +131,8 @@ impl SubstitutionService {
         let totals = tracker.record(&usage);
         self.update_ai_metrics(totals);
         if let Some(recorder) = &self.recorder {
-            let record = self.build_ai_usage_record(meta, status, &usage, totals.exceeded);
+            let record =
+                self.build_ai_usage_record(meta, status, response_bytes, &usage, totals.exceeded);
             if let Err(e) = self.record_ai_sample(recorder, &record).await {
                 tracing::warn!(error = %e, "ai.usage audit emit failed");
             }
@@ -143,6 +147,7 @@ impl SubstitutionService {
         meta: &AiRequestMeta,
         status: u16,
         body: &[u8],
+        response_bytes: u64,
     ) {
         if !self
             .ai_policy
@@ -160,7 +165,8 @@ impl SubstitutionService {
         let totals = tracker.record(&usage);
         self.update_ai_metrics(totals);
         if let Some(recorder) = &self.recorder {
-            let record = self.build_ai_usage_record(meta, status, &usage, totals.exceeded);
+            let record =
+                self.build_ai_usage_record(meta, status, response_bytes, &usage, totals.exceeded);
             if let Err(e) = self.record_ai_sample(recorder, &record).await {
                 tracing::warn!(error = %e, "ai.usage audit emit failed");
             }
@@ -214,6 +220,8 @@ impl SubstitutionService {
             total_tokens: None,
             status: 0,
             budget_exceeded: true,
+            request_bytes: None,
+            response_bytes: None,
         };
         if let Err(e) = recorder.record_ai_budget_exceeded(&record).await {
             tracing::warn!(error = %e, destination, "ai.budget_exceeded audit emit failed");
@@ -255,6 +263,7 @@ impl SubstitutionService {
         &self,
         meta: &AiRequestMeta,
         status: u16,
+        response_bytes: u64,
         usage: &ai_meter::ExtractedUsage,
         budget_exceeded: bool,
     ) -> AiUsageRecord {
@@ -273,6 +282,8 @@ impl SubstitutionService {
             total_tokens: usage.total_tokens,
             status,
             budget_exceeded,
+            request_bytes: Some(meta.request_bytes),
+            response_bytes: Some(response_bytes),
         }
     }
 }
@@ -536,6 +547,28 @@ mod ai_metering_tests {
         assert!(
             matches!(second, WireResponse::Refused { ref message, .. } if message.contains("AI egress budget")),
         );
+    }
+
+    #[tokio::test]
+    async fn usage_record_carries_payload_free_byte_counts() {
+        let (service, _metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::metered(),
+        );
+        let url = "https://api.openai.com/v1/chat/completions";
+        let meta = AiRequestMeta {
+            method: "POST".into(),
+            url: url.into(),
+            request_bytes: 42,
+        };
+        let body = openai_response();
+        let usage = ai_meter::extract_usage(url, &body).expect("openai usage block");
+        let record = service.build_ai_usage_record(&meta, 200, 77, &usage, false);
+        assert_eq!(record.request_bytes, Some(42));
+        assert_eq!(record.response_bytes, Some(77));
+        let labels: std::collections::BTreeMap<_, _> = record.to_labels().into_iter().collect();
+        assert_eq!(labels["request_bytes"], "42");
+        assert_eq!(labels["response_bytes"], "77");
     }
 
     #[tokio::test]

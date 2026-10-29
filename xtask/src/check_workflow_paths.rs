@@ -592,6 +592,53 @@ mod tests {
     }
 
     #[test]
+    fn linux_evidence_dispatch_is_read_only_main_and_keeps_full_coverage() {
+        let dispatch = workflow("e2e-docs-linux-evidence.yml");
+        let macos = workflow("e2e-docs-macos-evidence.yml");
+        let expected = macos
+            .replace("macOS", "Linux")
+            .replace("the self-hosted lane", "the live lane")
+            .replace("run_linux: false", "run_linux: true")
+            .replace("run_macos: true", "run_macos: false")
+            .replace("      macos_blocks_on_unusable_host: true\n", "");
+        assert_eq!(dispatch, expected);
+        let reusable = workflow("e2e-docs.yml");
+        let linux = job_block(&reusable, "e2e-docs-linux");
+        assert_eq!(job_if(linux), "inputs.run_linux");
+        for required in [
+            "shard: [\"0/2\", \"1/2\"]",
+            "run: just e2e::docs",
+            "uses: actions/checkout@v6\n",
+            "MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: ${{ inputs.allow_runtime_candidate_skip }}",
+        ] {
+            assert!(linux.contains(required), "missing {required}");
+        }
+        assert!(!linux.contains("ref:"));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let script =
+            std::fs::read_to_string(root.join("scripts/e2e-documented-surface.sh")).unwrap();
+        for required in [
+            "MVM_BDD_LIVE=1",
+            "MVM_BDD_DIR_SHARE=1",
+            "MVM_BDD_STRICT_SKIPS=1",
+            "--test conformance --features bdd",
+        ] {
+            assert!(script.contains(required), "missing {required}");
+        }
+        let volume = std::fs::read_to_string(
+            root.join("features/suites/s26_volumes/volume_lifecycle.feature"),
+        )
+        .unwrap();
+        assert!(volume.contains(
+            "@live @firecracker @workload_kernel\n  Scenario: restarting refreshes a registered host directory snapshot"
+        ));
+        assert!(!volume.contains("@runtime_candidate"));
+        for required in ["dir-volume-visible", "dir-volume-refreshed"] {
+            assert!(volume.contains(required), "missing {required}");
+        }
+    }
+
+    #[test]
     fn macos_evidence_dispatch_is_read_only_main_and_keeps_full_coverage() {
         let dispatch = workflow("e2e-docs-macos-evidence.yml");
         assert!(dispatch.contains("on:\n  workflow_dispatch:\n"));
@@ -1652,6 +1699,26 @@ mod tests {
             ebpf.contains("cargo +nightly install --locked --version ")
                 && ebpf.contains("bpf-linker"),
             "eBPF lane must install a pinned bpf-linker version"
+        );
+        // bpf-linker 0.11.0 dropped the rustc-LLVM proxy, so from 0.11.0 on
+        // the linker is built against a named LLVM and links that LLVM's
+        // shared library. The `--features` flag and the apt suite that
+        // provides it have to name the same LLVM: a linker built against
+        // 22.x cannot link a 23.x library, and the failure is a link error
+        // far from the cause. Asserting the pairing here makes a deliberate
+        // LLVM bump a one-line change instead of a broken lane.
+        assert!(
+            ebpf.contains("--no-default-features --features llvm-23")
+                && ebpf.contains("llvm-toolchain-noble-23"),
+            "eBPF lane must pin one LLVM version for both the bpf-linker feature and the apt suite"
+        );
+        // The nightly is floating on purpose, so the LLVM it bundles moves on
+        // rustc's schedule. The lane checks the two against each other; that
+        // check is what keeps a floating nightly safe to combine with a
+        // pinned LLVM, so it must not be dropped.
+        assert!(
+            ebpf.contains("rustc +nightly --version --verbose") && ebpf.contains("23.1.*"),
+            "eBPF lane must check the nightly's LLVM against the pinned one"
         );
 
         let policy = job_block(&ci, "lint-policy");

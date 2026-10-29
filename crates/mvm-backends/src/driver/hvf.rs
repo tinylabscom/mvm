@@ -648,9 +648,10 @@ fn boot_retaining_child(
                     .unwrap_or_default();
                 startup_failure_record(summary, Some(status)).emit();
                 bail!(
-                    "HVF supervisor exited before readiness ({}); {}; retain runtime evidence",
+                    "HVF supervisor exited before readiness ({}); {}{}; retain runtime evidence",
                     summary.exited(status),
-                    mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
+                    mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT,
+                    mvm_vmm::host::hvf_supervisor::failure_record::detail(&paths.state_dir)
                 );
             }
             if deadline_reached(Instant::now(), deadline) {
@@ -660,9 +661,10 @@ fn boot_retaining_child(
                     .unwrap_or_default();
                 startup_failure_record(summary, None).emit();
                 bail!(
-                    "HVF supervisor readiness deadline; {}; {}; retain runtime evidence",
+                    "HVF supervisor readiness deadline; {}; {}{}; retain runtime evidence",
                     summary.child_status(None),
-                    mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
+                    mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT,
+                    mvm_vmm::host::hvf_supervisor::failure_record::detail(&paths.state_dir)
                 );
             }
             // External readiness is reconciled; only authenticated control is
@@ -687,9 +689,10 @@ fn boot_retaining_child(
                 .unwrap_or_default();
             startup_failure_record(summary, observed_exit).emit();
             return Err(error).context(format!(
-                "HVF supervisor failed readiness; {}; {}",
+                "HVF supervisor failed readiness; {}; {}{}",
                 summary.child_status(observed_exit),
-                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
+                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT,
+                mvm_vmm::host::hvf_supervisor::failure_record::detail(&paths.state_dir)
             ));
         }
         Ok(())
@@ -1114,6 +1117,7 @@ impl VmFullControl for HvfVmFullControl {
         let (request, ram, frame) = self.fixed_snapshot_paths();
         let _ = std::fs::remove_file(&ram);
         let _ = std::fs::remove_file(&frame);
+        mvm_vmm::host::snapshot_publish::clear_error(&self.state_dir);
         std::fs::write(&request, b"capture\n")
             .with_context(|| format!("request HVF snapshot at {}", request.display()))?;
         let deadline = Instant::now() + SNAPSHOT_PUBLISH_TIMEOUT;
@@ -1122,10 +1126,16 @@ impl VmFullControl for HvfVmFullControl {
             std::thread::sleep(wait);
             wait = (wait * 2).min(std::time::Duration::from_millis(5));
         }
-        anyhow::ensure!(
-            ram.exists() && frame.exists(),
-            "HVF supervisor did not publish its paused snapshot within {SNAPSHOT_PUBLISH_TIMEOUT:?}"
-        );
+        if !ram.exists() || !frame.exists() {
+            let why = mvm_vmm::host::snapshot_publish::last_error(&self.state_dir)
+                .map_or_else(String::new, |reason| {
+                    format!("; the supervisor's last refusal: {reason}")
+                });
+            bail!(
+                "HVF supervisor did not publish its paused snapshot within \
+                 {SNAPSHOT_PUBLISH_TIMEOUT:?}{why}"
+            );
+        }
         std::fs::copy(&ram, memory_path).with_context(|| {
             format!(
                 "copying captured HVF RAM {} -> {}",

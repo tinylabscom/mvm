@@ -38,6 +38,27 @@ pub enum CaptureAuthority<'a> {
     OperationalLiveOnly,
 }
 
+impl<'a> CaptureAuthority<'a> {
+    /// The one authority a supervisor boots under: a registered caller first,
+    /// then the launch's own admitted plan, then an operational role (builder
+    /// or standby) that may capture live output only. A launch with none of
+    /// them is refused, so a restored child must carry its own plan.
+    pub fn select(
+        registered: Option<Box<crate::supervisor::caller_registration::ConsumedCallerLaunch>>,
+        admitted: Option<&'a ExecutionPlan>,
+        operational_role: bool,
+    ) -> Result<Self> {
+        if let Some(launch) = registered {
+            return Ok(Self::CallerRegistered(launch));
+        }
+        match admitted {
+            Some(plan) => Ok(Self::Admitted(plan)),
+            None if operational_role => Ok(Self::OperationalLiveOnly),
+            None => anyhow::bail!("workload protected capture requires an admitted plan"),
+        }
+    }
+}
+
 pub struct CaptureParams<'a> {
     pub vm: &'a str,
     pub authority: CaptureAuthority<'a>,
@@ -493,6 +514,25 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_restored_child_with_its_own_plan_is_admitted() {
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let authority = CaptureAuthority::select(None, Some(&plan), false).unwrap();
+        assert!(matches!(authority, CaptureAuthority::Admitted(_)));
+    }
+
+    #[test]
+    fn a_launch_with_no_plan_and_no_operational_role_is_refused() {
+        let error = CaptureAuthority::select(None, None, false).err().unwrap();
+        assert!(error.to_string().contains("requires an admitted plan"));
+    }
+
+    #[test]
+    fn an_operational_role_without_a_plan_captures_live_only() {
+        let authority = CaptureAuthority::select(None, None, true).unwrap();
+        assert!(matches!(authority, CaptureAuthority::OperationalLiveOnly));
+    }
+
     use super::*;
     use mvm_core::plan::test_support::PlanFixture;
     use mvm_core::transcript::{self, MANIFEST_FILENAME};

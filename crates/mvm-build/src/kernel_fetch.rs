@@ -649,6 +649,10 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let kernel = staged(dir.path(), b"kernel bytes", true);
 
+            std::thread::sleep(
+                mvm_core::crypto::verified_digest::RACY_WINDOW
+                    + std::time::Duration::from_millis(60),
+            );
             assert!(matches!(
                 resolve_kernel(dir.path(), "aarch64", "workload", true),
                 KernelResolution::Cached(_)
@@ -670,6 +674,10 @@ mod tests {
             let _env = env_guard();
             let dir = tempfile::tempdir().unwrap();
             let kernel = staged(dir.path(), b"kernel bytes", true);
+            std::thread::sleep(
+                mvm_core::crypto::verified_digest::RACY_WINDOW
+                    + std::time::Duration::from_millis(60),
+            );
             // Warm the cache, then corrupt the pin so the next resolve evicts.
             assert!(matches!(
                 resolve_kernel(dir.path(), "aarch64", "workload", true),

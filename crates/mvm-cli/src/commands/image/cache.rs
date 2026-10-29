@@ -1618,6 +1618,9 @@ mod tests {
         write_file(tmp.path(), "manifests/alpine.json", b"{}");
         write_file(tmp.path(), "legacy/alpine.ext4", b"x");
         let rootfs = tmp.path().join("legacy/alpine.ext4");
+        std::thread::sleep(
+            mvm_core::crypto::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+        );
         mvm_core::crypto::image_verify::sha256_file_cached(&rootfs).expect("hash");
         let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(&rootfs);
         assert!(sidecar.exists(), "the digest cache wrote its sidecar");

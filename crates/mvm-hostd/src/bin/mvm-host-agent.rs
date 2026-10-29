@@ -40,7 +40,6 @@ const HOST_AGENT_WORKER_ENV: &str = "MVM_HOST_AGENT_WORKER";
 const SIGNER_HELPER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_RESTART_BACKOFF: Duration = Duration::from_millis(250);
-const REGISTRATION_JOURNAL_FILE: &str = "registrations.json";
 
 fn read_stdin_blocking() -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(1024);
@@ -163,7 +162,6 @@ async fn spawn_signer_helper(cfg: &HostAgentConfig) -> Result<Child> {
         software_chain_key_path: Some(cfg.software_chain_key_path.clone()),
         max_frame_bytes: cfg.max_frame_bytes,
     };
-    let _ = std::fs::remove_file(&cfg.signer_helper_uds_path);
     let mut child = Command::from(mvm_core::env_hygiene::helper_command(&bin))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -200,7 +198,9 @@ async fn wait_for_helper_uds(child: &mut Child, uds_path: &Path) -> Result<()> {
         if let Some(status) = child.try_wait().context("poll mvm-signer-helper status")? {
             anyhow::bail!("mvm-signer-helper exited before readiness: {status}");
         }
-        if uds_path.exists() {
+        // A crashed helper leaves its socket path behind; only a successful
+        // connection proves the replacement is ready for registration replay.
+        if tokio::net::UnixStream::connect(uds_path).await.is_ok() {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -288,7 +288,7 @@ async fn run_worker_once(cfg: HostAgentConfig) -> Result<()> {
         "mvm-host-agent worker starting"
     );
 
-    let registration_journal = registration_journal_path(&cfg)?;
+    let registration_journal = cfg.registration_journal_path()?;
     let daemon = Arc::new(Mutex::new(
         HostAgentDaemon::new(cfg.tenant_id.clone(), verifying_key, cfg.max_frame_bytes)
             .with_signer_helper(cfg.signer_helper_uds_path.clone())
@@ -391,14 +391,6 @@ async fn supervise_worker(cfg: HostAgentConfig, raw_cfg: Vec<u8>) -> Result<()> 
         let _ = worker.wait().await;
         tokio::time::sleep(WORKER_RESTART_BACKOFF).await;
     }
-}
-
-fn registration_journal_path(cfg: &HostAgentConfig) -> Result<PathBuf> {
-    let dir = cfg
-        .control_socket
-        .parent()
-        .context("host-agent control socket path must have a parent directory")?;
-    Ok(dir.join(REGISTRATION_JOURNAL_FILE))
 }
 
 fn main() -> Result<()> {

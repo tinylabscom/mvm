@@ -775,11 +775,13 @@ outruns its bound is killed with exit `124` and a chain-signed entry. A bound
 whose kill could not be audited refuses to boot rather than running unbounded.
 Firecracker has no such supervisor process and is not covered. The wasm
 backend wires admitted fuel and wall-clock bounds into wasmtime fuel
-consumption and epoch interruption. A restored or warm-claimed child is
-admission-bounded without its host-side CPU control **or its wall-clock
-timer** being re-armed — a restore deliberately does not inherit the parent's
-plan, since auditing a child's kill under its parent's identity would write a
-wrong entry rather than a missing one.
+consumption and epoch interruption. A restore never inherits the
+parent's plan, since auditing a child's kill under its parent's identity would
+write a wrong entry rather than a missing one. An HVF forked child carries its
+own admitted plan: its supervisor verifies it (host key, validity window,
+names this child; no nonce re-spent) and arms the wall clock from the restore,
+audited under the child's identity. Other restored or warm-claimed children are
+admission-bounded without the host-side CPU control or the timer re-armed.
 ADR-001's ledger carries the "Preview 18 limits" note; do not paraphrase
 this row as enforced without it.
 

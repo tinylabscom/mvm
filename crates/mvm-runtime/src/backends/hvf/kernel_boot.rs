@@ -40,7 +40,7 @@ use super::sys::*;
 use super::vcpu::esr_ec;
 use super::{BootFault, default_bootargs};
 use crate::vmm::device::Pl011;
-use crate::vmm::device_state::{SnapshotDeviceState, capture_device_states};
+use crate::vmm::device_state::SnapshotDeviceState;
 use crate::vmm::fdt;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
@@ -1063,6 +1063,7 @@ fn run_primary<B: run::DeviceBus>(
         frame: snapshot_frame,
     } = snapshot;
     let runtime_observer = runtime_observer.as_ref();
+    let mut last_refusal = String::new();
 
     run::run_on_bus(
         vcpu,
@@ -1138,41 +1139,26 @@ fn run_primary<B: run::DeviceBus>(
                     "a parked state per CPU beyond the boot CPU"
                 );
 
-                // RAM goes first and whole, and the frame is renamed into
-                // place: the host takes the frame's appearance as the signal
-                // that both files are complete, so neither may be visible
-                // half-written.
-                let ram_layout = super::snapshot::write_ram_image(guest_ram, ram_path)
-                    .map_err(|_| HvfError::SnapshotState("snapshot RAM write failed"))?;
-                let device_bytes = capture_device_states(devices).map_err(|error| {
-                    eprintln!("HVF snapshot device capture failed: {error}");
-                    HvfError::SnapshotState("snapshot device capture failed")
-                })?;
-                let gic_bytes = super::snapshot::capture_gic_device_state()?;
-                // Boot CPU first, then the rest in CPU order — the order a
-                // restore hands them back out in.
-                let mut vcpu_states = Vec::with_capacity(vcpus as usize);
-                vcpu_states.push(vcpu.capture_state()?);
-                vcpu_states.extend(secondary_states);
-                let artifact_digests = runtime_observer
-                    .map(|observer| observer.snapshot_payload())
-                    .transpose()
-                    .map_err(|_| HvfError::SnapshotState("runtime evidence capture failed"))?
-                    .unwrap_or_default();
-                let frame = super::snapshot::encode_hvf_snapshot_frame(
-                    HVF_SNAPSHOT_BACKEND_KIND,
-                    0,
-                    ram_layout,
-                    &device_bytes,
-                    &gic_bytes,
-                    &vcpu_states,
-                    &artifact_digests,
-                )
-                .map_err(|_| HvfError::SnapshotState("snapshot frame encode failed"))?;
-                mvm_core::util::atomic_io::atomic_write(frame_path, &frame)
-                    .map_err(|_| HvfError::SnapshotState("snapshot frame write failed"))?;
-                std::fs::remove_file(request_path)
-                    .map_err(|_| HvfError::SnapshotState("snapshot request cleanup failed"))?;
+                // A refusal is not fatal: it is recorded for the host and the
+                // request stays, so the next turn of the hold tries again. An
+                // error out of this hook would end the run loop and take the
+                // guest with it.
+                let outcome = super::snapshot_capture::SnapshotAttempt {
+                    vcpu,
+                    devices,
+                    secondary_states,
+                    runtime_observer,
+                    guest_ram,
+                    request: request_path,
+                    ram: ram_path,
+                    frame: frame_path,
+                }
+                .publish();
+                mvm_vmm::host::snapshot_publish::settle_attempt(
+                    request_path,
+                    &mut last_refusal,
+                    outcome,
+                );
                 Ok(())
             },
             should_throttle: || shared.throttle.load(Ordering::Relaxed),

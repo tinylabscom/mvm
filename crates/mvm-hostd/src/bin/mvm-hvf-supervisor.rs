@@ -542,7 +542,21 @@ fn restore_image_from(
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+/// The validated state directory, once startup has established it. A failure
+/// before this point has nowhere private to be recorded.
+static FAILURE_RECORD_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn main() -> anyhow::Result<()> {
+    let outcome = run();
+    if let (Err(error), Some(dir)) = (&outcome, FAILURE_RECORD_DIR.get()) {
+        mvm_vmm::host::hvf_supervisor::failure_record::record(dir, error);
+    }
+    outcome
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn run() -> anyhow::Result<()> {
     use std::os::fd::AsRawFd;
     use std::time::Duration;
 
@@ -655,6 +669,7 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("protected handoff requires a planless vsock standby");
     }
 
+    let _ = FAILURE_RECORD_DIR.set(state_dir.to_path_buf());
     diagnostics.stage(StartupStage::StartupInputs);
     // Adopt the verified saved state before anything else can open a file, so
     // no descriptor number is reused out from under it.
@@ -792,10 +807,19 @@ fn main() -> anyhow::Result<()> {
     // The timer records its timeout exit code beside the pid file. A plan-
     // bearing boot with nowhere to record it is refused rather than booted
     // unbounded — same fail-closed posture as an unauditable kill.
+    // A restored child's plan arrives over the spawn pipe: verify it before any
+    // timer or audit emitter exists, and arm only from the verified value.
+    let armed_plan = mvm_hostd::supervisor::restored_plan::plan_to_arm(
+        cfg.plan.as_ref(),
+        restore.is_some(),
+        &cfg.vm_name,
+        cfg.signing_key_path.as_deref(),
+    )
+    .map_err(|_| anyhow::anyhow!("restored child plan failed verification"))?;
     let _wall_clock = match cfg.pid_file.parent() {
         Some(vm_state_dir) => {
             let timer_inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
-                plan_json: cfg.plan.as_ref(),
+                plan_json: armed_plan.as_ref(),
                 audit_dir: cfg.audit_dir.as_deref(),
                 signing_key_path: cfg.signing_key_path.as_deref(),
                 vm_state_dir,
@@ -838,8 +862,7 @@ fn main() -> anyhow::Result<()> {
     // supervisor only wires the relay socket paths through.
     diagnostics.stage(StartupStage::CapturePolicy);
     use mvm_hostd::stream::protected::{CaptureAuthority, CaptureParams};
-    let admitted_plan = cfg
-        .plan
+    let admitted_plan = armed_plan
         .as_ref()
         .map(mvm_hostd::supervisor::wall_clock::decode_admitted_plan)
         .transpose()
@@ -848,17 +871,11 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|plan| plan.redaction.clone())
         .unwrap_or_default();
-    let authority = if let Some(launch) = registered_launch {
-        CaptureAuthority::CallerRegistered(launch)
-    } else {
-        match admitted_plan.as_ref() {
-            Some(plan) => CaptureAuthority::Admitted(plan),
-            None if cfg.trusted_builder_egress || cfg.handoff_socket.is_some() => {
-                CaptureAuthority::OperationalLiveOnly
-            }
-            None => anyhow::bail!("workload protected capture requires an admitted plan"),
-        }
-    };
+    let authority = CaptureAuthority::select(
+        registered_launch,
+        admitted_plan.as_ref(),
+        cfg.trusted_builder_egress || cfg.handoff_socket.is_some(),
+    )?;
     diagnostics.stage(StartupStage::CaptureSetup);
     let (capture_owner, console_sink) =
         match mvm_hostd::stream::protected::CaptureOwner::start(CaptureParams {

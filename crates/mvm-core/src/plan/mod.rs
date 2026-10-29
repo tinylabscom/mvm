@@ -28,6 +28,7 @@ pub mod bundle;
 pub mod content_id;
 #[cfg(unix)]
 pub mod nonce_ledger;
+pub mod restored_child;
 pub mod signing;
 pub mod synthesis;
 #[cfg(any(test, feature = "test-support"))]
@@ -57,6 +58,7 @@ pub use bundle::{read_and_verify_bundle, verify_plan_bundle, write_bundle};
 pub use content_id::{PlanIdMismatch, compute_plan_id, verify_plan_id};
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 pub use mvm_contract::plan::output_grant::{OutputGrant, OutputGrantError};
+pub use restored_child::{ImageBinding, RestoredChildBinding, verify_restored_child_plan};
 pub use sdk_sidecar::{
     SDK_HOST_SERVICES, SDK_SIDECAR_GUEST_PATH, SDK_SIDECAR_LIB_PATH, is_sdk_host_service,
     sdk_host_services_in, sdk_sidecar_required, sdk_sidecar_required_for,
