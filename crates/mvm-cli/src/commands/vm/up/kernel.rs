@@ -2,8 +2,9 @@
 //! fallback to the cached builder-VM kernel, and the `--kernel-pin` /
 //! bundle-pin resolution paths against the mvm cache.
 
-#[cfg(test)]
+use mvm_build::image_source::LocalImageCheckout;
 use mvm_core::image_set::WorkloadImageProfile;
+use std::path::PathBuf;
 
 /// Kernel-less images (mkGuest ships no kernel) still need a real kernel
 /// file on every VMM that boots one — hvf, firecracker and libkrun, whose
@@ -23,17 +24,19 @@ pub(in crate::commands::vm) fn resolve_workload_kernel(
     vmlinux_path: &str,
     hypervisor: &str,
 ) -> anyhow::Result<String> {
-    resolve_workload_kernel_with(vmlinux_path, hypervisor, || {
-        crate::commands::env::builder_vm::selected_local_checkout()
-    })
+    resolve_workload_kernel_with(
+        vmlinux_path,
+        hypervisor,
+        crate::commands::env::builder_vm::selected_local_checkout,
+        crate::commands::env::builder_vm::ensure_pair_workload_kernel,
+    )
 }
 
 fn resolve_workload_kernel_with(
     vmlinux_path: &str,
     hypervisor: &str,
-    selected_checkout: impl FnOnce() -> anyhow::Result<
-        Option<mvm_build::image_source::LocalImageCheckout>,
-    >,
+    selected_checkout: impl FnOnce() -> anyhow::Result<Option<LocalImageCheckout>>,
+    pair_kernel: impl FnOnce(&LocalImageCheckout, WorkloadImageProfile) -> anyhow::Result<PathBuf>,
 ) -> anyhow::Result<String> {
     if std::path::Path::new(vmlinux_path).exists() {
         return Ok(vmlinux_path.to_string());
@@ -46,14 +49,9 @@ fn resolve_workload_kernel_with(
     // A selected checkout is the fallback's source too: the pair's
     // `default-tenant` set carries the workload kernel.
     if let Some(checkout) = selected_checkout()? {
-        return Ok(
-            crate::commands::env::builder_vm::ensure_pair_workload_kernel(
-                &checkout,
-                mvm_core::image_set::WorkloadImageProfile::DefaultTenant,
-            )?
+        return Ok(pair_kernel(&checkout, WorkloadImageProfile::DefaultTenant)?
             .display()
-            .to_string(),
-        );
+            .to_string());
     }
     let cache_dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host().to_string();
@@ -131,6 +129,16 @@ where
 /// workload kernel from the mvm cache; presence is the signal — the value is a
 /// human label only. Shared by the canonical `machine run` boot path.
 pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Result<Option<String>> {
+    resolve_kernel_pin_path_with(
+        pinned,
+        crate::commands::env::builder_vm::ensure_pair_workload_kernel,
+    )
+}
+
+fn resolve_kernel_pin_path_with(
+    pinned: bool,
+    pair_kernel: impl FnOnce(&LocalImageCheckout, WorkloadImageProfile) -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<Option<String>> {
     if !pinned {
         return Ok(None);
     }
@@ -144,12 +152,9 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
     // `workload_kernel` member the default image boots.
     if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
         return Ok(Some(
-            crate::commands::env::builder_vm::ensure_pair_workload_kernel(
-                &checkout,
-                mvm_core::image_set::WorkloadImageProfile::DefaultTenant,
-            )?
-            .display()
-            .to_string(),
+            pair_kernel(&checkout, WorkloadImageProfile::DefaultTenant)?
+                .display()
+                .to_string(),
         ));
     }
     // Only an image checkout can build the kernel, and a selected one has
@@ -171,7 +176,12 @@ mod resolve_workload_kernel_tests {
         vmlinux_path: &str,
         hypervisor: &str,
     ) -> anyhow::Result<String> {
-        resolve_workload_kernel_with(vmlinux_path, hypervisor, || Ok(None))
+        resolve_workload_kernel_with(
+            vmlinux_path,
+            hypervisor,
+            || Ok(None),
+            |_, _| panic!("released resolution must not use a checkout"),
+        )
     }
 
     #[test]
@@ -396,13 +406,20 @@ mod resolve_pinned_kernel_tests {
             .display()
             .to_string();
 
-        let fallback = super::resolve_workload_kernel("/no/such/vmlinux", "hvf")
-            .expect("the fallback resolves from the pair");
+        let fallback = super::resolve_workload_kernel_with(
+            "/no/such/vmlinux",
+            "hvf",
+            crate::commands::env::builder_vm::selected_local_checkout,
+            |checkout, profile| pair.workload_kernel(checkout, profile),
+        )
+        .expect("the fallback resolves from the pair");
         assert_eq!(fallback, kernel);
 
-        let pinned = super::resolve_kernel_pin_path(true)
-            .expect("the pin resolves from the pair")
-            .expect("a pin was requested");
+        let pinned = super::resolve_kernel_pin_path_with(true, |checkout, profile| {
+            pair.workload_kernel(checkout, profile)
+        })
+        .expect("the pin resolves from the pair")
+        .expect("a pin was requested");
         assert_eq!(pinned, kernel);
     }
 

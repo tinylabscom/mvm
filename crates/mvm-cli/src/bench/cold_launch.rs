@@ -1762,6 +1762,7 @@ mod tests {
 
     #[test]
     fn template_warm_lanes_require_the_claimed_child_to_boot_a_slot_rootfs() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         for lane in [LaunchLane::WarmClaimFlake, LaunchLane::WarmClaimManifest] {
             let mut sample = warm_launch_sample();
             sample.artifacts.rootfs = Some(template_rootfs());

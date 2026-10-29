@@ -46,6 +46,16 @@ pre-migration plans alongside durable documents. For a read-only briefing, run
 issue, linked repository documents, open pull requests, and Graft; do not save it
 as another status file.
 
+For a plain terminal list of unchecked tasks in `tinylabscom/mvm#3731` and
+`#4839`, run `just maint::watch-issues`. It needs Python 3 and an authenticated
+`gh` CLI, refreshes 30 seconds after each fetch on a TTY, and exits cleanly on
+Ctrl+C. Use `just maint::watch-issues --once` for a single snapshot; redirected
+output is also one-shot. Append issue numbers, `owner/repo#number` refs, or
+GitHub issue URLs to include children explicitly; it does not crawl links.
+Only issue bodies are read (including closed issues); comments and fenced code
+examples are ignored. Headings and parent list items provide context. Fetch
+errors are shown per issue and make a one-shot run exit nonzero.
+
 A fast advisory agent may generate this briefing, classify or link work, and
 flag drift. It must propose consequential changes for review rather than
 silently closing issues, changing priority, or rewriting architectural
@@ -248,7 +258,7 @@ until the whole ladder is green.
 | Rung | Command | What it proves | Cost |
 |------|---------|----------------|------|
 | 1 | `cargo fmt --all` (or `just lints::fmt`) | Formatting matches rustfmt across the workspace | seconds |
-| 2 | `cargo check -p <crate>` (optional first: `just check::fast-cargo`) | The touched crate compiles (`check::fast-cargo` only validates pinned toolchain/config wiring) | seconds–a minute |
+| 2 | `cargo check -p <crate>` (optional first: `just check::toolchain`) | The touched crate compiles (`check::toolchain` only validates pinned toolchain/config wiring) | seconds–a minute |
 | 3 | `just tests::crate <crate>` (or `cargo test -p <crate> <filter>`) | New/changed behavior passes, including the failure path | a minute |
 | 4 | `just lints::clippy` | Zero warnings (`-D warnings`) across the workspace | a few minutes cold |
 | 5 | `cargo test --workspace` | Nothing else regressed | longer |

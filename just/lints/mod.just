@@ -38,7 +38,7 @@ fmt-check:
 
 # Run clippy with warnings as errors
 clippy:
-    ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
+    ./scripts/cargo.sh clippy --workspace --all-targets -- -D warnings
 
 # Compile the cucumber conformance target. It sits behind the `bdd` feature to
 # stay out of `cargo nextest run --workspace` (nextest lists tests via `--list`,
@@ -48,4 +48,4 @@ clippy:
 
 # Run clippy over the cucumber conformance target (`--features bdd`)
 clippy-bdd:
-    ./scripts/cargo-stable.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings
+    ./scripts/cargo.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings

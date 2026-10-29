@@ -276,11 +276,6 @@ e2e_phase build
 echo "==> refreshing embedded aux helpers"
 just payload::refresh
 
-# Every surface, the default included, carries manifest-verify, which the
-# verified-fetch path needs to accept the published builder VM image. The
-# `user` build keeps the standard compiler/linker path; the featureless local
-# path uses the faster wrapper, which links aws-lc through the LLVM overrides in
-# .cargo/fast.toml.
 # Preserve a feature-off binary first. Its SDK-sidecar warm is the regression
 # for the contributor path: a binary that carries no host payload must still
 # pack both sidecars on the host from the checkout's guest runtime, without
@@ -303,10 +298,10 @@ if [[ -n "$E2E_FEATURES" ]]; then
   cargo build --profile "$E2E_PROFILE" --bin mvmctl --features "$E2E_FEATURES,embed-host-bins"
 else
   echo "==> building unembedded mvmctl"
-  ./scripts/cargo-fast.sh build --profile "$E2E_PROFILE" --bin mvmctl
+  ./scripts/cargo.sh build --profile "$E2E_PROFILE" --bin mvmctl
   cp "$MVMCTL" "$UNEMBEDDED_MVMCTL"
   echo "==> building mvmctl"
-  ./scripts/cargo-fast.sh build --profile "$E2E_PROFILE" --bin mvmctl --features embed-host-bins
+  ./scripts/cargo.sh build --profile "$E2E_PROFILE" --bin mvmctl --features embed-host-bins
 fi
 
 # Always rebuild the per-VM helpers, never just check they exist.
@@ -847,7 +842,7 @@ MVM_HOME="$E2E_HOME" \
     --timeout "$E2E_TIMEOUT_SECS" \
     --grace 5 \
     --log "$SUITE_LOG" \
-    -- ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
+    -- ./scripts/cargo.sh test -p mvm-conformance --test conformance --features bdd
 SUITE_STATUS=$?
 set -e
 e2e_phase_end

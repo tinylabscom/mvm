@@ -333,8 +333,7 @@ jobs:
                      scripts/check-no-orchestration-server.test.sh \
                      scripts/security-lane-verdict.sh \
                      scripts/security-lane-verdict.test.sh \
-                     scripts/cargo-fast.sh \
-                     scripts/cargo-stable.sh \
+                     scripts/cargo.sh \
                      scripts/e2e-phase-timings.sh \
                      scripts/dev-run-guard.test.sh \
                      scripts/cargo-target-dir-guard.sh \
@@ -393,7 +392,7 @@ jobs:
         run: python3 scripts/test_bdd_phase_timings.py
 
       - name: Clippy
-        run: ./scripts/cargo-stable.sh clippy --all-targets -- -D warnings
+        run: ./scripts/cargo.sh clippy --all-targets -- -D warnings
 
       # The cucumber runner is `harness = false`, so it sits behind the `bdd`
       # feature to keep it out of `cargo nextest run --workspace` — nextest
@@ -403,7 +402,7 @@ jobs:
       # so a struct or signature change anywhere in the workspace can break the
       # BDD suite unnoticed and only surface in a release run. Compile it here.
       - name: Clippy (BDD conformance target)
-        run: ./scripts/cargo-stable.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings
+        run: ./scripts/cargo.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings
 
   # The fast-gate half of feature coverage. A feature-gated compile break is
   # the commonest deterministic failure, and the feature *test* lanes below
@@ -463,7 +462,7 @@ jobs:
           features="$features,mvm-backends/test-support,mvm-vmm/test-support,mvm-fs/test-support"
           features="$features,mvm-agentd/addons"
           echo "features: $features"
-          ./scripts/cargo-stable.sh clippy --locked --all-targets \
+          ./scripts/cargo.sh clippy --locked --all-targets \
             -p mvmctl -p mvm-core -p mvm-client -p mvm-sdk -p mvm-build -p mvm-cli \
             -p mvm-hostd -p mvm-runtime -p mvm-backends -p mvm-vmm -p mvm-fs -p mvm-agentd \
             --features "$features" -- -D warnings
@@ -472,10 +471,10 @@ jobs:
       # is shipped code that the workspace build never compiles: the root
       # package's defaults unify `manifest-verify` in.
       - name: Clippy (release verifier absent)
-        run: ./scripts/cargo-stable.sh clippy --locked --all-targets -p mvm-core -p mvm-build -p mvm-client -- -D warnings
+        run: ./scripts/cargo.sh clippy --locked --all-targets -p mvm-core -p mvm-build -p mvm-client -- -D warnings
 
       - name: Clippy (mvm-sdk without default features)
-        run: ./scripts/cargo-stable.sh clippy --locked --all-targets -p mvm-sdk --no-default-features -- -D warnings
+        run: ./scripts/cargo.sh clippy --locked --all-targets -p mvm-sdk --no-default-features -- -D warnings
 
   lint-policy:
     # This policy lane publishes the `Invariant` context. The architecture
@@ -494,7 +493,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-08-25
+          toolchain: 1.97.1
 
       # Policy checks invoke xtask, and the stub/parity checks invoke the
       # pinned Python and TypeScript generators. They are independent of the
@@ -617,15 +616,10 @@ jobs:
       - name: Policy gates (check-abi-layout) (single-network-path)
         run: cargo run -p xtask -- check-all
 
-      # `check-fast-cargo` pins the whole nightly-fast / stable-lint split —
-      # the toolchain versions, the cranelift and threads settings, and the
-      # exact invocations in the Justfile and the pre-commit hook. It is a
-      # shell script rather than an xtask gate, so `check-all` above does not
-      # reach it, and until now nothing in CI did either: it had gone red on
-      # main unnoticed when rust-toolchain.toml was bumped to
-      # nightly-2026-08-25 and bdd.yml was left on nightly-2026-08-08.
-      - name: Fast/stable toolchain split is pinned
-        run: ./scripts/check-fast-cargo.sh
+      - name: Workspace toolchain is pinned
+        run: |
+          ./scripts/check-cargo-toolchain.sh
+          python3 scripts/test_cargo_wrapper.py
 
       - name: Every Cargo crate has a detailed README
         run: |
@@ -898,7 +892,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-08-25
+          toolchain: 1.97.1
 
       - uses: ./.github/actions/apt-deps
         with:

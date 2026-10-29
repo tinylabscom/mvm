@@ -6,6 +6,11 @@ status: accepted
 
 # Opt-in Firecracker lifecycle service prototype
 
+Historical design: the unpublished prototype was retired under #4839. The
+crate, executable and commands below no longer exist. This preserves the
+original design and its limitations, not current lifecycle or deployment
+guidance; see [the retirement decision](../contracts/build-dependency-decisions.md#firecracker-lifecycle-prototype-retirement).
+
 Backing: preview
 Validation: targeted
 

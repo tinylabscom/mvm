@@ -1,22 +1,7 @@
 //! Content-addressed store for the binaries mvm-cli's build script produces.
 //!
-//! The script has two nested legs — the musl cross-compile of the embedded
-//! host binaries, and the native per-VM helpers — and neither could tell a
-//! fresh artifact from a stale one. The embedded leg keyed reuse on
-//! `PROFILE == "debug"` plus "does the file exist", so it handed back whatever
-//! bytes were on disk and rebuilt from scratch under every other profile,
-//! target triple and worktree. The helper leg had no reuse at all and so ran
-//! four to six nested `cargo build`s on every `cargo check`.
-//!
-//! Measured on a fresh worktree before this existed: the script was 332.7s of
-//! a 359s cold build (93%), and 14.3s of an 18s rebuild after a one-line
-//! `mvm-core` edit (79%).
-//!
-//! Keying on content fixes both halves with one mechanism. A key derived from
-//! the binary's real dependency closure *proves* freshness, so reuse stops
-//! being a bet that a stale artifact is tolerable and becomes sound
-//! everywhere — which is what lets the store sit outside the target directory
-//! and be shared across worktrees, profiles and triples.
+//! Keys bind the workspace source closure, manifest, lockfile, target and
+//! pinned toolchain. Stored bytes are digest-checked before reuse.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

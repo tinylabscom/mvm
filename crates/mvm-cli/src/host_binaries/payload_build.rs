@@ -14,7 +14,7 @@
 //! Each includer provides `super::embed_toolchain`, the pinned toolchain the
 //! compile uses: the build script by path, `mvmctl` from `mvm-build`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,19 +36,15 @@ struct KeyRequest<'a> {
     flavor: &'a str,
 }
 
-/// The content store, plus the per-package source hashes its keys are built
-/// from. Hashing a closure is the expensive part, so it is memoised: the
-/// embedded binaries share two root packages between them.
+/// One source snapshot per workspace member, shared by all payload keys.
 pub(crate) struct EmbedCache {
     pub workspace_root: PathBuf,
-    pub graph: build_embed_cache::WorkspaceGraph,
+    graph: build_embed_cache::WorkspaceGraph,
     lockfile: String,
     toolchain_file: String,
     workspace_manifest: Option<build_embed_cache::WorkspaceManifestDigest>,
     pub root: Option<PathBuf>,
     sources: BTreeMap<String, Vec<(String, String)>>,
-    /// Every workspace member a computed key hashed.
-    pub watched: BTreeSet<String>,
 }
 
 impl EmbedCache {
@@ -72,26 +68,32 @@ impl EmbedCache {
                 .ok(),
             root,
             sources: BTreeMap::new(),
-            watched: BTreeSet::new(),
         }
     }
 
     /// Source hashes for everything `package` can reach inside the workspace.
     fn closure_sources(&mut self, package: &str) -> Vec<(String, String)> {
-        if let Some(hit) = self.sources.get(package) {
-            return hit.clone();
-        }
         let mut hashes = Vec::new();
         for member in build_embed_cache::workspace_closure(&self.graph, &[package]) {
             let Some(dir) = self.graph.dirs.get(&member) else {
                 continue;
             };
-            self.watched.insert(member.clone());
-            hashes.extend(build_embed_cache::hash_member(&self.workspace_root, dir));
+            let sources = self
+                .sources
+                .entry(member)
+                .or_insert_with(|| build_embed_cache::hash_member(&self.workspace_root, dir));
+            hashes.extend_from_slice(sources);
         }
         hashes.sort();
-        self.sources.insert(package.to_string(), hashes.clone());
         hashes
+    }
+
+    /// Cargo watches the same inputs used in the keys, without rereading them.
+    pub(crate) fn watched_paths(&self) -> impl Iterator<Item = &str> {
+        self.sources
+            .values()
+            .flatten()
+            .map(|(path, _)| path.as_str())
     }
 
     /// `None` when caching is off or unavailable — callers then build.
@@ -378,6 +380,55 @@ fn scoped_tool_cache_dir(tool: &str, target_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_sources_use_one_snapshot_across_payload_packages() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        for (name, dependencies) in [
+            ("first", "[dependencies]\nshared = { path = '../shared' }\n"),
+            (
+                "second",
+                "[dependencies]\nshared = { path = '../shared' }\n",
+            ),
+            ("shared", ""),
+        ] {
+            let member = root.join("crates").join(name);
+            std::fs::create_dir_all(member.join("src")).unwrap();
+            std::fs::write(
+                member.join("Cargo.toml"),
+                format!("[package]\nname = '{name}'\nversion = '0.1.0'\n{dependencies}"),
+            )
+            .unwrap();
+            std::fs::write(member.join("src/lib.rs"), "pub fn original() {}\n").unwrap();
+        }
+        let mut cache = EmbedCache::with_root(root, Some(root.join("store")));
+        let expected = build_embed_cache::workspace_closure(&cache.graph, &["second"])
+            .iter()
+            .flat_map(|member| build_embed_cache::hash_member(root, &cache.graph.dirs[member]))
+            .collect::<Vec<_>>();
+        cache.closure_sources("first");
+        std::fs::write(
+            root.join("crates/shared/src/lib.rs"),
+            "pub fn changed() {}\n",
+        )
+        .unwrap();
+
+        let mut expected = expected;
+        expected.sort();
+        assert_eq!(cache.closure_sources("second"), expected);
+        let paths = cache
+            .watched_paths()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(paths.len(), 6);
+        assert!(paths.contains("crates/shared/src/lib.rs"));
+        assert!(paths.contains("crates/first/Cargo.toml"));
+        assert!(paths.contains("crates/second/Cargo.toml"));
+        assert_eq!(cache.watched_paths().count(), paths.len());
+        let mut next = EmbedCache::with_root(root, Some(root.join("store")));
+        assert_ne!(next.closure_sources("second"), expected);
+    }
 
     #[test]
     fn root_profile_snapshot_rekeys_every_payload_for_both_architectures() {

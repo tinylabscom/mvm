@@ -1,5 +1,4 @@
-//! Local MCP process transport. The protocol and dispatch live in `mvm-mcp`;
-//! this module only selects the local `MvmClient` and connects stdio.
+//! Connect the local client and policy gate to the stdio MCP adapter.
 
 use std::io;
 use std::sync::Arc;
@@ -36,7 +35,7 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
             // a policy that exists but does not resolve refuses to start
             // rather than serve ungated.
             let gate = crate::tool_gate::McpToolGate::resolve(None)?;
-            let server = mvm_mcp::McpServer::new(client);
+            let server = crate::mcp::McpServer::new(client);
             let server = match drive {
                 Some(drive) => server.with_drive(Arc::new(drive)),
                 None => server,

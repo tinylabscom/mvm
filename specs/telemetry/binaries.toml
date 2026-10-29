@@ -381,20 +381,6 @@ category = "artifact-tool"
 reason = "Standalone local artifact construction or verification command, not an installed VM producer."
 
 [[binary]]
-package = "mvm-fc-lifecycle"
-name = "mvm-fc-lifecycle"
-source = "crates/mvm-fc-lifecycle/src/main.rs"
-required_features = []
-[binary.capture]
-kind = "runtime-gap"
-role = "host"
-owner = "Operator-managed opt-in Firecracker lifecycle service"
-signals = ["diagnostics"]
-entrypoint = "fn main("
-gap = "Startup/refusal diagnostics have no certified bounded host telemetry capture path; protocol responses and registration IDs are not telemetry."
-required_witness = "Installed opt-in service diagnostics reach bounded non-waiting host collection without exposing capabilities, request bodies or registry contents; saturation reports loss rather than stalling lifecycle operations."
-
-[[binary]]
 package = "mvm-fs"
 name = "mvm-extension-image"
 source = "crates/mvm-fs/src/bin/mvm-extension-image.rs"

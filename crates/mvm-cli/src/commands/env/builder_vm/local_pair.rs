@@ -43,9 +43,17 @@ pub(crate) fn derive_pair_key(
         mvm_build::image_source::mvm_source_checkout(channel).context(
             "a local image set is built against the mvm checkout this binary was compiled              from, and that checkout is no longer on disk",
         )?;
+    derive_pair_key_from(checkout, target, &mvm_root)
+}
+
+pub(super) fn derive_pair_key_from(
+    checkout: &LocalImageCheckout,
+    target: &ImageBuildTarget,
+    mvm_root: &Path,
+) -> Result<LocalImageCacheKey> {
     LocalImageCacheKey::derive(&mvm_build::image_source::KeyInputs {
         images: checkout,
-        mvm_checkout: &mvm_root,
+        mvm_checkout: mvm_root,
         target,
         arch: GuestArch::host(),
     })
@@ -112,8 +120,16 @@ pub(crate) fn ensure_pair_workload_kernel(
     checkout: &LocalImageCheckout,
     profile: WorkloadImageProfile,
 ) -> Result<std::path::PathBuf> {
+    ensure_pair_workload_kernel_with(checkout, profile, ensure_pair_built)
+}
+
+pub(super) fn ensure_pair_workload_kernel_with(
+    checkout: &LocalImageCheckout,
+    profile: WorkloadImageProfile,
+    build: impl FnOnce(&LocalImageCheckout, ImageBuildTarget) -> Result<PairBuild>,
+) -> Result<std::path::PathBuf> {
     let target = pair_workload_kernel_target(profile);
-    let build = ensure_pair_built(checkout, target)?;
+    let build = build(checkout, target)?;
     let artifact = build
         .entry
         .set
@@ -174,6 +190,10 @@ pub(crate) fn seed_pair_workload_kernel_cache() -> Result<()> {
     let profile = mvm_core::image_set::WorkloadImageProfile::DefaultTenant;
     let fingerprint = pair_workload_kernel_fingerprint(&checkout, profile)?;
     let kernel = ensure_pair_workload_kernel(&checkout, profile)?;
+    install_pair_workload_kernel(&kernel, &fingerprint)
+}
+
+pub(super) fn install_pair_workload_kernel(kernel: &Path, fingerprint: &str) -> Result<()> {
     let arch = mvm_core::arch::GuestArch::host().to_string();
     let dest = mvm_build::kernel_fetch::cached_kernel_path(
         std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
@@ -184,7 +204,7 @@ pub(crate) fn seed_pair_workload_kernel_cache() -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    copy_contract_file(&kernel, &dest)?;
+    copy_contract_file(kernel, &dest)?;
     mvm_build::kernel_fetch::record_kernel_digest(&dest)
         .with_context(|| format!("recording the digest of {}", dest.display()))?;
     std::fs::write(
@@ -430,7 +450,8 @@ mod tests {
             .find(|artifact| artifact.role.to_string().contains("kernel"))
             .expect("the fixture set carries the workload kernel");
 
-        super::seed_pair_workload_kernel_cache().expect("the seed installs the pair kernel");
+        pair.seed_workload_kernel()
+            .expect("the seed installs the pair kernel");
 
         let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
         let arch = mvm_core::arch::GuestArch::host().to_string();

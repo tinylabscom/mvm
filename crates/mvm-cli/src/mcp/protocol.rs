@@ -7,11 +7,12 @@ use mvm_client::drive::{DriveError, DriveFileOperation, EntrypointEvent, FsResul
 use mvm_client::dto::{MachineFilter, MachineId, MachineStatus};
 use mvm_client::mock::MockBackend;
 use mvm_client::{ClientOperationCapabilities, MvmClient};
-use mvm_mcp::{
+use serde_json::{Value, json};
+
+use super::{
     CURRENT_PROTOCOL_VERSION, DriveTools, HANDSHAKE_PROTOCOL_VERSIONS, LEGACY_PROTOCOL_VERSION,
     McpServer, ServerLimits,
 };
-use serde_json::{Value, json};
 
 struct GrantedDrive;
 
@@ -555,7 +556,7 @@ async fn list_status_filter_uses_the_wire_enum() {
 }
 
 /// Where the agent-facing tool contract is pinned.
-const TOOL_CONTRACT_FIXTURE: &str = "tests/fixtures/tool-contract.json";
+const TOOL_CONTRACT_FIXTURE: &str = "src/mcp/fixtures/tool-contract.json";
 
 /// Set to rewrite the pinned contract from what the server advertises.
 const TOOL_CONTRACT_UPDATE_ENV: &str = "MVM_UPDATE_MCP_TOOL_CONTRACT";
@@ -715,8 +716,8 @@ async fn tool_surface_matches_the_pinned_contract() {
          Tool names, descriptions, input schemas, and gating operations are what an agent \
          is offered, so a change here is a contract change. If it is intended, re-bless and \
          review the fixture diff:\n  \
-         {TOOL_CONTRACT_UPDATE_ENV}=1 cargo test -p mvm-mcp --test protocol \
-         tool_surface_matches_the_pinned_contract",
+         {TOOL_CONTRACT_UPDATE_ENV}=1 cargo test -p mvm-cli --lib \
+         mcp::protocol::tool_surface_matches_the_pinned_contract",
         contract_drift(&pinned, &advertised)
     );
 }

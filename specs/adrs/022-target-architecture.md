@@ -42,7 +42,7 @@ The current architectural crates:
 | `mvm-backends` | Host VMM mechanics behind `mvm-vmm`'s contracts: Firecracker, libkrun, QEMU, and Mock drivers. Backend selection and lifecycle orchestration remain in `mvm-runtime`. |
 | `mvm-build` | The Nix builder pipeline; also hosts the builder-VM-only binaries (the resident builder daemon and its supporting init/egress/patch tools), cross-compiled and embedded into the CLI at build time, inert on non-Linux hosts. |
 | `mvm-agentd` | The vsock protocol, console, in-guest integrations, and guest agent; the in-guest function-workload runner; small in-guest helper binaries (loopback DNS resolution, a loopback-TCP-to-vsock bridge) baked into the runtime overlay. Folds together the former `mvm-guest` and `mvm-guest-helpers` crates. |
-| `mvm-cli` | The Clap CLI, bootstrap, update, doctor, and template commands — a thin shell with no business logic of its own. |
+| `mvm-cli` | The Clap CLI, bootstrap, update, doctor, and template commands, plus the private stdio MCP adapter over `MvmClient`. Lifecycle and policy authority belong below these frontend adapters. |
 | `mvm-hostd` | Host-side daemon roles: the broker and its per-tenant successor, the signing-key holders, and the secret-substitution endpoint — each its own `[[bin]]` target so each role is its own process. It also hosts the per-VM libkrun and HVF supervisors absorbed from the former `mvm-vm-host` crate. Firecracker has no supervisor or gateway binary. |
 | `mvm-net` | The `NetworkProvider` trait: provisioning, ingress/egress policy, DNS, and audit as a seam; the TAP/bridge/gateway implementation itself lives in `mvm-runtime`, which owns the in-VM shell it runs from. (Renamed from `mvm-network`.) |
 | `mvm-fs` | OCI image distribution: registry resolution, manifest fetch, digest verification, layer fetch with streaming and size caps; the OCI-to-rootfs materialization pipeline; and a minimal, `#![forbid(unsafe_code)]`, deterministic ext4 image writer for read-only rootfs materialization — no external `mkfs`, no builder VM, no subprocess, zero `mvm-*` dependencies. Folds together the former `mvm-oci` and `mvm-ext4` crates. |
@@ -50,7 +50,6 @@ The current architectural crates:
 | `mvm-http` | Bounded HTTP parsing and rewriting shared by the host-mediated egress paths. |
 | `mvm-observability` | Shared audit, metrics, and tracing contracts used across host processes. |
 | `mvm-capture` | Project-environment capture and normalization into canonical workload inputs. |
-| `mvm-mcp` | The MCP server and typed tool dispatch over the same client/runtime contracts as the CLI. |
 | `mvm-host-services` | A C-ABI cdylib veneer over the in-guest host-services broker clients, so each language SDK binding loads one shared object instead of carrying its own Rust FFI surface. The package name intentionally emits `libmvm_host_services` without a rename. |
 
 Two more workspace members sit outside this architectural count: `xtask`

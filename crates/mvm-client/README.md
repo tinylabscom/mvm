@@ -6,8 +6,8 @@ mocks, workload output streams, volumes, secrets, readiness, and audit records.
 
 ## Who uses it
 
-`mvm-cli` uses the facade for command implementation and `mvm-mcp` translates
-MCP requests into the same operations. External Rust automation can depend on
+`mvm-cli` uses the facade for commands and its private MCP adapter.
+External Rust automation can depend on
 this crate instead of the full `mvmctl` facade. `mvm-conformance` tests the
 contract. The trait and common DTOs are defined in feature-gated `mvm-core` so
 `mvm-sdk` can share them without creating a dependency cycle.

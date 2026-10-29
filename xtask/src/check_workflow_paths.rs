@@ -1142,9 +1142,7 @@ mod tests {
         );
 
         let lint_core = job_block(&workflow, "lint-core");
-        assert!(
-            lint_core.contains("./scripts/cargo-stable.sh clippy --all-targets -- -D warnings")
-        );
+        assert!(lint_core.contains("./scripts/cargo.sh clippy --all-targets -- -D warnings"));
         assert!(lint_core.contains("cargo fmt --all -- --check"));
         assert!(lint_core.contains("cargo metadata --locked --format-version 1 --no-deps"));
         let lint_policy = job_block(&workflow, "lint-policy");
@@ -1657,8 +1655,8 @@ mod tests {
         let core = job_block(&ci, "lint-core");
         for expected in [
             "cargo fmt --all -- --check",
-            "./scripts/cargo-stable.sh clippy --all-targets -- -D warnings",
-            "./scripts/cargo-stable.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings",
+            "./scripts/cargo.sh clippy --all-targets -- -D warnings",
+            "./scripts/cargo.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings",
         ] {
             assert!(
                 core.contains(expected),

@@ -1,7 +1,7 @@
 # The MCP tool surface is pinned before it grows
 
 Backing: shipped-source
-Validation: cargo nextest run -p mvm-mcp
+Validation: cargo test -p mvm-cli --lib mcp::
 
 `mvm-mcp` described its tools in one function and decided which to offer in
 another. The second was a `match` on the tool name ending in `_ => false`, so a
@@ -29,7 +29,7 @@ later: offered, but answered with "unknown tool".
 
 ## The contract fixture
 
-`crates/mvm-mcp/tests/fixtures/tool-contract.json` holds what a fully capable
+`crates/mvm-cli/src/mcp/fixtures/tool-contract.json` holds what a fully capable
 client is advertised, built from `tools/list` responses rather than read out of
 the table. For each tool it records the name, description, input schema, and the
 operation that gates it (`null` when every client gets the tool). Tools are
@@ -40,7 +40,7 @@ fails on any byte of difference. The failure lists which tools were added,
 removed, or changed, and prints the re-bless command:
 
 ```sh
-MVM_UPDATE_MCP_TOOL_CONTRACT=1 cargo test -p mvm-mcp --test protocol tool_surface_matches_the_pinned_contract
+MVM_UPDATE_MCP_TOOL_CONTRACT=1 cargo test -p mvm-cli --lib mcp::protocol::tool_surface_matches_the_pinned_contract
 ```
 
 The variable follows the repository's existing `MVM_UPDATE_DOCS_COVERAGE`

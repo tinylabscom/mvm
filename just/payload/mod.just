@@ -50,8 +50,8 @@ supervisors *ARGS:
     # This recipe links the same `mvm-hostd` binaries `embed` does and needs the
     # same rust-objcopy repair; without it every supervisor ships unstripped.
     source "{{justfile_directory()}}/scripts/macos-objcopy-env.sh" "{{justfile_directory()}}"
-    ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
-    ./scripts/cargo-fast.sh build -p mvm-gpu --bin mvm-gpu-endpoint {{ARGS}}
+    ./scripts/cargo.sh build -p mvm-hostd --bins {{ARGS}}
+    ./scripts/cargo.sh build -p mvm-gpu --bin mvm-gpu-endpoint {{ARGS}}
 
 # Intentionally absent from `build` and `supervisors` so standard builds never
 # probe for libkrun.h or enable native libkrun linkage.
@@ -61,7 +61,7 @@ libkrun-supervisor *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{justfile_directory()}}/scripts/macos-objcopy-env.sh" "{{justfile_directory()}}"
-    ./scripts/cargo-fast.sh build -p mvm-hostd \
+    ./scripts/cargo.sh build -p mvm-hostd \
       --bin mvm-libkrun-supervisor --features libkrun-sys {{ARGS}}
 
 # Dev builds reuse these instead of re-running cargo-zigbuild, which is the bulk
