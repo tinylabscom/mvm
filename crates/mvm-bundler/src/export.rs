@@ -217,6 +217,53 @@ fn stage_bundle_at(
         contents.push_canonical_linux_proof(proof, boot, now)?;
     }
 
+    for (name, path) in inputs.supplemental_artifacts {
+        anyhow::ensure!(
+            !name.is_empty()
+                && *name != "."
+                && *name != ".."
+                && !name.contains(['/', '\\', ':', '\0']),
+            "supplemental artifact name must be a safe basename: {name:?}"
+        );
+        anyhow::ensure!(
+            ![
+                KERNEL_NAME,
+                ROOTFS_NAME,
+                INITRD_NAME,
+                VERITY_NAME,
+                SIDECAR_FILENAME,
+                BOOT_MANIFEST_NAME,
+                LINUX_SIGNATURE_NAME,
+                REVOCATIONS_NAME,
+                REVOCATIONS_SIGNATURE_NAME,
+                mvm_core::registry_pack_boot::APPLICATION_ROOT_HASH_MEMBER_NAME,
+                "guest-runtime.tar.gz",
+                "guest-runtime.sha256",
+                "guest-runtime.bundle",
+                "guest-runtime.sha256.bundle",
+                "runtime-overlay.ext4",
+                "runtime-overlay.verity",
+            ]
+            .contains(name),
+            "reserved supplemental artifact name: {name}"
+        );
+        // Match existing file inputs' symlink following, but never hash a device or FIFO.
+        anyhow::ensure!(
+            std::fs::metadata(path)
+                .with_context(|| format!("reading supplemental artifact {}", path.display()))?
+                .is_file(),
+            "supplemental artifact must resolve to a regular file: {}",
+            path.display()
+        );
+        contents.push_file(
+            name,
+            ArtifactRole::Other,
+            "supplemental artifact",
+            path.to_str()
+                .context("supplemental artifact path is not UTF-8")?,
+        )?;
+    }
+
     let key_id = signer.key_id();
     let members = declarations_for(inputs, &contents.artifacts, verity.is_some());
     let manifest = manifest_for(inputs, signer, &key_id, contents.artifacts, members, verity);

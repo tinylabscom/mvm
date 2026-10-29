@@ -22,6 +22,145 @@ const VERITY: &[u8] = b"verity hash tree";
 const SIDECAR: &[u8] = br#"{"accessible":false}"#;
 const ROOTHASH: &str = "abababababababababababababababababababababababababababababababab";
 
+#[test]
+fn supplemental_files_are_signed_verified_and_tamper_evident() {
+    let slot = Slot::new();
+    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let path = slot.dir.path().join("diagnostic.txt");
+    let bytes = b"unique supplemental diagnostic payload";
+    std::fs::write(&path, bytes).unwrap();
+    let extras = [("diagnostic.txt", path.as_path())];
+    let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+    assert!(inputs.supplemental_artifacts.is_empty());
+    inputs.supplemental_artifacts = &extras;
+    export(&inputs, &signer);
+    let bundle = verify(&out, &signer).unwrap();
+    assert_eq!(bundle.manifest.schema_version, 3);
+    let artifact = bundle.manifest.find_by_name("diagnostic.txt").unwrap();
+    assert_eq!(artifact.role, ArtifactRole::Other);
+    assert_eq!(artifact.path, "artifacts/diagnostic.txt");
+    assert_eq!(artifact.sha256, sha256_hex(bytes));
+    assert_eq!(artifact.size_bytes, bytes.len() as u64);
+    assert_eq!(bundle.artifacts[&artifact.path], bytes);
+    let mut archive = std::fs::read(&out).unwrap();
+    let at = archive
+        .windows(bytes.len())
+        .position(|window| window == bytes)
+        .unwrap();
+    archive[at] ^= 1;
+    assert!(matches!(
+        read_and_verify_bundle(&archive, &OneKey(signer.key.verifying_key())),
+        Err(BundleVerifyError::ArtifactSha256Mismatch { .. })
+    ));
+    let mut archive = std::fs::read(&out).unwrap();
+    let at = archive
+        .windows(artifact.sha256.len())
+        .position(|window| window == artifact.sha256.as_bytes())
+        .unwrap();
+    archive[at] = if archive[at] == b'a' { b'b' } else { b'a' };
+    assert!(
+        read_and_verify_bundle(&archive, &OneKey(signer.key.verifying_key())).is_err(),
+        "changing a supplemental manifest digest must invalidate its signature"
+    );
+}
+
+#[test]
+fn supplemental_names_refuse_unsafe_reserved_and_duplicate_inputs() {
+    let slot = Slot::new();
+    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let path = Path::new(&kernel);
+    let signer = TestSigner::new(7);
+    for name in [
+        "",
+        ".",
+        "..",
+        "../escape",
+        "/absolute",
+        "nested/file",
+        r"nested\file",
+        "C:drive",
+        "vmlinux",
+        "rootfs.ext4",
+        "initrd",
+        "rootfs.verity",
+        "mvm-meta.json",
+        "boot-image-set.json",
+        "boot-image-set.json.bundle",
+        "image-set-revocations.json",
+        "image-set-revocations.json.bundle",
+        mvm_core::registry_pack_boot::APPLICATION_ROOT_HASH_MEMBER_NAME,
+        "guest-runtime.tar.gz",
+        "guest-runtime.sha256",
+        "guest-runtime.bundle",
+        "guest-runtime.sha256.bundle",
+        "runtime-overlay.ext4",
+        "runtime-overlay.verity",
+    ] {
+        let extras = [(name, path)];
+        let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+        inputs.supplemental_artifacts = &extras;
+        assert!(
+            export_bundle_with_signer(&inputs, &signer).is_err(),
+            "{name:?}"
+        );
+        assert_nothing_written(&out);
+    }
+    let extras = [("duplicate", path), ("duplicate", path)];
+    let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+    inputs.supplemental_artifacts = &extras;
+    let error = export_bundle_with_signer(&inputs, &signer).unwrap_err();
+    assert!(format!("{error:#}").contains("duplicate bundle artifact"));
+    assert_nothing_written(&out);
+}
+
+#[test]
+fn supplemental_files_refuse_directories_missing_files_and_oversized_files() {
+    let slot = Slot::new();
+    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let large = slot.dir.path().join("large");
+    std::fs::File::create(&large)
+        .unwrap()
+        .set_len(MAX_BUNDLE_ENTRY_BYTES + 1)
+        .unwrap();
+    let missing = slot.dir.path().join("missing");
+    for path in [slot.dir.path(), missing.as_path(), large.as_path()] {
+        let extras = [("diagnostic", path)];
+        let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+        inputs.supplemental_artifacts = &extras;
+        assert!(export_bundle_with_signer(&inputs, &TestSigner::new(7)).is_err());
+        assert_nothing_written(&out);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn supplemental_symlinks_follow_regular_targets_only() {
+    let slot = Slot::new();
+    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let link = slot.dir.path().join("link");
+    std::os::unix::fs::symlink(&kernel, &link).unwrap();
+    let extras = [("diagnostic", link.as_path())];
+    let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+    inputs.supplemental_artifacts = &extras;
+    let signer = TestSigner::new(7);
+    export(&inputs, &signer);
+    assert_eq!(
+        verify(&out, &signer).unwrap().artifacts["artifacts/diagnostic"],
+        KERNEL
+    );
+    let bad_link = slot.dir.path().join("directory-link");
+    std::os::unix::fs::symlink(slot.dir.path(), &bad_link).unwrap();
+    let extras = [("diagnostic", bad_link.as_path())];
+    inputs.supplemental_artifacts = &extras;
+    assert!(export_bundle_with_signer(&inputs, &signer).is_err());
+    let socket = slot.dir.path().join("socket");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let extras = [("diagnostic", socket.as_path())];
+    inputs.supplemental_artifacts = &extras;
+    assert!(export_bundle_with_signer(&inputs, &signer).is_err());
+}
+
 struct TestSigner {
     key: SigningKey,
 }
