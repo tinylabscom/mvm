@@ -16,6 +16,16 @@
 //!
 //! Any failure here (no key, wrong permissions, unreadable file) means "do not
 //! use the cache": the caller hashes the file, which is always correct.
+//!
+//! The seal is a claim only this host's key can make; it does not stop a process
+//! of the same user that can read the key file, which can mint a seal for any
+//! bytes. A malicious host is out of scope, so that is the line this cache
+//! holds, not a stronger one.
+//!
+//! A digest is sealed only for a file that has [`settled`](FileIdentity::settled):
+//! a write in the same timestamp tick as the sealing `stat` leaves size, mtime
+//! and ctime unchanged, so a file that was just written cannot be told apart
+//! from the same file rewritten.
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
@@ -71,6 +81,41 @@ impl FileIdentity {
     #[must_use]
     pub fn of(_meta: &Metadata) -> Option<Self> {
         None
+    }
+
+    /// Whether the newest of mtime and ctime is at least `window` older than
+    /// `now`, so a later write cannot share the recorded timestamps. A
+    /// timestamp in the future, a clock before the epoch, and a ctime with no
+    /// sub-second part (a filesystem too coarse for any window to outlast its
+    /// tick) are all unsettled.
+    #[must_use]
+    pub fn settled(&self, now: std::time::SystemTime, window: std::time::Duration) -> bool {
+        self.settle_delay(now, window) == Some(std::time::Duration::ZERO)
+    }
+
+    /// Time remaining before this identity can settle; `None` means waiting
+    /// cannot help (coarse timestamps, a future timestamp, or a pre-epoch clock).
+    #[must_use]
+    pub fn settle_delay(
+        &self,
+        now: std::time::SystemTime,
+        window: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        const SECOND: i128 = 1_000_000_000;
+        let now = now.duration_since(std::time::UNIX_EPOCH).ok()?;
+        let newest = self.mtime_nanos.max(self.ctime_nanos);
+        let age = i128::try_from(now.as_nanos()).unwrap_or(i128::MAX) - newest;
+        if self.ctime_nanos.rem_euclid(SECOND) == 0 || age < 0 {
+            return None;
+        }
+        if age >= i128::try_from(window.as_nanos()).unwrap_or(i128::MAX) {
+            return Some(std::time::Duration::ZERO);
+        }
+        let age = std::time::Duration::new(
+            u64::try_from(age / SECOND).ok()?,
+            u32::try_from(age % SECOND).ok()?,
+        );
+        Some(window.saturating_sub(age))
     }
 }
 
@@ -209,6 +254,82 @@ mod tests {
             mtime_nanos: 10,
             ctime_nanos: ctime,
         }
+    }
+
+    const WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+
+    fn at(nanos: i128) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + std::time::Duration::from_nanos(u64::try_from(nanos).unwrap())
+    }
+
+    fn stamped(mtime: i128, ctime: i128) -> FileIdentity {
+        FileIdentity {
+            mtime_nanos: mtime,
+            ..identity(1, ctime)
+        }
+    }
+
+    #[test]
+    fn a_file_is_settled_exactly_at_the_window_and_not_a_nanosecond_before() {
+        let ctime = 5_000_000_123;
+        let id = stamped(ctime, ctime);
+        let window = WINDOW.as_nanos() as i128;
+        assert!(!id.settled(at(ctime + window - 1), WINDOW));
+        assert!(id.settled(at(ctime + window), WINDOW));
+    }
+
+    #[test]
+    fn the_newer_of_mtime_and_ctime_decides() {
+        let id = stamped(9_000_000_007, 5_000_000_123);
+        let window = WINDOW.as_nanos() as i128;
+        assert!(!id.settled(at(9_000_000_007 + window - 1), WINDOW));
+        assert!(id.settled(at(9_000_000_007 + window), WINDOW));
+    }
+
+    #[test]
+    fn a_timestamp_in_the_future_is_never_settled() {
+        let id = stamped(5_000_000_123, 9_000_000_007);
+        assert!(!id.settled(at(5_000_000_124), WINDOW));
+        assert!(!id.settled(at(9_000_000_006), WINDOW));
+    }
+
+    #[test]
+    fn a_whole_second_ctime_is_never_settled() {
+        let id = stamped(1_000_000_001, 2_000_000_000);
+        assert!(!id.settled(at(1_000_000_000_000), WINDOW));
+    }
+
+    #[test]
+    fn a_clock_before_the_epoch_settles_nothing() {
+        let before = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert!(!stamped(5_000_000_123, 5_000_000_123).settled(before, WINDOW));
+    }
+
+    #[test]
+    fn settle_delay_only_waits_for_identities_that_can_settle() {
+        use std::time::Duration;
+        let stamp = 5_000_000_123;
+        let id = stamped(stamp, stamp);
+        let read_started = at(stamp + 100_000_000);
+        assert_eq!(
+            id.settle_delay(read_started, WINDOW),
+            Some(Duration::from_millis(150))
+        );
+        assert!(!id.settled(read_started, WINDOW));
+        assert!(id.settled(read_started + Duration::from_millis(300), WINDOW));
+        assert_eq!(
+            id.settle_delay(at(stamp + 250_000_000), WINDOW),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(id.settle_delay(at(stamp - 1), WINDOW), None);
+        assert_eq!(
+            stamped(stamp, 5_000_000_000).settle_delay(at(stamp), WINDOW),
+            None
+        );
+        assert_eq!(
+            id.settle_delay(std::time::UNIX_EPOCH - Duration::from_secs(1), WINDOW),
+            None
+        );
     }
 
     #[test]

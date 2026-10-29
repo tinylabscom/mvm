@@ -745,8 +745,7 @@ mod tests {
     #[test]
     fn an_oversized_batch_is_split_and_a_single_oversized_record_is_dropped() {
         let sink = Capture::default();
-        let (queue, guard) =
-            start_injected_sink(worker(sink.clone()), 64, Duration::from_secs(5)).unwrap();
+        let (queue, rx) = span_queue(64);
         // Each span carries ~1.5 MiB of attributes: two fit in one request,
         // three do not, so four split into two requests.
         let fat = |id| {
@@ -775,7 +774,9 @@ mod tests {
             })
             .collect();
         queue.offer(huge);
-        drop(guard);
+        // Test splitting through the real worker/drain without racing the
+        // guard's shutdown deadline; bounded shutdown has separate coverage.
+        worker(sink.clone()).run(&rx, &AtomicBool::new(true), &queue);
         let batches = sink.0.lock().unwrap().clone();
         assert_eq!(batches.iter().sum::<usize>(), 4, "{batches:?}");
         assert!(batches.len() >= 2, "the fat batch was split: {batches:?}");

@@ -13,6 +13,7 @@ mod mmio_layout;
 mod page_release;
 mod smp;
 pub mod snapshot;
+mod snapshot_capture;
 mod sys;
 mod vcpu;
 

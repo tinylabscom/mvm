@@ -664,6 +664,24 @@ debug = "line-tables-only"
 incremental = true
 codegen-units = 256
 
+# Local-image integration tests repeatedly fingerprint the full source checkout.
+# Optimize the measured observation/attribute/object-decoding hot paths without
+# changing test assertions, overflow checks, or production build profiles.
+[profile.test.package.mvm-build]
+opt-level = 2
+[profile.test.package.gix-worktree]
+opt-level = 2
+[profile.test.package.gix-attributes]
+opt-level = 2
+[profile.test.package.gix-glob]
+opt-level = 2
+[profile.test.package.gix-pack]
+opt-level = 2
+[profile.test.package.gix-odb]
+opt-level = 2
+[profile.test.package.zlib-rs]
+opt-level = 2
+
 # The `dev` profile is what cargo compiles every LIBRARY crate under, even during
 # `cargo test`/`nextest` (only the test *binaries* use `[profile.test]`). Without
 # this override it defaults to `debug = 2` — full DWARF — which is the single

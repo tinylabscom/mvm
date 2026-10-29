@@ -482,6 +482,52 @@ not paraphrase this row without them.
   the project never accidentally commits to defending against them by
   omission.
 
+### PS-21 Firecracker authority boundary
+
+**Approved source-design direction, not shipped enforcement or a live witness.**
+The owner approved [option A for #4414](https://github.com/tinylabscom/mvm/issues/4414#issuecomment-6481580558):
+direct current-user launches with operator-provisioned access and predelegated
+resources. This refines the [existing-role contract](https://github.com/tinylabscom/mvm/issues/4414#issuecomment-6224073768);
+it does not promote a claim, change the tier matrix, or establish that the
+current shell/scope launch paths satisfy this boundary.
+
+- **Provisioning precedes launch.** The operator supplies KVM/device access and
+  delegated resource authority separately. Hosts relying on the old implicit
+  privileged route are unsupported by the replacement until provisioned. Missing
+  rights or mechanisms refuse before process creation; there is no `sudo`,
+  `doas`, `pkexec`, shell, utility, or unbounded-launch fallback.
+- **Containment exists at birth.** Before creating the selected VMM process, the
+  backend validates finite CPU, memory, swap, task, FD and time limits against
+  the admitted plan and operator policy. Linux resource-group placement must be
+  atomic with process creation, not a later move into a cgroup. A mechanism that
+  cannot enforce a required limit cannot launch. Numeric role profiles and their
+  enforcement need review and evidence; this decision invents no default budget.
+- **Authority is closed and prepared.** Only the selected verified VMM binary
+  and the original admitted typed plan authorize a launch. Final effective
+  configuration, environment, generation and retained descriptors stay bound
+  to that admission. Caller-provided program paths, argv, PIDs or callbacks are
+  not execution authority; deferred build, probing or signing is not a launch step.
+- **Original ownership survives failure.** The original process/generation
+  observer, runtime/file leases, required role owners and capture writer remain
+  held through activation, dispatch, flush and confirmed stop. Uncertain stop or
+  writer state remains nonterminal: no destructive cleanup, partial publication
+  or terminal audit seal. PID disappearance alone is not terminal proof.
+- **Existing security boundaries remain.** Keep the VMM supervisor, FlowMux
+  endpoint, broker/signer key-holder, host-agent and conditional GPU roles
+  separate and use only those required by the selected backend. This authorizes
+  no additional service or generic helper. Signed grants, chain-signed audit,
+  the NIC-less guest and authenticated vsock path remain binding; keys and raw
+  credentials do not move into the parser, VMM or guest.
+
+The alternative of a new privileged launch service was not approved: it would
+add privileged IPC, installation and lifecycle authority beyond this contract.
+Implementation must remove the old escalation/utility route and demonstrate
+pre-birth refusal, bounded readiness, confirmed stop, retained recovery ownership
+and cleanup before runtime parity is claimed. Installation, activation, native
+or privileged witnesses, billable runs, signing and release actions still need
+their applicable authorization. This decision alone satisfies none of those
+execution or acceptance gates.
+
 ### Per-backend tier matrix
 
 mvm ships four workload-capable VM backends plus a test-only mock and an

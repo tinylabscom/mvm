@@ -1193,31 +1193,141 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     ui::info("The binary has been replaced on disk.");
     ui::info("To verify: Open a new shell and run 'mvmctl --version'");
     ui::info("Or run: hash -r  (to clear your shell's command cache)");
-    ui::info(UPDATED_BINARY_BOOTSTRAP_NOTE);
+
+    // The updated binary assembles its guest runtime from the archive this
+    // update just staged, and there is no other copy to boot, so a launch
+    // refuses until that has run. Do it here rather than leaving the user to.
+    let preparation =
+        prepare_after_update(std::env::var("MVM_SKIP_BOOTSTRAP").ok().as_deref(), || {
+            ui::info("Getting the new version ready...");
+            run_updated_binary_preparation(&current_exe)
+        });
+    match preparation {
+        Preparation::Ready => ui::success(preparation.message()),
+        Preparation::Skipped | Preparation::Failed => ui::warn(preparation.message()),
+    }
 
     Ok(())
 }
 
-/// The updated binary assembles its runtime overlay, initramfs and SDK
-/// sidecars from the guest runtime just staged, and there is no other copy to
-/// boot: until it runs bootstrap, a launch refuses and names it.
-const UPDATED_BINARY_BOOTSTRAP_NOTE: &str = "Then run 'mvmctl bootstrap' once: the new version \
-     assembles its guest runtime from the archive this update staged before its first launch.";
+/// How getting the freshly installed version ready ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Preparation {
+    /// The user opted out with `MVM_SKIP_BOOTSTRAP=1`, as for the installer.
+    Skipped,
+    Ready,
+    /// The attempt did not finish. It is not an update failure: the new binary
+    /// is installed and verified, and the preparation can be retried.
+    Failed,
+}
+
+impl Preparation {
+    /// What the user is told. While a launch still refuses until the guest
+    /// runtime is prepared, the two non-ready outcomes must say how to finish.
+    fn message(self) -> &'static str {
+        match self {
+            Self::Ready => "Ready.",
+            Self::Skipped => {
+                "Skipped getting the new version ready (MVM_SKIP_BOOTSTRAP=1). \
+                 Run 'mvmctl bootstrap' before your first launch."
+            }
+            Self::Failed => {
+                "The update is installed, but getting it ready did not finish. \
+                 Run 'mvmctl bootstrap' to retry before your first launch."
+            }
+        }
+    }
+}
+
+/// Decide and run the post-update preparation. `skip` is the value of
+/// `MVM_SKIP_BOOTSTRAP`; only `1` opts out, matching the installer. `run`
+/// reports whether the preparation succeeded.
+fn prepare_after_update(skip: Option<&str>, run: impl FnOnce() -> bool) -> Preparation {
+    if skip == Some("1") {
+        return Preparation::Skipped;
+    }
+    if run() {
+        Preparation::Ready
+    } else {
+        Preparation::Failed
+    }
+}
+
+/// Run the installed binary's own preparation. It must be the new binary, not
+/// this process: the guest runtime is assembled for the version that runs it.
+fn run_updated_binary_preparation(exe: &Path) -> bool {
+    mvm_core::env_hygiene::helper_command(exe)
+        .arg("bootstrap")
+        .status()
+        .is_ok_and(|status| status.success())
+}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        UPDATED_BINARY_BOOTSTRAP_NOTE, UpdateAction, decide_update, source_helper_commit,
+        Preparation, UpdateAction, decide_update, prepare_after_update, source_helper_commit,
         source_helper_commit_for, source_helper_marker_matches, validate_source_helper_bundle,
         validate_source_helper_identity,
     };
     use mvm_build::artifact_acquisition::DistributionChannel;
 
-    /// An updated binary has no assembled guest runtime of its own version
-    /// yet, and nothing to fall back to, so the update names the bootstrap.
+    /// An updated binary has no assembled guest runtime of its own version and
+    /// nothing to fall back to, so the update gets it ready instead of asking.
     #[test]
-    fn an_update_names_the_bootstrap_that_assembles_the_new_guest_runtime() {
-        assert!(UPDATED_BINARY_BOOTSTRAP_NOTE.contains("mvmctl bootstrap"));
+    fn an_update_gets_the_new_version_ready_itself() {
+        let mut ran = false;
+        let outcome = prepare_after_update(None, || {
+            ran = true;
+            true
+        });
+        assert!(ran);
+        assert_eq!(outcome, Preparation::Ready);
+    }
+
+    #[test]
+    fn only_the_installers_opt_out_value_skips_the_preparation() {
+        let mut ran = false;
+        assert_eq!(
+            prepare_after_update(Some("1"), || {
+                ran = true;
+                true
+            }),
+            Preparation::Skipped
+        );
+        assert!(!ran, "an opted-out update must not run it");
+        for other in ["0", "", "true", "yes"] {
+            assert_eq!(
+                prepare_after_update(Some(other), || true),
+                Preparation::Ready,
+                "{other:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_preparation_that_does_not_finish_is_reported_and_is_not_an_update_failure() {
+        assert_eq!(prepare_after_update(None, || false), Preparation::Failed);
+        assert!(Preparation::Failed.message().contains("installed"));
+    }
+
+    /// While a launch still refuses until the runtime is prepared, a user who
+    /// skipped or hit a failure must be told how to finish. Neither message may
+    /// use the builder's internal vocabulary.
+    #[test]
+    fn the_messages_say_how_to_finish_and_use_no_internal_vocabulary() {
+        for outcome in [Preparation::Skipped, Preparation::Failed] {
+            assert!(outcome.message().contains("mvmctl bootstrap"));
+        }
+        for outcome in [
+            Preparation::Ready,
+            Preparation::Skipped,
+            Preparation::Failed,
+        ] {
+            let message = outcome.message().to_lowercase();
+            for banned in ["builder vm", "stage 0", "image set", "guest runtime"] {
+                assert!(!message.contains(banned), "{outcome:?}: {message}");
+            }
+        }
     }
 
     #[test]

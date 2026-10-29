@@ -18,7 +18,10 @@ const DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::CLOEXEC);
 
 pub(super) fn list(store: &CheckpointStore) -> Result<Vec<CheckpointMeta>> {
-    let root = match rustix::fs::open(&store.root, DIRECTORY, Mode::empty()) {
+    // Ancestors remain the caller's trusted prefix. Strip trailing separators
+    // and current-directory components so NOFOLLOW checks the catalog itself.
+    let root: std::path::PathBuf = store.root.components().collect();
+    let root = match rustix::fs::open(&root, DIRECTORY, Mode::empty()) {
         Ok(root) => File::from(root),
         Err(rustix::io::Errno::NOENT) => return Ok(Vec::new()),
         Err(error) => return Err(error).context("opening checkpoints directory"),
@@ -117,6 +120,29 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn root_no_follow_is_independent_of_trailing_path_spelling() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("catalog");
+        let expected = seed(&root, "a");
+        let link = parent.path().join("alias");
+        symlink(&root, &link).unwrap();
+
+        for suffix in ["", "/", "/.", "/./"] {
+            let real = format!("{}{suffix}", root.display());
+            assert_eq!(
+                CheckpointStore::at(&real).list().unwrap(),
+                vec![expected.clone()],
+                "real directory spelling {real}"
+            );
+            let alias = format!("{}{suffix}", link.display());
+            assert!(
+                CheckpointStore::at(&alias).list().is_err(),
+                "followed symlink root {alias}"
+            );
+        }
     }
 
     #[test]

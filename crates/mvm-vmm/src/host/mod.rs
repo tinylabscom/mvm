@@ -35,6 +35,7 @@ pub mod process_usage;
 pub mod restore_image;
 pub mod runtime_meta;
 pub mod shell;
+pub mod snapshot_publish;
 pub mod snapshot_upper;
 pub mod spec_map;
 pub mod telemetry_provisioning;
