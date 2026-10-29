@@ -7,12 +7,16 @@
 //! refuses to seal such a manifest, and [`super::read_and_verify_bundle`]
 //! refuses to accept one.
 
+#[cfg(feature = "host-state")]
 use mvm_contract::plan::bundle::{
-    ArtifactRole, BundleManifest, BundleMember, BundleSecurityPosture,
-    ENVIRONMENT_MEMBER_MIN_SCHEMA, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES,
+    ArtifactRole, BundleManifest, BundleMember, ENVIRONMENT_MEMBER_MIN_SCHEMA,
     MAX_KERNEL_CMDLINE_BYTES,
 };
+use mvm_contract::plan::bundle::{
+    BundleSecurityPosture, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES,
+};
 use mvm_contract::plan::environment::{EnvironmentCapability, EnvironmentDescriptor};
+#[cfg(feature = "host-state")]
 use mvm_contract::plan::types::BuildProvenance;
 use mvm_contract::policy::security::AgentProfile;
 
@@ -54,12 +58,49 @@ impl BundleSizeBudget {
 
 /// Every check on a manifest's declarations: the size caps over its declared
 /// artifacts, then each declaration member.
+#[cfg(feature = "host-state")]
 pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), BundleVerifyError> {
     let mut budget = BundleSizeBudget::default();
     for artifact in &manifest.artifacts {
         budget.admit(&artifact.path, artifact.size_bytes)?;
     }
     refuse_repeated_declarations(&manifest.members)?;
+    for member in &manifest.members {
+        let floor = member.minimum_schema_version();
+        if manifest.schema_version < floor {
+            let reason = format!(
+                "the member requires bundle schema {floor}, but the manifest declares schema {}",
+                manifest.schema_version
+            );
+            return Err(if matches!(member, BundleMember::Environment(_)) {
+                BundleVerifyError::EnvironmentRefused { reason }
+            } else {
+                BundleVerifyError::ManifestParse(reason)
+            });
+        }
+    }
+    if let Some(runtime) = manifest.members.iter().find_map(|member| match member {
+        BundleMember::EmbeddedCliBootAssets(runtime) => Some(runtime),
+        _ => None,
+    }) {
+        if manifest.members.iter().any(|member| {
+            matches!(
+                member,
+                BundleMember::EmbeddedBootAssets { .. } | BundleMember::EmbeddedImageSet { .. }
+            )
+        }) {
+            return Err(BundleVerifyError::ManifestParse(
+                "CLI boot assets cannot mix legacy or full image-set members".into(),
+            ));
+        }
+        validate_cli_runtime(runtime, manifest)?;
+    }
+    if let Some(proof) = manifest.members.iter().find_map(|member| match member {
+        BundleMember::CanonicalLinuxProof(proof) => Some(proof),
+        _ => None,
+    }) {
+        validate_canonical_linux_proof(proof, manifest)?;
+    }
     if manifest
         .members
         .iter()
@@ -98,10 +139,13 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn declaration_class(member: &BundleMember) -> Option<&'static str> {
     match member {
         BundleMember::EmbeddedImageSet { .. } => None,
         BundleMember::EmbeddedBootAssets { .. } => Some("embedded_boot_assets"),
+        BundleMember::EmbeddedCliBootAssets(_) => Some("embedded_cli_boot_assets"),
+        BundleMember::CanonicalLinuxProof(_) => Some("canonical_linux_proof"),
         BundleMember::KernelCmdline { .. } => Some("kernel_cmdline"),
         BundleMember::SecurityPosture(_) => Some("security_posture"),
         BundleMember::BuildProvenance(_) => Some("build_provenance"),
@@ -109,8 +153,144 @@ fn declaration_class(member: &BundleMember) -> Option<&'static str> {
     }
 }
 
+#[cfg(feature = "host-state")]
+fn validate_canonical_linux_proof(
+    proof: &mvm_contract::plan::bundle::CanonicalLinuxProof,
+    manifest: &BundleManifest,
+) -> Result<(), BundleVerifyError> {
+    let refused = |reason: &str| BundleVerifyError::ManifestParse(reason.to_owned());
+    let runtime = manifest
+        .members
+        .iter()
+        .find_map(|member| match member {
+            BundleMember::EmbeddedCliBootAssets(runtime) => Some(runtime),
+            _ => None,
+        })
+        .ok_or_else(|| refused("canonical Linux proof requires explicit CLI boot assets"))?;
+    if proof.manifest_artifact != runtime.manifest_artifact {
+        return Err(refused(
+            "canonical Linux proof names a different selected Linux root",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for name in [
+        &proof.manifest_artifact,
+        &proof.signature_bundle_artifact,
+        &proof.revocation_document_artifact,
+        &proof.revocation_signature_bundle_artifact,
+    ] {
+        if !seen.insert(name) {
+            return Err(refused("canonical Linux proof references must be distinct"));
+        }
+        let artifact = manifest
+            .find_by_name(name)
+            .ok_or_else(|| refused("canonical Linux proof artifact missing"))?;
+        let limit = if name == &proof.manifest_artifact {
+            4 * 1024 * 1024
+        } else {
+            1024 * 1024
+        };
+        if artifact.role != ArtifactRole::Other
+            || artifact.size_bytes == 0
+            || artifact.size_bytes > limit
+        {
+            return Err(refused(
+                "canonical Linux proof artifact has wrong role or invalid size",
+            ));
+        }
+        if name != &proof.manifest_artifact
+            && [
+                &runtime.archive_artifact,
+                &runtime.checksum_artifact,
+                &runtime.signature_bundle_artifact,
+                &runtime.checksum_signature_bundle_artifact,
+                &runtime.overlay_artifact,
+                &runtime.overlay_verity_artifact,
+                &runtime.initramfs_artifact,
+            ]
+            .contains(&name)
+        {
+            return Err(refused(
+                "canonical Linux proof cannot alias CLI runtime artifacts",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "host-state")]
+fn validate_cli_runtime(
+    runtime: &mvm_contract::plan::bundle::EmbeddedCliBootAssets,
+    manifest: &BundleManifest,
+) -> Result<(), BundleVerifyError> {
+    let refused = |reason: &str| BundleVerifyError::ManifestParse(reason.to_owned());
+    if runtime.arch != manifest.arch
+        || !matches!(runtime.arch.as_str(), "x86_64" | "aarch64")
+        || runtime.version.is_empty()
+        || runtime.version.trim() != runtime.version
+        || runtime.protocol_version == 0
+        || runtime.min_supported_protocol_version == 0
+        || runtime.min_supported_protocol_version > runtime.protocol_version
+        || runtime.overlay_roothash.len() != 64
+        || !runtime
+            .overlay_roothash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(refused(
+            "invalid CLI runtime identity, protocol or verity root",
+        ));
+    }
+    let names = [
+        &runtime.manifest_artifact,
+        &runtime.archive_artifact,
+        &runtime.checksum_artifact,
+        &runtime.signature_bundle_artifact,
+        &runtime.checksum_signature_bundle_artifact,
+        &runtime.overlay_artifact,
+        &runtime.overlay_verity_artifact,
+        &runtime.initramfs_artifact,
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for name in names {
+        if !seen.insert(name) {
+            return Err(refused("CLI runtime members must name distinct artifacts"));
+        }
+        let artifact = manifest
+            .find_by_name(name)
+            .ok_or_else(|| refused("CLI runtime artifact missing"))?;
+        let role = if name == &runtime.initramfs_artifact {
+            ArtifactRole::Initrd
+        } else {
+            ArtifactRole::Other
+        };
+        if artifact.role != role || artifact.size_bytes == 0 {
+            return Err(refused("CLI runtime artifact has wrong role or is empty"));
+        }
+    }
+    if manifest
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.role == ArtifactRole::Initrd)
+        .count()
+        != 1
+        || manifest
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.role == ArtifactRole::Kernel)
+            .count()
+            != 1
+    {
+        return Err(refused(
+            "CLI boot assets require exactly one kernel and initrd",
+        ));
+    }
+    Ok(())
+}
+
 /// Two postures in one bundle would leave the launcher to pick one, and
 /// whichever it picked the other was signed for nothing.
+#[cfg(feature = "host-state")]
 fn refuse_repeated_declarations(members: &[BundleMember]) -> Result<(), BundleVerifyError> {
     let mut seen: Vec<&'static str> = Vec::new();
     for class in members.iter().filter_map(declaration_class) {
@@ -122,6 +302,7 @@ fn refuse_repeated_declarations(members: &[BundleMember]) -> Result<(), BundleVe
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn validate_cmdline(cmdline: &str) -> Result<(), BundleVerifyError> {
     let malformed = |reason: String| Err(BundleVerifyError::MalformedCmdline { reason });
     if cmdline.trim().is_empty() {
@@ -141,6 +322,7 @@ fn validate_cmdline(cmdline: &str) -> Result<(), BundleVerifyError> {
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn validate_posture(
     posture: &BundleSecurityPosture,
     has_verity_binding: bool,
@@ -174,6 +356,7 @@ fn validate_posture(
 /// signed posture permits. A descriptor that requires any capability without a
 /// posture to measure it against is refused: there is nothing to say the
 /// publisher permitted it.
+#[cfg(feature = "host-state")]
 fn validate_environment(
     environment: &EnvironmentDescriptor,
     manifest: &BundleManifest,
@@ -208,6 +391,74 @@ fn validate_environment(
         });
     }
     Ok(())
+}
+
+/// Signed requirements for which launch admission cannot establish fulfillment.
+///
+/// Keep this rule shared by local and externally signed plan admission. Merely
+/// preserving a declaration in an authenticated manifest does not enforce it.
+pub fn unsupported_environment_requirements(
+    environment: &EnvironmentDescriptor,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if environment.entrypoint.working_dir.is_some() {
+        fields.push("entrypoint.working_dir");
+    }
+    if !environment.volumes.is_empty() {
+        fields.push("volumes");
+    }
+    if !environment.services.is_empty() {
+        fields.push("services");
+    }
+    fields
+}
+
+/// Whether a concrete launch network is contained in the signed environment.
+/// This measures a ceiling only; it never supplies authority or defaults.
+pub fn environment_network_permitted(
+    environment: &EnvironmentDescriptor,
+    network: &crate::network_policy::NetworkPolicy,
+) -> bool {
+    use mvm_contract::grants::{EgressGrant, Grants, subset::grants_are_subset};
+    use mvm_contract::plan::environment::EnvironmentPolicy;
+    let Some(policy) = &environment.policy else {
+        return true;
+    };
+    if policy.validate().is_err() || !network.peers().is_empty() {
+        return false;
+    }
+    if let Some(ceiling) = policy.request_budget {
+        let Some(actual) = network.ai().and_then(|ai| ai.request_budget) else {
+            return false;
+        };
+        if !ceiling.permits(&actual) {
+            return false;
+        }
+    }
+    let Some(rules) = network.resolve_rules() else {
+        return false;
+    };
+    let allowed: Vec<_> = policy
+        .allow_hosts
+        .iter()
+        .filter_map(|host| EnvironmentPolicy::parse_authority(host).ok())
+        .collect();
+    let child = Grants {
+        egress: Some(EgressGrant { allow: rules }),
+        ..Default::default()
+    };
+    let parent = Grants {
+        egress: Some(EgressGrant {
+            allow: allowed.clone(),
+        }),
+        ..Default::default()
+    };
+    grants_are_subset(&child, &parent).is_ok()
+        && network.routes().iter().all(|route| {
+            allowed
+                .iter()
+                .any(|host| host.host == route.host && host.port == route.port)
+        })
 }
 
 /// Required descriptor slots not bound by the signed plan. This checks names,
@@ -254,6 +505,7 @@ fn posture_permits(posture: &BundleSecurityPosture, capability: EnvironmentCapab
 /// bundle carries must match it. Digests for outputs a bundle has no role for
 /// (`mvm_init`, `snapshot_base`) describe the build, not the archive, and are
 /// carried as recorded.
+#[cfg(feature = "host-state")]
 fn validate_provenance(
     provenance: &BuildProvenance,
     manifest: &BundleManifest,
@@ -292,7 +544,7 @@ fn validate_provenance(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-state"))]
 mod tests {
     use super::*;
     use mvm_contract::plan::bundle::{BUNDLE_SCHEMA_VERSION, BundleArtifact, KeyId, VerityInfo};
@@ -333,6 +585,121 @@ mod tests {
             requires_auth: true,
             allows_volumes: false,
             allows_egress: false,
+        }
+    }
+
+    #[test]
+    fn canonical_linux_proof_requires_complete_paired_inventory_and_floor_seven() {
+        use mvm_contract::plan::bundle::{CanonicalLinuxProof, EmbeddedCliBootAssets};
+        let runtime = EmbeddedCliBootAssets {
+            manifest_artifact: "linux.json".into(),
+            version: "0.24.0".into(),
+            arch: "x86_64".into(),
+            archive_artifact: "runtime.tar.gz".into(),
+            checksum_artifact: "runtime.sha256".into(),
+            signature_bundle_artifact: "runtime.bundle".into(),
+            checksum_signature_bundle_artifact: "runtime.sha256.bundle".into(),
+            overlay_artifact: "overlay".into(),
+            overlay_verity_artifact: "overlay.verity".into(),
+            initramfs_artifact: "initrd".into(),
+            overlay_roothash: "a".repeat(64),
+            protocol_version: 2,
+            min_supported_protocol_version: 2,
+        };
+        let proof = CanonicalLinuxProof {
+            manifest_artifact: "linux.json".into(),
+            signature_bundle_artifact: "linux.bundle".into(),
+            revocation_document_artifact: "revocations.json".into(),
+            revocation_signature_bundle_artifact: "revocations.bundle".into(),
+        };
+        let artifacts = [
+            "linux.json",
+            "linux.bundle",
+            "revocations.json",
+            "revocations.bundle",
+            "runtime.tar.gz",
+            "runtime.sha256",
+            "runtime.bundle",
+            "runtime.sha256.bundle",
+            "overlay",
+            "overlay.verity",
+            "initrd",
+            "kernel",
+        ]
+        .into_iter()
+        .map(|name| {
+            artifact(
+                name,
+                match name {
+                    "initrd" => ArtifactRole::Initrd,
+                    "kernel" => ArtifactRole::Kernel,
+                    _ => ArtifactRole::Other,
+                },
+                &"a".repeat(64),
+                1,
+            )
+        })
+        .collect();
+        let valid = manifest(
+            artifacts,
+            vec![
+                BundleMember::EmbeddedCliBootAssets(runtime),
+                BundleMember::CanonicalLinuxProof(proof.clone()),
+            ],
+        );
+        // Structural/inventory validation only; no freshness or boot claim.
+        validate_declarations(&valid).unwrap();
+        let mut bad = valid.clone();
+        bad.schema_version = 6;
+        assert!(validate_declarations(&bad).is_err());
+        bad = valid.clone();
+        bad.members
+            .push(BundleMember::CanonicalLinuxProof(proof.clone()));
+        assert!(matches!(
+            validate_declarations(&bad),
+            Err(BundleVerifyError::DuplicateMember { .. })
+        ));
+        bad = valid.clone();
+        bad.members.remove(0);
+        assert!(validate_declarations(&bad).is_err());
+        for name in ["linux.bundle", "revocations.json", "revocations.bundle"] {
+            for mutation in 0..4 {
+                let mut bad = valid.clone();
+                let i = bad.artifacts.iter().position(|a| a.name == name).unwrap();
+                match mutation {
+                    0 => {
+                        bad.artifacts.remove(i);
+                    }
+                    1 => bad.artifacts[i].size_bytes = 0,
+                    2 => bad.artifacts[i].size_bytes = 1024 * 1024 + 1,
+                    _ => bad.artifacts[i].role = ArtifactRole::Kernel,
+                }
+                assert!(validate_declarations(&bad).is_err(), "{name}/{mutation}");
+            }
+        }
+        for replacement in ["different-root", "linux.bundle", "runtime.bundle"] {
+            let mut bad = valid.clone();
+            let BundleMember::CanonicalLinuxProof(p) = &mut bad.members[1] else {
+                unreachable!()
+            };
+            match replacement {
+                "different-root" => p.manifest_artifact = replacement.into(),
+                "linux.bundle" => p.revocation_document_artifact = replacement.into(),
+                _ => p.signature_bundle_artifact = replacement.into(),
+            }
+            assert!(validate_declarations(&bad).is_err(), "{replacement}");
+        }
+        for member in [
+            BundleMember::EmbeddedBootAssets {
+                manifest_artifact: "linux.json".into(),
+            },
+            BundleMember::EmbeddedImageSet {
+                manifest_artifact: "linux.json".into(),
+            },
+        ] {
+            let mut mixed = valid.clone();
+            mixed.members.push(member);
+            assert!(validate_declarations(&mixed).is_err());
         }
     }
 
@@ -577,6 +944,159 @@ mod tests {
             allows_volumes: true,
             allows_egress: true,
         }
+    }
+
+    #[test]
+    fn signed_policy_is_an_exact_network_ceiling_not_authority() {
+        use crate::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
+        let mut descriptor = environment(&["egress"]);
+        descriptor.policy = Some(mvm_contract::plan::EnvironmentPolicy {
+            allow_hosts: vec!["api.anthropic.com:443".into()],
+            request_budget: None,
+        });
+        for network in [
+            NetworkPolicy::deny_all(),
+            NetworkPolicy::allow_list(vec![HostPort::new("api.anthropic.com", 443)]),
+        ] {
+            assert!(environment_network_permitted(&descriptor, &network));
+        }
+        for network in [
+            NetworkPolicy::unrestricted(),
+            NetworkPolicy::preset(NetworkPreset::Dev),
+            NetworkPolicy::allow_list(vec![HostPort::new("api.openai.com", 443)]),
+            NetworkPolicy::allow_list(vec![HostPort::new("api.anthropic.com", 8443)]),
+            NetworkPolicy::allow_list(vec![HostPort::new("API.ANTHROPIC.COM", 443)]),
+            NetworkPolicy::allow_list(vec![HostPort::new("*.anthropic.com", 443)]),
+            NetworkPolicy::allow_list(vec![HostPort::new("::1", 443)]),
+        ] {
+            assert!(
+                !environment_network_permitted(&descriptor, &network),
+                "{network:?}"
+            );
+        }
+        for host in ["*.anthropic.com", "api.openai.com"] {
+            let route = serde_json::from_value(serde_json::json!({
+                "id": "route", "host": host, "port": 443
+            }))
+            .unwrap();
+            assert!(!environment_network_permitted(
+                &descriptor,
+                &NetworkPolicy::deny_all().with_routes(vec![route])
+            ));
+        }
+        let exact_route = serde_json::from_value(serde_json::json!({
+            "id": "exact", "host": "api.anthropic.com", "port": 443
+        }))
+        .unwrap();
+        assert!(environment_network_permitted(
+            &descriptor,
+            &NetworkPolicy::allow_list(vec![HostPort::new("api.anthropic.com", 443)])
+                .with_routes(vec![exact_route])
+        ));
+        let peer = serde_json::from_value(serde_json::json!({
+            "name": "db.mvm.peer", "port": 5432, "host_addr": "127.0.0.1", "host_port": 5432
+        }))
+        .unwrap();
+        assert!(!environment_network_permitted(
+            &descriptor,
+            &NetworkPolicy::deny_all().with_peers(vec![peer])
+        ));
+        descriptor.policy = None;
+        assert!(environment_network_permitted(
+            &descriptor,
+            &NetworkPolicy::unrestricted()
+        ));
+    }
+
+    #[test]
+    fn signed_request_budget_cannot_be_omitted_or_widened() {
+        use crate::network_policy::{AiPolicy, HostPort, NetworkPolicy};
+        use mvm_contract::policy::network_policy::{AiBudgetModel, AiRequestBudget};
+        let ceiling = AiRequestBudget {
+            max_requests: 1,
+            max_spend_microusd: 500_000,
+            model: AiBudgetModel::ClaudeHaiku45,
+        };
+        let mut descriptor = environment(&["egress"]);
+        descriptor.policy = Some(mvm_contract::plan::EnvironmentPolicy {
+            allow_hosts: vec!["api.anthropic.com:443".into()],
+            request_budget: Some(ceiling),
+        });
+        let network = || NetworkPolicy::allow_list(vec![HostPort::new("api.anthropic.com", 443)]);
+        assert!(!environment_network_permitted(&descriptor, &network()));
+        for (requests, spend, permitted) in [
+            (1, 500_000, true),
+            (0, 1, true),
+            (2, 500_000, false),
+            (1, 500_001, false),
+        ] {
+            let mut ai = AiPolicy::metered();
+            ai.request_budget = Some(AiRequestBudget {
+                max_requests: requests,
+                max_spend_microusd: spend,
+                ..ceiling
+            });
+            assert_eq!(
+                environment_network_permitted(&descriptor, &network().with_ai(Some(ai))),
+                permitted
+            );
+        }
+    }
+
+    #[test]
+    fn signed_ipv6_authorities_match_only_the_canonical_runtime_host() {
+        use crate::network_policy::{HostPort, NetworkPolicy};
+        let mut descriptor = environment(&["egress"]);
+        descriptor.policy = Some(mvm_contract::plan::EnvironmentPolicy {
+            allow_hosts: vec!["[2001:db8::1]:443".into()],
+            request_budget: None,
+        });
+        assert!(environment_network_permitted(
+            &descriptor,
+            &NetworkPolicy::allow_list(vec![HostPort::new("2001:db8::1", 443)])
+        ));
+        for host in [
+            "[2001:db8::1]",
+            "2001:0db8::1",
+            "2001:db8::2",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(
+                !environment_network_permitted(
+                    &descriptor,
+                    &NetworkPolicy::allow_list(vec![HostPort::new(host, 443)])
+                ),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_requirements_are_explicit_and_do_not_change_export_validation() {
+        let mut descriptor = environment(&[]);
+        assert!(unsupported_environment_requirements(&descriptor).is_empty());
+        descriptor.entrypoint.working_dir = Some("/workspace".into());
+        descriptor.volumes = serde_json::from_value(serde_json::json!([
+            { "name": "workspace", "guest_path": "/workspace" }
+        ]))
+        .unwrap();
+        descriptor.capabilities = vec![EnvironmentCapability::HostVolumes];
+        descriptor.services = serde_json::from_value(serde_json::json!([
+            { "name": "indexer", "argv": ["/usr/bin/indexer"] }
+        ]))
+        .unwrap();
+        assert_eq!(
+            unsupported_environment_requirements(&descriptor),
+            vec!["entrypoint.working_dir", "volumes", "services"]
+        );
+        let m = manifest(
+            Vec::new(),
+            vec![
+                BundleMember::SecurityPosture(open_dev_posture()),
+                BundleMember::Environment(descriptor),
+            ],
+        );
+        validate_declarations(&m).expect("requirements stay exportable and inspectable");
     }
 
     #[test]

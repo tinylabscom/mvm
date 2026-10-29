@@ -9,14 +9,18 @@
 
 use super::PackError;
 use super::lower::{NPM_LOCKFILE, NPM_MANIFEST, app_relative};
+use super::python::{UV_LOCKFILE, UV_MANIFEST};
 use mvm_contract::ir::Dependencies;
 use mvm_contract::pack_spec::PackSpec;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Write the application tree for `spec` into `out`, reading only `snapshot`.
-/// `dependencies` is the lowered declaration; an npm manifest and lockfile are
-/// placed at the tree root, where the factory installs them from.
+/// `dependencies` is the lowered declaration; its manifest and lockfile are
+/// placed at the tree root. The factory installs npm dependencies from there,
+/// and the uv pair keeps the application tree's own lockfile check, and the
+/// project metadata the application may read, consistent with what was
+/// resolved.
 pub(super) fn assemble(
     spec: &PackSpec,
     dependencies: Option<&Dependencies>,
@@ -30,10 +34,13 @@ pub(super) fn assemble(
         let destination = out.join(app_relative(&copy.destination)?);
         copy_entry(&source, &destination, &copy.source, &copy.destination)?;
     }
-    if let Some(Dependencies::Node { .. }) = dependencies {
-        for name in [NPM_MANIFEST, NPM_LOCKFILE] {
-            place_dependency_file(&root, out, name)?;
-        }
+    let files = match dependencies {
+        Some(Dependencies::Node { .. }) => [NPM_MANIFEST, NPM_LOCKFILE],
+        Some(Dependencies::Python { .. }) => [UV_MANIFEST, UV_LOCKFILE],
+        Some(Dependencies::None) | None => return Ok(()),
+    };
+    for name in files {
+        place_dependency_file(&root, out, name)?;
     }
     Ok(())
 }
@@ -128,7 +135,7 @@ fn copy_file(source: &Path, destination: &Path, destination_name: &str) -> Resul
     Ok(())
 }
 
-/// Place an npm manifest or lockfile at the tree root. A copy that already put
+/// Place a dependency manifest or lockfile at the tree root. A copy that already put
 /// different bytes there would install something other than what is locked.
 fn place_dependency_file(root: &Path, out: &Path, name: &str) -> Result<(), PackError> {
     let source = contained_source(root, name)?;
@@ -338,5 +345,21 @@ mod tests {
             assemble_into(&spec, Some(&deps), snap.path()),
             Err(PackError::CopyConflict { .. })
         ));
+    }
+
+    #[test]
+    fn uv_files_land_at_the_tree_root() {
+        let snap = snapshot();
+        fs::write(snap.path().join(UV_MANIFEST), "[project]\n").unwrap();
+        fs::write(snap.path().join(UV_LOCKFILE), "version = 1\n").unwrap();
+        let deps = Dependencies::Python {
+            lockfile: UV_LOCKFILE.into(),
+            tool: mvm_contract::ir::PythonTool::Uv,
+        };
+        let spec = with_copies(&[("hello.txt", "/app/hello.txt")]);
+        let out = assemble_into(&spec, Some(&deps), snap.path()).unwrap();
+        assert!(out.path().join("app").join(UV_MANIFEST).is_file());
+        assert!(out.path().join("app").join(UV_LOCKFILE).is_file());
+        assert!(!out.path().join("app").join(NPM_MANIFEST).exists());
     }
 }

@@ -2,26 +2,23 @@ import { Section } from "./primitives/Section";
 import { Eyebrow } from "./primitives/Eyebrow";
 import { Reveal } from "./primitives/Reveal";
 
-// Control for the people who own the risk: the one-pager's operator
-// section. Builders get the contract; admins and security teams get the
-// levers — start/stop, kill on violation, and the audit trail underneath.
-// Everything named here is shipped surface: machine start/stop, and the
-// chain-signed audit log verified via `mvmctl trust audit verify`.
+// Operator controls: machine start/stop and the chain-signed audit log
+// verified via `mvmctl trust audit verify`.
 const CONTROLS = [
   {
-    label: "turn it off",
-    title: "Workloads run at your pleasure",
-    body: "Start and stop workloads on command. If something violates the contract, kill the box — it's gone.",
+    label: "Lifecycle",
+    title: "Stop a running workload",
+    body: "Start a workload when you need it. Stop it when you're done or need to cut a run short.",
   },
   {
-    label: "everything on the record",
-    title: "Logging and traceability underneath it all",
-    body: "Every action is written to a signed log — what started, what ran, what was allowed. Tamper with it and it shows.",
+    label: "Audit log",
+    title: "Review execution records",
+    body: "Look back through a run's recorded activity to investigate what happened.",
   },
   {
-    label: "proof on demand",
-    title: "Evidence you can hand to compliance",
-    body: "What ran, and what it was allowed to do — a verifiable record, not a claim.",
+    label: "Verification",
+    title: "Check for tampering",
+    body: "Verify the record's digital signatures to check whether it has been changed.",
   },
 ];
 
@@ -32,7 +29,7 @@ export function RiskControl() {
   return (
     <Section id="risk-control" rule className="bg-raised">
       <Reveal>
-        <Eyebrow>The operators</Eyebrow>
+        <Eyebrow>Operations</Eyebrow>
         {/* Inline margins, not margin utilities: Starlight's unlayered
             stylesheet beats layered utilities on this page (see
             Positioning.tsx). */}
@@ -40,13 +37,12 @@ export function RiskControl() {
           className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl"
           style={{ marginBottom: "1.5rem" }}
         >
-          control for the people who{" "}
-          <span className="text-accent-2">own the risk.</span>
+          Stop workloads.{" "}
+          <span className="text-accent-2">Review what ran.</span>
         </h2>
         <p className="max-w-2xl text-base leading-relaxed text-body">
-          Visibility and control aren&rsquo;t just for builders. The contract
-          gives admins and security teams the levers &mdash; and the evidence
-          trail underneath them.
+          Control when workloads run and review their recorded activity
+          afterward.
         </p>
       </Reveal>
 
@@ -84,7 +80,7 @@ export function RiskControl() {
             href={`${base}security/claim-ledger/`}
             className="text-sm text-accent underline underline-offset-2 hover:text-accent/80"
           >
-            The audit chain, claim by claim
+            What the audit chain records
           </a>
         </div>
       </Reveal>

@@ -294,6 +294,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let installed = tmp.path().join("rootfs.ext4");
         std::fs::write(&installed, b"old bytes").unwrap();
+        std::thread::sleep(
+            mvm_core::crypto::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+        );
         mvm_core::crypto::image_verify::sha256_file_cached(&installed).unwrap();
         let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(&installed);
         assert!(sidecar.exists(), "the digest cache wrote its sidecar");
@@ -310,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn two_pairs_publish_concurrently_without_sharing_cache_entries() {
+    fn two_pairs_coexist_without_sharing_cache_entries() {
         let mut env = TestEnv::new();
         // Distinct committed identities so the pair keys differ no matter
         // when the fixtures are created.
@@ -335,35 +338,51 @@ mod tests {
             )]
         };
 
-        env.set("MVM_HOME", &home_a);
-        let entry_a = pair_a.publish(ImageBuildRole::BuilderVm, "default", &members("pair-a"));
-        env.set("MVM_HOME", &home_b);
-        let entry_b = pair_b.publish(ImageBuildRole::BuilderVm, "default", &members("pair-b"));
-
-        // Distinct keys, distinct entry dirs, each under its own home: no
-        // mutable state is shared, and the digest-keyed pair identities keep
-        // the two apart before any bytes are compared.
-        assert_ne!(entry_a.key, entry_b.key);
-        assert!(entry_a.dir.starts_with(home_a.join("cache")));
-        assert!(entry_b.dir.starts_with(home_b.join("cache")));
-
-        // Each home resolves its own pair's entry, and the other pair's
-        // build has not touched it: single-sided invalidation is per pair.
         let contract = mvm_build::image_source::contract_for(&Pair::target(
             ImageBuildRole::BuilderVm,
             "default",
         ))
         .expect("builder-vm contract");
-        let mvm_root = mvm_build::image_source::mvm_source_checkout(
-            mvm_build::artifact_acquisition::compiled_channel(),
-        )
-        .unwrap();
+        // Cache isolation needs real checkout identities, not the entire
+        // compiled-from repository. Keep publication and lookup paired with
+        // the same small checkout; resolver tests cover the production root.
+        let publish = |pair: &Pair, marker: &str| {
+            let key = pair.key(ImageBuildRole::BuilderVm, "default");
+            let cache = LocalImageCache::open_default();
+            let context = mvm_build::image_source::EntryContext {
+                images: &pair.images,
+                mvm_checkout: &pair.mvm,
+                roles: contract.set_roles,
+            };
+            let staged = cache.stage(&key).expect("stage");
+            Pair::emit_set(
+                staged.dir(),
+                &pair.images.current_checkouts(&pair.mvm).unwrap(),
+                key.arch,
+                &members(marker),
+            );
+            cache.publish(staged, &context).unwrap().entry().clone()
+        };
+        env.set("MVM_HOME", &home_a);
+        let entry_a = publish(&pair_a, "pair-a");
+        env.set("MVM_HOME", &home_b);
+        let entry_b = publish(&pair_b, "pair-b");
 
+        // Distinct keys, distinct entry dirs, each under its own home: no
+        // mutable state is shared, and the digest-keyed pair identities keep
+        // the two apart before any bytes are compared.
+        assert_ne!(entry_a.key, entry_b.key);
+        assert_ne!(entry_a.key.images, entry_b.key.images);
+        assert!(entry_a.dir.starts_with(home_a.join("cache")));
+        assert!(entry_b.dir.starts_with(home_b.join("cache")));
+
+        // Each home resolves its own pair's entry, and the other pair's
+        // build has not touched it: single-sided invalidation is per pair.
         env.set("MVM_HOME", &home_a);
         let cache_a = mvm_build::image_source::LocalImageCache::open_default();
         let ctx_a = mvm_build::image_source::EntryContext {
             images: &pair_a.images,
-            mvm_checkout: &mvm_root,
+            mvm_checkout: &pair_a.mvm,
             roles: contract.set_roles,
         };
         assert!(
@@ -378,7 +397,7 @@ mod tests {
         let cache_b = mvm_build::image_source::LocalImageCache::open_default();
         let ctx_b = mvm_build::image_source::EntryContext {
             images: &pair_b.images,
-            mvm_checkout: &mvm_root,
+            mvm_checkout: &pair_b.mvm,
             roles: contract.set_roles,
         };
         assert!(

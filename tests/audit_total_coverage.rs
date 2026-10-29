@@ -90,9 +90,31 @@ const STORAGE_SUB: &[(&str, AuditPosture)] = &[
 
 const SANDBOX_SUB: &[(&str, AuditPosture)] = &[("gc", AuditPosture::Emits("SandboxGc"))];
 
+const CALLER_IDENTITY_SUB: &[(&str, AuditPosture)] = &[
+    // Explicit credential bootstrap runs before ordinary startup creates signing
+    // or audit state; it reserves and records only the native caller identity.
+    ("enroll", AuditPosture::InteractiveOrControl),
+    ("show", AuditPosture::ReadOnly),
+];
+
+// `mvmctl backend <sub>` — per-backend host component sets. `list` and
+// `detect` only read the component table and the host; `detect` runs before
+// startup as install.sh's probe. `add`/`remove` rewrite files in the
+// install.sh release directory and record that host change.
+const BACKEND_SUB: &[(&str, AuditPosture)] = &[
+    ("list", AuditPosture::ReadOnly),
+    ("add", AuditPosture::Emits("ConfigChange")),
+    ("remove", AuditPosture::Emits("ConfigChange")),
+    ("detect", AuditPosture::ReadOnly),
+];
+
 // Plan 178 (D5) — environment/install lifecycle grouped under `env <sub>`.
 const ENV_SUB: &[(&str, AuditPosture)] = &[
     ("bootstrap", AuditPosture::InteractiveOrControl),
+    (
+        "caller-identity",
+        AuditPosture::DelegatesToSub(CALLER_IDENTITY_SUB),
+    ),
     ("cleanup", AuditPosture::Emits("SlotPrune")),
     // Written once the uninstall has removed the install and a state directory
     // remains to hold the entry. A successful `--purge`, a run with no state
@@ -101,6 +123,7 @@ const ENV_SUB: &[(&str, AuditPosture)] = &[
     ("uninstall", AuditPosture::Emits("Uninstall")),
     ("update", AuditPosture::Emits("UpdateInstall")),
     ("verify-release", AuditPosture::ReadOnly),
+    ("verify-runtime", AuditPosture::ReadOnly),
     ("sign", AuditPosture::ReadOnly),
 ];
 
@@ -123,7 +146,7 @@ const TEMPLATE_SUB: &[(&str, AuditPosture)] = &[
 
 const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
-// `build runtime-overlay build` primes the shared guest-runtime cache for the
+// `dev runtime-overlay build` primes the shared guest-runtime cache for the
 // current host version. Like the other build-time cache preparation verbs here,
 // it does not emit a local audit-chain entry of its own.
 const RUNTIME_OVERLAY_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
@@ -132,8 +155,8 @@ const RUNTIME_OVERLAY_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::R
 // supply-chain audit events to the shared Stage 0 runner.
 const SDK_SIDECAR_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
-// Plan 178 (D1) — build-time verbs grouped under `build <sub>`.
-const BUILD_SUB: &[(&str, AuditPosture)] = &[
+// Contributor build-time verbs grouped under `dev <sub>`.
+const DEV_SUB: &[(&str, AuditPosture)] = &[
     // Reads an IR document and prints its content identity; no state change.
     ("address", AuditPosture::ReadOnly),
     ("compile", AuditPosture::ReadOnly),
@@ -144,15 +167,17 @@ const BUILD_SUB: &[(&str, AuditPosture)] = &[
         AuditPosture::DelegatesToSub(RUNTIME_OVERLAY_SUB),
     ),
     ("sdk-sidecar", AuditPosture::DelegatesToSub(SDK_SIDECAR_SUB)),
-    // `build image-set` builds one target of the local image checkout in the
+    // `dev image-set` builds one target of the local image checkout in the
     // builder VM and publishes it into the pair-scoped local image cache.
     // Like the other build-time cache preparation verbs here, it does not
     // emit a local audit-chain entry of its own.
     ("image-set", AuditPosture::ReadOnly),
-    // `build guest-bins` packages guest binaries from the shared guest-build
+    // `dev guest-bins` packages guest binaries from the shared guest-build
     // cache into an archive in a caller-named directory. It produces a build
     // output and touches no security state, so it emits no audit-chain entry.
     ("guest-bins", AuditPosture::ReadOnly),
+    // Hidden fixture command: writes a caller-owned archive only.
+    ("export-template", AuditPosture::ReadOnly),
 ];
 
 const NETWORK_SUB: &[(&str, AuditPosture)] = &[
@@ -203,7 +228,7 @@ const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
 ];
 
 // `mvmctl image dev ensure` primes the dev default-tenant image cache, the
-// same build-time cache-preparation class as `build sdk-sidecar build`: it
+// same build-time cache-preparation class as `dev sdk-sidecar build`: it
 // does not emit a local audit-chain entry of its own.
 const IMAGE_DEV_SUB: &[(&str, AuditPosture)] = &[("ensure", AuditPosture::ReadOnly)];
 
@@ -240,6 +265,7 @@ const PACK_REGISTRY_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[(
 
 const PACK_REGISTRY_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
+    ("install-local", AuditPosture::Emits("RegistryPackPin")),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
     ("update", AuditPosture::Emits("RegistryPackPin")),
     (
@@ -264,7 +290,7 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("verify", AuditPosture::ReadOnly),
     ("search", AuditPosture::ReadOnly),
     // Both write only the file they were asked for (a lock or a flake
-    // directory) and touch no host state, like `build compile`.
+    // directory) and touch no host state, like `dev compile`.
     ("lock", AuditPosture::ReadOnly),
     ("compile", AuditPosture::ReadOnly),
     ("pull", AuditPosture::Emits("RegistryPackPin")),
@@ -383,6 +409,8 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ),
     ("wait", AuditPosture::ReadOnly),
     ("boot-report", AuditPosture::ReadOnly),
+    // Reads the collector's status and sealed records beside the VM.
+    ("telemetry", AuditPosture::ReadOnly),
     ("set-ttl", AuditPosture::Emits("VmTtlSet")),
     ("rekernel", AuditPosture::Emits("VmRekernel")),
     ("forward", AuditPosture::ReadOnly),
@@ -474,29 +502,17 @@ const SNAPSHOT_SUB: &[(&str, AuditPosture)] = &[
     ("rm", AuditPosture::Emits("SnapshotDelete")),
 ];
 
-// `mvmctl artifact`. `pack` is `bundle export` under its older name: it
-// writes a signed `.mvmpkg` and touches no host audit-chain state, exactly as
-// `bundle export` does.
 const ARTIFACT_SUB: &[(&str, AuditPosture)] = &[
-    ("pack", AuditPosture::ReadOnly),
-    // Plan 134 — architecture-aware artifact-model commands. All static
+    // Architecture-aware artifact-model commands. All static
     // (read manifest / validate / emit a Firecracker config / build an
-    // artifact via the builder); none touch the host audit chain — like
-    // `pack` above, they only produce local artifacts.
+    // artifact via the builder); none touch the host audit chain.
     ("model-inspect", AuditPosture::ReadOnly),
     ("model-validate", AuditPosture::ReadOnly),
     ("model-config", AuditPosture::ReadOnly),
     ("model-build", AuditPosture::ReadOnly),
 ];
 
-// Sprint 52 W2 — bundle / trust subcommand tables.
-//
-// `bundle export` writes a `.mvmpkg` archive to disk under the
-// host's `--out` path; that's a local artifact, not host-side
-// state that the audit chain tracks, so it shipped as
-// `InteractiveOrControl` rather than `Emits` for now. Bumping it
-// to a `BundleExport` emission is the natural follow-up when the
-// host-side bundle registry lands.
+// Bundle / trust subcommand tables.
 //
 // `bundle fetch` is verify-only in this commit (no extraction),
 // so it's `ReadOnly`. When the registry-replacement flow lands
@@ -507,9 +523,6 @@ const ARTIFACT_SUB: &[(&str, AuditPosture)] = &[
 // audit entries (publisher trust is host-trust-boundary state);
 // list is `ReadOnly`.
 const BUNDLE_SUB: &[(&str, AuditPosture)] = &[
-    // Like export, build produces a caller-owned archive, not a registry install.
-    ("build", AuditPosture::InteractiveOrControl),
-    ("export", AuditPosture::InteractiveOrControl),
     ("fetch", AuditPosture::ReadOnly),
     // `bundle install` mutates the local bundle registry under
     // `~/.mvm/bundles/<sha>/` and emits
@@ -588,6 +601,9 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("publish-root", AuditPosture::ReadOnly),
     ("prove", AuditPosture::ReadOnly),
     ("verify-inclusion", AuditPosture::ReadOnly),
+    // Aggregates the chain's `host.ai.usage` entries into a per-destination
+    // metering view; a read over the verified chain, writes nothing.
+    ("usage", AuditPosture::ReadOnly),
     // The only verb under `audit` that writes to the chain rather than reading
     // it: a prune appends a signed `chain.pruned` record before deleting the
     // segments it names. Emitting is the whole point — a deletion with no entry
@@ -658,6 +674,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // and `init`.
     ("bootstrap", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
+    ("backend", AuditPosture::DelegatesToSub(BACKEND_SUB)),
     // `bench` emits nothing itself: it spawns `mvmctl run` once per sample,
     // and each of those launches carries its own `cmd.run` envelope and its
     // own signed-plan admission. Auditing the harness on top would double-count
@@ -705,9 +722,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
         "__builder-egress-supervisor",
         AuditPosture::InteractiveOrControl,
     ),
-    // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
-    // kernel grouped under `build <sub>`.
-    ("build", AuditPosture::DelegatesToSub(BUILD_SUB)),
+    // Contributor compilation and artifact preparation stay grouped under
+    // `dev <sub>` while retaining their existing per-operation audit verbs.
+    ("build", AuditPosture::Emits("cmd.build")),
+    ("dev", AuditPosture::DelegatesToSub(DEV_SUB)),
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
     ("manifest", AuditPosture::DelegatesToSub(MANIFEST_SUB)),
     ("storage", AuditPosture::DelegatesToSub(STORAGE_SUB)),
@@ -749,7 +767,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Plan 73 Followup C — sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
     ("capture", AuditPosture::DelegatesToSub(CAPTURE_SUB)),
-    // Plan 76 Phase 6 — `artifact pack` and the artifact-model commands.
+    // Artifact-model commands.
     ("artifact", AuditPosture::DelegatesToSub(ARTIFACT_SUB)),
     // Host-side developer tool: ptrace a command and report syscalls. No host
     // audit-chain emission of its own; classified as interactive/control.
@@ -916,6 +934,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "CheckpointRestored",
         "NetworkCreate",
         "NetworkRemove",
+        "PackBuild",
         "PackCacheChange",
         "PoolWarm",
         "RegistryReconcile",
@@ -977,6 +996,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "chain.pruned",
         // Top-level command audit envelopes.
         "cmd.agent-session",
+        "cmd.build",
         "cmd.deploy",
         // Image time-travel restore marker.
         "image.reverted",

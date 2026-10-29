@@ -16,7 +16,9 @@
     "",
     "`python_only_type_erased_in_typescript` exists in TypeScript as",
     "`export type`, which tsc erases, so a runtime surface check cannot see",
-    "it."
+    "it.",
+    "RecoveryRequiredDetails is a frozen, keyword-only Python dataclass;",
+    "TypeScript exports its readonly shape as a type, not a constructor."
   ],
   "python_only_type_erased_in_typescript": [
     "ExecResult",
@@ -25,6 +27,7 @@
     "MachineResult",
     "ProcessResult",
     "ProcessStreamEvent",
+    "RecoveryRequiredDetails",
     "Runtime",
     "RuntimeFsEntry",
     "RuntimeFsStat",

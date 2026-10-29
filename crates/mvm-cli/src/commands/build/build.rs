@@ -1,4 +1,4 @@
-//! `mvmctl build` — build an Mvmfile or Nix flake into a microVM image.
+//! `mvmctl machine build` — build an Mvmfile or Nix flake into a microVM image.
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
@@ -6,9 +6,10 @@ use serde::Serialize;
 
 use crate::ui;
 
+#[cfg(test)]
+use mvm_core::manifest::key_for_manifest_identity;
 use mvm_core::manifest::{
-    self, MANIFEST_SCHEMA_VERSION, Manifest, PersistedManifest, Provenance,
-    key_for_manifest_identity, resolve_manifest_config_path,
+    self, Manifest, PersistedManifest, Provenance, resolve_manifest_config_path,
 };
 use mvm_core::naming::validate_flake_ref;
 use mvm_core::user_config::MvmConfig;
@@ -83,14 +84,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // `mvm_build::pipeline::dev_build` reads. Set once at the top so every
     // subsequent dispatch (flake / manifest / mvmfile) sees the same toggle,
     // and left set for the process's lifetime so every codepath under
-    // `mvmctl build` agrees on the choice.
+    // `mvmctl machine build` agrees on the choice.
     if args.no_persistent_builder {
         crate::commands::set_cli_env("MVM_NO_PERSISTENT_BUILDER", "1");
     }
     // `--deps` narrows the build to the deps
     // volume only. We invalidate the cache index entries pointing at
     // the project's lockfile and short-circuit before the rootfs
-    // build. The next install-pipeline run (`mvmctl build` without
+    // build. The next install-pipeline run (`mvmctl machine build` without
     // `--deps`) rebuilds the volume from scratch.
     if args.deps {
         return invalidate_deps_cache(&args);
@@ -113,13 +114,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 
     if let Some(manifest_path) = resolve_manifest_for_args(&args)? {
-        return build_manifest(
+        build_manifest(
             &manifest_path,
             args.force,
             args.update_hash,
             args.json,
             args.build_mode.resolve(),
-        );
+        )?;
+        return Ok(());
     }
 
     build_mvmfile(&args.path, args.output.as_deref())
@@ -164,7 +166,7 @@ fn build_manifest(
     update_hash: bool,
     json: bool,
     mode: mvm_build::pipeline::BuildMode,
-) -> Result<()> {
+) -> Result<String> {
     let manifest = Manifest::read_file(manifest_path)?;
     let canonical = std::fs::canonicalize(manifest_path).with_context(|| {
         format!(
@@ -181,7 +183,7 @@ fn build_manifest(
     }
 
     // Resolve flake "." relative to the manifest's parent directory so a
-    // user running `mvmctl build /elsewhere/mvm.toml` from any cwd still
+    // user running `mvmctl machine build /elsewhere/mvm.toml` from any cwd still
     // picks up the right flake.
     let flake = manifest.flake_ref();
     let resolved_flake = if flake == "." {
@@ -301,7 +303,20 @@ fn build_manifest(
         ));
     }
 
-    Ok(())
+    Ok(persisted.manifest_hash)
+}
+
+/// Build a manifest through the existing machine-build path and return its slot.
+pub(in crate::commands) fn build_manifest_to_slot(
+    manifest_path: &std::path::Path,
+) -> Result<String> {
+    build_manifest(
+        manifest_path,
+        false,
+        false,
+        false,
+        mvm_build::pipeline::BuildMode::Prod,
+    )
 }
 
 /// Build a slot from an `image`-source manifest.
@@ -316,7 +331,7 @@ fn build_manifest_from_image(
     image_ref: &str,
     json: bool,
     mode: mvm_build::pipeline::BuildMode,
-) -> Result<()> {
+) -> Result<String> {
     if json {
         PhaseEvent::new("build", "manifest", "started")
             .with_message(&format!(
@@ -404,7 +419,7 @@ fn build_manifest_from_image(
         ));
     }
 
-    Ok(())
+    Ok(persisted.manifest_hash)
 }
 
 /// Bring the builder image a flake build boots into the cache before the
@@ -604,14 +619,14 @@ fn audit_build_error(mode: &str, source: &str, err: &anyhow::Error) {
     );
 }
 
-/// `mvmctl build --deps` implementation.
+/// `mvmctl machine build --deps` implementation.
 ///
 /// Narrows the build to the deps volume by invalidating the cache
 /// index entries pointing at lockfiles under the project root. The
 /// next install-pipeline run rebuilds the volume from scratch. We
 /// deliberately do NOT spawn the builder VM here — that's the
 /// install pipeline's job, kicked off by the
-/// orchestrator on the next `mvmctl build`.
+/// orchestrator on the next `mvmctl machine build`.
 ///
 /// Invalidation strategy: walk `<deps_volumes_dir>/index/`, read
 /// each `<lockfile_hash>` pointer's volume hash, and delete both
@@ -630,7 +645,7 @@ fn invalidate_deps_cache(args: &Args) -> Result<()> {
     if !index_dir.is_dir() {
         ui::info(
             "No deps cache index found; nothing to invalidate. The next \
-             `mvmctl build` will populate it on first install.",
+             `mvmctl machine build` will populate it on first install.",
         );
         return Ok(());
     }
@@ -688,7 +703,7 @@ fn invalidate_deps_cache(args: &Args) -> Result<()> {
 
     if invalidated.is_empty() {
         ui::info(
-            "No matching deps cache entries to invalidate. Run `mvmctl build` \
+            "No matching deps cache entries to invalidate. Run `mvmctl machine build` \
              without `--deps` to (re)populate the volume on next install.",
         );
     } else {
@@ -762,7 +777,7 @@ fn lockfile_sha256s_under(project_root: &std::path::Path) -> Vec<String> {
 /// Build a Nix flake into a reusable template slot and return the slot hash.
 ///
 /// This is the backing function for `machine run --flake <ref>`: it runs the
-/// same flake build as `mvmctl build --flake` but registers the result as a
+/// same flake build as `mvmctl machine build --flake` but registers the result as a
 /// `PersistedManifest` slot so downstream persistent and transient runners can
 /// reference it by hash without re-running the build.
 ///
@@ -773,9 +788,90 @@ pub(in crate::commands) fn build_flake_to_slot(
     flake_ref: &str,
     profile: Option<&str>,
 ) -> Result<String> {
+    let (slot, _) = build_flake_slot(flake_ref, profile, None)?;
+    Ok(slot)
+}
+
+/// Build ownership keeps a private source identity and slot alive through all
+/// consumers. The slot record is removed before its source snapshot disappears.
+pub(in crate::commands) struct FrozenFlakeSlot {
+    inputs: mvm_build::pipeline::frozen::FrozenInputs,
+    slot_hash: String,
+    revision_hash: String,
+}
+
+impl FrozenFlakeSlot {
+    fn own(inputs: mvm_build::pipeline::frozen::FrozenInputs) -> Result<Self> {
+        inputs.verify()?;
+        let flake_ref = inputs
+            .path()
+            .to_str()
+            .context("frozen input path is not UTF-8")?;
+        let resolved = resolve_flake_ref(flake_ref)?;
+        let persisted = flake_slot_manifest(&resolved, None, "private");
+        Ok(Self {
+            slot_hash: persisted.manifest_hash,
+            revision_hash: String::new(),
+            inputs,
+        })
+    }
+
+    pub fn build(inputs: mvm_build::pipeline::frozen::FrozenInputs) -> Result<Self> {
+        let mut owned = Self::own(inputs)?;
+        let flake_ref = owned
+            .inputs
+            .path()
+            .to_str()
+            .context("frozen input path is not UTF-8")?;
+        let (slot, revision) = build_flake_slot(flake_ref, None, Some(&owned.inputs))?;
+        if slot != owned.slot_hash {
+            anyhow::bail!("frozen flake slot identity changed during build");
+        }
+        owned.revision_hash = revision;
+        owned.verify_revision()?;
+        Ok(owned)
+    }
+
+    pub fn verify_revision(&self) -> Result<()> {
+        let current =
+            std::fs::canonicalize(mvm_core::manifest::slot_current_symlink(&self.slot_hash))?;
+        let expected = std::fs::canonicalize(mvm_core::manifest::slot_revision_dir(
+            &self.slot_hash,
+            &self.revision_hash,
+        ))?;
+        if current != expected {
+            anyhow::bail!("private frozen slot no longer selects the returned build revision");
+        }
+        Ok(())
+    }
+
+    pub fn slot_hash(&self) -> &str {
+        &self.slot_hash
+    }
+}
+
+impl Drop for FrozenFlakeSlot {
+    fn drop(&mut self) {
+        let path = mvm_core::manifest::slot_dir(&self.slot_hash);
+        if let Err(error) = std::fs::remove_dir_all(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, %path, "removing private frozen build slot failed");
+        }
+    }
+}
+
+fn build_flake_slot(
+    flake_ref: &str,
+    profile: Option<&str>,
+    frozen: Option<&mvm_build::pipeline::frozen::FrozenInputs>,
+) -> Result<(String, String)> {
     validate_flake_ref(flake_ref)
         .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
 
+    if let Some(inputs) = frozen {
+        inputs.verify()?;
+    }
     prepare_builder_vm_image_for_build()
         .context("ensuring the builder VM image before the flake build")?;
 
@@ -800,16 +896,21 @@ pub(in crate::commands) fn build_flake_to_slot(
     let persisted = flake_slot_manifest(&resolved, profile, &backend);
 
     let slot_hash = persisted.manifest_hash.clone();
-    let revision = tmpl::template_build_from_manifest(&persisted, false, false, mode)
-        .with_context(|| format!("building flake {resolved:?} into slot {slot_hash}"))?;
+    let revision = match frozen {
+        Some(inputs) => tmpl::build_frozen_manifest(&persisted, inputs, mode),
+        None => tmpl::template_build_from_manifest(&persisted, false, false, mode),
+    }
+    .with_context(|| format!("building flake {resolved:?} into slot {slot_hash}"))?;
 
     audit_build_ok("flake-slot", &resolved, &slot_hash, &revision.revision_hash);
 
     // Record the compiled image as an audited version-lineage node (same
     // fail-closed posture as the manifest build path).
-    super::image_lineage::record_flake_build_node(&persisted, &revision)?;
+    if frozen.is_none() {
+        super::image_lineage::record_flake_build_node(&persisted, &revision)?;
+    }
 
-    Ok(slot_hash)
+    Ok((slot_hash, revision.revision_hash))
 }
 
 fn flake_slot_manifest(
@@ -817,23 +918,7 @@ fn flake_slot_manifest(
     profile: Option<&str>,
     backend: &str,
 ) -> PersistedManifest {
-    let synthetic_path = format!("<flake-slot>/{resolved_flake_ref}");
-    PersistedManifest {
-        schema_version: MANIFEST_SCHEMA_VERSION,
-        manifest_path: synthetic_path.clone(),
-        manifest_hash: key_for_manifest_identity(&synthetic_path),
-        flake_ref: resolved_flake_ref.to_string(),
-        profile: profile.unwrap_or("default").to_string(),
-        vcpus: 2,
-        mem_mib: 512,
-        mem_initial_mib: None,
-        data_disk_mib: 0,
-        name: None,
-        backend: backend.to_string(),
-        provenance: Provenance::current(),
-        created_at: mvm_core::time::utc_now(),
-        updated_at: mvm_core::time::utc_now(),
-    }
+    PersistedManifest::from_flake_identity(resolved_flake_ref, profile, backend)
 }
 
 /// Read the volume's `meta.json.annotations.lockfile_sha256`. Returns
@@ -852,6 +937,60 @@ fn volume_lockfile_sha256(volume_dir: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_native_private_slots_keep_identity_and_refuse_retargeting() {
+        use mvm_build::pipeline::frozen::{FrozenInputs, tree_digest};
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let source = tempfile::tempdir().unwrap();
+        let mut slots = Vec::new();
+        for pin in ["rev-a", "rev-b"] {
+            std::fs::write(
+                source.path().join("flake.nix"),
+                format!("github:tinylabscom/mvm/{pin}"),
+            )
+            .unwrap();
+            std::fs::write(source.path().join("workload.json"), "same-workload").unwrap();
+            let inputs =
+                FrozenInputs::stage(source.path(), &tree_digest(source.path()).unwrap()).unwrap();
+            let mut owned = FrozenFlakeSlot::own(inputs).unwrap();
+            owned.revision_hash = pin.to_string();
+            let revision = mvm_core::manifest::slot_revision_dir(&owned.slot_hash, pin);
+            std::fs::create_dir_all(&revision).unwrap();
+            std::os::unix::fs::symlink(
+                &revision,
+                mvm_core::manifest::slot_current_symlink(&owned.slot_hash),
+            )
+            .unwrap();
+            owned.verify_revision().unwrap();
+            slots.push(owned);
+        }
+        assert_ne!(slots[0].slot_hash, slots[1].slot_hash);
+        assert_ne!(slots[0].inputs.path(), slots[1].inputs.path());
+        let first = slots[0].inputs.path().to_path_buf();
+        let current = mvm_core::manifest::slot_current_symlink(&slots[1].slot_hash);
+        std::fs::remove_file(&current).unwrap();
+        std::os::unix::fs::symlink(
+            mvm_core::manifest::slot_revision_dir(&slots[0].slot_hash, "rev-a"),
+            &current,
+        )
+        .unwrap();
+        assert!(slots[1].verify_revision().is_err());
+        slots[0].verify_revision().unwrap();
+        let slot_dirs: Vec<_> = slots
+            .iter()
+            .map(|slot| mvm_core::manifest::slot_dir(&slot.slot_hash))
+            .collect();
+        drop(slots);
+        assert!(!first.exists());
+        assert!(
+            slot_dirs
+                .iter()
+                .all(|path| !std::path::Path::new(path).exists())
+        );
+    }
 
     #[test]
     fn flake_slot_manifest_hashes_synthetic_identity_without_canonicalizing() {

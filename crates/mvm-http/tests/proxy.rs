@@ -25,6 +25,134 @@ async fn read_until(sock: &mut TcpStream, needle: &[u8]) -> Vec<u8> {
 
 const OK_BODY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi";
 
+#[tokio::test]
+async fn https_through_connect_verifies_the_origin_and_delivers_the_response() {
+    exercise_https_connect("origin.test", true, true).await;
+}
+
+#[tokio::test]
+async fn https_through_connect_rejects_an_untrusted_origin() {
+    exercise_https_connect("origin.test", false, false).await;
+}
+
+#[tokio::test]
+async fn https_through_connect_rejects_a_trusted_certificate_for_another_host() {
+    exercise_https_connect("other.test", true, false).await;
+}
+
+async fn exercise_https_connect(cert_name: &str, trust_origin: bool, expect_success: bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let identity = rcgen::generate_simple_self_signed(vec![cert_name.to_string()]).unwrap();
+        let cert = identity.cert.der().clone();
+        let mut roots = rustls::RootCertStore::empty();
+        if trust_origin {
+            roots.add(cert.clone()).unwrap();
+        }
+        let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert],
+            rustls_pki_types::PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()).into(),
+        )
+        .unwrap();
+
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let origin_task = tokio::spawn(async move {
+            let (socket, _) = origin.accept().await.unwrap();
+            let handshake = tokio_rustls::TlsAcceptor::from(Arc::new(tls))
+                .accept(socket)
+                .await;
+            if !expect_success {
+                assert!(handshake.is_err(), "the client must reject the certificate");
+                return None;
+            }
+            let mut tls = handshake.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(tls.read_u8().await.unwrap());
+                assert!(head.len() < 8192, "origin request head must be bounded");
+            }
+            tls.write_all(OK_BODY).await.unwrap();
+            tls.shutdown().await.unwrap();
+            Some(String::from_utf8(head).unwrap())
+        });
+
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            let (mut downstream, _) = proxy.accept().await.unwrap();
+            let head = read_until(&mut downstream, b"\r\n\r\n").await;
+            let mut upstream = TcpStream::connect(origin_addr).await.unwrap();
+            downstream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            let forwarded = tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await;
+            if expect_success {
+                forwarded.unwrap();
+            }
+            String::from_utf8(head).unwrap()
+        });
+
+        // origin.test has no DNS record: only the proxy can reach this origin.
+        let client = Client::builder()
+            .root_store(roots)
+            .proxy(ProxyConfig::all(
+                Proxy::parse(&format!("http://user:password@{proxy_addr}")).unwrap(),
+            ))
+            .build()
+            .unwrap();
+        let response = client.get("https://origin.test/private?x=1").send().await;
+        if expect_success {
+            let response = response.expect("verified HTTPS through CONNECT");
+            assert_eq!(response.status().as_u16(), 200);
+            assert_eq!(response.text().await.unwrap(), "hi");
+        } else {
+            let error = response.expect_err("invalid origin certificate must be rejected");
+            assert!(matches!(error, mvm_http::Error::Tls { .. }), "{error:?}");
+        }
+        drop(client);
+
+        if let Some(request) = origin_task.await.unwrap() {
+            assert!(request.starts_with("GET /private?x=1 HTTP/1.1\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("proxy-authorization"));
+        }
+        let connect = proxy_task.await.unwrap();
+        assert!(connect.starts_with("CONNECT origin.test:443 HTTP/1.1\r\n"));
+        assert!(connect.contains("Proxy-Authorization: Basic dXNlcjpwYXNzd29yZA==\r\n"));
+    })
+    .await
+    .expect("HTTPS-over-CONNECT test must finish within its deadline");
+}
+
+#[tokio::test]
+async fn https_proxy_scheme_is_rejected_before_any_dial() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let result = async {
+        let proxy = Proxy::parse(&format!("https://username-token:password-token@{addr}"))?;
+        let _client = Client::builder().proxy(ProxyConfig::all(proxy)).build();
+        Ok::<_, mvm_http::ProxyError>(())
+    }
+    .await;
+    let err = result.unwrap_err();
+    assert!(matches!(err, mvm_http::ProxyError::Scheme));
+    for diagnostic in [err.to_string(), format!("{err:?}")] {
+        assert!(!diagnostic.contains("username-token"));
+        assert!(!diagnostic.contains("password-token"));
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
 /// An HTTP proxy that records the request line it was given and answers it
 /// itself, standing in for the origin.
 async fn http_proxy_recording_request_line() -> (u16, tokio::task::JoinHandle<String>) {

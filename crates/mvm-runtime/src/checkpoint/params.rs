@@ -394,6 +394,7 @@ pub struct CaptureVmFullParams {
     pub vm_name: String,
     pub supervisor_config_digest: String,
     pub runtime_overlay_version: Option<String>,
+    pub runtime_launch_binding: Option<mvm_core::protocol::runtime_release::RuntimeLaunchBinding>,
     /// The live VM's persisted supervisor config, copied into the checkpoint so
     /// restore can rebuild the state dir (every stop reaps the live one).
     /// `None` for backends that do not persist a supervisor config (the
@@ -441,6 +442,7 @@ pub struct CaptureVmFullParamsBuilder {
     vm_name: Option<String>,
     supervisor_config_digest: Option<String>,
     runtime_overlay_version: Option<String>,
+    runtime_launch_binding: Option<mvm_core::protocol::runtime_release::RuntimeLaunchBinding>,
     supervisor_config_src: Option<PathBuf>,
     tag: Option<String>,
     created_unix: Option<u64>,
@@ -461,6 +463,7 @@ impl CaptureVmFullParamsBuilder {
             vm_name: None,
             supervisor_config_digest: None,
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             supervisor_config_src: None,
             tag: None,
             created_unix: None,
@@ -508,6 +511,16 @@ impl CaptureVmFullParamsBuilder {
         runtime_overlay_version: impl Into<Option<String>>,
     ) -> Self {
         self.runtime_overlay_version = runtime_overlay_version.into();
+        self
+    }
+
+    /// Bind the exact runtime generation frozen by this capture.
+    #[must_use]
+    pub fn runtime_launch_binding(
+        mut self,
+        binding: Option<mvm_core::protocol::runtime_release::RuntimeLaunchBinding>,
+    ) -> Self {
+        self.runtime_launch_binding = binding;
         self
     }
 
@@ -583,6 +596,7 @@ impl CaptureVmFullParamsBuilder {
                 BuilderError::missing("CaptureVmFullParams", "supervisor_config_digest"),
             )?,
             runtime_overlay_version: self.runtime_overlay_version,
+            runtime_launch_binding: self.runtime_launch_binding,
             supervisor_config_src: self.supervisor_config_src,
             tag: self.tag,
             created_unix: self

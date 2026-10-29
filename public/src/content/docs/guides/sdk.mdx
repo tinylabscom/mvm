@@ -1,6 +1,6 @@
 ---
 title: SDK — Python and TypeScript
-description: Declare microVM workloads with the mvm Python and TypeScript SDKs. Decorator-style author surface; mvmctl build compile / deploy compiles the same source statically without executing it.
+description: Declare microVM workloads with the mvm Python and TypeScript SDKs. Decorator-style author surface; mvmctl dev compile / deploy compiles the same source statically without executing it.
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
@@ -12,7 +12,7 @@ source file produce the same `Workload` IR:
 - **In-process**: `python app.py` or `node app.ts` imports `mvm`, the
   decorator records the declaration, and `mvm.emit_json()` /
   `mvm.emitJson()` writes the canonical IR to stdout.
-- **Static compile**: `mvmctl build compile app.py` walks the AST without
+- **Static compile**: `mvmctl dev compile app.py` walks the AST without
   importing the script. Same IR; the host never runs user code.
 
 ## Declaration
@@ -47,7 +47,7 @@ def greet(name: str) -> str:
 Build, run, invoke:
 
 ```sh
-mvmctl build compile examples/python/hello-app/app.py --out /tmp/hello-app
+mvmctl dev compile examples/python/hello-app/app.py --out /tmp/hello-app
 echo '[[], {"name":"ari"}]' | mvmctl machine run --entrypoint --flake /tmp/hello-app   # → "hello ari"
 ```
 
@@ -74,7 +74,7 @@ export const greet = mvm.app({
 Build, run, invoke:
 
 ```sh
-mvmctl build compile examples/node/hello-app/app.ts --out /tmp/hello-app
+mvmctl dev compile examples/node/hello-app/app.ts --out /tmp/hello-app
 echo '[[], {"name":"ari"}]' | mvmctl machine run --entrypoint --flake /tmp/hello-app   # → "hello ari"
 ```
 
@@ -116,7 +116,7 @@ Nix factory to bake into `/etc/mvm/hooks/<phase>.sh`.
 
 ## Build artifacts
 
-Use `mvmctl build compile` to produce local build artifacts that can be reviewed,
+Use `mvmctl dev compile` to produce local build artifacts that can be reviewed,
 signed, built, and launched through the normal `mvm` workflow. Treat packaging
 and rollout as a separate admission step, not as part of declaration parsing.
 For a pack image that will be published, pass `--mvm-revision` with the full
@@ -141,10 +141,10 @@ value.
 
 ## TypeScript runner
 
-`mvmctl build compile app.ts` walks the AST statically for `mvm.app({...})`
+`mvmctl dev compile app.ts` walks the AST statically for `mvm.app({...})`
 calls and does not run user code. When a `.ts` script uses the
 record-mode `Sandbox` API instead (no `mvm.app` decorator), `mvmctl
-build compile` falls back to **auto-run**: it spawns the script on the host
+dev compile` falls back to **auto-run**: it spawns the script on the host
 with `MVM_SDK_MODE=record` set, and the SDK's atexit hook writes a
 recording JSON that the CLI then lowers into a `Workload`.
 
@@ -171,11 +171,11 @@ npm install --save-dev tsx
 ```
 
 That puts the binary at `./node_modules/.bin/tsx`, and `mvmctl
-build compile` picks it up automatically — see the resolution order below.
+dev compile` picks it up automatically — see the resolution order below.
 
 ### Resolution order
 
-`mvmctl build compile` resolves the runner in this order, picking the
+`mvmctl dev compile` resolves the runner in this order, picking the
 first hit:
 
 1. `MVM_TSX=<path>` env override — explicit pin (any binary).

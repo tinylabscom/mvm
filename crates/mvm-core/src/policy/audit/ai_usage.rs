@@ -38,6 +38,11 @@ pub struct AiUsageRecord {
     pub status: u16,
     /// Whether this request caused the VM's AI budget to be exceeded.
     pub budget_exceeded: bool,
+    /// Request body length in bytes, when the host measured it.
+    pub request_bytes: Option<u64>,
+    /// Response body length in bytes as received from the provider (after
+    /// reflection scrubbing), when the host measured it.
+    pub response_bytes: Option<u64>,
 }
 
 impl AiUsageRecord {
@@ -80,6 +85,12 @@ impl AiUsageRecord {
         if let Some(n) = self.total_tokens {
             labels.push(("total_tokens".to_string(), n.to_string()));
         }
+        if let Some(n) = self.request_bytes {
+            labels.push(("request_bytes".to_string(), n.to_string()));
+        }
+        if let Some(n) = self.response_bytes {
+            labels.push(("response_bytes".to_string(), n.to_string()));
+        }
         labels
     }
 }
@@ -104,6 +115,8 @@ mod tests {
             total_tokens: Some(15),
             status: 200,
             budget_exceeded: false,
+            request_bytes: Some(120),
+            response_bytes: Some(0),
         };
         let json = serde_json::to_string(&record).unwrap();
         let back: AiUsageRecord = serde_json::from_str(&json).unwrap();
@@ -126,6 +139,8 @@ mod tests {
             total_tokens: None,
             status: 200,
             budget_exceeded: true,
+            request_bytes: None,
+            response_bytes: None,
         };
         let labels: std::collections::BTreeMap<String, String> =
             record.to_labels().into_iter().collect();
@@ -133,5 +148,32 @@ mod tests {
         assert!(!labels.contains_key("model"));
         assert!(!labels.contains_key("input_tokens"));
         assert_eq!(labels["budget_exceeded"], "true");
+        assert!(!labels.contains_key("request_bytes"));
+        assert!(!labels.contains_key("response_bytes"));
+    }
+
+    #[test]
+    fn ai_usage_record_labels_carry_byte_counts_including_zero() {
+        let record = AiUsageRecord {
+            trace_id: String::new(),
+            span_id: String::new(),
+            host: "api.openai.com".to_string(),
+            port: 443,
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            provider: "openai".to_string(),
+            model: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            status: 200,
+            budget_exceeded: false,
+            request_bytes: Some(120),
+            response_bytes: Some(0),
+        };
+        let labels: std::collections::BTreeMap<String, String> =
+            record.to_labels().into_iter().collect();
+        assert_eq!(labels["request_bytes"], "120");
+        assert_eq!(labels["response_bytes"], "0");
     }
 }

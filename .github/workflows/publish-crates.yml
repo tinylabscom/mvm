@@ -5,18 +5,17 @@ name: Publish to crates.io
 # [workspace.metadata.mvm.publish], dependencies first, minus the crates
 # declared blocked and everything above them (it says which, and why).
 #
-# The plan is the public crates only (today `mvm-contract`); every internal
+# The plan is the public crates only (`mvm-contract` and `runmvm-client`); every internal
 # crate says `publish = false`, and a root that cannot be published takes its
 # whole closure out of the plan rather than leaving its dependencies to be
 # uploaded alone.
 #
-# release.yml dispatches this with dry_run=false on every tag push, because a
-# GITHUB_TOKEN-raised release event starts no downstream workflow. A dry run
-# needs no token: it packages and build-verifies the whole plan with
+# Publication is a separate, explicitly authorized step after the installed
+# release gates, never an automatic consequence of creating a GitHub release.
+# A dry run needs no token: it packages and build-verifies the whole plan with
 # `cargo package`, which resolves the plan's crates against each other
 # instead of against crates.io, so it works before any of them is published.
-# It runs on pull requests that change the publish machinery and nightly from
-# Extended CI.
+# It runs on pull requests that change the publish machinery.
 
 on:
   workflow_dispatch:
@@ -51,7 +50,7 @@ concurrency:
 
 # Only a direct dispatch with dry_run explicitly false uploads. A reusable
 # workflow sees its caller's event, so `github.event_name` is
-# `workflow_dispatch` whenever Extended CI was started by hand; and
+# `workflow_dispatch` whenever a caller was started by hand; and
 # `workflow_call` declares no `dry_run`, so `inputs.dry_run` is null there and
 # `!inputs.dry_run` is true. Guarded on those two alone, the upload job (and
 # the BDD suite before it) starts from a nightly dry run, which passes no
@@ -98,6 +97,15 @@ jobs:
           for crate in "${crates[@]}"; do args+=(--package "${crate}"); done
           cargo package "${args[@]}"
           ls -la target/package/*.crate
+
+  rust-registry-smoke:
+    needs: [publish]
+    if: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) == 'false' && needs.publish.result == 'success' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/rust-registry-smoke.yml
+    with:
+      tag: ${{ inputs.tag }}
 
   publish:
     needs: [bdd, package]

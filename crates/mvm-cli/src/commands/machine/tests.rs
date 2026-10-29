@@ -3,7 +3,8 @@ use super::remove::{
     remove_machine_runtime_state, remove_machine_spec, resolve_remove_targets, rm_running_refusal,
 };
 use super::runtime::{
-    PostStart, post_start_action, resolve_persistent_spec, transient_volume_warning,
+    PostStart, effective_hypervisor, needs_built_pack_preflight, post_start_action,
+    preflight_registry_pack_image, resolve_persistent_spec, transient_volume_warning,
 };
 use super::*;
 use crate::commands::{Cli, Commands};
@@ -919,10 +920,25 @@ fn non_image_run_refuses_prod_before_source_work() {
             .expect_err("non-image production run must be refused");
         assert!(
             err.to_string()
-                .contains("only with `--image` or `--runtime`"),
+                .contains("only with `--image`, `--runtime`, or a signed bundle artifact"),
             "argv {argv:?}: {err}"
         );
     }
+
+    // A signed bundle artifact is the one source the gate admits without
+    // `--image`/`--runtime`: its signature is verified when the manifest
+    // settles, and a host-local build is refused under --prod at that step.
+    let args = parse_run(&[
+        "run",
+        "--manifest",
+        "./app.mvmpkg",
+        "--prod",
+        "--",
+        "/bin/true",
+    ])
+    .expect("bundle production run parses");
+    args.refuse_unsupported_prod()
+        .expect("a signed bundle artifact may carry production policy");
 }
 
 #[test]
@@ -1042,68 +1058,6 @@ fn resolve_mode_accepts_materialized_flake_slot_after_build() {
         .expect("materialized flake is a source");
 
     assert_eq!(mode, MachineRunMode::Transient);
-}
-
-#[test]
-fn an_installed_application_runs_without_a_caller_command() {
-    let mut args = parse_run(&["run", "--manifest", &"a".repeat(64)]).expect("parse");
-    args.run.application_policy = Some("agent/environment@1.0.0".into());
-    assert_eq!(
-        args.resolve_mode(false).expect("declared entrypoint"),
-        MachineRunMode::Transient
-    );
-}
-
-#[test]
-fn a_development_application_terminal_needs_explicit_development_selection() {
-    let environment = serde_json::from_value(serde_json::json!({
-        "descriptor_version": 1,
-        "target": "aarch64-linux",
-        "entrypoint": {"argv": ["/usr/bin/agent"]},
-    }))
-    .unwrap();
-    let mut posture = mvm_core::plan::BundleSecurityPosture {
-        profile: mvm_core::security::AgentProfile::Dev,
-        verity_protected: true,
-        requires_auth: true,
-        allows_volumes: false,
-        allows_egress: false,
-    };
-    let mut standard = parse_run(&[
-        "run",
-        "--profile",
-        "standard",
-        "--manifest",
-        &"a".repeat(64),
-    ])
-    .unwrap();
-    assert!(
-        runtime::prepare_application_run(&mut standard, &posture, &environment)
-            .unwrap_err()
-            .to_string()
-            .contains("--profile dev")
-    );
-    let mut development = parse_run(&[
-        "run",
-        "--profile",
-        "dev",
-        "-it",
-        "--manifest",
-        &"a".repeat(64),
-    ])
-    .unwrap();
-    runtime::prepare_application_run(&mut development, &posture, &environment).unwrap();
-    assert_eq!(development.run.argv, vec!["/usr/bin/agent"]);
-    assert!(development.run.pty);
-    posture.profile = mvm_core::security::AgentProfile::SealedProd;
-    let mut sealed = parse_run(&["run", "-it", "--manifest", &"a".repeat(64)]).unwrap();
-    assert_eq!(sealed.run.profile, RunProfile::Dev);
-    assert!(
-        runtime::prepare_application_run(&mut sealed, &posture, &environment)
-            .unwrap_err()
-            .to_string()
-            .contains("sealed")
-    );
 }
 
 #[test]
@@ -1545,7 +1499,7 @@ fn run_directory_volume_is_refused_under_every_profile() {
 }
 
 /// A persistent `machine run` spec for `--volume <volume>` under `profile`.
-/// `None` leaves the flag off, which is the default (`dev`) profile.
+/// `None` leaves the flag off, which is the default (`standard`) profile.
 fn machine_run_spec_with_volume(profile: Option<&str>, volume: &str) -> Result<MachineSpec> {
     let mut argv = vec!["run", "--image", "x", "--name", "web"];
     if let Some(profile) = profile {
@@ -1803,6 +1757,92 @@ fn persistent_spec_reconnects_without_image_and_errors_when_absent() {
 }
 
 #[test]
+fn persistent_machine_run_persists_a_preselected_pack_pin_as_its_only_source() {
+    let _state = IsolatedMachineState::new();
+    let mut args = parse_run(&["run", "--name", "python", "--detach"]).expect("parse");
+    args.run.registry_pack_image = Some(
+        mvm_core::registry_pack::PackPin::new(
+            "runtime/python@1.1.0".parse().expect("reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("pack pin"),
+    );
+
+    let (spec, _) =
+        resolve_persistent_spec(&args, "python", None, None).expect("create pack-backed machine");
+
+    assert_eq!(
+        spec.registry_pack_image
+            .as_ref()
+            .map(|pin| pin.reference().to_string())
+            .as_deref(),
+        Some("runtime/python@1.1.0")
+    );
+    assert!(spec.image.is_none());
+    assert!(spec.manifest.is_none());
+    assert!(spec.deployment.is_none());
+    assert!(!spec.runtime_pack);
+}
+
+#[test]
+fn source_pack_preflight_does_not_treat_its_pin_as_a_built_image() {
+    let _state = IsolatedMachineState::new();
+    let mut spec = spec_fixture("source");
+    spec.manifest = Some("verified-source-slot".into());
+    spec.registry_pack_image = Some(
+        mvm_core::registry_pack::PackPin::new(
+            "runtime/python@1.1.0".parse().expect("reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("pack pin"),
+    );
+
+    preflight_registry_pack_image(&spec, Some("firecracker"))
+        .expect("Source pack slot is handled by the Source validator");
+}
+
+#[test]
+fn persistent_preflight_uses_the_backend_selected_for_the_actual_start() {
+    let mut env = TestEnv::new();
+    env.set("MVM_HYPERVISOR", "libkrun");
+    assert_eq!(effective_hypervisor(None), "libkrun");
+    assert_eq!(effective_hypervisor(Some("firecracker")), "firecracker");
+}
+
+#[test]
+fn persistent_preflight_is_skipped_only_for_an_already_running_reuse() {
+    assert!(!needs_built_pack_preflight(&SpecReconcile::Reuse, true));
+    assert!(needs_built_pack_preflight(&SpecReconcile::Reuse, false));
+    assert!(needs_built_pack_preflight(&SpecReconcile::Create, true));
+    assert!(needs_built_pack_preflight(
+        &SpecReconcile::Recreate {
+            changed: "source".into(),
+        },
+        true
+    ));
+}
+
+#[test]
+fn fresh_transient_machine_run_accepts_a_preselected_pack_pin_as_its_source() {
+    let _state = IsolatedMachineState::new();
+    let mut args =
+        parse_run(&["run", "--policy", "runtime/python@1.1.0", "--", "/bin/true"]).expect("parse");
+    args.run.registry_pack_image = Some(
+        mvm_core::registry_pack::PackPin::new(
+            "runtime/python@1.1.0".parse().expect("reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("pack pin"),
+    );
+
+    assert_eq!(
+        args.resolve_mode(false)
+            .expect("built pack is a boot source"),
+        MachineRunMode::Transient
+    );
+}
+
+#[test]
 fn interactive_requires_a_host_tty() {
     require_tty(true).expect("a host TTY is allowed");
     let err = require_tty(false).expect_err("no TTY must be refused, not left to hang");
@@ -1830,6 +1870,7 @@ fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
             accessible: false,
             rootfs_path: None,
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
             restored_device_anchors: None,
         },
@@ -1867,6 +1908,7 @@ fn resolve_machine_build_mode_is_fail_closed_and_reads_accessible() {
                 accessible,
                 rootfs_path: None,
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 observability_target: None,
                 restored_device_anchors: None,
             },

@@ -7,7 +7,7 @@
 
 /**
  * One command in a hook phase.
- * 
+ *
  * Two variants, internally tagged on `kind` — matches the rest of the IR's enum conventions (`Source`, `Image`, `MountSource`, …) so the JSON Schema and SDK generators handle the discriminant uniformly.
  */
 export type HookCmd = ({
@@ -30,13 +30,13 @@ path: string
 })
 /**
  * Addon composition tier.
- * 
+ *
  * `Separate` is the v1 shape — the addon runs as its own microVM and the consumer reaches it over the mesh. `InVm` is reserved for the future in-VM addon tier where small Nix fragments compose directly into the consumer's `mkGuest` flake; it is rejected by the validator with `E_ADDON_TIER_NOT_IMPLEMENTED` until that lands.
  */
 export type AddonTier = ("separate" | "in_vm")
 /**
  * Per-app dependency declaration.
- * 
+ *
  * The host validates the lockfile exists in the bundled source tree and that it's pinned (every entry carries hashes the install step can verify). The actual install runs at image build time inside the upstream-mvm Nix factory; this IR field is the *declaration* shape, not the install machinery.
  */
 export type Dependencies = ({
@@ -60,7 +60,7 @@ export type PythonTool = ("uv" | "pip_tools")
 export type NodeTool = ("pnpm" | "npm" | "yarn")
 /**
  * How the wrapper inside the microVM is dispatched.
- * 
+ *
  * `Command` is the legacy shape: an explicit argv that runs once at boot. `Function` is the function-call shape: a long-running language wrapper baked into the image dispatches a named function whose return value is encoded back to the caller per the declared serialization format.
  */
 export type Entrypoint = ({
@@ -77,7 +77,7 @@ working_dir?: string
 args_schema?: (JsonSchemaShape | null)
 /**
  * Opt-in concurrency model for this entrypoint.
- * 
+ *
  * When `None`, the function runs under the cold model: a fresh wrapper process per invocation. When `Some(WarmProcess(...))`, mvm bakes a long-running wrapper that handles many sequential calls without respawning, dispatched via mvm's warm-process worker pool. Warm-process is opt-in because state can leak across calls.
  */
 concurrency?: (Concurrency | null)
@@ -99,7 +99,7 @@ function: string
 kind: "function"
 /**
  * Language whose shim renderer / Nix factory mvm dispatches to when compiling this entrypoint. Open string validated mvm-side; current allowlist is in `validate.rs::SUPPORTED_LANGUAGES`. Adding a language is a one-PR change in mvm — no IR schema bump. SDKs set this from their own language at registration time (`"python"` for the Python SDK, `"node"` for the TypeScript SDK); users can override for cross-language manifest authoring (e.g. authoring a Python workload from the TypeScript SDK).
- * 
+ *
  * Replaces the earlier closed-enum `runtime: Runtime` field. Pre-1.0 schema bump.
  */
 language: string
@@ -130,7 +130,7 @@ ref: SecretRef
 export type AuthType = ("sigv4" | "hmac" | "bearer" | "basic")
 /**
  * Where an injected credential's placeholder may sit in a request, and so where its value is substituted.
- * 
+ *
  * Only injected credentials (`Bearer`, `Basic`) have a position; a signing scheme (`Sigv4`, `Hmac`) signs the whole request and is always `Header`.
  */
 export type InjectionMode = ("header" | "query_param" | "url_path" | "basic_auth")
@@ -143,7 +143,7 @@ path: string
 })
 /**
  * Concurrency model for a function-entrypoint.
- * 
+ *
  * Open enum tagged on `kind` so future tiers (`InProcessConcurrent`, `Pool`, …) can be added without breaking existing IR. Today the only variant is `WarmProcess` — a long-running wrapper handling many sequential calls per worker, with bounded recycling.
  */
 export type Concurrency = {
@@ -200,6 +200,10 @@ config: unknown
 kind: "external"
 provider: string
 })
+/**
+ * Reviewed model/tariff combinations supported by pre-forward reservations.
+ */
+export type AiBudgetModel = "claude-haiku-4-5-20251001"
 export type NetworkDns = ({
 kind: "none"
 } | {
@@ -236,7 +240,7 @@ reference: string
 })
 /**
  * Threat-tier label on the *consumer* (App). Combines with the addon's `[security].trust_tier` to drive mvmd's SMT-affinity scheduler matrix.
- * 
+ *
  * Defaults to `Untrusted` (most protective). Workloads that run only first-party reviewed code can opt into `Trusted` for finer packing.
  */
 export type ThreatTier = ("untrusted" | "trusted")
@@ -253,15 +257,15 @@ volumes?: Volume[]
 export interface App {
 /**
  * Composable addon-uses. Each entry pulls a sha-attested addon from the registry (or a local-path during development); mvmd instantiates each addon-use as a separate microVM and bridges it to this app over the workload mesh.
- * 
+ *
  * Empty list (or absent field) = no addons; preserves the v0 behavior. Each entry is validated against the lockfile by `addon::resolve_and_validate` (sibling to `compile::compile`, hermetic boundary preserved).
  */
 addons?: AddonUse[]
 /**
  * Dependency declaration.
- * 
+ *
  * Function-entrypoint workloads must declare this explicitly — either point at a hash-pinned lockfile or assert `kind = "none"` if the workload only needs stdlib. The host's `mvm validate` enforces existence + per-format hash-pin heuristic and rejects unpinned entries with `E_UNPINNED_DEPS`.
- * 
+ *
  * Optional for command-style entrypoints (preserved v0 behavior) until a future ADR flips that default.
  */
 dependencies?: (Dependencies | null)
@@ -297,7 +301,7 @@ threat_tier?: ThreatTier
 }
 /**
  * One use of an addon by the consuming app.
- * 
+ *
  * The triple `(name, ref, sha256)` uniquely identifies the addon artifact; `alias` disambiguates env-var prefixes when the same addon is used multiple times. `params` are validated against the manifest's `[[addon.params]]` table at compile time.
  */
 export interface AddonUse {
@@ -334,7 +338,7 @@ tier: AddonTier
 }
 /**
  * Per-phase lifecycle command lists for an `App` or an `AddonUse`.
- * 
+ *
  * Each phase is a `Vec<HookCmd>` — always. The "empty vec means no hook" rule plus the `skip_serializing_if = "Vec::is_empty"` field attribute on every phase keeps IR documents that don't use hooks byte-identical to v0 fixtures: the JSON object simply omits the `hooks` key when every phase is empty.
  */
 export interface Hooks {
@@ -451,6 +455,10 @@ budget?: (AiBudget | null)
  * Whether to record AI token usage for this workload.
  */
 metering?: boolean
+/**
+ * Strict pre-forward request and USD reservation ceiling, independent of metering.
+ */
+request_budget?: (AiRequestBudget | null)
 }
 /**
  * Token budget for AI egress. A `None` field means no limit for that category.
@@ -459,6 +467,23 @@ export interface AiBudget {
 max_input_tokens?: (number | null)
 max_output_tokens?: (number | null)
 max_total_tokens?: (number | null)
+}
+/**
+ * Pre-forward limits for one endpoint lifetime. Reservations are never refunded.
+ */
+export interface AiRequestBudget {
+/**
+ * Maximum upstream attempts, including failed and cancelled attempts.
+ */
+max_requests: number
+/**
+ * USD ceiling in millionths of a dollar, excluding taxes and account charges.
+ */
+max_spend_microusd: number
+/**
+ * Exact model and conservative tariff revision; aliases are not accepted.
+ */
+model: AiBudgetModel
 }
 export interface NetworkEgress {
 /**

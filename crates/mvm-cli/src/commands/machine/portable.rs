@@ -1,5 +1,5 @@
-//! `machine check-artifact <app.mvmpkg>`: verify a signed bundle, confirm it
-//! can run on this host, and show what it declares about any launch of it.
+//! `machine check-artifact <app.mvmpkg>`: verify a signed bundle, confirm its
+//! host architecture compatibility, and preview its launch declarations.
 //!
 //! Read-only: no install, no extraction, no boot, no audit-chain emission.
 //! The run path (`machine run --manifest <app.mvmpkg>`) verifies the same
@@ -8,7 +8,7 @@
 use anyhow::Result;
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::BackendImageSupport;
-use mvm_core::plan::bundle::verify_bundle_file;
+use mvm_core::plan::bundle::BundleOrigin;
 use mvm_core::plan::{BundleManifest, FsTrustStore, check_embedded_image_set_for_backend};
 use std::path::PathBuf;
 
@@ -32,7 +32,7 @@ pub(in crate::commands) struct CheckArtifactArgs {
 pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result<()> {
     if !mvm_client::launch::manifest_ref::is_bundle_archive(&args.path) {
         anyhow::bail!(
-            "{} is not a .mvmpkg bundle; seal one with `mvmctl bundle export`",
+            "{} is not a .mvmpkg bundle; create one with `mvmctl build`",
             args.path.display()
         );
     }
@@ -40,11 +40,16 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
         Some(path) => FsTrustStore::new(path),
         None => FsTrustStore::default_path()?,
     };
-    let verified = verify_bundle_file(&args.path, &trust)
-        .map_err(|error| anyhow::anyhow!("{}: {error}", args.path.display()))?;
+    let (verified, origin) = mvm_client::bundle_preview::verify_for_preview(&args.path, trust)?;
+    anyhow::ensure!(
+        origin != BundleOrigin::Untrusted,
+        "{}: signed origin is neither release-verified nor a local build signed by this host",
+        args.path.display()
+    );
     let host_arch = GuestArch::require_host(&verified.manifest.arch)
         .map_err(|error| anyhow::anyhow!("{}: not runnable here: {error}", args.path.display()))?;
 
+    let mut backend_compatibility_checked = false;
     if let Some(name) = args.backend.as_deref() {
         let support = backend_image_support(name)?;
         let host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
@@ -53,6 +58,7 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
                 .map_err(|error| {
                     anyhow::anyhow!("backend {name} refuses embedded image set: {error}")
                 })?;
+            backend_compatibility_checked = true;
         }
     }
 
@@ -63,7 +69,9 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
                 "path": args.path.display().to_string(),
                 "bundle_sha256": verified.bundle_sha256,
                 "arch": verified.manifest.arch,
-                "runnable_here": true,
+                "runnable_here": null,
+                "host_arch_compatible": true,
+                "backend_compatibility_checked": backend_compatibility_checked,
                 "artifact_count": verified.manifest.artifacts.len(),
                 "embedded_image_sets": verified.embedded_image_sets.iter().map(|set| {
                     set.manifest_sha256.as_str()
@@ -72,13 +80,29 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
                 "posture": posture_preview(&verified.manifest),
                 "kernel_cmdline": verified.manifest.kernel_cmdline(),
                 "built_from": verified.manifest.build_provenance().map(|p| p.input_ref.as_str()),
-                "verified": true,
+                "origin": match origin {
+                    BundleOrigin::ReleaseVerified => "release-verified",
+                    BundleOrigin::LocalBuild => "local-build",
+                    BundleOrigin::Untrusted => "untrusted",
+                },
+                "verified": origin == BundleOrigin::ReleaseVerified,
+                "release_verified": origin == BundleOrigin::ReleaseVerified,
             }))?
         );
     } else {
-        crate::ui::success(&format!(
-            "{}: verified, runnable on {host_arch} ({} artifacts, {} embedded image set{}){}",
+        // This is the requested verification report, not opt-in UI chatter.
+        // It must remain visible without --verbose and when stdout is piped.
+        if origin == BundleOrigin::LocalBuild {
+            println!("{}", mvm_core::plan::bundle::LOCAL_BUILD_NOTICE);
+        }
+        println!(
+            "{}: {}architecture compatible with {host_arch} ({} artifacts, {} embedded image set{}); launch readiness not checked{}",
             args.path.display(),
+            if origin == BundleOrigin::ReleaseVerified {
+                "verified, "
+            } else {
+                ""
+            },
             verified.manifest.artifacts.len(),
             verified.embedded_image_sets.len(),
             if verified.embedded_image_sets.len() == 1 {
@@ -86,11 +110,15 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
             } else {
                 "s"
             },
-            args.backend
-                .as_deref()
-                .map(|backend| format!(", backend {backend} compatible"))
-                .unwrap_or_default(),
-        ));
+            if backend_compatibility_checked {
+                format!(
+                    ", embedded image sets compatible with backend {}",
+                    args.backend.as_deref().unwrap_or_default()
+                )
+            } else {
+                String::new()
+            },
+        );
         println!("  posture: {}", posture_line(&verified.manifest));
         if let Some(cmdline) = verified.manifest.kernel_cmdline() {
             println!("  kernel cmdline: {cmdline}");

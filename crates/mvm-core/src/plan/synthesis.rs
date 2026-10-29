@@ -154,7 +154,7 @@ pub struct SynthesisInput<'a> {
     /// backend dispatch. Boots resolved from an installed bundle set it.
     pub bundle_pin: Option<crate::plan::bundle::PlanArtifact>,
     /// Optional pin to an application-dependencies volume sealed by
-    /// `mvm_compiler::deps_audit::seal_volume`. No boot path sets it
+    /// `mvm_core::deps_audit::seal_volume`. No boot path sets it
     /// today. When it is set, the supervisor's admit path re-runs
     /// `verify_sealed_volume` against the pinned `volume_hash` +
     /// `manifest_sha256` before backend dispatch (security claim 9).
@@ -278,9 +278,10 @@ pub struct SynthesisInputBuilder<'a> {
 }
 
 impl<'a> SynthesisInputBuilder<'a> {
-    /// An empty builder: nothing set yet.
-    #[must_use]
-    pub fn new() -> Self {
+    /// An empty builder: nothing set yet. Reached only through
+    /// [`SynthesisInput::builder`], so the builder has no `Default` a caller
+    /// could use to skip it.
+    fn new() -> Self {
         Self {
             vm_name: None,
             tenant: None,
@@ -702,12 +703,6 @@ impl<'a> SynthesisInputBuilder<'a> {
                 .ok_or(BuilderError::missing("SynthesisInput", "stream_retention"))?,
             attestation_mode: self.attestation_mode.unwrap_or(AttestationMode::Noop),
         })
-    }
-}
-
-impl<'a> Default for SynthesisInputBuilder<'a> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

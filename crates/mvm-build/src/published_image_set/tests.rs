@@ -7,7 +7,161 @@ use mvm_core::util::test_env::TestEnv;
 const ARCH: GuestArch = GuestArch::Aarch64;
 const MEMBER: &str = "stage0-vmlinux-aarch64";
 
+#[test]
+fn workload_acquisition_does_not_require_or_authorize_builder_support() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let mut source = with_member(b"stage0").serve_from(served.path());
+    let path = served.path().join("image-set.json");
+    let mut manifest: ImageSetManifest =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest.compatibility.builder_cache_contract += 1;
+    source.train.compatibility = manifest.compatibility.clone();
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    source.train.image_set.manifest_sha256 = Sha256Hex::from_bytes(&bytes);
+    std::fs::write(&path, bytes).unwrap();
+    let full_source = ImageSetSource::new(source.train.clone(), source.base_url.clone())
+        .with_download(source.download);
+    assert!(PublishedImageSet::acquire_from(full_source).is_err());
+    let set = PublishedImageSet::acquire_workload_from(source).unwrap();
+    let destination = served.path().join("stage0");
+    set.fetch_member_artifact(
+        ImageSetRole::Stage0BootstrapKernel,
+        ARCH,
+        MEMBER,
+        &destination,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(destination).unwrap(), b"stage0");
+    let builder = set
+        .manifest()
+        .members
+        .iter()
+        .find(|member| member.role == ImageSetRole::BuilderVm)
+        .unwrap();
+    let artifact = &builder.artifacts[0];
+    assert!(
+        set.artifact(builder.role, builder.target, artifact.name.as_str())
+            .is_err()
+    );
+    assert!(
+        set.fetch_artifact(artifact, &served.path().join("builder"))
+            .is_err()
+    );
+}
+
+#[test]
+fn workload_acquisition_preserves_pin_completeness_and_base_contract_checks() {
+    let _env = unsigned_env();
+    for failure in ["pin", "complete", "base"] {
+        let served = tempfile::tempdir().unwrap();
+        let fixture = match failure {
+            "complete" => ImageSetFixture::complete().without_member(
+                ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant),
+                MemberTarget::Arch(ARCH),
+            ),
+            "base" => ImageSetFixture::complete()
+                .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::new(99))),
+            _ => ImageSetFixture::complete(),
+        };
+        let source = fixture.serve_from(served.path());
+        if failure == "pin" {
+            let path = served.path().join("image-set.json");
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes.push(b'\n');
+            std::fs::write(path, bytes).unwrap();
+        }
+        assert!(
+            PublishedImageSet::acquire_workload_from(source).is_err(),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn workload_acquisition_preserves_member_digest_checks() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let source = with_member(b"stage0").serve_from(served.path());
+    std::fs::write(served.path().join(MEMBER), b"tamper").unwrap();
+    let set = PublishedImageSet::acquire_workload_from(source).unwrap();
+    assert!(matches!(
+        set.fetch_member_artifact(
+            ImageSetRole::Stage0BootstrapKernel,
+            ARCH,
+            MEMBER,
+            &served.path().join("download"),
+        ),
+        Err(ImageSetMemberError::DigestMismatch { .. })
+    ));
+}
+
+#[test]
+fn portable_publisher_proof_requires_current_feed_even_for_fixture_acquisition() {
+    let mut env = unsigned_env();
+    let home = tempfile::tempdir().unwrap();
+    env.isolate_mvm_home(home.path());
+    let served = tempfile::tempdir().unwrap();
+    for acquire in [
+        PublishedImageSet::acquire_from,
+        PublishedImageSet::acquire_workload_from,
+    ] {
+        let fixture = ImageSetFixture::complete();
+        let set = acquire(fixture.serve_from(served.path())).unwrap();
+        let error = set.retained_publisher_proof().unwrap_err();
+        assert!(format!("{error:#}").contains("current signed image-set revocations required"));
+    }
+    assert!(!mvm_core::image_set::image_set_root_proof_cache().exists());
+}
+
+#[test]
+fn cached_compatibility_binding_accepts_matching_authenticated_contract_shape() {
+    let expected = ImageSetFixture::complete()
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+        .into_manifest()
+        .compatibility;
+    let actual = expected.clone();
+
+    verify_cached_compatibility_binding(&expected, &actual).unwrap();
+}
+
+#[test]
+fn cached_compatibility_binding_rejects_mismatching_base_contract() {
+    let expected = ImageSetFixture::complete()
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+        .into_manifest()
+        .compatibility;
+    let mut actual = expected.clone();
+    actual.base_image_contract = None;
+
+    let error = verify_cached_compatibility_binding(&expected, &actual).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "cached authenticated image-set compatibility does not match images.lock"
+    );
+}
+
+#[test]
+fn cached_compatibility_binding_rejects_mismatching_builder_boot_abi() {
+    let expected = ImageSetFixture::complete()
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+        .into_manifest()
+        .compatibility;
+    let mut actual = expected.clone();
+    actual.builder_boot_abi = None;
+
+    let error = verify_cached_compatibility_binding(&expected, &actual).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "cached authenticated image-set compatibility does not match images.lock"
+    );
+}
+
 fn contract_root(marker: Option<&[u8]>, symlink: Option<&str>) -> Vec<u8> {
+    contract_root_with_mode(marker, symlink, 0o444)
+}
+
+fn contract_root_with_mode(marker: Option<&[u8]>, symlink: Option<&str>, mode: u16) -> Vec<u8> {
     use mvm_fs::ext4::{Node, Owner};
     let mut nodes = ["/etc", "/etc/mvm"]
         .into_iter()
@@ -21,7 +175,7 @@ fn contract_root(marker: Option<&[u8]>, symlink: Option<&str>) -> Vec<u8> {
     if let Some(bytes) = marker {
         nodes.push(Node::File {
             path: "/etc/mvm/base-image-contract".into(),
-            mode: 0o444,
+            mode,
             data: bytes.to_vec(),
             xattrs: Vec::new(),
             owner: Owner::ROOT,
@@ -66,25 +220,29 @@ fn new_base_markers_are_checked_after_authentication_for_each_profile_and_arch()
                         "contract-root.ext4",
                         root,
                     );
-                let set =
-                    PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
-                let out = tempfile::tempdir().unwrap();
-                let destination = out.path().join("root.ext4");
-                let result = set.fetch_member_artifact(
-                    ImageSetRole::WorkloadRootfs(profile),
-                    arch,
-                    "contract-root.ext4",
-                    &destination,
-                );
-                if marker == Some(b"1\n".as_slice()) {
-                    result.unwrap();
-                    assert!(destination.exists());
-                } else {
-                    assert!(matches!(
-                        result,
-                        Err(ImageSetMemberError::BaseImageContract { .. })
-                    ));
-                    assert!(!destination.exists());
+                for acquire in [
+                    PublishedImageSet::acquire_from,
+                    PublishedImageSet::acquire_workload_from,
+                ] {
+                    let set = acquire(fixture.serve_from(served.path())).unwrap();
+                    let out = tempfile::tempdir().unwrap();
+                    let destination = out.path().join("root.ext4");
+                    let result = set.fetch_member_artifact(
+                        ImageSetRole::WorkloadRootfs(profile),
+                        arch,
+                        "contract-root.ext4",
+                        &destination,
+                    );
+                    if marker == Some(b"1\n".as_slice()) {
+                        result.unwrap();
+                        assert!(destination.exists());
+                    } else {
+                        assert!(matches!(
+                            result,
+                            Err(ImageSetMemberError::BaseImageContract { .. })
+                        ));
+                        assert!(!destination.exists());
+                    }
                 }
             }
         }
@@ -252,6 +410,27 @@ fn renamed_ext4_payload_still_requires_the_marker_and_installs_by_authenticated_
             assert!(result.is_err(), "renaming cannot bypass the marker");
             assert!(!installed.path().join("rootfs.ext4").exists());
         }
+    }
+}
+
+#[test]
+fn base_marker_requires_exact_readonly_mode_in_every_admission_path() {
+    let mut compatibility = mvm_core::image_set::image_train_lock()
+        .compatibility
+        .clone();
+    compatibility.base_image_contract = Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER);
+    for mode in [0o444, 0o644, 0o400, 0o4444, 0o2444, 0o1444] {
+        let image = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            image.path(),
+            contract_root_with_mode(Some(b"1\n"), None, mode),
+        )
+        .unwrap();
+        assert_eq!(
+            verify_base_image_contract(image.path(), &compatibility).is_ok(),
+            mode == 0o444,
+            "marker mode {mode:o}"
+        );
     }
 }
 
@@ -487,6 +666,119 @@ fn fetch_dev_workload_installs_the_pair_build_layout() {
     );
 }
 
+#[test]
+fn dev_root_selection_uses_format_without_a_legacy_filename_escape() {
+    use mvm_core::image_set::ArtifactFormat;
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let role = ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant);
+    let target = MemberTarget::Arch(ARCH);
+    let root = contract_root(Some(b"1\n"), None);
+    let fixture = ImageSetFixture::complete()
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+        .publish_dev(
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+            target,
+            "dev-kernel",
+            b"kernel".to_vec(),
+        )
+        .publish_dev(role, target, "not-a-root.ext4", b"decoy".to_vec())
+        .publish_dev_extra(role, target, "root-payload", root.clone())
+        .publish_dev_extra(role, target, "meta.json", b"{}".to_vec())
+        .with_artifact_format("not-a-root.ext4", ArtifactFormat::Text)
+        .with_artifact_format("root-payload", ArtifactFormat::Ext4)
+        .with_artifact_format("meta.json", ArtifactFormat::Json);
+    let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    set.fetch_dev_workload(ARCH, out.path()).unwrap();
+    assert_eq!(std::fs::read(out.path().join("rootfs.ext4")).unwrap(), root);
+    assert_eq!(
+        std::fs::read(out.path().join("mvm-meta.json")).unwrap(),
+        b"{}"
+    );
+}
+
+#[test]
+fn installed_workload_requires_each_half_of_the_selected_pair() {
+    use mvm_core::image_set::ArtifactFormat;
+    let profile = WorkloadImageProfile::DefaultTenant;
+    let target = MemberTarget::Arch(ARCH);
+    for missing_role in [
+        ImageSetRole::WorkloadKernel(profile),
+        ImageSetRole::WorkloadRootfs(profile),
+    ] {
+        let manifest = ImageSetFixture::complete()
+            .publish(
+                ImageSetRole::WorkloadKernel(profile),
+                target,
+                "kernel",
+                b"kernel".to_vec(),
+            )
+            .publish(
+                ImageSetRole::WorkloadRootfs(profile),
+                target,
+                "root.ext4",
+                b"root".to_vec(),
+            )
+            .with_artifact_format(
+                "kernel",
+                ArtifactFormat::Kernel(mvm_core::kernel_format::KernelFormat::Image),
+            )
+            .with_artifact_format("root.ext4", ArtifactFormat::Ext4)
+            .without_member(missing_role, target)
+            .into_manifest();
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(out.path().join("vmlinux"), b"kernel").unwrap();
+        std::fs::write(out.path().join("rootfs.ext4"), b"root").unwrap();
+        let error = verify_installed_workload_files(&manifest, out.path(), ARCH, profile, None)
+            .expect_err("one authenticated member is not a complete workload");
+        assert!(error.to_string().contains("no complete"), "{error:#}");
+    }
+}
+
+#[test]
+fn installed_workload_refuses_a_symlink_even_when_its_size_and_target_digest_match() {
+    use mvm_core::image_set::ArtifactFormat;
+    let profile = WorkloadImageProfile::DefaultTenant;
+    let target = MemberTarget::Arch(ARCH);
+    let manifest = ImageSetFixture::complete()
+        .publish(
+            ImageSetRole::WorkloadKernel(profile),
+            target,
+            "kernel",
+            b"kernel".to_vec(),
+        )
+        .publish(
+            ImageSetRole::WorkloadRootfs(profile),
+            target,
+            "root.ext4",
+            b"root".to_vec(),
+        )
+        .with_artifact_format(
+            "kernel",
+            ArtifactFormat::Kernel(mvm_core::kernel_format::KernelFormat::Image),
+        )
+        .with_artifact_format("root.ext4", ArtifactFormat::Ext4)
+        .into_manifest();
+    let out = tempfile::tempdir().unwrap();
+    std::fs::write(out.path().join("target"), b"kernel").unwrap();
+    std::os::unix::fs::symlink("target", out.path().join("vmlinux")).unwrap();
+    std::fs::write(out.path().join("rootfs.ext4"), b"root").unwrap();
+    assert_eq!(
+        std::fs::symlink_metadata(out.path().join("vmlinux"))
+            .unwrap()
+            .len(),
+        6,
+        "the symlink length deliberately equals the declared kernel size"
+    );
+    let error = verify_installed_workload_files(&manifest, out.path(), ARCH, profile, None)
+        .expect_err("matching target bytes cannot turn a symlink into a regular file");
+    assert!(
+        error.to_string().contains("not the declared regular file"),
+        "{error:#}"
+    );
+}
+
 /// A set without dev members refuses the dev fetch with NoMember, so the
 /// caller falls back to a pair build.
 #[test]
@@ -713,14 +1005,19 @@ fn acquire_refuses_a_root_without_a_signature() {
     env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
     let served = tempfile::tempdir().unwrap();
 
-    let err = PublishedImageSet::acquire_from(with_member(b"o").serve_from(served.path()))
-        .err()
-        .expect("an unsigned root must be refused even when its digest is pinned");
-    let rendered = format!("{err:#}");
-    assert!(
-        rendered.contains("publisher identity"),
-        "the refusal must be the signature rung: {rendered}"
-    );
+    for acquire in [
+        PublishedImageSet::acquire_from,
+        PublishedImageSet::acquire_workload_from,
+    ] {
+        let err = acquire(with_member(b"o").serve_from(served.path()))
+            .err()
+            .expect("an unsigned root must be refused even when its digest is pinned");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("publisher identity"),
+            "the refusal must be the signature rung: {rendered}"
+        );
+    }
 }
 
 /// The two hatches are independent: waiving digest checks must not waive the
@@ -761,4 +1058,28 @@ fn the_locked_source_names_the_pinned_release_directory() {
             .starts_with("http://127.0.0.1:9/"),
         "a mirror moves the host and nothing else"
     );
+}
+
+#[test]
+fn a_host_with_no_applied_revocations_acquires_as_before() {
+    use mvm_core::image_set_revocation::ImageSetRevocationStoreError as Store;
+    assert!(usable_revocations(Err(Store::Missing)).is_none());
+}
+
+#[test]
+fn a_list_that_cannot_be_used_is_not_enforced_and_does_not_block_acquisition() {
+    use mvm_core::image_set_revocation::{ImageSetRevocationError, ImageSetRevocationStoreError};
+    let now = chrono::Utc::now();
+    for error in [
+        ImageSetRevocationStoreError::Corrupt,
+        ImageSetRevocationStoreError::Incomplete,
+        ImageSetRevocationStoreError::TooLarge,
+        ImageSetRevocationStoreError::Storage("disk".into()),
+        ImageSetRevocationStoreError::Verification(ImageSetRevocationError::Expired {
+            not_after: now,
+            now,
+        }),
+    ] {
+        assert!(usable_revocations(Err(error)).is_none());
+    }
 }

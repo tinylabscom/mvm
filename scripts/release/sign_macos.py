@@ -30,6 +30,8 @@ FAT = {b"\xca\xfe\xba\xbe": (">", False), b"\xbe\xba\xfe\xca": ("<", False),
 ROLES = {
     "mvmctl": ["com.apple.security.virtualization"],
     "mvm-hvf-supervisor": ["com.apple.security.hypervisor"],
+    "mvm-libkrun-supervisor": ["com.apple.security.hypervisor"],
+    # Retain the historical spelling when inspecting older staging layouts.
     "mvm-krun-supervisor": ["com.apple.security.hypervisor"],
 }
 # codesign treats a requirement argument without '=' as a filename.
@@ -49,7 +51,11 @@ def run(*args):
 
 
 def macho_type(path):
-    """Read thin/universal Mach-O headers, including extensionless helpers."""
+    """Read thin/single-slice FAT headers, including extensionless helpers.
+
+    Multi-slice FAT is outside the ARM-only producer scope: default-slice
+    entitlement readback cannot establish the entitlement policy for every slice.
+    """
     with path.open("rb") as stream:
         header = stream.read(16)
         magic = header[:4]
@@ -61,6 +67,8 @@ def macho_type(path):
         count = struct.unpack(endian + "I", header[4:8])[0]
         if not 0 < count <= 64:
             raise RuntimeError(f"invalid universal Mach-O: {path}")
+        if count > 1:
+            raise RuntimeError(f"multi-slice FAT Mach-O is not supported: {path}")
         types = set()
         for index in range(count):
             stream.seek(8 + index * (32 if wide else 20) + 8)
@@ -89,12 +97,64 @@ def targets(payload):
         if kind is not None:
             if kind not in (2, 6, 8):  # MH_EXECUTE, MH_DYLIB, MH_BUNDLE
                 raise RuntimeError(f"unsupported shipped Mach-O type {kind}: {path}")
+            if path.name in ROLES and kind != 2:
+                raise RuntimeError(f"runtime role must be MH_EXECUTE: {path}")
             found.append((path, kind))
         elif path.suffix in (".dylib", ".so") or path.name in ROLES:
             raise RuntimeError(f"expected Mach-O: {path}")
     if not found:
         raise RuntimeError("payload contains no Mach-O code")
     return found
+
+
+def verify_entitlements(path, keys):
+    """Check the signed bytes, never the input entitlement template."""
+    embedded = run("codesign", "-d", "--entitlements", "-", "--xml", path)
+    actual = plistlib.loads(embedded.encode()) if embedded.strip() else {}
+    if not isinstance(actual, dict) or set(actual) != set(keys) or not all(
+            actual[key] is True for key in keys):
+        raise RuntimeError(f"required runtime entitlement missing or unexpected: {path}")
+
+
+def producer_sign(payload, report, require_cli_inventory=False):
+    """Mandatory credential-free gate for new producer staging bytes only."""
+    report.unlink(missing_ok=True)
+    payload = payload.resolve(strict=True)
+    if not payload.is_dir():
+        raise RuntimeError("--payload must be a staging directory")
+    if report.resolve().is_relative_to(payload):
+        raise RuntimeError("--report must be outside the payload")
+    if platform.system() != "Darwin":
+        raise RuntimeError("producer signing requires macOS")
+    code = targets(payload)
+    if require_cli_inventory:
+        names = {path.name for path, kind in code if kind == 2}
+        missing = {"mvmctl", "mvm-hvf-supervisor", "mvm-libkrun-supervisor"} - names
+        if missing:
+            raise RuntimeError("missing required CLI inventory: " + ", ".join(sorted(missing)))
+    entries = []
+    with tempfile.TemporaryDirectory(prefix="mvm-producer-sign-") as tmp:
+        for path, kind in sorted(code, key=lambda item: item[1] == 2):
+            keys = ROLES.get(path.name, []) if kind == 2 else []
+            args = ["codesign", "--force", "--sign", "-", "--timestamp=none"]
+            if keys:
+                entitlements = Path(tmp) / "entitlements.plist"
+                entitlements.write_bytes(plistlib.dumps(dict.fromkeys(keys, True)))
+                args += ["--entitlements", entitlements]
+            run(*args, path)
+            run("codesign", "--verify", "--strict", "--all-architectures", path)
+            verify_entitlements(path, keys)
+            entries.append({
+                "path": str(path.relative_to(payload)),
+                "role": path.name if keys else "code",
+                "required_entitlements": keys,
+                "verification": "strict-all-architectures",
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            })
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps({
+        "status": "ProducerAdhocVerified", "notarized": False, "files": entries,
+    }, indent=2) + "\n")
 
 
 def unconfigured(report):
@@ -171,11 +231,7 @@ def sign(payload, report):
                 run(*args, path)
                 run("codesign", "--verify", "--strict", "--all-architectures",
                     "-R", requirement, path)
-                if keys:
-                    actual = plistlib.loads(run(
-                        "codesign", "-d", "--entitlements", "-", "--xml", path).encode())
-                    if not all(actual.get(key) is True for key in keys):
-                        raise RuntimeError(f"required runtime entitlement missing: {path}")
+                verify_entitlements(path, keys)
             archive = root / "submission.zip"
             run("ditto", "-c", "-k", "--keepParent", payload, archive)
             result = json.loads(run(
@@ -204,11 +260,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--payload", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--producer-adhoc", action="store_true",
+                        help="sign and verify new staged Mach-O without Apple credentials")
+    parser.add_argument("--require-cli-inventory", action="store_true",
+                        help="require mvmctl plus the HVF and libkrun supervisors")
     parser.add_argument(
         "--skip-unconfigured", action="store_true",
         help="exit 0 with an Unconfigured report when no Apple credential is set")
     args = parser.parse_args()
     try:
+        if args.producer_adhoc:
+            if args.skip_unconfigured:
+                raise RuntimeError("--producer-adhoc cannot skip signing")
+            producer_sign(args.payload, args.report, args.require_cli_inventory)
+            return
+        if args.require_cli_inventory:
+            raise RuntimeError("--require-cli-inventory requires --producer-adhoc")
         if args.skip_unconfigured and unconfigured(args.report):
             return
         sign(args.payload, args.report)

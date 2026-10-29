@@ -78,6 +78,26 @@ pub fn require_serving_guest(
     })
 }
 
+/// Validate the actual completed activation ACK and original native lifetime.
+/// No second socket/name probe is opened: readiness belongs to the retained
+/// protected session, not a newly authenticated connection.
+pub(crate) fn require_serving_owned(
+    owner: &mut crate::entrypoint::boot::OwnedClientBoot,
+    timeout: std::time::Duration,
+) -> std::result::Result<(), DetachedReadinessError> {
+    let original_name = owner.resources().config.name.clone();
+    owner
+        .with_original(|_, runtime| runtime.validate_live())
+        .map_err(|error| match error.downcast::<DetachedReadinessError>() {
+            Ok(error) => error,
+            Err(source) => DetachedReadinessError::AbortUnresolved {
+                name: original_name,
+                timeout_secs: timeout.as_secs(),
+                source,
+            },
+        })
+}
+
 fn require_serving_guest_result(
     name: &str,
     timeout: std::time::Duration,

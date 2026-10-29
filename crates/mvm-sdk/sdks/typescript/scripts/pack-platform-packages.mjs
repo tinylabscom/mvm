@@ -19,6 +19,7 @@
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { libraryFileName } from "../dist/_hostlib.js";
@@ -34,6 +35,18 @@ if (!values.libs || !values.out) {
 
 const mainPath = path.resolve("package.json");
 const main = JSON.parse(readFileSync(mainPath, "utf8"));
+const revision = process.env.MVM_RELEASE_SOURCE_REV || process.env.GITHUB_SHA || "";
+if (!/^[0-9a-fA-F]{40}$/.test(revision)) {
+  throw new Error("native packages require the exact 40-hex build revision in MVM_RELEASE_SOURCE_REV or GITHUB_SHA");
+}
+const sourceRoot = fileURLToPath(new URL("../../../../deps/mvm-macho-sign/", import.meta.url));
+const mplLicense = readFileSync(path.join(sourceRoot, "LICENSE"));
+const sourceNotice =
+  "This native library contains mvm-macho-sign, modified MPL-2.0 Covered Software " +
+  "adapted from apple-codesign 0.29.0, Copyright Gregory Szorc.\n" +
+  "LICENSE-MPL-2.0.txt governs those files, not Apache-2.0 alone.\n" +
+  "Corresponding source, including modifications, is available under MPL-2.0 at:\n" +
+  `https://github.com/tinylabscom/mvm/tree/${revision}/crates/deps/mvm-macho-sign\n`;
 const outDir = path.resolve(values.out);
 const stageRoot = path.join(outDir, "platforms");
 rmSync(stageRoot, { recursive: true, force: true });
@@ -52,17 +65,19 @@ for (const pkg of PLATFORM_PACKAGES) {
   const stage = path.join(stageRoot, pkg.key);
   mkdirSync(stage, { recursive: true });
   copyFileSync(lib, path.join(stage, libName));
+  writeFileSync(path.join(stage, "LICENSE-MPL-2.0.txt"), mplLicense);
+  writeFileSync(path.join(stage, "THIRD_PARTY_NOTICES.txt"), sourceNotice);
   const manifest = {
     name,
     version: main.version,
     description: `libmvm_hostlib for ${main.name} on ${pkg.key}.`,
-    license: main.license,
+    license: `(${main.license} AND MPL-2.0)`,
     repository: main.repository,
     homepage: main.homepage,
     os: [pkg.os],
     cpu: [pkg.cpu],
     ...(pkg.libc ? { libc: [pkg.libc] } : {}),
-    files: [libName],
+    files: [libName, "LICENSE-MPL-2.0.txt", "THIRD_PARTY_NOTICES.txt"],
     publishConfig: main.publishConfig,
   };
   writeFileSync(path.join(stage, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);

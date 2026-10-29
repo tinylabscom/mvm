@@ -1,7 +1,7 @@
 //! Building a flake and sealing what it produced into a signed `.mvmpkg`.
 //!
 //! [`build_and_export_bundle`] is the library form of building an image and
-//! then running `mvmctl bundle export` on it: one flake build in a builder VM,
+//! then sealing it through `mvmctl build`: one flake build in a builder VM,
 //! then the same export, under the caller's signer.
 //!
 //! ## Which processes can build
@@ -160,8 +160,11 @@ pub fn export_builder_result(
             posture: None,
             provenance: Some(request.provenance(verified.build())),
             environment: None,
-            application_policy: None,
+            local_build: false,
             boot_assets: None,
+            cli_boot_assets: None,
+            canonical_linux_proof: None,
+            supplemental_artifacts: &[],
             out: &request.bundle_out,
             debug_out: request.debug_out.clone(),
         },

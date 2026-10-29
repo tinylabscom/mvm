@@ -429,19 +429,28 @@ mod tests {
     }
 
     fn root_artifact(directory: &Path, marker: Option<&[u8]>) -> VerifiedArtifact {
-        let tree = directory.join("tree");
-        std::fs::create_dir_all(tree.join("etc/mvm")).unwrap();
+        use mvm_fs::ext4::{Node, Owner};
+        let mut nodes = ["/etc", "/etc/mvm"]
+            .into_iter()
+            .map(|path| Node::Dir {
+                path: path.into(),
+                mode: 0o755,
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            })
+            .collect::<Vec<_>>();
         if let Some(marker) = marker {
-            std::fs::write(tree.join("etc/mvm/base-image-contract"), marker).unwrap();
+            nodes.push(Node::File {
+                path: "/etc/mvm/base-image-contract".into(),
+                mode: 0o444,
+                data: marker.to_vec(),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            });
         }
         let path = directory.join("rootfs.ext4");
-        mvm_fs::rootfs::materialize_ext4_pure(
-            &tree,
-            &path,
-            &mvm_fs::rootfs::MaterializeOptions::default(),
-        )
-        .unwrap();
-        let bytes = std::fs::read(&path).unwrap();
+        let bytes = mvm_fs::ext4::build_image(nodes, &Default::default()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
         VerifiedArtifact {
             role: serde_json::from_value(json!({"workload_rootfs": "default_tenant"})).unwrap(),
             target: serde_json::from_value(json!({"arch": "aarch64"})).unwrap(),

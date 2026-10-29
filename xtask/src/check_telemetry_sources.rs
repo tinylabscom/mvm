@@ -785,7 +785,7 @@ note = "standing endpoint"
             ),
             (
                 "mvm-agentd/mvm-guest-agent",
-                "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+                "crates/mvm-builder-guest/src/bin/mvm-host-vm-init.rs",
                 "fork_guest_agent();",
             ),
             (

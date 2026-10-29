@@ -36,6 +36,9 @@ pub const FC_CI_ASSETS_VERSION: &str = "v1.15";
 /// The build-time override `MVM_BOOT_IMAGE_TAG` stays so a build can point at
 /// an unpublished tag without editing the lock; the lock is what every unset
 /// build gets.
+///
+/// Host-state: the train lock it reads is a host-side boot pin.
+#[cfg(feature = "host-state")]
 pub fn default_boot_image_tag() -> &'static str {
     match option_env!("MVM_BOOT_IMAGE_TAG") {
         Some(tag) => tag,
@@ -54,6 +57,9 @@ pub fn default_boot_image_tag() -> &'static str {
 pub const ARCH: &str = std::env::consts::ARCH;
 
 /// Normalize Firecracker version strings to a canonical form (e.g., "Firecracker v1.14.1" -> "v1.14.1").
+///
+/// Host-state: the Firecracker toolchain is resolved on the host.
+#[cfg(feature = "host-state")]
 pub fn normalize_fc_version(raw: &str) -> String {
     // Capture the last semantic version (v?MAJOR.MINOR[.PATCH])
     let re = regex::Regex::new(r"(?:v)?\d+\.\d+(?:\.\d+)?").expect("valid regex");
@@ -79,6 +85,9 @@ pub fn normalize_fc_version(raw: &str) -> String {
 /// Get the effective Firecracker version.
 /// Priority: runtime env `MVM_FC_VERSION` > compile-time default.
 /// The CLI `--fc-version` flag sets `MVM_FC_VERSION` before calling this.
+///
+/// Host-state: only the host downloads or runs a Firecracker binary.
+#[cfg(feature = "host-state")]
 pub fn fc_version() -> String {
     let raw = std::env::var("MVM_FC_VERSION").unwrap_or_else(|_| FC_VERSION_DEFAULT.to_string());
     normalize_fc_version(&raw)
@@ -86,6 +95,24 @@ pub fn fc_version() -> String {
 
 /// Basename used by the default host-state root.
 pub const DEFAULT_MVM_HOME_DIR_NAME: &str = ".mvm";
+
+/// Default host-state root beneath an explicitly supplied user home.
+///
+/// This pure derivation ignores the ambient `MVM_HOME` override so isolation
+/// checks can identify the default state they must never touch.
+pub fn default_mvm_home_at(user_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    user_home.as_ref().join(DEFAULT_MVM_HOME_DIR_NAME)
+}
+
+/// Read the user home without a fallback or an `MVM_HOME` override.
+///
+/// Native credential custody uses this context independently of relocated mvm
+/// state. Callers requiring an absolute, UTF-8, existing home must validate it.
+pub fn user_home_dir_strict() -> std::io::Result<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "$HOME unset"))
+}
 
 /// The single root directory for ALL host-side mvm state.
 ///
@@ -139,13 +166,13 @@ pub fn mvm_home_strict() -> std::io::Result<std::path::PathBuf> {
     {
         return Ok(std::path::PathBuf::from(d));
     }
-    let home = std::env::var_os("HOME").ok_or_else(|| {
+    let home = user_home_dir_strict().map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "$HOME unset and MVM_HOME not set; cannot locate ~/.mvm",
         )
     })?;
-    Ok(std::path::PathBuf::from(home).join(".mvm"))
+    Ok(default_mvm_home_at(home))
 }
 
 // `~/.mvm` holds the dev VM's GC root, the host-backed Nix store disk image,
@@ -434,7 +461,7 @@ pub fn mvm_share_dir() -> String {
 }
 
 /// Root directory for application-dependency volumes sealed by
-/// `mvm_compiler::deps_audit::seal_volume`: `<mvm_home>/volumes/deps`.
+/// `mvm_core::deps_audit::seal_volume`: `<mvm_home>/volumes/deps`.
 /// Each immediate child is a `<volume_hash>/` directory containing
 /// `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, `meta.json`.
 ///
@@ -486,7 +513,7 @@ pub fn mvm_volumes_env() -> Vec<String> {
 /// Resolve `<deps_volumes_dir>/<volume_hash>` for a single deps
 /// volume. The caller is responsible for verifying the directory
 /// exists and matches its sealed manifest — see
-/// `mvm_compiler::deps_audit::verify_sealed_volume`.
+/// `mvm_core::deps_audit::verify_sealed_volume`.
 pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_deps_volumes_dir()).join(volume_hash)
 }
@@ -498,6 +525,15 @@ pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
 /// area the atomic rename-promote moves out of.
 pub fn pack_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_cache_dir()).join("packs")
+}
+
+/// Work directory `mvmctl build` compiles one locked pack spec into,
+/// keyed by the lock's workload digest. The flake built from it records this
+/// path, so rebuilding the same lock reuses the same template slot.
+pub fn pack_build_dir(workload_sha256: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_cache_dir())
+        .join("pack-builds")
+        .join(workload_sha256)
 }
 
 /// Resolve `<pack_cache_dir>/<pack_hash>` for a single promoted pack.
@@ -579,6 +615,11 @@ pub fn vms_dir() -> std::path::PathBuf {
 /// use the canonical layout without mutating process-wide environment state.
 pub fn vms_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
     mvm_home.as_ref().join("vms")
+}
+
+/// Private retained runtime generations, outside PID-reconciled VM state.
+pub fn runtime_evidence_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("runtime-evidence")
 }
 
 /// Idle Firecracker processes waiting to be claimed by a cold launch:
@@ -697,10 +738,45 @@ pub fn host_agent_dir_at(
     host_agent_root_at(mvm_home).join(tenant)
 }
 
+/// Directory that holds a tenant's host-agent Unix sockets, given the tenant
+/// directory ([`host_agent_dir_at`]). That directory itself when both sockets
+/// fit the Unix-domain path budget; otherwise the same short private `/tmp`
+/// namespace deep VM state dirs use ([`vm_socket_dir_at`]), so a worktree-local
+/// `MVM_HOME` cannot stop the daemon binding. Pid file and spawn lock stay in
+/// the tenant directory.
+pub fn host_agent_socket_dir_in(tenant_dir: &std::path::Path) -> std::path::PathBuf {
+    if fits_unix_socket_path(&tenant_dir.join(HOST_AGENT_SIGNER_HELPER_SOCKET))
+        && fits_unix_socket_path(&tenant_dir.join(HOST_AGENT_CONTROL_SOCKET))
+    {
+        tenant_dir.to_path_buf()
+    } else {
+        short_vm_socket_dir_at(tenant_dir)
+    }
+}
+
+/// Create the short socket directory a deep tenant dir falls back to, owned and
+/// private, or refuse. Does nothing when the sockets live in the tenant dir.
+pub fn secure_host_agent_socket_dir(tenant: &str) -> std::io::Result<()> {
+    let tenant_dir = host_agent_dir(tenant);
+    let socket_dir = host_agent_socket_dir_in(&tenant_dir);
+    if socket_dir == tenant_dir {
+        return Ok(());
+    }
+    crate::private_fs::create_owned_private_dir(&socket_dir)
+}
+
+const HOST_AGENT_CONTROL_SOCKET: &str = "control.sock";
+const HOST_AGENT_SIGNER_HELPER_SOCKET: &str = "signer-helper.sock";
+
+/// The host-agent control UDS inside a tenant directory.
+pub fn host_agent_control_socket_in(tenant_dir: &std::path::Path) -> std::path::PathBuf {
+    host_agent_socket_dir_in(tenant_dir).join(HOST_AGENT_CONTROL_SOCKET)
+}
+
 /// The per-tenant host-agent control UDS the daemon binds (mode 0700) and the
 /// backend registers VMs over.
 pub fn host_agent_control_socket(tenant: &str) -> std::path::PathBuf {
-    host_agent_dir(tenant).join("control.sock")
+    host_agent_control_socket_in(&host_agent_dir(tenant))
 }
 
 /// The per-tenant host-agent worker pid file used by restart recovery.
@@ -712,7 +788,8 @@ pub fn host_agent_worker_pid(tenant: &str) -> std::path::PathBuf {
 /// helper is a child of the host-agent and owns the tenant's signing keys plus
 /// per-VM workload chain heads.
 pub fn host_agent_signer_helper_socket(tenant: &str) -> std::path::PathBuf {
-    host_agent_dir(tenant).join("signer-helper.sock")
+    let tenant_dir = host_agent_dir(tenant);
+    host_agent_socket_dir_in(&tenant_dir).join(HOST_AGENT_SIGNER_HELPER_SOCKET)
 }
 
 /// `<mvm_home>/pool/` — the supervisor standby pool root.
@@ -801,6 +878,21 @@ pub fn vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     } else {
         short_vm_socket_dir_at(state_dir)
     }
+}
+
+/// Create the short `/tmp` socket directory a deep state directory falls back
+/// to, owned and private, or refuse. Does nothing when the sockets live in the
+/// state directory itself, which sits under the mvm home.
+///
+/// The fallback name is derived from the state-dir path, so another local user
+/// can compute it and create it first. Everything that creates or first uses
+/// the directory goes through here so a directory it does not own is refused.
+pub fn secure_fallback_socket_dir_at(state_dir: &std::path::Path) -> std::io::Result<()> {
+    let socket_dir = vm_socket_dir_at(state_dir);
+    if socket_dir == state_dir {
+        return Ok(());
+    }
+    crate::private_fs::create_owned_private_dir(&socket_dir)
 }
 
 /// Per-VM Unix-socket directory for a named VM.
@@ -1028,6 +1120,35 @@ pub fn vm_hvf_agent_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf
     vm_socket_dir_at(state_dir).join(hvf_agent_socket_filename())
 }
 
+/// The fixed control socket a warm HVF parent listens on to accept one live
+/// handoff: `<socket-dir>/hvf-handoff.sock`. It sits beside the agent socket
+/// and shares its path budget: a state dir too deep for a Unix-domain path
+/// moves both to the short `/tmp` namespace, and a socket left in the state dir
+/// there cannot be bound at all.
+pub fn vm_hvf_handoff_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join("hvf-handoff.sock")
+}
+
+/// Whether `dir` is a short-socket fallback directory ([`vm_socket_dir_at`])
+/// this user owns and keeps private: a direct `mvm-sock-*` child of `/tmp`.
+pub fn is_owned_fallback_socket_dir(dir: &std::path::Path) -> bool {
+    let (Ok(dir), Ok(tmp)) = (std::fs::canonicalize(dir), std::fs::canonicalize("/tmp")) else {
+        return false;
+    };
+    let named = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("mvm-sock-"));
+    if !named || dir.parent() != Some(tmp.as_path()) {
+        return false;
+    }
+    std::fs::symlink_metadata(&dir).is_ok_and(|meta| {
+        meta.is_dir()
+            && crate::private_fs::require_current_owner(&meta).is_ok()
+            && crate::private_fs::mode_bits(&dir, &meta).is_ok_and(|mode| mode & 0o077 == 0)
+    })
+}
+
 /// The hvf VMM's host→guest agent-RPC socket for a VM by name:
 /// `<socket-dir>/hvf-agent.sock`. See [`vm_hvf_agent_socket_at`].
 pub fn vm_hvf_agent_socket(name: &str) -> std::path::PathBuf {
@@ -1106,6 +1227,13 @@ pub fn deployments_dir() -> std::path::PathBuf {
 /// Chain-signed audit logs: `<mvm_home>/audit/`.
 pub fn mvm_audit_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("audit")
+}
+
+/// Where the host remembers the nonces of externally signed plans it has
+/// admitted: `<mvm_home>/plan-nonces`. Private to the user, like the audit chain
+/// it protects the admission of.
+pub fn plan_nonce_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("plan-nonces")
 }
 
 /// Published Merkle transparency-log root for a tenant's audit chain:
@@ -1602,6 +1730,7 @@ mod tests {
         env.remove("MVM_PRODUCTION");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn test_fc_version_default() {
         let mut env = TestEnv::new();
@@ -1612,30 +1741,35 @@ mod tests {
         assert!(v.contains('.'), "FC version should contain a dot");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn normalize_firecracker_banner() {
         let raw = "Firecracker v1.14.1";
         assert_eq!(normalize_fc_version(raw), "v1.14.1");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn normalize_with_leading_v() {
         let raw = "v1.14.1";
         assert_eq!(normalize_fc_version(raw), "v1.14.1");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn normalize_without_v() {
         let raw = "1.14.1";
         assert_eq!(normalize_fc_version(raw), "v1.14.1");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn normalize_minor_only() {
         let raw = "Firecracker v1.14";
         assert_eq!(normalize_fc_version(raw), "v1.14");
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn normalize_garbage_falls_back() {
         let raw = "nonsense";
@@ -1646,6 +1780,70 @@ mod tests {
     }
 
     // --- Single-root layout tests ---
+
+    #[test]
+    fn default_mvm_home_at_uses_only_the_supplied_user_home() {
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", "/isolated/runtime");
+        env.set("HOME", "/ambient/user");
+        assert_eq!(
+            default_mvm_home_at("/explicit/user"),
+            std::path::PathBuf::from("/explicit/user/.mvm")
+        );
+        assert_eq!(default_mvm_home_at(""), std::path::PathBuf::from(".mvm"));
+        assert_eq!(
+            default_mvm_home_at("relative"),
+            std::path::PathBuf::from("relative/.mvm")
+        );
+    }
+
+    #[test]
+    fn strict_user_home_is_independent_of_the_state_override() {
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", "/isolated/runtime");
+        env.remove("HOME");
+        assert_eq!(
+            user_home_dir_strict().unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            mvm_home_strict().unwrap(),
+            std::path::PathBuf::from("/isolated/runtime")
+        );
+        env.remove("MVM_HOME");
+        let missing = mvm_home_strict().unwrap_err();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            missing.to_string(),
+            "$HOME unset and MVM_HOME not set; cannot locate ~/.mvm"
+        );
+        for home in ["", "/explicit/user", "relative"] {
+            env.set("HOME", home);
+            env.set("MVM_HOME", "");
+            assert_eq!(
+                user_home_dir_strict().unwrap(),
+                std::path::PathBuf::from(home)
+            );
+            assert_eq!(mvm_home_strict().unwrap(), default_mvm_home_at(home));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_user_home_preserves_non_utf8_and_ignores_non_utf8_state_override() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut env = TestEnv::new();
+        let raw = std::ffi::OsString::from_vec(vec![b'/', 0xff]);
+        env.set("HOME", &raw);
+        env.set("MVM_HOME", &raw);
+        assert_eq!(user_home_dir_strict().unwrap().as_os_str(), &raw);
+        assert_eq!(mvm_home_strict().unwrap(), default_mvm_home_at(&raw));
+        env.set("MVM_HOME", "/isolated/runtime");
+        assert_eq!(
+            mvm_home_strict().unwrap(),
+            std::path::PathBuf::from("/isolated/runtime")
+        );
+    }
 
     #[test]
     fn test_mvm_home_env_override() {
@@ -2049,6 +2247,74 @@ mod tests {
         env.remove("MVM_HOME");
     }
 
+    /// The handoff socket must follow the agent socket into the short
+    /// namespace: left in a deep state dir it overflows `sun_path` and the
+    /// warm parent dies right after its agent bridge binds.
+    #[test]
+    fn the_handoff_socket_fits_wherever_the_agent_socket_does() {
+        let mut env = TestEnv::new();
+        let root = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", root.path().join("d".repeat(120)));
+        let state_dir = vm_state_dir("standby-0123456789ab");
+
+        let handoff = vm_hvf_handoff_socket_at(&state_dir);
+        assert!(!fits_unix_socket_path(&state_dir.join("hvf-handoff.sock")));
+        assert!(fits_unix_socket_path(&handoff), "{}", handoff.display());
+        assert_eq!(
+            handoff.parent(),
+            vm_hvf_agent_socket_at(&state_dir).parent()
+        );
+    }
+
+    /// A claimed child's socket namespace may already exist at the umask's
+    /// mode when the claim reaches it; the parent refuses to bind there until
+    /// it is private.
+    #[test]
+    fn securing_a_deep_state_dirs_socket_namespace_tightens_one_left_wide() {
+        let state_dir = std::path::PathBuf::from("/tmp").join(format!(
+            "{}-{}",
+            "x".repeat(70),
+            std::process::id()
+        ));
+        let socket_dir = vm_socket_dir_at(&state_dir);
+        assert_ne!(socket_dir, state_dir, "fixture must fall back");
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        crate::private_fs::set_mode(&socket_dir, 0o755).unwrap();
+
+        let secured = secure_fallback_socket_dir_at(&state_dir);
+        let meta = std::fs::symlink_metadata(&socket_dir).unwrap();
+        let mode = crate::private_fs::mode_bits(&socket_dir, &meta).unwrap();
+        std::fs::remove_dir(&socket_dir).unwrap();
+        secured.unwrap();
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn only_a_private_owned_tmp_namespace_is_a_fallback_socket_dir() {
+        let tmp = tempfile::Builder::new()
+            .prefix("mvm-sock-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        crate::private_fs::set_mode(tmp.path(), 0o700).unwrap();
+        assert!(is_owned_fallback_socket_dir(tmp.path()), "0700 and owned");
+        let other = tempfile::Builder::new()
+            .prefix("zzz-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        assert!(!is_owned_fallback_socket_dir(other.path()), "wrong name");
+        let nested = tmp.path().join("mvm-sock-inner");
+        std::fs::create_dir(&nested).unwrap();
+        assert!(
+            !is_owned_fallback_socket_dir(&nested),
+            "not a child of /tmp"
+        );
+        crate::private_fs::set_mode(tmp.path(), 0o755).unwrap();
+        assert!(
+            !is_owned_fallback_socket_dir(tmp.path()),
+            "group/other access"
+        );
+    }
+
     #[test]
     fn long_vm_socket_paths_fall_back_to_short_tmp_namespace() {
         let mut env = TestEnv::new();
@@ -2146,6 +2412,37 @@ mod tests {
         );
     }
 
+    /// The CI e2e home that produced a 105-byte control socket path.
+    #[test]
+    fn deep_home_host_agent_sockets_fit_and_are_private() {
+        let deep = std::path::Path::new(
+            "/Users/gha-runner/src/actions-runner/_work/mvm/mvm/.mvm-e2e-40387241526-1-0",
+        );
+        let dir = host_agent_dir_at(deep, "local");
+        assert!(!fits_unix_socket_path(&dir.join("control.sock")));
+        let control = host_agent_control_socket_in(&dir);
+        assert!(fits_unix_socket_path(&control), "{}", control.display());
+        assert_eq!(control.file_name().unwrap(), "control.sock");
+        let other = host_agent_control_socket_in(&host_agent_dir_at(deep, "acme"));
+        assert_ne!(control.parent(), other.parent());
+        assert_eq!(control, host_agent_control_socket_in(&dir));
+        let sock_dir = host_agent_socket_dir_in(&dir);
+        assert!(fits_unix_socket_path(&sock_dir.join("signer-helper.sock")));
+        crate::private_fs::create_owned_private_dir(&sock_dir).unwrap();
+        assert!(is_owned_fallback_socket_dir(&sock_dir));
+        std::fs::remove_dir(&sock_dir).unwrap();
+    }
+
+    #[test]
+    fn short_home_host_agent_sockets_stay_in_the_tenant_dir() {
+        let dir = host_agent_dir_at("/isolated/mvm", "acme");
+        assert_eq!(
+            host_agent_control_socket_in(&dir),
+            std::path::PathBuf::from("/isolated/mvm/host-agent/acme/control.sock")
+        );
+        assert_eq!(host_agent_socket_dir_in(&dir), dir);
+    }
+
     #[test]
     fn vm_state_dir_at_uses_an_explicit_isolated_home() {
         assert_eq!(
@@ -2207,5 +2504,55 @@ mod tests {
         let by_name = transcript_capture_dir("acme", "capture-1");
         let by_root = transcript_capture_dir_at(&mvm_transcripts_dir(), "acme", "capture-1");
         assert_eq!(by_name, by_root);
+    }
+
+    /// A state dir deep enough that its sockets move to the `/tmp` fallback.
+    #[cfg(unix)]
+    fn deep_state_dir(root: &std::path::Path) -> std::path::PathBuf {
+        let mut dir = root.to_path_buf();
+        while dir.as_os_str().len() < 140 {
+            dir.push("deeply-nested-state-dir-component");
+        }
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn securing_the_socket_dir_is_a_noop_when_sockets_stay_in_the_state_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("vm");
+        assert_eq!(vm_socket_dir_at(&state), state);
+        secure_fallback_socket_dir_at(&state).unwrap();
+        assert!(!state.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fallback_socket_dir_is_created_private_and_a_planted_symlink_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let state = deep_state_dir(root.path());
+        let fallback = vm_socket_dir_at(&state);
+        assert_ne!(
+            fallback, state,
+            "state dir must be deep enough to fall back"
+        );
+        let _ = std::fs::remove_dir_all(&fallback);
+
+        secure_fallback_socket_dir_at(&state).unwrap();
+        let mode = std::fs::metadata(&fallback).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        secure_fallback_socket_dir_at(&state).unwrap();
+
+        std::fs::remove_dir(&fallback).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &fallback).unwrap();
+        let refused = secure_fallback_socket_dir_at(&state);
+        std::fs::remove_file(&fallback).unwrap();
+        assert!(
+            refused.is_err(),
+            "a symlink at the fallback path must be refused"
+        );
     }
 }

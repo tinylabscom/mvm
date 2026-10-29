@@ -330,17 +330,22 @@ pub fn sha256_reader(mut reader: impl io::Read) -> io::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// SHA-256 of a file, cached in a `<path>.sha256cache` sidecar keyed on the
-/// file's size + mtime. Returns the cached digest when the sidecar matches the
-/// file's current size/mtime; otherwise hashes the file, writes the sidecar
-/// (best-effort), and returns the fresh digest.
+/// SHA-256 of a file, cached in a `<path>.sha256cache` sidecar that this host
+/// has sealed. Returns the cached digest when the sidecar's seal verifies for
+/// the file as it is now; otherwise hashes the file, writes a freshly sealed
+/// sidecar (best-effort), and returns the digest.
 ///
 /// Admission re-hashes the rootfs on every boot to bind the plan's image
 /// digest (claim 8). For an immutable cached image that hundreds-of-MB hash is
-/// identical every time, and re-reading it each boot dominates the boot. Keying on
-/// size+mtime keeps the cache sound: any rewrite of the file (different
-/// content) moves its mtime and forces a re-hash, so a stale digest can never
-/// be admitted. A read-only cache dir simply means the next boot re-hashes.
+/// identical every time, and re-reading it each boot dominates the boot. The
+/// sidecar is a file next to the artifact, so anyone who can write the artifact
+/// can write a sidecar; it is therefore sealed with an HMAC under a per-install
+/// key that covers the file's inode, size, mtime and ctime
+/// (see [`super::digest_cache`]). Editing the file, replacing it, or copying a
+/// sidecar line from another file changes an input and the seal stops
+/// verifying. A host that cannot read or create the key, or a platform without
+/// inodes, never uses the cache and hashes every time. A read-only cache dir
+/// likewise just means the next boot re-hashes.
 pub fn sha256_file_cached(path: &Path) -> io::Result<String> {
     sha256_file_cached_report_source(path).map(|(hex, _)| hex)
 }
@@ -362,27 +367,86 @@ pub enum DigestSource {
 /// [`sha256_file_cached`], reporting whether the sidecar served the digest.
 #[tracing::instrument(name = "sha256_file.cached", skip_all, fields(path = %path.display()))]
 pub fn sha256_file_cached_report_source(path: &Path) -> io::Result<(String, DigestSource)> {
+    sha256_file_cached_with_key(path, super::digest_cache::process_key())
+}
+
+fn sha256_file_cached_with_key(
+    path: &Path,
+    key: Option<&super::digest_cache::CacheKey>,
+) -> io::Result<(String, DigestSource)> {
+    use super::digest_cache::FileIdentity;
+
+    let read_started = std::time::SystemTime::now();
     let meta = fs::metadata(path)?;
     let size = meta.len();
-    let mtime_nanos = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos());
+    let sealed = key.zip(FileIdentity::of(&meta));
 
     let sidecar = sha256_cache_path(path);
-    if let Some(mtime) = mtime_nanos
+    if let Some((key, identity)) = &sealed
         && let Ok(contents) = fs::read_to_string(&sidecar)
-        && let Some(hex) = parse_sha256_sidecar(&contents, size, mtime)
+        && let Some(hex) = parse_sha256_sidecar(&contents, key, identity)
     {
         return Ok((hex, DigestSource::Sidecar));
     }
 
     let hex = sha256_file(path)?;
-    if let Some(mtime) = mtime_nanos {
-        let _ = write_sha256_sidecar(&sidecar, &hex, size, mtime);
+    if let Some(sealed) = &sealed {
+        seal_if_unchanged_and_settled(path, sealed, &hex, read_started);
     }
     Ok((hex, DigestSource::Hashed(size)))
+}
+
+/// Seal `hex` as `path`'s digest when it is safe to: the file must be the one
+/// that was hashed (its identity is unchanged since before the read) and must
+/// have settled before the read, so a write in the same timestamp tick cannot
+/// leave a seal that still verifies. Best-effort; a write failure only means
+/// the next call hashes. Returns whether a sidecar was written.
+fn seal_if_unchanged_and_settled(
+    path: &Path,
+    (key, identity): &(
+        &super::digest_cache::CacheKey,
+        super::digest_cache::FileIdentity,
+    ),
+    hex: &str,
+    read_started: std::time::SystemTime,
+) -> bool {
+    use super::digest_cache::FileIdentity;
+
+    fs::metadata(path).ok().and_then(|m| FileIdentity::of(&m)) == Some(*identity)
+        && identity.settled(read_started, super::verified_digest::RACY_WINDOW)
+        && write_sha256_sidecar(&sha256_cache_path(path), hex, &key.seal(identity, hex)).is_ok()
+}
+
+/// Seal `accepted` as `path`'s digest, only if the file still hashes to exactly
+/// that value. For a caller that already verified `accepted` against an
+/// authenticated expectation and wants later processes to reuse it: nothing it
+/// seals is a digest that verification did not accept. Returns whether a
+/// sidecar was written; `false` is not an error (no key, a file that has not
+/// settled, an unwritable directory, or bytes that no longer match).
+pub fn seal_digest_if_matches(path: &Path, accepted: &str) -> io::Result<bool> {
+    seal_digest_if_matches_with_key(path, accepted, super::digest_cache::process_key())
+}
+
+fn seal_digest_if_matches_with_key(
+    path: &Path,
+    accepted: &str,
+    key: Option<&super::digest_cache::CacheKey>,
+) -> io::Result<bool> {
+    use super::digest_cache::FileIdentity;
+
+    let read_started = std::time::SystemTime::now();
+    let Some(sealed) = key.zip(FileIdentity::of(&fs::metadata(path)?)) else {
+        return Ok(false);
+    };
+    if sha256_file(path)? != accepted {
+        return Ok(false);
+    }
+    Ok(seal_if_unchanged_and_settled(
+        path,
+        &sealed,
+        accepted,
+        read_started,
+    ))
 }
 
 /// Where [`sha256_file_cached`] keeps `path`'s digest.
@@ -397,23 +461,30 @@ pub fn sha256_cache_path(path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(s)
 }
 
-/// Parse a `"<hex> <size> <mtime_nanos>"` sidecar, returning the digest only
-/// when its size+mtime still match the file being hashed.
-fn parse_sha256_sidecar(contents: &str, size: u64, mtime_nanos: u128) -> Option<String> {
+/// Parse a `"<hex> <seal>"` sidecar, returning the digest only when its seal
+/// verifies for `identity` under `key`. An old unsealed line has the wrong shape
+/// and is rejected, so it is re-hashed and replaced.
+fn parse_sha256_sidecar(
+    contents: &str,
+    key: &super::digest_cache::CacheKey,
+    identity: &super::digest_cache::FileIdentity,
+) -> Option<String> {
     let mut it = contents.split_whitespace();
     let hex = it.next()?;
-    let cached_size: u64 = it.next()?.parse().ok()?;
-    let cached_mtime: u128 = it.next()?.parse().ok()?;
-    (cached_size == size && cached_mtime == mtime_nanos && hex.len() == 64).then(|| hex.to_string())
+    let seal = it.next()?;
+    if it.next().is_some() || hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    key.verify(identity, hex, seal).then(|| hex.to_string())
 }
 
 /// Write the sidecar atomically (temp + rename) so a concurrent boot never
 /// reads a torn line. Best-effort; the caller ignores failure.
-fn write_sha256_sidecar(sidecar: &Path, hex: &str, size: u64, mtime_nanos: u128) -> io::Result<()> {
+fn write_sha256_sidecar(sidecar: &Path, hex: &str, seal: &str) -> io::Result<()> {
     let mut tmp_os = sidecar.as_os_str().to_os_string();
     tmp_os.push(format!(".{}.tmp", std::process::id()));
     let tmp = std::path::PathBuf::from(tmp_os);
-    fs::write(&tmp, format!("{hex} {size} {mtime_nanos}\n"))?;
+    fs::write(&tmp, format!("{hex} {seal}\n"))?;
     fs::rename(&tmp, sidecar)
 }
 
@@ -421,7 +492,6 @@ fn write_sha256_sidecar(sidecar: &Path, hex: &str, size: u64, mtime_nanos: u128)
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempfile::NamedTempFile;
 
     /// Hashing an open reader gives the same digest as hashing the file by
     /// path, across a buffer boundary, and the empty input hashes to the
@@ -443,33 +513,159 @@ mod tests {
         );
     }
 
+    fn test_key(seed: u8) -> super::super::digest_cache::CacheKey {
+        super::super::digest_cache::CacheKey::from_bytes([seed; 32])
+    }
+
+    /// Wait until a file written now would count as settled.
+    fn settle() {
+        std::thread::sleep(
+            super::super::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+        );
+    }
+
+    #[test]
+    fn a_digest_is_not_sealed_for_a_file_that_has_not_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = artifact(&dir, "fresh", b"just written");
+        let key = test_key(1);
+        let (_, source) = sha256_file_cached_with_key(&path, Some(&key)).unwrap();
+        assert!(matches!(source, DigestSource::Hashed(_)));
+        assert!(!sha256_cache_path(&path).exists(), "nothing was sealed");
+    }
+
+    /// Real time passes between the read starting and the seal being decided: a
+    /// file that was fresh when the read began must not be sealed because the
+    /// (slow) hash outlasted the settle window. Reverting the seal to use the
+    /// current time instead of `read_started` makes this fail.
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_read_does_not_age_a_fresh_identity_into_a_seal() {
+        use super::super::digest_cache::FileIdentity;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = artifact(&dir, "slow-read", b"verified bytes");
+        let identity = FileIdentity::of(&fs::metadata(&path).unwrap()).unwrap();
+        let key = test_key(1);
+        let digest = sha256_file(&path).unwrap();
+
+        let read_started = std::time::SystemTime::now();
+        settle(); // the hash "takes" longer than the window
+        assert!(!seal_if_unchanged_and_settled(
+            &path,
+            &(&key, identity),
+            &digest,
+            read_started,
+        ));
+        assert!(!sha256_cache_path(&path).exists(), "nothing was sealed");
+
+        assert!(seal_if_unchanged_and_settled(
+            &path,
+            &(&key, identity),
+            &digest,
+            std::time::SystemTime::now(),
+        ));
+        assert!(
+            sha256_cache_path(&path).exists(),
+            "a fresh read start seals"
+        );
+    }
+
+    #[test]
+    fn a_settled_file_is_sealed_and_then_served_from_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = artifact(&dir, "settled", b"old enough");
+        settle();
+        let key = test_key(1);
+        let (hex, first) = sha256_file_cached_with_key(&path, Some(&key)).unwrap();
+        assert!(matches!(first, DigestSource::Hashed(_)));
+        let (again, second) = sha256_file_cached_with_key(&path, Some(&key)).unwrap();
+        assert_eq!((again, second), (hex, DigestSource::Sidecar));
+    }
+
+    #[test]
+    fn only_the_accepted_digest_is_sealed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = artifact(&dir, "accepted", b"verified bytes");
+        settle();
+        let key = test_key(1);
+        let accepted = sha256_file(&path).unwrap();
+
+        let wrong = "0".repeat(64);
+        assert!(!seal_digest_if_matches_with_key(&path, &wrong, Some(&key)).unwrap());
+        assert!(
+            !sha256_cache_path(&path).exists(),
+            "a mismatch seals nothing"
+        );
+
+        assert!(seal_digest_if_matches_with_key(&path, &accepted, Some(&key)).unwrap());
+        let (hex, source) = sha256_file_cached_with_key(&path, Some(&key)).unwrap();
+        assert_eq!((hex, source), (accepted, DigestSource::Sidecar));
+    }
+
+    #[test]
+    fn nothing_is_sealed_without_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = artifact(&dir, "keyless", b"bytes");
+        settle();
+        let accepted = sha256_file(&path).unwrap();
+        assert!(!seal_digest_if_matches_with_key(&path, &accepted, None).unwrap());
+        assert!(!sha256_cache_path(&path).exists());
+    }
+
+    /// A file in a fresh directory, so no other test shares its inode.
+    fn artifact(dir: &tempfile::TempDir, name: &str, body: &[u8]) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        fs::write(&path, body).expect("write artifact");
+        path
+    }
+
+    /// File times on some filesystems advance in coarse ticks, so a change made
+    /// straight after another can carry the same ctime.
+    fn cross_a_timestamp_tick() {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+
     #[test]
     fn sha256_file_cached_matches_uncached_and_invalidates_on_change() {
-        let mut f = NamedTempFile::new().expect("tempfile");
-        f.write_all(b"hello").expect("write");
-        f.flush().expect("flush");
-        let p = f.path().to_path_buf();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = test_key(1);
+        let p = artifact(&dir, "blob", b"hello");
+        settle();
         let sidecar = sha256_cache_path(&p);
 
         let direct = sha256_file(&p).expect("direct hash");
         // First cached call computes + writes the sidecar.
-        assert_eq!(sha256_file_cached(&p).expect("cached1"), direct);
+        assert_eq!(
+            sha256_file_cached_with_key(&p, Some(&key))
+                .expect("cached1")
+                .0,
+            direct
+        );
         assert!(sidecar.exists(), "sidecar written");
         // Second call serves from the sidecar (same digest).
-        assert_eq!(sha256_file_cached(&p).expect("cached2"), direct);
+        assert_eq!(
+            sha256_file_cached_with_key(&p, Some(&key))
+                .expect("cached2")
+                .0,
+            direct
+        );
 
-        // Mutating the file (size + mtime change) invalidates the cache.
+        // Mutating the file invalidates the cache.
+        cross_a_timestamp_tick();
+        let mut f = fs::OpenOptions::new().append(true).open(&p).expect("open");
         f.write_all(b" world").expect("append");
         f.flush().expect("flush");
+        drop(f);
         let direct2 = sha256_file(&p).expect("direct hash 2");
         assert_ne!(direct2, direct, "content changed");
         assert_eq!(
-            sha256_file_cached(&p).expect("cached3"),
+            sha256_file_cached_with_key(&p, Some(&key))
+                .expect("cached3")
+                .0,
             direct2,
             "stale digest must never be served after a content change"
         );
-
-        let _ = fs::remove_file(&sidecar);
     }
 
     /// A cache hit must not read the artifact. The digest is correct either
@@ -478,22 +674,20 @@ mod tests {
     /// a full re-read of the artifact on every launch.
     #[test]
     fn a_sidecar_hit_serves_the_digest_without_reading_the_artifact() {
-        let mut f = NamedTempFile::new().expect("tempfile");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = test_key(2);
         let body = b"the quick brown fox";
-        f.write_all(body).expect("write");
-        f.flush().expect("flush");
-        let p = f.path().to_path_buf();
-        let sidecar = sha256_cache_path(&p);
-        let _ = fs::remove_file(&sidecar);
+        let p = artifact(&dir, "blob", body);
+        settle();
 
-        let (miss, miss_source) = sha256_file_cached_report_source(&p).expect("cached miss");
+        let (miss, miss_source) = sha256_file_cached_with_key(&p, Some(&key)).expect("miss");
         assert_eq!(
             miss_source,
             DigestSource::Hashed(body.len() as u64),
             "a sidecar miss reads the whole artifact"
         );
 
-        let (hit, hit_source) = sha256_file_cached_report_source(&p).expect("cached hit");
+        let (hit, hit_source) = sha256_file_cached_with_key(&p, Some(&key)).expect("hit");
         assert_eq!(hit, miss, "a hit serves the digest the miss computed");
         assert_eq!(
             hit_source,
@@ -501,32 +695,163 @@ mod tests {
             "a sidecar hit must not read the artifact"
         );
 
-        // A rewrite moves size+mtime, so the next call must read again rather
-        // than serve the digest of content that is gone.
+        // A rewrite must be read again rather than served from a stale sidecar.
+        cross_a_timestamp_tick();
+        let mut f = fs::OpenOptions::new().append(true).open(&p).expect("open");
         f.write_all(b" jumps").expect("append");
-        f.flush().expect("flush");
-        let (fresh, fresh_source) = sha256_file_cached_report_source(&p).expect("after rewrite");
+        drop(f);
+        let (fresh, fresh_source) = sha256_file_cached_with_key(&p, Some(&key)).expect("after");
         assert_ne!(fresh, miss, "content changed, so the digest must change");
         assert!(
             matches!(fresh_source, DigestSource::Hashed(_)),
             "a rewritten artifact must be re-read, not served from a stale sidecar"
         );
+    }
 
-        let _ = fs::remove_file(&sidecar);
+    /// Someone who can write the artifact edits it in place, keeps its size and
+    /// puts its mtime back. Size and mtime alone would accept the old digest;
+    /// the ctime that editing moves, which no user-space call can set, must not.
+    #[test]
+    fn an_in_place_edit_with_the_mtime_restored_is_not_served_the_old_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = test_key(3);
+        let p = artifact(&dir, "rootfs", b"original image bytes");
+        let original = sha256_file_cached_with_key(&p, Some(&key)).expect("seal").0;
+        let mtime = fs::metadata(&p).expect("stat").modified().expect("mtime");
+
+        cross_a_timestamp_tick();
+        fs::write(&p, b"tampered image bytes").expect("same-size edit");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&p)
+            .expect("open")
+            .set_modified(mtime)
+            .expect("restore mtime");
+
+        let (served, source) = sha256_file_cached_with_key(&p, Some(&key)).expect("after edit");
+        assert_ne!(
+            served, original,
+            "the edited file must not carry the old digest"
+        );
+        assert!(matches!(source, DigestSource::Hashed(_)), "got {source:?}");
+    }
+
+    /// A valid sidecar line is copied onto a different file made to have the
+    /// same size and mtime. The line is sealed for the first file's inode and
+    /// ctime, so it does not verify for the second.
+    #[test]
+    fn a_sidecar_copied_onto_another_file_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = test_key(4);
+        let good = artifact(&dir, "good", b"trusted image bytes");
+        settle();
+        let trusted = sha256_file_cached_with_key(&good, Some(&key))
+            .expect("seal")
+            .0;
+        let mtime = fs::metadata(&good)
+            .expect("stat")
+            .modified()
+            .expect("mtime");
+
+        cross_a_timestamp_tick();
+        let evil = artifact(&dir, "evil", &vec![b'e'; b"trusted image bytes".len()]);
+        assert_eq!(
+            fs::metadata(&evil).expect("stat").len(),
+            fs::metadata(&good).expect("stat").len()
+        );
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&evil)
+            .expect("open")
+            .set_modified(mtime)
+            .expect("match mtime");
+        fs::copy(sha256_cache_path(&good), sha256_cache_path(&evil)).expect("copy sidecar");
+
+        let (served, source) = sha256_file_cached_with_key(&evil, Some(&key)).expect("evil");
+        assert_ne!(
+            served, trusted,
+            "another file must not inherit the sealed digest"
+        );
+        assert_eq!(served, sha256_file(&evil).expect("direct"));
+        assert!(matches!(source, DigestSource::Hashed(_)), "got {source:?}");
     }
 
     #[test]
-    fn parse_sha256_sidecar_rejects_size_or_mtime_drift() {
+    fn a_forged_legacy_or_foreign_keyed_sidecar_is_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = test_key(5);
+        let p = artifact(&dir, "blob", b"payload");
+        let real = sha256_file(&p).expect("hash");
+        let forged = "f".repeat(64);
+        let meta = fs::metadata(&p).expect("stat");
+        let size = meta.len();
+
+        for (label, line) in [
+            ("unsealed legacy line", format!("{forged} {size} 0\n")),
+            ("guessed seal", format!("{forged} {}\n", "0".repeat(64))),
+            ("digest only", format!("{forged}\n")),
+        ] {
+            fs::write(sha256_cache_path(&p), line).expect("plant sidecar");
+            let (served, source) = sha256_file_cached_with_key(&p, Some(&key)).expect(label);
+            assert_eq!(served, real, "{label}");
+            assert!(
+                matches!(source, DigestSource::Hashed(_)),
+                "{label}: {source:?}"
+            );
+        }
+
+        // A sidecar sealed under another host's key does not verify here.
+        let other = test_key(6);
+        sha256_file_cached_with_key(&p, Some(&other)).expect("sealed by another key");
+        let (_, source) = sha256_file_cached_with_key(&p, Some(&key)).expect("under our key");
+        assert!(matches!(source, DigestSource::Hashed(_)), "got {source:?}");
+    }
+
+    #[test]
+    fn without_a_key_nothing_is_cached_and_every_call_hashes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = artifact(&dir, "blob", b"payload");
+        for _ in 0..2 {
+            let (_, source) = sha256_file_cached_with_key(&p, None).expect("hash");
+            assert!(matches!(source, DigestSource::Hashed(_)), "got {source:?}");
+        }
+        assert!(
+            !sha256_cache_path(&p).exists(),
+            "no unsealed sidecar is written"
+        );
+    }
+
+    #[test]
+    fn parse_sha256_sidecar_rejects_malformed_lines() {
+        let key = test_key(7);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = artifact(&dir, "blob", b"x");
+        let identity = super::super::digest_cache::FileIdentity::of(&fs::metadata(&p).unwrap())
+            .expect("identity");
         let hex = "a".repeat(64);
-        let line = format!("{hex} 100 200");
-        assert_eq!(parse_sha256_sidecar(&line, 100, 200), Some(hex.clone()));
-        assert_eq!(parse_sha256_sidecar(&line, 101, 200), None, "size drift");
-        assert_eq!(parse_sha256_sidecar(&line, 100, 201), None, "mtime drift");
-        assert_eq!(parse_sha256_sidecar("garbage", 100, 200), None);
+        let seal = key.seal(&identity, &hex);
         assert_eq!(
-            parse_sha256_sidecar("short 100 200", 100, 200),
+            parse_sha256_sidecar(&format!("{hex} {seal}"), &key, &identity),
+            Some(hex.clone())
+        );
+        assert_eq!(parse_sha256_sidecar("garbage", &key, &identity), None);
+        assert_eq!(
+            parse_sha256_sidecar(&format!("short {seal}"), &key, &identity),
+            None
+        );
+        assert_eq!(
+            parse_sha256_sidecar(&format!("{hex} {seal} extra"), &key, &identity),
+            None
+        );
+        let non_hex = format!("{}g", "a".repeat(63));
+        assert_eq!(
+            parse_sha256_sidecar(
+                &format!("{non_hex} {}", key.seal(&identity, &non_hex)),
+                &key,
+                &identity
+            ),
             None,
-            "non-64-char digest rejected"
+            "a 64-character non-hex digest is rejected"
         );
     }
 

@@ -71,9 +71,9 @@ mvmctl machine run --image alpine --mount /tmp:/data/host -- cat /data/host/foo 
 A sized disk image (`HOST.img:GUEST:SIZE:rw`) is an ext4 file mvm creates at
 `HOST` if it is absent and attaches as a block device. The guest writes into
 that image, never into the host filesystem, so every profile that accepts
-`--mount` accepts it writable — `standard`, the default `dev`, and
-`--prod --profile standard` included. Select `--profile standard` to keep data
-without granting development access:
+`--mount` accepts it writable — including `standard` and `--prod`.
+This is the way to keep data without `--profile dev`, which would also hand the
+guest the dev shell agent and the DevOnly verbs:
 
 ```bash
 mvmctl machine run --image alpine --mount ./state.img:/data/state:1G:rw \
@@ -144,6 +144,24 @@ mvmctl machine run --image alpine -e FOO=bar -e BAZ=qux -- env | grep -E '^(FOO|
 `--env` (or `-e`) is repeatable. When used together with `--launch-plan`,
 CLI `--env` overrides any env vars the launch plan carries (see below).
 
+These are workload variables, not runtime configuration. A workload may set
+`PATH` and change its own environment or that of its children. Do not treat a
+bare command such as `ls` inside user code as a trusted runtime operation:
+its meaning can depend on the workload's search path and files.
+
+Runtime-owned guest helpers and mediated tools use a separate environment
+policy: their `PATH` is fixed to
+`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, and known
+loader, interpreter-startup, and shell-startup overrides are removed. The
+initial helper executable is selected by an explicit path or validated file
+descriptor, not the workload's `PATH`.
+
+This protects command selection at the trusted launch boundary; it is not a
+claim that an arbitrary tool's descendants can execute only trusted code.
+Tools can still interpret user input, load application configuration or
+plugins, execute explicit paths, or change their own environment. Admit tools
+and their arguments with those behaviors in mind.
+
 ## Snapshot restore (registered templates)
 
 When you pass `--manifest <name>` and that template has a compatible recovery
@@ -185,10 +203,10 @@ Workload IR manifest (top-level `apps[]`) — and auto-detects which
 one it is given. Both shapes were historically produced by the
 `mvmforge` toolchain
 ([see the migration guide](/guides/mvmforge-migration/));
-the canonical producer today is `mvmctl build compile` in the mvm SDK.
+the canonical producer today is `mvmctl dev compile` in the mvm SDK.
 
 ```bash
-mvmctl build compile manifest.json --out ./build
+mvmctl dev compile manifest.json --out ./build
 mvmctl run --launch-plan ./build/launch.json
 ```
 

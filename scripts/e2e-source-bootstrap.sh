@@ -101,7 +101,7 @@ just payload::supervisors
 # a guest runtime it compiles on the host. It needs neither the image checkout
 # nor a builder VM, so Stage 0 is first reached by the bootstrap below.
 e2e_phase sdk-sidecar
-"$UNEMBEDDED_MVMCTL" build sdk-sidecar build
+"$UNEMBEDDED_MVMCTL" dev sdk-sidecar build
 
 # Stage 0 is first reached here, by the binary that carries no payload. That
 # is the handoff step 2 no longer exercises now that sidecars pack on the host.

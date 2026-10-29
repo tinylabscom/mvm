@@ -477,7 +477,7 @@ fn cmd_attach(args: AttachArgs) -> Result<()> {
         ui::info(&format!("ephemeral session {id}: torn down after attach"));
     }
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }
@@ -602,7 +602,7 @@ fn dispatch_run_code(
     }
 
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }
@@ -656,7 +656,7 @@ fn run_in_session(
     }
 
     if output.exit_code != 0 {
-        mvm_observability::exit(output.exit_code);
+        crate::observability::exit(output.exit_code);
     }
     Ok(())
 }
@@ -736,6 +736,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
                     cpus: args.cpus,
                     memory_mib: args.memory_mib,
                     admission,
+                    portable_boot_assets: None,
                 },
                 mode,
                 idle_timeout_secs: args.idle_timeout,

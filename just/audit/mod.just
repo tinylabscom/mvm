@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list audit
+
 # Security audit (cargo-audit — RUSTSEC advisories against Cargo.lock)
 audit:
     cargo audit

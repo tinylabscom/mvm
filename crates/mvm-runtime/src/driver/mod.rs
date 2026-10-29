@@ -20,8 +20,8 @@ pub use spec::{
     BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
 };
 pub use traits::{
-    ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
-    RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
+    ChildForkRequest, DuplexStream, LateVolumeAttach, PreloadChildRequest, PreloadedChild,
+    RunningVm, RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
 };
 
 #[cfg(any(test, feature = "test-support"))]

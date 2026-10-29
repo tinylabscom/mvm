@@ -145,6 +145,16 @@ pub fn session_info(raw_id: &str) -> Result<SessionRecord> {
         .ok_or_else(|| anyhow::anyhow!("no session with id {id}"))
 }
 
+/// Classify an existing target from its recorded backend, without constructing
+/// a backend or probing the VM. This metadata is not native ownership or proof.
+///
+/// # Errors
+/// No existing backend marker identifies the target. Never uses a default.
+pub fn existing_vm_backend_kind(vm_name: &str) -> Result<mvm_core::vm_backend::BackendKind> {
+    mvm_runtime::AnyBackend::started_vm_kind(vm_name)
+        .context("existing machine has no recorded backend")
+}
+
 /// Look up a running session by id, applying the strict-creator gate. The
 /// errors are stable phrasings callers match on.
 ///
@@ -247,14 +257,8 @@ pub fn call_session(
 /// # Errors
 /// A malformed id, no such session, or one that is not running.
 pub fn kill_session(raw_id: &str) -> Result<SessionRecord> {
-    let record = session_info(raw_id)?;
+    let record = session_for_stop(raw_id)?;
     let id = record.id.clone();
-    if record.state != SessionState::Running {
-        bail!(
-            "session {id} is not running (state: {}); cannot kill",
-            record.state
-        );
-    }
     session::update_session(&id, |r| {
         r.state = SessionState::Killed;
         Ok(())
@@ -267,6 +271,23 @@ pub fn kill_session(raw_id: &str) -> Result<SessionRecord> {
         Some(&format!("session={id}")),
     );
     forget_call_lock(&id);
+    Ok(record)
+}
+
+/// Read and validate the existing stop target, without mutation or VM access.
+/// Stop retains its own policy; the dispatch-only creator gate does not apply.
+///
+/// # Errors
+/// A malformed id, no such session, or one that is not running.
+pub fn session_for_stop(raw_id: &str) -> Result<SessionRecord> {
+    let record = session_info(raw_id)?;
+    let id = record.id.clone();
+    if record.state != SessionState::Running {
+        bail!(
+            "session {id} is not running (state: {}); cannot kill",
+            record.state
+        );
+    }
     Ok(record)
 }
 
@@ -491,6 +512,45 @@ mod tests {
         let record = SessionRecord::new_running(vm, "wl", mode);
         session::write_session(&record).expect("write");
         record
+    }
+
+    #[test]
+    fn existing_backend_classification_is_metadata_only_and_never_defaults() {
+        let _home = isolated();
+        use mvm_core::vm_backend::BackendKind;
+        assert!(existing_vm_backend_kind("absent").is_err());
+        for (vm, marker, expected) in [
+            ("native-record", "hvf.pid", BackendKind::Hvf),
+            ("ordinary-record", "fc.pid", BackendKind::Firecracker),
+        ] {
+            let dir = mvm_core::config::vm_state_dir(vm);
+            std::fs::create_dir_all(&dir).unwrap();
+            // Deliberately not a real PID or child: classification is not proof.
+            std::fs::write(dir.join(marker), b"untrusted metadata").unwrap();
+            assert_eq!(existing_vm_backend_kind(vm).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn stop_lookup_preserves_running_policy_without_dispatch_creator_gate() {
+        let (mut env, _home) = isolated();
+        env.set(session::STRICT_CREATOR_PID_ENV, "1");
+        let mut record = running("lookup-only", SessionMode::Prod);
+        record.creator_pid = std::process::id().checked_add(1).unwrap();
+        session::write_session(&record).unwrap();
+        assert!(require_running_session(record.id.as_str()).is_err());
+        assert_eq!(
+            session_for_stop(record.id.as_str()).unwrap().state,
+            SessionState::Running
+        );
+        assert_eq!(
+            session_info(record.id.as_str()).unwrap().state,
+            SessionState::Running
+        );
+        record.state = SessionState::Killed;
+        session::write_session(&record).unwrap();
+        let error = session_for_stop(record.id.as_str()).unwrap_err();
+        assert!(error.to_string().contains("cannot kill"));
     }
 
     #[test]

@@ -19,6 +19,25 @@ pub struct BootAssetsInputs<'a> {
     pub initramfs: &'a Path,
 }
 
+/// Durable release proofs and prepared bytes for a schema-6 portable bundle.
+/// The caller authenticates the release and verifies the assembly first.
+#[derive(Debug, Clone)]
+pub struct CliBootAssetsInputs<'a> {
+    pub manifest_bytes: &'a [u8],
+    pub manifest_sha256: &'a mvm_core::packs::Sha256Hex,
+    pub runtime: &'a mvm_core::plan::bundle::EmbeddedCliBootAssets,
+    pub artifacts: &'a [(&'a str, &'a Path)],
+}
+
+/// Original canonical publisher evidence, captured by the existing verifiers.
+/// These owned proof objects cannot be replaced by caller-authored flags or
+/// parsed JSON. Freshness is checked again at export and consumer admission.
+#[derive(Debug, Clone)]
+pub struct CanonicalLinuxProofInputs<'a> {
+    pub root: &'a mvm_core::image_set::RetainedImageSetRootProof,
+    pub revocations: &'a mvm_core::image_set_revocation::RetainedImageSetRevocationProof,
+}
+
 /// Everything one export reads.
 ///
 /// The verity pair is taken as the caller found it rather than as one value:
@@ -26,7 +45,12 @@ pub struct BootAssetsInputs<'a> {
 /// that is refused.
 #[derive(Debug, Clone)]
 pub struct BundleExportInputs<'a> {
+    /// Additional named files sealed as `Other` artifacts. Names must be
+    /// nonreserved basenames; regular-file symlinks are followed.
+    pub supplemental_artifacts: &'a [(&'a str, &'a Path)],
     pub boot_assets: Option<BootAssetsInputs<'a>>,
+    pub cli_boot_assets: Option<CliBootAssetsInputs<'a>>,
+    pub canonical_linux_proof: Option<CanonicalLinuxProofInputs<'a>>,
     /// Path to the kernel image.
     pub vmlinux: &'a str,
     /// Path to the initrd, when the template boots with one.
@@ -61,11 +85,10 @@ pub struct BundleExportInputs<'a> {
     /// `arch_label` or whose capabilities the posture does not permit, so a
     /// descriptor that needs a capability needs a posture beside it.
     pub environment: Option<EnvironmentDescriptor>,
-    /// Exact package profile bytes, sealed as an ordinary policy artifact.
-    /// Requires an environment descriptor identifying the package.
-    pub application_policy: Option<&'a [u8]>,
+    /// Stamp this host-signed archive as local build output.
+    pub local_build: bool,
     /// Where the archive is written. Missing parent directories are created;
-    /// an existing file is overwritten.
+    /// publication refuses any existing destination without replacing it.
     pub out: &'a Path,
     /// Where to write a summary of the export, if anywhere.
     pub debug_out: Option<DebugOutput>,
@@ -75,7 +98,10 @@ impl<'a> BundleExportInputs<'a> {
     /// An export of a kernel and a rootfs, with nothing optional set.
     pub fn new(vmlinux: &'a str, rootfs: &'a str, arch_label: &'a str, out: &'a Path) -> Self {
         Self {
+            supplemental_artifacts: &[],
             boot_assets: None,
+            cli_boot_assets: None,
+            canonical_linux_proof: None,
             vmlinux,
             initrd: None,
             rootfs,
@@ -89,7 +115,7 @@ impl<'a> BundleExportInputs<'a> {
             posture: None,
             provenance: None,
             environment: None,
-            application_policy: None,
+            local_build: false,
             out,
             debug_out: None,
         }
@@ -142,8 +168,8 @@ impl<'a> BundleExportInputs<'a> {
         self
     }
 
-    pub fn application_policy(mut self, profile: &'a [u8]) -> Self {
-        self.application_policy = Some(profile);
+    pub fn local_build(mut self) -> Self {
+        self.local_build = true;
         self
     }
 

@@ -2079,16 +2079,24 @@ mod tests {
         }
     }
 
-    /// A root-owned, canonical executable present on every supported host,
-    /// standing in for an application binary.
-    const ROOT_OWNED_PROGRAM: &str = "/usr/bin/id";
+    /// A root-owned executable present on every supported host, standing in
+    /// for an application binary. Resolved to the file itself because `/usr/bin`
+    /// entries are symlinks on some distributions (multicall coreutils), and a
+    /// grant naming a symlink is refused.
+    static ROOT_OWNED_PROGRAM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        std::fs::canonicalize("/usr/bin/id")
+            .expect("/usr/bin/id resolves")
+            .to_str()
+            .expect("utf-8 path")
+            .to_string()
+    });
 
     #[test]
     fn an_application_terminal_grant_admits_only_its_exact_argv() {
-        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM]);
+        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM.as_str()]);
         assert!(
             enforce_application_terminal_grant(
-                &console_open(&[ROOT_OWNED_PROGRAM], Vec::new()),
+                &console_open(&[ROOT_OWNED_PROGRAM.as_str()], Vec::new()),
                 Some(&grant)
             )
             .is_none()
@@ -2109,7 +2117,10 @@ mod tests {
             ("HTTPS_PROXY", "http://attacker.example:8080"),
         ] {
             let refused = refusal_message(enforce_application_terminal_grant(
-                &console_open(&[ROOT_OWNED_PROGRAM], vec![(env.0.into(), env.1.into())]),
+                &console_open(
+                    &[ROOT_OWNED_PROGRAM.as_str()],
+                    vec![(env.0.into(), env.1.into())],
+                ),
                 Some(&grant),
             ));
             assert!(
@@ -2120,7 +2131,7 @@ mod tests {
         assert!(
             enforce_application_terminal_grant(
                 &console_open(
-                    &[ROOT_OWNED_PROGRAM],
+                    &[ROOT_OWNED_PROGRAM.as_str()],
                     vec![("HTTPS_PROXY".into(), "http://127.0.0.1:1080".into())],
                 ),
                 Some(&grant)
@@ -2135,7 +2146,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(dir.path()).unwrap();
         let link = dir.join("app");
-        std::os::unix::fs::symlink(ROOT_OWNED_PROGRAM, &link).unwrap();
+        std::os::unix::fs::symlink(ROOT_OWNED_PROGRAM.as_str(), &link).unwrap();
         let link = link.to_str().unwrap();
         let grant = verb_grant_with_terminal(&[link]);
         let refused = refusal_message(enforce_application_terminal_grant(
@@ -2162,6 +2173,91 @@ mod tests {
         assert!(refused.contains("other than root"), "{refused}");
     }
 
+    /// Ownership alone disqualifies a program: a file nobody but its owner can
+    /// write is still a file its owner can swap, and the owner is not root.
+    /// The permission half of the ancestor check must not be what carries
+    /// this refusal, so the fixture is deliberately not group- or
+    /// world-writable.
+    #[test]
+    fn a_granted_program_owned_by_a_user_other_than_root_is_refused_even_when_only_its_owner_can_write_it()
+     {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: a file this test creates would be root-owned");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let program = dir.join("app");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program = program.to_str().unwrap();
+        let grant = verb_grant_with_terminal(&[program]);
+        let refused = refusal_message(enforce_application_terminal_grant(
+            &console_open(&[program], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(refused.contains("other than root"), "{refused}");
+        assert!(
+            refused.contains(program),
+            "the refusal names the program itself, not a directory above it: {refused}"
+        );
+    }
+
+    /// A regular file without any execute bit is refused for that reason. The
+    /// ownership check that follows would refuse this fixture too, so the
+    /// assertion is on the reason given: a refusal that only arrives from the
+    /// later check means the execute-bit test let it through.
+    #[test]
+    fn a_granted_regular_file_without_an_execute_bit_is_refused_as_not_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let program = dir.join("app");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let program = program.to_str().unwrap();
+        let grant = verb_grant_with_terminal(&[program]);
+        let refused = refusal_message(enforce_application_terminal_grant(
+            &console_open(&[program], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(
+            refused.contains("not an executable regular file"),
+            "{refused}"
+        );
+        assert!(refused.contains(program), "{refused}");
+    }
+
+    #[test]
+    fn a_regular_file_without_execute_bits_is_not_a_granted_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("app");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let program = std::fs::canonicalize(program).unwrap();
+        let refused = program_identity_refusal(&program).expect("read permission is not execution");
+        assert_eq!(
+            refused,
+            format!("{} is not an executable regular file", program.display())
+        );
+    }
+
+    #[test]
+    fn an_executable_in_an_untrusted_directory_is_not_a_stable_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("app");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let program = std::fs::canonicalize(program).unwrap();
+        let refused = program_identity_refusal(&program)
+            .expect("a read-only executable in a user-controlled tree is not grantable");
+        assert!(refused.contains("other than root"), "{refused}");
+    }
+
     #[test]
     fn a_missing_or_non_executable_granted_program_is_refused() {
         let grant = verb_grant_with_terminal(&["/nonexistent/app"]);
@@ -2185,7 +2281,7 @@ mod tests {
         assert!(
             enforce_application_terminal_grant(&request, Some(&verb_grant_with_drive())).is_none()
         );
-        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM]);
+        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM.as_str()]);
         assert!(
             enforce_application_terminal_grant(
                 &GuestRequest::ConsoleResize {

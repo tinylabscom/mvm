@@ -75,7 +75,7 @@ pub(in crate::commands) fn run(args: &Args) -> Result<()> {
     let stdin_bytes = super::invoke::read_stdin_payload(args.stdin.as_deref())?;
     let exit_code = run_wrapper(args, stdin_bytes)?;
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }

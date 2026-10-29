@@ -11,6 +11,10 @@
 
 use std::time::Duration;
 
+/// Cold boot allowance for the initial guest listener and authenticated session.
+/// This is not the native stop/control budget and never permits reconnecting.
+pub const COLD_GUEST_AGENT_READY_BUDGET: Duration = Duration::from_secs(30);
+
 mod activation;
 mod api;
 mod connection;
@@ -44,8 +48,8 @@ pub use api::{
 };
 pub use connection::{
     HOST_CID, connect_host_vsock, connect_to, connect_to_port, connect_to_port_before,
-    connect_to_port_once, connect_unix_before, run_with_stream_deadline, send_request,
-    send_request_stream, vsock_uds_path,
+    connect_to_port_once, connect_unix_before, open_peer_authenticated_session,
+    run_with_stream_deadline, send_request, send_request_stream, vsock_uds_path,
 };
 pub use framing::{
     AuthenticatedSession, handshake_as_guest, handshake_as_host, read_frame, write_frame,
@@ -69,9 +73,10 @@ pub use rpc::{
     call_streaming, call_unary, check_response, negotiate_protocol, probe_agent_ready,
     probe_agent_serving, read_exec_stream, require_capabilities, send_agent_prompt_while,
     send_attributed_mediated_exec_streaming, send_cancel_extension, send_close_stream_input,
-    send_display_input, send_drive_file, send_drive_open, send_exec_streaming,
-    send_mediated_exec_streaming, send_run_code_streaming, send_run_detached, send_run_entrypoint,
-    send_run_entrypoint_while, send_run_extension, send_stream_input,
+    send_display_input, send_drive_file, send_drive_open, send_entrypoint_on_authenticated_session,
+    send_exec_on_authenticated_session, send_exec_streaming, send_mediated_exec_streaming,
+    send_run_code_streaming, send_run_detached, send_run_entrypoint, send_run_entrypoint_while,
+    send_run_extension, send_stream_input,
 };
 pub use verb_grant::{
     HOST_SIGNER_PUB_CMDLINE_KEY, HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH,
@@ -198,6 +203,11 @@ pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Oldest guest-agent control protocol this host can speak.
 pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 2;
+
+/// Exact source defining this build's protocol constants. Runtime producers
+/// compare a selected checkout against these bytes before declaring its ABI.
+/// Owned here so packaged consumers never read another crate's source tree.
+pub const COMPILED_PROTOCOL_SOURCE: &[u8] = include_bytes!("mod.rs");
 
 /// Maximum response frame size (256 KiB).
 pub const MAX_FRAME_SIZE: usize = 256 * 1024;

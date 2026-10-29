@@ -98,7 +98,7 @@ selectors, and host-grant fields. An image source never authorizes a host
 directory share or a guest network device.
 
 For an application image, the SDK compiler can generate the flake from a
-Python or TypeScript workload declaration. `mvmctl build compile` accepts
+Python or TypeScript workload declaration. `mvmctl dev compile` accepts
 `--mvm-revision` with an exact 40-character commit ID; this pins the mvm input
 instead of using the compiler's normal development input. Put the generated
 `flake.nix`, `launch.json`, `workload.json`, and `src/` together under the
@@ -224,8 +224,10 @@ which builds the registry layout by:
 5. committing the published layout under `packs/`.
 
 The repository rename changes that workflow's signing identity. The built-in
-policy accepts both exact workflow identities for legacy `agent/` and
-`runtime/` packs until 2026-11-06 00:00 UTC, when the former identity expires.
+policy accepts the current exact workflow identity for `agent/` and `runtime/`.
+The former identity is accepted only for the nine exact historical manifest
+reference/digest pairs [listed below](#decide-who-may-publish), and only before
+2026-11-06 00:00 UTC.
 Publish newly signed bundles only after a client release with that policy is
 available; a repository URL change alone does not make a bundle trustworthy.
 Existing signed versions retain their old identity unless re-signed. Official
@@ -425,8 +427,32 @@ https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/head
 ```
 
 under the issuer `https://token.actions.githubusercontent.com`. The former
-`mvm-templates` workflow identity is also accepted until 2026-11-06 00:00
-UTC, after which its bundles fail under built-in trust. The `mvm/` namespace
+`mvm-templates` exact `publish.yml@refs/heads/main` workflow identity is
+accepted only before 2026-11-06 00:00 UTC and only for the following exact
+versioned manifest references and SHA-256 digests of their signed bytes:
+
+| Manifest reference | Manifest-byte SHA-256 |
+| --- | --- |
+| `agent/claude@1.0.1` | `c4be773ef57a0f4365730858e522207c5e609f9fda76f1499eab3d6b0c6293f5` |
+| `agent/codex@1.0.0` | `63f7c363966fe3bacb894e50be1e04e720ea6ac4e9a2d878fb2c811dc21bea7c` |
+| `agent/goose@1.0.0` | `043fe83720bd8dc25aa1c11c298993957a1b4ec23a71d0a7d2343b0b13024506` |
+| `agent/opencode@1.0.0` | `1304b068122bc84fbae7c795727d9d7ccf3bf852cbb8309ab2e9d4903fdf2a1a` |
+| `agent/pi@1.0.0` | `f4049d71e7f18fcb23cb90f01898fe7af06b66daf958920416010a9aa8438272` |
+| `runtime/go@1.0.0` | `ce1ac86f67e6a9df7a1b1a46d63384fa20a30848fdd7e5967d2293bfb5ceec50` |
+| `runtime/node@1.0.0` | `e10d2c7f070e00a1b5d8c713568c0aebe608cc4e346c091a4cb25057ffd25bd3` |
+| `runtime/python@1.0.0` | `80903c11a95708dcf493d673bf76a99f3828a41a4e640550e19b76fd8affa229` |
+| `runtime/rust@1.0.0` | `e9e27c4055186d2416af010804000410cbd54b86d530084aa706cb0bf79c344e` |
+
+The producer evidence is pinned to `tinylabscom/mvm-packs` commit
+`bef6dea6cea2b982596e3429dcb3c9c4c265588e`; its list is not evidence that
+older consumers enforced digest binding. The consumer checks this exception
+after real Sigstore verification identifies the signer. Changing signed
+manifest bytes, the version, or the namespace cannot extend the exception.
+At or after the cutoff, all former-identity bundles fail under built-in trust.
+Explicit operator publisher policy is separate: neither this historical
+digest restriction nor its built-in cutoff applies to that operator decision.
+
+The `mvm/` namespace
 is reserved to the exact current workflow identity. An operator policy may
 exclude `mvm`, but its wildcard or explicit `mvm` entry cannot assign a
 different identity. Official status requires both full pack verification and
@@ -483,8 +509,9 @@ changes for existing installations:
   override the new defaults. A mirror may keep serving an old signed artifact.
 - Previously published Sigstore bundles remain bound to the
   `mvm-templates` workflow identity. Renaming the repository cannot rewrite
-  them. Built-in trust accepts that identity for `agent/` and `runtime/` only
-  before 2026-11-06 00:00 UTC, including when reopening an installed pack.
+  them. Built-in trust accepts only the nine exact historical manifest
+  reference/digest pairs above and only before 2026-11-06 00:00 UTC,
+  including when reopening an installed pack.
 - A bundle newly signed by the `mvm-packs` workflow has a different identity.
   The built-in policy accepts it for legacy `agent/` and `runtime/` packs, but
   the publisher must wait until that client policy is released before replacing

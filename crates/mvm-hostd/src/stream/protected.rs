@@ -32,8 +32,31 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 /// independently of the logical workload named by an admitted plan.
 pub enum CaptureAuthority<'a> {
     Admitted(&'a ExecutionPlan),
+    /// Verified and durably consumed before trusted cold-start setup.
+    CallerRegistered(Box<crate::supervisor::caller_registration::ConsumedCallerLaunch>),
     /// Only a validated builder/standby launch role may select this variant.
     OperationalLiveOnly,
+}
+
+impl<'a> CaptureAuthority<'a> {
+    /// The one authority a supervisor boots under: a registered caller first,
+    /// then the launch's own admitted plan, then an operational role (builder
+    /// or standby) that may capture live output only. A launch with none of
+    /// them is refused, so a restored child must carry its own plan.
+    pub fn select(
+        registered: Option<Box<crate::supervisor::caller_registration::ConsumedCallerLaunch>>,
+        admitted: Option<&'a ExecutionPlan>,
+        operational_role: bool,
+    ) -> Result<Self> {
+        if let Some(launch) = registered {
+            return Ok(Self::CallerRegistered(launch));
+        }
+        match admitted {
+            Some(plan) => Ok(Self::Admitted(plan)),
+            None if operational_role => Ok(Self::OperationalLiveOnly),
+            None => anyhow::bail!("workload protected capture requires an admitted plan"),
+        }
+    }
 }
 
 pub struct CaptureParams<'a> {
@@ -46,6 +69,7 @@ pub struct CaptureOwner {
     worker: Option<JoinHandle<()>>,
     exited: mpsc::Receiver<()>,
     failed: Arc<AtomicBool>,
+    caller: Option<crate::supervisor::caller_registration::RegisteredCaller>,
     #[cfg(test)]
     rotations: mpsc::Receiver<()>,
 }
@@ -65,9 +89,14 @@ impl CaptureOwner {
             authority,
             redaction,
         } = params;
-        let (plan, retention) = match authority {
-            CaptureAuthority::Admitted(plan) => (Some(plan.clone()), plan.stream_retention),
-            CaptureAuthority::OperationalLiveOnly => (None, StreamRetention::Ephemeral),
+        let (plan, retention, caller) = match authority {
+            CaptureAuthority::Admitted(plan) => (Some(plan.clone()), plan.stream_retention, None),
+            CaptureAuthority::CallerRegistered(launch) => {
+                let (plan, caller) = launch.into_owner(vm)?;
+                let retention = plan.stream_retention;
+                (Some(plan), retention, Some(caller))
+            }
+            CaptureAuthority::OperationalLiveOnly => (None, StreamRetention::Ephemeral, None),
         };
         mvm_core::naming::validate_vm_name(vm)?;
         let keys = config::mvm_keys_dir();
@@ -96,7 +125,10 @@ impl CaptureOwner {
             .as_nanos();
         let run = ProtectedRun {
             version: 1,
-            run: format!("{stamp}-{}", std::process::id()),
+            run: caller.as_ref().map_or_else(
+                || format!("{stamp}-{}", std::process::id()),
+                |caller| caller.capture_run(),
+            ),
             persists: retention.persists(),
         };
         let run_dir = run.directory(&root)?;
@@ -177,11 +209,20 @@ impl CaptureOwner {
                 worker: Some(worker),
                 exited,
                 failed,
+                caller,
                 #[cfg(test)]
                 rotations,
             },
             producer,
         ))
+    }
+
+    /// The caller identity is immutable for this owner's whole lifetime. This
+    /// accessor provides no installation, replacement, or producer-ready action.
+    pub fn registered_caller(
+        &self,
+    ) -> Option<&crate::supervisor::caller_registration::RegisteredCaller> {
+        self.caller.as_ref()
     }
 
     /// The producer must be dropped first, including the UART's final partial
@@ -473,6 +514,25 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_restored_child_with_its_own_plan_is_admitted() {
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let authority = CaptureAuthority::select(None, Some(&plan), false).unwrap();
+        assert!(matches!(authority, CaptureAuthority::Admitted(_)));
+    }
+
+    #[test]
+    fn a_launch_with_no_plan_and_no_operational_role_is_refused() {
+        let error = CaptureAuthority::select(None, None, false).err().unwrap();
+        assert!(error.to_string().contains("requires an admitted plan"));
+    }
+
+    #[test]
+    fn an_operational_role_without_a_plan_captures_live_only() {
+        let authority = CaptureAuthority::select(None, None, true).unwrap();
+        assert!(matches!(authority, CaptureAuthority::OperationalLiveOnly));
+    }
+
     use super::*;
     use mvm_core::plan::test_support::PlanFixture;
     use mvm_core::transcript::{self, MANIFEST_FILENAME};

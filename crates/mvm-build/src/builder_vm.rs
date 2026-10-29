@@ -81,57 +81,7 @@ pub struct BuilderMounts {
     pub staged_user_flake: Option<PathBuf>,
 }
 
-/// What the builder is asked to produce.
-///
-/// An enum so the same trait can dispatch both flake builds (`Flake`)
-/// and the application-dependency install pipeline (`Install`). Each
-/// variant pairs 1:1 with a [`BuilderArtifacts`] variant — see the
-/// per-variant docs there for the expected outputs.
-///
-/// The `Install` variant is plumbing only: it's reserved here so the
-/// install pipeline can land behavior changes against a stable shape,
-/// and today every backend errors with
-/// [`BuilderVmError::NotYetImplemented`] when it sees an `Install`
-/// job.
-///
-/// `Serialize`/`Deserialize` + `#[serde(deny_unknown_fields)]` let
-/// `BuilderJob` ride inside
-/// [`crate::builder_protocol::HostVmRequest::Run`] over the
-/// vsock-framed dispatch channel.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub enum BuilderJob {
-    /// Build a Nix flake attribute. The flake attribute path is
-    /// system-specific; callers map host architecture to the
-    /// matching Linux system (`aarch64-linux` on Apple Silicon,
-    /// `x86_64-linux` on Intel/AMD).
-    Flake {
-        /// Flake reference (e.g. `git+file:///work?dir=.`, `.#default`,
-        /// `path:./.`).
-        flake_ref: String,
-        /// Attribute path under the flake (e.g.
-        /// `packages.x86_64-linux.tenant-worker`). Resolved by callers
-        /// before invoking the builder.
-        attr_path: String,
-    },
-
-    /// Application-dependency install pipeline. The builder VM reads a
-    /// serialised install spec from `spec_path` (lockfile +
-    /// source-root + ecosystem + gate), runs the corresponding package
-    /// manager (`uv pip install --no-deps`, `pnpm install
-    /// --frozen-lockfile`, …) inside the VM, seals the resulting volume
-    /// with SBOM + fetch log + CVE + attestations, and emits a
-    /// `result.json` next to the volume.
-    ///
-    /// **Today every backend errors with
-    /// [`BuilderVmError::NotYetImplemented`] for this variant.**
-    Install {
-        /// Absolute host path to the install-spec JSON the builder
-        /// VM reads at start-up. Today the orchestrator does not
-        /// produce one.
-        spec_path: PathBuf,
-    },
-}
+pub use mvm_builder_guest::builder_protocol::BuilderJob;
 
 /// Result of a successful build. The variant returned matches the
 /// [`BuilderJob`] variant the caller passed: a `Flake` job yields
@@ -172,7 +122,7 @@ pub enum BuilderArtifacts {
         /// Directory the builder VM sealed the application-deps
         /// volume into (content + SBOM + fetch log + CVE scan +
         /// attestations + meta). Caller hashes this with
-        /// `mvm_compiler::deps_audit::verify_sealed_volume` to
+        /// `mvm_core::deps_audit::verify_sealed_volume` to
         /// derive the canonical `volume_hash`.
         volume_dir: PathBuf,
         /// JSON sidecar emitted by `mvm-host-vm-init` next to the
@@ -719,6 +669,29 @@ pub enum BuilderVmError {
 }
 
 impl BuilderVmError {
+    /// Project only typed, payload-free fields for an observational record.
+    pub fn failure_diagnostic(&self) -> mvm_core::launch_trace::failure::Record {
+        use crate::builder_job_contract::FailureCategory as C;
+        use mvm_core::launch_trace::failure::{Category, Phase, Record};
+        let mut record = Record::new(Phase::BuilderJob);
+        record.category = match self.failure_category() {
+            C::Unknown => Category::Unknown,
+            C::Internal => Category::Internal,
+            C::InvalidRequest => Category::InvalidRequest,
+            C::Unsupported => Category::Unsupported,
+            C::Version => Category::Version,
+            C::Fetch => Category::Fetch,
+            C::NixBuild => Category::NixBuild,
+            C::NixEval => Category::NixEval,
+            C::Timeout => Category::Timeout,
+            C::OutputContract => Category::OutputContract,
+        };
+        if let Self::SupervisorExited { exit_code, .. } = self {
+            record.exit_code = Some(*exit_code);
+        }
+        record
+    }
+
     /// The stable category this failure belongs to, for callers that choose a
     /// message or a retry posture without parsing the text.
     pub fn failure_category(&self) -> crate::builder_job_contract::FailureCategory {
@@ -1370,26 +1343,9 @@ pub use mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract;
 // never touched.
 // ──────────────────────────────────────────────────────────────────
 
-/// job. Devices appear after the builder VM's persistent Nix-store
-/// disk; the first extra disk here is `/dev/vdc` in the guest.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderExtraDisk {
-    pub id: String,
-    pub path: PathBuf,
-    pub read_only: bool,
-}
-
-/// Generic builder-VM shell job.
-///
-/// This is intentionally narrower than [`BuilderJob`]: it is for
-/// in-tree infrastructure commands that need the Linux builder
-/// boundary but do not produce Nix build artifacts. The OCI image
-/// runner uses it to run `mkfs.ext4` and copy an OCI-unpacked rootfs
-/// into a writable virtio-blk image.
-/// The minimum builder image cache contract this host reads. A newer contract
-/// remains compatible when it still declares every capability this host
-/// requires; only older contracts are refused.
-pub const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 5;
+pub use crate::builder_contract::{
+    BUILDER_VM_CACHE_CONTRACT_VERSION, BuilderExtraDisk, BuilderShellJob,
+};
 
 /// Default vCPU count for a builder VM.
 pub const DEFAULT_VCPUS: u8 = 4;
@@ -1447,14 +1403,6 @@ impl BuilderVmImage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderShellJob {
-    pub work_dir: PathBuf,
-    pub artifact_out: PathBuf,
-    pub script: String,
-    pub extra_disks: Vec<BuilderExtraDisk>,
-}
-
 /// Result metadata from a one-shot builder shell job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderShellResult {
@@ -1465,6 +1413,26 @@ pub struct BuilderShellResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_excludes_builder_detail_and_paths() {
+        let errors = [
+            BuilderVmError::JobFailed {
+                category: crate::builder_job_contract::FailureCategory::NixEval,
+                detail: "SENTINEL_SECRET".into(),
+            },
+            BuilderVmError::SupervisorExited {
+                exit_code: 17,
+                vm_state_dir: "SENTINEL_SECRET".into(),
+            },
+        ];
+        for error in &errors {
+            let bytes = serde_json::to_string(&error.failure_diagnostic()).unwrap();
+            assert!(!bytes.contains("SENTINEL_SECRET"));
+            assert!(error.to_string().contains("SENTINEL_SECRET"));
+        }
+        assert_eq!(errors[1].failure_diagnostic().exit_code, Some(17));
+    }
 
     #[test]
     fn dangling_store_line_matches_the_nix_gc_signature() {

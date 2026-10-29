@@ -39,6 +39,21 @@ pub(in crate::commands) enum LaneArg {
     ArtifactMiss,
     /// A claimed warm standby. Never folded into a cold number.
     WarmClaim,
+    /// A claimed warm standby for a `--flake` launch. Name the flake in the
+    /// launch after `--`.
+    WarmClaimFlake,
+    /// A claimed warm standby for a `--manifest` launch. Name the manifest in
+    /// the launch after `--`.
+    WarmClaimManifest,
+    /// A claimed warm standby for a signed `.mvmpkg` that pins no boot
+    /// assets. Name the archive in the launch after `--`.
+    WarmClaimBundle,
+    /// A claimed warm standby whose parent booted the egress client. Name the
+    /// allowed hosts in the launch after `--`.
+    WarmClaimEgress,
+    /// A claimed warm standby whose read-only mount images attach from cache.
+    /// Name the mounts in the launch after `--`.
+    WarmClaimMount,
 }
 
 impl From<LaneArg> for LaunchLane {
@@ -50,6 +65,11 @@ impl From<LaneArg> for LaunchLane {
             LaneArg::MountMiss => LaunchLane::MountMiss,
             LaneArg::ArtifactMiss => LaunchLane::ArtifactMiss,
             LaneArg::WarmClaim => LaunchLane::WarmClaim,
+            LaneArg::WarmClaimFlake => LaunchLane::WarmClaimFlake,
+            LaneArg::WarmClaimManifest => LaunchLane::WarmClaimManifest,
+            LaneArg::WarmClaimBundle => LaunchLane::WarmClaimBundle,
+            LaneArg::WarmClaimEgress => LaunchLane::WarmClaimEgress,
+            LaneArg::WarmClaimMount => LaunchLane::WarmClaimMount,
         }
     }
 }
@@ -173,19 +193,52 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
 ///
 /// The artifact lane has no baseline. Its subject is a signed archive, and
 /// there is no archive every host has, so it asks for one rather than
-/// measuring a launch that would only be refused as not belonging in the lane.
+/// measuring a launch that would only be refused as not belonging in the
+/// lane. The warm shape lanes share that property: no flake, manifest,
+/// archive, mount source, or allowed host exists on every host, and each
+/// lane also needs a standby warmed from exactly that shape, which a default
+/// could not arrange either.
 fn launch_for(lane: LaunchLane, launch: &[String]) -> Result<Vec<String>> {
     if !launch.is_empty() {
         return Ok(launch.to_vec());
     }
-    if lane == LaunchLane::PreparedColdArtifact {
-        anyhow::bail!(
+    match lane {
+        LaunchLane::PreparedColdArtifact => anyhow::bail!(
             "the `prepared-cold-artifact` lane measures a signed archive and has no default \
              launch; name one after `--`, e.g. \
              `mvmctl bench --lane prepared-cold-artifact -- run ./app.mvmpkg -- /bin/true`"
-        );
+        ),
+        LaunchLane::WarmClaimFlake => anyhow::bail!(
+            "the `warm-claim-flake` lane measures a claimed standby warmed from a flake and \
+             has no default launch; name one after `--`, e.g. \
+             `mvmctl bench --lane warm-claim-flake -- run --flake ./flake.nix -- /bin/true`"
+        ),
+        LaunchLane::WarmClaimManifest => anyhow::bail!(
+            "the `warm-claim-manifest` lane measures a claimed standby warmed from a manifest \
+             and has no default launch; name one after `--`, e.g. \
+             `mvmctl bench --lane warm-claim-manifest -- run --manifest ./manifest.json -- /bin/true`"
+        ),
+        LaunchLane::WarmClaimBundle => anyhow::bail!(
+            "the `warm-claim-bundle` lane measures a claimed standby for a signed archive \
+             that pins no boot assets and has no default launch; name one after `--`, e.g. \
+             `mvmctl bench --lane warm-claim-bundle -- run ./app.mvmpkg -- /bin/true`"
+        ),
+        LaunchLane::WarmClaimEgress => anyhow::bail!(
+            "the `warm-claim-egress` lane measures a claimed standby whose parent booted the \
+             egress client and has no default launch; name one after `--`, e.g. \
+             `mvmctl bench --lane warm-claim-egress -- run --allow-host example.com:443 --image alpine -- /bin/true`"
+        ),
+        LaunchLane::WarmClaimMount => anyhow::bail!(
+            "the `warm-claim-mount` lane measures a claimed standby whose mount images attach \
+             from cache and has no default launch; name one after `--`, e.g. \
+             `mvmctl bench --lane warm-claim-mount -- run --mount ./data:/data:ro --image alpine -- /bin/true`"
+        ),
+        LaunchLane::PreparedCold
+        | LaunchLane::PreparedColdMountHit
+        | LaunchLane::MountMiss
+        | LaunchLane::ArtifactMiss
+        | LaunchLane::WarmClaim => Ok(DEFAULT_LAUNCH.iter().map(|s| s.to_string()).collect()),
     }
-    Ok(DEFAULT_LAUNCH.iter().map(|s| s.to_string()).collect())
 }
 
 /// Render the benchmark as labelled tables with plain-text verdicts.
@@ -390,6 +443,7 @@ mod tests {
                     "Every prepared boot must reach authenticated command dispatch in under 200 ms."
                         .to_string(),
             }),
+            startup_requirement: None,
             raw: Vec::new(),
         }
     }
@@ -471,6 +525,43 @@ mod tests {
             launch_for(LaunchLane::PreparedCold, &[]).expect("baseline"),
             DEFAULT_LAUNCH.to_vec()
         );
+    }
+
+    /// Every warm shape lane measures a shape no host has by default, so a
+    /// bare invocation must say what to name rather than measure the wrong
+    /// thing.
+    #[test]
+    fn the_warm_shape_lanes_have_no_default_launch_and_name_the_form() {
+        for (lane, example) in [
+            (LaunchLane::WarmClaimFlake, "--flake ./flake.nix"),
+            (LaunchLane::WarmClaimManifest, "--manifest ./manifest.json"),
+            (LaunchLane::WarmClaimBundle, "run ./app.mvmpkg"),
+            (LaunchLane::WarmClaimEgress, "--allow-host example.com:443"),
+            (LaunchLane::WarmClaimMount, "--mount ./data:/data:ro"),
+        ] {
+            let err = launch_for(lane, &[]).unwrap_err();
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains(lane.as_str().replace('_', "-").as_str()),
+                "{lane:?} error must name the lane: {rendered}"
+            );
+            assert!(
+                rendered.contains(example),
+                "{lane:?} error must show the launch form: {rendered}"
+            );
+        }
+        // A named launch always wins, on any lane.
+        let named: Vec<String> = ["run", "--flake", "./flake.nix", "--", "/bin/true"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        for lane in LaunchLane::ALL {
+            assert_eq!(
+                launch_for(lane, &named).expect("named launch"),
+                named,
+                "{lane:?}"
+            );
+        }
     }
 
     #[test]

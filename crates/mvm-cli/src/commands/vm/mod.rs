@@ -48,6 +48,7 @@ pub(super) mod sdk_no_vm;
 pub(super) mod session;
 pub(super) mod set_ttl;
 pub(super) mod snapshot;
+pub(super) mod telemetry;
 pub(super) mod tenant_resolution;
 pub(crate) mod up;
 pub(super) mod volume;

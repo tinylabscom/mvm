@@ -169,11 +169,13 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 /// Public because a cache that boots kernels in place has to recognise them.
 #[must_use]
 pub fn extracted_elf_files(path: &Path) -> [PathBuf; 2] {
-    [sibling_elf(path), sibling(path, ".elf.src")]
+    mvm_core::kernel_format::extracted_elf_files(path)
 }
 
+#[cfg(test)]
 fn sibling_elf(path: &Path) -> PathBuf {
-    sibling(path, ".elf")
+    let [elf, _] = extracted_elf_files(path);
+    elf
 }
 
 fn gzip_offsets(image: &[u8]) -> impl Iterator<Item = usize> + '_ {
@@ -398,6 +400,9 @@ mod tests {
         let kpath = dir.path().join("vmlinux");
         std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x99))).unwrap();
 
+        std::thread::sleep(
+            mvm_core::crypto::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+        );
         ensure_fc_loadable_kernel(&kpath).unwrap();
 
         let (_, source) = sha256_file_cached_report_source(&kpath).unwrap();
@@ -416,6 +421,9 @@ mod tests {
         let kpath = dir.path().join("vmlinux");
         std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x42))).unwrap();
 
+        std::thread::sleep(
+            mvm_core::crypto::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+        );
         ensure_fc_loadable_kernel(&kpath).unwrap();
 
         let mut left: Vec<PathBuf> = std::fs::read_dir(dir.path())

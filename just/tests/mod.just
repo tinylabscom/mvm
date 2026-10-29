@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list tests
+
 # Usage: just tests::crate CRATE
 #   CRATE: crate name to test
 
@@ -8,18 +13,22 @@ crate CRATE:
     ./scripts/require-nextest.sh
     ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
 
-# Usage: just tests::scoped CRATE [FILTER]
+# Usage: just tests::scoped CRATE [FILTER] [--lib | --test NAME]
 
-# Run one crate's tests filtered by test name during the debugging loop
-scoped CRATE FILTER="":
+# Run one crate's tests, optionally limiting compilation to one target
+[positional-arguments]
+scoped CRATE FILTER="" *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     ./scripts/require-nextest.sh
-    if [ -n "{{ FILTER }}" ]; then
-    ./scripts/cargo-fast.sh nextest run -p {{ CRATE }} -E 'test({{ FILTER }})'
-    else
-    ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
+    crate="$1"
+    filter="$2"
+    shift 2
+    args=(nextest run -p "$crate" "$@")
+    if [ -n "$filter" ]; then
+      args+=(-E "test($filter)")
     fi
+    exec ./scripts/cargo-fast.sh "${args[@]}"
 
 # No retries, slow-test warnings, and a JUnit report at
 # target/nextest/ci/junit.xml carrying pass/fail structure only (no captured

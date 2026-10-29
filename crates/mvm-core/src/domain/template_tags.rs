@@ -394,6 +394,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn save_writes_mode_0600() {
         use std::os::unix::fs::PermissionsExt;
         let _g = DataDirGuard::new();

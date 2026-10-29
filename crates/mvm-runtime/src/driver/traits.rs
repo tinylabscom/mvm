@@ -5,6 +5,6 @@
 //! lifecycle orchestration in `mvm-runtime`.
 
 pub use mvm_vmm::driver::traits::{
-    ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
-    RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
+    ChildForkRequest, DuplexStream, LateVolumeAttach, PreloadChildRequest, PreloadedChild,
+    RunningVm, RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
 };

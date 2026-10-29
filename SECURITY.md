@@ -94,7 +94,7 @@ Bundles use cosign's new bundle format, so verifying by hand needs cosign >= v2.
 
 ## Hardening status by claim
 
-Each of mvm's published security claims is backed by a named witness — a test or a CI job. The claims ledger in [ADR-001](specs/adrs/001-microvm-security-posture.md) is the source of truth for the claim set, its witnesses, and each claim's status; `xtask check-claim-catalog` fails the build when a named witness stops existing. [CONFORMANCE.md](CONFORMANCE.md) is the generated view of the same register.
+Each of mvm's published security claims is backed by a named witness — a test or a CI job. The claims ledger in [ADR-001](specs/adrs/001-microvm-security-posture.md) is the source of truth for the claim set, its witnesses, and each claim's status; `xtask check-claim-catalog` fails the build when a named witness stops existing. [CONFORMANCE.md](docs/CONFORMANCE.md) is the generated view of the same register.
 
 Claims carrying a `Preview` status are held to a weaker bar than the shipped ones and their limits are stated in the ledger. Read the status column before relying on a claim.
 
@@ -111,4 +111,4 @@ _(none yet — placeholder for future credits)_
 - [ADR-001 — microvm security posture](specs/adrs/001-microvm-security-posture.md) — the master security claim list and threat model.
 - [ADR-020 — host services broker](specs/adrs/020-host-services-broker.md) — the architecture of the broker subprocess set, its trust gradient, and the narrowed insider-threat clause.
 - [ADR-023 — secrets subsystem and egress substitution](specs/adrs/023-secrets-subsystem-egress-substitution.md) — why no raw secret value crosses the broker channel.
-- [CONFORMANCE.md](CONFORMANCE.md) — the generated claim register with each claim's honesty level and witnesses.
+- [CONFORMANCE.md](docs/CONFORMANCE.md) — the generated claim register with each claim's honesty level and witnesses.

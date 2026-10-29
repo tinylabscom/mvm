@@ -12,6 +12,13 @@ name: Guest bins
 on:
   workflow_dispatch:
   workflow_call:
+    outputs:
+      unsigned_artifact_id:
+        description: Exact same-run unsigned guest runtime upload ID
+        value: ${{ jobs.guest-bins.outputs.unsigned_artifact_id }}
+      unsigned_artifact_digest:
+        description: SHA256 of the uploaded unsigned artifact ZIP
+        value: ${{ jobs.guest-bins.outputs.unsigned_artifact_digest }}
 
 permissions:
   contents: read
@@ -24,7 +31,11 @@ concurrency:
 
 jobs:
   guest-bins:
-    runs-on: ubuntu-latest
+    outputs:
+      unsigned_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      unsigned_artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     # A cold debug build of mvmctl plus every guest cross-compile for both
     # arches: two overlay builds, the OCI set, setpriv, the initramfs agent and
     # eight shared objects per arch.
@@ -41,11 +52,22 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Build the guest-bins artifact
-        run: cargo run --locked -p mvmctl -- build guest-bins --out dist
+        run: cargo run --locked -p mvmctl -- dev guest-bins --out dist
+
+      - name: Retain the already-built canonical reader for pre-signing checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 0700 "${CARGO_TARGET_DIR:-target}/debug/mvmctl" dist/mvmctl
+          strip --strip-debug dist/mvmctl
+
+      - name: Bind the upload to its actual producer attempt
+        run: python3 scripts/runtime-proof-candidate.py emit-upload-context --kind unsigned --directory dist
 
       - name: Upload the artifact
+        id: upload
         uses: actions/upload-artifact@v7
         with:
-          name: mvm-guest-bins
+          name: mvm-guest-bins-attempt-${{ github.run_attempt }}
           path: dist/
           if-no-files-found: error

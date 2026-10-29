@@ -44,6 +44,16 @@ const ALLOWLIST: &[&str] = &[
     // 0.14. Both majors are dev-only/test paths; criterion has no 0.14-compatible
     // release.
     "itertools",
+    // faster-hex optionally requires defmt ^0.3; 0.3.101 is an upstream
+    // compatibility shim that non-optionally re-exports defmt 1.1 through
+    // defmt10 ^1. This metadata-only duplication is absent from the selected
+    // Linux all-feature closure.
+    "defmt",
+    // Existing wasmparser 0.244 uses hashbrown 0.15's default hasher
+    // (foldhash 0.1.5); required gix-index 0.55 uses hashbrown 0.17's
+    // defaults (foldhash 0.2.0). gix-hashtable and indexmap disable those
+    // defaults. Their incompatible requirements have no feature-only unification.
+    "foldhash",
     "getrandom",
     "hashbrown",
     // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates.

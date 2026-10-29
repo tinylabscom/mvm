@@ -251,6 +251,7 @@ pub(super) fn curl_download_args(dest: &str, url: &str) -> Vec<String> {
         "-o".to_string(),
         dest.to_string(),
     ];
+    args.extend(mvm_core::util::curl::curl_transport_args(url).map(str::to_string));
     args.push(url.to_string());
     args
 }
@@ -286,22 +287,55 @@ fn download_to(url: &str, dest: &std::path::Path) -> Result<()> {
 
 /// Download a file from a URL using curl, resuming a partial `dest`.
 pub(crate) fn download_file(url: &str, dest: &str) -> Result<()> {
-    let status = mvm_core::env_hygiene::helper_command("curl")
-        .args(curl_download_args(dest, url))
+    download_file_response(url, dest, false).and_then(|found| {
+        anyhow::ensure!(found, "{}", download_failure_message());
+        Ok(())
+    })
+}
+
+/// Return false only for a confirmed HTTP 404; all other failures are errors.
+pub(crate) fn download_file_or_missing(url: &str, dest: &str) -> Result<bool> {
+    download_file_response(url, dest, true)
+}
+
+fn download_file_response(url: &str, dest: &str, allow_missing: bool) -> Result<bool> {
+    let mut command = mvm_core::env_hygiene::helper_command("curl");
+    command.args(curl_download_args(dest, url));
+    if allow_missing {
+        // Routing needs the response of this request, not a retry's later
+        // transport failure. The caller decides whether a 404 has a fallback.
+        command.args(["--retry", "0"]);
+    }
+    let output = command
+        .args(["--write-out", "%{http_code}"])
         .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
-        .status()
+        .output()
         .context("Failed to run curl")?;
 
+    download_response_found(output.status, &output.stdout, allow_missing)
+}
+
+fn download_response_found(
+    status: std::process::ExitStatus,
+    http_status: &[u8],
+    allow_missing: bool,
+) -> Result<bool> {
+    anyhow::ensure!(
+        http_status.len() == 3 && http_status.iter().all(u8::is_ascii_digit),
+        "curl returned a malformed HTTP status"
+    );
     if !status.success() {
+        if allow_missing && status.code() == Some(22) && http_status == b"404" {
+            return Ok(false);
+        }
         // Keep any partial file: curl's `-C -` resumes it on the next
         // run. It's never hash-accepted while incomplete — verify runs
         // only after a successful download, and the SHA-256 gate deletes
         // on mismatch — so leaving it is safe and saves re-fetching.
         anyhow::bail!("{}", download_failure_message());
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -309,6 +343,28 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
     use sha2::{Digest, Sha256};
+
+    #[cfg(unix)]
+    #[test]
+    fn curl_response_only_a_confirmed_404_is_missing() {
+        use std::os::unix::process::ExitStatusExt;
+        let success = std::process::ExitStatus::from_raw(0);
+        let http_error = std::process::ExitStatus::from_raw(22 << 8);
+        let transport_error = std::process::ExitStatus::from_raw(7 << 8);
+        assert!(!download_response_found(http_error, b"404", true).unwrap());
+        assert!(download_response_found(http_error, b"404", false).is_err());
+        assert!(download_response_found(transport_error, b"404", true).is_err());
+        for status in [b"401", b"403", b"500", b"000"] {
+            assert!(download_response_found(http_error, status, true).is_err());
+        }
+        for malformed in [&b""[..], &b"404\n"[..], &b"garbage"[..]] {
+            assert!(download_response_found(http_error, malformed, true).is_err());
+            assert!(download_response_found(success, malformed, true).is_err());
+        }
+        assert!(download_response_found(success, b"200", true).unwrap());
+        // Exact-base overrides retain the existing file:// fixture/mirror support.
+        assert!(download_response_found(success, b"000", true).unwrap());
+    }
 
     #[test]
     fn curl_download_args_request_resume() {
@@ -335,6 +391,19 @@ mod tests {
             "connection resets must be retried: {args:?}"
         );
         assert_eq!(args.last().unwrap(), "https://example/x");
+    }
+
+    #[test]
+    fn curl_download_args_confine_the_fetch_to_https() {
+        let args = curl_download_args("/tmp/out", "https://example/x");
+        assert!(
+            args.windows(2).any(|w| w == ["--proto", "=https"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["--proto-redir", "=https"]),
+            "{args:?}"
+        );
     }
 
     #[test]

@@ -124,8 +124,9 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
                 memory_mib: self.memory_mib,
             })
             .map_err(|e| {
-                map_runner_failure(format!("{} builder shell job: {e}", self.driver.name()))
-            })?;
+                map_runner_failure(format!("{} builder shell job: {e:#}", self.driver.name()))
+            })
+            .inspect_err(|error| error.failure_diagnostic().emit())?;
         if !outcome.stopped {
             return Err(deadline_exceeded(&format!(
                 "{} builder VM shell job",
@@ -136,7 +137,11 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
         let vm_state_dir = mvm_core::config::vm_state_dir(&name);
         let result = read_job_result(&outcome.output_dir, &vm_state_dir)?;
         if result.exit_code != 0 {
-            return Err(shell_job_exit_error(result.exit_code, &result.stderr_tail));
+            let error = shell_job_exit_error(result.exit_code, &result.stderr_tail);
+            let mut record = error.failure_diagnostic();
+            record.exit_code = Some(result.exit_code);
+            record.emit();
+            return Err(error);
         }
 
         if outcome.output_dir != job.artifact_out {
@@ -354,7 +359,8 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
             })
-            .map_err(|e| map_runner_failure(format!("{} builder run: {e}", self.driver.name())))?;
+            .map_err(|e| map_runner_failure(format!("{} builder run: {e:#}", self.driver.name())))
+            .inspect_err(|error| error.failure_diagnostic().emit())?;
         if !outcome.stopped {
             return Err(deadline_exceeded(&format!(
                 "{} builder VM",
@@ -377,6 +383,7 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
             })?;
         }
         finalize_flake_job(&outcome.output_dir, &mounts.artifact_out, &job_id)
+            .inspect_err(|error| error.failure_diagnostic().emit())
     }
 }
 

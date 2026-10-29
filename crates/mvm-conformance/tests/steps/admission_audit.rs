@@ -7,6 +7,7 @@ use mvm_core::plan::test_support::PlanFixture;
 use mvm_hostd::audit::{
     emitter::AuditEmitter,
     host_keypair::{self, HostSigner},
+    session::SealReason,
 };
 
 use crate::world::CliWorld;
@@ -43,6 +44,46 @@ fn admit_plan_to_audit_chain(world: &mut CliWorld) {
     emitter
         .emit_admitted(&plan, "host:test")
         .expect("emit plan.admitted entry");
+}
+
+#[given(expr = "a sealed audit fixture for session {string}")]
+fn sealed_audit_fixture(world: &mut CliWorld, session: String) {
+    let home = isolated_home(world).to_path_buf();
+    let signer = host_signer(world);
+    let emitter = AuditEmitter::with_dir(signer.signing, &home.join("audit"))
+        .expect("open fixture audit emitter");
+    let plan = PlanFixture::new().tenant("local").plan_id(&session).build();
+    emitter
+        .emit_admitted(&plan, "host:test")
+        .expect("record fixture admission");
+    emitter
+        .emit_launched(&plan, "fixture")
+        .expect("record fixture launch");
+    emitter
+        .emit_exited(&plan, 0, "fixture")
+        .expect("record fixture exit");
+    emitter
+        .seal_session(&plan, SealReason::Exited)
+        .expect("seal fixture session");
+}
+
+#[then(expr = "the audit session JSON reports {string} for {string}")]
+fn audit_session_json_verdict(world: &mut CliWorld, verdict: String, session: String) {
+    let report: serde_json::Value =
+        serde_json::from_slice(&world.last_output().stdout).expect("CLI emits a JSON verdict");
+    assert_eq!(report["tenant"], "local");
+    assert_eq!(report["plan_id"], session);
+    assert_eq!(report["verdict"], verdict);
+    if verdict == "VERIFIED" {
+        assert_eq!(report["event_count"], 3);
+        assert_eq!(report["late_entries"], 0);
+        assert_eq!(report["seals"].as_array().expect("seal list").len(), 1);
+        assert_eq!(report["seals"][0]["seal"]["exit_code"], "0");
+        assert!(report.get("reason").is_none());
+    } else {
+        assert!(report["reason"].is_string(), "{report}");
+        assert!(report["detail"].is_string(), "{report}");
+    }
 }
 
 #[given("a caller-committed workload plan was admitted in the audit chain")]

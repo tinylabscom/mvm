@@ -268,6 +268,10 @@ pub enum LocalAuditKind {
     /// and a credential-free URL or path otherwise. Emitted only on the success
     /// arm; verify failures don't reach the emit.
     BundleInstall,
+    /// `mvmctl run <app-ref>` / `--app` — an installed application reference
+    /// was re-verified and resolved to the bundle the launch then boots.
+    /// Detail: `application=<ref>,descriptor_sha256=<64hex>,bundle_sha256=<64hex>`.
+    ApplicationLaunch,
     /// `mvmctl bundle gc <sha>` or `mvmctl bundle gc --all` —
     /// pruned one or more installed bundles from the registry.
     /// Detail: `removed=<count>,shas=<sha1>[,sha2,...]` (truncated
@@ -277,6 +281,10 @@ pub enum LocalAuditKind {
     /// against the local trust store to an image registry. Detail:
     /// `bundle_sha256=<64hex>,key_id=<32hex>,reference=oci://<ref>@<digest>`.
     BundlePush,
+    /// `mvmctl build` with a pack source — built a locked pack, passed its health boot, and
+    /// sealed it into an archive signed by the host key. Detail:
+    /// `pack=<ns/name@version>,workload_sha256=<64hex>,bundle_sha256=<64hex>,key_id=<id>`.
+    PackBuild,
     /// `mvmctl manifest export-oci <template> --out <path>` —
     /// copied a slot's OCI tarball (produced by `mkGuest`'s
     /// `dockerTools.streamLayeredImage`) to a user-supplied path
@@ -1293,8 +1301,10 @@ mod tests {
             LocalAuditKind::TrustInstructionsSign,
             // Bundle registry mutations.
             LocalAuditKind::BundleInstall,
+            LocalAuditKind::ApplicationLaunch,
             LocalAuditKind::BundleGc,
             LocalAuditKind::BundlePush,
+            LocalAuditKind::PackBuild,
             // OCI export follow-on.
             LocalAuditKind::ImageExportOci,
             // Stage 0 bootstrap lifecycle.
@@ -1359,8 +1369,10 @@ mod tests {
             ),
             // Bundle registry mutations.
             (LocalAuditKind::BundleInstall, "bundle_install"),
+            (LocalAuditKind::ApplicationLaunch, "application_launch"),
             (LocalAuditKind::BundleGc, "bundle_gc"),
             (LocalAuditKind::BundlePush, "bundle_push"),
+            (LocalAuditKind::PackBuild, "pack_build"),
             // OCI export follow-on.
             (LocalAuditKind::ImageExportOci, "image_export_oci"),
             // Stage 0 bootstrap lifecycle. Wire strings are

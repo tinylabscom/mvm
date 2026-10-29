@@ -2,7 +2,8 @@
 
 mvm runs workloads in microVMs on macOS and Linux. Each workload gets its own
 Linux kernel under a hypervisor: the in-house HVF backend on macOS 26+ Apple
-Silicon, Firecracker on Linux with `/dev/kvm`. You can start one from an OCI
+Silicon, the bundled libkrun preview on macOS 13–25 Apple Silicon, and Firecracker
+on Linux with `/dev/kvm`. You can start one from an OCI
 image, a Nix flake, or a decorated Python or TypeScript function. The CLI is
 `mvmctl`. Python, TypeScript and Rust libraries drive the same operations from
 code.
@@ -23,7 +24,7 @@ There is no SSH server in any guest.
 ## Install
 
 ```bash
-# Release binary: macOS 26+ on Apple Silicon, or Linux x86_64/aarch64 with /dev/kvm
+# Release binary: macOS 13+ Apple Silicon (libkrun preview on 13–25), or Linux x86_64/aarch64 with /dev/kvm
 curl -fsSL https://runmvm.com/install.sh | sh
 
 # From source (run ./target/release/mvmctl from the checkout)
@@ -43,17 +44,28 @@ few extra steps, covered in
 ## Quick start
 
 ```bash
-mvmctl doctor
+mvmctl doctor --workflow cli-run
 mvmctl bootstrap
 mvmctl image pull alpine
-mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -a"
+MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref )"
+mvmctl machine run --name local-demo --profile dev \
+  --image "${MVM_DEMO_IMAGE:?Run preparation in this terminal first}" \
+  --cpus 1 --memory 256M --timeout 30 \
+  -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'
 ```
 
 `bootstrap` fetches the kernel, guest runtime and builder image. `image pull`
 fetches and unpacks an OCI image; a `machine run --image` launch reads only the
 local cache and never downloads anything.
 
-The first run of an image boots cold, says so on stderr, and leaves a standby
+The named foreground run above is transient and cold: its workload VM is torn
+down on exit, with no persistent volume or standby requested. It needs no
+`mvmd`, API key, host Nix, or Docker. The captured digest keeps later launches
+on the same cached image. This is a development-profile demo, not a sealed
+production workload. See the [native local demo](public/src/content/docs/getting-started/native-demo.md)
+for expected output, cleanup, and the opt-in live smoke test.
+
+An unnamed run of an image boots cold, says so on stderr, and leaves a standby
 VM of that image ready. The next matching run claims the standby instead of
 booting, and a fresh one is prepared behind it. Standbys are held within a host
 memory cap and released after 20 idle minutes. To make even the first run warm,
@@ -156,12 +168,12 @@ def greet(name: str) -> str:
 ```
 
 ```bash
-mvmctl build compile app.py --out ./out
+mvmctl dev compile app.py --out ./out
 mvmctl machine build --flake ./out
 echo '[[], {"name": "ari"}]' | mvmctl machine run --entrypoint --flake ./out
 ```
 
-`build compile` parses the file without running it and writes a flake and a
+`dev compile` parses the file without running it and writes a flake and a
 launch plan. The decorator and the `mvm` import are stripped from the bundled
 source, so the guest runs the plain function. The entrypoint reads
 `[args, kwargs]` as JSON on stdin. For locked dependencies and sealed
@@ -271,6 +283,42 @@ each one is mapped either to a conformance scenario that runs it or to a
 recorded reason it cannot run
 ([readme_examples.toml](features/suites/s8_readme_contract/readme_examples.toml)).
 PRs merge through the merge queue.
+
+### Releasing a patch version
+
+Releases use the `release` module's recipes rather than a top-level recipe.
+You need `git-cliff`, `cargo-nextest`, an authenticated GitHub CLI (`gh`),
+and push access to `origin`.
+
+Start from an up-to-date `main` with a clean working tree, then prepare the
+release from the checkout where you run release operations:
+
+```bash
+git switch main
+git pull --ff-only
+# Example: if the current version is 0.24.0, prepare the next patch:
+just release::pr 0.24.1
+```
+
+Use the next patch version explicitly, without a `v` prefix. Omitting the
+version (`just release::pr`) lets `git-cliff` choose the next version from
+conventional commits and does **not** guarantee a patch bump.
+
+The recipe runs formatting, Clippy fixes/checks, and workspace tests, creates
+`release/v0.24.1`, updates version pins, lockfiles, and the changelog, then
+reruns workspace tests against the bumped tree. It commits and pushes the
+branch and opens a release PR.
+
+Merge that PR through the merge queue, then publish the tag:
+
+```bash
+just release::tag 0.24.1
+```
+
+The tag recipe fetches `origin/main` and refuses unless it carries the
+requested version. It tags that commit as `v0.24.1` and pushes the tag,
+triggering the release build/publish pipeline. Use the same version for
+both commands; do not tag before the release PR merges.
 
 ## License
 

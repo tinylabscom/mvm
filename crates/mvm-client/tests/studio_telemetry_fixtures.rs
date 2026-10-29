@@ -30,6 +30,10 @@ fn served_page(name: &str) -> TelemetryReadResponse {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
+fn records_key() -> mvm_core::crypto::aead::Key {
+    mvm_core::crypto::aead::Key::from_bytes([8; 32])
+}
+
 /// Persist `records` the way the collector does and return a reader over
 /// the directory holding them.
 fn stage_records(dir: &Path, records: &[ReceivedRecord]) -> LocalTelemetryReader {
@@ -39,10 +43,10 @@ fn stage_records(dir: &Path, records: &[ReceivedRecord]) -> LocalTelemetryReader
         let at = received
             .received_at_ms
             .expect("the fixture page stamps every receive time");
-        bytes.extend(ReceivedRecord::encode_line(at, &received.record).unwrap());
+        bytes.extend(ReceivedRecord::seal_line(&records_key(), at, &received.record).unwrap());
     }
     std::fs::write(records_path, bytes).unwrap();
-    LocalTelemetryReader::for_state_dir(dir)
+    LocalTelemetryReader::for_state_dir(dir).with_records_key(records_key())
 }
 
 #[test]
@@ -107,6 +111,7 @@ fn the_reader_types_every_collector_snapshot_as_the_committed_status() {
                 status: state.label(),
                 generation,
                 shed: *shed,
+                losses: Default::default(),
             };
             std::fs::write(&status_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
         }

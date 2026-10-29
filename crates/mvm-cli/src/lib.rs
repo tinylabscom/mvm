@@ -2,11 +2,10 @@
 // Depends on mvm-core, mvm, mvm-build
 
 // `std::process::exit` runs no destructors, so spans still queued for trace
-// export would be lost. End early through `mvm_observability::exit`, which
+// export would be lost. End early through `observability::exit`, which
 // flushes them first.
 #![deny(clippy::exit)]
 
-pub mod application_package;
 pub mod approval;
 pub mod bench;
 pub mod bootstrap;
@@ -21,6 +20,7 @@ pub mod json_out;
 pub mod logging;
 pub mod metrics_server;
 pub(crate) mod mount_cache;
+pub mod observability;
 pub mod pack_registry;
 pub(crate) mod release_guest_runtime;
 pub mod shell_init;

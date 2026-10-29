@@ -7,6 +7,29 @@ use mvm_core::build_env::ShellEnvironment;
 
 use super::BuildMode;
 
+/// Source selection is independent of the guest's development/production mode.
+#[derive(Debug, Clone, Copy)]
+enum SourcePolicy<'a> {
+    Contributor,
+    Frozen(&'a super::frozen::FrozenInputs),
+}
+
+/// Locked inputs use the ordinary one-shot builder, never a resident session's
+/// `/work` or the contributor-source cache.
+pub fn frozen_build(
+    env: &dyn ShellEnvironment,
+    inputs: &super::frozen::FrozenInputs,
+    profile: Option<&str>,
+    mode: BuildMode,
+) -> Result<DevBuildResult> {
+    inputs.verify()?;
+    let flake_ref = inputs
+        .path()
+        .to_str()
+        .context("frozen input path is not UTF-8")?;
+    run_one_shot(env, flake_ref, profile, mode, SourcePolicy::Frozen(inputs))
+}
+
 /// Base directory for dev build artifacts ($HOME/.mvm/dev/builds).
 fn dev_builds_dir() -> String {
     format!("{}/dev/builds", mvm_core::config::mvm_home())
@@ -451,12 +474,29 @@ fn dev_build_via_builder_vm_uncached(
     // acquiring libkrun, and Linux libkrun never degrades to qemu. A genuine
     // build error surfaces unchanged, and an explicit
     // `--builder`/`MVM_BUILDER_BACKEND` also stays single-backend.
+    run_one_shot(env, flake_ref, profile, mode, SourcePolicy::Contributor)
+}
+
+fn run_one_shot(
+    env: &dyn ShellEnvironment,
+    flake_ref: &str,
+    profile: Option<&str>,
+    mode: BuildMode,
+    source_policy: SourcePolicy<'_>,
+) -> Result<DevBuildResult> {
     use crate::builder_backend_select as bbs;
     let selected = bbs::resolve_choice(None);
     let explicit = bbs::resolve_env_override().is_some();
     bbs::run_with_builder_fallback_anyhow(selected, explicit, |choice| {
         let builder = bbs::try_resolve_builder_backend(Some(choice)).map_err(anyhow::Error::new)?;
-        dev_build_with_builder_vm(env, flake_ref, profile, mode, builder.as_ref())
+        build_with_builder_vm(
+            env,
+            flake_ref,
+            profile,
+            mode,
+            builder.as_ref(),
+            source_policy,
+        )
     })
 }
 
@@ -484,9 +524,6 @@ fn persistent_routing_allowed(
 /// Resolve the in-repo mvm workspace to build a user
 /// flake against, or `None` to keep the flake's own `mvm` pin.
 ///
-/// Frozen compiler artifacts carry their pack lock. Their input is authoritative,
-/// including in a contributor checkout; a local override would invalidate it.
-///
 /// Returns the workspace root only when **both** hold:
 ///   (a) mvmctl was compiled from a source checkout whose `nix/flake.nix`
 ///       still exists on disk (walk up from the compile-time manifest dir),
@@ -496,9 +533,6 @@ fn persistent_routing_allowed(
 ///       has an input to replace and we're genuinely swapping a remote
 ///       fetch for the local checkout.
 fn local_mvm_workspace(user_flake: &std::path::Path) -> Option<std::path::PathBuf> {
-    if std::fs::symlink_metadata(user_flake.join(mvm_compiler::pack::LOCK_FILE)).is_ok() {
-        return None;
-    }
     let workspace = find_mvm_workspace_root(&std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
         .or_else(|| find_mvm_workspace_root(user_flake))?;
     let flake_nix = std::fs::read_to_string(user_flake.join("flake.nix")).ok()?;
@@ -521,12 +555,31 @@ fn find_mvm_workspace_root(start: &std::path::Path) -> Option<std::path::PathBuf
     }
 }
 
+#[cfg(test)]
 fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     env: &dyn ShellEnvironment,
     flake_ref: &str,
     profile: Option<&str>,
     mode: BuildMode,
     builder: &B,
+) -> Result<DevBuildResult> {
+    build_with_builder_vm(
+        env,
+        flake_ref,
+        profile,
+        mode,
+        builder,
+        SourcePolicy::Contributor,
+    )
+}
+
+fn build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
+    env: &dyn ShellEnvironment,
+    flake_ref: &str,
+    profile: Option<&str>,
+    mode: BuildMode,
+    builder: &B,
+    source_policy: SourcePolicy<'_>,
 ) -> Result<DevBuildResult> {
     use crate::builder_vm::GUEST_WORK_DIR;
     use crate::builder_vm::{BuilderJob, BuilderMounts, host_system_linux};
@@ -538,7 +591,10 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     };
     let _ = mode;
 
-    let user_flake = resolve_user_flake(flake_ref);
+    let user_flake = match source_policy {
+        SourcePolicy::Contributor => resolve_user_flake(flake_ref),
+        SourcePolicy::Frozen(inputs) => inputs.path().to_path_buf(),
+    };
 
     // Source-checkout invariant: a compiled flake pins
     // `mvm` to GitHub for portability, but when mvmctl runs from a source
@@ -547,7 +603,14 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     // In that case mount the workspace at /work and stage the user flake
     // into the job dir; `cmd.sh` overrides `mvm` to `path:/work/nix`.
     // Otherwise keep the legacy layout: the user flake is `/work`.
-    let (flake_src, staged_user_flake) = match local_mvm_workspace(&user_flake) {
+    let workspace = match source_policy {
+        SourcePolicy::Contributor => local_mvm_workspace(&user_flake),
+        SourcePolicy::Frozen(inputs) => {
+            inputs.verify()?;
+            None
+        }
+    };
+    let (flake_src, staged_user_flake) = match workspace {
         Some(workspace) => {
             env.log_info(
                 "Source checkout: building workload against the in-repo mvm flake \
@@ -558,9 +621,22 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
         None => (user_flake, None),
     };
 
-    let job = BuilderJob::Flake {
-        flake_ref: GUEST_WORK_DIR.to_string(),
-        attr_path,
+    let job = match source_policy {
+        SourcePolicy::Frozen(inputs) if inputs.observation().is_some() => {
+            let (revision, _) = inputs
+                .observation()
+                .context("missing frozen observation options")?;
+            BuilderJob::FrozenFlakeDiagnostic {
+                flake_ref: GUEST_WORK_DIR.to_string(),
+                attr_path,
+                input_digest: inputs.digest().to_string(),
+                expected_mvm_revision: revision.to_string(),
+            }
+        }
+        SourcePolicy::Contributor | SourcePolicy::Frozen(_) => BuilderJob::Flake {
+            flake_ref: GUEST_WORK_DIR.to_string(),
+            attr_path,
+        },
     };
     let staging = unique_dev_staging_dir();
     std::fs::create_dir_all(&staging).with_context(|| format!("creating staging dir {staging}"))?;
@@ -584,17 +660,52 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
         staged_user_flake,
     };
 
+    if let SourcePolicy::Frozen(inputs) = source_policy {
+        inputs.verify()?;
+    }
     let artifacts = builder
         .run_build(&job, &mounts)
         // Preserve the `BuilderVmError` as a downcastable anyhow source (not a
         // stringified context) so the single-shot caller's auto-fallback can
         // detect a VMM-level failure (`run_with_builder_fallback_anyhow`).
         .map_err(|e| anyhow::Error::new(e).context("builder VM"))?;
+    if let SourcePolicy::Frozen(inputs) = source_policy {
+        inputs.verify()?;
+    }
     let revision_hash = match artifacts {
         crate::builder_vm::BuilderArtifacts::Image { revision_hash, .. } => revision_hash,
         crate::builder_vm::BuilderArtifacts::InstallVolume { .. } => {
             anyhow::bail!("builder VM returned install-volume artifacts for a flake build");
         }
+    };
+
+    let observation = if let SourcePolicy::Frozen(inputs) = source_policy
+        && let Some((revision, destination)) = inputs.observation()
+    {
+        let report = super::frozen::take_input_observation(
+            &std::path::Path::new(&staging).join("frozen-input-observation.json"),
+            inputs.digest(),
+            revision,
+            &revision_hash,
+        )?;
+        let flake_sha =
+            mvm_core::crypto::image_verify::sha256_file(&inputs.path().join("flake.nix"))?;
+        let observed: serde_json::Value = serde_json::from_slice(&report)?;
+        let attr = match &job {
+            BuilderJob::FrozenFlakeDiagnostic { attr_path, .. } => attr_path.as_str(),
+            BuilderJob::Flake { .. } | BuilderJob::Install { .. } => {
+                anyhow::bail!("input observation returned for an ordinary build");
+            }
+        };
+        if observed["flake_sha256"].as_str() != Some(flake_sha.as_str())
+            || observed["attr_path"].as_str() != Some(attr)
+        {
+            anyhow::bail!("input observation source or output attribute mismatch");
+        }
+        super::frozen::verify_observed_outputs(std::path::Path::new(&staging), &observed)?;
+        Some((destination.to_path_buf(), report, observed))
+    } else {
+        None
     };
 
     let final_dir = dev_build_dir(&revision_hash);
@@ -613,6 +724,11 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     // The staging dir is gone one way or another by this point (renamed
     // away, or removed above) — disarm so Drop doesn't redundantly try.
     staging_guard.disarm();
+
+    if let Some((destination, report, observed)) = observation {
+        super::frozen::verify_observed_outputs(std::path::Path::new(&final_dir), &observed)?;
+        std::fs::write(destination, report)?;
+    }
 
     let build_dir = final_dir;
     let vmlinux_path = format!("{build_dir}/vmlinux");
@@ -1000,20 +1116,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    #[test]
-    fn frozen_pack_artifacts_never_replace_their_input_with_the_contributor_tree() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("flake.nix"),
-            "inputs.mvm.url = \"github:tinylabscom/mvm/main?dir=nix\";",
-        )
-        .unwrap();
-        // A present lock suppresses the override even if it is damaged. The
-        // frozen compiler owns validating and replacing it, not this selector.
-        std::fs::write(dir.path().join(mvm_compiler::pack::LOCK_FILE), b"damaged").unwrap();
-        assert!(super::local_mvm_workspace(dir.path()).is_none());
-    }
-
     /// Mock ShellEnvironment for testing dev_build logic without a real VM.
     struct TestEnv {
         stdout_responses: Mutex<HashMap<String, String>>,
@@ -1289,6 +1391,136 @@ mod tests {
             .expect("seek copied tail");
         copied.read_exact(&mut tail).expect("read copied tail");
         assert_eq!(&tail, b"tail");
+    }
+
+    #[test]
+    fn non_native_frozen_github_input_preserved_with_checkout_and_dev_override_unchanged() {
+        let home = tempfile::tempdir().unwrap();
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_HOME", home.path());
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("nix")).unwrap();
+        std::fs::write(workspace.path().join("nix/flake.nix"), "{}").unwrap();
+        let source = workspace.path().join("workload");
+        std::fs::create_dir(&source).unwrap();
+        let flake =
+            "inputs.mvm.url = \"github:tinylabscom/mvm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\";";
+        std::fs::write(source.join("flake.nix"), flake).unwrap();
+        assert!(local_mvm_workspace(&source).is_some());
+        let frozen = super::super::frozen::FrozenInputs::stage(
+            &source,
+            &super::super::frozen::tree_digest(&source).unwrap(),
+        )
+        .unwrap();
+        let env = TestEnv::new();
+        let locked = RecordingBuilderVm::new("non-native-frozen");
+        build_with_builder_vm(
+            &env,
+            frozen.path().to_str().unwrap(),
+            None,
+            BuildMode::Dev,
+            &locked,
+            SourcePolicy::Frozen(&frozen),
+        )
+        .unwrap();
+        let seen = locked.seen.lock().unwrap();
+        assert_eq!(seen[0].1.flake_src, frozen.path());
+        assert!(seen[0].1.staged_user_flake.is_none());
+        assert_eq!(
+            std::fs::read_to_string(seen[0].1.flake_src.join("flake.nix")).unwrap(),
+            flake
+        );
+        let staged_job = tempfile::tempdir().unwrap();
+        crate::builder_vm_runtime::stage_job_dir(
+            staged_job.path(),
+            &seen[0].0,
+            seen[0].1.staged_user_flake.as_deref(),
+            None,
+        )
+        .unwrap();
+        let command = std::fs::read_to_string(staged_job.path().join("cmd.sh")).unwrap();
+        assert!(!command.contains("--override-input"));
+        assert!(command.contains("--no-write-lock-file"));
+        let transported =
+            crate::builder_vm_runtime::stage_filtered_work_input(&seen[0].1.flake_src).unwrap();
+        assert_eq!(
+            super::super::frozen::tree_digest(transported.path()).unwrap(),
+            super::super::frozen::tree_digest(frozen.path()).unwrap(),
+        );
+        drop(seen);
+        let contributor = RecordingBuilderVm::new("non-native-contributor");
+        dev_build_with_builder_vm(
+            &env,
+            source.to_str().unwrap(),
+            None,
+            BuildMode::Dev,
+            &contributor,
+        )
+        .unwrap();
+        let seen = contributor.seen.lock().unwrap();
+        assert_eq!(
+            seen[0].1.staged_user_flake.as_deref(),
+            Some(source.as_path())
+        );
+        assert_eq!(seen[0].1.flake_src, local_mvm_workspace(&source).unwrap());
+    }
+
+    #[test]
+    fn non_native_observed_mock_build_refuses_missing_evidence() {
+        let home = tempfile::tempdir().unwrap();
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_HOME", home.path());
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("flake.nix"), "{}").unwrap();
+        let report = home.path().join("report.json");
+        let frozen = super::super::frozen::FrozenInputs::stage(
+            source.path(),
+            &super::super::frozen::tree_digest(source.path()).unwrap(),
+        )
+        .unwrap()
+        .with_input_observation(&"a".repeat(40), report.clone())
+        .unwrap();
+        let builder = RecordingBuilderVm::new("mock-output");
+        assert!(
+            build_with_builder_vm(
+                &TestEnv::new(),
+                frozen.path().to_str().unwrap(),
+                None,
+                BuildMode::Dev,
+                &builder,
+                SourcePolicy::Frozen(&frozen),
+            )
+            .is_err()
+        );
+        assert!(!report.exists());
+        assert!(matches!(
+            builder.seen.lock().unwrap()[0].0,
+            crate::builder_vm::BuilderJob::FrozenFlakeDiagnostic { .. }
+        ));
+        frozen.verify().unwrap();
+    }
+
+    #[test]
+    fn non_native_mutated_frozen_snapshot_is_refused_before_builder_consumption() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("flake.nix"), "{}").unwrap();
+        let frozen = super::super::frozen::FrozenInputs::stage(
+            source.path(),
+            &super::super::frozen::tree_digest(source.path()).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(frozen.path().join("flake.nix"), "mutated").unwrap();
+        let builder = RecordingBuilderVm::new("must-not-run");
+        let result = build_with_builder_vm(
+            &TestEnv::new(),
+            frozen.path().to_str().unwrap(),
+            None,
+            BuildMode::Dev,
+            &builder,
+            SourcePolicy::Frozen(&frozen),
+        );
+        assert!(result.is_err());
+        assert!(builder.seen.lock().unwrap().is_empty());
     }
 
     #[test]

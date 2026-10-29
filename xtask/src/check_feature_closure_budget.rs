@@ -97,7 +97,21 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// 487 (was 486): the unpublished `mvm-fc-lifecycle` prototype adds one
 /// first-party workspace node; no new third-party dependencies or default
 /// mvmctl dependencies are introduced.
-const FEATURE_CLOSURE_BUDGET: usize = 487;
+///
+/// 489 (was 487): the standalone public Rust hostlib client adds one crate and
+/// libloading 0.8, retaining Rust 1.85 support without internal runtime dependencies.
+///
+/// 549 (was 489): in-process checkout identity adds 57 Git support crates with
+/// only gix attributes/excludes/sha1 requested directly. The byte-only Mach-O signer,
+/// plist and XML parser add three more. Seven existing all-feature nodes also
+/// enter the default closure but do not increase this count. The identity
+/// path does not execute commands, filters, hooks, credential helpers or
+/// network clients; gix default/basic/extras/network-client features stay off.
+///
+/// 547 (was 549): `mvm-observability` folds into `mvm-cli`, its only consumer;
+/// the folded crate itself is the single removed node. The workspace tree had
+/// also been measuring one under the budget, so that slack goes with it.
+const FEATURE_CLOSURE_BUDGET: usize = 547;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

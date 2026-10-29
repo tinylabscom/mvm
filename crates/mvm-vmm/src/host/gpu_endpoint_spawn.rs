@@ -80,6 +80,11 @@ pub fn spawn_gpu_endpoint(
     device_ordinal: Option<u32>,
 ) -> Result<()> {
     let endpoint = resolve_gpu_endpoint_path()?;
+    // The endpoint creates the socket's directory when it is missing, at the
+    // umask's mode. For a deep state dir that is the short `/tmp` namespace,
+    // which the VM's supervisor then refuses for not being private.
+    mvm_core::config::secure_fallback_socket_dir_at(state_dir)
+        .with_context(|| format!("securing the socket directory of VM {vm_name}"))?;
     let listen = match &transport {
         EndpointTransport::Uds { path } => format!("unix:{}", path.display()),
         EndpointTransport::Vsock { port } => format!("vsock:{port}"),

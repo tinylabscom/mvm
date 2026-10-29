@@ -30,7 +30,7 @@ availability; that page covers enforcement.
 | Backend | Status | Notes |
 | --- | --- | --- |
 | Firecracker | Shipped | The Linux/KVM workload runtime. Primary production backend. |
-| libkrun | Development-only | Optional integration test path; not included in standard builds or release artifacts. |
+| libkrun | Preview | Explicit macOS 13–25 workload path bundled in the signed Apple Silicon release; packaged loading is verified and the real guest-launch witness remains open. |
 | HVF (in-house Hypervisor.framework VMM) | Shipped | Default workload backend on macOS 26+ Apple Silicon. No Homebrew prerequisites. |
 | QEMU | Shipped | Dev/test substrate only — opt-in, never auto-selected, and never carries untrusted multi-tenant workload. |
 | apple-container | Shipped | Opt-in only (`--hypervisor apple-container`): the HVF runner booting Apple's prebuilt container kernel. Auto-detect never selects it. |
@@ -45,7 +45,7 @@ leaves the guest only over vsock to the host-side policy endpoint. See the
 | Platform | Status | Notes |
 | --- | --- | --- |
 | Linux with `/dev/kvm` | Shipped | Firecracker directly on the host. |
-| macOS 13–25 (Apple Silicon) | Unsupported | Update to macOS 26+ or use a Linux KVM host. |
+| macOS 13–25 (Apple Silicon) | Preview | The signed Apple Silicon archive carries the libkrun tier with no Homebrew dependency. Select it explicitly; the real guest-launch witness remains open. |
 | macOS 26+ (Apple Silicon) | Shipped | Via the in-house HVF VMM. |
 | Windows via WSL2 | Experimental | No standard workload backend; only the explicit QEMU dev/test tier is available. See the [Windows install guide](/install/windows/). |
 | Windows native | Planned | Tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428). |

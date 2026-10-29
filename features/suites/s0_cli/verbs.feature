@@ -8,7 +8,7 @@ Feature: mvmctl top-level CLI surface
     When I run mvmctl with "--help"
     Then the command exits with code 0
     And the help output lists the "machine" verb
-    And the help output lists the "build" verb
+    And the help output lists the "dev" verb
     And the help output lists the "doctor" verb
     And the help output lists the "bootstrap" verb
 
@@ -31,6 +31,23 @@ Feature: mvmctl top-level CLI surface
     And the help output contains "Seconds between health"
     But the help output does not contain "Mutually exclusive with"
     And the help output does not contain "production-safe call surface"
+
+  Scenario: build refuses an ambiguous source before invoking a builder
+    Given an isolated mvm home
+    And a scratch working directory
+    And the scratch directory contains ambiguous manifest and flake sources
+    When I run mvmctl in the scratch directory with "build ."
+    Then the command exits with code 1
+    And the error output contains "ambiguous source"
+    And the error output contains "--from manifest|flake"
+
+  Scenario: build help advertises every workload source class
+    When I run mvmctl with "build --help"
+    Then the command exits with code 0
+    And the help output contains "SDK app"
+    And the help output contains "OCI image"
+    And the help output contains "--production"
+    And the help output contains "--debug-out"
 
   Scenario: every CLI help item is one line shorter than 80 columns
     Then every mvmctl command and subcommand help item is one line shorter than 80 columns

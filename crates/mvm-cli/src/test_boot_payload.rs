@@ -1,24 +1,35 @@
-//! Process-isolated boot-payload capability fixtures; never used for real boots.
+//! Process-isolated test fixtures; never used for real boots.
 
 const CHILD: &str = "MVM_BASE_CONTRACT_TEST_CHILD";
+const FRESH_CHILD: &str = "MVM_FRESH_PROCESS_TEST_CHILD";
 
 pub(crate) fn in_payload_capable_test_process(module: &str, name: &str) -> bool {
+    in_test_process(module, name, CHILD)
+}
+
+pub(crate) fn in_fresh_test_process(module: &str, name: &str) -> bool {
+    in_test_process(module, name, FRESH_CHILD)
+}
+
+fn in_test_process(module: &str, name: &str, marker: &str) -> bool {
     let module = module
         .split_once("::")
         .expect("test module includes crate")
         .1;
     let test = format!("{module}::{name}");
-    if std::env::var(CHILD).as_deref() == Ok(test.as_str()) {
+    if std::env::var(marker).as_deref() == Ok(test.as_str()) {
         return true;
     }
     let output = mvm_core::env_hygiene::helper_command(std::env::current_exe().unwrap())
         .args(["--exact", &test, "--nocapture"])
-        .env(CHILD, &test)
+        .env_remove(CHILD)
+        .env_remove(FRESH_CHILD)
+        .env(marker, &test)
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "payload-capable test child failed:\n{}\n{}",
+        "isolated test child failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

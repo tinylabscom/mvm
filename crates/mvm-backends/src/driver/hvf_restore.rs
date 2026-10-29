@@ -59,6 +59,11 @@ pub struct HvfRestoreRequest<'a> {
     /// bytes the supervisor loads, which is why the checkpoint layer does not
     /// hash those two blobs itself.
     pub content: &'a [ContentBlob],
+    /// The child's own admitted, signed plan, already verified by admission.
+    /// The supervisor takes its capture authority, wall-clock bound and audit
+    /// identity from it. `None` for a same-identity resume, which admits no
+    /// plan of its own.
+    pub plan_json: Option<&'a str>,
 }
 
 /// The blobs [`restore_hvf_vm`] verifies itself, on the bytes it loads.
@@ -135,8 +140,18 @@ fn read_parent_config(state_dir: &Path) -> Result<HvfSupervisorConfig> {
     let path = state_dir.join(SUPERVISOR_CONFIG_BLOB);
     let raw = std::fs::read(&path)
         .with_context(|| format!("reading the captured HVF launch config {}", path.display()))?;
-    serde_json::from_slice(&raw)
-        .with_context(|| format!("parsing the captured HVF launch config {}", path.display()))
+    let parent = serde_json::from_slice(&raw)
+        .with_context(|| format!("parsing the captured HVF launch config {}", path.display()))?;
+    require_unregistered_restore(&parent)?;
+    Ok(parent)
+}
+
+fn require_unregistered_restore(parent: &HvfSupervisorConfig) -> Result<()> {
+    anyhow::ensure!(
+        parent.caller_registration.is_none(),
+        "caller-registered checkpoints require a fresh cold launch; restore is unsupported"
+    );
+    Ok(())
 }
 
 /// Read the absolute device paths the saved state embeds.
@@ -205,6 +220,7 @@ pub fn hvf_child_restore_config(
     anchors: &DeviceAnchors,
     req: &HvfRestoreRequest<'_>,
 ) -> Result<HvfSupervisorConfig> {
+    require_unregistered_restore(parent)?;
     if !parent.kernel.is_file() {
         bail!(
             "HVF restore needs the captured kernel {}, which is not on disk",
@@ -227,6 +243,14 @@ pub fn hvf_child_restore_config(
         .map(|disk| remap_disk(disk, anchors, req.state_dir))
         .collect::<Result<Vec<_>>>()?;
 
+    let binding = match req.plan_json {
+        Some(json) => Some(
+            mvm_vmm::host::spec_map::plan_binding_for(json)
+                .ok_or_else(|| anyhow!("the restored child's plan is not valid JSON"))?,
+        ),
+        None => None,
+    };
+
     Ok(HvfSupervisorConfig {
         console_capture: parent.console_capture,
         vm_name: req.vm_name.to_string(),
@@ -238,6 +262,8 @@ pub fn hvf_child_restore_config(
         // that is still running off it. A restored child is not a builder.
         builder_egress_endpoint: None,
         kernel: parent.kernel.clone(),
+        kernel_fd: None,
+        boot_image_fds: None,
         cmdline: parent.cmdline.clone(),
         memory_mib: parent.memory_mib,
         // A restored child resumes the parent's saved vCPU state, so it must
@@ -259,14 +285,12 @@ pub fn hvf_child_restore_config(
         restore_frame: Some(restore_frame),
         restore_fds: None,
         timeout_secs: parent.timeout_secs,
-        // A restored child does not re-arm the wall-clock timer. Inheriting the
-        // parent's plan would audit the child's kill against the parent's
-        // identity — a wrong entry in the chain is worse than a missing one.
-        // The child is still admission-bounded; this mirrors the host-side CPU
-        // control, which a restore does not re-arm either.
-        plan: None,
-        audit_dir: None,
-        signing_key_path: None,
+        // The child's OWN admitted plan, never the parent's: inheriting the
+        // parent's would audit the child's kill against the parent's identity.
+        plan: binding.as_ref().map(|b| b.plan_json.clone()),
+        caller_registration: None,
+        audit_dir: binding.as_ref().map(|b| b.audit_dir.clone()),
+        signing_key_path: binding.as_ref().map(|b| b.signing_key_path.clone()),
         agent_socket: Some(mvm_core::config::vm_hvf_agent_socket_at(req.state_dir)),
         // Authority-bearing relays never survive a restore: the child reaches
         // the network, the broker and an interactive console only through
@@ -442,13 +466,13 @@ fn restore_hvf_vm_with(
             req.state_dir.display()
         );
     }
+    let parent = read_parent_config(req.state_dir)?;
     // The private copies are created in the state dir under a temporary name,
     // so it has to be reachable by this user alone before anything reads or
     // writes it. State dirs are created at the process umask; this puts it,
     // and every directory above it inside the mvm home, at 0700.
     mvm_core::config::create_private_dir(req.state_dir)
         .with_context(|| format!("making {} private", req.state_dir.display()))?;
-    let parent = read_parent_config(req.state_dir)?;
     let anchors = read_anchors(req.state_dir)?;
     let mut cfg = hvf_child_restore_config(&parent, &anchors, req)?;
 
@@ -542,9 +566,10 @@ fn await_restored(
 /// Report control-plane status without reflecting untrusted supervisor stderr.
 fn restore_failure(req: &HvfRestoreRequest<'_>, what: &str) -> String {
     format!(
-        "HVF restore of '{}': the supervisor {what}; {}",
+        "HVF restore of '{}': the supervisor {what}; {}{}",
         req.vm_name,
-        mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
+        mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT,
+        mvm_vmm::host::hvf_supervisor::failure_record::detail(req.state_dir)
     )
 }
 
@@ -559,6 +584,8 @@ mod tests {
             trusted_builder_egress: false,
             builder_egress_endpoint: None,
             kernel: state.join("Image"),
+            kernel_fd: None,
+            boot_image_fds: None,
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
             memory_mib: 512,
             vcpus: 1,
@@ -579,6 +606,7 @@ mod tests {
             gpu_socket: None,
             timeout_secs: 0,
             plan: None,
+            caller_registration: None,
             audit_dir: None,
             signing_key_path: None,
             agent_socket: Some(PathBuf::from("/parent/hvf-agent.sock")),
@@ -622,7 +650,67 @@ mod tests {
             state_dir: dir,
             cpu_grant: None,
             content: &[],
+            plan_json: None,
         }
+    }
+
+    #[test]
+    fn a_restored_child_carries_its_own_plan_and_never_the_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchors = materialized(dir.path());
+        let mut parent = parent_config(dir.path(), vec![]);
+        parent.plan = Some(serde_json::json!({"parent": "plan"}));
+        let child_plan = r#"{"child":"plan"}"#;
+        let mut req = request("child", dir.path());
+        req.plan_json = Some(child_plan);
+        let cfg = hvf_child_restore_config(&parent, &anchors, &req).unwrap();
+        assert_eq!(cfg.plan, Some(serde_json::json!({"child": "plan"})));
+        assert!(cfg.audit_dir.is_some() && cfg.signing_key_path.is_some());
+
+        let planless =
+            hvf_child_restore_config(&parent, &anchors, &request("child", dir.path())).unwrap();
+        assert!(planless.plan.is_none() && planless.audit_dir.is_none());
+    }
+
+    #[test]
+    fn registered_checkpoint_refuses_public_restore_before_child_state_changes() {
+        use mvm_core::crypto::entrypoint_delegation::test_support;
+        use mvm_core::vm_backend::caller_registration::CallerRegistration;
+        let dir = tempfile::tempdir().unwrap();
+        let anchors = materialized(dir.path());
+        let mut parent = parent_config(dir.path(), vec![]);
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let installation =
+            serde_json::from_str("\"bdf189ab-9a9a-440b-a266-e95b19e58a5e\"").unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expected = CallerRegistration::challenge_for_plan(
+            "parent",
+            &plan,
+            test_support::identity([3; 32], installation),
+            now,
+        )
+        .unwrap();
+        let proof = test_support::proof([3; 32], &expected, now).unwrap();
+        parent.caller_registration = Some(CallerRegistration {
+            vm: "parent".into(),
+            expected,
+            proof,
+        });
+        let config_path = dir.path().join(SUPERVISOR_CONFIG_BLOB);
+        let original = serde_json::to_vec(&parent).unwrap();
+        std::fs::write(&config_path, &original).unwrap();
+        let before = std::fs::read_dir(dir.path()).unwrap().count();
+        let req = request("child", dir.path());
+        let direct = hvf_child_restore_config(&parent, &anchors, &req).unwrap_err();
+        assert!(direct.to_string().contains("restore is unsupported"));
+        let public = restore_hvf_vm(&req).unwrap_err();
+        assert!(public.to_string().contains("restore is unsupported"));
+        assert_eq!(std::fs::read(config_path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
+        assert!(!dir.path().join(PID_FILE_NAME).exists());
     }
 
     /// The predicate decides whether the operator is warned that every restore
@@ -953,6 +1041,7 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
                 content: &[],
+                plan_json: None,
             },
             1024,
             &[],
@@ -996,6 +1085,7 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
                 content: &[],
+                plan_json: None,
             },
             1024,
             &[],
@@ -1039,6 +1129,7 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: None,
                 content: &[],
+                plan_json: None,
             },
             1024,
             &[],
@@ -1070,6 +1161,7 @@ mod tests {
             state_dir: &state,
             cpu_grant: None,
             content: &[],
+            plan_json: None,
         };
         let supervisor = Path::new("/usr/bin/mvm-hvf-supervisor");
 
@@ -1191,6 +1283,7 @@ mod tests {
             state_dir: dir,
             cpu_grant: None,
             content,
+            plan_json: None,
         }
     }
 

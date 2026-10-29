@@ -273,6 +273,16 @@ let
     rootPaths = packages ++ extraFileSourceRoots;
   };
 
+  # External GNU ELF support is an explicit application-package opt-in, not a
+  # base-image change. Match the pinned output, not an arbitrary package name.
+  nativeRuntimeEnabled = lib.any (
+    pkg: toString (lib.getLib pkg) == toString (lib.getLib pkgs.glibc)
+  ) packages;
+  nativeRuntimeRoots = lib.optional nativeRuntimeEnabled (lib.getLib pkgs.glibc);
+  nativeRuntimeClosure = pkgs.closureInfo {
+    rootPaths = nativeRuntimeRoots;
+  };
+
   # `mvm-host-vm-init` loads this registration into the writable persistent
   # Nix store before an unprivileged builder starts. Without it, Nix treats
   # the read-only rootfs closure as absent and tries to substitute every path
@@ -340,7 +350,7 @@ let
     inherit mvmSrc;
   };
   # Without a baked copy, the helper is the one the builder boot payload
-  # installs at `RUNTIME_HOST_BIN_DIR` (crates/mvm-build/src/builder_guest_paths.rs).
+  # installs at `RUNTIME_HOST_BIN_DIR` (crates/mvm-builder-guest/src/builder_guest_paths.rs).
   setpriv = if withSetpriv then "${setprivPkg}/bin/mvm-setpriv" else "/run/mvm/host-bins/mvm-setpriv";
   setprivHelperName = "mvm-setpriv";
 
@@ -959,6 +969,14 @@ let
       )
       (builtins.seq assertNoSshTemplateInputs packages)
     }
+
+    # The existing ext4 closure materializer below retains these absolute store
+    # targets. Do not copy or patch the application's upstream ELF bytes.
+    ${lib.optionalString nativeRuntimeEnabled ''
+      ${pkgs.python3}/bin/python3 ${./native-runtime.py} \
+        --system ${lib.escapeShellArg system} \
+        --closure ${nativeRuntimeClosure}/store-paths --root "$out"
+    ''}
   '';
 
   # Package the tree as an ext4 image. nixpkgs ships a make-ext4-fs

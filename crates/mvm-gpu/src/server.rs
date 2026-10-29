@@ -5,7 +5,7 @@
 //! to the guest process that minted them; two guests never share a handle
 //! table, and a connection dropping reclaims its backend wholesale.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
@@ -112,12 +112,13 @@ pub fn serve_connection<S: Read + Write>(
 
 /// Accept connections until `stop` is set, spawning one thread per
 /// connection. `make_backend` builds a fresh backend per connection.
+/// Backend initialization failure closes the accepted stream and stops serving.
 ///
 /// Returns once the listener errors or `stop` flips. The stop flag is the
 /// reap path: the per-VM supervisor sets it when the VM dies.
 pub fn run(
     addr: &ListenAddr,
-    make_backend: impl Fn() -> Box<dyn GpuBackend> + Send + 'static,
+    make_backend: impl Fn() -> io::Result<Box<dyn GpuBackend>> + Send + 'static,
     stop: &'static AtomicBool,
 ) -> std::io::Result<()> {
     match addr {
@@ -140,7 +141,7 @@ pub fn run(
 
 fn accept_loop<L, S, E>(
     listener: &L,
-    make_backend: impl Fn() -> Box<dyn GpuBackend>,
+    make_backend: impl Fn() -> io::Result<Box<dyn GpuBackend>>,
     stop: &'static AtomicBool,
     accept: impl Fn(&L) -> Result<(S, E), std::io::Error>,
 ) -> std::io::Result<()>
@@ -152,7 +153,7 @@ where
         match accept(listener) {
             Ok((stream, _)) => {
                 let backend: Arc<std::sync::Mutex<Box<dyn GpuBackend>>> =
-                    Arc::new(std::sync::Mutex::new(make_backend()));
+                    Arc::new(std::sync::Mutex::new(make_backend()?));
                 std::thread::spawn(move || {
                     let _ = serve_connection(stream, backend);
                 });
@@ -176,7 +177,7 @@ fn listener_nonblocking_hint<L>(_listener: &L) {}
 #[cfg(target_os = "linux")]
 fn run_vsock(
     port: u32,
-    make_backend: impl Fn() -> Box<dyn GpuBackend> + Send + 'static,
+    make_backend: impl Fn() -> io::Result<Box<dyn GpuBackend>> + Send + 'static,
     stop: &'static AtomicBool,
 ) -> std::io::Result<()> {
     let listener = vsock::VsockListener::bind(port)?;
@@ -311,6 +312,23 @@ mod tests {
     use crate::stub::StubBackend;
     use mvm_contract::protocol::gpu::GpuResponse;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn backend_initialization_failure_closes_connection_and_stops_accepting() {
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let (mut client, stream) = UnixStream::pair().expect("pair");
+        let accepted = std::cell::RefCell::new(Some(stream));
+        let error = accept_loop(
+            &(),
+            || Err(io::Error::other("native backend unavailable")),
+            &STOP,
+            |_| Ok((accepted.borrow_mut().take().expect("only one accept"), ())),
+        )
+        .expect_err("initialization error must stop the listener");
+        assert_eq!(error.to_string(), "native backend unavailable");
+        client.set_nonblocking(true).expect("bounded read");
+        assert_eq!(client.read(&mut [0_u8; 1]).expect("closed stream"), 0);
+    }
 
     #[test]
     fn listen_addresses_parse_by_kind() {

@@ -34,10 +34,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::key::{ImageBuildRole, ImageBuildTarget};
+use crate::build_cache::mvm_workspace_source_digest;
 use crate::builder_image_inputs::BUILDER_FLAKE_NIX_INPUTS;
 use crate::image_source::LocalImageCheckout;
 use crate::image_source::build::{TargetContract, contract_for};
-use crate::pipeline::build_cache::mvm_workspace_source_digest;
 use crate::source_closure::{SETPRIV_PACKAGE, fold_package_source_identity};
 use crate::workspace_graph::{hash_file, hash_tree};
 
@@ -57,7 +57,7 @@ const IMAGE_ROLE_LISTED_INPUTS: &[&str] = &["Cargo.toml", "nix"];
 
 /// The package the image checkout's `scripts/build-host-binaries.sh` compiles
 /// the builder's host binaries from.
-const HOST_BINARY_PACKAGE: &str = "mvm-build";
+const HOST_BINARY_PACKAGE: &str = "mvm-builder-guest";
 
 /// Cargo configuration the host-binary build reads from the checkout, beside
 /// the manifests: target flags and linker settings change the bytes.

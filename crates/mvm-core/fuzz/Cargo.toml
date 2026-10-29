@@ -19,11 +19,21 @@ serde_json = "1"
 
 [dependencies.mvm-core]
 path = ".."
+# fuzz_application_locator drives the registry-pack application surface,
+# which is host-state-gated.
+features = ["host-state"]
 
 # libfuzzer harness only; never a bench/test/doc target.
 [[bin]]
 name = "fuzz_snapshot_frame"
 path = "fuzz_targets/fuzz_snapshot_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_application_locator"
+path = "fuzz_targets/fuzz_application_locator.rs"
 test = false
 doc = false
 bench = false

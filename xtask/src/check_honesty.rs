@@ -83,7 +83,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     // Docs that are public-facing or normative.
     let mut docs: Vec<PathBuf> = vec![
         workspace.join("README.md"),
-        workspace.join("CONFORMANCE.md"),
+        workspace.join(crate::check_conformance::CONFORMANCE_PATH),
     ];
     let public_docs = workspace.join("public/src/content/docs");
     if public_docs.is_dir() {

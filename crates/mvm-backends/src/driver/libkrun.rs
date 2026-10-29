@@ -694,6 +694,52 @@ mod tests {
         }
     }
 
+    fn running_vm_at(dir: &Path) -> LibkrunRunningVm {
+        LibkrunRunningVm {
+            id: VmId("vm".into()),
+            state_dir: dir.to_path_buf(),
+            pid_file: dir.join("libkrun.pid"),
+        }
+    }
+
+    #[test]
+    fn pause_and_resume_are_refused_because_libkrun_cannot_do_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm = running_vm_at(dir.path());
+        assert!(vm.pause().unwrap_err().to_string().contains("pause"));
+        assert!(vm.resume().unwrap_err().to_string().contains("resume"));
+    }
+
+    /// A supervisor that ignores SIGTERM is still stopped: the grace window
+    /// ends in SIGKILL, and only then is the pid file dropped.
+    #[test]
+    fn kill_escalates_to_sigkill_for_a_supervisor_that_ignores_sigterm() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm = running_vm_at(dir.path());
+        let ready = dir.path().join("ready");
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "trap '' TERM; : > '{}'; while :; do sleep 1; done",
+                ready.display()
+            ))
+            .spawn()
+            .unwrap();
+        while !ready.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(&vm.pid_file, child.id().to_string()).unwrap();
+        let pid = child.id();
+        // The observer may reap the child before this thread does.
+        let reaper = std::thread::spawn(move || child.wait());
+        vm.kill().expect("a SIGKILL-able supervisor is stopped");
+        reaper.join().unwrap().ok();
+        assert!(!vm.pid_file.exists());
+        assert!(!crate::driver::libkrun_process::pid_alive(
+            pid as libc::pid_t
+        ));
+    }
+
     fn relay(spec: &VmmSpec) -> SupervisorConfig {
         relay_libkrun_supervisor_config(spec, Path::new("/state/w")).unwrap()
     }
@@ -701,6 +747,7 @@ mod tests {
     fn binding() -> mvm_vmm::driver::spec::PlanBinding {
         mvm_vmm::driver::spec::PlanBinding {
             plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
+            caller_registration: None,
             audit_dir: "/fixture/audit".into(),
             signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
         }
@@ -888,6 +935,29 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn the_conformance_kernel_helper_reports_the_relay_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("vmlinux");
+        std::fs::write(&kernel, b"\x7fELFconformance-kernel").unwrap();
+        let spec = spec_with(KernelImage::Path(kernel.clone()), vec![], vec![]);
+        let expected = relay_libkrun_supervisor_config(&spec, dir.path()).unwrap();
+
+        let (path, format) = map_kernel_for_test(&spec, dir.path()).unwrap();
+        assert_eq!(path.as_deref(), kernel.to_str());
+        assert_eq!(path, expected.krun.kernel_path);
+        assert_eq!(format, expected.krun.kernel_format);
+    }
+
+    #[test]
+    fn availability_is_whatever_the_libkrun_binding_reports() {
+        assert_eq!(
+            LibkrunDriver.is_available().unwrap(),
+            libkrun_sys::is_available()
+        );
+    }
+
     #[test]
     fn relay_config_prepares_the_kernel_for_the_host_format() {
         let dir = tempfile::tempdir().unwrap();
@@ -1056,8 +1126,17 @@ mod tests {
             Some("console=hvc0 root=/dev/vda ro init=/init")
         );
 
-        // Empty + an initramfs (no disk root) ⇒ the console-only verity base.
+        // Empty + an initramfs ⇒ the console-only verity base, even though the
+        // spec carries disks: the initramfs owns root selection.
         spec.initramfs = Some("/img/initrd.cpio".into());
+        spec.cmdline = String::new();
+        let cfg = relay(&spec);
+        assert_eq!(
+            cfg.krun.kernel_cmdline.as_deref(),
+            Some(crate::driver::libkrun_process::VERITY_CMDLINE)
+        );
+
+        // Empty + an initramfs and no disks ⇒ the same base.
         spec.blocks.clear();
         spec.cmdline = String::new();
         let cfg = relay(&spec);

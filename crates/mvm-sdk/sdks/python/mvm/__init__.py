@@ -117,6 +117,7 @@ from mvm._errors import (
     MachineBackendError,
     MachineConflictError,
     MachineNotFoundError,
+    MachineRecoveryRequiredError,
     MachineRejectedError,
     MachineSpecError,
     MachineUnauthorizedError,
@@ -162,13 +163,24 @@ from mvm._runtime.runtime import (
 from mvm import audit, host, kv
 
 # Host-side built-manifest inspection; the host library loads only on use.
-from mvm import manifest
+from mvm import checkpoint, manifest
+
+# Host-side pack authoring is pure data construction, with no build at import.
+from mvm import packs
+
+from mvm import attestation, image_revocations
+from mvm._hostlib import RecoveryRequiredDetails
 
 __all__ = [
+    "attestation",
+    "image_revocations",
+    "RecoveryRequiredDetails",
     "audit",
     "host",
     "kv",
     "manifest",
+    "checkpoint",
+    "packs",
     "DEFAULT_TTL_SECONDS",
     "MVM_HOSTLIB_PATH_ENV",
     "MVM_SDK_MODE_ENV",
@@ -203,6 +215,7 @@ __all__ = [
     "MachineConflictError",
     "MachineError",
     "MachineNotFoundError",
+    "MachineRecoveryRequiredError",
     "MachineRejectedError",
     "MachineResult",
     "MachineSpecError",

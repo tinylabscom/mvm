@@ -39,7 +39,7 @@ on:
 
 permissions:
   contents: read
-  issues: write # the scheduled run opens/updates/closes the tracking issue
+  issues: write # the scheduled run opens/updates the tracking issue; a pull request closes it
   actions: read # reads watched workflows' run history
 
 concurrency:
@@ -128,8 +128,8 @@ jobs:
         run: |
           EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number')
           if [ -n "$EXISTING" ]; then
-            gh issue close "$EXISTING" \
-              --comment "Every claim-bearing scheduled lane is running again. Watcher run: $RUN_URL"
+            gh issue comment "$EXISTING" \
+              --body "Every claim-bearing scheduled lane is running again. Watcher run: $RUN_URL Close this issue with a pull request."
           fi
 
       # The gate's own verdict decides the job, so a pull-request run that

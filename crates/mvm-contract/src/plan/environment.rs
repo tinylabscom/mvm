@@ -20,7 +20,7 @@
 //! the rest of the manifest (architecture, posture) run in `mvm-core`'s bundle
 //! verifier.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,9 @@ pub struct EnvironmentDescriptor {
     /// from these; the host's admission ceilings and budget still apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<PackResources>,
+    /// Signed egress ceiling; this declaration grants no launch authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<EnvironmentPolicy>,
     /// Mount points the workload expects. Declaring any requires the
     /// [`EnvironmentCapability::HostVolumes`] capability.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -76,6 +79,85 @@ pub struct EnvironmentDescriptor {
     /// are guest processes, not host services the broker exposes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ApplicationService>,
+}
+
+/// Exact destinations an application may request. An empty list denies all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentPolicy {
+    /// Canonical lowercase DNS names or IP literals with an explicit nonzero
+    /// port. IPv6 literals use brackets; patterns and implicit ports are refused.
+    pub allow_hosts: Vec<String>,
+    /// Signed pre-forward ceiling, applied without granting additional egress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_budget: Option<crate::policy::network_policy::AiRequestBudget>,
+}
+
+impl EnvironmentPolicy {
+    pub fn validate(&self) -> Result<(), EnvironmentDescriptorError> {
+        bounded("policy.allow_hosts", self.allow_hosts.len())?;
+        for authority in &self.allow_hosts {
+            Self::parse_authority(authority)?;
+        }
+        unique(
+            "policy.allow_hosts",
+            self.allow_hosts.iter().map(String::as_str),
+        )
+    }
+
+    /// Parse only the canonical authority spelling accepted in signed policy.
+    pub fn parse_authority(
+        authority: &str,
+    ) -> Result<crate::policy::network_policy::HostPort, EnvironmentDescriptorError> {
+        use crate::policy::network_policy::HostPort;
+        use core::net::{Ipv4Addr, Ipv6Addr};
+
+        let fail = || invalid("policy.allow_hosts", "expected a canonical exact HOST:PORT");
+        if authority.len() > MAX_ENVIRONMENT_STRING_BYTES {
+            return Err(fail());
+        }
+        let parsed: HostPort = authority.parse().map_err(|_| fail())?;
+        let (_, port) = authority.rsplit_once(':').ok_or_else(fail)?;
+        if parsed.port == 0 || port != parsed.port.to_string() {
+            return Err(fail());
+        }
+        if let Some(host) = parsed
+            .host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+        {
+            let ip: Ipv6Addr = host.parse().map_err(|_| fail())?;
+            if ip.to_string() != host {
+                return Err(fail());
+            }
+            return Ok(HostPort::new(host, parsed.port));
+        }
+        let host = &parsed.host;
+        if let Ok(ip) = host.parse::<Ipv4Addr>() {
+            if ip.to_string() != *host {
+                return Err(fail());
+            }
+        } else if host.len() > 253
+            || host.split('.').all(|label| {
+                label.bytes().all(|b| b.is_ascii_digit())
+                    || label.strip_prefix("0x").is_some_and(|hex| {
+                        !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+            })
+            || host.split('.').any(|label| {
+                label.is_empty()
+                    || label.len() > 63
+                    || label.starts_with('-')
+                    || label.ends_with('-')
+                    || !label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            })
+        {
+            return Err(fail());
+        }
+        Ok(parsed)
+    }
 }
 
 /// The program an environment runs: literal argv, no shell evaluation.
@@ -192,6 +274,9 @@ impl EnvironmentDescriptor {
                 .map_err(|_| EnvironmentDescriptorError::PackIdentity)?;
         }
         validate_resources(self.resources.as_ref())?;
+        if let Some(policy) = &self.policy {
+            policy.validate()?;
+        }
         bounded("volumes", self.volumes.len())?;
         bounded("secret_slots", self.secret_slots.len())?;
         bounded("capabilities", self.capabilities.len())?;
@@ -421,6 +506,7 @@ mod tests {
                 cpu_cores: 2,
                 memory_mb: 2048,
             }),
+            policy: None,
             volumes: vec![EnvironmentVolume {
                 name: s("workspace"),
                 guest_path: s("/workspace"),
@@ -534,6 +620,119 @@ mod tests {
     }
 
     type Mutation = fn(&mut EnvironmentDescriptor);
+
+    #[test]
+    fn absent_policy_preserves_old_descriptor_bytes() {
+        let bytes = br#"{"descriptor_version":1,"target":"aarch64-linux","entrypoint":{"argv":["/bin/app"]}}"#;
+        let d: EnvironmentDescriptor = serde_json::from_slice(bytes).unwrap();
+        d.validate().unwrap();
+        assert!(d.policy.is_none());
+        assert_eq!(serde_json::to_vec(&d).unwrap(), bytes);
+    }
+
+    #[test]
+    fn an_old_closed_reader_refuses_a_policy_bearing_descriptor() {
+        #[derive(Deserialize, Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct OldDescriptor {
+            descriptor_version: u32,
+            target: PackTarget,
+            entrypoint: EnvironmentEntrypoint,
+        }
+        let old = serde_json::json!({
+            "descriptor_version": 1, "target": "aarch64-linux",
+            "entrypoint": {"argv": ["/bin/app"]}
+        });
+        let descriptor: OldDescriptor = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(descriptor).unwrap(), old);
+        let mut new = old;
+        new["policy"] = serde_json::json!({"allow_hosts": ["api.anthropic.com:443"]});
+        assert!(serde_json::from_value::<OldDescriptor>(new).is_err());
+    }
+
+    #[test]
+    fn signed_policy_round_trips_and_is_closed() {
+        let mut d = descriptor();
+        d.policy = Some(EnvironmentPolicy {
+            allow_hosts: vec![s("api.anthropic.com:443"), s("[2001:db8::1]:443")],
+            request_budget: None,
+        });
+        d.validate().unwrap();
+        let mut value = serde_json::to_value(&d).unwrap();
+        assert_eq!(
+            serde_json::from_value::<EnvironmentDescriptor>(value.clone()).unwrap(),
+            d
+        );
+        value["policy"]["allow_any"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<EnvironmentDescriptor>(value).is_err());
+    }
+
+    #[test]
+    fn signed_request_budget_round_trips_and_rejects_unreviewed_fields() {
+        let mut value = serde_json::to_value(descriptor()).unwrap();
+        value["policy"] = serde_json::json!({
+            "allow_hosts": ["api.anthropic.com:443"],
+            "request_budget": {
+                "max_requests": 1, "max_spend_microusd": 500000,
+                "model": "claude-haiku-4-5-20251001"
+            }
+        });
+        let parsed: EnvironmentDescriptor = serde_json::from_value(value.clone()).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        value["policy"]["request_budget"]["allow_unknown_models"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<EnvironmentDescriptor>(value).is_err());
+    }
+
+    #[test]
+    fn policy_refuses_ambiguous_authorities_duplicates_and_bounds() {
+        for host in [
+            "",
+            "api.anthropic.com",
+            "api.anthropic.com:0",
+            "api.anthropic.com:0443",
+            "api.anthropic.com:+443",
+            "API.anthropic.com:443",
+            "api.anthropic.com.:443",
+            "*.anthropic.com:443",
+            "https://api.anthropic.com:443",
+            "user@api.anthropic.com:443",
+            "api.anthropic.com:443/path",
+            "api.anthropic.com :443",
+            "127.00.0.1:443",
+            "127.1:443",
+            "0x7f000001:443",
+            "0x7f.1:443",
+            "2001:db8::1:443",
+            "[2001:0db8::1]:443",
+            "[::1%lo0]:443",
+            "a..com:443",
+            "-a.com:443",
+        ] {
+            assert!(EnvironmentPolicy::parse_authority(host).is_err(), "{host}");
+        }
+        for host in ["api.anthropic.com:443", "127.0.0.1:443", "[::1]:443"] {
+            assert!(EnvironmentPolicy::parse_authority(host).is_ok(), "{host}");
+        }
+        let mut policy = EnvironmentPolicy {
+            allow_hosts: vec![s("api.anthropic.com:443"); 2],
+            request_budget: None,
+        };
+        assert!(matches!(
+            policy.validate(),
+            Err(EnvironmentDescriptorError::Duplicate { .. })
+        ));
+        policy.allow_hosts = (0..=MAX_ENVIRONMENT_ENTRIES)
+            .map(|i| alloc::format!("host{i}.example:443"))
+            .collect();
+        assert!(policy.validate().is_err());
+        policy.allow_hosts.pop();
+        policy.validate().unwrap();
+        policy.allow_hosts = vec![s(&"a".repeat(MAX_ENVIRONMENT_STRING_BYTES + 1))];
+        assert!(policy.validate().is_err());
+        policy.allow_hosts.clear();
+        policy.validate().unwrap();
+    }
 
     #[test]
     fn structural_refusals() {

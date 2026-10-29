@@ -82,6 +82,16 @@ fn schema_selects_base_contract_not_guest_protocol() {
     ));
     new.mvm_source_commit = None;
     validate_structure(&new).unwrap();
+    // No recorded contract is refused beside a workload root, accepted without one.
+    let mut none = new.clone();
+    none.compatibility.base_image_contract = None;
+    assert!(matches!(
+        validate_structure(&none),
+        Err(ImageSetError::WorkloadCompatibilitySchemaMismatch { .. })
+    ));
+    none.members
+        .retain(|m| !matches!(m.role, ImageSetRole::WorkloadRootfs(_)));
+    validate_structure(&none).unwrap();
     let mut null_source = serde_json::to_value(&new).unwrap();
     null_source["mvm_source_commit"] = serde_json::Value::Null;
     assert!(serde_json::from_value::<ImageSetManifest>(null_source).is_err());

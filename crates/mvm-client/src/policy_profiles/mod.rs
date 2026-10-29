@@ -19,10 +19,10 @@
 //! in the user's policy directory, or a built-in ([`builtin`]).
 
 pub mod builtin;
+pub mod environment;
 pub mod manifest;
 pub mod merge;
 pub mod model;
-pub mod package;
 pub mod preview;
 pub mod query;
 pub mod resolve;
@@ -31,7 +31,6 @@ pub mod source;
 pub use manifest::{FoldedLaunch, LaunchFlags, ResolvedManifest, fold};
 pub use merge::{LayerSummary, ResolvedPolicy};
 pub use model::{GroupFile, PolicyBody, ProfileFile};
-pub use package::compose_package;
 pub use resolve::{MAX_EXTENDS_DEPTH, Platform, PolicySelection, ProjectPolicy, resolve};
 pub use source::{LayerOrigin, PolicyError, PolicyRef, PolicyStore};
 

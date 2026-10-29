@@ -5,7 +5,6 @@ import { ExecutionContract } from "./ExecutionContract";
 import { Footer } from "./Footer";
 import { Hero } from "./Hero";
 import { Quickstart } from "./Quickstart";
-import { RegulatorsNow } from "./RegulatorsNow";
 import { RequestAccess } from "./RequestAccess";
 import { RiskControl } from "./RiskControl";
 import { WhyNow } from "./WhyNow";
@@ -16,42 +15,8 @@ import { WhyNow } from "./WhyNow";
 // commented-out <Positioning /> below.
 // import { Positioning } from "./Positioning";
 
-// The landing page tells the pitch story — one beat per section, in the
-// pitch script's order. The section order IS the argument; do not reorder
-// or insert a section without re-reading the pitch script (the 3–4 minute
-// spoken pitch is the brief for this page — the reshape-brief.md /
-// layout-match-report.md files the old comment cited no longer exist in
-// the repo).
-//   1. Hero              — the claim ("run code you can't fully trust"),
-//                          the box sentence, and the boundary diagram.
-//   2. Quickstart         — the developer off-ramp: install and run one
-//                          command in a hardware-isolated microVM.
-//   3. Why now (problem)  — AI is proliferating and so are exploits; teams
-//                          want to go hands-off and fear it, because the
-//                          non-determinism that makes agents useful is
-//                          exactly what makes them dangerous. The
-//                          emotional core.
-//      3x. Demo teaser     — browser sandbox. HIDDEN for now, not removed.
-//   4. Execution contract — the box is table stakes, the contract is the
-//                          product: declare → sign → proof. Six layers,
-//                          plus the link out to /how-it-works.
-//   5. Risk control       — control for the people who own the risk:
-//                          start/stop, kill on violation, and the audit
-//                          trail compliance asks for.
-//   6. Regulators         — the timing argument's second half: regulators
-//                          want proof of what agents did and were allowed
-//                          to do, and the contract is that proof.
-//      6x. Positioning     — HIDDEN for now, not removed.
-//   7. Request access     — the design-partner form (#request-access, the
-//                          enterprise off-ramp after the product story).
-//   8. Close + footer     — the vision (controls upstream, to the moment
-//                          a prompt is written) and the closing line.
-//                          HIDDEN for now (commented out below), not
-//                          removed — the page currently ends on the
-//                          request-access form and the footer.
-// The mechanism/evidence sections (WhyMicrovm, LaunchPerf,
-// DeploymentTiers, Backends, FAQ) moved to /how-it-works — see
-// HowItWorks.tsx — linked from the contract section and the header nav.
+// Start with a runnable example, then explain workloads, execution plans,
+// and operator controls. Keep the contact form after the product details.
 export function Landing() {
   return (
     <div className="min-h-screen w-full bg-canvas">
@@ -63,7 +28,6 @@ export function Landing() {
       <WhyNow />
       <ExecutionContract />
       <RiskControl />
-      <RegulatorsNow />
       {/* Positioning ("one project. three ways to drive it.") is hidden for
           now, not deleted — restore by uncommenting here and re-adding its
           entry to the section-order comment above. */}

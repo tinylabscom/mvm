@@ -1,0 +1,47 @@
+name: Fetch exact runtime candidate
+description: Verify current-attempt runtime transport, fixed signatures and all four output pins
+inputs:
+  artifact-id:
+    description: Actual candidate upload ID
+    required: true
+  artifact-digest:
+    description: Actual candidate artifact ZIP digest
+    required: true
+  archive-sha256:
+    description: Candidate archive byte pin
+    required: true
+  checksum-sha256:
+    description: Candidate checksum byte pin
+    required: true
+  archive-bundle-sha256:
+    description: Candidate archive signature bundle byte pin
+    required: true
+  checksum-bundle-sha256:
+    description: Candidate checksum signature bundle byte pin
+    required: true
+outputs:
+  directory:
+    description: Isolated verified candidate directory, not a runtime authority flag
+    value: ${{ steps.fetch.outputs.directory }}
+runs:
+  using: composite
+  steps:
+    - uses: sigstore/cosign-installer@v3
+    - id: fetch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CANDIDATE_ID: ${{ inputs.artifact-id }}
+        CANDIDATE_DIGEST: ${{ inputs.artifact-digest }}
+        RUNTIME_ARCHIVE_SHA256: ${{ inputs.archive-sha256 }}
+        RUNTIME_CHECKSUM_SHA256: ${{ inputs.checksum-sha256 }}
+        RUNTIME_ARCHIVE_BUNDLE_SHA256: ${{ inputs.archive-bundle-sha256 }}
+        RUNTIME_CHECKSUM_BUNDLE_SHA256: ${{ inputs.checksum-bundle-sha256 }}
+      run: |
+        set -euo pipefail
+        directory="$RUNNER_TEMP/runtime-proof-candidate"
+        python3 scripts/runtime-proof-candidate.py fetch --kind signed \
+          --artifact-id "$CANDIDATE_ID" --artifact-digest "$CANDIDATE_DIGEST" \
+          --out-dir "$directory"
+        python3 scripts/runtime-proof-candidate.py verify-collected --directory "$directory"
+        echo "directory=$directory" >> "$GITHUB_OUTPUT"

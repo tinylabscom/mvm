@@ -4,6 +4,12 @@
 verifies OCI content, builds deterministic ext4 images, seals root filesystems,
 clones runtime state efficiently, and stores content-addressed snapshots.
 
+The ext4 writer/reader, image-contract metadata, output path rules and manifest
+digests are platform-neutral. Host directory materialization, OCI unpacking,
+output extraction, cloning and snapshot mutation are Unix-only APIs. Non-Unix
+hosts do not silently drop extended attributes or substitute weaker write
+semantics for these operations.
+
 ## Who uses it
 
 `mvm-build` uses it to turn source and OCI content into bootable artifacts.
@@ -34,7 +40,7 @@ on read, so warm-pool state is addressed by content rather than mutable names.
 | `initramfs` | Initramfs construction and inspection |
 | `overlay` | Runtime overlay selection and integrity checks |
 | `clone` | Reflink/copy-on-write cloning |
-| `hash` / `snapshot_store` | Content identity and durable snapshots |
+| `hash` / `manifest` / `snapshot_store` | Content identity and durable snapshots; `manifest` is the chunked v2 form that lets a CoW-chain child reuse its parent's chunk digests where the kernel proves the bytes unchanged |
 | `extension_image` / `sdk_sidecar` | Auxiliary guest image assembly |
 | `trusted_snapshot` | Platform-backed trusted snapshot support |
 
@@ -43,7 +49,8 @@ on read, so warm-pool state is addressed by content rather than mutable names.
 Registry and archive input is untrusted. Paths are normalized before writes,
 digests are checked before content is trusted, allocations are capped, and
 special files or traversal attempts are rejected. The crate denies unsafe code
-except for small reviewed platform calls in the cloning implementation.
+except for small reviewed platform calls in the cloning and extent-map
+implementations.
 
 ## Developing
 

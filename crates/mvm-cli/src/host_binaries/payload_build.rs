@@ -1,5 +1,8 @@
-//! Producing the Linux host payload: which binaries it holds, the content-store
-//! key each one is filed under, and the `cargo zigbuild` that compiles one.
+//! Producing the Linux host payload: the content-store key each binary is
+//! filed under, and the `cargo zigbuild` that compiles one. What the payload
+//! holds and the argument vector of that compile are the build plan in
+//! `payload_build_plan`, shared with `xtask`'s compile-units report, which
+//! includes that file directly rather than depending on this crate.
 //!
 //! Compiled twice. `build.rs` includes this file by path to embed the payload
 //! at build time, and `mvmctl` compiles it as a module to produce the same
@@ -17,139 +20,11 @@ use std::process::Command;
 
 #[path = "../../build_embed_cache.rs"]
 pub(crate) mod build_embed_cache;
+#[path = "payload_build_plan.rs"]
+pub(crate) mod payload_build_plan;
 
 use super::embed_toolchain::{Pin, resolve_pinned_zig, strip_glibc, try_rustup_cargo_and_rustc};
-
-/// One binary in the payload, as the payload manifest declares it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EmbeddedSourceBinary {
-    pub package: String,
-    pub name: String,
-    pub features: String,
-}
-
-/// The payload manifest, relative to the workspace root.
-pub(crate) const MANIFEST_PATH: &str = "crates/mvm-build/src/host_payload_manifest.rs";
-
-/// Every binary in the payload, read from the manifest in `workspace_root`.
-pub(crate) fn read_manifest(workspace_root: &Path) -> Result<Vec<EmbeddedSourceBinary>, String> {
-    let path = workspace_root.join(MANIFEST_PATH);
-    let src =
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    parse_embedded_manifest(&src)
-}
-
-/// Every binary in the payload, in the order the table lists them.
-///
-/// Read out of the *text* of `crates/mvm-build/src/host_payload_manifest.rs`,
-/// because a build script cannot depend on the crate it is building. The order
-/// is part of the payload's identity — extraction hashes the table in order —
-/// so both callers must read the same text the same way.
-///
-/// `HOST_BINARIES` (the builder boot payload) and the bootstrap support list
-/// name each binary's package. `SEED_BINARIES` (host-side only, e.g. the
-/// Stage 0 nix-seed's `/init`) are `mvm-build` `[[bin]]`s and name none.
-pub(crate) fn parse_embedded_manifest(src: &str) -> Result<Vec<EmbeddedSourceBinary>, String> {
-    let mut manifest = parse_host_binaries(src)?;
-    manifest.extend(
-        read_quoted_strings_block(src, "SEED_BINARIES")?
-            .into_iter()
-            .map(|name| EmbeddedSourceBinary {
-                package: "mvm-build".to_string(),
-                name,
-                features: String::new(),
-            }),
-    );
-    manifest.extend(parse_bootstrap_support_binaries(src)?);
-    Ok(manifest)
-}
-
-fn parse_host_binaries(src: &str) -> Result<Vec<EmbeddedSourceBinary>, String> {
-    let section = "HOST_BINARIES";
-    let packages = read_quoted_field_block(src, section, "package:")?;
-    let names = read_quoted_field_block(src, section, "name:")?;
-    if packages.len() != names.len() {
-        return Err(format!(
-            "{section} in the payload manifest has {} packages and {} names; \
-             every entry needs both",
-            packages.len(),
-            names.len()
-        ));
-    }
-    Ok(packages
-        .into_iter()
-        .zip(names)
-        .map(|(package, name)| EmbeddedSourceBinary {
-            package,
-            name,
-            features: String::new(),
-        })
-        .collect())
-}
-
-fn parse_bootstrap_support_binaries(src: &str) -> Result<Vec<EmbeddedSourceBinary>, String> {
-    let section = "BOOTSTRAP_SUPPORT_BINARIES";
-    let packages = read_quoted_field_block(src, section, "package:")?;
-    let names = read_quoted_field_block(src, section, "name:")?;
-    let features = read_quoted_field_block(src, section, "features:")?;
-    if packages.len() != names.len() || packages.len() != features.len() {
-        return Err(format!(
-            "{section} in the payload manifest has {} packages, {} names and {} feature lists; \
-             every entry needs all three",
-            packages.len(),
-            names.len(),
-            features.len()
-        ));
-    }
-    Ok(packages
-        .into_iter()
-        .zip(names)
-        .zip(features)
-        .map(|((package, name), features)| EmbeddedSourceBinary {
-            package,
-            name,
-            features,
-        })
-        .collect())
-}
-
-fn read_manifest_section<'a>(src: &'a str, name: &str) -> Result<&'a str, String> {
-    let start = src
-        .find(name)
-        .ok_or_else(|| format!("the payload manifest declares no {name}"))?;
-    let rest = &src[start..];
-    let end = rest.find("];").map(|i| i + 2).unwrap_or(rest.len());
-    Ok(&rest[..end])
-}
-
-fn read_quoted_field_block(src: &str, section: &str, field: &str) -> Result<Vec<String>, String> {
-    Ok(read_manifest_section(src, section)?
-        .lines()
-        .filter_map(|line| extract_quoted_after(line, field))
-        .collect())
-}
-
-fn read_quoted_strings_block(src: &str, section: &str) -> Result<Vec<String>, String> {
-    let mut out = Vec::new();
-    let mut s = read_manifest_section(src, section)?;
-    while let Some(q1) = s.find('"') {
-        let after = &s[q1 + 1..];
-        let Some(q2) = after.find('"') else { break };
-        out.push(after[..q2].to_string());
-        s = &after[q2 + 1..];
-    }
-    Ok(out)
-}
-
-/// Extract the quoted string after `key` on one line, e.g.
-/// `name: "mvm-host-vm-init",` + `"name:"` → `Some("mvm-host-vm-init")`.
-pub(crate) fn extract_quoted_after(line: &str, key: &str) -> Option<String> {
-    let i = line.find(key)? + key.len();
-    let rest = &line[i..];
-    let q1 = rest.find('"')? + 1;
-    let q2 = rest[q1..].find('"')?;
-    Some(rest[q1..q1 + q2].to_string())
-}
+pub(crate) use payload_build_plan::{EmbeddedSourceBinary, read_manifest};
 
 /// What identifies one cacheable artifact.
 struct KeyRequest<'a> {
@@ -169,6 +44,7 @@ pub(crate) struct EmbedCache {
     pub graph: build_embed_cache::WorkspaceGraph,
     lockfile: String,
     toolchain_file: String,
+    workspace_manifest: Option<build_embed_cache::WorkspaceManifestDigest>,
     pub root: Option<PathBuf>,
     sources: BTreeMap<String, Vec<(String, String)>>,
     /// Every workspace member a computed key hashed.
@@ -190,6 +66,10 @@ impl EmbedCache {
             toolchain_file: build_embed_cache::hash_file(
                 &workspace_root.join("rust-toolchain.toml"),
             ),
+            // A failed snapshot disables reuse/publication, never supplies an
+            // empty digest. Cache-off callers still build without a cache.
+            workspace_manifest: build_embed_cache::WorkspaceManifestDigest::read(workspace_root)
+                .ok(),
             root,
             sources: BTreeMap::new(),
             watched: BTreeSet::new(),
@@ -217,6 +97,7 @@ impl EmbedCache {
     /// `None` when caching is off or unavailable — callers then build.
     fn key_for(&mut self, request: &KeyRequest<'_>) -> Option<String> {
         self.root.as_ref()?;
+        let workspace_manifest = self.workspace_manifest.clone()?;
         let sources = self.closure_sources(request.package);
         Some(build_embed_cache::artifact_key(
             &build_embed_cache::KeyInputs {
@@ -227,6 +108,7 @@ impl EmbedCache {
                 toolchain: format!("{} rust={}", request.toolchain, self.toolchain_file),
                 flavor: request.flavor.to_string(),
                 lockfile: self.lockfile.clone(),
+                workspace_manifest,
                 sources,
             },
         ))
@@ -344,25 +226,10 @@ pub(crate) struct ZigbuildSpec<'a> {
 }
 
 impl ZigbuildSpec<'_> {
-    /// The `cargo` arguments, after the program name.
-    fn args(&self) -> Vec<&str> {
-        let binary = self.binary;
-        let mut args = vec!["zigbuild", "--release"];
-        if self.quiet {
-            args.push("--quiet");
-        }
-        args.extend([
-            "--target",
-            self.pin.target.as_str(),
-            "-p",
-            binary.package.as_str(),
-            "--bin",
-            binary.name.as_str(),
-        ]);
-        if !binary.features.is_empty() {
-            args.extend(["--features", binary.features.as_str()]);
-        }
-        args
+    /// The `cargo` arguments, after the program name — the shared plan's, so
+    /// every consumer of the plan reports this exact selection.
+    fn args(&self) -> Vec<String> {
+        payload_build_plan::zigbuild_args(self.binary, &self.pin.target, self.quiet)
     }
 }
 
@@ -513,6 +380,99 @@ mod tests {
     use super::*;
 
     #[test]
+    fn root_profile_snapshot_rekeys_every_payload_for_both_architectures() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let binaries = read_manifest(workspace).unwrap();
+        assert_eq!(binaries.len(), 5);
+        for arch in ["aarch64", "x86_64"] {
+            let pin =
+                super::super::embed_toolchain::try_read_pinned_toolchain(workspace, arch).unwrap();
+            for binary in &binaries {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path();
+                let manifest = "[workspace]\n[profile.release]\nstrip = true\n";
+                std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+                let mut before = EmbedCache::with_root(root, Some(root.join("store")));
+                let key = artifact_key_for(&mut before, binary, &pin).unwrap();
+                assert_eq!(artifact_key_for(&mut before, binary, &pin).unwrap(), key);
+                std::fs::write(
+                    root.join("Cargo.toml"),
+                    format!("{manifest}[profile.release.build-override]\nstrip = false\n"),
+                )
+                .unwrap();
+                // One cache owns one snapshot; callers freeze the remaining
+                // build inputs independently of this cache-key calculation.
+                assert_eq!(artifact_key_for(&mut before, binary, &pin).unwrap(), key);
+                let mut after = EmbedCache::with_root(root, Some(root.join("store")));
+                let changed = artifact_key_for(&mut after, binary, &pin).unwrap();
+                assert_ne!(key, changed, "{} {arch}", binary.name);
+                assert_eq!(artifact_key_for(&mut after, binary, &pin).unwrap(), changed);
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_failure_never_mints_a_reusable_key_and_cache_off_stays_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let request = KeyRequest {
+            package: "mvm-builder-guest",
+            binary: "mvm-builderd",
+            features: "",
+            target: "x86_64-unknown-linux-musl",
+            toolchain: "test",
+            flavor: "musl-static",
+        };
+        let mut missing = EmbedCache::with_root(root, Some(root.join("store")));
+        assert!(missing.key_for(&request).is_none());
+        std::fs::create_dir(root.join("Cargo.toml")).unwrap();
+        let mut unreadable = EmbedCache::with_root(root, Some(root.join("store")));
+        assert!(unreadable.key_for(&request).is_none());
+        std::fs::remove_dir(root.join("Cargo.toml")).unwrap();
+        for invalid in ["", "not valid [", "[package]\nname = 'not-a-workspace'\n"] {
+            std::fs::write(root.join("Cargo.toml"), invalid).unwrap();
+            let mut cache = EmbedCache::with_root(root, Some(root.join("store")));
+            assert!(cache.key_for(&request).is_none());
+        }
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let mut off = EmbedCache::with_root(root, None);
+        assert!(off.key_for(&request).is_none());
+        assert!(!root.join("store").exists());
+    }
+
+    #[test]
+    fn payload_key_uses_the_same_manifest_bound_common_writer_in_both_includers() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let mut cache = EmbedCache::with_root(root, Some(root.join("store")));
+        let request = KeyRequest {
+            package: "mvm-builder-guest",
+            binary: "mvm-builderd",
+            features: "",
+            target: "x86_64-unknown-linux-musl",
+            toolchain: "test",
+            flavor: "musl-static",
+        };
+        let expected = build_embed_cache::artifact_key(&build_embed_cache::KeyInputs {
+            package: request.package.into(),
+            binary: request.binary.into(),
+            features: request.features.into(),
+            target: request.target.into(),
+            toolchain: format!("{} rust={}", request.toolchain, cache.toolchain_file),
+            flavor: request.flavor.into(),
+            lockfile: cache.lockfile.clone(),
+            workspace_manifest: build_embed_cache::WorkspaceManifestDigest::read(root).unwrap(),
+            sources: Vec::new(),
+        });
+        assert_eq!(cache.key_for(&request), Some(expected));
+    }
+
+    #[test]
     fn nested_rust_env_drops_outer_nightly_flags_and_selects_safe_wrapper() {
         let mut cmd = Command::new("cargo");
         cmd.env("RUSTFLAGS", "-Zthreads=8")
@@ -579,70 +539,33 @@ mod tests {
         );
     }
 
-    fn spec_args(binary: &EmbeddedSourceBinary, quiet: bool) -> Vec<String> {
+    #[test]
+    fn the_spec_args_are_the_shared_plan_args() {
+        let binary = EmbeddedSourceBinary {
+            package: "mvm-agentd".to_string(),
+            name: "mvm-egress-client".to_string(),
+            features: "addons".to_string(),
+        };
         let pin = Pin {
             rust: "1.91.1".to_string(),
             zig: "0.13.0".to_string(),
             cargo_zigbuild: "0.23.0".to_string(),
             target: "aarch64-unknown-linux-musl".to_string(),
         };
-        ZigbuildRequest::default()
-            .with_root(Path::new("/workspace"))
-            .with_target_dir(Path::new("/nested"))
-            .with_binary(binary)
-            .with_pin(&pin)
-            .with_output(Path::new("/out/bin"))
-            .with_quiet(quiet)
-            .build()
-            .args()
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    }
-
-    #[test]
-    fn the_zigbuild_names_the_package_binary_features_and_target() {
-        let binary = EmbeddedSourceBinary {
-            package: "mvm-agentd".to_string(),
-            name: "mvm-egress-client".to_string(),
-            features: "addons".to_string(),
-        };
-        assert_eq!(
-            spec_args(&binary, false),
-            [
-                "zigbuild",
-                "--release",
-                "--target",
-                "aarch64-unknown-linux-musl",
-                "-p",
-                "mvm-agentd",
-                "--bin",
-                "mvm-egress-client",
-                "--features",
-                "addons",
-            ]
-        );
-    }
-
-    /// Runtime callers pass `--quiet` unless asked to be verbose; nothing else
-    /// about the compile may change with it, or the bytes would.
-    #[test]
-    fn a_quiet_zigbuild_differs_only_by_quiet() {
-        let binary = EmbeddedSourceBinary {
-            package: "mvm-build".to_string(),
-            name: "mvm-host-vm-init".to_string(),
-            features: String::new(),
-        };
-        let loud = spec_args(&binary, false);
-        let quiet = spec_args(&binary, true);
-        assert!(!loud.contains(&"--quiet".to_string()));
-        assert_eq!(
-            quiet
-                .iter()
-                .filter(|arg| *arg != "--quiet")
-                .collect::<Vec<_>>(),
-            loud.iter().collect::<Vec<_>>()
-        );
+        for quiet in [false, true] {
+            let spec = ZigbuildRequest::default()
+                .with_root(Path::new("/workspace"))
+                .with_target_dir(Path::new("/nested"))
+                .with_binary(&binary)
+                .with_pin(&pin)
+                .with_output(Path::new("/out/bin"))
+                .with_quiet(quiet)
+                .build();
+            assert_eq!(
+                spec.args(),
+                payload_build_plan::zigbuild_args(&binary, &pin.target, quiet)
+            );
+        }
     }
 
     #[test]
@@ -657,105 +580,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parses_bootstrap_support_binaries_with_their_own_package() {
-        let src = r#"
-pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[
-    SourceBuiltBinary {
-        package: "mvm-agentd",
-        name: "mvm-egress-client",
-        features: "addons",
-    },
-];
-"#;
-        assert_eq!(
-            parse_bootstrap_support_binaries(src).unwrap(),
-            vec![EmbeddedSourceBinary {
-                package: "mvm-agentd".to_string(),
-                name: "mvm-egress-client".to_string(),
-                features: "addons".to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn a_support_entry_missing_a_field_is_refused_rather_than_misaligned() {
-        let src = r#"
-pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[
-    SourceBuiltBinary { package: "mvm-agentd", name: "mvm-egress-client" },
-];
-"#;
-        let reason = parse_bootstrap_support_binaries(src).unwrap_err();
-        assert!(reason.contains("every entry needs all three"), "{reason}");
-    }
-
-    #[test]
-    fn host_binary_names_exclude_bootstrap_support_entries() {
-        let src = r#"
-pub const HOST_BINARIES: &[HostBinary] = &[
-    HostBinary { package: "mvm-build", name: "mvm-host-vm-init", install_path: Some("/sbin/mvm-host-vm-init"), mode: 0o755 },
-    HostBinary { package: "mvm-build", name: "mvm-builderd", install_path: Some("/sbin/mvm-builderd"), mode: 0o755 },
-];
-pub const SEED_BINARIES: &[&str] = &["stage0-init"];
-pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary {
-    package: "mvm-agentd",
-    name: "mvm-egress-client",
-    features: "addons",
-}];
-"#;
-        assert_eq!(
-            read_quoted_field_block(src, "HOST_BINARIES", "name:").unwrap(),
-            vec!["mvm-host-vm-init".to_string(), "mvm-builderd".to_string()]
-        );
-    }
-
-    #[test]
-    fn a_host_binary_is_built_from_the_package_it_names() {
-        let src = r#"
-pub const HOST_BINARIES: &[HostBinary] = &[
-    HostBinary {
-        package: "mvm-build",
-        name: "mvm-host-vm-init",
-        install_path: Some("/sbin/mvm-host-vm-init"),
-        mode: 0o755,
-    },
-    HostBinary {
-        package: "mvm-setpriv",
-        name: "mvm-setpriv",
-        install_path: None,
-        mode: 0o755,
-    },
-];
-"#;
-        assert_eq!(
-            parse_host_binaries(src).unwrap(),
-            vec![
-                EmbeddedSourceBinary {
-                    package: "mvm-build".to_string(),
-                    name: "mvm-host-vm-init".to_string(),
-                    features: String::new(),
-                },
-                EmbeddedSourceBinary {
-                    package: "mvm-setpriv".to_string(),
-                    name: "mvm-setpriv".to_string(),
-                    features: String::new(),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn a_host_binary_without_a_package_is_refused_rather_than_misaligned() {
-        let src = r#"
-pub const HOST_BINARIES: &[HostBinary] = &[
-    HostBinary { package: "mvm-build", name: "mvm-host-vm-init", mode: 0o755 },
-    HostBinary { name: "mvm-setpriv", mode: 0o755 },
-];
-"#;
-        let reason = parse_host_binaries(src).unwrap_err();
-        assert!(reason.contains("every entry needs both"), "{reason}");
-    }
-
     /// The build script parses the manifest's text and `mvmctl` reads the
     /// compiled constants, so the two must describe the same binaries in the
     /// same order — the order is part of the payload's identity.
@@ -765,14 +589,18 @@ pub const HOST_BINARIES: &[HostBinary] = &[
             BOOTSTRAP_SUPPORT_BINARIES, HOST_BINARIES, SEED_BINARIES,
         };
 
-        let parsed = parse_embedded_manifest(include_str!(
-            "../../../mvm-build/src/host_payload_manifest.rs"
+        let parsed = payload_build_plan::parse_embedded_manifest(include_str!(
+            "../../../mvm-builder-guest/src/host_payload_manifest.rs"
         ))
         .unwrap();
         let compiled: Vec<EmbeddedSourceBinary> = HOST_BINARIES
             .iter()
             .map(|bin| (bin.package, bin.name))
-            .chain(SEED_BINARIES.iter().map(|name| ("mvm-build", *name)))
+            .chain(
+                SEED_BINARIES
+                    .iter()
+                    .map(|name| ("mvm-builder-guest", *name)),
+            )
             .map(|(package, name)| EmbeddedSourceBinary {
                 package: package.to_string(),
                 name: name.to_string(),
@@ -789,14 +617,5 @@ pub const HOST_BINARIES: &[HostBinary] = &[
             )
             .collect();
         assert_eq!(parsed, compiled);
-    }
-
-    #[test]
-    fn extract_quoted_after_reads_the_quoted_value() {
-        assert_eq!(
-            extract_quoted_after(r#"        name: "mvm-host-vm-init","#, "name:"),
-            Some("mvm-host-vm-init".to_string())
-        );
-        assert_eq!(extract_quoted_after("no key here", "name:"), None);
     }
 }

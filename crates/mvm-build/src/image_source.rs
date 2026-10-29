@@ -42,12 +42,19 @@ mod cache;
 mod git;
 mod local_set;
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "image_source/tests/repository.rs"]
+pub mod repository_fixture;
+
+#[cfg(unix)]
+pub use build::build_target_for_pair;
 pub use build::{
     EMIT_MANIFEST_SCRIPT, EmitRequest, HOST_BINARIES_SCRIPT, LocalImageBuildError, OutputFile,
-    OutputFormat, PairBuild, TargetContract, build_host_binaries, build_target_for_pair,
-    contract_for, emit_argv, emit_local_manifest, render_build_script, stage_contract_files,
-    stage_overlay_contract_files, stage_work_tree,
+    OutputFormat, PairBuild, PairBuildHooks, TargetContract, build_host_binaries,
+    build_target_for_pair_with, contract_for, emit_argv, emit_local_manifest, render_build_script,
+    stage_contract_files, stage_overlay_contract_files, stage_work_tree,
 };
+#[cfg(unix)]
 pub(crate) use cache::verify_local_cache_entry_record;
 pub use cache::{
     CacheLookup, CachedImageSet, ENTRY_RECORD_NAME, EntryContext, FlakeAttr, FlakeLockDigest,
@@ -320,6 +327,7 @@ pub fn refuse_tier_in_production(
 
 /// The provenance file a builder-VM cache entry records; only the field the
 /// tier reader needs.
+#[cfg(unix)]
 const BUILDER_CACHE_PROVENANCE_FILE: &str = ".mvm-provenance.json";
 
 /// The tier recorded with a managed image cache entry holding `path`, when
@@ -329,6 +337,7 @@ const BUILDER_CACHE_PROVENANCE_FILE: &str = ".mvm-provenance.json";
 /// production however it was selected. Unmanaged paths (an operator-named
 /// `--image`) record nothing and return `None`: their admission stays the
 /// digest pin.
+#[cfg(unix)]
 pub fn recorded_tier_for(path: &Path) -> Option<ImageTrustTier> {
     let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let rel = {
@@ -351,6 +360,7 @@ pub fn recorded_tier_for(path: &Path) -> Option<ImageTrustTier> {
 /// bytes reached this host. Anything but an explicit `fetched` is local —
 /// built in-tree, installed from a pair — and unrecognized values fail
 /// closed to local.
+#[cfg(unix)]
 fn default_image_cache_tier(variant_dir: &Path) -> Option<ImageTrustTier> {
     let sidecar = crate::builder_vm::GuestSidecar::read_from_dir(variant_dir).ok()??;
     Some(match sidecar.source.as_str() {
@@ -364,6 +374,7 @@ fn default_image_cache_tier(variant_dir: &Path) -> Option<ImageTrustTier> {
 /// records the release tag) is a verified release; every other kind — the
 /// Stage 0 source build, a pair install — is local, and unrecognized values
 /// fail closed to local.
+#[cfg(unix)]
 fn builder_vm_cache_tier(arch_dir: &Path) -> Option<ImageTrustTier> {
     #[derive(serde::Deserialize)]
     struct ProvenanceKind {

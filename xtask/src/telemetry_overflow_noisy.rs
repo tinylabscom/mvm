@@ -463,20 +463,34 @@ struct Round {
     outbox: PolicyOutbox,
 }
 
+fn quiesce<T>(
+    stop: &AtomicBool,
+    producers_done: &AtomicBool,
+    join_producers: impl FnOnce() -> T,
+) -> T {
+    stop.store(true, Ordering::Relaxed);
+    let producers = join_producers();
+    // A producer may already have passed its stop check. Quiesce both
+    // producers before allowing the worker to perform its final drain.
+    producers_done.store(true, Ordering::Relaxed);
+    producers
+}
+
 fn round(policy: Policy, template: &[u8], phases: Phases) -> Round {
     let outbox = PolicyOutbox::new(policy, CAPTURE_SLOTS, CAPTURE_SLOTS * MAX_RECORD_BYTES);
     let done = AtomicBool::new(false);
+    let producers_done = AtomicBool::new(false);
     let start = Instant::now();
     let (noisy, quiet, worker) = std::thread::scope(|scope| {
         let noisy = scope.spawn(|| produce(&outbox, NOISY, template, start, &done, None));
         let quiet =
             scope.spawn(|| produce(&outbox, QUIET, template, start, &done, Some(QUIET_PERIOD)));
-        let worker = scope.spawn(|| drain(&outbox, start, phases, &done));
+        let worker = scope.spawn(|| drain(&outbox, start, phases, &producers_done));
         std::thread::sleep(phases.total());
-        done.store(true, Ordering::Relaxed);
+        let (noisy, quiet) = quiesce(&done, &producers_done, || (noisy.join(), quiet.join()));
         (
-            noisy.join().expect("noisy producer"),
-            quiet.join().expect("quiet producer"),
+            noisy.expect("noisy producer"),
+            quiet.expect("quiet producer"),
             worker.join().expect("worker"),
         )
     });
@@ -686,6 +700,53 @@ mod tests {
         h.record(10_000);
         assert_eq!(h.percentile(100.0), 10_000);
         assert_eq!(h.max, 10_000);
+    }
+
+    #[test]
+    fn final_drain_waits_for_an_admission_already_in_flight() {
+        for policy in [Policy::DropNewest, Policy::DropOldest] {
+            let outbox = PolicyOutbox::new(policy, 1, MAX_RECORD_BYTES);
+            let stop = AtomicBool::new(false);
+            let producers_done = AtomicBool::new(false);
+            let checked_stop = std::sync::Barrier::new(2);
+            let finish_offer = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                let producer = scope.spawn(|| {
+                    assert!(!stop.load(Ordering::Relaxed));
+                    checked_stop.wait();
+                    finish_offer.wait();
+                    outbox.offer(NOISY, &record(512))
+                });
+                checked_stop.wait();
+                let outcome = quiesce(&stop, &producers_done, || {
+                    let stopped = stop.load(Ordering::Relaxed);
+                    let worker_stopped = producers_done.load(Ordering::Relaxed);
+                    // The worker can observe an empty queue while the last
+                    // admitted record is still waiting to be offered.
+                    let empty = outbox.take().is_none();
+                    finish_offer.wait();
+                    let outcome = producer.join().unwrap();
+                    assert!(stopped);
+                    assert!(!worker_stopped);
+                    assert!(empty);
+                    outcome
+                });
+                assert_eq!(outcome, Admit::Queued);
+                assert!(producers_done.load(Ordering::Relaxed));
+                let worker = drain(
+                    &outbox,
+                    Instant::now(),
+                    Phases {
+                        live_ms: 0,
+                        outage_ms: 0,
+                        recovery_ms: 0,
+                    },
+                    &producers_done,
+                );
+                assert_eq!(worker.delivered[NOISY] + outbox.evicted(NOISY), 1);
+                assert!(outbox.take().is_none());
+            });
+        }
     }
 
     #[test]

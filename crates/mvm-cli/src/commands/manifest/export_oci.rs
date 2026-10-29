@@ -11,7 +11,7 @@
 //! workloads to hosts without KVM.
 //!
 //! Failure modes (each surfaces with a clear message):
-//! - Template doesn't exist → "no slot named X; run mvmctl build"
+//! - Template doesn't exist → "no slot at … — run `mvmctl manifest ls`"
 //! - Slot exists but no current revision → "no current revision"
 //! - Revision exists but no image.tar.gz → "this template wasn't
 //!   built with the OCI output enabled — rebuild after wiring
@@ -68,7 +68,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         anyhow::bail!(
             "no OCI tarball at {} — this template wasn't built with the OCI output enabled. \
              Rebuild after wiring `dockerTools.streamLayeredImage` into the flake's mkGuest \
-             call, or use `mvmctl bundle export` for a signed .mvmpkg instead.",
+             call, or use `mvmctl build` for a signed .mvmpkg instead.",
             oci_src.display()
         );
     }

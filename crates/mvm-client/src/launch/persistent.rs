@@ -185,6 +185,86 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
 pub fn start_persistent_oci_machine(
     params: PersistentImageStartParams<'_>,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
+    let PreparedPersistentBoot {
+        backend,
+        start_config,
+        admission,
+        prepared_volumes,
+        built_runtime: _built_runtime,
+    } = prepare_persistent_boot(params)?;
+    let name_label = start_config.name.clone();
+    let name = name_label.as_str();
+    let backend_label = backend.name().to_string();
+    let backend_name = backend_label.as_str();
+    finish_legacy_persistent(
+        backend,
+        start_config,
+        admission,
+        prepared_volumes,
+        name,
+        backend_name,
+    )
+}
+
+struct PreparedPersistentBoot {
+    backend: mvm_runtime::backend::AnyBackend,
+    start_config: mvm_core::vm_backend::VmStartConfig,
+    admission: crate::admission::AdmissionContext,
+    prepared_volumes: crate::volume::LaunchPreparation,
+    built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
+}
+
+/// A real owning receiver for an ordinary native boot. No registry, DTO or
+/// process-exit fallback is a durable handoff. The caller must retain this.
+pub fn start_persistent_oci_machine_owned(
+    params: PersistentImageStartParams<'_>,
+) -> Result<crate::entrypoint::boot::OwnedClientBoot> {
+    let prepared = prepare_persistent_boot(params)?;
+    let mut owner =
+        crate::boot::start_prepared_owned(crate::entrypoint::boot::ClientBootResources {
+            backend: prepared.backend,
+            config: prepared.start_config,
+            admission: prepared.admission,
+            _volumes: Some(prepared.prepared_volumes),
+            built_runtime: prepared.built_runtime,
+        })
+        .map_err(|mut failure| {
+            failure.emit_failed("backend-start");
+            anyhow::Error::new(failure)
+        })?;
+    if let Err(error) =
+        super::detached::require_serving_owned(&mut owner, std::time::Duration::from_secs(30))
+    {
+        let name = owner.resources().config.name.clone();
+        let mut failure = owner.failure(anyhow::Error::new(error));
+        failure.emit_failed("guest-readiness");
+        failure.observe_failure(|context, error| {
+            if let Some(error) = error.downcast_ref::<super::detached::DetachedReadinessError>() {
+                audit_detached_readiness_failure(context, &name, error);
+            }
+        });
+        return Err(anyhow::Error::new(failure));
+    }
+    if let Err(error) = super::grants_report::report_owned_grants(&mut owner) {
+        let mut failure = owner.failure(error);
+        failure.emit_failed("grants");
+        return Err(anyhow::Error::new(failure));
+    }
+    if let Err(error) = super::budget_charge::record_owned_charge(&mut owner) {
+        let mut failure = owner.failure(error);
+        failure.emit_failed("host-budget");
+        return Err(anyhow::Error::new(failure));
+    }
+    let resources = owner.resources();
+    emit_launched(&resources.admission, resources.backend.name(), true);
+    record_vm_readiness(&resources.config.name, InstanceReadiness::LaunchAccepted);
+    mvm_core::audit_emit!(VmStart, vm: &resources.config.name);
+    Ok(owner)
+}
+
+fn prepare_persistent_boot(
+    params: PersistentImageStartParams<'_>,
+) -> Result<PreparedPersistentBoot> {
     let PersistentImageStartParams {
         name,
         image_label,
@@ -194,7 +274,7 @@ pub fn start_persistent_oci_machine(
         mut cpus,
         memory_mib,
         mem_initial_mib,
-        mut prepared_volumes,
+        prepared_volumes,
         network_policy,
         ports,
         backend_name,
@@ -318,6 +398,7 @@ pub fn start_persistent_oci_machine(
                     kernel_path: config.kernel_path.as_deref().map(std::path::Path::new),
                     precomputed_image_sha256: None,
                     boot_artifact_identity: None,
+                    runtime_config: Some(config),
                     cpus,
                     mem_mib: u64::from(memory_mib),
                     seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -400,6 +481,36 @@ pub fn start_persistent_oci_machine(
             .as_deref()
             .map(std::path::Path::new),
     )?;
+    let _built_runtime = mvm_hostd::plan_admission::prepare_built_pack_start(
+        &admission.admitted,
+        &mut start_config,
+        crate::backend_kind_for(backend_name),
+    )
+    .inspect_err(|error| {
+        emit_failed(&admission, "registry-pack-boot", error);
+    })?;
+    if let Some(runtime) = &_built_runtime {
+        runtime.verify_config(&start_config).inspect_err(|error| {
+            emit_failed(&admission, "registry-pack-runtime", error);
+        })?;
+    }
+    Ok(PreparedPersistentBoot {
+        backend,
+        start_config,
+        admission,
+        prepared_volumes,
+        built_runtime: _built_runtime,
+    })
+}
+
+fn finish_legacy_persistent(
+    backend: mvm_runtime::backend::AnyBackend,
+    start_config: mvm_core::vm_backend::VmStartConfig,
+    admission: crate::admission::AdmissionContext,
+    mut prepared_volumes: crate::volume::LaunchPreparation,
+    name: &str,
+    backend_name: &str,
+) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
     // VMM selection + workload-support check + start move behind the facade; the
     // admission gate (above) and the launched/failed emits stay here.
     let started = match crate::start_prepared(backend, &start_config) {
@@ -505,6 +616,7 @@ mod persistent_oci_boot_tests {
             kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config: None,
             cpus: 2,
             mem_mib: 512,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

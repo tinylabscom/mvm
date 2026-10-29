@@ -82,6 +82,7 @@ pub fn warm_restore_instance_from_path(
             hostname: Some(name.to_string()),
             grant_envelope: None,
             seccomp_tier: None,
+            volumes: Vec::new(),
         },
         POST_RESTORE_READY_TIMEOUT,
     ) {

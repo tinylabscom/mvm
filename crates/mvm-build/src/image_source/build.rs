@@ -6,18 +6,12 @@
 //! checkout, and for the builder image the host binaries built from the paired
 //! mvm checkout — and whose `/out` receives the target's output files.
 //!
-//! Two steps stay on the host because they are the image repository's own
-//! contract, and running its scripts is how that contract is kept to one
-//! implementation:
+//! Manifest production stays on the host and uses typed schema-3 data and
+//! in-process inspection of the copied Linux artifacts. No Python producer
+//! or mvm source identity participates in a new local manifest.
 //!
-//! - the builder image's static host binaries, built by the image
-//!   checkout's `scripts/build-host-binaries.sh --mvm-checkout` exactly as its
-//!   release does; the builder image has Nix and nothing else, so a
-//!   cross-compile with the pinned zig cannot run inside it;
-//! - the local manifest, written by the image checkout's
-//!   `scripts/emit-local-manifest.py`. That emitter is the one producer of a
-//!   local set; this crate is its reader, and every build therefore checks the
-//!   two against each other.
+//! Historical builder images can still stage their static host binaries.
+//! Linux-only images receive only their own image definitions.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -33,8 +27,11 @@ use super::cache::{
     CacheLookup, CachedImageSet, EntryContext, ImageBuildRole, ImageBuildTarget, KeyInputs,
     LocalImageCache, LocalImageCacheKey,
 };
-use crate::builder_vm_runtime::copy_dir_filtered;
 use crate::host_payload_manifest::legacy_installed_host_binary_names;
+use crate::source_copy::copy_dir_filtered;
+
+#[path = "emitter.rs"]
+mod emitter;
 
 /// The image checkout's host-binary build script, relative to its root.
 pub const HOST_BINARIES_SCRIPT: &str = "scripts/build-host-binaries.sh";
@@ -234,8 +231,7 @@ pub fn contract_for(
 }
 
 /// The `cmd.sh` the builder guest runs: build `target` from the staged image
-/// checkout with the staged mvm checkout as its `mvm` input, and copy the
-/// contract's files to `/out`.
+/// checkout without an mvm source input, and copy its files to `/out`.
 ///
 /// The image checkout is evaluated as a `path:` flake, so the build sees the
 /// working tree as staged, uncommitted edits included, which is what its
@@ -281,7 +277,6 @@ download-attempts = 5'
 unset MVM_WORKSPACE_PATH
 {host_bins}mkdir -p "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
 out=$(/sbin/nix build '{flake}' \
-  --override-input mvm 'path:/work/{WORK_MVM}' \
   --no-link --print-out-paths --no-write-lock-file --impure --print-build-logs)
 test -n "$out"
 test -d "$out"
@@ -316,8 +311,8 @@ pub fn stage_work_tree(
         })
     };
     copy(images_root, dest.join(WORK_IMAGES))?;
-    copy(mvm_root, dest.join(WORK_MVM))?;
     if let Some(bins) = host_bins {
+        copy(mvm_root, dest.join(WORK_MVM))?;
         let to = dest.join(WORK_HOST_BINS);
         std::fs::create_dir_all(&to).map_err(|source| LocalImageBuildError::Io {
             op: "creating",
@@ -446,13 +441,9 @@ pub struct EmitRequest<'a> {
     pub contract: &'a TargetContract,
 }
 
-/// Write the local manifest for a built target into `request.out`, with the
-/// image checkout's emitter.
+/// Write a typed Linux-only local manifest from the copied target bytes.
 pub fn emit_local_manifest(request: &EmitRequest<'_>) -> Result<(), LocalImageBuildError> {
-    let argv = emit_argv(request)?;
-    let mut cmd = mvm_core::env_hygiene::helper_command("python3");
-    cmd.args(argv).stderr(std::process::Stdio::inherit());
-    run_tool("writing the local image-set manifest", &mut cmd).map(|_| ())
+    emitter::emit(request)
 }
 
 /// The emitter's argument vector. Kernel formats are read from the built
@@ -604,7 +595,7 @@ fn emit_manifest_into_staging(
             images_root,
             legacy_mvm_root: Some(mvm_root),
             arch,
-            builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
+            builder_cache_contract: crate::builder_contract::BUILDER_VM_CACHE_CONTRACT_VERSION,
             built,
             out,
             contract,
@@ -819,6 +810,7 @@ fn seed_local_images_from_default_home(cache: &LocalImageCache) {
 /// builder-vm target: the image-set build runs *inside* a builder, so its
 /// builder image comes from the published bootstrap, never from the pair
 /// being built.
+#[cfg(unix)]
 pub fn build_target_for_pair(
     checkout: &LocalImageCheckout,
     mvm_root: &Path,
@@ -826,7 +818,7 @@ pub fn build_target_for_pair(
     arch: GuestArch,
     cache: &LocalImageCache,
     prepare_builder: &mut dyn FnMut() -> Result<(), String>,
-    run_job: &mut dyn FnMut(&crate::builder_vm::BuilderShellJob) -> Result<(), String>,
+    run_job: &mut dyn FnMut(&crate::builder_contract::BuilderShellJob) -> Result<(), String>,
 ) -> Result<PairBuild, LocalImageBuildError> {
     build_target_for_pair_with(
         checkout,
@@ -844,20 +836,20 @@ pub fn build_target_for_pair(
 
 /// Admits the build of the named artifact, told the reason its cache entry was
 /// just evicted when one was.
-pub(super) type AdmitPairBuild<'a> = &'a mut dyn FnMut(&str, Option<&str>) -> Result<(), String>;
+pub type AdmitPairBuild<'a> = &'a mut dyn FnMut(&str, Option<&str>) -> Result<(), String>;
 
 /// The boundaries a pair build crosses once the cache has not answered:
 /// admitting the build to the user, readying the builder, and booting it.
 /// Injected so a test can drive a build with neither a terminal nor a VM.
-pub(super) struct PairBuildHooks<'a> {
-    pub(super) admit: AdmitPairBuild<'a>,
-    pub(super) prepare_builder: &'a mut dyn FnMut() -> Result<(), String>,
-    pub(super) run_job:
-        &'a mut dyn FnMut(&crate::builder_vm::BuilderShellJob) -> Result<(), String>,
+pub struct PairBuildHooks<'a> {
+    pub admit: AdmitPairBuild<'a>,
+    pub prepare_builder: &'a mut dyn FnMut() -> Result<(), String>,
+    pub run_job: &'a mut dyn FnMut(&crate::builder_contract::BuilderShellJob) -> Result<(), String>,
 }
 
 /// A rebuild after an eviction says why, rather than showing the first-run
 /// notice, which would blame the checkout for the cache's fault.
+#[cfg(unix)]
 fn admit_pair_build(artifact: &str, evicted: Option<&str>) -> Result<(), String> {
     match evicted {
         Some(reason) => mvm_vmm::host::ui::admit_rebuild_after_eviction(artifact, reason),
@@ -866,7 +858,7 @@ fn admit_pair_build(artifact: &str, evicted: Option<&str>) -> Result<(), String>
 }
 
 /// [`build_target_for_pair`] over injected [`PairBuildHooks`].
-pub(super) fn build_target_for_pair_with(
+pub fn build_target_for_pair_with(
     checkout: &LocalImageCheckout,
     mvm_root: &Path,
     target: ImageBuildTarget,
@@ -952,10 +944,17 @@ pub(super) fn build_target_for_pair_with(
         });
     }
 
-    let job = crate::builder_vm::BuilderShellJob {
+    let job = crate::builder_contract::BuilderShellJob {
         work_dir: work,
         artifact_out: out.clone(),
-        script: render_build_script(&target, arch, contract),
+        script: render_build_script(
+            &target,
+            arch,
+            &TargetContract {
+                needs_host_binaries: host_bins.is_some(),
+                ..*contract
+            },
+        ),
         extra_disks: Vec::new(),
     };
     (hooks.run_job)(&job).map_err(|detail| LocalImageBuildError::Tool {
@@ -1126,7 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn the_script_builds_the_staged_images_against_the_staged_mvm() {
+    fn the_script_builds_only_the_staged_linux_images() {
         let t = target(ImageBuildRole::DefaultTenant, "default");
         let contract = contract_for(&t).unwrap();
         let script = render_build_script(&t, GuestArch::Aarch64, contract);
@@ -1136,7 +1135,8 @@ mod tests {
                 "'path:/work/images#legacyPackages.aarch64-linux.default-tenant.default'"
             )
         );
-        assert!(script.contains("--override-input mvm 'path:/work/mvm'"));
+        assert!(!script.contains("--override-input mvm"));
+        assert!(!script.contains("/work/mvm"));
         assert!(script.contains("/sbin/nix build"));
         assert!(script.contains("unset MVM_WORKSPACE_PATH"));
         assert!(!script.contains("MVM_HOST_BIN_DIR"));
@@ -1204,6 +1204,19 @@ mod tests {
         let err = stage_work_tree(&src, &src, Some(&bins), &tmp.path().join("work")).unwrap_err();
 
         assert!(err.to_string().contains("host binary"), "{err}");
+    }
+
+    #[test]
+    fn linux_only_staging_does_not_read_or_copy_mvm_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let images = tmp.path().join("images");
+        write(&images.join("flake.nix"), b"{}");
+        let missing_mvm = tmp.path().join("no-mvm-checkout");
+        let dest = tmp.path().join("work");
+        stage_work_tree(&images, &missing_mvm, None, &dest).unwrap();
+        assert!(dest.join("images/flake.nix").is_file());
+        assert!(!dest.join("mvm").exists());
+        assert!(!dest.join("host-bins").exists());
     }
 
     #[test]

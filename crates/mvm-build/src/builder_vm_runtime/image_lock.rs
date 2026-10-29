@@ -40,7 +40,7 @@ use crate::builder_vm::BuilderVmError;
 /// hypervisor open the image exclusively. The host holds no fd on the
 /// image.
 ///
-/// `_file: std::fs::File` is **load-bearing** — it's the sidecar lock
+/// `_lock` is **load-bearing** — it's the sidecar lock
 /// handle; dropping the guard releases the lock. Callers must keep the
 /// guard alive until the supervisor exits and all artifact reads are
 /// done. Called out explicitly because an underscore-prefixed field
@@ -51,7 +51,7 @@ use crate::builder_vm::BuilderVmError;
 #[derive(Debug)]
 pub struct NixStoreImageLock {
     path: PathBuf,
-    _file: std::fs::File,
+    _lock: HeldImageLock,
 }
 
 impl NixStoreImageLock {
@@ -59,6 +59,24 @@ impl NixStoreImageLock {
     /// the `virtio-blk` device backing. (The lock is on `<path>.lock`.)
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// Own an exclusive sidecar lock until drop, without exposing a clonable file.
+///
+/// Explicit unlock releases the shared open-file-description lock even if an
+/// unrelated concurrent fork temporarily retains an inherited descriptor.
+#[derive(Debug)]
+#[must_use = "keep the lock guard alive for the protected VM lifetime"]
+pub struct HeldImageLock {
+    file: std::fs::File,
+}
+
+impl Drop for HeldImageLock {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::File::unlock(&self.file) {
+            tracing::warn!(%error, "failed to release store image lock");
+        }
     }
 }
 
@@ -687,10 +705,10 @@ pub(crate) fn acquire_nix_store_image_lock_named_within(
     // before touching the image. The lock is on `<image>.lock`, never
     // the image fd — HVF needs to open the image exclusively at
     // start (see [`NixStoreImageLock`] docs).
-    let lock = acquire_sidecar_lock_within(&sidecar_lock_path(&path), wait)?;
+    let lock = hold_image_lock(&sidecar_lock_path(&path), wait)?;
     sparse_create_or_grow_image(&path, size_bytes)?;
 
-    Ok(NixStoreImageLock { path, _file: lock })
+    Ok(NixStoreImageLock { path, _lock: lock })
 }
 
 /// Materialize the Nix store image **without** taking its lock, and return the
@@ -747,15 +765,15 @@ impl UnlockedStoreImage {
     }
 }
 
-/// Take the exclusive sidecar lock at `lock_path` and return the open file
+/// Take the exclusive sidecar lock at `lock_path` and return the owning guard
 /// whose lifetime *is* the lock's.
 ///
 /// Called by a supervisor at startup for the image its VM will write. The
 /// returned handle must stay alive for the process's lifetime — binding it to
 /// `_` rather than a named `_guard` drops it immediately and silently unlocks
 /// the image.
-pub fn hold_image_lock(lock_path: &Path, wait: LockWait) -> Result<std::fs::File, BuilderVmError> {
-    acquire_sidecar_lock_within(lock_path, wait)
+pub fn hold_image_lock(lock_path: &Path, wait: LockWait) -> Result<HeldImageLock, BuilderVmError> {
+    acquire_sidecar_lock_within(lock_path, wait).map(|file| HeldImageLock { file })
 }
 
 #[cfg(test)]
@@ -1080,7 +1098,7 @@ mod tests {
         );
 
         drop(guard);
-        hold_image_lock(image.lock_path(), LockWait::none())
+        let _reacquired = hold_image_lock(image.lock_path(), LockWait::none())
             .expect("the lock must be free once its holder drops");
     }
 

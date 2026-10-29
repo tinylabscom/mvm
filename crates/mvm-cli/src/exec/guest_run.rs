@@ -80,8 +80,10 @@ pub(super) fn run_in_guest(
     // Establishing the channel the command goes out on — the dispatch cost,
     // distinct from how long the command itself then runs in the guest.
     sub.start(SubPhase::FirstDispatch);
-    let transport = vsock_transport::for_vm(vm_name)?;
-    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    let mut stream = vsock_transport::for_vm(vm_name)
+        .and_then(|transport| transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT))
+        .with_context(|| format!("opening the first dispatch channel to guest '{vm_name}'"))
+        .inspect_err(|_| emit_guest_console_diagnostic(vm_name))?;
     sub.finish(SubPhase::FirstDispatch);
     // The last host-side point before the command is written to the guest:
     // a launch already over its startup ceiling is refused here, with the
@@ -249,7 +251,34 @@ fn run_command_call(
 
 const AGENT_FAILURE_CONSOLE_LINES: usize = 80;
 
+const HYPERVISOR_LOG_LINES: usize = 40;
+
+/// The last `line_count` redacted lines of the VMM log that mention vsock.
+fn vsock_log_tail(contents: &[u8], line_count: usize) -> String {
+    let text = String::from_utf8_lossy(contents);
+    let matching = text
+        .lines()
+        .filter(|line| line.to_ascii_lowercase().contains("vsock"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    redacted_console_tail(matching.as_bytes(), line_count)
+}
+
+fn emit_hypervisor_vsock_diagnostic(vm_name: &str) {
+    let path = mvm_core::config::vm_hypervisor_log(vm_name);
+    if let Ok(contents) = std::fs::read(&path) {
+        let tail = vsock_log_tail(&contents, HYPERVISOR_LOG_LINES);
+        if !tail.is_empty() {
+            eprintln!(
+                "[mvm] Hypervisor vsock log tail ({}):\n{tail}",
+                path.display()
+            );
+        }
+    }
+}
+
 pub(super) fn emit_guest_console_diagnostic(vm_name: &str) {
+    emit_hypervisor_vsock_diagnostic(vm_name);
     let path = mvm_core::config::vm_console_log(vm_name);
     let Ok(contents) = std::fs::read(&path) else {
         eprintln!(
@@ -592,6 +621,15 @@ mod tests {
         };
         let provisioned = with_provisioned_egress_env(&req, "no-egress-vm");
         assert_eq!(provisioned.env, req.env);
+    }
+
+    #[test]
+    fn vsock_log_tail_keeps_only_the_last_vsock_lines() {
+        let tail = vsock_log_tail(
+            b"api request\nVsock muxer: a\nnet thing\nvsock conn reset\nvsock last\n",
+            2,
+        );
+        assert_eq!(tail, "vsock conn reset\nvsock last");
     }
 
     #[test]

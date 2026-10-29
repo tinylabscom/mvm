@@ -40,6 +40,12 @@ pub fn record_boot_charge(
     )
 }
 
+pub(crate) fn record_owned_charge(
+    owner: &mut crate::entrypoint::boot::OwnedClientBoot,
+) -> anyhow::Result<()> {
+    owner.record_charge()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +79,7 @@ mod tests {
             kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config: None,
             cpus: 2,
             mem_mib: 512,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

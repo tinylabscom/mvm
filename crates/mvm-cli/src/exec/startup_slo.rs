@@ -35,22 +35,33 @@ pub(super) struct StartupClock {
 }
 
 impl StartupClock {
-    /// Refuse the dispatch when this launch is already at or over its
-    /// ceiling. `agent_ready` is when the guest agent answered; the span after
-    /// it is the host's own dispatch preparation.
+    /// Report — but do not refuse — a warm dispatch that exceeds its startup
+    /// ceiling.  `agent_ready` is when the guest agent answered; the span
+    /// after it is the host's own dispatch preparation.
+    ///
+    /// A launch that already reached the guest has done all its host work.
+    /// Refusing it would discard that work without preventing the cost, so
+    /// the overrun is reported as a warning and the workload proceeds.  The
+    /// phase breakdown is always populated so the operator can see where the
+    /// time went without rerunning with timing on.
     pub(super) fn gate_dispatch(
         &self,
         agent_ready: Instant,
         sub: &LaunchSubMarks,
     ) -> anyhow::Result<()> {
-        match self.overrun(agent_ready, Instant::now(), sub) {
-            Some(refusal) => Err(anyhow::Error::new(refusal)),
-            None => Ok(()),
+        if let Some(overrun) = self.overrun(agent_ready, Instant::now(), sub) {
+            tracing::warn!(
+                elapsed_ms = overrun.elapsed_ms,
+                ceiling_ms = overrun.ceiling_ms,
+                launch_mode = overrun.launch_mode,
+                "warm launch exceeded startup ceiling: {overrun}"
+            );
         }
+        Ok(())
     }
 
-    /// The refusal for a launch checked at `now`, or `None` when it may
-    /// dispatch. A cold launch is not held to the warm ceiling.
+    /// The overrun for a launch checked at `now`, or `None` when it is below
+    /// its ceiling.  A cold launch is not held to the warm ceiling.
     fn overrun(
         &self,
         agent_ready: Instant,
@@ -162,20 +173,19 @@ mod tests {
     }
 
     #[test]
-    fn a_warm_launch_at_the_ceiling_is_refused_and_names_the_slow_phase() {
+    fn a_warm_launch_at_the_ceiling_reports_and_names_the_slow_phase() {
         let clock = clock(LaunchMode::Warm, 40, 260);
         let ready = clock.started + Duration::from_millis(290);
         let now = clock.started + Duration::from_millis(300);
-        let refusal = clock
+        let overrun = clock
             .overrun(ready, now, &LaunchSubMarks::new(true))
             .expect("exactly 300ms misses a strict ceiling");
-        assert_eq!(refusal.slowest_phase().unwrap().name, "warm_claim");
-        let total: f64 = refusal.phases.iter().map(|phase| phase.ms).sum();
+        assert_eq!(overrun.slowest_phase().unwrap().name, "warm_claim");
+        let total: f64 = overrun.phases.iter().map(|phase| phase.ms).sum();
         assert!(
-            (total - refusal.elapsed_ms).abs() < 0.01,
+            (total - overrun.elapsed_ms).abs() < 0.01,
             "phases partition the elapsed time"
         );
-        assert!(refusal.to_string().contains("the workload was not started"));
     }
 
     #[test]
@@ -205,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_returns_the_typed_refusal_the_audit_classifies() {
+    fn the_gate_reports_but_does_not_refuse_an_over_ceiling_warm_launch() {
         let started = Instant::now() - Duration::from_millis(400);
         let clock = StartupClock {
             launch_mode: LaunchMode::Warm,
@@ -213,12 +223,15 @@ mod tests {
             admitted: started,
             booted: started,
         };
-        let err = clock
+        // The gate must succeed: a completed launch reports its overrun
+        // without refusing the dispatch.
+        clock
             .gate_dispatch(started, &LaunchSubMarks::new(true))
-            .unwrap_err();
-        assert_eq!(
-            mvm_client::launch::startup_budget::failure_class(&err, "launch"),
-            mvm_client::launch::startup_budget::STARTUP_BUDGET_CLASS
-        );
+            .expect("gate_dispatch must not refuse a completed warm launch");
+        // The overrun is still detectable for reporting.
+        let overrun = clock
+            .overrun(started, Instant::now(), &LaunchSubMarks::new(true))
+            .expect("400ms exceeds the 300ms ceiling");
+        assert!(overrun.elapsed_ms >= 400.0);
     }
 }

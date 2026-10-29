@@ -407,6 +407,12 @@ fn an_applied_list_loads_back_with_private_files() {
         .expect("update");
     let loaded = store.load(at(3)).expect("load");
     assert_eq!(loaded.checkpoint(), &checkpoint);
+    let retained = store
+        .capture_applied_proof(at(3))
+        .expect("retain applied proof");
+    assert_eq!(retained.verified(), &loaded);
+    assert_eq!(retained.document(), bytes);
+    assert_eq!(retained.signature_bundle(), bundle_for_publication(1));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -415,6 +421,34 @@ fn an_applied_list_loads_back_with_private_files() {
             assert_eq!(mode, 0o600);
         }
     }
+}
+
+#[test]
+fn retained_feed_keeps_originals_across_new_publication_but_is_not_evergreen() {
+    // Store/checkpoint behavior only; this module's existing signer seam is
+    // test-only and does not establish a real Sigstore-positive witness.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = store_in(&dir);
+    let first = document(&list(at(1), at(20)));
+    let first_signature = bundle_for_publication(1);
+    store.update(&first, &first_signature, at(2)).unwrap();
+    let retained = store.capture_applied_proof(at(3)).unwrap();
+    let next = document(&list(at(4), at(20)));
+    store
+        .update(&next, &bundle_for_publication(2), at(5))
+        .unwrap();
+    assert_eq!(retained.document(), first);
+    assert_eq!(retained.signature_bundle(), first_signature);
+    assert_eq!(retained.verified().checkpoint().publication, 1);
+    let current = store.capture_applied_proof(at(6)).unwrap();
+    assert_eq!(current.document(), next);
+    assert_eq!(current.verified().checkpoint().publication, 2);
+    assert!(matches!(
+        store.capture_applied_proof(at(20)),
+        Err(ImageSetRevocationStoreError::Verification(
+            ImageSetRevocationError::Expired { .. }
+        ))
+    ));
 }
 
 #[test]
@@ -640,6 +674,7 @@ mod published {
         ));
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn the_published_bundle_does_not_vouch_for_another_feed() {
         let err = crate::registry_pack_revocation::verify_registry_pack_revocations(

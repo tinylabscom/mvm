@@ -60,6 +60,7 @@ build_valid_fixture() {
     local pkg="$dir/mvmctl-$t"
     mkdir -p "$pkg"
     for b in $(bins_for "$t"); do printf '#!/bin/sh\n' > "$pkg/$b"; chmod +x "$pkg/$b"; done
+    printf '# component table fixture\n' > "$pkg/components.tsv"
     ( cd "$dir" && tar czf "mvmctl-$t.tar.gz" "mvmctl-$t" && rm -rf "mvmctl-$t" )
     printf 'bundle\n' > "$dir/mvmctl-$t.tar.gz.bundle"
     echo "$(sha256_of "$dir/mvmctl-$t.tar.gz")  mvmctl-$t.tar.gz" >> "$dir/checksums-sha256.txt"
@@ -134,6 +135,18 @@ grep -v "mvmctl-$t.tar.gz" "$d/checksums-sha256.txt" > "$d/.c.tmp"
 echo "$(sha256_of "$d/mvmctl-$t.tar.gz")  mvmctl-$t.tar.gz" >> "$d/.c.tmp"
 mv "$d/.c.tmp" "$d/checksums-sha256.txt"
 if run "$d"; then bad "an archive missing a required binary must fail"; else ok "an archive missing a required binary fails closed"; fi
+rm -rf "$d"
+
+# 7b. An archive missing the backend component table → fail closed: install.sh
+# reads it to select backend components.
+d="$(build_valid_fixture)"
+t=x86_64-unknown-linux-gnu
+( cd "$d" && tar xzf "mvmctl-$t.tar.gz" && rm -f "mvmctl-$t/components.tsv" \
+  && tar czf "mvmctl-$t.tar.gz" "mvmctl-$t" && rm -rf "mvmctl-$t" )
+grep -v "mvmctl-$t.tar.gz" "$d/checksums-sha256.txt" > "$d/.c.tmp"
+echo "$(sha256_of "$d/mvmctl-$t.tar.gz")  mvmctl-$t.tar.gz" >> "$d/.c.tmp"
+mv "$d/.c.tmp" "$d/checksums-sha256.txt"
+if run "$d"; then bad "an archive missing components.tsv must fail"; else ok "an archive missing components.tsv fails closed"; fi
 rm -rf "$d"
 
 # 8. A Linux target without its .deb → fail closed.

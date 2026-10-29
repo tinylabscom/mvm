@@ -43,8 +43,9 @@ pub(super) struct BootedVm {
 ///
 /// Returns the booted VM — a claimed standby runs under its own standby id,
 /// not `vm_name` — and, for a cold boot, the reason no standby served it. A
-/// cold-boot failure returns the error after the normal transient state
-/// cleanup path.
+/// failed snapshot restore is not fatal: the launch warns, drops the partial
+/// restore state, and boots cold. A cold-boot failure returns the error after
+/// the normal transient state cleanup path.
 pub(super) fn boot_transient_vm(
     vm_name: String,
     use_snapshot: bool,
@@ -136,9 +137,26 @@ pub(super) fn boot_transient_vm(
             ui::info(&format!(
                 "Restoring transient VM '{vm_name}' from template '{tmpl}' snapshot..."
             ));
+            // A restored guest resumes already running; there is no activation
+            // left to hold it behind the admission's sync.
+            attempt.start_config.wait_for_admission_durability()?;
             match restore_via_snapshot(&vm_name, tmpl, snap, attempt.start_config) {
                 Ok(()) => true,
-                Err(e) => return Err(e).context("restoring transient VM snapshot"),
+                Err(e) => {
+                    // A snapshot is a boot accelerator, never a requirement:
+                    // a missing, corrupt, or incompatible one degrades to the
+                    // cold boot below rather than failing the launch. The
+                    // attempt may have left partial state behind (a reserved
+                    // slot's run-info.json), which the cold boot would
+                    // otherwise inherit.
+                    ui::warn(&format!(
+                        "Snapshot restore failed ({e:#}) — booting '{vm_name}' cold instead."
+                    ));
+                    remove_transient_state_dir(
+                        &mvm_core::config::vm_state_dir(&vm_name).to_string_lossy(),
+                    );
+                    false
+                }
             }
         } else {
             false
@@ -521,6 +539,24 @@ mod tests {
         }
     }
 
+    /// A resolved template image carrying snapshot metadata, as
+    /// `snapshot_eligible` requires before the restore path runs.
+    fn snapshot_resolved_image() -> ResolvedImage {
+        ResolvedImage {
+            template_id: Some("tmpl".into()),
+            snap_info: Some(mvm_core::template::SnapshotInfo {
+                created_at: "2026-01-01T00:00:00Z".into(),
+                vmstate_size_bytes: 1,
+                mem_size_bytes: 1,
+                boot_args: String::new(),
+                vcpus: 2,
+                mem_mib: 1024,
+                compatibility: None,
+            }),
+            ..resolved_image()
+        }
+    }
+
     /// A shape the pool could serve, on a host holding no standbys.
     fn claimable_config_without_a_pool() -> VmStartConfig {
         VmStartConfig {
@@ -668,6 +704,59 @@ mod tests {
         assert!(
             !effective.exists(),
             "the claimed standby dir must be removed"
+        );
+    }
+
+    /// A snapshot restore that cannot complete — here the shell-backed slot
+    /// allocation has no Linux environment behind it — warns and boots cold
+    /// instead of failing the launch, dropping the partial state the attempt
+    /// reserved so the cold boot does not inherit it.
+    #[test]
+    fn a_failed_snapshot_restore_falls_back_to_a_cold_boot() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove("MVM_RESIDENCY");
+        env.remove("MVM_HVF_WARM_REQUIRE_CLAIM");
+        // Every shell op answers empty output: `allocate_slot` finds no slot
+        // index in it, so the restore fails before reaching the snapshot load.
+        let _shell = mvm_vmm::host::shell::mock::install_handler(|_| {
+            mvm_vmm::host::shell::mock::MockResponse::empty()
+        });
+        // The partial state a failed attempt leaves behind: the reserved
+        // slot's run-info.json under the VM's state dir.
+        let state_dir = mvm_core::config::vm_state_dir("vm-snap");
+        std::fs::create_dir_all(&state_dir).expect("create state dir");
+        std::fs::write(
+            state_dir.join("run-info.json"),
+            br#"{"slot_reserved":true}"#,
+        )
+        .expect("write slot reservation");
+
+        let mock = mvm_runtime::MockBackend::new();
+        let backend = AnyBackend::Mock(mock.clone());
+        let start_config = VmStartConfig {
+            name: "vm-snap".into(),
+            ..claimable_config_without_a_pool()
+        };
+        let resolved = snapshot_resolved_image();
+        let attempt = BootAttempt {
+            backend: &backend,
+            start_config: &start_config,
+            resolved: &resolved,
+            user_named: false,
+        };
+        let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::default();
+        let booted = boot_transient_vm("vm-snap".to_string(), true, &attempt, None, &mut sub)
+            .expect("a failed restore must degrade to a cold boot, not fail the launch");
+
+        assert_eq!(booted.name, "vm-snap");
+        assert_eq!(
+            booted.launch_mode,
+            crate::commands::vm::phase_timing::LaunchMode::Cold
+        );
+        assert_eq!(mock.count(), 1, "the cold path must boot the VM");
+        assert!(
+            !state_dir.exists(),
+            "the partial restore state must be removed before the cold boot"
         );
     }
 }

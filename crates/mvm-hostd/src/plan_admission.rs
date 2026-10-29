@@ -55,6 +55,9 @@
 //! ceiling, budget, validity window, and replay protection apply unchanged,
 //! so the host stays the final authority over what it boots.
 
+mod rollback;
+use rollback::{FailureAuditPolicy, UndoLaunch, undo_launch, undo_launch_with};
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use ed25519_dalek::VerifyingKey;
@@ -71,7 +74,7 @@ use mvm_core::pack_cache::{PackVerifyCtx, resolve_pack_digest};
 use mvm_core::packs::{PackKind, Sha256Hex};
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
-    ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
+    ExecutionPlan, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
     check_embedded_image_set_for_backend, check_window, sign_plan, verify_plan, verify_plan_bundle,
     verify_plan_id,
 };
@@ -79,7 +82,6 @@ use mvm_core::policy::PolicyBundle;
 use mvm_core::spawn_scope;
 use mvm_core::vm_backend::BackendKind;
 use mvm_vmm::quota::QuotaConfig;
-use std::sync::Mutex;
 
 use crate::audit::host_keypair::host_signer_id;
 use mvm_contract::builder::BuilderError;
@@ -88,39 +90,25 @@ use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 use sha2::{Digest, Sha256};
 
+mod assurance_runtime;
 mod bundle_environment;
+mod canonical_kernel;
 mod display_grants;
+mod final_gates;
 mod host_trust;
+mod nonce_ledger;
 mod registry_pack;
 mod verb_grant_sidecar;
+
+use assurance_runtime::{AssuranceRuntimeBinding, verify_selected_runtime};
 use host_trust::{host_grant_ceiling, host_trusted_plan_signers};
+pub use nonce_ledger::InMemoryNonceLedger;
 use registry_pack::verify_registry_pack_assets;
 use verb_grant_sidecar::mint_verb_grant_sidecar;
 
 pub use bundle_environment::BundleEnvironmentRefused;
 pub use mvm_core::time::{Clock, SystemClock};
-
-/// Production nonce ledger. Holds a `NonceStore` behind a mutex so
-/// it's `Send + Sync`. In v0 we instantiate one per boot —
-/// later when the supervisor is in-process, the ledger spans every
-/// up call for the lifetime of the supervisor.
-pub struct InMemoryNonceLedger {
-    inner: Mutex<NonceStore>,
-}
-
-impl InMemoryNonceLedger {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(NonceStore::default()),
-        }
-    }
-}
-
-impl Default for InMemoryNonceLedger {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_built_pack_start};
 
 /// Result of a successful admission. Carries everything the caller
 /// needs to hand to the backend (the plan + its id), to the audit
@@ -147,6 +135,9 @@ pub struct AdmittedPlan {
     signer_id: String,
     signed: SignedExecutionPlan,
     extensions: Vec<AdmittedExtension>,
+    assurance_runtime: Option<AssuranceRuntimeBinding>,
+    canonical_kernel: Option<std::sync::Arc<canonical_kernel::AdmittedKernel>>,
+    backend: Option<BackendKind>,
 }
 
 /// Re-verified host artifact behind one extension binding in the signed plan.
@@ -211,7 +202,18 @@ impl AdmittedPlan {
             plan,
             signed,
             extensions: Vec::new(),
+            assurance_runtime: None,
+            canonical_kernel: None,
+            backend: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_assurance_runtime_for_test(mut self, config: &VmStartConfig) -> Self {
+        self.assurance_runtime = Some(
+            AssuranceRuntimeBinding::verify(config, &self.plan).expect("verified test runtime"),
+        );
+        self
     }
 }
 
@@ -330,6 +332,8 @@ pub fn admit_plan_for_run(
     extension_ctx: Option<&ExtensionAdmissionContext<'_>>,
     posture: RunPosture,
 ) -> Result<AdmittedPlan> {
+    posture.verify_runtime()?;
+    let assurance_runtime = posture.assurance_runtime(plan)?;
     validate_extension_bindings(plan)?;
     let extensions = verify_extension_packs(plan, extension_ctx)?;
     verify_registry_pack_assets(plan)?;
@@ -367,6 +371,8 @@ pub fn admit_plan_for_run(
         signed,
         signer_id,
         extensions,
+        assurance_runtime,
+        posture,
         clock,
         ledger,
         bundle_ctx,
@@ -412,6 +418,8 @@ pub fn admit_signed_plan_for_run(
         verify_plan(signed, &trusted_refs).context("verifying externally-signed plan")?;
     let signer_id = signed.0.signer_id.clone();
 
+    posture.verify_runtime()?;
+    let assurance_runtime = posture.assurance_runtime(&verified)?;
     validate_extension_bindings(&verified)?;
     // No extension verification context on this path: a plan that binds
     // optional extensions is refused rather than admitted unchecked.
@@ -427,6 +435,8 @@ pub fn admit_signed_plan_for_run(
         signed: signed.clone(),
         signer_id,
         extensions,
+        assurance_runtime,
+        posture,
         clock,
         ledger,
         bundle_ctx,
@@ -450,6 +460,8 @@ struct VerifiedAdmission<'a> {
     signer_id: String,
     /// Re-verified extension artifacts, empty when the plan binds none.
     extensions: Vec<AdmittedExtension>,
+    assurance_runtime: Option<AssuranceRuntimeBinding>,
+    posture: RunPosture<'a>,
     clock: &'a dyn Clock,
     ledger: &'a InMemoryNonceLedger,
     bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
@@ -468,10 +480,13 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         signed,
         signer_id,
         extensions,
+        assurance_runtime,
         clock,
         ledger,
         bundle_ctx,
+        posture,
     } = parts;
+    let backend = posture.backend;
 
     // The plan_id is the content-address of the plan body — recompute it and
     // refuse a plan whose stored id doesn't match, so a run is only ever
@@ -501,6 +516,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
     // plan is operator misconfiguration (the driver wasn't wired
     // with a resolver/trust store), so we refuse rather than skip
     // silently.
+    let canonical_kernel = canonical_kernel::AdmittedKernel::capture(posture, &verified)?;
     if let Some(pin) = verified.bundle.as_ref() {
         let ctx = bundle_ctx.ok_or_else(|| {
             anyhow::anyhow!(
@@ -508,9 +524,27 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
                 bundle = pin.bundle_sha256
             )
         })?;
-        let verified_bundle = verify_plan_bundle(pin, ctx.resolver, ctx.trust)
-            .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
-        bundle_environment::verify_environment(&verified, &verified_bundle.manifest)?;
+        let verified_bundle = if let Some(config) = posture.runtime_config {
+            if let Some(owner) = &config.canonical_kernel {
+                mvm_core::plan::bundle::verify_canonical_plan_bundle(
+                    pin,
+                    ctx.resolver,
+                    ctx.trust,
+                    owner,
+                    config,
+                    posture
+                        .backend
+                        .context("canonical kernel admission requires actual backend")?,
+                    &mvm_build::stage0_kernel::current_image_set_protocol_support(),
+                )
+            } else {
+                verify_plan_bundle(pin, ctx.resolver, ctx.trust)
+            }
+        } else {
+            verify_plan_bundle(pin, ctx.resolver, ctx.trust)
+        }
+        .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
+        bundle_environment::verify_environment(&verified, &verified_bundle.manifest, posture)?;
         if !verified_bundle.embedded_image_sets.is_empty() {
             let image = ctx.image.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -547,12 +581,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
 
     // Spend the nonce only after every fallible descriptor and bundle check.
     // Refusal must not consume an externally signed plan's replay allowance.
-    {
-        let mut store = ledger.inner.lock().expect("nonce store mutex poisoned");
-        store
-            .check_and_insert(&signer_id, &verified)
-            .context("replay protection check")?;
-    }
+    ledger.spend(&signer_id, &verified, now)?;
 
     Ok(AdmittedPlan {
         plan_id: verified.plan_id.clone(),
@@ -560,6 +589,9 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         plan: verified,
         signed,
         extensions,
+        assurance_runtime,
+        canonical_kernel,
+        backend,
     })
 }
 
@@ -766,12 +798,13 @@ fn admit_within_host_budget(plan: &ExecutionPlan) -> Result<()> {
 /// gate that read it would be deciding which resource controls apply from a
 /// string a caller picked.
 #[derive(Debug, Clone, Copy)]
-pub struct RunPosture {
+pub struct RunPosture<'a> {
     variant: Variant,
     backend: Option<BackendKind>,
+    runtime_config: Option<&'a VmStartConfig>,
 }
 
-impl RunPosture {
+impl<'a> RunPosture<'a> {
     /// A run whose backend is in hand. The only shape that can measure a grant
     /// against the mechanisms that will really be there.
     #[must_use]
@@ -779,6 +812,7 @@ impl RunPosture {
         Self {
             variant,
             backend: Some(backend),
+            runtime_config: None,
         }
     }
 
@@ -794,7 +828,15 @@ impl RunPosture {
         Self {
             variant,
             backend: None,
+            runtime_config: None,
         }
+    }
+
+    /// The actual launch selection, not claims copied from plan JSON.
+    #[must_use]
+    pub fn with_runtime(mut self, runtime_config: Option<&'a VmStartConfig>) -> Self {
+        self.runtime_config = runtime_config;
+        self
     }
 
     /// The sealed-production / developer posture this run carries.
@@ -1082,6 +1124,7 @@ pub fn populate_audit_substrate(
 ) -> Result<()> {
     thread_tenant_id(cfg, admitted);
     thread_cpu_grant(cfg, admitted);
+    admitted.bind_canonical_kernel(cfg)?;
 
     let plan_json = serde_json::to_string(admitted.signed())
         .context("serializing SignedExecutionPlan for VmStartConfig.plan_json")?;
@@ -1808,16 +1851,56 @@ pub fn apply_admitted_grants_or_undo_launch(
     admitted: &AdmittedPlan,
     emitter: Option<&crate::audit::emitter::AuditEmitter>,
 ) -> Result<EnforcedGrants> {
+    apply_admitted_grants_with_rollback(
+        backend,
+        vm_id,
+        admitted,
+        emitter,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::LegacyImmediate,
+    )
+}
+
+/// Share admitted-grants policy with an original-owner rollback operation.
+pub fn apply_admitted_grants_with_owned_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+) -> Result<EnforcedGrants> {
+    apply_admitted_grants_with_rollback(
+        backend,
+        vm_id,
+        admitted,
+        emitter,
+        rollback,
+        FailureAuditPolicy::OwnedAfterConfirmedRollback,
+    )
+}
+
+fn apply_admitted_grants_with_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+    audit_policy: FailureAuditPolicy,
+) -> Result<EnforcedGrants> {
     apply_admitted_grants(backend, vm_id, admitted).map_err(|err| {
-        undo_launch(UndoLaunch {
-            backend,
-            vm_id,
-            admitted,
-            emitter,
-            stage: "grants",
-            reason: "grants could not be applied",
-            err,
-        })
+        undo_launch_with(
+            UndoLaunch {
+                backend,
+                vm_id,
+                admitted,
+                emitter,
+                stage: "grants",
+                reason: "grants could not be applied",
+                err,
+            },
+            rollback,
+            audit_policy,
+        )
     })
 }
 
@@ -1834,96 +1917,66 @@ pub fn record_charge_or_undo_launch(
     admitted: &AdmittedPlan,
     emitter: Option<&crate::audit::emitter::AuditEmitter>,
 ) -> Result<()> {
+    record_charge_with_rollback(
+        backend,
+        vm_id,
+        vm_name,
+        admitted,
+        emitter,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::LegacyImmediate,
+    )
+}
+
+/// Share budget policy while the host receiver keeps original native custody.
+pub fn record_charge_with_owned_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    record_charge_with_rollback(
+        backend,
+        vm_id,
+        vm_name,
+        admitted,
+        emitter,
+        rollback,
+        FailureAuditPolicy::OwnedAfterConfirmedRollback,
+    )
+}
+
+fn record_charge_with_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+    audit_policy: FailureAuditPolicy,
+) -> Result<()> {
     let undeclared = Grants::default();
     let charge = crate::admission_budget::charge_for(
         admitted.plan().resources.mem_mib,
         admitted.plan().grants.as_ref().unwrap_or(&undeclared),
     );
     crate::admission_budget::record_charge(vm_name, charge).map_err(|err| {
-        undo_launch(UndoLaunch {
-            backend,
-            vm_id,
-            admitted,
-            emitter,
-            stage: "host-budget",
-            reason: "its admitted charge could not be recorded",
-            err,
-        })
+        undo_launch_with(
+            UndoLaunch {
+                backend,
+                vm_id,
+                admitted,
+                emitter,
+                stage: "host-budget",
+                reason: "its admitted charge could not be recorded",
+                err,
+            },
+            rollback,
+            audit_policy,
+        )
     })
-}
-
-/// The four post-admission gates between `plan.admitted` and the backend
-/// start, run in order. On refusal the failing stage's wire label is
-/// returned alongside the error so the caller can emit a terminal
-/// `plan.failed` entry naming the gate.
-fn run_post_admission_gates(
-    mut config: VmStartConfig,
-    admitted: &AdmittedPlan,
-    backend: BackendKind,
-    policy_bundle: Option<&PolicyBundle>,
-) -> std::result::Result<VmStartConfig, (&'static str, anyhow::Error)> {
-    if let Err(e) = populate_audit_substrate(&mut config, admitted, policy_bundle) {
-        return Err(("audit-substrate", e));
-    }
-    if let Err(e) = enforce_admitted_shares(&config.volumes, admitted.plan()) {
-        return Err(("admitted-shares", e));
-    }
-    if let Err(e) = enforce_admitted_environment(
-        config.kernel_path.as_deref().map(std::path::Path::new),
-        admitted.plan(),
-    ) {
-        return Err(("admitted-environment", e));
-    }
-    if let Err(e) = enforce_sdk_sidecar_backend_compatibility(backend, admitted.plan()) {
-        return Err(("sdk-sidecar", e.into()));
-    }
-    if let Err(e) = enforce_sdk_sidecar_attachment(
-        &config.volumes,
-        admitted.plan(),
-        mvm_build::guest_libc::recorded_image_libc(std::path::Path::new(&config.rootfs_path)),
-    ) {
-        return Err(("sdk-sidecar", e));
-    }
-    if let Err(e) = attach_admitted_extensions(&mut config, admitted) {
-        return Err(("extension-attachment", e));
-    }
-    Ok(config)
-}
-
-fn attach_admitted_extensions(config: &mut VmStartConfig, admitted: &AdmittedPlan) -> Result<()> {
-    if !admitted.extensions().is_empty() {
-        config.extension_plan_id = Some(admitted.plan_id().0.clone());
-    }
-    for extension in admitted.extensions() {
-        if extension.binding.placement
-            != mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload
-        {
-            anyhow::bail!(
-                "extension placement isolated_controller reached guest attachment after admission"
-            );
-        }
-        let digest = hex::encode(extension.binding.pack_digest);
-        let guest = format!("/run/mvm/extensions/{digest}");
-        if config.volumes.iter().any(|volume| volume.guest == guest) {
-            anyhow::bail!("extension mountpoint collision at {guest}");
-        }
-        config.volumes.push(mvm_core::vm_backend::VmVolume {
-            materialized_image: None,
-            volume_label: None,
-            host: extension
-                .root
-                .join(&extension.binding.artifact)
-                .display()
-                .to_string(),
-            guest,
-            size: String::new(),
-            read_only: true,
-            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
-            encrypted: false,
-        });
-        config.extensions.push(extension.binding.clone());
-    }
-    Ok(())
 }
 
 fn launch_decision_record(plan: &ExecutionPlan, backend_name: &str) -> DecisionRecord {
@@ -1963,47 +2016,6 @@ fn attach_assurance_proxy(
     }
     config.service_proxies.push(proxy);
     Ok(())
-}
-
-/// What rolling a launch back needs to know. A struct rather than seven
-/// positional arguments, so a caller cannot silently swap the stage label for
-/// the reason.
-struct UndoLaunch<'a> {
-    backend: &'a AnyBackend,
-    vm_id: &'a VmId,
-    admitted: &'a AdmittedPlan,
-    emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
-    /// Wire label of the stage that refused, for the terminal audit entry.
-    stage: &'static str,
-    /// Human-readable clause naming what went wrong, for the stop-failure log.
-    reason: &'static str,
-    err: anyhow::Error,
-}
-
-/// Stop a VM that started but must not keep running, emit the terminal
-/// `plan.failed` entry, and hand the original error back.
-///
-/// One helper for both post-start refusals: leaving a VM up whose bounds were
-/// never established would mean the only record of the run claims it was
-/// bounded when it was not.
-fn undo_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
-    if let Err(stop_err) = undo.backend.stop(undo.vm_id) {
-        tracing::warn!(
-            error = %stop_err,
-            "stopping a VM whose {reason} failed; it may still be running",
-            reason = undo.reason,
-        );
-    }
-    if let Some(emitter) = undo.emitter
-        && let Err(e) = emitter.emit_failed(
-            undo.admitted.plan(),
-            undo.stage,
-            &format!("{err:#}", err = undo.err),
-        )
-    {
-        tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
-    }
-    undo.err
 }
 
 /// Everything the post-admission tail needs, in one struct.
@@ -2057,13 +2069,22 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
     // A refusal in any post-admission gate must still terminate the chain:
     // `plan.admitted` already fired, so a gate refusal emits `plan.failed`
     // carrying the refusing stage rather than leaving a dangling admission.
-    let mut config = match run_post_admission_gates(
-        params.config,
-        &admitted,
-        backend.kind(),
-        params.policy_bundle,
-    ) {
-        Ok(config) => config,
+    let gated = (|| {
+        if params.assurance.is_some() || admitted.assurance_runtime.is_some() {
+            admitted
+                .verify_assurance_launch(&params.config)
+                .map_err(|error| ("assurance-runtime", error))?;
+        }
+        verify_selected_runtime(&params.config).map_err(|error| ("guest-runtime", error))?;
+        final_gates::run_post_admission_gates(
+            params.config,
+            &admitted,
+            backend.kind(),
+            params.policy_bundle,
+        )
+    })();
+    let (mut config, _built_runtime) = match gated {
+        Ok(prepared) => prepared,
         Err((stage, err)) => {
             if let Some(emitter) = params.emitter
                 && let Err(e) = emitter.emit_failed(admitted.plan(), stage, &format!("{err:#}"))
@@ -2081,6 +2102,12 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
 
     let backend_name = backend.name().to_string();
     let vm_name = config.name.clone();
+    registry_pack::verify_runtime_at_dispatch(
+        _built_runtime.as_ref(),
+        &config,
+        &admitted,
+        params.emitter,
+    )?;
     match backend
         .start(&config)
         .context("backend start after signed-plan admission")
@@ -2171,7 +2198,11 @@ pub fn admit_and_start(
     // name: the grant gate decides which resource controls a run is measured
     // against, and deciding that from a string is how a plan ends up measured
     // against a tier it is not running on.
-    let posture = RunPosture::on_backend(params.variant, backend.kind());
+    let posture =
+        RunPosture::on_backend(params.variant, backend.kind()).with_runtime(Some(&params.config));
+    if params.assurance.is_some() {
+        crate::operator_admitted_trial_booter::verify_assurance_guest_protocol(&params.config)?;
+    }
 
     // Synthesize the plan up-front so a refusal can be recorded with the
     // plan context if admission fails. Synthesis failures have no plan to
@@ -2676,7 +2707,7 @@ mod tests {
         );
         let admitted = admitted_with_extension(guest_binding.clone(), root.path());
         let mut config = mvm_core::vm_backend::VmStartConfig::default();
-        attach_admitted_extensions(&mut config, &admitted)
+        final_gates::attach_admitted_extensions(&mut config, &admitted)
             .expect("an admitted guest extension attaches");
         assert_eq!(
             config.extension_plan_id.as_deref(),
@@ -2684,7 +2715,7 @@ mod tests {
         );
         assert_eq!(config.extensions, vec![guest_binding]);
         assert_eq!(config.volumes.len(), 1);
-        let error = attach_admitted_extensions(&mut config, &admitted)
+        let error = final_gates::attach_admitted_extensions(&mut config, &admitted)
             .expect_err("the same guest mountpoint must not attach twice");
         assert!(error.to_string().contains("mountpoint collision"));
 
@@ -2692,7 +2723,7 @@ mod tests {
             mvm_contract::protocol::extension_pack::ExtensionPlacement::IsolatedController,
         );
         let admitted = admitted_with_extension(controller_binding, root.path());
-        let error = attach_admitted_extensions(
+        let error = final_gates::attach_admitted_extensions(
             &mut mvm_core::vm_backend::VmStartConfig::default(),
             &admitted,
         )
@@ -2969,6 +3000,15 @@ mod tests {
         );
         let error = verify_registry_pack_assets(&plan).expect_err("version required");
         assert!(error.to_string().contains("exact version"), "{error}");
+        assert!(
+            registry_pack::verify_registry_pack_boot(
+                &plan,
+                &mut VmStartConfig::default(),
+                BackendKind::Firecracker,
+            )
+            .is_err(),
+            "backend handoff must also refuse a non-versioned pack pin"
+        );
 
         plan.asset_identities
             .last_mut()
@@ -2998,6 +3038,12 @@ mod tests {
         let (_env, _home) = host_with_ceiling(Default::default());
         let plan = plan_binding(&[]);
         verify_registry_pack_assets(&plan).expect("ordinary plan has no pack lookup");
+        registry_pack::verify_registry_pack_boot(
+            &plan,
+            &mut VmStartConfig::default(),
+            BackendKind::Mock,
+        )
+        .expect("ordinary workloads need no built-pack boot contract");
     }
 
     #[cfg(feature = "manifest-verify")]
@@ -3016,6 +3062,60 @@ mod tests {
             .expect("pack asset identity"),
         );
         verify_registry_pack_assets(&plan).expect("signed pack admits");
+        registry_pack::verify_registry_pack_boot(
+            &plan,
+            &mut VmStartConfig::default(),
+            BackendKind::Mock,
+        )
+        .expect("source packs do not acquire built-image boot authority");
+
+        let ledger = InMemoryNonceLedger::new();
+        let admitted = admit_plan_for_run(
+            &plan,
+            &SystemClock,
+            &ledger,
+            None,
+            None,
+            None,
+            RunPosture::on_backend(Variant::Dev, BackendKind::Firecracker),
+        )
+        .expect("real source pack plan is admitted");
+        let mut config = VmStartConfig {
+            tenant_id: Some(admitted.plan().tenant.0.clone()),
+            plan_json: Some(serde_json::to_string(admitted.signed()).unwrap()),
+            ..Default::default()
+        };
+        assert!(
+            admitted
+                .built_pack_boot_check()
+                .unwrap()
+                .unwrap()
+                .prepare(&mut config, BackendKind::Firecracker)
+                .unwrap()
+                .is_none(),
+            "a source pack keeps its existing non-built launch path"
+        );
+        assert!(
+            admitted
+                .built_pack_boot_check()
+                .unwrap()
+                .unwrap()
+                .prepare(&mut config, BackendKind::Hvf)
+                .unwrap_err()
+                .to_string()
+                .contains("backend differs")
+        );
+        config.plan_json = Some("{}".into());
+        assert!(
+            admitted
+                .built_pack_boot_check()
+                .unwrap()
+                .unwrap()
+                .prepare(&mut config, BackendKind::Firecracker)
+                .unwrap_err()
+                .to_string()
+                .contains("admitted plan")
+        );
 
         plan.asset_identities
             .last_mut()
@@ -4226,6 +4326,186 @@ mod tests {
     }
 
     #[test]
+    fn direct_and_external_admission_refuse_unenforced_environment_requirements() {
+        use mvm_core::plan::bundle::BundleMember;
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let fleet = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let mut config = mvm_core::user_config::load(None);
+        config.trusted_plan_signers = vec![mvm_core::user_config::TrustedPlanSigner {
+            signer_id: "requirements-fleet".into(),
+            ed25519_pubkey_hex: hex::encode(fleet.verifying_key().as_bytes()),
+        }];
+        mvm_core::user_config::save(&config, None).unwrap();
+        for (field, value, refused_field) in [
+            (
+                "entrypoint",
+                serde_json::json!({"argv": ["/usr/bin/agent"], "working_dir": "/workspace"}),
+                "entrypoint.working_dir",
+            ),
+            (
+                "volumes",
+                serde_json::json!([{"name": "workspace", "guest_path": "/workspace"}]),
+                "volumes",
+            ),
+            (
+                "services",
+                serde_json::json!([{"name": "indexer", "argv": ["/usr/bin/indexer"]}]),
+                "services",
+            ),
+        ] {
+            let mut document = serde_json::json!({
+                "descriptor_version": 1,
+                "target": format!("{arch}-linux"),
+                "entrypoint": { "argv": ["/usr/bin/agent"] },
+            });
+            document[field] = value;
+            let mut members = vec![BundleMember::Environment(
+                serde_json::from_value(document).unwrap(),
+            )];
+            if field == "volumes" {
+                let BundleMember::Environment(environment) = &mut members[0] else {
+                    panic!("environment fixture");
+                };
+                environment.capabilities =
+                    vec![mvm_contract::plan::environment::EnvironmentCapability::HostVolumes];
+                members.push(BundleMember::SecurityPosture(
+                    mvm_core::plan::BundleSecurityPosture {
+                        profile: mvm_core::security::AgentProfile::Dev,
+                        verity_protected: false,
+                        requires_auth: true,
+                        allows_volumes: true,
+                        allows_egress: false,
+                    },
+                ));
+            }
+            let (archive, pin) =
+                make_test_bundle_with_members(&sk, b"kernel", b"rootfs", &arch, members);
+            let trust = MapTrust(HashMap::from([(
+                key_id_from_pubkey(&sk.verifying_key()),
+                sk.verifying_key(),
+            )]));
+            let resolver = FixedResolver(archive);
+            let ctx = BundleAdmissionContext {
+                resolver: &resolver,
+                trust: &trust,
+                image: None,
+            };
+            let input = input_with_pin("vm-requirements", &pin);
+            let error = admit_for_run(
+                &input,
+                &SystemClock,
+                &InMemoryNonceLedger::new(),
+                Some(dir.path()),
+                Some(&ctx),
+                RunPosture::without_backend(Variant::Dev),
+            )
+            .expect_err("self-synthesized plans must meet signed requirements");
+            assert!(format!("{error:#}").contains(refused_field), "{error:#}");
+            let signed = sign_plan(
+                &synthesize_plan(&input).unwrap(),
+                &fleet,
+                "requirements-fleet",
+            );
+            let ledger = InMemoryNonceLedger::new();
+            for _ in 0..2 {
+                let error = admit_signed_plan_for_run(
+                    &signed,
+                    &SystemClock,
+                    &ledger,
+                    Some(&ctx),
+                    RunPosture::without_backend(Variant::Dev),
+                )
+                .expect_err("external plans cannot bypass signed requirements");
+                assert!(format!("{error:#}").contains(refused_field), "{error:#}");
+            }
+        }
+    }
+
+    #[test]
+    fn signed_environment_policy_refuses_missing_or_wider_actual_runtime() {
+        use mvm_core::network_policy::NetworkPolicy;
+        use mvm_core::plan::bundle::BundleMember;
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let environment = serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": format!("{arch}-linux"),
+            "entrypoint": { "argv": ["/usr/bin/agent"] },
+            "policy": { "allow_hosts": ["api.anthropic.com:443"] }
+        }))
+        .unwrap();
+        let (archive, pin) = make_test_bundle_with_members(
+            &sk,
+            b"kernel",
+            b"rootfs",
+            &arch,
+            vec![BundleMember::Environment(environment)],
+        );
+        let trust = MapTrust(HashMap::from([(
+            key_id_from_pubkey(&sk.verifying_key()),
+            sk.verifying_key(),
+        )]));
+        let resolver = FixedResolver(archive);
+        let ctx = BundleAdmissionContext {
+            resolver: &resolver,
+            trust: &trust,
+            image: None,
+        };
+        let input = input_with_pin("vm-policy", &pin);
+        let fleet = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let mut config = mvm_core::user_config::load(None);
+        config.trusted_plan_signers = vec![mvm_core::user_config::TrustedPlanSigner {
+            signer_id: "policy-fleet".into(),
+            ed25519_pubkey_hex: hex::encode(fleet.verifying_key().as_bytes()),
+        }];
+        mvm_core::user_config::save(&config, None).unwrap();
+        let signed = sign_plan(&synthesize_plan(&input).unwrap(), &fleet, "policy-fleet");
+        let wider = VmStartConfig {
+            network_policy: NetworkPolicy::unrestricted(),
+            ..Default::default()
+        };
+        for runtime in [None, Some(&wider)] {
+            let posture = RunPosture::without_backend(Variant::Dev).with_runtime(runtime);
+            let error = admit_for_run(
+                &input,
+                &SystemClock,
+                &InMemoryNonceLedger::new(),
+                Some(dir.path()),
+                Some(&ctx),
+                posture,
+            )
+            .expect_err("signed policy requires an actual bounded runtime");
+            assert!(
+                error.downcast_ref::<BundleEnvironmentRefused>().is_some(),
+                "{error:#}"
+            );
+            assert!(
+                format!("{error:#}").contains("actual launch network"),
+                "{error:#}"
+            );
+            let ledger = InMemoryNonceLedger::new();
+            for _ in 0..2 {
+                let error =
+                    admit_signed_plan_for_run(&signed, &SystemClock, &ledger, Some(&ctx), posture)
+                        .expect_err("external plans cannot bypass the runtime ceiling");
+                assert!(
+                    error.downcast_ref::<BundleEnvironmentRefused>().is_some(),
+                    "{error:#}"
+                );
+                assert!(
+                    !format!("{error:#}").contains("replay protection"),
+                    "{error:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn direct_host_admission_enforces_signed_environment_slots() {
         use mvm_core::plan::bundle::BundleMember;
         let (_env, _home) = host_with_ceiling(Default::default());
@@ -4976,6 +5256,191 @@ mod tests {
     // admit_and_start: the shared admitted-boot entrypoint
     // ───────────────────────────────────────────────────────────────
 
+    fn baked_assurance_config(directory: &std::path::Path) -> VmStartConfig {
+        mvm_runtime::signed_legacy_runtime_fixture(
+            directory,
+            std::path::Path::new(&mvm_core::config::mvm_home()),
+            false,
+        )
+    }
+
+    #[test]
+    fn an_unsigned_release_proof_cannot_mint_an_assurance_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("runtime.tar.gz");
+        let checksum = directory.path().join("runtime.tar.gz.sha256");
+        let signature = directory.path().join("runtime.tar.gz.bundle");
+        std::fs::write(&archive, b"unsigned archive").unwrap();
+        let digest = mvm_core::crypto::image_verify::sha256_file(&archive).unwrap();
+        std::fs::write(&checksum, format!("{digest}  runtime.tar.gz\n")).unwrap();
+        std::fs::write(&signature, b"{}").unwrap();
+        let config = VmStartConfig {
+            runtime_release_proof: Some(mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                archive,
+                checksum,
+                signature_bundle: signature,
+                archive_sha256: digest,
+                version: "1.2.3".into(),
+                arch: mvm_core::arch::GuestArch::host(),
+            }),
+            runtime_overlay_version: Some("1.2.3".into()),
+            runtime_overlay_path: Some(directory.path().join("overlay").display().to_string()),
+            runtime_overlay_verity_path: Some(
+                directory.path().join("verity").display().to_string(),
+            ),
+            runtime_overlay_roothash: Some("a".repeat(64)),
+            initrd_path: Some(directory.path().join("initramfs").display().to_string()),
+            ..Default::default()
+        };
+        assert!(AssuranceRuntimeBinding::verify(&config, &plan_binding(&[])).is_err());
+    }
+
+    #[test]
+    fn changed_runtime_after_admission_records_failure_without_starting_backend() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let directory = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let config = VmStartConfig {
+            name: "changed-assurance-runtime".into(),
+            ..baked_assurance_config(directory.path())
+        };
+        let image_sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .unwrap();
+        let mut synthesis = fixture_input(&config.name);
+        synthesis.image_sha256 = &image_sha256;
+        synthesis
+            .services
+            .push(mvm_core::protocol::broker::ServiceId::parse("host.assurance.v1").unwrap());
+        let admitted = admit_for_run(
+            &synthesis,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(directory.path()),
+            None,
+            RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+        )
+        .unwrap();
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[41; 32]),
+            audit.path(),
+        )
+        .unwrap();
+        crate::audit::durability::record_admission(
+            Some(&emitter),
+            admitted.plan(),
+            admitted.signer_id(),
+            crate::audit::durability::AuditDurability::BestEffort,
+        )
+        .unwrap();
+        std::fs::write(&config.rootfs_path, b"changed after admission").unwrap();
+        let vm_id = mvm_core::vm_backend::VmId(config.name.clone());
+        start_admitted(StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        })
+        .expect_err("admitted artifact substitution must refuse before spawn");
+        assert!(!matches!(
+            backend.status(&vm_id),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+        assert!(chain.contains("plan.admitted"), "{chain}");
+        assert!(chain.contains("plan.failed"), "{chain}");
+        assert!(chain.contains("assurance-runtime"), "{chain}");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+    }
+
+    #[test]
+    fn assurance_binding_requires_matching_image_and_unchanged_launch_bytes() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let directory = tempfile::tempdir().unwrap();
+        let kernel = directory.path().join("kernel");
+        std::fs::write(&kernel, b"original kernel").unwrap();
+        let config = VmStartConfig {
+            name: "assurance-bound".into(),
+            kernel_path: Some(kernel.display().to_string()),
+            ..baked_assurance_config(directory.path())
+        };
+        let mut plan = plan_binding(&[]);
+        assert!(AssuranceRuntimeBinding::verify(&config, &plan).is_err());
+        plan.image.sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .unwrap();
+        let signer_id = "host:test".to_string();
+        let signed = sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            &signer_id,
+        );
+        let unchecked = AdmittedPlan::for_test(plan, signer_id, signed);
+        assert!(unchecked.require_assurance_runtime(&config.name).is_err());
+        let admitted = unchecked.with_assurance_runtime_for_test(&config);
+        admitted.require_assurance_runtime(&config.name).unwrap();
+        assert!(
+            admitted
+                .require_assurance_runtime("different-machine")
+                .is_err()
+        );
+        admitted.verify_assurance_launch(&config).unwrap();
+
+        let renamed = VmStartConfig {
+            name: "different-machine".into(),
+            ..config.clone()
+        };
+        assert!(admitted.verify_assurance_launch(&renamed).is_err());
+        std::fs::write(&kernel, b"replacement kernel").unwrap();
+        assert!(admitted.verify_assurance_launch(&config).is_err());
+        std::fs::write(&config.rootfs_path, b"replacement rootfs").unwrap();
+        assert!(AssuranceRuntimeBinding::verify(&config, admitted.plan()).is_err());
+    }
+
+    #[test]
+    fn portable_assurance_capability_binds_original_proof_and_manifest_after_admission() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let directory = tempfile::tempdir().unwrap();
+        let config = mvm_runtime::signed_legacy_portable_runtime_fixture(directory.path());
+        let mut plan = plan_binding(&[]);
+        plan.image.sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .unwrap();
+        let signer_id = "host:test".to_string();
+        let signed = sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            &signer_id,
+        );
+        let admitted = AdmittedPlan::for_test(plan, signer_id, signed)
+            .with_assurance_runtime_for_test(&config);
+        admitted.verify_assurance_launch(&config).unwrap();
+        for mutation in 0..3 {
+            let mut changed = config.clone();
+            let proof = changed.legacy_portable_runtime.as_mut().unwrap();
+            match mutation {
+                0 => proof.pin.bundle_sha256 = "0".repeat(64),
+                1 => proof.manifest_sha256 = "0".repeat(64),
+                2 => {
+                    let copy = directory.path().join("same-signed-archive.mvmpkg");
+                    std::fs::copy(&proof.archive, &copy).unwrap();
+                    proof.archive = copy;
+                    // An independently valid proof at another location still
+                    // changes the selection this capability admitted.
+                    AssuranceRuntimeBinding::verify(&changed, admitted.plan()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                admitted.verify_assurance_launch(&changed).is_err(),
+                "mutation {mutation}"
+            );
+        }
+    }
+
     #[test]
     fn admit_and_start_admits_then_boots_on_mock() {
         let (_env, _home) = host_with_ceiling(Default::default());
@@ -5087,9 +5552,12 @@ mod tests {
         synthesis.services = vec![service];
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-rollback".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            ..Default::default()
+            ..baked_assurance_config(dir.path())
         };
+        let image_sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .expect("fixture digest");
+        synthesis.image_sha256 = &image_sha256;
 
         let err = admit_and_start(
             &backend,
@@ -5362,9 +5830,12 @@ mod tests {
         );
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-assurance".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            ..Default::default()
+            ..baked_assurance_config(dir.path())
         };
+        let image_sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .expect("fixture digest");
+        synthesis.image_sha256 = &image_sha256;
 
         let started = admit_and_start(
             &backend,
@@ -5411,8 +5882,7 @@ mod tests {
                 synthesis: &refused_synthesis,
                 config: mvm_core::vm_backend::VmStartConfig {
                     name: "vm-assurance-refused".into(),
-                    rootfs_path: "/store/rootfs.ext4".into(),
-                    ..Default::default()
+                    ..baked_assurance_config(dir.path())
                 },
                 clock: &SystemClock,
                 ledger: &InMemoryNonceLedger::new(),
@@ -6248,6 +6718,43 @@ mod signed_plan_admission_tests {
             .expect_err("a plan whose window has not opened must be refused");
         assert!(
             format!("{err:#}").contains("plan validity window violated"),
+            "got: {err:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replayed_plan_is_refused_by_a_fresh_process_sharing_the_durable_ledger() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+        let dir = tempfile::tempdir().expect("ledger dir");
+        let ledger_dir = dir.path().join("plan-nonces");
+
+        // Two ledgers on one directory stand in for two launches, which each
+        // build their own ledger.
+        let first = InMemoryNonceLedger::durable_in(&ledger_dir).expect("open ledger");
+        admit(&signed, &first).expect("the first launch is admitted");
+        let second = InMemoryNonceLedger::durable_in(&ledger_dir).expect("open ledger");
+        let err = admit(&signed, &second).expect_err("the same plan in a later launch is a replay");
+        assert!(format!("{err:#}").contains("replay"), "got: {err:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plan_is_refused_when_its_nonce_cannot_be_recorded() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+        let dir = tempfile::tempdir().expect("ledger dir");
+        let ledger =
+            InMemoryNonceLedger::durable_in(dir.path().join("plan-nonces")).expect("open ledger");
+        std::fs::write(
+            dir.path().join("plan-nonces").join("nonces.tsv"),
+            "corrupt\n",
+        )
+        .expect("corrupt the ledger");
+        let err = admit(&signed, &ledger).expect_err("an unreadable ledger must refuse");
+        assert!(
+            format!("{err:#}").contains("cannot be recorded"),
             "got: {err:#}"
         );
     }

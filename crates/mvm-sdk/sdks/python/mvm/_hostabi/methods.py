@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 7
+ABI_MINOR: Final = 10
 
 
 class Classification(str, Enum):
@@ -28,6 +28,32 @@ class Method:
     key: str
     classification: Classification
     summary: str
+
+
+#: Lists complete local checkpoint metadata in deterministic ID
+#: order.
+CHECKPOINT_LIST: Final = "checkpoint.list"
+
+
+#: Export a host-signed v0 identity report, not measured-boot
+#: evidence.
+ATTESTATION_EXPORT: Final = "attestation.export"
+
+
+#: Verify a bounded report file under explicitly selected trust.
+ATTESTATION_VERIFY: Final = "attestation.verify"
+
+
+#: Inspect public identity metadata, initializing identity if needed.
+ATTESTATION_STATUS: Final = "attestation.status"
+
+
+#: Apply bounded signed revocation files through the canonical store.
+IMAGE_REVOCATIONS_UPDATE: Final = "image_revocations.update"
+
+
+#: Reauthenticate the applied image-set revocation list.
+IMAGE_REVOCATIONS_STATUS: Final = "image_revocations.status"
 
 
 #: Inspect a built manifest slot and its optional snapshot.
@@ -223,6 +249,12 @@ TELEMETRY_STATUS: Final = "telemetry.status"
 
 
 METHODS: dict[str, Method] = {
+    "checkpoint.list": Method(key="checkpoint_list", classification=Classification.PROD_SAFE, summary="Lists complete local checkpoint metadata in deterministic ID order."),
+    "attestation.export": Method(key="attestation_export", classification=Classification.PROD_SAFE, summary="Export a host-signed v0 identity report, not measured-boot evidence."),
+    "attestation.verify": Method(key="attestation_verify", classification=Classification.PROD_SAFE, summary="Verify a bounded report file under explicitly selected trust."),
+    "attestation.status": Method(key="attestation_status", classification=Classification.PROD_SAFE, summary="Inspect public identity metadata, initializing identity if needed."),
+    "image_revocations.update": Method(key="image_revocations_update", classification=Classification.PROD_SAFE, summary="Apply bounded signed revocation files through the canonical store."),
+    "image_revocations.status": Method(key="image_revocations_status", classification=Classification.PROD_SAFE, summary="Reauthenticate the applied image-set revocation list."),
     "manifest.info": Method(key="manifest_info", classification=Classification.PROD_SAFE, summary="Inspect a built manifest slot and its optional snapshot."),
     "manifest.list": Method(key="manifest_list", classification=Classification.PROD_SAFE, summary="List built manifest slots with orphan and tag-intersection filters."),
     "manifest.verify": Method(key="manifest_verify", classification=Classification.PROD_SAFE, summary="Verify built manifest artifact checksums; signature verification is refused."),
@@ -272,6 +304,12 @@ METHODS: dict[str, Method] = {
 }
 
 __all__ = [
+    "CHECKPOINT_LIST",
+    "ATTESTATION_EXPORT",
+    "ATTESTATION_VERIFY",
+    "ATTESTATION_STATUS",
+    "IMAGE_REVOCATIONS_UPDATE",
+    "IMAGE_REVOCATIONS_STATUS",
     "MANIFEST_INFO",
     "MANIFEST_LIST",
     "MANIFEST_VERIFY",

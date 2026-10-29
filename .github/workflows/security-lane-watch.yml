@@ -1,48 +1,20 @@
 name: Security lane watch
 
-# The workflows this watches — Security, and the pack signing round-trip —
-# run on release tags, a nightly cron, and manual dispatch, never on a pull
-# request. Nothing surfaces a failure, so a red lane is invisible until
-# somebody thinks to read run history. That is not
-# hypothetical: cargo-deny, cargo-audit, the fuzz lane, the flake-lock check
-# and builder-VM reproducibility were all red for six consecutive nights
-# before anyone noticed, and three of those five back numbered security
-# claims (ADR-001). A claim keeps a green ledger entry while its only
-# evidence is failing.
-#
-# This watches Security instead of living inside it. Two reasons:
-#
-#   1. `workflow_run` fires after the whole run completes, so there is no
-#      20-entry `needs:` list to keep in sync with the job graph.
-#   2. It reads each job's real conclusion from the API rather than the
-#      workflow's aggregate status. A job marked `continue-on-error: true`
-#      never fails the workflow, so an `if: failure()` guard would not fire
-#      for it. The API still reports that job as failed, and this reports it
-#      too. No job in security.yml carries that marking today — the
-#      mutation-witness lane used to and this comment went on naming it for
-#      months after it stopped — but the API-reading approach costs nothing
-#      and does not have to be revisited when one does.
-#
-# Reading the API was necessary and, for a fortnight, not sufficient: a
-# guard above the read short-circuited whenever the run concluded
-# `cancelled`, which Actions does whenever any one job is cancelled — a
-# timed-out mutation shard included. The verdict now lives in
-# scripts/security-lane-verdict.sh, under test, because that contradiction
-# was invisible in the YAML and no assertion on the workflow text would
-# have found it.
-#
-# Failure opens or updates one tracking issue; a clean run closes it. The
-# issue is the enforcement surface, not a merge block: these lanes do not
-# run on PRs, so there is nothing to block.
+# These workflows run on tags, cron and dispatch, never on a pull request, so
+# a red lane is otherwise invisible while its claim keeps a green ledger entry.
+# This reads each job's real conclusion (scripts/security-lane-verdict.sh, under
+# test) from `workflow_run`, so continue-on-error jobs and runs concluded
+# `cancelled` by one timed-out job are still reported. Failure opens or updates
+# one tracking issue and a clean run comments on it. It never blocks a merge.
 
 on:
   workflow_run:
-    workflows: ["Security", "Pack signing smoke", "Extended CI"]
+    workflows: ["Security", "Pack signing smoke"]
     types: [completed]
 
 permissions:
   contents: read
-  issues: write # opens/updates/closes the tracking issue
+  issues: write # opens/updates the tracking issue; a pull request closes it
   actions: read # reads the watched run's per-job conclusions
 
 concurrency:
@@ -66,7 +38,7 @@ jobs:
       # run's ref, so the verdict logic is always the reviewed copy.
       - uses: actions/checkout@v6
 
-      - name: Collect failing jobs and open, update, or close the tracking issue
+      - name: Collect failing jobs and open or update the tracking issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -125,10 +97,9 @@ jobs:
             if [ -n "$EXISTING" ]; then
               # Backticks here are markdown, not command substitution; %s carries the values.
               # shellcheck disable=SC2016
-              printf '%s run [%s](%s) on `%s` is green again — closing.\n' \
+              printf '%s run [%s](%s) on `%s` is green again. Close this issue with a pull request.\n' \
                 "$WATCHED" "$RUN_ID" "$RUN_URL" "$HEAD_SHA" > body.md
               gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
-              gh issue close "$EXISTING" --repo "$REPO"
             fi
             echo "$WATCHED run $RUN_ID: all jobs green."
             exit 0

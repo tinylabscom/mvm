@@ -41,14 +41,14 @@ pub enum ProxyKind {
 /// Errors from parsing proxy configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
-    #[error("proxy url {0:?} is not a valid url")]
-    Url(String),
+    #[error("proxy URL is not a valid URL")]
+    Url,
     #[error(
-        "proxy url {url:?} has unsupported scheme {scheme:?}; expected http, https, socks5 or socks5h"
+        "proxy URL has unsupported scheme; expected http, socks5 or socks5h (TLS-to-proxy is not supported)"
     )]
-    Scheme { url: String, scheme: String },
-    #[error("proxy url {0:?} has no host")]
-    NoHost(String),
+    Scheme,
+    #[error("proxy URL has no host")]
+    NoHost,
 }
 
 /// One upstream proxy endpoint.
@@ -62,7 +62,7 @@ pub struct Proxy {
 }
 
 /// Proxy credentials. Deliberately not `Display`/`Debug`-transparent for the
-/// password.
+/// username or password.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProxyAuth {
     pub username: String,
@@ -72,7 +72,7 @@ pub struct ProxyAuth {
 impl fmt::Debug for ProxyAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProxyAuth")
-            .field("username", &self.username)
+            .field("username", &"<redacted>")
             .field("password", &"<redacted>")
             .finish()
     }
@@ -87,23 +87,14 @@ impl Proxy {
     /// `socks5h` semantics. Resolving locally would defeat the point on a host
     /// that cannot resolve external names itself.
     pub fn parse(raw: &str) -> Result<Self, ProxyError> {
-        let url = Url::parse(raw).map_err(|_| ProxyError::Url(raw.to_string()))?;
+        let url = Url::parse(raw).map_err(|_| ProxyError::Url)?;
         let scheme = url.scheme().to_ascii_lowercase();
         let (kind, default_port) = match scheme.as_str() {
             "http" => (ProxyKind::Http, 80),
-            "https" => (ProxyKind::Http, 443),
             "socks5" | "socks5h" => (ProxyKind::Socks5, 1080),
-            other => {
-                return Err(ProxyError::Scheme {
-                    url: raw.to_string(),
-                    scheme: other.to_string(),
-                });
-            }
+            _ => return Err(ProxyError::Scheme),
         };
-        let host = url
-            .host_str()
-            .ok_or_else(|| ProxyError::NoHost(raw.to_string()))?
-            .to_string();
+        let host = url.host_str().ok_or(ProxyError::NoHost)?.to_string();
         let auth = match (url.username(), url.password()) {
             ("", _) => None,
             (user, pass) => Some(ProxyAuth {
@@ -307,7 +298,6 @@ mod tests {
     fn parses_each_supported_scheme_with_its_default_port() {
         for (raw, kind, port) in [
             ("http://proxy.corp", ProxyKind::Http, 80),
-            ("https://proxy.corp", ProxyKind::Http, 443),
             ("socks5://proxy.corp", ProxyKind::Socks5, 1080),
             ("socks5h://proxy.corp", ProxyKind::Socks5, 1080),
         ] {
@@ -323,19 +313,35 @@ mod tests {
     fn an_unsupported_scheme_is_an_error_not_a_silent_direct_dial() {
         assert!(matches!(
             Proxy::parse("ftp://proxy.corp"),
-            Err(ProxyError::Scheme { .. })
+            Err(ProxyError::Scheme)
         ));
-        assert!(matches!(Proxy::parse("not a url"), Err(ProxyError::Url(_))));
+        assert!(matches!(Proxy::parse("not a url"), Err(ProxyError::Url)));
+    }
+
+    #[test]
+    fn malformed_proxy_diagnostics_never_retain_input_credentials() {
+        let sensitive = format!("private-{}", std::process::id());
+        for raw in [
+            format!("invalid {sensitive}"),
+            format!("https://{sensitive}:{sensitive}@proxy.corp"),
+            format!("ftp://{sensitive}:{sensitive}@proxy.corp"),
+            format!("http://{sensitive}:{sensitive}@"),
+        ] {
+            let err = Proxy::parse(&raw).unwrap_err();
+            assert!(!err.to_string().contains(&sensitive));
+            assert!(!format!("{err:?}").contains(&sensitive));
+        }
     }
 
     #[test]
     fn credentials_never_appear_in_debug_or_endpoint() {
-        let p = Proxy::parse("http://user:hunter2@proxy.corp:3128").unwrap();
+        let p = Proxy::parse("http://username-token:hunter2@proxy.corp:3128").unwrap();
         let auth = p.auth.as_ref().expect("userinfo parsed");
-        assert_eq!(auth.username, "user");
+        assert_eq!(auth.username, "username-token");
         assert_eq!(auth.password, "hunter2");
-        let rendered = format!("{:?} {}", p, p.endpoint());
+        let rendered = format!("{p:?} {} {:?}", p.endpoint(), ProxyConfig::all(p.clone()));
         assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!rendered.contains("username-token"), "{rendered}");
     }
 
     #[test]

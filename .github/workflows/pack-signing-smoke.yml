@@ -6,7 +6,8 @@ name: Pack signing smoke
 # artifacts, signs it with `cosign sign-blob` using this job's own GitHub
 # Actions OIDC identity, then feeds the real bundle through the Rust
 # sigstore-verify stack the pack verifier uses in production. Signs nothing
-# a real user consumes and publishes no artifacts.
+# a real user consumes. The application check emits only allowlisted public
+# synthetic fixture bytes and verification results in logs, never consumer homes.
 #
 # It also runs on release-tag pushes, because that is the only run whose
 # signing identity is tag-bound — and an image lock can name nothing else.
@@ -35,6 +36,7 @@ env:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
@@ -125,6 +127,7 @@ jobs:
           workflow=".github/workflows/pack-signing-smoke.yml"
           cp smoke/inputs/vmlinux smoke/image-set/vmlinux
           kernel_sha="$(sha256sum smoke/image-set/vmlinux | cut -d' ' -f1)"
+          builder_cache_contract="$(scripts/locked-image-tag.sh compatibility builder_cache_contract)"
           cat > smoke/image-set.json <<JSON
           {
             "schema_version": 2,
@@ -137,7 +140,7 @@ jobs:
               "source_commit": "${GITHUB_SHA}"
             },
             "mvm_source_commit": "${GITHUB_SHA}",
-            "compatibility": {"builder_cache_contract": 1},
+            "compatibility": {"builder_cache_contract": ${builder_cache_contract}},
             "nix_inputs": {
               "flake_locks": [{"reference": "smoke", "lock_hash": "${kernel_sha}"}],
               "source_revisions": []
@@ -249,3 +252,44 @@ jobs:
             exit 1
           fi
           echo "ok: legacy-format bundle refused, as the release contract requires"
+
+          # Step 7: Real CLI application inspection under explicit synthetic trust.
+          # The Ed25519 author key is enrolled only in a disposable consumer;
+          # the descriptor uses this workflow's existing keyless identity.
+          # Neither the archive nor its single dummy rootfs is executed.
+          # Malformed revocation-trust refusal is not a signed revoked-feed witness.
+          # This operator feed is independent of THIS synthetic descriptor
+          # publisher, not of descriptors signed by mvm-packs/publish.yml.
+          # Resolve once and fetch both public signed inputs at that exact commit;
+          # HTTPS transport is not authority: the CLI verifies signature,
+          # <=48h validity and durable checkpoint before application pull.
+          feed_ref="$(timeout 60 git ls-remote https://github.com/tinylabscom/mvm-packs.git refs/heads/main)"
+          read -r feed_sha feed_name <<<"${feed_ref}"
+          [[ "${feed_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${feed_name}" == refs/heads/main ]]
+          [[ "${feed_ref}" == "${feed_sha}"$'\t'refs/heads/main ]]
+          mkdir smoke/operator-revocations
+          for name in revocations.json revocations.sigstore.json; do
+            curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --max-time 60 --max-filesize 1048576 -fsSL \
+              "https://raw.githubusercontent.com/tinylabscom/mvm-packs/${feed_sha}/packs/${name}" \
+              -o "smoke/operator-revocations/${name}"
+          done
+          MVM_HOME="$PWD/smoke/application/consumer-home" \
+            cargo run --release -p mvm-core --example application-inspection-fixture \
+            --features manifest-verify,host-state -- \
+            --out-dir "$PWD/smoke/application" --identity "${IDENTITY}"
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/application/manifest.sigstore.json \
+            smoke/application/manifest.json
+          python3 scripts/release/check_application_inspection_smoke.py \
+            --cli target/release/mvmctl \
+            --fixture-dir smoke/application \
+            --wrong-signature smoke/pack-manifest.json.bundle \
+            --out-dir smoke/application-results \
+            --revocation-document smoke/operator-revocations/revocations.json \
+            --revocation-bundle smoke/operator-revocations/revocations.sigstore.json \
+            --revocation-source-sha "${feed_sha}" \
+            --source-sha "${GITHUB_SHA}"

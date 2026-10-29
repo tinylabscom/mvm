@@ -11,7 +11,10 @@ use anyhow::{Context, Result, bail};
 
 use crate::commands::image::OciRegistryAuthDecision;
 use mvm_contract::plan::bundle::{BUNDLE_ARTIFACT_TYPE, BUNDLE_LAYER_MEDIA_TYPE};
-use mvm_core::plan::bundle::{TrustStore, VerifiedBundle, read_and_verify_bundle};
+use mvm_core::plan::bundle::{
+    KeyId, TrustStore, VerifiedBundle, inspect_bundle_manifest_for_refusal,
+    is_registry_forbidden_local_build, read_and_verify_bundle,
+};
 use mvm_fs::oci::{
     ArtifactKind, ArtifactLimits, ClientConfig, ClientProtocol, ImageReference, OciArtifactClient,
     PushedArtifact, RegistryAuthConfig,
@@ -23,7 +26,8 @@ pub(super) const REGISTRY_SCHEME: &str = "oci://";
 
 /// Largest bundle layer a pull buffers. Bundles are verified in memory, so
 /// this bounds what a registry can make the host allocate.
-pub(super) const MAX_BUNDLE_LAYER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub(super) const MAX_BUNDLE_LAYER_BYTES: u64 =
+    mvm_core::registry_pack::application_bundle::MAX_APPLICATION_ARCHIVE_BYTES;
 
 const BUNDLE_KIND: ArtifactKind<'static> = ArtifactKind {
     artifact_type: BUNDLE_ARTIFACT_TYPE,
@@ -66,8 +70,12 @@ impl RegistryTransport {
     }
 
     fn client(&self) -> OciArtifactClient {
+        self.client_with_limit(MAX_BUNDLE_LAYER_BYTES)
+    }
+
+    fn client_with_limit(&self, max_layer_bytes: u64) -> OciArtifactClient {
         OciArtifactClient::new(self.config.clone(), self.auth.clone()).with_limits(ArtifactLimits {
-            max_layer_bytes: MAX_BUNDLE_LAYER_BYTES,
+            max_layer_bytes,
             ..ArtifactLimits::default()
         })
     }
@@ -152,8 +160,20 @@ pub(super) fn pull_bundle(
     reference: &ImageReference,
     transport: &RegistryTransport,
 ) -> Result<PulledBundle> {
+    pull_bundle_bounded(reference, transport, MAX_BUNDLE_LAYER_BYTES)
+}
+
+pub(super) fn pull_bundle_bounded(
+    reference: &ImageReference,
+    transport: &RegistryTransport,
+    max_layer_bytes: u64,
+) -> Result<PulledBundle> {
     let pulled = runtime()?
-        .block_on(transport.client().pull(reference, BUNDLE_KIND))
+        .block_on(
+            transport
+                .client_with_limit(max_layer_bytes)
+                .pull(reference, BUNDLE_KIND),
+        )
         .with_context(|| format!("pulling bundle from {}", display_reference(reference)))?;
     Ok(PulledBundle {
         bytes: pulled.layer,
@@ -169,13 +189,33 @@ pub(super) fn publish_bundle(
     reference: &ImageReference,
     transport: &RegistryTransport,
     trust: &dyn TrustStore,
+    host_key_id: &KeyId,
 ) -> Result<(VerifiedBundle, PushedArtifact)> {
+    refuse_local_build_registry_transfer(archive, host_key_id, "publish")?;
     let verified = read_and_verify_bundle(archive, trust)
         .context("refusing to push a bundle that does not verify against the local trust store")?;
     let pushed = runtime()?
         .block_on(transport.client().push(reference, BUNDLE_KIND, archive))
         .with_context(|| format!("pushing bundle to {}", display_reference(reference)))?;
     Ok((verified, pushed))
+}
+
+/// Refuse a host-local archive before consulting publisher trust. The manifest
+/// is intentionally inspected without trusting it: this helper can only deny,
+/// and successful transfer still takes the normal verification path.
+pub(super) fn refuse_local_build_registry_transfer(
+    archive: &[u8],
+    host_key_id: &KeyId,
+    action: &str,
+) -> Result<()> {
+    let manifest = inspect_bundle_manifest_for_refusal(std::io::Cursor::new(archive))
+        .context("inspecting bundle origin before registry transfer")?;
+    if is_registry_forbidden_local_build(&manifest, host_key_id) {
+        bail!(
+            "refusing to {action} a local build: local builds are never published or accepted from a registry"
+        );
+    }
+    Ok(())
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {

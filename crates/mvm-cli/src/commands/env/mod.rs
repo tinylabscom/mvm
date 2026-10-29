@@ -7,6 +7,7 @@
 pub(crate) mod artifact_verify;
 pub(super) mod bootstrap;
 pub(crate) mod builder_vm;
+pub(super) mod caller_identity;
 pub(super) mod cleanup;
 pub(super) mod completions;
 pub(super) mod doctor;
@@ -19,6 +20,7 @@ pub(super) mod sign;
 pub(super) mod uninstall;
 pub(super) mod update;
 pub(super) mod verify_release;
+pub(super) mod verify_runtime;
 
 // Re-export the top-level `Cli` so files inside this group can keep
 // using `super::Cli`.

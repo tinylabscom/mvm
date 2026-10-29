@@ -1421,7 +1421,9 @@ fn run_build_qemu(
     //     regardless of VMM. Flake reads /job/result + validates
     //     /out/rootfs.ext4; Install reads /out/result.json.
     let artifacts = match job {
-        BuilderJob::Flake { .. } => finalize_flake_job(&job_dir, &mounts.artifact_out, &job_id),
+        BuilderJob::Flake { .. } | BuilderJob::FrozenFlakeDiagnostic { .. } => {
+            finalize_flake_job(&job_dir, &mounts.artifact_out, &job_id)
+        }
         BuilderJob::Install { .. } => finalize_install_job(&mounts.artifact_out),
     }?;
     drop(nix_store_lock);
@@ -1456,6 +1458,11 @@ fn validate_build_job(job: &BuilderJob) -> Result<(), BuilderVmError> {
         BuilderJob::Flake {
             flake_ref,
             attr_path,
+        }
+        | BuilderJob::FrozenFlakeDiagnostic {
+            flake_ref,
+            attr_path,
+            ..
         } => {
             if flake_ref.trim().is_empty() {
                 return Err(BuilderVmError::NixBuildFailed(

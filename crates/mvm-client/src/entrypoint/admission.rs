@@ -24,6 +24,15 @@ use crate::admission::{
 /// The tenant every locally admitted entrypoint VM is scoped under.
 const LOCAL_TENANT: &str = "local";
 
+#[derive(Clone)]
+struct ProducerIdentity(mvm_core::crypto::entrypoint_identity::EnrolledIdentity);
+
+impl std::fmt::Debug for ProducerIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProducerIdentity(<redacted>)")
+    }
+}
+
 /// The policy an entrypoint VM is admitted under. Built once per boot; the
 /// facts only the boot can know (rootfs, kernel, name, volumes) arrive at
 /// [`EntrypointAdmission::admit`] time.
@@ -38,6 +47,9 @@ pub struct EntrypointAdmission {
     dev: bool,
     network_policy: NetworkPolicy,
     stream_stdin: bool,
+    producer_identity: Option<ProducerIdentity>,
+    assets: Vec<crate::admission::AssetSpec>,
+    bundle_posture: Option<mvm_core::plan::BundleSecurityPosture>,
 }
 
 /// An admitted entrypoint boot: the context the audit narrative binds to, and
@@ -65,6 +77,9 @@ impl EntrypointAdmission {
             dev: false,
             network_policy: NetworkPolicy::deny_all(),
             stream_stdin: false,
+            producer_identity: None,
+            assets: Vec::new(),
+            bundle_posture: None,
         })
     }
 
@@ -102,6 +117,21 @@ impl EntrypointAdmission {
     /// stdin grant over a shell-shaped or unresolvable entrypoint, or a plan
     /// that cannot be persisted ahead of the egress moat.
     pub fn admit(&self, inputs: AdmitInputs<'_>) -> Result<AdmittedEntrypoint> {
+        anyhow::ensure!(
+            self.producer_identity.is_none() || self.backend_name == "hvf",
+            "caller registration currently requires a cold HVF entrypoint launch"
+        );
+        // Unsupported builds/platforms refuse before admission or managed-state
+        // effects. The native factory shares one bounded process-wide lane;
+        // custody lookup and possession still happen on this measured launch.
+        let producer = self
+            .producer_identity
+            .as_ref()
+            .map(|identity| {
+                mvm_hostd::caller_identity::IdentityClient::native()
+                    .map(|client| (identity, client))
+            })
+            .transpose()?;
         let AdmitInputs {
             rootfs,
             kernel,
@@ -110,6 +140,7 @@ impl EntrypointAdmission {
             assets,
             volumes,
             bundle_archive,
+            runtime_config,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let materialized_mounts = crate::admission::instructions::materialized_mounts(volumes);
@@ -128,6 +159,7 @@ impl EntrypointAdmission {
             kernel_path: kernel,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config,
             cpus: self.cpus,
             mem_mib: self.mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -139,10 +171,10 @@ impl EntrypointAdmission {
             audit_dir: None,
             policy_dir: None,
             bundle_pin: bundle_archive.map(crate::admission::BundlePin::boots),
-            bundle_posture: None,
+            bundle_posture: self.bundle_posture,
             deps_volume: None,
             shares: mvm_hostd::run::shares_from_vm_volumes(volumes),
-            assets: assets.to_vec(),
+            assets: assets.iter().chain(&self.assets).cloned().collect(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             tools: Default::default(),
             network_policy: self.network_policy.clone(),
@@ -168,7 +200,10 @@ impl EntrypointAdmission {
             // An entrypoint boot admits the built workload's own launch and
             // authors no grant of its own.
             grants: None,
-            backend_kind: None,
+            backend_kind: self
+                .producer_identity
+                .as_ref()
+                .map(|_| mvm_core::vm_backend::BackendKind::Hvf),
         })?;
 
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
@@ -190,11 +225,38 @@ impl EntrypointAdmission {
             .map(serde_json::to_string)
             .transpose()
             .context("serializing admitted policy bundle for the entrypoint VM")?;
+        let caller_registration = producer
+            .map(|(identity, client)| {
+                use mvm_core::vm_backend::caller_registration::CallerRegistration;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let credential = client.load(&identity.0, deadline)?.wait()?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs();
+                let challenge = CallerRegistration::challenge_for_plan(
+                    vm_name,
+                    ctx.admitted.plan(),
+                    credential.identity(),
+                    now,
+                )?;
+                let proof = credential
+                    .prove_registration(&challenge, now)?
+                    .verify(&challenge, now)?;
+                mvm_hostd::supervisor::caller_registration::admit_caller(
+                    &ctx.admitted,
+                    vm_name,
+                    challenge,
+                    proof,
+                )
+            })
+            .transpose()?;
         Ok(AdmittedEntrypoint {
             substrate: SessionAuditSubstrate {
                 tenant_id: ctx.admitted.plan().tenant.0.clone(),
                 plan_json,
+                caller_registration,
                 bundle_json,
+                built_pack_check: ctx.admitted.built_pack_boot_check()?,
                 config_files: start_config.config_files,
                 read_only_materialized_images: ctx
                     .admitted
@@ -204,6 +266,7 @@ impl EntrypointAdmission {
                     .filter(|share| share.read_only)
                     .map(|share| share.host_path.clone())
                     .collect(),
+                durability: None,
             },
             context: ctx,
         })
@@ -214,6 +277,36 @@ impl EntrypointAdmission {
 pub struct EntrypointAdmissionBuilder(EntrypointAdmission);
 
 impl EntrypointAdmissionBuilder {
+    /// Bind internally selected descriptor identities into the signed plan.
+    #[must_use]
+    pub fn assets(mut self, assets: Vec<crate::admission::AssetSpec>) -> Self {
+        self.0.assets = assets;
+        self
+    }
+
+    /// Bound the requested launch by the independently verified bundle posture.
+    #[must_use]
+    pub fn bundle_posture(
+        mut self,
+        posture: Option<mvm_core::plan::BundleSecurityPosture>,
+    ) -> Self {
+        self.0.bundle_posture = posture;
+        self
+    }
+
+    /// Opt into immutable caller registration on a cold macOS HVF launch with
+    /// the `native-caller-identity` build feature. Enrollment is explicit and
+    /// must already exist in native custody at this exact pin.
+    /// Registration alone does not enable producer ingress or protected output.
+    #[must_use]
+    pub fn producer_identity(
+        mut self,
+        identity: mvm_core::crypto::entrypoint_identity::EnrolledIdentity,
+    ) -> Self {
+        self.0.producer_identity = Some(ProducerIdentity(identity));
+        self
+    }
+
     /// vCPUs the plan admits.
     #[must_use]
     pub fn cpus(mut self, cpus: u32) -> Self {
@@ -313,6 +406,7 @@ mod tests {
             assets: &[],
             volumes: &[],
             bundle_archive: None,
+            runtime_config: None,
         }
     }
 
@@ -333,6 +427,89 @@ mod tests {
             .expect("a default admission builds");
         assert!(!admission.streams_stdin());
         assert!(admission.with_stream_stdin(true).streams_stdin());
+    }
+
+    #[test]
+    fn entrypoint_builder_retains_descriptor_assets_and_signed_posture() {
+        let pin = mvm_core::registry_pack::PackPin::new(
+            "agent/claude@2.0.0".parse().unwrap(),
+            mvm_core::packs::Sha256Hex::new("a".repeat(64)).unwrap(),
+        )
+        .unwrap();
+        let assets = vec![crate::admission::AssetSpec::RegistryPack(pin)];
+        let posture = mvm_core::plan::BundleSecurityPosture {
+            profile: mvm_core::security::AgentProfile::SealedProd,
+            verity_protected: true,
+            requires_auth: true,
+            allows_volumes: false,
+            allows_egress: true,
+        };
+        let admission = EntrypointAdmission::builder("firecracker")
+            .assets(assets.clone())
+            .bundle_posture(Some(posture))
+            .build()
+            .unwrap()
+            .with_stream_stdin(true);
+        assert_eq!(admission.assets, assets);
+        assert_eq!(admission.bundle_posture, Some(posture));
+        assert!(!admission.dev);
+        let defaults = EntrypointAdmission::builder("mock").build().unwrap();
+        assert!(defaults.assets.is_empty());
+        assert!(defaults.bundle_posture.is_none());
+    }
+
+    #[test]
+    fn caller_registration_is_explicit_and_rejects_unsupported_backend_before_custody() {
+        let default = EntrypointAdmission::builder("hvf").build().unwrap();
+        assert!(default.producer_identity.is_none());
+        let identity = serde_json::from_value(serde_json::json!({
+            "installation": "bdf189ab-9a9a-440b-a266-e95b19e58a5e",
+            "public_key": vec![1; 32]
+        }))
+        .unwrap();
+        let admission = EntrypointAdmission::builder("mock")
+            .producer_identity(identity)
+            .build()
+            .unwrap();
+        let Err(error) = admission.admit(inputs(std::path::Path::new("/unopened"), "refused"))
+        else {
+            panic!("unsupported backend must refuse before custody or image access");
+        };
+        assert_eq!(
+            error.to_string(),
+            "caller registration currently requires a cold HVF entrypoint launch"
+        );
+        let debug = format!("{admission:?}");
+        assert!(!debug.contains("bdf189ab"));
+        assert!(!debug.contains("public_key"));
+    }
+
+    #[cfg(not(all(feature = "native-caller-identity", target_os = "macos")))]
+    #[test]
+    fn unsupported_caller_registration_refuses_before_admission_or_managed_state() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let identity = serde_json::from_value(serde_json::json!({
+            "installation": "bdf189ab-9a9a-440b-a266-e95b19e58a5e",
+            "public_key": vec![1; 32]
+        }))
+        .unwrap();
+        let admission = EntrypointAdmission::builder("hvf")
+            .producer_identity(identity)
+            .build()
+            .unwrap();
+        let Err(error) = admission.admit(inputs(std::path::Path::new("/unopened"), "refused"))
+        else {
+            panic!("unsupported native custody must refuse");
+        };
+        assert!(matches!(
+            error.downcast_ref::<mvm_hostd::caller_identity::IdentityError>(),
+            Some(mvm_hostd::caller_identity::IdentityError::Unsupported),
+        ));
+        assert!(!mvm_core::config::mvm_keys_dir().exists());
+        assert!(!mvm_core::config::mvm_audit_dir().exists());
+        assert!(!mvm_core::config::vm_state_dir("refused").exists());
     }
 
     #[test]
@@ -595,6 +772,7 @@ mod stdin_grant_tests {
                     assets: &[],
                     volumes: &[],
                     bundle_archive: None,
+                    runtime_config: None,
                 })
         }
     }

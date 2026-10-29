@@ -1,0 +1,19 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. See LICENSE.
+[package]
+name = "mvm-macho-sign"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license = "MPL-2.0"
+description = "Byte-only in-process ad-hoc Mach-O signing"
+
+[dependencies]
+plist = "1"
+sha1.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

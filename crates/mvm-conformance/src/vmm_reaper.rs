@@ -351,7 +351,13 @@ mod tests {
 
     #[test]
     fn a_long_state_dir_adds_its_socket_fallback_directory() {
-        let home = tempfile::tempdir().unwrap();
+        // Root the home at a short path: a runner whose TMPDIR is already
+        // near the socket limit would earn the home itself a fallback entry
+        // and break the two-marker expectation.
+        let home = tempfile::Builder::new()
+            .prefix("mvm-reaper-test-")
+            .tempdir_in("/tmp")
+            .expect("create short home fixture directory");
         let long_name = "m".repeat(90);
         let state_dir = mvm_core::config::vms_dir_at(home.path()).join(&long_name);
         std::fs::create_dir_all(&state_dir).unwrap();

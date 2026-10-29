@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use crate::arch::GuestArch;
 use crate::image_set::{
     ArtifactFormat, BackendImageSupport, HostProtocolSupport, ImageSetManifest, MemberArtifact,
-    WorkloadImageProfile, image_set_root_proof_cache, image_train_lock, read_cached_image_set_root,
-    select_workload_image,
+    WorkloadImageProfile, image_set_root_proof_cache, image_train_lock,
+    read_cached_workload_image_set_root, select_workload_image,
 };
 use crate::image_set_revocation::{ImageSetRevocationStore, VerifiedImageSetRevocations};
 use crate::kernel_format::KernelFormat;
@@ -26,6 +26,9 @@ use crate::plan::{AssetKind, ExecutionPlan};
 use crate::protocol::vm_backend::{BackendKind, VmStartConfig};
 use crate::registry_pack::{PackPin, RegistryPackImage};
 use crate::registry_pack_image::{BuiltImagePlatform, BuiltPackImageDescriptor};
+
+/// Signed raw member emitted by the canonical sealed-bundle producer.
+pub const APPLICATION_ROOT_HASH_MEMBER_NAME: &str = "rootfs.roothash";
 
 /// One freshly authenticated installed image and its accepted base declarations.
 ///
@@ -37,6 +40,195 @@ pub struct BuiltPackBootContract {
     payload: PathBuf,
     image: BuiltPackImageDescriptor,
     base: ImageSetManifest,
+}
+
+/// Which authenticated image member a reader supplies. Not a boot authority.
+#[derive(Debug, Clone, Copy)]
+pub enum BootImageAsset {
+    Rootfs,
+    Verity,
+    Metadata,
+    RootHash,
+}
+
+/// Expectations copied only from an authenticated contract's private assets.
+///
+/// This verifies artifact bytes, not plan admission, descriptor custody, or a
+/// native launch. Readers must still be frozen and retained by their consumer.
+#[derive(Debug)]
+pub struct AuthenticatedBootImageExpectations {
+    rootfs: crate::registry_pack_image::BuiltImageAsset,
+    verity: crate::registry_pack_image::BuiltImageAsset,
+    metadata: crate::registry_pack_image::BuiltImageAsset,
+    roothash: crate::registry_pack_image::BuiltImageAsset,
+    root_hash: String,
+}
+
+impl AuthenticatedBootImageExpectations {
+    /// Bind application byte facts to the original descriptor/archive selection.
+    ///
+    /// Plan/config are expectations, not admission. Current trust, compatibility,
+    /// canonical kernel preparation and native custody remain mandatory at the
+    /// caller's admission and handoff boundaries.
+    /// Legacy archives without the original signed raw root-hash member are
+    /// unsupported by this route; they are never silently upgraded or repinned.
+    pub fn for_application(
+        application: &crate::registry_pack::application_bundle::VerifiedApplicationBundle,
+        plan: &ExecutionPlan,
+        config: &VmStartConfig,
+    ) -> Result<Self> {
+        use crate::image_set::ArtifactName;
+        use crate::plan::bundle::{ArtifactRole, BundleArtifact, BundleRegistry};
+        use crate::registry_pack::AuthenticatedRegistryManifest;
+
+        let original = application.bundle().plan_artifact();
+        ensure!(
+            plan.bundle.as_ref() == Some(&original),
+            "application plan differs from the original archive, signature or author"
+        );
+        let descriptor = application.application();
+        let reference = descriptor.reference().to_string();
+        let mut identities = plan
+            .asset_identities
+            .iter()
+            .filter(|asset| asset.kind == AssetKind::RegistryPack && asset.name == reference);
+        let identity = identities
+            .next()
+            .context("application plan does not bind its descriptor reference")?;
+        ensure!(
+            identities.next().is_none(),
+            "application plan descriptor reference is ambiguous"
+        );
+        ensure!(
+            identity.digest == descriptor.manifest_sha256().as_str(),
+            "application plan descriptor digest differs from its authenticated descriptor"
+        );
+        let manifest = &application.bundle().manifest;
+        let mut paths = std::collections::BTreeSet::new();
+        ensure!(
+            manifest
+                .artifacts
+                .iter()
+                .all(|artifact| paths.insert(&artifact.path)),
+            "application signed inventory contains duplicate paths"
+        );
+        let unique_role = |role: ArtifactRole| -> Result<&BundleArtifact> {
+            let mut found = manifest
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.role == role);
+            let selected = found
+                .next()
+                .context("application signed boot role is missing")?;
+            ensure!(
+                found.next().is_none(),
+                "application signed boot role is ambiguous"
+            );
+            ensure!(selected.size_bytes > 0, "application boot member is empty");
+            Ok(selected)
+        };
+        let named_other = |name: &str| -> Result<&BundleArtifact> {
+            let mut found = manifest
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.name == name);
+            let selected = found
+                .next()
+                .context("application signed boot member is missing")?;
+            ensure!(
+                found.next().is_none()
+                    && selected.role == ArtifactRole::Other
+                    && selected.size_bytes > 0,
+                "application named boot member is ambiguous, empty or has the wrong role"
+            );
+            Ok(selected)
+        };
+        let rootfs = unique_role(ArtifactRole::Rootfs)?;
+        let verity = unique_role(ArtifactRole::VerityHashSidecar)?;
+        let binding = manifest
+            .verity
+            .as_ref()
+            .context("application has no signed verity binding")?;
+        ensure!(
+            binding.sidecar_artifact == verity.name,
+            "application verity binding selects a different signed member"
+        );
+        let metadata = named_other(crate::guest_sidecar::SIDECAR_FILENAME)?;
+        let roothash = named_other(APPLICATION_ROOT_HASH_MEMBER_NAME)?;
+        let directory = Path::new(&rootfs.path)
+            .parent()
+            .context("application rootfs parent missing")?;
+        ensure!(
+            Path::new(&metadata.path) == directory.join(crate::guest_sidecar::SIDECAR_FILENAME)
+                && Path::new(&roothash.path) == directory.join(APPLICATION_ROOT_HASH_MEMBER_NAME),
+            "application metadata or root hash is outside the supported rootfs layout"
+        );
+        let installed = BundleRegistry::default_path()?.install_dir(&original.bundle_sha256);
+        ensure!(
+            Path::new(&config.rootfs_path) == installed.join(&rootfs.path)
+                && config.verity_path.as_deref().map(Path::new)
+                    == Some(installed.join(&verity.path).as_path())
+                && plan.image.sha256 == rootfs.sha256,
+            "application effective config or plan rootfs differs from its signed inventory"
+        );
+        let canonical_hash = Sha256Hex::new(binding.roothash.clone())?;
+        let expected_bytes = format!("{}\n", canonical_hash.as_str());
+        ensure!(
+            roothash.size_bytes == 65
+                && roothash.sha256 == crate::plan::bundle::sha256_hex(expected_bytes.as_bytes()),
+            "application root hash member must sign exactly 64 lowercase hex bytes and one LF"
+        );
+        let bytes = application.application_root_hash_member()?;
+        ensure!(
+            bytes == expected_bytes.as_bytes()
+                && config.roothash.as_deref() == Some(canonical_hash.as_str()),
+            "application raw member, manifest verity and effective root hash disagree"
+        );
+        let asset =
+            |artifact: &BundleArtifact| -> Result<crate::registry_pack_image::BuiltImageAsset> {
+                Ok(crate::registry_pack_image::BuiltImageAsset {
+                    name: ArtifactName::new(artifact.name.clone())?,
+                    sha256: Sha256Hex::new(artifact.sha256.clone())?,
+                    size: artifact.size_bytes,
+                })
+            };
+        Ok(Self {
+            rootfs: asset(rootfs)?,
+            verity: asset(verity)?,
+            metadata: asset(metadata)?,
+            roothash: asset(roothash)?,
+            root_hash: canonical_hash.as_str().to_owned(),
+        })
+    }
+
+    fn asset(&self, role: BootImageAsset) -> &crate::registry_pack_image::BuiltImageAsset {
+        match role {
+            BootImageAsset::Rootfs => &self.rootfs,
+            BootImageAsset::Verity => &self.verity,
+            BootImageAsset::Metadata => &self.metadata,
+            BootImageAsset::RootHash => &self.roothash,
+        }
+    }
+
+    pub fn expected_size(&self, role: BootImageAsset) -> u64 {
+        self.asset(role).size
+    }
+
+    pub fn expected_sha256(&self, role: BootImageAsset) -> &Sha256Hex {
+        &self.asset(role).sha256
+    }
+
+    /// The captured, authenticated value, never a later unsigned sidecar read.
+    pub fn root_hash(&self) -> &str {
+        &self.root_hash
+    }
+
+    /// Verify a reader positioned at the member's beginning against original
+    /// signed size/digest. Success does not freeze that reader or mint a permit.
+    pub fn verify_reader(&self, role: BootImageAsset, reader: impl Read) -> Result<()> {
+        let asset = self.asset(role);
+        check_reader(reader, &asset.sha256, asset.size)
+    }
 }
 
 impl BuiltPackBootContract {
@@ -100,7 +292,7 @@ impl BuiltPackBootContract {
         };
         let accepted = &image_train_lock().image_set;
         image.validate_pin(pin.reference(), accepted)?;
-        let root = read_cached_image_set_root(
+        let root = read_cached_workload_image_set_root(
             &image_set_root_proof_cache(),
             accepted,
             host,
@@ -128,6 +320,69 @@ impl BuiltPackBootContract {
 
     pub fn rootfs_sha256(&self) -> &Sha256Hex {
         &self.image.assets.rootfs.sha256
+    }
+
+    /// Capture original authenticated asset expectations without treating a
+    /// mutable source's current digest as authority. Large members are verified
+    /// later through the exact readers supplied by their owning consumer.
+    pub fn image_expectations(
+        &self,
+        plan: &ExecutionPlan,
+        config: &VmStartConfig,
+        arch: GuestArch,
+        backend: BackendKind,
+    ) -> Result<AuthenticatedBootImageExpectations> {
+        self.verify_plan(plan, arch, backend)?;
+        let directory = Path::new(&config.rootfs_path)
+            .parent()
+            .context("built rootfs has no parent directory")?;
+        let captured = read_roothash(
+            &directory.join("rootfs.roothash"),
+            &self.image.assets.roothash,
+        )?;
+        self.bind_captured_hash(config, &captured)
+    }
+
+    /// Capture signed image facts from an untrusted, already-held hash reader.
+    ///
+    /// Reads from the reader's CURRENT position, bounded by signed size + 1.
+    /// The caller must supply the whole member from offset zero (for a shared
+    /// file, use positional reads). This does not rewind, freeze, or retain the
+    /// reader and confers neither descriptor custody nor launch admission.
+    pub fn capture_image_expectations(
+        &self,
+        plan: &ExecutionPlan,
+        config: &VmStartConfig,
+        arch: GuestArch,
+        backend: BackendKind,
+        root_hash_reader: impl Read,
+    ) -> Result<AuthenticatedBootImageExpectations> {
+        self.verify_plan(plan, arch, backend)?;
+        let captured = decode_roothash(root_hash_reader, &self.image.assets.roothash)?;
+        self.bind_captured_hash(config, &captured)
+    }
+
+    fn bind_captured_hash(
+        &self,
+        config: &VmStartConfig,
+        captured: &str,
+    ) -> Result<AuthenticatedBootImageExpectations> {
+        let root_hash = captured.trim();
+        ensure!(
+            root_hash.len() == 64
+                && root_hash
+                    .bytes()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+                && config.roothash.as_deref() == Some(root_hash),
+            "built image config lacks its authenticated canonical roothash"
+        );
+        Ok(AuthenticatedBootImageExpectations {
+            rootfs: self.image.assets.rootfs.clone(),
+            verity: self.image.assets.verity.clone(),
+            metadata: self.image.assets.mvm_meta.clone(),
+            roothash: self.image.assets.roothash.clone(),
+            root_hash: root_hash.to_owned(),
+        })
     }
 
     /// Resolve only the pack/base-owned image fields and verify the proposed
@@ -316,9 +571,17 @@ fn read_roothash(
     asset: &crate::registry_pack_image::BuiltImageAsset,
 ) -> Result<String> {
     ensure!(asset.size <= 128, "oversized built image roothash");
-    let mut bytes = Vec::new();
     let file = open_regular(path, asset.size)?;
-    file.take(asset.size + 1).read_to_end(&mut bytes)?;
+    decode_roothash(file, asset)
+}
+
+fn decode_roothash(
+    reader: impl Read,
+    asset: &crate::registry_pack_image::BuiltImageAsset,
+) -> Result<String> {
+    ensure!(asset.size <= 128, "oversized built image roothash");
+    let mut bytes = Vec::new();
+    reader.take(asset.size + 1).read_to_end(&mut bytes)?;
     ensure!(
         bytes.len() as u64 == asset.size && Sha256Hex::from_bytes(&bytes) == asset.sha256,
         "built image roothash differs from its signed digest"
@@ -328,7 +591,12 @@ fn read_roothash(
 
 fn check_file(path: &Path, expected: &Sha256Hex, size: u64) -> Result<()> {
     let file = open_regular(path, size)?;
-    let mut reader = file.take(size.checked_add(1).context("artifact size overflow")?);
+    check_reader(file, expected, size)
+        .with_context(|| format!("checking built boot artifact {}", path.display()))
+}
+
+fn check_reader(reader: impl Read, expected: &Sha256Hex, size: u64) -> Result<()> {
+    let mut reader = reader.take(size.checked_add(1).context("artifact size overflow")?);
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 65536];
     let mut count = 0u64;
@@ -337,13 +605,14 @@ fn check_file(path: &Path, expected: &Sha256Hex, size: u64) -> Result<()> {
         if n == 0 {
             break;
         }
-        count += n as u64;
+        count = count
+            .checked_add(n as u64)
+            .context("artifact byte count overflow")?;
         hash.update(&buffer[..n]);
     }
     ensure!(
         count == size && hex::encode(hash.finalize()) == expected.as_str(),
-        "built boot artifact {} differs from its signed digest",
-        path.display()
+        "built boot artifact reader differs from its signed size or digest"
     );
     Ok(())
 }

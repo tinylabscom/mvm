@@ -1,6 +1,7 @@
 """Credential-free command assembly tests; never invokes Apple signing services."""
 
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -55,8 +56,12 @@ class SigningTests(unittest.TestCase):
         if "--entitlements" in args and "--sign" in args:
             self.entitlements[Path(args[-1]).name] = plistlib.loads(
                 Path(args[args.index("--entitlements") + 1]).read_bytes())
+        if "--sign" in args:
+            path = Path(args[-1])
+            path.write_bytes(path.read_bytes() + b"mock-signature")
         if "-d" in args and "--entitlements" in args:
-            return plistlib.dumps(self.entitlements[Path(args[-1]).name]).decode()
+            embedded = self.entitlements.get(Path(args[-1]).name)
+            return plistlib.dumps(embedded).decode() if embedded is not None else ""
         if args[:3] == ("xcrun", "notarytool", "submit"):
             return json.dumps({"status": self.status, "id": "mock-submission"})
         return ""
@@ -203,7 +208,7 @@ class SigningTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "escapes"):
             signing.targets(self.payload)
 
-    def test_universal_macho_is_discovered(self):
+    def test_single_slice_fat_macho_is_discovered(self):
         binary = self.binary("universal", 6)
         thin = binary.read_bytes()
         binary.write_bytes(b"\xca\xfe\xba\xbe" + struct.pack(">I", 1) +
@@ -219,6 +224,180 @@ class SigningTests(unittest.TestCase):
     def test_report_cannot_be_inside_signed_payload(self):
         with self.assertRaisesRegex(RuntimeError, "outside"):
             signing.sign(self.payload, self.payload / "report.json")
+
+    def test_canonical_libkrun_role_has_the_hypervisor_requirement(self):
+        self.assertEqual(
+            signing.ROLES["mvm-libkrun-supervisor"],
+            ["com.apple.security.hypervisor"],
+        )
+        self.assertEqual(
+            signing.ROLES["mvm-libkrun-supervisor"],
+            signing.ROLES["mvm-krun-supervisor"],
+        )
+
+    def test_producer_full_role_matrix_and_post_sign_hashes_without_credentials(self):
+        for name in signing.ROLES:
+            self.binary(name)
+        self.binary("helpers/extensionless")
+        self.binary("lib/native.dylib", 6)
+        self.binary("plugin.so", 8)
+        with patch.dict(os.environ, {}, clear=True):
+            signing.producer_sign(self.payload, self.report, True)
+        calls = [c for c in self.calls if "--sign" in c]
+        self.assertEqual(len(calls), len(signing.ROLES) + 3)
+        self.assertEqual(self.entitlements, {
+            name: dict.fromkeys(keys, True) for name, keys in signing.ROLES.items()
+        })
+        for call in calls:
+            self.assertEqual(call[call.index("--sign") + 1], "-")
+            self.assertNotIn("--deep", call)
+            self.assertNotIn("--options", call)
+        verifies = [c for c in self.calls if "--verify" in c]
+        self.assertEqual(len(verifies), len(signing.ROLES) + 3)
+        self.assertTrue(all("--strict" in c and "--all-architectures" in c for c in verifies))
+        report = json.loads(self.report.read_text())
+        self.assertEqual(report["status"], "ProducerAdhocVerified")
+        self.assertIs(report["notarized"], False)
+        for entry in report["files"]:
+            self.assertEqual(entry["sha256"], hashlib.sha256(
+                (self.payload / entry["path"]).read_bytes()).hexdigest())
+            self.assertEqual(entry["verification"], "strict-all-architectures")
+        self.assertFalse(any(c[0] in ("security", "xcrun") for c in self.calls))
+
+    def test_producer_requires_embedded_exact_boolean_entitlements(self):
+        self.binary("mvmctl")
+        for actual in ({}, {"com.apple.security.virtualization": False},
+                       {"com.apple.security.virtualization": 1},
+                       {"com.apple.security.virtualization": "true"},
+                       {"com.apple.security.virtualization": True,
+                        "com.apple.security.cs.allow-jit": True}):
+            with self.subTest(actual=actual):
+                original = self.run_tool
+
+                def readback(*args):
+                    result = original(*args)
+                    return plistlib.dumps(actual).decode() if "-d" in args else result
+
+                self.report.write_text('{"status": "ProducerAdhocVerified"}')
+                with patch.object(signing, "run", side_effect=readback):
+                    with self.assertRaisesRegex(RuntimeError, "entitlement missing"):
+                        signing.producer_sign(self.payload, self.report)
+                self.assertFalse(self.report.exists())
+
+    def test_producer_signature_failure_and_required_inventory_fail_closed(self):
+        self.binary("mvmctl")
+        with self.assertRaisesRegex(RuntimeError, "missing required CLI inventory"):
+            signing.producer_sign(self.payload, self.report, True)
+        self.assertEqual(self.calls, [])
+        self.binary("mvm-hvf-supervisor")
+        self.binary("mvm-libkrun-supervisor")
+        for flag in ("--sign", "--verify"):
+            self.fail = flag
+            self.report.write_text('{"status": "ProducerAdhocVerified"}')
+            with self.assertRaisesRegex(RuntimeError, "mock tool failed"):
+                signing.producer_sign(self.payload, self.report, True)
+            self.assertFalse(self.report.exists())
+
+    def test_producer_library_only_inventory_and_wrong_role_type(self):
+        self.binary("native.dylib", 6)
+        signing.producer_sign(self.payload, self.report)
+        self.assertEqual(self.entitlements, {})
+        self.binary("mvm-krun-supervisor", 6)
+        with self.assertRaisesRegex(RuntimeError, "must be MH_EXECUTE"):
+            signing.producer_sign(self.payload, self.report)
+        self.assertFalse(self.report.exists())
+
+    def test_code_only_targets_reject_embedded_entitlements_without_value_leak(self):
+        self.binary("native.dylib", 6)
+        private = "mock-private-entitlement-value"
+        original = self.run_tool
+
+        def readback(*args):
+            result = original(*args)
+            if "-d" in args:
+                return plistlib.dumps({"com.apple.security.cs.allow-jit": private}).decode()
+            return result
+
+        for entrypoint in (signing.producer_sign, signing.sign):
+            with self.subTest(entrypoint=entrypoint.__name__):
+                with patch.object(signing, "run", side_effect=readback):
+                    with self.assertRaisesRegex(RuntimeError, "entitlement missing") as caught:
+                        entrypoint(self.payload, self.report)
+                self.assertNotIn(private, str(caught.exception))
+                self.assertFalse(self.report.exists())
+        self.assertFalse(any("notarytool" in call for call in self.calls))
+
+    def test_code_only_targets_accept_embedded_empty_dict(self):
+        self.binary("helpers/extensionless")
+        original = self.run_tool
+
+        def readback(*args):
+            result = original(*args)
+            return plistlib.dumps({}).decode() if "-d" in args else result
+
+        with patch.object(signing, "run", side_effect=readback):
+            signing.producer_sign(self.payload, self.report)
+        self.assertEqual(json.loads(self.report.read_text())["files"][0]["role"], "code")
+
+    def test_multislice_fat_rejected_before_signing(self):
+        binary = self.binary("native.dylib", 6)
+        thin = binary.read_bytes()
+        binary.write_bytes(b"\xca\xfe\xba\xbe" + struct.pack(">I", 2) +
+                           struct.pack(">IIIII", 0, 0, 48, len(thin), 0) +
+                           struct.pack(">IIIII", 0, 0, 64, len(thin), 0) + thin + thin)
+        for entrypoint in (signing.producer_sign, signing.sign):
+            with self.subTest(entrypoint=entrypoint.__name__):
+                with self.assertRaisesRegex(RuntimeError, "multi-slice FAT"):
+                    entrypoint(self.payload, self.report)
+                self.assertFalse(self.report.exists())
+        self.assertEqual(self.calls, [])
+
+    def test_producer_cli_entrypoint_requires_no_credentials(self):
+        self.binary("mvmctl")
+        helper = self.binary("mvm-hvf-supervisor")
+        thin = helper.read_bytes()
+        helper.write_bytes(b"\xca\xfe\xba\xbe" + struct.pack(">I", 1) +
+                           struct.pack(">IIIII", 0, 0, 28, len(thin), 0) + thin)
+        self.binary("mvm-libkrun-supervisor")
+        argv = ["sign_macos.py", "--producer-adhoc", "--require-cli-inventory",
+                "--payload", str(self.payload), "--report", str(self.report)]
+        with patch.dict(os.environ, {}, clear=True), patch.object(os.sys, "argv", argv):
+            signing.main()
+        self.assertEqual(len(json.loads(self.report.read_text())["files"]), 3)
+        self.assertFalse(any(c[0] in ("security", "xcrun") for c in self.calls))
+
+    def test_producer_cli_cannot_be_skipped(self):
+        argv = ["sign_macos.py", "--producer-adhoc", "--skip-unconfigured",
+                "--payload", str(self.payload), "--report", str(self.report)]
+        with patch.object(os.sys, "argv", argv):
+            with self.assertRaises(SystemExit) as caught:
+                signing.main()
+        self.assertEqual(caught.exception.code, 1)
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.report.exists())
+
+    def test_mandatory_producer_gate_precedes_optional_signing_and_packaging(self):
+        repo = Path(__file__).resolve().parents[2]
+        for workflow, after in (
+            ("release.yml", "      - name: Package binary"),
+            ("publish-pypi.yml", "      - name: Build sdist + wheel"),
+            ("publish-npm.yml", "      - name: Upload the platform library"),
+        ):
+            source = (repo / ".github/workflows" / workflow).read_text()
+            start = source.index("      - name: Mandatory ad-hoc producer signing")
+            end = source.index("      - name: Retain macOS producer")
+            block = source[start:end]
+            self.assertLess(end, source.index(after))
+            optional = "      - name: Sign and notarize" if workflow == "release.yml" else (
+                "      - name: Developer ID sign")
+            self.assertLess(end, source.index(optional))
+            self.assertIn("--producer-adhoc", block)
+            self.assertNotIn("secrets.", block)
+            self.assertNotIn("ref_type", block)
+            self.assertNotIn("dry_run", block)
+            self.assertNotIn("--skip-unconfigured", block)
+            self.assertNotIn("continue-on-error", block)
+            self.assertEqual("--require-cli-inventory" in block, workflow == "release.yml")
 
     def test_sdk_signing_precedes_packaging_for_every_publish_and_tag_rehearsal(self):
         repo = Path(__file__).resolve().parents[2]

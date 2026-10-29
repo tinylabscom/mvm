@@ -56,8 +56,9 @@ use anyhow::{Context, Result, bail};
 
 use mvm_core::crypto::snapshot_encryption;
 use mvm_core::crypto::snapshot_hmac::{
-    EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotFiles, VMSTATE_FILENAME,
-    VerifyError, files_in, load_or_init_key, seal, verify,
+    EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotFiles,
+    SnapshotIntegrityParams, VMSTATE_FILENAME, VerifyError, files_in, load_or_init_key, seal,
+    verify,
 };
 
 use secrecy::ExposeSecret;
@@ -144,7 +145,9 @@ pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(
             let _ = std::fs::remove_dir_all(&path);
         })
     };
-    let sidecar = seal_into(staged.path(), &dir, io, key)?;
+    let runtime =
+        mvm_vmm::host::runtime_meta::read(vm_name)?.and_then(|meta| meta.runtime_launch_binding);
+    let sidecar = seal_into(staged.path(), &dir, io, key, runtime.as_ref())?;
     publish(staged, &dir)?;
     Ok(sidecar)
 }
@@ -156,9 +159,11 @@ fn seal_into<IO: SnapshotIO + ?Sized>(
     published: &Path,
     io: &IO,
     key: &SnapshotKey,
+    runtime: Option<&mvm_core::protocol::runtime_release::RuntimeLaunchBinding>,
 ) -> Result<IntegritySidecar> {
     io.create_snapshot(staged)
         .with_context(|| format!("Firecracker create_snapshot({})", staged.display()))?;
+    crate::checkpoint::runtime_binding::verify_capture(runtime, &io.runtime_artifacts()?)?;
     tighten_snapshot_file_modes(staged)?;
 
     // The HMAC envelope below covers the ciphertext, so a tampered artifact
@@ -183,10 +188,8 @@ fn seal_into<IO: SnapshotIO + ?Sized>(
 
     seal(
         staged,
-        &files,
-        next_epoch,
-        mvmctl_version,
-        hmac_key.expose_secret(),
+        &SnapshotIntegrityParams::new(&files, next_epoch, mvmctl_version, hmac_key.expose_secret())
+            .with_runtime_binding(runtime),
     )
     .with_context(|| format!("sealing instance snapshot at {}", staged.display()))
 }
@@ -401,6 +404,9 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
         Ok(s) => s,
         Err(e) => return Err(map_verify_error(e, dir)),
     };
+    if let Some(runtime) = sidecar.runtime_launch_binding.as_ref() {
+        crate::runtime_evidence::verify_runtime_binding(runtime)?;
+    }
 
     // HMAC verify passed → the artifacts on disk are the bytes that were
     // sealed. If they're AES-GCM-encrypted (MVSE magic), they are decrypted
@@ -423,7 +429,12 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
     });
     let load_dir = staged.as_ref().map_or(dir, |staged| staged.path());
 
-    guarded_load_resume(io, load_dir)?;
+    mvm_vmm::snapshot::guarded_load_resume_with(io, load_dir, || {
+        crate::checkpoint::runtime_binding::verify_capture(
+            sidecar.runtime_launch_binding.as_ref(),
+            &io.runtime_artifacts()?,
+        )
+    })?;
     Ok(sidecar)
 }
 
@@ -1205,12 +1216,14 @@ mod tests {
         ));
         let key = load_or_init_key(&key_path).unwrap();
         let epoch = EpochStore::new(dir.join(EPOCH_FILENAME)).next().unwrap();
-        seal(
+        mvm_core::crypto::snapshot_hmac::seal(
             &dir,
-            &files_in(&dir),
-            epoch,
-            env!("CARGO_PKG_VERSION"),
-            key.expose_secret(),
+            &SnapshotIntegrityParams::new(
+                &files_in(&dir),
+                epoch,
+                env!("CARGO_PKG_VERSION"),
+                key.expose_secret(),
+            ),
         )
         .unwrap();
     }
@@ -1262,6 +1275,10 @@ mod tests {
     }
 
     impl SnapshotIO for LoadProbe {
+        fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+            self.inner.runtime_artifacts()
+        }
+
         fn create_snapshot(&self, dir: &Path) -> Result<()> {
             self.inner.create_snapshot(dir)
         }
@@ -1360,6 +1377,10 @@ mod tests {
     struct InterruptedLoad(CannedIO);
 
     impl SnapshotIO for InterruptedLoad {
+        fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+            self.0.runtime_artifacts()
+        }
+
         fn create_snapshot(&self, dir: &Path) -> Result<()> {
             self.0.create_snapshot(dir)
         }
@@ -1451,6 +1472,10 @@ mod tests {
     }
 
     impl SnapshotIO for CaptureProbe {
+        fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+            self.inner.runtime_artifacts()
+        }
+
         fn create_snapshot(&self, dir: &Path) -> Result<()> {
             let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
             *self.seen.borrow_mut() = Some((dir.to_path_buf(), mode));
@@ -1778,9 +1803,9 @@ mod tests {
         )?;
         crate::microvm::api_put_socket(
             &sock,
-            "/drives/rootfs",
+            "/drives/blk0",
             &crate::microvm::FcDrive {
-                drive_id: "rootfs",
+                drive_id: "blk0",
                 path_on_host: &rootfs_copy.to_string_lossy(),
                 is_root_device: true,
                 is_read_only: false,
@@ -1901,9 +1926,9 @@ mod tests {
         .expect("configure boot source");
         crate::microvm::api_put_socket(
             &sock,
-            "/drives/rootfs",
+            "/drives/blk0",
             &crate::microvm::FcDrive {
-                drive_id: "rootfs",
+                drive_id: "blk0",
                 path_on_host: &images.rootfs.to_string_lossy(),
                 is_root_device: true,
                 is_read_only: false,

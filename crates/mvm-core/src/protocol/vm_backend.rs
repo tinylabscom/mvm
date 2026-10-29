@@ -18,6 +18,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
+pub mod caller_registration;
+
 pub use mvm_contract::protocol::capability_negotiation::{CapabilityAlternative, CapabilityGap};
 pub use mvm_contract::protocol::resource_controls::{
     CpuControl, EnforcedGrants, EnforcedTier, ResourceControls, WallClockControl,
@@ -36,6 +38,29 @@ pub use mvm_contract::protocol::vm_backend::{
 // ---------------------------------------------------------------------------
 // VmStartConfig — backend-agnostic VM launch configuration
 // ---------------------------------------------------------------------------
+
+/// Untrusted inputs for a legacy image's baked runtime. The runtime boundary
+/// re-verifies the pin against the host's enrolled publishers and binds the
+/// selected rootfs and initrd to signed artifact roles. This is not authority
+/// to bypass verification, and the archive cannot supply its own trust store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LegacyBundleRuntimeProof {
+    pub archive: std::path::PathBuf,
+    pub pin: crate::plan::PlanArtifact,
+}
+
+/// Untrusted original schema-4 archive and schema-2 runtime selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LegacyPortableRuntimeProof {
+    pub archive: std::path::PathBuf,
+    pub pin: crate::plan::PlanArtifact,
+    pub manifest_sha256: String,
+    pub arch: crate::arch::GuestArch,
+}
 
 /// Backend-agnostic configuration describing *what* to run.
 ///
@@ -80,8 +105,21 @@ pub struct VmStartConfig {
     pub rootfs_path: String,
     /// Absolute path to the kernel image (Firecracker needs this; others may ignore).
     pub kernel_path: Option<String>,
+    /// Optional byte-continuity constraint for a producer health launch.
+    /// NOT publisher or plan authority: normal admission remains mandatory.
+    /// A supporting backend must consume a private verified descriptor, never
+    /// reopen the path after checking this digest; unsupported backends refuse.
+    pub kernel_read_sha256: Option<String>,
+    /// In-process canonical data custody. Cloning keeps the SAME owner;
+    /// deserialized paths, hashes or caller-authored metadata cannot supply it.
+    pub canonical_kernel: Option<std::sync::Arc<crate::canonical_linux::PreparedCanonicalLinux>>,
     /// Absolute path to the initial ramdisk (NixOS stage-1), if present.
     pub initrd_path: Option<String>,
+    /// Untrusted pinned bundle inputs for a baked runtime and per-image initrd.
+    /// External CLI runtime selections still require their own release/source proof.
+    pub legacy_bundle_runtime: Option<LegacyBundleRuntimeProof>,
+    /// Portable overlay evidence must be independently verified before launch.
+    pub legacy_portable_runtime: Option<LegacyPortableRuntimeProof>,
     /// Verified bundle runtime selection. Never inferred from a cache version.
     pub bundle_boot_assets: Option<BundleBootAssetsPin>,
     /// Absolute path to the dm-verity Merkle hash sidecar.
@@ -114,6 +152,15 @@ pub struct VmStartConfig {
     /// runtime metadata so lifecycle operations can reason about the exact
     /// overlay the VM booted with rather than consulting mutable cache state.
     pub runtime_overlay_version: Option<String>,
+    /// Untrusted release inputs. The launch boundary authenticates the archive
+    /// and snapshots the selected boot artifacts before a backend can read them.
+    pub runtime_release_proof: Option<super::runtime_release::RuntimeReleaseProof>,
+    /// Explicit unsigned contributor runtime. Never sufficient for production
+    /// assurance, regardless of cache fingerprints or declared protocol.
+    pub unsigned_runtime_development: bool,
+    /// Digest selected by the checked source resolver. This pins continuity,
+    /// not authority: source admission must independently recheck its bytes.
+    pub source_runtime_archive_sha256: Option<String>,
     /// Nix store revision hash.
     pub revision_hash: String,
     /// Original flake reference (for display / status).
@@ -176,13 +223,17 @@ pub struct VmStartConfig {
     pub tenant_id: Option<String>,
     /// JSON-encoded `SignedExecutionPlan` envelope. Carried as a
     /// `String` so this wire type stays a serde seam with no typed
-    /// coupling to `mvm_core::plan`. **The supervisor
-    /// re-verifies the signature** before trusting any decoded field;
-    /// the host is in the TCB but the supervisor still runs Ed25519
-    /// verification. **Do not log this value** — the envelope may carry
+    /// coupling to `mvm_core::plan`. Legacy supervisor paths trust the
+    /// authorized launcher; decoding this envelope is not signature verification.
+    /// Opted-in caller registration separately re-verifies it against the
+    /// canonical local host public key before installation.
+    /// **Do not log this value** — the envelope may carry
     /// secret bindings, env vars, or policy refs that resolve to
     /// credentials.
     pub plan_json: Option<String>,
+    /// Optional caller registration from the trusted entrypoint admission path.
+    /// This is not producer readiness and is not accepted by warm launches.
+    pub caller_registration: Option<caller_registration::CallerRegistration>,
     /// JSON-encoded `PlanArtifact` (bundle pin)
     /// when `admitted.plan.bundle.is_some()`. `None` when the plan
     /// has no `.mvmpkg` pin (the common case). Same "do not log"
@@ -226,6 +277,27 @@ pub struct VmStartConfig {
     /// Optional host GPU ordinal pinned to this VM. The endpoint exposes the
     /// selected host device as guest ordinal zero and hides every other GPU.
     pub gpu_device: Option<u32>,
+    /// The admission's audit sync, when it is still in flight.
+    ///
+    /// `None` means the admission was durable before this config was built,
+    /// which is what every launch that does not opt in still does. When it is
+    /// set, the VMM may start before the sync finishes, but nothing the plan
+    /// authorizes may run until [`AdmissionDurability::wait`] succeeds: the
+    /// workload runner waits for it immediately before activation, and a
+    /// boot path that has no activation step waits for it before it boots.
+    ///
+    /// [`AdmissionDurability::wait`]: crate::admission_durability::AdmissionDurability::wait
+    pub admission_durability: Option<crate::admission_durability::AdmissionDurability>,
+}
+
+impl VmStartConfig {
+    /// Wait for the admission's audit sync when it is still in flight; see
+    /// [`Self::admission_durability`]. Waiting again once the sync has
+    /// finished costs nothing, so every path that is about to let the
+    /// workload run waits, whether or not an earlier step already did.
+    pub fn wait_for_admission_durability(&self) -> Result<()> {
+        crate::admission_durability::wait_for(self.admission_durability.as_ref())
+    }
 }
 
 /// Envelope carried in the `mvm.verb_grant=<base64(JSON)>` kernel-cmdline token.

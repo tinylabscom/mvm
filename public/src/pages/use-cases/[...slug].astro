@@ -1,0 +1,32 @@
+---
+import { getCollection, render } from "astro:content";
+import BlogLayout from "../../layouts/BlogLayout.astro";
+
+export async function getStaticPaths() {
+  return (await getCollection("useCases")).map(entry => ({
+    params: { slug: entry.id },
+    props: { entry },
+  }));
+}
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+---
+
+<BlogLayout title={entry.data.title} description={entry.data.description}>
+  <article class="blog-article">
+    <header class="blog-article-header">
+      <a class="blog-back-link" href="/use-cases/">← All use cases</a>
+      <p class="blog-eyebrow">{entry.data.team}</p>
+      <h1>{entry.data.title}</h1>
+      <p>{entry.data.description}</p>
+      <div class="blog-tags"><span>{entry.data.outcome}</span></div>
+    </header>
+    <div class="blog-prose">
+      <Content />
+      <h2>Put it into practice</h2>
+      <p><a href={entry.data.guide}>{entry.data.guideLabel} →</a></p>
+      <p>New to mvm? Start with the <a href="/getting-started/quickstart/">quickstart</a>. Review <a href="/reference/platform-support/">platform support</a> and the <a href="/security/claim-ledger/">security claim ledger</a> for the guarantees of your chosen backend and tier.</p>
+      <p><a href="/use-cases/">Explore more use cases →</a></p>
+    </div>
+  </article>
+</BlogLayout>

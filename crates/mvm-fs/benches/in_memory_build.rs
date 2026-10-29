@@ -1,15 +1,24 @@
 //! Criterion benchmarks for the in-memory / streamed build paths.
 
+#[cfg(unix)]
 use std::collections::HashSet;
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::path::Path;
 
+#[cfg(unix)]
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+#[cfg(unix)]
 use mvm_fs::oci::layer::verify_and_unpack_layer_file;
+#[cfg(unix)]
 use mvm_fs::oci::{LayerDescriptor, UnpackOptions};
+#[cfg(unix)]
 use mvm_fs::rootfs::{MaterializeOptions, build_ext4_pure};
+#[cfg(unix)]
 use sha2::Digest;
 
+#[cfg(unix)]
 fn make_fixture_tree(root: &Path, files: usize, file_size: usize) {
     for d in 0..10 {
         std::fs::create_dir_all(root.join(format!("dir{d:02}"))).unwrap();
@@ -21,6 +30,7 @@ fn make_fixture_tree(root: &Path, files: usize, file_size: usize) {
     }
 }
 
+#[cfg(unix)]
 fn bench_build_ext4_pure(c: &mut Criterion) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("rootfs");
@@ -32,6 +42,7 @@ fn bench_build_ext4_pure(c: &mut Criterion) {
     });
 }
 
+#[cfg(unix)]
 fn gzip_tar_layer(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for (name, bytes) in entries {
@@ -48,6 +59,7 @@ fn gzip_tar_layer(entries: &[(&str, &[u8])]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
+#[cfg(unix)]
 fn bench_verify_and_unpack_layer_file(c: &mut Criterion) {
     let layer_bytes = gzip_tar_layer(&[("bench.txt", &[0xabu8; 256 * 1024])]);
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&layer_bytes)));
@@ -84,9 +96,17 @@ fn bench_verify_and_unpack_layer_file(c: &mut Criterion) {
     });
 }
 
+#[cfg(unix)]
 criterion_group!(
     benches,
     bench_build_ext4_pure,
     bench_verify_and_unpack_layer_file
 );
+#[cfg(unix)]
 criterion_main!(benches);
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("host filesystem materialization benchmarks require a Unix host");
+    std::process::exit(1);
+}

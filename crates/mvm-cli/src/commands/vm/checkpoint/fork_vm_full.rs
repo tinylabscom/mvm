@@ -204,6 +204,13 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
                 child.vm_name,
                 child.state_dir,
                 child.cpu_grant,
+                &mvm_backends::fc::ForkRuntimeEvidence {
+                    observation_sha256: &child.content.iter().find(|blob| blob.name == "runtime-artifacts.json")
+                        .context("Firecracker checkpoint has no authenticated runtime evidence; recapture it")?.sha256,
+                    anchors_sha256: &child.content.iter().find(|blob| blob.name == "device-anchors.json")
+                        .context("Firecracker checkpoint has no authenticated device anchors")?.sha256,
+                    reseeded_identity_sha256: child.reseeded_identity_sha256,
+                },
             )
         },
         &anchor,
@@ -314,6 +321,14 @@ struct AdmittedForkChild {
 /// the real shape is baked into the saved machine state and enforced by the VMM
 /// at load time, so these values are claim-8 admission metadata only.
 fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChild> {
+    let anchor = SignedChainAnchor::load().context("loading fork runtime audit chain")?;
+    mvm_runtime::checkpoint::verify_lineage(p.store, p.checkpoint, &anchor)
+        .context("authenticating inherited runtime metadata before admission")?;
+    anyhow::ensure!(
+        p.parent_meta.compute_meta_digest() == p.store.read_meta(p.checkpoint)?.meta_digest,
+        "fork runtime metadata differs from the authenticated checkpoint"
+    );
+    mvm_runtime::checkpoint::verify_checkpoint_runtime(p.store, p.parent_meta)?;
     let restrict_agent_verbs = fork_restrict_agent_verbs(p)?;
     let user_cfg = mvm_core::user_config::load(None);
     // A chunked checkpoint has no contiguous rootfs in its content directory.
@@ -325,6 +340,8 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         .context("creating fork admission materialization")?;
     let (rootfs_blob, recorded_sha) =
         fork_admission_rootfs(p.store, p.parent_meta, scratch.path())?;
+    let inherited_runtime =
+        inherited_runtime_config(p.parent_meta.runtime_launch_binding.as_ref(), &rootfs_blob);
     let parent_agent_verbs = parent_agent_verb_override(p.checkpoint, p.store);
     let parent_bundle =
         mvm_client::admission::InheritedBundle::of_parent_vm(&p.parent_meta.vm_name)?;
@@ -353,8 +370,9 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             // not the parent's: a child admitted under an environment it did
             // not itself load would record a pin nothing here verified.
             kernel_path: None,
-            precomputed_image_sha256: Some(recorded_sha),
+            precomputed_image_sha256: Some(recorded_sha.clone()),
             boot_artifact_identity: None,
+            runtime_config: inherited_runtime.as_ref(),
             cpus: user_cfg.default_cpus,
             mem_mib: user_cfg.default_memory_mib as u64,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -404,6 +422,9 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     let child_plan_json = serde_json::to_string(admission.admitted.signed())
         .expect("admitted plan is always serializable");
     let child_tenant_id = admission.admitted.plan().tenant.0.clone();
+    // Admission just signed this plan; confirm it names this child and the
+    // rootfs being restored before it can become the child's authority.
+    verify_child_plan_binds_restore(admission.admitted.signed(), p.child_vm_name, &recorded_sha)?;
 
     let mint_cfg = mvm_core::vm_backend::VmStartConfig {
         name: p.child_vm_name.to_string(),
@@ -416,6 +437,39 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         admission,
         child_plan_json,
         child_tenant_id,
+    })
+}
+
+fn verify_child_plan_binds_restore(
+    signed: &mvm_core::plan::SignedExecutionPlan,
+    child_vm_name: &str,
+    image_sha256: &str,
+) -> Result<()> {
+    let trusted = mvm_hostd::audit::host_keypair::load_or_init()
+        .context("loading the host signer to verify the child plan")?
+        .verifying_key();
+    mvm_core::plan::verify_restored_child_plan(
+        signed,
+        &trusted,
+        &mvm_core::plan::RestoredChildBinding {
+            vm_name: child_vm_name,
+            image: mvm_core::plan::ImageBinding::Pinned(image_sha256),
+            now: chrono::Utc::now(),
+        },
+    )
+    .context("the admitted child plan does not bind the restore")?;
+    Ok(())
+}
+
+fn inherited_runtime_config(
+    binding: Option<&mvm_core::protocol::runtime_release::RuntimeLaunchBinding>,
+    rootfs: &std::path::Path,
+) -> Option<mvm_core::vm_backend::VmStartConfig> {
+    binding.map(|binding| {
+        let mut config = mvm_core::vm_backend::VmStartConfig::default();
+        binding.apply_to_config(&mut config);
+        config.rootfs_path = rootfs.display().to_string();
+        config
     })
 }
 
@@ -617,9 +671,10 @@ fn stop_fc_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error
 
 /// Record a restored child's runtime metadata (`mode.json`) exactly as a cold
 /// boot does: its own rootfs, the accessibility bit from the guest sidecar the
-/// checkpoint carried beside it, and the parent's runtime overlay version —
-/// plus the device paths its restored VMM still names, which a snapshot of the
-/// child embeds and a fork of that snapshot must remap.
+/// checkpoint carried beside it, and the parent's runtime overlay version and
+/// authenticated runtime launch binding — plus the device paths its restored
+/// VMM still names, which a snapshot of the child embeds and a fork of that
+/// snapshot must remap.
 ///
 /// A step checkpoint of the child resolves its rootfs from this record, so a
 /// child without it answers prompts but can never be checkpointed or replayed
@@ -645,6 +700,7 @@ fn record_fork_runtime_meta(
     let mut meta = runtime_meta::read(child_vm_name)?
         .context("restored child runtime metadata was not written")?;
     meta.runtime_overlay_version = parent.runtime_overlay_version.clone();
+    meta.runtime_launch_binding = parent.runtime_launch_binding.clone();
     meta.restored_device_anchors = runtime_meta::read_restored_device_anchors(&state_dir)?;
     runtime_meta::write(child_vm_name, &meta)?;
     let persisted = runtime_meta::read(child_vm_name)?
@@ -668,7 +724,7 @@ fn deliver_hvf_fork_post_restore(
     let outcome = mvm_vmm::post_restore::signal_post_restore(
         child_vm_name,
         &mvm_vmm::post_restore::VsockPostRestoreSignal::for_resumed_child(token, grant_envelope),
-        mvm_vmm::post_restore::POST_RESTORE_READY_TIMEOUT,
+        mvm_vmm::post_restore::POST_RESTORE_CLAIM_READY_TIMEOUT,
     )
     .with_context(|| format!("sending PostRestore to '{child_vm_name}'"))?;
     anyhow::ensure!(
@@ -748,6 +804,41 @@ mod tests {
     use mvm_contract::plan::{SecretBinding, SecretSource};
     use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta, ROOTFS_BLOB};
     use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
+
+    #[test]
+    fn inherited_legacy_runtime_uses_the_verified_materialized_rootfs() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let config = mvm_runtime::signed_legacy_runtime_fixture(home.path(), home.path(), false);
+        let rootfs = home.path().join("child.ext4");
+        std::fs::copy(&config.rootfs_path, &rootfs).unwrap();
+        let binding = mvm_core::protocol::runtime_release::RuntimeLaunchBinding::LegacyBundle {
+            proof: config.legacy_bundle_runtime.clone().unwrap(),
+            rootfs_path: config.rootfs_path.clone().into(),
+            initramfs_path: config.initrd_path.as_ref().map(std::path::PathBuf::from),
+        };
+        std::fs::remove_file(&config.rootfs_path).unwrap();
+        let inherited = inherited_runtime_config(Some(&binding), &rootfs).unwrap();
+        assert_eq!(inherited.rootfs_path, rootfs.display().to_string());
+        assert!(inherited.runtime_overlay_path.is_none());
+        assert!(inherited.runtime_overlay_version.is_none());
+        assert!(inherited.runtime_release_proof.is_none());
+        assert!(!inherited.unsigned_runtime_development);
+        mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+            &inherited,
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        )
+        .unwrap();
+        std::fs::write(&rootfs, b"changed child").unwrap();
+        assert!(
+            mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+                &inherited,
+                mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn a_restored_child_records_its_own_rootfs_and_overlay() {
@@ -915,12 +1006,62 @@ mod tests {
         assert!(fork_admission_rootfs(&store, &parent, &scratch).is_err());
     }
 
-    /// A vm_full parent checkpoint carrying a real chunked rootfs. The blob has
-    /// to exist: admission *verifies* the recorded digest against the bytes
-    /// rather than trusting it, so a fixture that records a digest without
-    /// storing the chunks fails before it reaches the plan. Admission reads
-    /// only the rootfs, so the record is captured as fs_quick and re-sealed
-    /// as vm_full rather than driving a machine-state capture.
+    struct CapturedParent(std::path::PathBuf);
+
+    impl mvm_vmm::checkpoint::VmFullControl for CapturedParent {
+        fn pause(&self) -> Result<()> {
+            Ok(())
+        }
+        fn resume(&self) -> Result<()> {
+            Ok(())
+        }
+        fn rootfs_path(&self) -> Result<std::path::PathBuf> {
+            Ok(self.0.clone())
+        }
+        fn save_memory(&self, memory: &std::path::Path) -> Result<()> {
+            std::fs::write(memory, b"mock parent memory")?;
+            std::fs::write(
+                memory.with_file_name(mvm_core::checkpoint::HVF_FRAME_BLOB),
+                b"mock HVF frame",
+            )?;
+            Ok(())
+        }
+        fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+            Ok(mvm_vmm::runtime_artifacts::RuntimeArtifacts {
+                kernel: None,
+                initramfs: None,
+                disks: vec![mvm_vmm::runtime_artifacts::RuntimeArtifact {
+                    path: self.0.clone(),
+                    sha256: mvm_core::crypto::image_verify::sha256_file(&self.0)?,
+                }],
+                kernel_cmdline: String::new(),
+                firecracker_drives: None,
+            })
+        }
+        fn extra_content(
+            &self,
+            directory: &std::path::Path,
+        ) -> Result<Vec<mvm_core::checkpoint::ContentBlob>> {
+            let name = mvm_core::checkpoint::HVF_FRAME_BLOB;
+            Ok(vec![mvm_core::checkpoint::ContentBlob {
+                name: name.into(),
+                sha256: mvm_core::crypto::image_verify::sha256_file(&directory.join(name))?,
+            }])
+        }
+        fn device_anchors(&self) -> Result<mvm_core::checkpoint::DeviceAnchors> {
+            Ok(mvm_core::checkpoint::DeviceAnchors {
+                rootfs: self.0.clone(),
+                rootfs_verity: None,
+                config: None,
+                secrets: None,
+                identity: None,
+                vsock: self.0.with_extension("sock"),
+            })
+        }
+    }
+
+    /// Drive the real capture and signed audit paths with an explicit mock HVF
+    /// observation. Admission must verify both the rootfs and the audit anchor.
     fn parent_with_grants(
         store: &CheckpointStore,
         id: &str,
@@ -929,20 +1070,24 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let rootfs = source.path().join(ROOTFS_BLOB);
         std::fs::write(&rootfs, b"fixture rootfs").unwrap();
-        let params = mvm_runtime::checkpoint::CaptureFsQuickParams::builder()
+        let params = mvm_runtime::checkpoint::CaptureVmFullParams::builder()
             .id(CheckpointId::new(id))
             .vm_name("parent-vm".into())
-            .rootfs(rootfs)
             .supervisor_config_digest("d".into())
             .created_unix(1)
-            .quiesced(true)
+            .retain_paused(false)
             .grants(grants)
             .build()
             .unwrap();
-        let mut meta = mvm_runtime::checkpoint::capture_fs_quick(store, params).unwrap();
-        meta.class = CheckpointClass::VmFull;
-        meta.meta_digest = meta.compute_meta_digest();
-        store.write_meta(&meta).unwrap();
+        let meta = mvm_runtime::checkpoint::capture_vm_full(store, params, &CapturedParent(rootfs))
+            .unwrap();
+        let signer = crate::commands::vm::host_signer::load_or_init().unwrap();
+        let emitter = crate::commands::vm::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-fork-parent")
+            .build();
+        mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, &plan, &meta).unwrap();
         meta
     }
 

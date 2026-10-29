@@ -15,8 +15,9 @@ pub use mvm_runtime::sdk_sidecar::SdkSidecarAttachment;
 pub use mvm_runtime::universal_initramfs::attach_universal_initramfs_if_cached;
 
 use crate::launch::runtime_overlay::{
-    RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
-    runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
+    AcquiredRuntimeOverlay, RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams,
+    acquire_runtime_overlay, acquire_runtime_overlay_for_launch, runtime_overlay_acquire_mode,
+    runtime_overlay_source_checkout_root,
 };
 use mvm_runtime::ui;
 
@@ -38,10 +39,29 @@ fn apply_runtime_overlay_artifact(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     artifact: mvm_fs::overlay::RuntimeOverlayArtifact,
 ) {
+    // A layout-only cache hit does not authenticate the archive that produced
+    // it. Never retain a previous selection's proof across replacement.
+    start_config.runtime_release_proof = None;
+    start_config.unsigned_runtime_development = false;
+    start_config.source_runtime_archive_sha256 = None;
+    start_config.legacy_portable_runtime = None;
+    start_config.legacy_bundle_runtime = None;
+    start_config.bundle_boot_assets = None;
     start_config.runtime_overlay_path = Some(artifact.overlay_ext4.display().to_string());
     start_config.runtime_overlay_verity_path = Some(artifact.sidecar.display().to_string());
     start_config.runtime_overlay_version = Some(artifact.version);
     start_config.runtime_overlay_roothash = Some(artifact.roothash);
+}
+
+fn apply_acquired_runtime_overlay(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    acquired: AcquiredRuntimeOverlay,
+) {
+    apply_runtime_overlay_artifact(start_config, acquired.artifact);
+    start_config.runtime_release_proof = acquired.release_proof;
+    // A request for development admission, never authority to bypass it.
+    start_config.unsigned_runtime_development = acquired.unsigned_source;
+    start_config.source_runtime_archive_sha256 = acquired.source_archive_sha256;
 }
 
 /// Attach the verity-sealed runtime overlay by
@@ -68,9 +88,9 @@ pub fn attach_runtime_overlay(
     if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&hypervisor) {
         return Ok(());
     }
-    match mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(resolver, arch) {
+    match acquire_runtime_overlay_for_launch(resolver, arch) {
         Ok(a) => {
-            apply_runtime_overlay_artifact(start_config, a);
+            apply_acquired_runtime_overlay(start_config, a);
             Ok(())
         }
         Err(e) => {
@@ -123,6 +143,18 @@ pub fn attach_runtime_overlay_if_cached_version(
     expected_version: Option<&str>,
     pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<()> {
+    let mut selected = start_config.clone();
+    attach_runtime_overlay_selection(&mut selected, hypervisor, expected_version, pair)?;
+    *start_config = selected;
+    Ok(())
+}
+
+fn attach_runtime_overlay_selection(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+    expected_version: Option<&str>,
+    pair: Option<&mut PairArtifactSource<'_>>,
+) -> Result<()> {
     if super::bundle_runtime::attach_if_installed_bundle(start_config, hypervisor)? {
         return Ok(());
     }
@@ -130,6 +162,18 @@ pub fn attach_runtime_overlay_if_cached_version(
         start_config.bundle_boot_assets.is_none(),
         "bundle boot-assets pin has no verified installed bundle; refusing runtime fallback"
     );
+    if start_config.legacy_portable_runtime.is_some()
+        || start_config.legacy_bundle_runtime.is_some()
+        || start_config.runtime_release_proof.is_some()
+        || start_config.source_runtime_archive_sha256.is_some()
+        || start_config.unsigned_runtime_development
+    {
+        mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+            start_config,
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        )?;
+        return Ok(());
+    }
     // The wasm backend runs a WASI module directly; it has no guest agent
     // runtime overlay to attach.
     if hypervisor == "wasm" {
@@ -327,7 +371,7 @@ fn sidecar_provenance_warning(origin: &str, marker: &std::path::Path) -> String 
         "SDK sidecar {origin}, so `libmvm_host_services.so` does not carry changes to \
          crates/mvm-host-services in this checkout. Host-service calls from the guest use \
          the verbs it shipped with; one added here answers `unknown method`. Run \
-         `mvmctl build sdk-sidecar build`, which repacks both libc variants on the host from \
+         `mvmctl dev sdk-sidecar build`, which repacks both libc variants on the host from \
          this checkout's guest runtime. Provenance marker: {}.",
         marker.display()
     )
@@ -374,7 +418,7 @@ mod sdk_sidecar_host_resolution_tests {
         // The remedy packs on the host from the guest runtime, so it needs
         // neither an image checkout nor the builder VM.
         assert!(
-            warning.contains("`mvmctl build sdk-sidecar build`"),
+            warning.contains("`mvmctl dev sdk-sidecar build`"),
             "{warning}"
         );
         assert!(!warning.contains("MVM_IMAGES_DIR"), "{warning}");
@@ -727,6 +771,93 @@ mod sdk_sidecar_host_resolution_tests {
 #[cfg(test)]
 mod runtime_overlay_attach_tests {
     use super::*;
+
+    fn mock_proof() -> mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+        mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+            archive: "/mock/archive".into(),
+            checksum: "/mock/checksum".into(),
+            signature_bundle: "/mock/signature".into(),
+            archive_sha256: "a".repeat(64),
+            version: "selected-release".into(),
+            arch: mvm_core::arch::GuestArch::host(),
+        }
+    }
+
+    fn mock_artifact() -> mvm_fs::overlay::RuntimeOverlayArtifact {
+        mvm_fs::overlay::RuntimeOverlayArtifact {
+            overlay_ext4: "/mock/overlay".into(),
+            sidecar: "/mock/verity".into(),
+            roothash_file: "/mock/roothash".into(),
+            roothash: "b".repeat(64),
+            arch: mvm_core::arch::GuestArch::host().to_string(),
+            version: "selected-release".into(),
+        }
+    }
+
+    #[test]
+    fn selected_runtime_proof_handoff_is_not_cryptographic_verification() {
+        let mut config = VmStartConfig::default();
+        apply_acquired_runtime_overlay(
+            &mut config,
+            AcquiredRuntimeOverlay {
+                artifact: mock_artifact(),
+                release_proof: Some(mock_proof()),
+                unsigned_source: false,
+                source_archive_sha256: None,
+            },
+        );
+        let proof = config.runtime_release_proof.as_ref().unwrap();
+        assert_eq!(proof.archive, std::path::Path::new("/mock/archive"));
+        assert_eq!(
+            config.runtime_overlay_version.as_deref(),
+            Some("selected-release")
+        );
+        assert!(!config.unsigned_runtime_development);
+        // Synthetic locator fixture only: forwarding never makes it verified.
+        assert!(
+            mvm_build::guest_runtime::evidence::verify_runtime_release_proof(
+                proof,
+                "selected-release",
+                GuestArch::host(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn replacing_selected_runtime_clears_stale_proof_and_development_request() {
+        let mut config = VmStartConfig {
+            runtime_release_proof: Some(mock_proof()),
+            unsigned_runtime_development: true,
+            source_runtime_archive_sha256: Some("c".repeat(64)),
+            ..Default::default()
+        };
+        apply_runtime_overlay_artifact(&mut config, mock_artifact());
+        assert!(config.runtime_release_proof.is_none());
+        assert!(!config.unsigned_runtime_development);
+        assert!(config.source_runtime_archive_sha256.is_none());
+    }
+
+    #[test]
+    fn source_runtime_handoff_requests_development_without_inventing_proof() {
+        let mut config = VmStartConfig {
+            runtime_release_proof: Some(mock_proof()),
+            ..Default::default()
+        };
+        apply_acquired_runtime_overlay(
+            &mut config,
+            AcquiredRuntimeOverlay {
+                artifact: mock_artifact(),
+                release_proof: None,
+                unsigned_source: true,
+                source_archive_sha256: Some("c".repeat(64)),
+            },
+        );
+        assert!(config.runtime_release_proof.is_none());
+        assert!(config.unsigned_runtime_development);
+        assert_eq!(config.source_runtime_archive_sha256, Some("c".repeat(64)));
+    }
+
     use crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV;
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
@@ -766,16 +897,31 @@ mod runtime_overlay_attach_tests {
     }
 
     /// Stage a complete overlay cache entry (the four files the resolver
-    /// validates) in the layout `resolve` expects.
+    /// validates), backed by the ordinary checked source archive.
     fn seed_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
+        let Some(workspace) = runtime_overlay_source_checkout_root() else {
+            seed_layout_only_cache(cache, version, arch);
+            return;
+        };
+        let runtime = mvm_build::guest_runtime::test_support::write_source_cache_fixture(
+            cache, &workspace, version, arch,
+        )
+        .unwrap();
+        mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime(
+            cache, version, arch, &runtime,
+        )
+        .unwrap();
+    }
+
+    fn seed_layout_only_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
         let layout = RuntimeOverlayResolver::new(cache.to_path_buf(), version.to_string())
             .layout(&arch.to_string());
         std::fs::create_dir_all(&layout.artifact_dir).unwrap();
-        let overlay_ext4 = valid_overlay_ext4_bytes(version, true);
+        let overlay = valid_overlay_ext4_bytes(version, true);
         let sidecar = b"verity-bytes";
         let roothash = format!("{}\n", "a".repeat(64));
         let version_text = format!("{version}\n");
-        std::fs::write(&layout.overlay_ext4, &overlay_ext4).unwrap();
+        std::fs::write(&layout.overlay_ext4, &overlay).unwrap();
         std::fs::write(&layout.sidecar, sidecar).unwrap();
         std::fs::write(&layout.roothash_file, &roothash).unwrap();
         std::fs::write(&layout.version_file, &version_text).unwrap();
@@ -783,27 +929,13 @@ mod runtime_overlay_attach_tests {
             &layout.checksum_manifest_file,
             format!(
                 "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
-                sha256_hex(&overlay_ext4),
+                sha256_hex(&overlay),
                 sha256_hex(sidecar),
                 sha256_hex(roothash.as_bytes()),
                 sha256_hex(version_text.as_bytes()),
             ),
         )
         .unwrap();
-        if let Some(workspace_root) =
-            crate::launch::runtime_overlay::runtime_overlay_source_checkout_root()
-        {
-            let fingerprint =
-                mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
-                    &workspace_root,
-                )
-                .expect("compute runtime-overlay source fingerprint");
-            std::fs::write(
-                &layout.local_source_fingerprint_file,
-                format!("{fingerprint}\n"),
-            )
-            .unwrap();
-        }
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -811,6 +943,92 @@ mod runtime_overlay_attach_tests {
         hex::encode(digest)
     }
 
+    #[test]
+    fn layout_only_cache_does_not_supply_runtime_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_layout_only_cache(dir.path(), version, arch);
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), version.into());
+        assert!(resolver.resolve(&arch.to_string()).is_ok());
+        let mut config = VmStartConfig::default();
+        assert!(attach_runtime_overlay(&mut config, "firecracker", &resolver, arch).is_err());
+        assert!(config.runtime_overlay_path.is_none());
+        assert!(config.runtime_release_proof.is_none());
+        assert!(!config.unsigned_runtime_development);
+    }
+
+    #[cfg(not(feature = "release-channel"))]
+    #[test]
+    fn rejected_release_does_not_fall_back_to_a_checked_source_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_cache(dir.path(), version, arch);
+        let release = dir.path().join("guest-runtime/releases").join(version);
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::write(
+            release.join(format!("mvm-guest-bins-v{version}.tar.gz")),
+            b"unauthenticated release",
+        )
+        .unwrap();
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), version.into());
+        let mut config = VmStartConfig::default();
+        assert!(attach_runtime_overlay(&mut config, "firecracker", &resolver, arch).is_err());
+        assert!(config.runtime_overlay_path.is_none());
+        assert!(!config.unsigned_runtime_development);
+    }
+
+    #[test]
+    fn an_unverified_bundle_pin_is_rejected_before_ambient_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let mut config = VmStartConfig {
+            bundle_boot_assets: Some(mvm_core::vm_backend::BundleBootAssetsPin {
+                manifest_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"set"),
+                arch: GuestArch::host(),
+                initrd_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"initrd"),
+            }),
+            runtime_overlay_path: Some("/selected/bundle/overlay".into()),
+            ..Default::default()
+        };
+        let error = attach_runtime_overlay_if_cached(&mut config, "firecracker").unwrap_err();
+        assert!(error.to_string().contains("no verified installed bundle"));
+        assert_eq!(
+            config.runtime_overlay_path.as_deref(),
+            Some("/selected/bundle/overlay")
+        );
+        assert!(!dir.path().join("cache").exists());
+    }
+
+    #[cfg(feature = "release-channel")]
+    #[test]
+    fn source_build_override_cannot_authorize_an_unsigned_release_channel_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "build");
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_layout_only_cache(dir.path(), version, arch);
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), version.into());
+        let mut config = VmStartConfig::default();
+        let error =
+            attach_runtime_overlay(&mut config, "firecracker", &resolver, arch).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("compiled release channel refuses")
+        );
+        assert!(!config.unsigned_runtime_development);
+    }
+
+    #[cfg(not(feature = "release-channel"))]
     #[test]
     fn firecracker_with_cached_overlay_populates_all_three_fields() {
         let dir = tempfile::tempdir().unwrap();
@@ -831,11 +1049,20 @@ mod runtime_overlay_attach_tests {
         assert!(sc.runtime_overlay_verity_path.is_some(), "verity path set");
         assert_eq!(
             sc.runtime_overlay_roothash.as_deref(),
-            Some("a".repeat(64).as_str())
+            Some(
+                resolver
+                    .resolve(&arch.to_string())
+                    .unwrap()
+                    .roothash
+                    .as_str()
+            )
         );
+        assert!(sc.unsigned_runtime_development);
+        assert!(sc.runtime_release_proof.is_none());
         assert_eq!(sc.runtime_overlay_version.as_deref(), Some(ver));
     }
 
+    #[cfg(not(feature = "release-channel"))]
     #[test]
     fn hvf_with_cached_overlay_populates_all_three_fields() {
         let dir = tempfile::tempdir().unwrap();
@@ -858,6 +1085,7 @@ mod runtime_overlay_attach_tests {
         assert_eq!(sc.runtime_overlay_version.as_deref(), Some(ver));
     }
 
+    #[cfg(not(feature = "release-channel"))]
     #[test]
     fn libkrun_with_cached_overlay_populates_all_three_fields() {
         let dir = tempfile::tempdir().unwrap();
@@ -884,6 +1112,7 @@ mod runtime_overlay_attach_tests {
     /// initramfs, the same activation, and the same overlay-contract gate. A
     /// launch that attached no overlay reached that gate with no egress client
     /// and failed activation on any boot that admitted egress.
+    #[cfg(not(feature = "release-channel"))]
     #[test]
     fn apple_container_with_cached_overlay_populates_all_three_fields() {
         let dir = tempfile::tempdir().unwrap();
@@ -1000,6 +1229,7 @@ mod runtime_overlay_attach_tests {
         assert!(err.to_string().contains("libkrun"));
     }
 
+    #[cfg(not(feature = "release-channel"))]
     #[test]
     fn qemu_with_cached_overlay_populates_all_three_fields() {
         let dir = tempfile::tempdir().unwrap();
@@ -1107,6 +1337,7 @@ mod runtime_overlay_attach_tests {
         );
     }
 
+    #[cfg(not(feature = "release-channel"))]
     #[test]
     fn attach_runtime_overlay_if_cached_version_uses_requested_cached_version() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1188,6 +1419,7 @@ mod runtime_overlay_attach_tests {
         );
     }
 
+    #[cfg(not(feature = "release-channel"))]
     #[test]
     fn attach_runtime_overlay_if_cached_prefers_current_host_version_for_plain_boot() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1226,6 +1458,7 @@ mod runtime_overlay_attach_tests {
         );
     }
 
+    #[cfg(not(feature = "release-channel"))]
     #[test]
     fn attach_runtime_overlay_if_cached_ignores_stale_recorded_version_on_plain_boot() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

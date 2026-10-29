@@ -130,17 +130,38 @@ pub enum LaunchLane {
     /// A claimed warm standby — kept as a comparison, never folded into a
     /// cold number.
     WarmClaim,
+    /// A claimed warm standby for a `--flake` launch; the child boots the
+    /// built slot's rootfs.
+    WarmClaimFlake,
+    /// A claimed warm standby for a `--manifest` launch; the child boots the
+    /// built slot's rootfs.
+    WarmClaimManifest,
+    /// A claimed warm standby for a signed `.mvmpkg` that pins no boot
+    /// assets: the archive is verified against the publisher trust store on
+    /// every run, then the claim runs.
+    WarmClaimBundle,
+    /// A claimed warm standby whose parent booted the egress client; the
+    /// measured launch names the hosts it may reach.
+    WarmClaimEgress,
+    /// A claimed warm standby whose read-only `--mount` images are attached
+    /// to the claimed child from the mount-image cache.
+    WarmClaimMount,
 }
 
 impl LaunchLane {
     /// Every lane, in contract order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 11] = [
         Self::PreparedCold,
         Self::PreparedColdMountHit,
         Self::PreparedColdArtifact,
         Self::MountMiss,
         Self::ArtifactMiss,
         Self::WarmClaim,
+        Self::WarmClaimFlake,
+        Self::WarmClaimManifest,
+        Self::WarmClaimBundle,
+        Self::WarmClaimEgress,
+        Self::WarmClaimMount,
     ];
 
     #[must_use]
@@ -152,6 +173,11 @@ impl LaunchLane {
             Self::MountMiss => "mount_miss",
             Self::ArtifactMiss => "artifact_miss",
             Self::WarmClaim => "warm_claim",
+            Self::WarmClaimFlake => "warm_claim_flake",
+            Self::WarmClaimManifest => "warm_claim_manifest",
+            Self::WarmClaimBundle => "warm_claim_bundle",
+            Self::WarmClaimEgress => "warm_claim_egress",
+            Self::WarmClaimMount => "warm_claim_mount",
         }
     }
 
@@ -175,6 +201,21 @@ impl LaunchLane {
             Self::WarmClaim => {
                 "A claimed warm standby — a comparison point, never folded into a cold number."
             }
+            Self::WarmClaimFlake => {
+                "A claimed warm standby for a --flake launch; the child boots the built slot's rootfs."
+            }
+            Self::WarmClaimManifest => {
+                "A claimed warm standby for a --manifest launch; the child boots the built slot's rootfs."
+            }
+            Self::WarmClaimBundle => {
+                "A claimed warm standby for a signed .mvmpkg that pins no boot assets: trust-store verification on every run, then the claim."
+            }
+            Self::WarmClaimEgress => {
+                "A claimed warm standby whose parent booted the egress client; the measured launch names the hosts it may reach."
+            }
+            Self::WarmClaimMount => {
+                "A claimed warm standby whose read-only --mount images are attached to the child from the mount-image cache."
+            }
         }
     }
 
@@ -193,7 +234,12 @@ impl LaunchLane {
                     hard_max_ms: Some(PREPARED_COLD_HARD_MAX_MS),
                 }
             }
-            Self::WarmClaim => LaneBudgets {
+            Self::WarmClaim
+            | Self::WarmClaimFlake
+            | Self::WarmClaimManifest
+            | Self::WarmClaimBundle
+            | Self::WarmClaimEgress
+            | Self::WarmClaimMount => LaneBudgets {
                 p50_ms: Some(WARM_CLAIM_P50_BUDGET_MS),
                 p95_ms: None,
                 p99_ms: Some(WARM_CLAIM_P99_BUDGET_MS),
@@ -220,14 +266,46 @@ impl LaunchLane {
         self.budgets().hard_max_ms.is_some()
     }
 
+    /// Whether this lane measures a claimed warm standby rather than a cold
+    /// boot. The benchmark waits for an idle standby before every sample in
+    /// such a lane, because a claimed standby's replacement takes seconds to
+    /// become ready and a sample taken before then boots cold and is refused.
+    #[must_use]
+    pub const fn is_warm_claim(self) -> bool {
+        match self {
+            Self::WarmClaim
+            | Self::WarmClaimFlake
+            | Self::WarmClaimManifest
+            | Self::WarmClaimBundle
+            | Self::WarmClaimEgress
+            | Self::WarmClaimMount => true,
+            Self::PreparedCold
+            | Self::PreparedColdMountHit
+            | Self::PreparedColdArtifact
+            | Self::MountMiss
+            | Self::ArtifactMiss => false,
+        }
+    }
+
     /// What the per-sample ceiling promises, in the words the report and the
     /// summary print beside it.
     const fn hard_ceiling_remark(self) -> &'static str {
         match self {
-            Self::WarmClaim => {
+            Self::WarmClaim
+            | Self::WarmClaimFlake
+            | Self::WarmClaimManifest
+            | Self::WarmClaimBundle
+            | Self::WarmClaimEgress
+            | Self::WarmClaimMount => {
                 "Every warm claim must reach authenticated command dispatch in under"
             }
-            _ => "Every prepared boot must reach authenticated command dispatch in under",
+            Self::PreparedCold
+            | Self::PreparedColdMountHit
+            | Self::PreparedColdArtifact
+            | Self::MountMiss
+            | Self::ArtifactMiss => {
+                "Every prepared boot must reach authenticated command dispatch in under"
+            }
         }
     }
 }
@@ -427,7 +505,10 @@ pub fn validate_matrix_report(report: &ColdLaunchReport) -> Result<(), LaneViola
         validate_lane(report.lane, &sample_to_launch_sample(sample))?;
     }
     let canonical = build_cold_launch_report(report.lane, report.warmup, report.raw.clone());
-    if report.stats != canonical.stats || report.hard_requirement != canonical.hard_requirement {
+    if report.stats != canonical.stats
+        || report.hard_requirement != canonical.hard_requirement
+        || report.startup_requirement != canonical.startup_requirement
+    {
         return Err(LaneViolation::NonCanonicalSummary);
     }
     validate_hard_boot_requirement(report)?;
@@ -469,6 +550,29 @@ pub fn validate_hard_boot_requirement(report: &ColdLaunchReport) -> Result<(), L
     };
     if let Some(found_ms) = requirement.observed_max_ms {
         validate_hard_boot_timing(report.lane, found_ms)?;
+    }
+
+    // The startup-from-invocation ceiling: a launch can clear the dispatch
+    // window while the caller waited far longer. Validate the stored
+    // requirement matches what the raw samples produce, then enforce it.
+    let startup_max_ms = report
+        .raw
+        .iter()
+        .filter_map(|s| s.phases.startup_ms)
+        .reduce(f64::max);
+    let expected_startup = HardBootRequirement::startup_for_lane(report.lane, startup_max_ms);
+    if report.startup_requirement != expected_startup {
+        return Err(LaneViolation::NonCanonicalSummary);
+    }
+    if let Some(startup) = report.startup_requirement.as_ref()
+        && let Some(found_ms) = startup.observed_max_ms
+        && found_ms >= STARTUP_HARD_MAX_MS
+    {
+        return Err(LaneViolation::StartupCeilingExceeded {
+            lane: report.lane,
+            found_ms,
+            limit_ms: STARTUP_HARD_MAX_MS,
+        });
     }
     Ok(())
 }
@@ -642,19 +746,82 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
             }
             require_cold(lane, sample)
         }
-        LaunchLane::WarmClaim => {
-            if !work.warm_claim || sample.launch_mode != LaunchMode::Warm {
+        LaunchLane::WarmClaim => require_warm_claim(lane, sample),
+        LaunchLane::WarmClaimFlake | LaunchLane::WarmClaimManifest => {
+            // Both sources resolve to a built template slot, so the claimed
+            // child's recorded rootfs is the shape evidence either way; what
+            // distinguishes the two lanes is the warm source and launch flag
+            // the measured argv carries.
+            require_warm_claim(lane, sample)?;
+            if !boots_template_slot(sample) {
                 return Err(LaneViolation::MissingWork {
                     lane,
-                    expected: "warm_claim",
+                    expected: "template_slot_rootfs",
                 });
             }
-            if sample.warm_first_command_memory.is_none() {
-                return Err(LaneViolation::MissingWarmMemory);
+            Ok(())
+        }
+        LaunchLane::WarmClaimBundle => {
+            // The archive's trust-store verification precedes the claim on
+            // every run; a sample without it named no archive.
+            require_warm_claim(lane, sample)?;
+            if work.bundle_verify_us.is_none() {
+                return Err(LaneViolation::MissingWork {
+                    lane,
+                    expected: "bundle_verify",
+                });
             }
-            require_startup_below_ceiling(lane, sample)
+            Ok(())
+        }
+        LaunchLane::WarmClaimEgress => {
+            // The sample records the claim but not the launch's egress
+            // policy: the shape is the measured launch's `--allow-host`, the
+            // way `warm_claim`'s shape is its `--image`. The claim itself is
+            // what this gate can and does prove.
+            require_warm_claim(lane, sample)
+        }
+        LaunchLane::WarmClaimMount => {
+            // A claim that materialized a mount image measured a cold mount
+            // cache, not this lane; the lookup span is the positive evidence
+            // that the claimed child had mount images to attach.
+            forbid(vec!["mount_materialize"])?;
+            require_warm_claim(lane, sample)?;
+            if sample.sub_phases.mount_cache_lookup_ms.is_none() {
+                return Err(LaneViolation::MissingWork {
+                    lane,
+                    expected: "mount_cache_lookup",
+                });
+            }
+            Ok(())
         }
     }
+}
+
+/// The requirement every warm lane shares: the launch claimed a standby
+/// (flag and mode are independent signals, so one going missing cannot pass
+/// the other), recorded whole-VMM memory evidence for the first command, and
+/// reached the guest below the ceiling from invocation.
+fn require_warm_claim(lane: LaunchLane, sample: &LaunchSample) -> Result<(), LaneViolation> {
+    if !sample.work.warm_claim || sample.launch_mode != LaunchMode::Warm {
+        return Err(LaneViolation::MissingWork {
+            lane,
+            expected: "warm_claim",
+        });
+    }
+    if sample.warm_first_command_memory.is_none() {
+        return Err(LaneViolation::MissingWarmMemory);
+    }
+    require_startup_below_ceiling(lane, sample)
+}
+
+/// Whether the launch booted a built template slot: a `--flake` or
+/// `--manifest` source resolves into the slot store, while a registry or
+/// bundled image's rootfs lives in the image caches. The recorded rootfs
+/// path is what the sample carries to tell those apart.
+fn boots_template_slot(sample: &LaunchSample) -> bool {
+    sample.artifacts.rootfs.as_deref().is_some_and(|rootfs| {
+        std::path::Path::new(rootfs).starts_with(mvm_core::template::templates_base_dir())
+    })
 }
 
 /// The dispatch window starts at admission, so a launch can clear it while the
@@ -870,6 +1037,7 @@ impl SpanStats {
 #[serde(rename_all = "snake_case")]
 pub enum TimingMetric {
     DispatchWindowMs,
+    StartupMs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -890,8 +1058,8 @@ pub struct HardBootRequirement {
 }
 
 impl HardBootRequirement {
-    /// The requirement `lane` is held to, or `None` for a lane with no
-    /// per-sample ceiling.
+    /// The dispatch-window requirement `lane` is held to, or `None` for a
+    /// lane with no per-sample ceiling.
     fn for_lane(lane: LaunchLane, observed_max_ms: Option<f64>) -> Option<Self> {
         let limit_ms = lane.budgets().hard_max_ms?;
         Some(Self {
@@ -901,6 +1069,24 @@ impl HardBootRequirement {
             observed_max_ms,
             met: observed_max_ms.is_some_and(|value| value < limit_ms),
             remark: format!("{} {limit_ms:.0} ms.", lane.hard_ceiling_remark()),
+        })
+    }
+
+    /// The startup-from-invocation requirement for lanes that enforce one,
+    /// or `None` for lanes that do not.
+    fn startup_for_lane(lane: LaunchLane, observed_max_ms: Option<f64>) -> Option<Self> {
+        // Only lanes with a dispatch ceiling also carry a startup ceiling.
+        let _ = lane.budgets().hard_max_ms?;
+        Some(Self {
+            metric: TimingMetric::StartupMs,
+            comparison: RequirementComparison::LessThan,
+            limit_ms: STARTUP_HARD_MAX_MS,
+            observed_max_ms,
+            met: observed_max_ms.is_some_and(|value| value < STARTUP_HARD_MAX_MS),
+            remark: format!(
+                "Every prepared or warm sample must reach the guest in under {:.0} ms from invocation.",
+                STARTUP_HARD_MAX_MS
+            ),
         })
     }
 }
@@ -965,9 +1151,12 @@ pub struct ColdLaunchReport {
     pub lane: LaunchLane,
     pub warmup: u32,
     pub stats: LaneStats,
-    /// Present on lanes governed by a strict per-sample ceiling.
+    /// Present on lanes governed by a strict per-sample dispatch ceiling.
     #[serde(default)]
     pub hard_requirement: Option<HardBootRequirement>,
+    /// Present on lanes governed by the startup-from-invocation ceiling.
+    #[serde(default)]
+    pub startup_requirement: Option<HardBootRequirement>,
     pub raw: Vec<ColdLaunchSample>,
 }
 
@@ -1013,6 +1202,11 @@ pub fn build_cold_launch_report(
     };
     let dispatch_window_ms = col(|s| s.phases.dispatch_window_ms());
     let hard_requirement = HardBootRequirement::for_lane(lane, dispatch_window_ms.max);
+    let startup_max_ms = raw
+        .iter()
+        .filter_map(|s| s.phases.startup_ms)
+        .reduce(f64::max);
+    let startup_requirement = HardBootRequirement::startup_for_lane(lane, startup_max_ms);
     ColdLaunchReport {
         schema_version: COLD_LAUNCH_SCHEMA_VERSION,
         lane,
@@ -1056,6 +1250,7 @@ pub fn build_cold_launch_report(
             }),
         },
         hard_requirement,
+        startup_requirement,
         raw,
     }
 }
@@ -1513,6 +1708,157 @@ mod tests {
         );
         sample.warm_first_command_memory = Some(warm_memory());
         assert_eq!(validate_lane(LaunchLane::WarmClaim, &sample), Ok(()));
+    }
+
+    /// A warm sample of any shape: claimed, mode-marked, and carrying the
+    /// first-command memory evidence every warm lane requires.
+    fn warm_launch_sample() -> LaunchSample {
+        let mut sample = launch_sample();
+        sample.work.warm_claim = true;
+        sample.launch_mode = LaunchMode::Warm;
+        sample.warm_first_command_memory = Some(warm_memory());
+        sample
+    }
+
+    /// The rootfs a `--flake` or `--manifest` launch records: the built
+    /// slot's revision directory inside the template store.
+    fn template_rootfs() -> String {
+        format!(
+            "{}/{}/artifacts/revisions/{}/rootfs.ext4",
+            mvm_core::template::templates_base_dir(),
+            "b".repeat(64),
+            "c".repeat(64)
+        )
+    }
+
+    #[test]
+    fn warm_shape_lanes_share_the_warm_claim_budget_and_ceiling() {
+        for lane in [
+            LaunchLane::WarmClaimFlake,
+            LaunchLane::WarmClaimManifest,
+            LaunchLane::WarmClaimBundle,
+            LaunchLane::WarmClaimEgress,
+            LaunchLane::WarmClaimMount,
+        ] {
+            assert_eq!(
+                lane.budgets(),
+                LaunchLane::WarmClaim.budgets(),
+                "{}",
+                lane.as_str()
+            );
+            assert!(lane.has_hard_boot_ceiling(), "{}", lane.as_str());
+            assert!(lane.is_warm_claim(), "{}", lane.as_str());
+        }
+        for lane in [
+            LaunchLane::PreparedCold,
+            LaunchLane::PreparedColdMountHit,
+            LaunchLane::PreparedColdArtifact,
+            LaunchLane::MountMiss,
+            LaunchLane::ArtifactMiss,
+        ] {
+            assert!(!lane.is_warm_claim(), "{}", lane.as_str());
+        }
+    }
+
+    #[test]
+    fn template_warm_lanes_require_the_claimed_child_to_boot_a_slot_rootfs() {
+        for lane in [LaunchLane::WarmClaimFlake, LaunchLane::WarmClaimManifest] {
+            let mut sample = warm_launch_sample();
+            sample.artifacts.rootfs = Some(template_rootfs());
+            assert_eq!(validate_lane(lane, &sample), Ok(()), "{}", lane.as_str());
+
+            // A registry image's rootfs lives in the image cache, not the
+            // slot store: labeling it as a template claim must not pass.
+            sample.artifacts.rootfs = Some(
+                mvm_core::config::oci_cache_dir()
+                    .join("sha256/ab/rootfs.ext4")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            assert_eq!(
+                validate_lane(lane, &sample),
+                Err(LaneViolation::MissingWork {
+                    lane,
+                    expected: "template_slot_rootfs",
+                }),
+                "{}",
+                lane.as_str()
+            );
+
+            // The launch mode is an independent signal: a cold launch of a
+            // slot is not a warm claim of one.
+            let mut cold = warm_launch_sample();
+            cold.artifacts.rootfs = Some(template_rootfs());
+            cold.launch_mode = LaunchMode::Cold;
+            cold.work.warm_claim = false;
+            assert_eq!(
+                validate_lane(lane, &cold),
+                Err(LaneViolation::MissingWork {
+                    lane,
+                    expected: "warm_claim",
+                }),
+                "{}",
+                lane.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn the_bundle_warm_lane_requires_archive_verification() {
+        let mut sample = warm_launch_sample();
+        assert_eq!(
+            validate_lane(LaunchLane::WarmClaimBundle, &sample),
+            Err(LaneViolation::MissingWork {
+                lane: LaunchLane::WarmClaimBundle,
+                expected: "bundle_verify",
+            })
+        );
+        sample.work.bundle_verify_us = Some(12_500);
+        assert_eq!(validate_lane(LaunchLane::WarmClaimBundle, &sample), Ok(()));
+    }
+
+    #[test]
+    fn the_mount_warm_lane_requires_a_cache_hit_and_refuses_materialization() {
+        let mut sample = warm_launch_sample();
+        // No mount evidence at all: the claim carried no mount images.
+        assert_eq!(
+            validate_lane(LaunchLane::WarmClaimMount, &sample),
+            Err(LaneViolation::MissingWork {
+                lane: LaunchLane::WarmClaimMount,
+                expected: "mount_cache_lookup",
+            })
+        );
+        sample.sub_phases.mount_cache_lookup_ms = Some(0.8);
+        assert_eq!(validate_lane(LaunchLane::WarmClaimMount, &sample), Ok(()));
+
+        // A lookup that missed and materialized during the measured launch
+        // measured a cold mount cache, whatever the claim did afterwards.
+        sample.work.mount_materialize = true;
+        assert_eq!(
+            validate_lane(LaunchLane::WarmClaimMount, &sample),
+            Err(LaneViolation::ForbiddenWork {
+                lane: LaunchLane::WarmClaimMount,
+                performed: vec!["mount_materialize"],
+            })
+        );
+    }
+
+    #[test]
+    fn the_egress_warm_lane_gates_the_claim_itself() {
+        // The sample records no egress policy: the lane's shape is the
+        // measured launch's `--allow-host`, and the gate holds the claim to
+        // the same bar as every warm lane.
+        assert_eq!(
+            validate_lane(LaunchLane::WarmClaimEgress, &warm_launch_sample()),
+            Ok(())
+        );
+        let mut cold = warm_launch_sample();
+        cold.launch_mode = LaunchMode::Cold;
+        cold.work.warm_claim = false;
+        assert!(matches!(
+            validate_lane(LaunchLane::WarmClaimEgress, &cold),
+            Err(LaneViolation::MissingWork { .. })
+        ));
     }
 
     #[test]
@@ -2053,5 +2399,37 @@ mod tests {
         assert_eq!(LaunchLane::MountMiss.as_str(), "mount_miss");
         assert_eq!(LaunchLane::ArtifactMiss.as_str(), "artifact_miss");
         assert_eq!(LaunchLane::WarmClaim.as_str(), "warm_claim");
+        assert_eq!(LaunchLane::WarmClaimFlake.as_str(), "warm_claim_flake");
+        assert_eq!(
+            LaunchLane::WarmClaimManifest.as_str(),
+            "warm_claim_manifest"
+        );
+        assert_eq!(LaunchLane::WarmClaimBundle.as_str(), "warm_claim_bundle");
+        assert_eq!(LaunchLane::WarmClaimEgress.as_str(), "warm_claim_egress");
+        assert_eq!(LaunchLane::WarmClaimMount.as_str(), "warm_claim_mount");
+    }
+
+    /// The lane set is the wire contract reports are published under: a lane
+    /// added without a name here is invisible, and one removed strands every
+    /// stored report that names it.
+    #[test]
+    fn the_lane_set_is_exactly_the_contracted_eleven() {
+        assert_eq!(LaunchLane::ALL.len(), 11);
+        let names: Vec<&str> = LaunchLane::ALL.iter().map(|lane| lane.as_str()).collect();
+        for expected in [
+            "prepared_cold",
+            "prepared_cold_mount_hit",
+            "prepared_cold_artifact",
+            "mount_miss",
+            "artifact_miss",
+            "warm_claim",
+            "warm_claim_flake",
+            "warm_claim_manifest",
+            "warm_claim_bundle",
+            "warm_claim_egress",
+            "warm_claim_mount",
+        ] {
+            assert!(names.contains(&expected), "missing lane {expected}");
+        }
     }
 }

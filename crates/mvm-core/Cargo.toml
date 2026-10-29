@@ -13,9 +13,12 @@ authors.workspace = true
 mvm-contract = { workspace = true, default-features = false, features = ["protocol", "volume"] }
 anyhow.workspace = true
 base64.workspace = true
-bs58.workspace = true
+# Host-only: the `did_key` module's did:key codec. Optional so guest binaries
+# never resolve it; enabled by the `host-state` feature.
+bs58 = { workspace = true, optional = true }
 serde_jcs = "0.1"
-unicode-normalization = "0.1"
+# Host-only: `workload_address` normalization. Optional; `host-state` pulls it.
+unicode-normalization = { version = "0.1", optional = true }
 chrono.workspace = true
 # The no_std + alloc foundation crate. `plan::validity` re-exports its
 # `FreshnessClaims`; `plan::{types,verb,verb_trust}` are module aliases
@@ -32,17 +35,26 @@ hex.workspace = true
 sha2.workspace = true
 # Folded in with mvm-plan: `plan::bundle` reads/writes
 # tar bundle archives. Sync — adds no async/runtime dep to mvm-core.
-tar.workspace = true
+# Optional: only the host-side bundle seal/verify/install surface
+# (`plan::bundle::stream` and the archive-reading functions in
+# `plan::bundle`) parses or writes tar; enabled by `host-state`.
+tar = { workspace = true, optional = true }
 thiserror.workspace = true
 # Optional: the only default-build async surface left is
 # `protocol`'s hostd IPC transport, gated behind `hostd-transport`.
 # `manifest-verify` (sigstore) pulls the rest. With both off, the default
 # `mvm-core` build is runtime-free.
 tokio = { workspace = true, optional = true }
-toml.workspace = true
+# Host-only: the `domain::manifest` workload-file parser (`mvm.toml`) and the
+# `user_config` operator-config store. Optional so guest binaries never
+# resolve it; enabled by the `host-state` feature.
+toml = { workspace = true, optional = true }
 tracing.workspace = true
 uuid.workspace = true
-regex.workspace = true
+# Host-only: `config::fc_version`'s version normalizer (the PII redactor and
+# threat classifier under `host-state` are the other users). Optional so
+# guest binaries never resolve it.
+regex = { workspace = true, optional = true }
 tempfile.workspace = true
 
 # Folded in with the former mvm-security crate: the
@@ -51,9 +63,11 @@ tempfile.workspace = true
 # (aho-corasick). All sync. `rand` is promoted from dev-only because
 # key_rotation / secret_store generate keys at runtime.
 aes-gcm.workspace = true
-aho-corasick.workspace = true
+# Host-only: secret-token scanning in `crypto::command_gate` /
+# `crypto::threat_classifier`. Optional; `host-state` pulls it.
+aho-corasick = { workspace = true, optional = true }
 hmac.workspace = true
-keyring.workspace = true
+keyring = { workspace = true, optional = true }
 secrecy.workspace = true
 zeroize.workspace = true
 rand.workspace = true
@@ -62,7 +76,7 @@ rand.workspace = true
 # — no rsa, no OIDC client, no async TUF fetch. The default mvm-core build stays
 # runtime-free because the stack is optional; enabling it does pull tokio (see
 # the `manifest-verify` feature below).
-sigstore-verify = { version = "0.11", default-features = false, features = ["rustls"], optional = true }
+sigstore-verify = { version = "0.11", default-features = false, optional = true }
 sigstore-trust-root = { version = "0.11", default-features = false, optional = true }
 sigstore-types = { version = "0.11", optional = true }
 # Only under the `schema` feature (protocol-schema codegen);
@@ -78,6 +92,12 @@ rcgen = { workspace = true, optional = true }
 # remote gateway. Both optional so a default/guest build pulls neither.
 async-trait = { workspace = true, optional = true }
 mvm-http = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mvm-macho-sign = { path = "../deps/mvm-macho-sign" }
+security-framework = "3.7"
+core-foundation = "0.10"
+plist = "1"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["fs", "process"] }
@@ -98,6 +118,31 @@ tss-esapi = { version = "7", optional = true }
 
 [features]
 default = []
+# OS-native key storage is host-only. Guest binaries retain the encrypted
+# file/env providers without carrying the keyring crate or its logging edge.
+os-keyring = ["dep:keyring"]
+# Host-only state and identity surface: `did_key`, `workload_address`,
+# `crypto::{command_gate, threat_classifier, secret_store}` (and all of
+# `crypto::keystore` except the pure `validate_shell_id` validator),
+# `pii`, `receipt`/`receipt_archive` (their signing API is did:key-shaped),
+# `stream_client` (its console redactor holds a `PiiRedactor`), the
+# `registry_pack*` family, `policy::toml_loader`, `image_set::train_lock`,
+# `domain::manifest` (the `mvm.toml` workload file), `user_config` (the
+# operator `config.toml` store), `config::fc_version` (the host's
+# Firecracker toolchain pin), and the tar archive I/O half of
+# `plan::bundle` (`stream` plus the archive-reading entry points). Off by
+# default so the guest binaries
+# (mvm-agentd / mvm-builder-guest / mvm-setpriv) never resolve `bs58`,
+# `unicode-normalization`, `aho-corasick`, `tar`, `toml` or `regex`; host
+# crates opt in.
+host-state = [
+    "dep:bs58",
+    "dep:unicode-normalization",
+    "dep:aho-corasick",
+    "dep:tar",
+    "dep:toml",
+    "dep:regex",
+]
 # Read-only PROV-O/Turtle export of chain-signed audit logs. Kept off by
 # default so lean builder-VM binaries (e.g. mvm-host-vm-init) do not pay
 # for the serializer or its extra dependencies.
@@ -126,14 +171,19 @@ hostd-transport = ["dep:tokio", "tokio/io-util"]
 # Cosign-keyless manifest verification via the modular sigstore-verify stack.
 # Verification is synchronous and offline (embedded trust root + the bundle's
 # inline transparency-log inclusion proof) and never calls an async API. The
-# stack still links tokio: sigstore-rekor, sigstore-tsa and sigstore-tuf depend
-# on a reqwest/hyper client unconditionally. The runtime-free invariant is about
-# the default build, which leaves this feature off.
+# upstream rekor and tsa crates compile an HTTP client unconditionally; the
+# workspace patches them (third_party/sigstore-patches.md) so that client, and
+# the reqwest/hyper stack under it, is built only with `sigstore-network`.
 manifest-verify = [
     "dep:sigstore-verify",
     "dep:sigstore-trust-root",
     "dep:sigstore-types",
 ]
+# Opt back into the Sigstore network clients (Rekor, timestamp authority, TUF
+# trust-root fetch) for an embedder that fetches trust material online. No
+# shipped `mvmctl` surface enables it: verification there uses the embedded
+# trust root and the bundle's inline proofs.
+sigstore-network = ["manifest-verify", "sigstore-verify/rustls"]
 # TPM2 hardware attestation provider (`crypto::attestation::tpm2`). Linux only.
 attestation-tpm2 = ["dep:tss-esapi"]
 # Derive `schemars::JsonSchema` on the protocol types the
@@ -167,6 +217,34 @@ required-features = ["manifest-verify"]
 [[example]]
 name = "verify-pack-revocation-list"
 required-features = ["manifest-verify"]
+
+# Application-descriptor fixture generator; it drives the registry-pack
+# application surface, which lives behind `host-state`.
+[[example]]
+name = "application-inspection-fixture"
+required-features = ["host-state"]
+
+# Integration tests that exercise host-state-gated modules (bundle archive
+# I/O, registry packs, receipts) only build where the feature is on.
+[[test]]
+name = "bundle_streaming_memory"
+path = "tests/bundle_streaming_memory.rs"
+required-features = ["host-state"]
+
+[[test]]
+name = "embedded_image_set_cache"
+path = "tests/embedded_image_set_cache.rs"
+required-features = ["host-state"]
+
+[[test]]
+name = "mvmev_canonicalization_vectors"
+path = "tests/mvmev_canonicalization_vectors.rs"
+required-features = ["host-state"]
+
+[[test]]
+name = "manifest_fixtures"
+path = "tests/manifest_fixtures.rs"
+required-features = ["host-state"]
 
 [dev-dependencies]
 # Test-only: the mandatory-deny range test parses CIDRs to cross-check the

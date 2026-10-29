@@ -1469,6 +1469,110 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("rootfs.ext4")).unwrap(), b"live");
     }
 
+    #[cfg(unix)]
+    fn while_child_is_before_exec<T>(probe: impl FnOnce() -> T) -> T {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt;
+        use std::time::Duration;
+
+        let (mut parent, child) = UnixStream::pair().unwrap();
+        parent
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let process = std::thread::spawn(move || {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", "exit 0"]);
+            // SAFETY: after fork this closure only obtains an fd and calls
+            // async-signal-safe read/write/poll. It neither allocates nor locks.
+            unsafe {
+                command.pre_exec(move || {
+                    let fd = child.as_raw_fd();
+                    let byte = [1_u8];
+                    if libc::write(fd, byte.as_ptr().cast(), 1) != 1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let mut event = libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    if libc::poll(&mut event, 1, 10_000) <= 0 {
+                        return Err(std::io::Error::from_raw_os_error(libc::ETIMEDOUT));
+                    }
+                    let mut release = [0_u8];
+                    if libc::read(fd, release.as_mut_ptr().cast(), 1) != 1 {
+                        return Err(std::io::Error::from_raw_os_error(libc::EPIPE));
+                    }
+                    // Refuse exec deliberately so spawn reaps this child:
+                    // no executable lifetime can outlive the bounded gate.
+                    Err(std::io::Error::from_raw_os_error(libc::ECANCELED))
+                });
+            }
+            command.spawn()
+        });
+        let ready = parent.read_exact(&mut [0_u8]);
+        let result = probe();
+        // Always release and reap before asserting, including on the failing
+        // implementation: the witness must not strand a pre-exec child.
+        let released = parent.write_all(&[1]);
+        let status = process.join().unwrap();
+        ready.unwrap();
+        released.unwrap();
+        assert_eq!(status.unwrap_err().raw_os_error(), Some(libc::ECANCELED));
+        result
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dropping_a_file_lock_releases_it_while_an_unrelated_child_is_before_exec() {
+        use mvm_core::util::atomic_io::FileLock;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("guard");
+        let held = FileLock::acquire(&path).unwrap();
+        let reacquired = while_child_is_before_exec(|| {
+            drop(held);
+            FileLock::try_acquire(&path)
+        });
+        assert!(
+            reacquired.unwrap().is_some(),
+            "guard drop must release the lock before child exec"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dropping_a_one_shot_store_lock_releases_it_before_an_unrelated_child_execs() {
+        use crate::builder_vm_runtime::{LockWait, acquire_nix_store_image_lock, hold_image_lock};
+        let directory = tempfile::tempdir().unwrap();
+        let held = acquire_nix_store_image_lock(directory.path(), "aarch64", 16).unwrap();
+        let mut sidecar = held.path().as_os_str().to_owned();
+        sidecar.push(".lock");
+        let path = std::path::PathBuf::from(sidecar);
+        let reacquired = while_child_is_before_exec(|| {
+            drop(held);
+            hold_image_lock(&path, LockWait::none())
+        });
+        let _reacquired =
+            reacquired.expect("one-shot guard drop must release the lock before child exec");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dropping_a_persistent_store_lock_releases_it_before_an_unrelated_child_execs() {
+        use crate::builder_vm_runtime::{LockWait, hold_image_lock};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.img.lock");
+        let held = hold_image_lock(&path, LockWait::none()).unwrap();
+        let reacquired = while_child_is_before_exec(|| {
+            drop(held);
+            hold_image_lock(&path, LockWait::none())
+        });
+        let _reacquired =
+            reacquired.expect("persistent guard drop must release the lock before child exec");
+    }
+
     /// The locks the whole materialization runs under are held for exactly as
     /// long as their proof lives: a second holder of either waits, and both
     /// are free again once it is gone.

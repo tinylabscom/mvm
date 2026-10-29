@@ -25,6 +25,12 @@ use mvm_conformance::IsolatedHome;
 use crate::steps::cli::{mvmctl_command, workspace_root};
 use crate::world::{CliWorld, LaunchRecord};
 
+#[path = "../support/pty_capture.rs"]
+mod pty_capture;
+
+#[path = "../support/failure_diagnostics.rs"]
+pub(crate) mod failure_diagnostics;
+
 /// Env var naming the artifact-warm `MVM_HOME` these scenarios share.
 ///
 /// Unset means the operator's real home, which is the point when running this
@@ -59,13 +65,11 @@ const GUEST_BOOT_FAILURES: &[(&str, &str)] = &[
 
 /// The residency the warm-launch scenarios run under.
 ///
-/// An unnamed launch claims a standby when one is ready and boots cold when
-/// none is; either way it leaves one behind for the next run. The warm
-/// scenarios prepare their standby explicitly and pin the residency so the
-/// claim they measure is the one they prepared for. A launch that means to
-/// boot cold is named, which also keeps it from leaving a standby behind.
+/// Ordinary documented scenarios run cold on every backend. A warm-claim
+/// capability opt-in only selects eligible scenarios; it must not change the
+/// residency of unrelated launches. Warm steps override this explicitly.
 const RESIDENCY_ENV: &str = mvm_core::residency::MVM_RESIDENCY_ENV;
-const DOCUMENTED_RESIDENCY: &str = "warm";
+const DOCUMENTED_RESIDENCY: &str = "cold";
 
 pub(crate) fn e2e_home() -> PathBuf {
     std::env::var_os(E2E_HOME_ENV)
@@ -136,6 +140,49 @@ fn shell_split(args: &str) -> Vec<String> {
     argv
 }
 
+/// When the running scenario began; set by the runner's `before` hook.
+static SCENARIO_START: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+pub(crate) fn mark_scenario_start() {
+    failure_diagnostics::begin_scenario();
+    if let Ok(mut start) = SCENARIO_START.lock() {
+        *start = Some(Instant::now());
+    }
+}
+
+/// Seconds since `mark_scenario_start`, or 0 when no scenario is marked.
+pub(crate) fn secs_since_scenario_start() -> f64 {
+    SCENARIO_START
+        .lock()
+        .ok()
+        .and_then(|start| start.map(|at| at.elapsed().as_secs_f64()))
+        .unwrap_or(0.0)
+}
+
+/// Prints how far into the scenario a Background step finished.
+fn log_background_mark(step: &str) {
+    eprintln!(
+        "[bdd-timing] background_step={step} scenario_elapsed={:.1}s",
+        secs_since_scenario_start()
+    );
+}
+
+/// The greppable per-command line: the verb words up to `--` (at most five)
+/// and the command's wall time.
+fn timing_line(argv: &[String], wall: std::time::Duration) -> String {
+    let summary: Vec<&str> = argv
+        .iter()
+        .map(String::as_str)
+        .take_while(|arg| *arg != "--")
+        .take(5)
+        .collect();
+    format!(
+        "[bdd-timing] cmd={} wall={:.1}s",
+        summary.join(" "),
+        wall.as_secs_f64()
+    )
+}
+
 fn run_in_e2e_home(args: &str, extra_env: &[(&str, &str)]) -> LaunchRecord {
     run_argv_in_e2e_home(&shell_split(args), extra_env)
 }
@@ -177,9 +224,15 @@ fn run_argv_in_e2e_home(argv: &[String], extra_env: &[(&str, &str)]) -> LaunchRe
     };
     command.env("PYTHONPATH", pythonpath);
 
+    if std::env::var_os(failure_diagnostics::DESTINATION_ENV).is_some() {
+        command.env(mvm_core::launch_trace::failure::ENABLE_ENV, "1");
+    }
     let started = Instant::now();
-    let output = command.output().expect("failed to spawn mvmctl");
+    let output = command.output();
     let wall = started.elapsed();
+    failure_diagnostics::observe(&output);
+    let output = output.expect("failed to spawn mvmctl");
+    eprintln!("{}", timing_line(argv, wall));
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -209,16 +262,47 @@ fn artifact_warm_home(world: &mut CliWorld) {
     world.e2e_home = Some(home);
 }
 
+#[path = "../support/launch_image_fixture.rs"]
+mod launch_image_fixture;
+
+/// Reuse each image's preparation while its identity and artifacts still match.
+/// Explicit `image pull` scenarios continue to exercise the verb itself.
+static PREPARED_IMAGES: mvm_conformance::prepared_once::PreparedOnce<
+    launch_image_fixture::Snapshot,
+> = mvm_conformance::prepared_once::PreparedOnce::new();
+
 #[given(expr = "the documented launch images are prepared")]
 fn documented_launch_images_are_prepared(_world: &mut CliWorld) {
+    let home = e2e_home();
     for image in ["alpine", "rust", "python:3.12", "curlimages/curl:8.21.0"] {
-        let pull = run_in_e2e_home(&format!("image pull {image}"), &[]);
-        assert_eq!(
-            pull.exit_code, 0,
-            "failed to prepare the {image} image\nstdout:\n{}\nstderr:\n{}",
-            pull.stdout, pull.stderr
-        );
+        let key = launch_image_fixture::preparation_key(&home, image)
+            .expect("canonical artifact-warm home");
+        let inspect = || {
+            let result = run_in_e2e_home(&format!("image inspect {image} --json"), &[]);
+            if result.exit_code != 0 {
+                return Err(format!("failed to inspect {image}: {}", result.stderr));
+            }
+            let output = serde_json::from_str(&result.stdout).map_err(|error| error.to_string())?;
+            let cache = mvm_core::config::mvm_cache_dir_at(&home).join("oci");
+            launch_image_fixture::inspect_snapshot(&cache, &output)
+                .map_err(|error| format!("incomplete prepared {image}: {error}"))
+        };
+        let prepared = PREPARED_IMAGES.ensure_observed(&key, inspect, || {
+            let pull = run_in_e2e_home(&format!("image pull {image}"), &[]);
+            if pull.exit_code == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "failed to prepare the {image} image\nstdout:\n{}\nstderr:\n{}",
+                    pull.stdout, pull.stderr
+                ))
+            }
+        });
+        if let Err(problem) = prepared {
+            panic!("{problem}");
+        }
     }
+    log_background_mark("images_prepared");
 }
 
 #[when(expr = "I prepare launch artifacts with {string}")]
@@ -266,6 +350,7 @@ fn warm_parent_is_ready(image: &str) {
         "failed to prepare the {image} warm parent\nstdout:\n{}\nstderr:\n{}",
         result.stdout, result.stderr
     );
+    log_background_mark("warm_parent_ready");
 }
 
 /// Wait for the standby an unnamed run leaves behind. The run starts the
@@ -331,7 +416,7 @@ fn launch_with_env(world: &mut CliWorld, args: String, key: String, value: Strin
 /// Generous on purpose: this is a real cold boot on whatever backend the host
 /// has, and a timeout that fires early would report a slow machine as a broken
 /// console. Nothing hangs on it in the passing case — the read ends when the
-/// child closes the PTY.
+/// direct child exits and its buffered output has been drained.
 const INTERACTIVE_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
 
 /// Run `mvmctl` with a real terminal on its stdin.
@@ -342,19 +427,11 @@ const INTERACTIVE_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// ever asked to open a console. That is exactly why a guest whose `openpty()`
 /// failed on every OCI image passed this suite.
 ///
-/// The child gets the PTY slave on all three descriptors and the parent keeps
-/// the master, reading until EOF. stdout and stderr are the same stream on a
-/// terminal, which is what a terminal is; the record carries the combined
-/// bytes in `stdout` and leaves `stderr` empty.
+/// The child gets the PTY slave on all three descriptors. Capture follows the
+/// CLI's lifetime, not EOF: detached helpers may retain the slave after the CLI
+/// exits. stdout and stderr share the terminal; the record carries both in
+/// `stdout` and leaves `stderr` empty. Capture errors and timeouts fail the step.
 fn run_interactive_in_e2e_home(args: &str) -> LaunchRecord {
-    use std::io::Read;
-    use std::os::fd::{AsRawFd, OwnedFd};
-    use std::process::Stdio;
-
-    let pty =
-        nix::pty::openpty(None, None).expect("allocate a host PTY for the interactive launch");
-    let (master, slave): (OwnedFd, OwnedFd) = (pty.master, pty.slave);
-
     let home = e2e_home();
     let mut command: Command = mvmctl_command();
     command
@@ -366,55 +443,19 @@ fn run_interactive_in_e2e_home(args: &str) -> LaunchRecord {
         // A terminal the guest shell can actually address. Without it the
         // shell falls back to `dumb` and some images print nothing at all,
         // which would read as a console failure.
-        .env("TERM", "xterm")
-        .stdin(Stdio::from(
-            slave.try_clone().expect("dup the PTY slave for stdin"),
-        ))
-        .stdout(Stdio::from(
-            slave.try_clone().expect("dup the PTY slave for stdout"),
-        ))
-        .stderr(Stdio::from(slave));
+        .env("TERM", "xterm");
 
     let started = Instant::now();
-    let mut child = command.spawn().expect("failed to spawn mvmctl on a PTY");
-    // The parent's copy of the slave is gone once `command` is dropped; only
-    // the child holds one. Without that the master never sees EOF and the read
-    // below blocks for the full timeout on a *successful* run.
-    drop(command);
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let master_fd = master.as_raw_fd();
-    std::thread::spawn(move || {
-        // SAFETY: `master_fd` is the live PTY master owned by `master` in the
-        // parent frame, which outlives this read: the frame joins on `rx`
-        // before dropping it.
-        let mut reader =
-            unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(master_fd) };
-        let mut buf = Vec::new();
-        // EIO is how a PTY master reports "the last slave closed" on Linux,
-        // and it arrives instead of EOF. Whatever was read before it is the
-        // session's output, not an error.
-        let _ = reader.read_to_end(&mut buf);
-        std::mem::forget(reader);
-        let _ = tx.send(buf);
-    });
-
-    let combined = rx
-        .recv_timeout(INTERACTIVE_LAUNCH_TIMEOUT)
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_else(|_| {
-            let _ = child.kill();
-            String::new()
-        });
-    let status = child.wait().expect("wait for the interactive mvmctl");
+    let output = pty_capture::output(command, INTERACTIVE_LAUNCH_TIMEOUT)
+        .expect("capture the interactive mvmctl terminal session");
+    let combined = String::from_utf8_lossy(&output.stdout).into_owned();
     let wall = started.elapsed();
-    drop(master);
 
     let dispatch_window_ms = parse_dispatch_window_ms(&combined);
     LaunchRecord {
         stdout: combined,
         stderr: String::new(),
-        exit_code: status.code().unwrap_or(-1),
+        exit_code: output.status.code().unwrap_or(-1),
         dispatch_window_ms,
         wall,
     }
@@ -554,6 +595,16 @@ fn output_mentions(world: &mut CliWorld, expected: String) {
     );
 }
 
+#[then(expr = "the output does not mention {string}")]
+fn output_does_not_mention(world: &mut CliWorld, expected: String) {
+    let record = last(world);
+    assert!(
+        !record.combined().contains(&expected),
+        "output unexpectedly mentioned {expected:?}.\n--- combined ---\n{}",
+        record.combined()
+    );
+}
+
 /// The regression guard proper.
 ///
 /// A guest that boots without its runtime overlay dies as a kernel panic, and
@@ -681,6 +732,28 @@ fn dispatch_window_recorded(world: &mut CliWorld) {
 }
 
 mod tests {
+    #[test]
+    fn timing_line_stops_at_the_double_dash_and_reports_seconds() {
+        let argv: Vec<String> = ["machine", "run", "--image", "alpine", "--", "sh", "-c", "x"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            super::timing_line(&argv, std::time::Duration::from_millis(2500)),
+            "[bdd-timing] cmd=machine run --image alpine wall=2.5s"
+        );
+    }
+
+    #[test]
+    fn the_host_pty_ends_do_not_leak_into_spawned_children() {
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+        use std::os::fd::AsRawFd;
+        let (master, slave) = super::open_host_pty();
+        for fd in [&master, &slave] {
+            let flags = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFD).expect("read fd flags");
+            assert!(FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC));
+        }
+    }
+
     #[test]
     fn shell_split_keeps_a_quoted_command_as_one_argument() {
         assert_eq!(

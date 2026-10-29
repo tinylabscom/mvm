@@ -13,6 +13,105 @@ import pytest
 import mvm
 from mvm import _hostlib
 
+def test_unknown_session_release_uses_original_context_close_and_checked_free(monkeypatch):
+    import ctypes
+    import json
+
+    monkeypatch.setenv("MVM_NO_VM", "0")
+    methods = []
+    def transport(method, _request):
+        methods.append(method)
+        return 6, json.dumps({
+            "code": "REJECTED", "message": "local fixture", "retryable": False
+        }).encode()
+    monkeypatch.setattr(_hostlib, "_invoke", transport)
+    with pytest.raises(_hostlib.OwnedContextFailure) as caught:
+        with mvm.session("fixture"):
+            pytest.fail("a refused start must not run its body")
+    owner = caught.value.session
+    context = caught.value.recovery
+    primary = caught.value.primary_error
+    calls = []
+    class Library:
+        close_ok = False
+        free_ok = False
+        def mvm_hostlib_context_close(self, _pointer, out):
+            calls.append("close")
+            out._obj.len = 0
+            return 0 if self.close_ok else 5
+        def mvm_hostlib_context_checked_free(self, pointer):
+            calls.append("free")
+            if not self.free_ok:
+                return 5
+            pointer._obj.value = None
+            return 0
+        def mvm_hostlib_free(self, _out):
+            pass
+    # Actual SDK receiver and C outcome adapter, not a native allocation/proof.
+    library = Library()
+    context._pointer = ctypes.c_void_p(123)
+    context._library = library
+    for close_ok in [False, True]:
+        library.close_ok = close_ok
+        with pytest.raises(_hostlib.OwnedContextFailure) as retry:
+            owner.retry_stop()
+        assert retry.value.primary_error is primary
+        assert retry.value.session is owner
+        assert retry.value.recovery is context
+        assert owner._start_phase == "unknown"
+        assert not context._freed
+        assert context._pointer.value == 123
+        assert "local fixture" not in str(retry.value)
+    assert len(owner._cleanup_errors) == 2
+    history = list(owner._cleanup_errors)
+    library.free_ok = True
+    owner.retry_stop()
+    assert owner._start_phase == "finished" and owner._stop_phase == "closed"
+    assert not owner._active and context._pointer.value is None
+    assert owner._start_error is primary
+    assert owner._cleanup_errors == history
+    finished_calls = list(calls)
+    owner.retry_stop()
+    assert calls == finished_calls
+    assert methods == ["session.start"]
+
+def test_actual_session_retains_body_and_cleanup_errors_and_retries_cleanup_only(monkeypatch):
+    monkeypatch.setenv("MVM_NO_VM", "0")
+    primary = ValueError("body fixture")
+    cleanup = RuntimeError("close fixture")
+    calls = []
+    class NoChildContext:
+        fail_close = True
+        def _reserve_session_start(self):
+            pass  # No C allocation or native resource exists in this adapter.
+        def call(self, method, _request):
+            calls.append(method)
+            if method == "session.start":
+                return {"session_id": "abcdefghijklmnopqrstuvwx", "vm_name": "fixture"}
+            return {}
+        def close(self):
+            calls.append("close")
+            if self.fail_close:
+                raise cleanup
+        def free(self):
+            calls.append("free")
+    context = NoChildContext()
+    monkeypatch.setattr(_hostlib, "NativeContext", lambda: context)
+    handle = mvm.session("fixture")
+    with pytest.raises(_hostlib.OwnedContextFailure) as caught:
+        with handle:
+            raise primary
+    assert caught.value.primary_error is primary
+    assert caught.value.cleanup_error is cleanup
+    assert caught.value.recovery is context
+    assert caught.value.session is handle
+    assert handle._active
+    context.fail_close = False
+    handle.retry_stop()
+    assert not handle._active
+    assert calls.count("session.stop") == 1
+    assert calls.count("close") == 2
+
 
 @pytest.fixture(autouse=True)
 def _clean_state(monkeypatch: pytest.MonkeyPatch):
@@ -202,25 +301,451 @@ def test_a_body_exception_still_stops_the_host_session(on_host) -> None:
     assert on_host.methods == ["session.start", "session.stop"]
 
 
-def test_a_stop_failure_never_masks_the_body_exception(on_host) -> None:
+def test_a_stop_failure_retains_body_and_stop_errors_in_the_owned_context(
+    on_host, monkeypatch
+) -> None:
+    # Host sessions now use the caller-owned context even for ordinary calls.
+    # This recorder exercises that consumer without a library or native child.
+    original_call = _hostlib.NativeContext.call
+    stop_errors = []
+
+    def record_stop_error(context, method, request):
+        try:
+            return original_call(context, method, request)
+        except mvm.HostLibraryError as error:
+            if method == "session.stop":
+                stop_errors.append(error)
+            raise
+
+    monkeypatch.setattr(_hostlib.NativeContext, "call", record_stop_error)
     on_host.fail("session.stop", "BACKEND_ERROR", "teardown failed")
-    with pytest.raises(RuntimeError, match="boom"):
-        with mvm.session("adder"):
-            raise RuntimeError("boom")
+    primary = RuntimeError("body fixture must not be rendered")
+    session = mvm.session("adder")
+    with pytest.raises(_hostlib.OwnedContextFailure) as caught:
+        with session:
+            raise primary
+    assert caught.value.primary_error is primary
+    assert caught.value.cleanup_error is stop_errors[0]
+    assert caught.value.recovery is session._context
+    assert caught.value.session is session
+    assert session._active
+    assert str(primary) not in str(caught.value)
+    assert str(stop_errors[0]) not in str(caught.value)
     on_host.fail("session.stop", "BACKEND_ERROR", "teardown failed")
     on_host.reply("session.start", {"session_id": SID, "vm_name": "session-vm"})
-    with pytest.raises(mvm.HostLibraryError, match="teardown failed"):
-        with mvm.session("adder"):
+    other = mvm.session("adder")
+    with pytest.raises(_hostlib.OwnedContextFailure) as no_body:
+        with other:
             pass
+    assert no_body.value.primary_error is None
+    assert no_body.value.cleanup_error is stop_errors[1]
+    assert no_body.value.recovery is other._context
+    assert no_body.value.session is other
+    assert other._active
 
 
-def test_a_start_without_a_usable_id_is_refused_before_the_body(on_host) -> None:
+def test_explicit_failed_retry_retains_original_body_all_errors_and_same_owner(
+    on_host, monkeypatch
+) -> None:
+    on_host.fail("session.stop", "BACKEND_ERROR", "first fixture stop")
+    on_host.fail("session.stop", "BACKEND_ERROR", "second fixture stop")
+    on_host.reply("session.stop", {})
+    primary = ValueError("body fixture must stay private")
+    errors = []
+    original_call = _hostlib.NativeContext.call
+
+    def observe(context, method, request):
+        try:
+            return original_call(context, method, request)
+        except BaseException as error:
+            errors.append(error)
+            raise
+
+    monkeypatch.setattr(_hostlib.NativeContext, "call", observe)
+    with pytest.raises(_hostlib.OwnedContextFailure) as first:
+        with mvm.session("adder"):
+            raise primary
+    with pytest.raises(_hostlib.OwnedContextFailure) as second:
+        first.value.session.retry_stop()
+    owner = second.value.session
+    assert second.value.primary_error is primary
+    assert second.value.cleanup_error is errors[1]
+    assert owner is first.value.session
+    assert second.value.recovery is first.value.recovery is owner._context
+    assert owner._primary_error is primary
+    assert len(owner._cleanup_errors) == 2
+    assert owner._cleanup_errors[0] is errors[0]
+    assert owner._cleanup_errors[1] is errors[1]
+    assert owner._active
+    assert "body fixture" not in str(second.value)
+    assert "fixture stop" not in str(second.value)
+    owner.retry_stop()
+    owner.retry_stop()
+    assert not owner._active
+    assert on_host.methods == ["session.start", "session.stop", "session.stop", "session.stop"]
+    assert owner._primary_error is primary
+    assert owner._cleanup_errors == errors
+
+
+def test_cleanup_error_budget_refuses_retry_before_transport_without_discard(on_host):
+    from mvm import _session
+
+    for _ in range(_session._MAX_CLEANUP_FAILURES):
+        on_host.fail("session.stop", "BACKEND_ERROR", "bounded fixture")
+    owner = mvm.session("adder")
+    owner.__enter__()
+    for _ in range(_session._MAX_CLEANUP_FAILURES):
+        with pytest.raises(_hostlib.OwnedContextFailure) as failed:
+            owner.retry_stop()
+        assert failed.value.session is owner
+        assert failed.value.recovery is owner._context
+    originals = list(owner._cleanup_errors)
+    before = list(on_host.calls)
+    with pytest.raises(_hostlib.OwnedContextFailure) as exhausted:
+        owner.retry_stop()
+    assert exhausted.value.session is owner
+    assert exhausted.value.recovery is owner._context
+    assert on_host.calls == before
+    assert len(owner._cleanup_errors) == _session._MAX_CLEANUP_FAILURES
+    assert all(a is b for a, b in zip(owner._cleanup_errors, originals))
+    assert owner._active
+    owner._reset_contextvar()
+    # Original no-child recorder state stays held. No terminal proof is minted.
+
+
+@pytest.mark.parametrize("reply", [
+    {}, {"session_id": None}, {"session_id": 7},
+    {"session_id": "NOT-BASE32"}, {"session_id": SID + "\n"},
+])
+def test_a_start_without_a_usable_id_retains_its_original_receiver(
+    on_host, monkeypatch, reply
+) -> None:
     on_host._queued["session.start"].clear()
-    on_host.reply("session.start", {"session_id": "NOT-BASE32", "vm_name": "x"})
-    with pytest.raises(mvm.MvmTransportError, match="no usable session id"):
+    on_host.reply("session.start", reply)
+    original_call = _hostlib.NativeContext.call
+    protocol_errors = []
+
+    def observe(context, method, request):
+        try:
+            return original_call(context, method, request)
+        except BaseException as error:
+            protocol_errors.append(error)
+            raise
+
+    monkeypatch.setattr(_hostlib.NativeContext, "call", observe)
+    with pytest.raises(_hostlib.OwnedContextFailure) as caught:
         with mvm.session("adder"):
             pytest.fail("the session body must not run")
+    owner = caught.value.session
+    context = caught.value.recovery
+    assert owner._context is context
+    assert caught.value.primary_error is protocol_errors[0]
+    assert owner._start_error is protocol_errors[0]
+    assert owner.id is None
+    assert not owner._active  # Not an assertion that an unknown launch stopped.
+    for cleanup in [owner.retry_stop, context.retry_stop, context.close, context.free]:
+        with pytest.raises(mvm.MvmTransportError):
+            cleanup()
+    with pytest.raises(_hostlib.OwnedContextFailure) as repeated:
+        owner.__enter__()
+    assert repeated.value.primary_error is protocol_errors[0]
+    assert repeated.value.session is owner
+    assert repeated.value.recovery is context
+    assert on_host.methods == ["session.start"]
     assert mvm.current_session_id() is None
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_cancelled_anonymous_async_start_retains_the_real_worker_and_receiver(
+    on_host, monkeypatch, malformed
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    starts = []
+    if malformed:
+        on_host._queued["session.start"].clear()
+        on_host.reply("session.start", {"private_marker": "must-not-render"})
+    on_host.reply("session.stop", {})
+
+    def blocked_inprocess_transport(method, request):
+        if method == "session.start":
+            starts.append(method)
+            entered.set()
+            assert release.wait(5), "test must release its no-child worker"
+        return on_host(method, request)
+
+    monkeypatch.setattr(_hostlib, "_invoke", blocked_inprocess_transport)
+
+    async def scenario():
+        async def anonymous():
+            async with mvm.session("adder"):
+                pytest.fail("cancelled start cannot enter the body")
+
+        entering = asyncio.create_task(anonymous())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            entering.cancel()
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await entering
+            failure = cancelled.value
+            owner = failure.session
+            context = failure.recovery
+            worker = failure.worker
+            assert owner._context is context
+            assert owner._start_task is worker
+            assert failure.primary_error is failure.__cause__
+            assert owner._start_cancellations[0] is failure.primary_error
+            assert not worker.done()
+            for cleanup in [owner.retry_stop, context.close, context.free]:
+                with pytest.raises(mvm.MvmTransportError):
+                    cleanup()
+            with pytest.raises(_hostlib.OwnedContextFailure):
+                await owner.__aenter__()
+            waiter = asyncio.create_task(owner.wait_started())
+            await asyncio.sleep(0)  # Yield until this waiter is on the held task.
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError) as cancelled_wait:
+                await waiter
+            assert cancelled_wait.value.session is owner
+            assert cancelled_wait.value.recovery is context
+            assert cancelled_wait.value.worker is worker
+            assert cancelled_wait.value.primary_error is cancelled_wait.value.__cause__
+            assert not worker.cancelled()
+            assert len(starts) == 1
+            release.set()
+            if malformed:
+                with pytest.raises(_hostlib.OwnedContextFailure) as worker_error:
+                    await owner.wait_started()
+                assert worker_error.value.primary_error is owner._start_error
+                assert owner._start_error is context._session_error
+                with pytest.raises(_hostlib.OwnedContextFailure):
+                    owner.retry_stop()
+                with pytest.raises(mvm.MvmTransportError):
+                    context.free()
+                assert owner.id is None
+                assert "must-not-render" not in str(worker_error.value)
+            else:
+                await owner.wait_started()
+                await owner.wait_started()
+                assert owner._active
+                owner.retry_stop()
+                assert not owner._active
+                assert on_host.methods == ["session.start", "session.stop"]
+            assert worker.done()
+            assert len(starts) == 1
+            assert owner._start_cancellations[0] is failure.primary_error
+        finally:
+            release.set()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("worker_fails", [False, True])
+def test_cancelled_anonymous_async_cleanup_keeps_cancel_worker_and_all_retries(
+    on_host, monkeypatch, worker_fails
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    primary = ValueError("private body fixture")
+    if worker_fails:
+        on_host.fail("session.stop", "BACKEND_ERROR", "private stop fixture")
+    else:
+        on_host.reply("session.stop", {})
+    on_host.reply("session.stop", {})
+    original_call = _hostlib.NativeContext.call
+    stop_errors = []
+
+    def observe(context, method, request):
+        try:
+            return original_call(context, method, request)
+        except BaseException as error:
+            if method == "session.stop":
+                stop_errors.append(error)
+            raise
+
+    def blocked_transport(method, request):
+        if method == "session.stop" and not entered.is_set():
+            entered.set()
+            assert release.wait(5), "test must release its no-child cleanup worker"
+        return on_host(method, request)
+
+    monkeypatch.setattr(_hostlib, "_invoke", blocked_transport)
+    monkeypatch.setattr(_hostlib.NativeContext, "call", observe)
+
+    async def scenario():
+        async def anonymous():
+            async with mvm.session("adder"):
+                raise primary
+
+        exiting = asyncio.create_task(anonymous())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            exiting.cancel()
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await exiting
+            first = cancelled.value
+            owner, context, worker = first.session, first.recovery, first.worker
+            original_cancel = first.cleanup_error
+            assert first.primary_error is primary
+            assert original_cancel is first.__cause__
+            assert owner._cleanup_task is worker
+            assert owner._context is context
+            assert owner._cleanup_cancellations[0] is original_cancel
+            assert owner._primary_error is primary
+            assert not worker.done()
+            before = list(on_host.calls)
+            with pytest.raises(_hostlib.OwnedContextFailure) as busy:
+                first.session.retry_stop()
+            assert busy.value.session is owner
+            assert busy.value.recovery is context
+            assert busy.value.worker is worker
+            assert busy.value.primary_error is primary
+            assert any(error is original_cancel for error in busy.value.cancellation_errors)
+            assert on_host.calls == before
+            waiter = asyncio.create_task(busy.value.session.wait_cleanup())
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError) as cancelled_wait:
+                await waiter
+            second_cancel = cancelled_wait.value.cleanup_error
+            assert cancelled_wait.value.session is owner
+            assert cancelled_wait.value.worker is worker
+            assert cancelled_wait.value.primary_error is primary
+            assert second_cancel is cancelled_wait.value.__cause__
+            assert owner._cleanup_cancellations == [original_cancel, second_cancel]
+            assert not worker.cancelled()
+            release.set()
+            if worker_fails:
+                with pytest.raises(_hostlib.OwnedContextFailure) as failed:
+                    await cancelled_wait.value.session.wait_cleanup()
+                assert failed.value.session is owner
+                assert failed.value.recovery is context
+                assert failed.value.worker is worker
+                assert failed.value.primary_error is primary
+                assert failed.value.cleanup_error is stop_errors[0]
+                assert any(error is original_cancel for error in failed.value.cancellation_errors)
+                assert any(error is second_cancel for error in failed.value.cancellation_errors)
+                assert owner._active
+                failed.value.session.retry_stop()
+            else:
+                await owner.wait_cleanup()
+            assert worker.done()
+            owner.retry_stop()
+            assert not owner._active
+            assert owner._primary_error is primary
+            assert any(error is original_cancel for error in owner._cleanup_errors)
+            assert any(error is second_cancel for error in owner._cleanup_errors)
+            assert owner._error_reserved == 0
+            assert len(on_host.requests("session.stop")) == (2 if worker_fails else 1)
+            assert "private body" not in str(first)
+            assert "private stop" not in str(first)
+        finally:
+            release.set()
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_cancellation_capacity_is_reserved_before_wait_and_worker_race(
+    on_host, monkeypatch
+) -> None:
+    from mvm import _session
+
+    entered = threading.Event()
+    release = threading.Event()
+    on_host.fail("session.stop", "BACKEND_ERROR", "no-child fixture")
+
+    def blocked_transport(method, request):
+        if method == "session.stop":
+            entered.set()
+            assert release.wait(5)
+        return on_host(method, request)
+
+    monkeypatch.setattr(_hostlib, "_invoke", blocked_transport)
+
+    async def scenario():
+        async def anonymous():
+            async with mvm.session("adder"):
+                pass
+
+        exiting = asyncio.create_task(anonymous())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            exiting.cancel()
+            with pytest.raises(asyncio.CancelledError) as first:
+                await exiting
+            owner = first.value.session
+            original = first.value.cleanup_error
+            # One original cancellation, one reserved worker outcome. Fill
+            # only the remaining slots with real pending wait operations.
+            waiters = [
+                asyncio.create_task(owner.wait_cleanup())
+                for _ in range(_session._MAX_CLEANUP_FAILURES - 2)
+            ]
+            await asyncio.sleep(0)
+            assert len(owner._cleanup_errors) + owner._error_reserved == _session._MAX_CLEANUP_FAILURES
+            before = list(on_host.calls)
+            with pytest.raises(_hostlib.OwnedContextFailure) as full:
+                await owner.wait_cleanup()
+            assert full.value.session is owner
+            assert any(error is original for error in full.value.cancellation_errors)
+            assert on_host.calls == before
+            for waiter in waiters:
+                waiter.cancel()
+            for waiter in waiters:
+                with pytest.raises(asyncio.CancelledError) as cancelled:
+                    await waiter
+                assert cancelled.value.session is owner
+                assert any(error is original for error in cancelled.value.cancellation_errors)
+            release.set()
+            # Observe actual no-child worker completion without taking a new
+            # public wait slot, then exercise the public completed-task path.
+            completed = asyncio.Event()
+            owner._cleanup_task.add_done_callback(lambda _task: completed.set())
+            await asyncio.wait_for(completed.wait(), 5)
+            with pytest.raises(_hostlib.OwnedContextFailure):
+                await owner.wait_cleanup()
+            assert len(owner._cleanup_errors) == _session._MAX_CLEANUP_FAILURES
+            assert owner._error_reserved == 0
+            originals = tuple(owner._cleanup_errors)
+            before = list(on_host.calls)
+            with pytest.raises(_hostlib.OwnedContextFailure) as refused:
+                owner.retry_stop()
+            assert refused.value.session is owner
+            assert any(error is original for error in refused.value.cancellation_errors)
+            assert on_host.calls == before
+            assert all(a is b for a, b in zip(owner._cleanup_errors, originals))
+            assert owner._active
+        finally:
+            release.set()
+
+    asyncio.run(scenario())
+
+
+def test_async_cleanup_refuses_before_task_when_two_error_slots_are_unavailable(on_host):
+    from mvm import _session
+
+    for _ in range(_session._MAX_CLEANUP_FAILURES - 1):
+        on_host.fail("session.stop", "BACKEND_ERROR", "no-child fixture")
+    on_host.reply("session.stop", {})
+    async def scenario():
+        owner = mvm.session("adder")
+        await owner.__aenter__()
+        for _ in range(_session._MAX_CLEANUP_FAILURES - 1):
+            with pytest.raises(_hostlib.OwnedContextFailure):
+                owner.retry_stop()
+        before = list(on_host.calls)
+        with pytest.raises(_hostlib.OwnedContextFailure) as full:
+            await owner.__aexit__(None, None, None)
+        assert full.value.session is owner
+        assert on_host.calls == before
+        assert owner._cleanup_task is None
+        assert owner._error_reserved == 0
+        owner.retry_stop()  # One synchronous outcome slot remains; no new worker.
+        owner.retry_stop()
+        assert not owner._active
+        assert mvm.current_session_id() is None
+
+    asyncio.run(scenario())
 
 
 def test_host_session_lifecycle_methods_reach_the_host(on_host) -> None:

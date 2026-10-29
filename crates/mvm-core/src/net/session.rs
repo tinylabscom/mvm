@@ -711,13 +711,15 @@ impl SealedFrame {
 /// Read a length-prefixed sealed frame from a stream.
 ///
 /// The length prefix is a 4-byte big-endian integer. `max_len` bounds the
-/// accepted sealed frame size.
+/// accepted sealed frame size. Only a timeout before the first byte is
+/// retryable; after consuming bytes the caller must discard the stream.
 pub fn read_sealed_frame<R: Read>(
     stream: &mut R,
     max_len: usize,
 ) -> Result<SealedFrame, SessionError> {
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
+    stream.read_exact(&mut len_buf[..1])?;
+    read_frame_remainder(stream, &mut len_buf[1..])?;
     let frame_len =
         usize::try_from(u32::from_be_bytes(len_buf)).expect("u32 frame length fits usize");
     if frame_len > max_len {
@@ -726,8 +728,23 @@ pub fn read_sealed_frame<R: Read>(
         )));
     }
     let mut buf = vec![0u8; frame_len];
-    stream.read_exact(&mut buf)?;
+    read_frame_remainder(stream, &mut buf)?;
     SealedFrame::decode(&buf)
+}
+
+fn read_frame_remainder(stream: &mut impl Read, buf: &mut [u8]) -> Result<(), SessionError> {
+    stream.read_exact(buf).map_err(|error| {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            SessionError::InvalidHandshake(
+                "sealed frame timed out after consuming bytes; discard the stream".into(),
+            )
+        } else {
+            SessionError::Io(error)
+        }
+    })
 }
 
 /// Write a sealed frame to a stream with a 4-byte big-endian length prefix.
@@ -1051,11 +1068,10 @@ mod tests {
         SigningKey::from_bytes(&seed)
     }
 
-    fn pair() -> (
-        std::os::unix::net::UnixStream,
-        std::os::unix::net::UnixStream,
-    ) {
-        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+    fn pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let a = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (b, _) = listener.accept().unwrap();
         a.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         (a, b)

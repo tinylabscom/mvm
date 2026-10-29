@@ -10,6 +10,7 @@ members = [
     # mvmd's; both register against this trait.
     "crates/mvm-net",
     "crates/deps/libkrun-sys",
+    "crates/deps/mvm-macho-sign",
     "crates/mvm-runtime",
     "crates/mvm-vmm",
     "crates/mvm-fc-lifecycle",
@@ -28,6 +29,10 @@ members = [
     # image's cache key, and a crate it reaches is a crate whose edits rebuild
     # the image.
     "crates/mvm-setpriv",
+    # The builder-VM guest binaries and the contract they share with the host.
+    # Embedded in `mvmctl` as static musl, so its closure is what that nested
+    # build compiles: keep it off `mvm-build`.
+    "crates/mvm-builder-guest",
     # GPU compute by API remoting: the per-VM host endpoint that serves
     # guest CUDA/NVML shim RPCs over vsock against the real driver or a
     # deterministic stub. Host-only (std); the guest side of the wire is
@@ -49,6 +54,7 @@ members = [
     "crates/mvm-cli",
     "crates/mvm-hostd",
     "crates/mvm-client",
+    "crates/runmvm-client",
     "crates/mvm-mcp",
     # The host library the language SDKs load in-process instead of running
     # mvmctl. Top of the graph: nothing depends on it.
@@ -61,7 +67,6 @@ members = [
     # ADR-014 §"Runtime Ownership" — keep its dep closure small.
     "crates/mvm-fs",
     "crates/mvm-http",
-    "crates/mvm-observability",
     # Plan 72 W3 — PID-1 for the libkrun builder VM. Linux-only at
     # runtime; the crate compiles on macOS / Windows as an inert
     # binary so workspace builds stay green for non-Linux contributors.
@@ -193,7 +198,7 @@ resolver = "3"
 # functionally different software. Bumping the minor signals "0.x
 # breaking changes" without prematurely committing to a 1.0 stability
 # promise.
-version = "0.24.0"
+version = "0.26.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -262,6 +267,7 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"]
 # `KeyProvider` / `WrappedKey` / snapshot-HMAC-key consumer.
 secrecy = { version = "0.10", features = ["serde"] }
 sha2 = "0.11"
+sha1 = { version = "=0.10.6", default-features = false, features = ["std"] }
 # BLAKE3 for the Apple Container kernel's digest-pin sidecar — an order of
 # magnitude faster than SHA-256 on multi-hundred-MB kernels. Default
 # features (`std`) suffice for the streamed host-side hash; no rayon.
@@ -329,11 +335,6 @@ notify-debouncer-mini = "0.7"
 # the canonical CIDR string ("10.0.0.0/24"), which is the wire
 # format the policy bundle TOML uses.
 ipnet = { version = "2", features = ["serde"] }
-# Plan 141 / ADR-003 — EthernetII/IPv4/IPv6/TCP/UDP parse + payload rebuild
-# for the gateway packet-observer pipeline. Pure-Rust, zero transitive
-# deps, fuzzed upstream. Lands on the untrusted-guest-bytes path (claim 5),
-# so a mature parser beats a hand-rolled one.
-etherparse = "0.20"
 async-trait = "=0.1.89"
 
 # Pure-Rust DNS resolver, used only by the opt-in custom-dns feature.
@@ -389,35 +390,35 @@ tree-sitter-typescript = "0.23.2"
 # here because member crates can't override that on a workspace-inherited
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
-mvm-contract = { path = "crates/mvm-contract", version = "0.24.0", default-features = false, features = ["protocol"] }
-mvm-core = { path = "crates/mvm-core", version = "0.24.0" }
-mvm-bundler = { path = "crates/mvm-bundler", version = "0.24.0" }
-mvm-compiler = { path = "crates/mvm-compiler", version = "0.24.0" }
-mvm-client ={ path = "crates/mvm-client", version = "0.24.0" }
-mvm-mcp = { path = "crates/mvm-mcp", version = "0.24.0" }
-mvm-agentd = { path = "crates/mvm-agentd", version = "0.24.0" }
-mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.24.0" }
-mvm-host-services = { path = "crates/mvm-host-services", version = "0.24.0" }
-mvm-hostlib = { path = "crates/mvm-hostlib", version = "0.24.0" }
-mvm-build = { path = "crates/mvm-build", version = "0.24.0", default-features = false }
-mvm-runtime = { path = "crates/mvm-runtime", version = "0.24.0", default-features = false }
-mvm-vmm = { path = "crates/mvm-vmm", version = "0.24.0" }
-mvm-backends = { path = "crates/mvm-backends", version = "0.24.0" }
-mvm-fs = { path = "crates/mvm-fs", version = "0.24.0" }
-mvm-http = { path = "crates/mvm-http", version = "0.24.0" }
-mvm-observability = { path = "crates/mvm-observability", version = "0.24.0" }
-mvm-net = { path = "crates/mvm-net", version = "0.24.0" }
-mvm-cli = { path = "crates/mvm-cli", version = "0.24.0", default-features = false }
-mvm-hostd = { path = "crates/mvm-hostd", version = "0.24.0", default-features = false }
+mvm-contract = { path = "crates/mvm-contract", version = "0.26.0", default-features = false, features = ["protocol"] }
+mvm-core = { path = "crates/mvm-core", version = "0.26.0" }
+mvm-bundler = { path = "crates/mvm-bundler", version = "0.26.0" }
+mvm-compiler = { path = "crates/mvm-compiler", version = "0.26.0" }
+mvm-client ={ path = "crates/mvm-client", version = "0.26.0" }
+mvm-mcp = { path = "crates/mvm-mcp", version = "0.26.0" }
+mvm-agentd = { path = "crates/mvm-agentd", version = "0.26.0" }
+mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.26.0" }
+mvm-builder-guest = { path = "crates/mvm-builder-guest", version = "0.26.0" }
+mvm-host-services = { path = "crates/mvm-host-services", version = "0.26.0" }
+mvm-hostlib = { path = "crates/mvm-hostlib", version = "0.26.0" }
+mvm-build = { path = "crates/mvm-build", version = "0.26.0", default-features = false }
+mvm-runtime = { path = "crates/mvm-runtime", version = "0.26.0", default-features = false }
+mvm-vmm = { path = "crates/mvm-vmm", version = "0.26.0" }
+mvm-backends = { path = "crates/mvm-backends", version = "0.26.0" }
+mvm-fs = { path = "crates/mvm-fs", version = "0.26.0" }
+mvm-http = { path = "crates/mvm-http", version = "0.26.0" }
+mvm-net = { path = "crates/mvm-net", version = "0.26.0" }
+mvm-cli = { path = "crates/mvm-cli", version = "0.26.0", default-features = false }
+mvm-hostd = { path = "crates/mvm-hostd", version = "0.26.0", default-features = false }
 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
-mvm-sdk = { path = "crates/mvm-sdk", version = "0.24.0" }
-mvm-capture = { path = "crates/mvm-capture", version = "0.24.0" }
+mvm-sdk = { path = "crates/mvm-sdk", version = "0.26.0" }
+mvm-capture = { path = "crates/mvm-capture", version = "0.26.0" }
 # Plan 57 W1 — libkrun FFI bindings split out of mvm-providers so the
 # bindgen + libclang build cost is isolated from the rest of the
 # workspace. Default feature set is empty; consumers wanting real FFI
 # enable `libkrun-sys` on a host with libkrun installed.
-libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.24.0" }
+libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.26.0" }
 
 # Dev dependencies
 assert_cmd = "2"
@@ -591,7 +592,8 @@ host = [
 ]
 
 # `user` — everything a user runs to create/drive sandboxes: cosign manifest
-# verification for `--prod` and `build --watch`. `default` already carries the
+# verification for `--prod`, `build --watch`, and native caller custody.
+# `default` already carries the
 # verifier; `user` names it too so a `default-features = false` build that asks
 # for the user surface still gets it.
 user = [
@@ -599,6 +601,7 @@ user = [
     "mvm-cli/manifest-verify",
     "mvm-core/manifest-verify",
     "mvm-cli/dev-watch",
+    "native-caller-identity",
 ]
 
 # `dev` — the local-development union. A contributor laptop is BOTH host and
@@ -619,6 +622,9 @@ dev = [
 # source builds and release artifacts never enable these features.
 libkrun-sys = ["mvm-cli/libkrun-sys"]
 libkrun-live = ["mvm-cli/libkrun-live"]
+
+# Platform-native caller custody, included in the standard user surface only.
+native-caller-identity = ["mvm-cli/native-caller-identity"]
 
 # Platform: link the TPM2 TSS provider. Kept root-owned so source-built host
 # packages remain cargo-auditable while selecting the Linux TPM dependency.
@@ -684,6 +690,12 @@ am-fs-ext4 = { path = "third_party/am-fs-ext4" }
 # on the reviewed 0.3.9 source at an immutable upstream revision until the
 # registry package is restored.
 arrayref = { path = "third_party/arrayref" }
+gix = { path = "third_party/gix-0.87.1" }
+gix-object = { path = "third_party/gix-object-0.64.1" }
+notify = { path = "third_party/notify-8.2.0" }
+sigstore-rekor = { path = "third_party/sigstore-rekor-0.11.0" }
+sigstore-tsa = { path = "third_party/sigstore-tsa-0.11.0" }
+io-extras = { path = "third_party/io-extras-0.19.0" }
 
 [profile.release]
 opt-level = 3
@@ -704,6 +716,12 @@ codegen-units = 16
 # percent on the hot paths and turns that class of bug into a fail-closed abort
 # instead of a memory-safety-adjacent surprise.
 overflow-checks = true
+
+# Host build scripts and proc-macros must remain loadable by the compiler.
+# Older LLVM stripping can misalign Mach-O LINKEDIT entries rejected by dyld.
+# This does not disable stripping for the shipped target binaries.
+[profile.release.build-override]
+strip = false
 
 # `release` semantics (no debug assertions, trapping overflow) without paying
 # fat LTO and single-codegen-unit linking on a ~4,350-test suite. This is what
@@ -741,6 +759,24 @@ opt-level = 0
 debug = "line-tables-only"
 incremental = true
 codegen-units = 256
+
+# Local-image integration tests repeatedly fingerprint the full source checkout.
+# Optimize the measured observation/attribute/object-decoding hot paths without
+# changing test assertions, overflow checks, or production build profiles.
+[profile.test.package.mvm-build]
+opt-level = 2
+[profile.test.package.gix-worktree]
+opt-level = 2
+[profile.test.package.gix-attributes]
+opt-level = 2
+[profile.test.package.gix-glob]
+opt-level = 2
+[profile.test.package.gix-pack]
+opt-level = 2
+[profile.test.package.gix-odb]
+opt-level = 2
+[profile.test.package.zlib-rs]
+opt-level = 2
 
 # The `dev` profile is what cargo compiles every LIBRARY crate under, even during
 # `cargo test`/`nextest` (only the test *binaries* use `[profile.test]`). Without
@@ -818,9 +854,10 @@ opt-level = 3
 [profile.dev.package.memchr]
 opt-level = 3
 
-# What goes to crates.io: the public crates and nothing else. `mvm-contract` is
-# the one library meant for outside consumers (no_std, no workspace
-# dependencies). Every other member is internal and says `publish = false`;
+# What goes to crates.io: the public crates and nothing else. `mvm-contract`
+# provides no_std contracts; `runmvm-client` is the standalone JSON host-library
+# client. Neither depends on internal workspace crates. Every other member is
+# internal and says `publish = false`;
 # mvmctl ships as release binaries, the installer, Homebrew and .deb/.rpm, not
 # from crates.io. `xtask publish-plan` publishes the shipped-dependency closure
 # of these roots, dependencies first, and `xtask check-publish-readiness`
@@ -831,7 +868,7 @@ opt-level = 3
 # `reason`; the plan then withholds that root and everything it alone needs,
 # so no internal crate is uploaded on behalf of a root that is not.
 [workspace.metadata.mvm.publish]
-roots = ["mvm-contract"]
+roots = ["mvm-contract", "runmvm-client"]
 
 [workspace.metadata.mvm.toolchain]
 # Pinned cross-compile toolchain for the embedded host-vm binaries
@@ -860,17 +897,6 @@ cargo-zigbuild = "0.23.0"
 # broken code rather than a stale tool. `scripts/require-nextest.sh` turns that
 # into one actionable line. This is a known-good floor, not a bisected minimum.
 nextest-min = "0.9.143"
-
-# The mutator behind `check-mutation-witnesses --run`. An exact pin, not a
-# floor: accepted misses in xtask/mutation-witness-baseline.json are matched
-# on cargo-mutants' own description text, and a release that attributes a
-# mutant to a different enclosing function renames it. Unpinned, one upstream
-# release can turn a baselined equivalent mutant into a "new" survivor, or
-# make a real one look already accepted. Bump deliberately, together with any
-# baseline descriptions the new version renders differently. The nightly lane
-# installs this version, and the gate refuses both a different installed
-# mutator and outcomes recorded by one.
-cargo-mutants = "27.1.0"
 
 # The Linux package builders distro-packages.yml installs. Exact pins: the
 # packages they write are signed release assets, and an unpinned

@@ -8,7 +8,7 @@
 //!
 //! The format — manifest, signature, archive layout — belongs to
 //! `mvm_core::plan::bundle`. What this crate owns is the decision about what
-//! an exported bundle contains, so `mvmctl bundle export` and a library
+//! an exported bundle contains, so `mvmctl build` and a library
 //! caller cannot disagree about it.
 //!
 //! ```no_run
@@ -37,6 +37,12 @@ mod inputs;
 mod signer;
 
 pub use debug::{DebugFormat, DebugOutput};
-pub use export::{ExportedBundle, export_bundle_with_signer, guest_sidecar_path};
-pub use inputs::{BootAssetsInputs, BundleExportInputs, PostureInputs};
+pub use export::{
+    ExportedBundle, StagedBundle, export_bundle_with_signer, guest_sidecar_path,
+    stage_bundle_with_signer,
+};
+pub use inputs::{
+    BootAssetsInputs, BundleExportInputs, CanonicalLinuxProofInputs, CliBootAssetsInputs,
+    PostureInputs,
+};
 pub use signer::BundleSigner;

@@ -282,8 +282,76 @@ impl HvfPersistentHostVm {
             output_disk,
             vm,
         };
-        session.wait_until_dispatch_ready(PERSISTENT_BUILDER_READY_TIMEOUT)?;
+        if let Err(error) = session.wait_until_dispatch_ready(PERSISTENT_BUILDER_READY_TIMEOUT) {
+            return Err(anyhow::Error::new(PersistentHvfLaunchFailure {
+                error,
+                session: std::sync::Mutex::new(Some(session)),
+            }));
+        }
         Ok(session)
+    }
+}
+
+/// A concrete fresh builder launch whose dispatch readiness failed. This owns
+/// the original session, not a VM name to reattach. Keep the error for retry;
+/// dropping an unconfirmed error conservatively retains that exact custody.
+pub struct PersistentHvfLaunchFailure {
+    error: anyhow::Error,
+    session: std::sync::Mutex<Option<PersistentHvfSession>>,
+}
+
+impl PersistentHvfLaunchFailure {
+    pub fn error(&self) -> &anyhow::Error {
+        &self.error
+    }
+
+    /// This session was created only by the concrete fresh HVF boot above.
+    /// Its held vm.kill reaches the original OwnedInstance stop/exit proof;
+    /// it performs no attach or name/PID lookup on this path.
+    pub fn retry_stop(&mut self) -> Result<()> {
+        let retained = self
+            .session
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(session) = retained.as_ref() {
+            session.vm.kill()?;
+        }
+        drop(retained.take());
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for PersistentHvfLaunchFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PersistentHvfLaunchFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for PersistentHvfLaunchFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for PersistentHvfLaunchFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+impl Drop for PersistentHvfLaunchFailure {
+    fn drop(&mut self) {
+        let retained = self
+            .session
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(session) = retained.take() {
+            // Abandonment is not native exit or recoverability. No blocking
+            // stop, name reconstruction or cleanup is attempted from Drop.
+            std::mem::forget(session);
+        }
     }
 }
 

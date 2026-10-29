@@ -8,6 +8,7 @@ use crate::ui;
 use mvm_core::config::fc_version;
 use mvm_core::platform;
 
+mod backends;
 mod builder;
 mod daemons;
 mod guest_runtime;
@@ -47,9 +48,9 @@ pub use toolchain::{ZigbuildProbe, probe_zigbuild};
 #[serde(rename_all = "kebab-case")]
 pub enum DoctorWorkflow {
     /// CLI user running an existing command (`mvmctl run`,
-    /// `mvmctl machine run`, `mvmctl build`).
+    /// `mvmctl machine run`, `mvmctl machine build`).
     CliRun,
-    /// Python SDK consumer (`@mvm.app` decorator + `mvmctl build
+    /// Python SDK consumer (`@mvm.app` decorator + `mvmctl dev
     /// compile` / `mvmctl machine run`).
     PythonSdk,
     /// TypeScript / Node SDK consumer.
@@ -229,6 +230,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(platform_checks::network_backend_check(plat));
     checks.push(platform_checks::egress_proxy_check());
     checks.push(platform_checks::ts_runner_check());
+    checks.extend(backends::backend_component_checks());
     checks.push(builder::stage0_status_check());
     checks.push(builder::builder_store_check());
     checks.push(builder::builder_egress_check());
@@ -269,6 +271,17 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(security_checks::security_snapshot_encryption_key_check());
     checks.push(security_checks::security_snapshot_dirs_check());
     checks.push(security_checks::security_signing_check());
+    if workflow == Some(DoctorWorkflow::BundleRun) {
+        checks.push(Check {
+            name: "local build authority",
+            category: "security",
+            ok: true,
+            info: format!(
+                "{}; requires the signed local-build label and is refused under --prod",
+                mvm_core::plan::bundle::LOCAL_BUILD_NOTICE
+            ),
+        });
+    }
 
     // ── Active backend security posture ──────
     let security_posture = security::collect_security_posture();

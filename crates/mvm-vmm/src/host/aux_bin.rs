@@ -57,6 +57,7 @@ mod source_build;
 pub use host_process::{
     CLI_BIN, CliSpawn, CliSpawnRefused, HostBinaryDirError, HostProcess,
     allow_helper_builds_from_source, declare_host_binary_dir, declare_library_embedder,
+    declare_release_binary,
 };
 
 /// A per-VM helper binary, its path-override env var, and how a source
@@ -111,6 +112,8 @@ impl<'a> AuxBin<'a> {
         self
     }
 }
+
+const LIBKRUN_SUPERVISOR_BIN: &str = "mvm-libkrun-supervisor";
 
 /// Resolve `spec` to an on-disk binary. Never builds — a missing one is a
 /// hard error with a recovery hint. Code that lists what is installed (the
@@ -218,14 +221,54 @@ enum ProbeOutcome {
 /// is pathological.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Run `helper --contract-version` and classify the answer.
-fn probe_contract(helper: &Path, timeout: Duration) -> ProbeOutcome {
-    let child = match mvm_core::env_hygiene::helper_command(helper)
+fn contract_probe_command(mut command: std::process::Command) -> std::process::Command {
+    // A resolver probe has null stdin, never a legacy supervisor's RAM replay.
+    // Scrub here, BEFORE resolution returns to a later boot-command policy.
+    command
+        .env_remove("MVM_HVF_LEGACY_CONFIG_REPLAY")
         .arg(helper_contract::CONTRACT_PROBE_FLAG)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    command
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn contract_probe_scrubs_replay_hint_even_when_not_unicode_without_execution() {
+    use std::os::unix::ffi::OsStringExt;
+    for value in [
+        std::ffi::OsString::from("shm-v1:2"),
+        std::ffi::OsString::from_vec(vec![0xff]),
+    ] {
+        let mut command = mvm_core::env_hygiene::helper_command("probe-not-executed");
+        command.env("MVM_HVF_LEGACY_CONFIG_REPLAY", value);
+        command.env("MVM_HVF_SIGNED", "1");
+        let command = contract_probe_command(command);
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "MVM_HVF_LEGACY_CONFIG_REPLAY")
+                .map(|(_, value)| value),
+            Some(None)
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "MVM_HVF_SIGNED")
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("1"))
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new(helper_contract::CONTRACT_PROBE_FLAG)]
+        );
+    }
+}
+
+/// Run `helper --contract-version` and classify the answer.
+fn probe_contract(helper: &Path, timeout: Duration) -> ProbeOutcome {
+    let child = match contract_probe_command(mvm_core::env_hygiene::helper_command(helper)).spawn()
     {
         Ok(child) => child,
         Err(e) => {
@@ -648,6 +691,25 @@ fn resolve_from(spec: &AuxBin, lookup: &Lookup) -> Result<PathBuf> {
         return Ok(found);
     }
     bail!(
+        "{}",
+        missing_message(spec, HostProcess::current().is_release_binary())
+    )
+}
+
+/// The error for a helper that resolved nowhere. A release download ships a
+/// fixed set of helpers, so for one the remedy is adding the signed component
+/// set or choosing another backend, never a `cargo build`.
+fn missing_message(spec: &AuxBin, release_binary: bool) -> String {
+    if release_binary && spec.bin == LIBKRUN_SUPERVISOR_BIN {
+        return format!(
+            "{} not found. This release install can fetch the signed libkrun component \
+             set: run `mvmctl backend add libkrun` (macOS 13-25 Apple Silicon); no \
+             separate libkrun install is needed. On macOS 26+ the default HVF backend \
+             needs no libkrun files. See https://runmvm.com/reference/platform-support/.",
+            spec.bin
+        );
+    }
+    format!(
         "{bin} not found. It is a per-VM host helper `[[bin]]` of {pkg}; on \
          a source checkout build it with `{command}` (add `--release` to match a \
          release build, or use `just payload::supervisors`), or set {env}=<path>.{hint}",
@@ -706,7 +768,7 @@ fn first_existing_bin(bin: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 
 /// Extra recovery hint for helpers with a host prerequisite. Empty otherwise.
 fn missing_hint(bin: &str) -> &'static str {
-    if bin == "mvm-libkrun-supervisor" {
+    if bin == LIBKRUN_SUPERVISOR_BIN {
         " This helper links libkrun; install it (`brew install slp/krun/libkrun`) and rebuild."
     } else {
         ""
@@ -1486,6 +1548,33 @@ mod tests {
     fn libkrun_missing_hint_mentions_libkrun() {
         assert!(missing_hint("mvm-libkrun-supervisor").contains("libkrun"));
         assert_eq!(missing_hint("mvm-hvf-supervisor"), "");
+    }
+
+    #[test]
+    fn a_release_binary_names_the_backend_add_and_hvf_remedies() {
+        let spec = AuxBin::new(
+            "mvm-libkrun-supervisor",
+            "MVM_LIBKRUN_SUPERVISOR",
+            "mvm-hostd",
+        );
+        let message = missing_message(&spec, true);
+        assert!(message.contains("mvmctl backend add libkrun"), "{message}");
+        assert!(message.contains("HVF"), "{message}");
+        assert!(!message.contains("cargo build"), "{message}");
+        // A release install never prints a Homebrew instruction.
+        assert!(!message.to_lowercase().contains("brew"), "{message}");
+    }
+
+    #[test]
+    fn a_source_checkout_keeps_the_rebuild_remedy() {
+        let spec = AuxBin::new(
+            "mvm-libkrun-supervisor",
+            "MVM_LIBKRUN_SUPERVISOR",
+            "mvm-hostd",
+        );
+        let message = missing_message(&spec, false);
+        assert!(message.contains("cargo build"));
+        assert!(message.contains("brew install slp/krun/libkrun"));
     }
 
     #[test]

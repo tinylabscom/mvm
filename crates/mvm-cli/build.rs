@@ -203,8 +203,9 @@ fn write_unembedded_table(workspace_root: &Path, out_dir: &Path, warning: Option
     println!("cargo:rerun-if-changed=build_support.rs");
     println!("cargo:rerun-if-changed=build_embed_cache.rs");
     println!("cargo:rerun-if-changed=src/host_binaries/payload_build.rs");
+    println!("cargo:rerun-if-changed=src/host_binaries/payload_build_plan.rs");
     println!("cargo:rerun-if-changed=../mvm-build/src/workspace_graph.rs");
-    println!("cargo:rerun-if-changed=../mvm-build/src/host_payload_manifest.rs");
+    println!("cargo:rerun-if-changed=../mvm-builder-guest/src/host_payload_manifest.rs");
     println!("cargo:rerun-if-changed=../mvm-build/src/embed_toolchain.rs");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_CACHE_DIR");
@@ -433,7 +434,7 @@ fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
     println!(
         "cargo:rerun-if-changed={}",
         workspace_root
-            .join("crates/mvm-build/src/host_payload_manifest.rs")
+            .join("crates/mvm-builder-guest/src/host_payload_manifest.rs")
             .display()
     );
     // The embedded binaries' bytes are the authoritative builder-VM

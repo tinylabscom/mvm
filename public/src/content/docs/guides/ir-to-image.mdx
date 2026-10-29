@@ -125,7 +125,7 @@ def greet(name: str) -> str:
     return f"hello, {name}"
 ```
 
-`mvmctl build compile entry.py` runs the user's module under `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json`. The decorators build a `Workload` dataclass tree, `_dsl.emit_json()` calls `json.dumps(..., sort_keys=True, separators=(",", ":"))`, and the canonical bytes land at `MVM_IR_OUT` (or stdout when unset).
+`mvmctl dev compile entry.py` runs the user's module under `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json`. The decorators build a `Workload` dataclass tree, `_dsl.emit_json()` calls `json.dumps(..., sort_keys=True, separators=(",", ":"))`, and the canonical bytes land at `MVM_IR_OUT` (or stdout when unset).
 
 </TabItem>
 <TabItem label="TypeScript">
@@ -147,7 +147,7 @@ export const greet = mvm.app({
 })((name: string): string => `hello, ${name}`);
 ```
 
-`mvmctl build compile entry.ts` runs the declaration under the same `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json` contract. The TypeScript helpers emit canonical IR through the same schema-owned shape as Python.
+`mvmctl dev compile entry.ts` runs the declaration under the same `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json` contract. The TypeScript helpers emit canonical IR through the same schema-owned shape as Python.
 
 </TabItem>
 <TabItem label="Rust">
@@ -292,7 +292,11 @@ The orchestrator picks a builder mode (`host` | `vsock` | `auto`) and dispatches
 3. **Runs `nix build`.** With `--override-input mvm git+file://...?dir=nix` so the builder VM consumes the in-tree `nix/lib` you're editing, not a pinned release.
 4. **Extracts artifacts.** Copies `rootfs.ext4`, `vmlinux`, and `mvm-meta.json` back to the host artifact dir.
 
-The host never runs `nix` itself. The standard builder VM runs on native HVF on supported Apple Silicon macOS hosts and QEMU on native Linux. The optional libkrun integration is not installed, linked, or selected by the standard macOS path; the build contract is otherwise unchanged.
+The host never runs `nix` itself. The standard builder VM runs on native HVF on
+supported Apple Silicon macOS hosts and QEMU on native Linux. macOS 26+ neither
+installs nor selects libkrun; the Apple Silicon release retains its bundled
+libkrun preview on macOS 13–25 for explicit selection. The build contract is
+otherwise unchanged.
 
 ### Caching and reuse
 
@@ -399,7 +403,7 @@ export const spec = mvm.app({
 
 ### The emitted IR
 
-`mvmctl build compile entry.py > workload-ir.json` produces canonical JSON. With whitespace re-added for readability:
+`mvmctl dev compile entry.py > workload-ir.json` produces canonical JSON. With whitespace re-added for readability:
 
 ```json
 {
@@ -429,7 +433,7 @@ export const spec = mvm.app({
 }
 ```
 
-`mvmctl build address workload-ir.json` accepts it and prints its address. `ir_hash()` returns a stable lowercase-hex SHA-256; copy that hash anywhere you need to refer to this exact IR (launch plan, audit entry, cache key).
+`mvmctl dev address workload-ir.json` accepts it and prints its address. `ir_hash()` returns a stable lowercase-hex SHA-256; copy that hash anywhere you need to refer to this exact IR (launch plan, audit entry, cache key).
 
 ### The flake
 

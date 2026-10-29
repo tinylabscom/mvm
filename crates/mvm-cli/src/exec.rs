@@ -24,10 +24,13 @@ use crate::commands::DirShareSpec;
 use crate::ui;
 
 mod baked_entrypoint;
+mod built_pack;
 mod either;
 /// Exit code the CLI returns when a guest command exceeds its `--timeout`.
 /// Matches GNU `timeout(1)` so scripts can branch on it.
 mod guest_run;
+mod image_artifacts;
+use image_artifacts::{ResolvedImage, resolve_image_artifacts};
 mod launch_plan;
 mod mounts;
 mod oci_boot;
@@ -136,6 +139,11 @@ pub enum ImageSource {
     /// Pre-built `wasm32-wasip1` module run directly under the wasm backend.
     /// No kernel, initrd, or rootfs — the module path is the workload.
     WasmModule { module_path: String, label: String },
+    /// A built registry image reopened under an exact pin. No cached host path
+    /// bypasses the shared client contract or final admitted-image check.
+    RegistryPack {
+        pin: mvm_core::registry_pack::PackPin,
+    },
 }
 
 fn effective_transient_initrd(
@@ -628,6 +636,7 @@ fn run_inner(
         use_snapshot,
         root_strategy,
         image: resolved,
+        _built_runtime,
     } = launch;
     let startup_admitted = std::time::Instant::now();
     let vm_name = start_config.name.clone();
@@ -651,6 +660,9 @@ fn run_inner(
     // snapshot-restore / cold boot. See `boot_transient_vm`.
     let mut warm_claim_marks = crate::commands::vm::phase_timing::WarmClaimMarks::default();
     let requested_vm_name = vm_name.clone();
+    if let Some(runtime) = &_built_runtime {
+        runtime.verify_config(&start_config)?;
+    }
     let boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
@@ -715,7 +727,9 @@ fn run_inner(
     // Run the command + always tear down. The wasm backend has no guest
     // agent; the module already ran inside `start`, so we just collect its
     // exit status instead of waiting for a vsock console.
-    let run_outcome = if backend.name() == "wasm" {
+    let run_outcome = if let Err(error) = start_config.wait_for_admission_durability() {
+        Err(error)
+    } else if backend.name() == "wasm" {
         match run_wasm_module(&backend, &vm_name) {
             Ok(code) => Ok((Either::Left(code), None)),
             Err(e) => Err(e),
@@ -995,96 +1009,6 @@ fn finish_warm_memory_measurement(
     })
 }
 
-/// Kernel/rootfs/initrd + provenance resolved from `req.image`: either a
-/// named template lookup (which also probes for a snapshot) or a pre-built
-/// kernel/rootfs pair carried through as-is.
-struct ResolvedImage {
-    vmlinux: String,
-    initrd: Option<String>,
-    rootfs: String,
-    revision: String,
-    flake_ref: String,
-    profile: Option<String>,
-    snap_info: Option<mvm_core::template::SnapshotInfo>,
-    template_id: Option<String>,
-}
-
-/// Resolve image artifacts: either a named template or a pre-built pair. For
-/// templates, also probe for a pre-built snapshot so the caller can skip the
-/// cold-boot cost when the request turns out to be snapshot-eligible.
-fn resolve_image_artifacts(image: &ImageSource) -> Result<ResolvedImage> {
-    match image {
-        ImageSource::Template(name) => {
-            let (spec, vmlinux, initrd, rootfs, rev) =
-                mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(name)
-                    .with_context(|| format!("Loading template '{name}'"))?;
-            let snap_info =
-                mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(name)
-                    .ok()
-                    .flatten();
-            Ok(ResolvedImage {
-                vmlinux,
-                initrd,
-                rootfs,
-                revision: rev,
-                flake_ref: spec.flake_ref.clone(),
-                profile: Some(spec.profile.clone()),
-                snap_info,
-                template_id: Some(name.clone()),
-            })
-        }
-        ImageSource::PinnedTemplate {
-            slot_hash,
-            revision_hash,
-        } => {
-            let (spec, vmlinux, initrd, rootfs, rev) =
-                mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision(
-                    slot_hash,
-                    revision_hash,
-                )
-                .with_context(|| {
-                    format!("Loading stored template revision {slot_hash}@{revision_hash}")
-                })?;
-            Ok(ResolvedImage {
-                vmlinux,
-                initrd,
-                rootfs,
-                revision: rev,
-                flake_ref: spec.flake_ref,
-                profile: Some(spec.profile),
-                snap_info: None,
-                template_id: Some(slot_hash.clone()),
-            })
-        }
-        ImageSource::Prebuilt {
-            kernel_path,
-            rootfs_path,
-            initrd_path,
-            label,
-            ..
-        } => Ok(ResolvedImage {
-            vmlinux: kernel_path.clone(),
-            initrd: initrd_path.clone(),
-            rootfs: rootfs_path.clone(),
-            revision: String::new(),
-            flake_ref: label.clone(),
-            profile: None,
-            snap_info: None,
-            template_id: None,
-        }),
-        ImageSource::WasmModule { module_path, label } => Ok(ResolvedImage {
-            vmlinux: String::new(),
-            initrd: None,
-            rootfs: module_path.clone(),
-            revision: String::new(),
-            flake_ref: label.clone(),
-            profile: None,
-            snap_info: None,
-            template_id: None,
-        }),
-    }
-}
-
 /// The run-path tier gate's outputs for one boot: whether the request is
 /// still snapshot-restore eligible, the dm-verity sidecar (if any), the
 /// resolved rootfs strategy + runtime source policy, and the effective
@@ -1296,6 +1220,8 @@ pub struct ResolvedLaunch {
     pub root_strategy: mvm_build::run_image::RootStrategy,
     /// Resolved image artifacts, kept for the snapshot-restore leg of the boot.
     image: ResolvedImage,
+    /// Retained until normal runtime lifecycle binding has taken ownership.
+    _built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
 }
 
 /// Resolve a launch's bootable [`VmStartConfig`] **without starting a VM**.
@@ -1318,6 +1244,12 @@ pub fn resolve_launch(
 ) -> Result<ResolvedLaunch> {
     use crate::commands::vm::phase_timing::SubPhase;
 
+    built_pack::validate_shape(
+        shape.image,
+        shape.assets,
+        shape.warm_pool_size,
+        admit.is_some(),
+    )?;
     let backend = select_exec_backend(
         shape_uses_vsock_proxy_backend(shape)?,
         shape.network_policy,
@@ -1327,7 +1259,7 @@ pub fn resolve_launch(
     // Resolve image artifacts: either a named template or a pre-built pair.
     // For templates, also probe for a pre-built snapshot so we can skip the
     // cold-boot cost when the request is snapshot-eligible.
-    let image = resolve_image_artifacts(shape.image)?;
+    let image = resolve_image_artifacts(shape.image, backend.name())?;
     marks.image_resolved = marks.now();
 
     // A transient run owns only its state directory. Host directories are
@@ -1374,6 +1306,7 @@ pub fn resolve_launch(
         "admit window: build_start_config"
     );
     let mut use_snapshot = boot.use_snapshot;
+    let mut built_pack_check = None;
 
     // Attach everything the boot waits on before admitting. Admission starts
     // the plan's validity window and the verb grant minted from it expires
@@ -1433,18 +1366,18 @@ pub fn resolve_launch(
             assets: shape.assets,
             volumes: &start_config.volumes,
             bundle_archive: bundle_archive.as_deref(),
+            runtime_config: Some(&start_config),
         })?
     {
-        start_config.tenant_id = Some(sub.tenant_id);
-        start_config.plan_json = Some(sub.plan_json);
-        start_config.bundle_json = sub.bundle_json;
-        start_config.config_files.extend(sub.config_files);
+        let mut sub = sub;
+        built_pack_check = sub.built_pack_check.take();
+        let read_only_materialized_images = sub.apply_to(&mut start_config);
         for volume in &mut start_config.volumes {
-            if sub.read_only_materialized_images.contains(&volume.host)
+            if read_only_materialized_images.contains(&volume.host)
                 || volume
                     .materialized_image
                     .as_ref()
-                    .is_some_and(|image| sub.read_only_materialized_images.contains(image))
+                    .is_some_and(|image| read_only_materialized_images.contains(image))
             {
                 volume.read_only = true;
             }
@@ -1497,6 +1430,11 @@ pub fn resolve_launch(
         "admit window: runtime source status"
     );
     marks.admitted = marks.now();
+    let built_runtime = built_pack_check
+        .map(|check| check.prepare(&mut start_config, backend.kind()))
+        .transpose()?
+        .flatten();
+    built_pack::require_handoff(shape.image, built_runtime.is_some())?;
 
     Ok(ResolvedLaunch {
         backend,
@@ -1504,6 +1442,7 @@ pub fn resolve_launch(
         use_snapshot,
         root_strategy: boot.root_strategy,
         image,
+        _built_runtime: built_runtime,
     })
 }
 
@@ -2119,9 +2058,11 @@ mod tests {
 
     #[test]
     fn build_guest_wrapper_launch_plan_emits_cd_and_env() {
-        let mut env = BTreeMap::new();
-        env.insert("PORT".to_string(), "8080".to_string());
-        env.insert("LOG".to_string(), "info".to_string());
+        let entrypoint = load_launch_plan(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/launch-plan/workload.json"),
+        )
+        .unwrap();
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
@@ -2134,13 +2075,7 @@ mod tests {
             dir_shares: Vec::new(),
             disk_volumes: Vec::new(),
             env: vec![("CLI_OVER".to_string(), "wins".to_string())],
-            target: ExecTarget::LaunchPlan {
-                entrypoint: LaunchEntrypoint {
-                    command: vec!["python".into(), "main.py".into()],
-                    working_dir: Some("/app".into()),
-                    env,
-                },
-            },
+            target: ExecTarget::LaunchPlan { entrypoint },
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),

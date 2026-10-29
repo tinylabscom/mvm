@@ -29,6 +29,11 @@ pub struct ChildForkRequest<'a> {
     /// The child's state dir, already holding the copy-on-write clone of the
     /// verified parent's own content.
     pub child_dir: &'a Path,
+    /// Digest of runtime-artifacts.json from the authenticated parent manifest.
+    /// Saved-state Firecracker restores require it before loading any state.
+    pub runtime_artifacts_sha256: Option<&'a str>,
+    /// Digest of device-anchors.json from that same authenticated manifest.
+    pub device_anchors_sha256: Option<&'a str>,
     /// Fresh VMGenID token, bound to the child's content-address, that the
     /// child must adopt so its CSPRNG diverges from the parent's.
     ///
@@ -73,6 +78,19 @@ pub struct ChildForkRequest<'a> {
     /// parent booted with no plan and would otherwise enforce none of them.
     /// A driver with no such process has nowhere to deliver it.
     pub admitted_plan: Option<&'a str>,
+    /// Read-only images to put behind the late-volume slots the parent booted,
+    /// before the child resumes. Empty for a claim that attaches none.
+    pub late_volumes: &'a [LateVolumeAttach],
+}
+
+/// One read-only image a claim attaches to a late-volume slot of a restored
+/// child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LateVolumeAttach {
+    /// The block slot the parent booted a placeholder in.
+    pub slot: u8,
+    /// The host image the slot serves from now on.
+    pub source: std::path::PathBuf,
 }
 
 /// What a driver needs to boot a warm-pool factory parent. Grouped so the seam
@@ -99,6 +117,10 @@ pub struct PreloadChildRequest<'a> {
     pub child_vm_name: &'a str,
     /// Canonical child state directory containing the materialized snapshot.
     pub child_dir: &'a Path,
+    /// Digest of runtime-artifacts.json from the authenticated parent manifest.
+    pub runtime_artifacts_sha256: Option<&'a str>,
+    /// Digest of device-anchors.json from that same authenticated manifest.
+    pub device_anchors_sha256: Option<&'a str>,
 }
 
 /// The process identity and control endpoint of a paused preloaded child.
@@ -141,8 +163,25 @@ pub trait VmmDriver: Send + Sync {
     fn supports_preloaded_standby(&self) -> bool {
         false
     }
+    /// How many read-only late-volume slots this VMM boots a warm parent with,
+    /// and can point at a claim's own images before the child resumes. Zero
+    /// means a claim can attach no volume and such a launch keeps its cold path.
+    fn late_volume_slots(&self) -> u8 {
+        0
+    }
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;
+
+    /// Consume the same verified, unlinked kernel descriptor, never reopen
+    /// the spec's diagnostic pathname. Unsupported drivers refuse explicitly.
+    #[cfg(unix)]
+    fn boot_verified_kernel(
+        &self,
+        _spec: &VmmSpec,
+        _kernel: &crate::host::restore_image::VerifiedRestoreFile,
+    ) -> Result<Box<dyn RunningVm>> {
+        anyhow::bail!("backend does not support verified kernel descriptor handoff")
+    }
 
     /// Boot the clean, pre-workload standby parent `req` describes and return
     /// its pool record. The parent runs no entrypoint and holds no secret or
@@ -245,7 +284,7 @@ pub trait VmmDriver: Send + Sync {
         signal_post_restore(
             child_vm_name,
             &identity.signal(),
-            crate::post_restore::POST_RESTORE_READY_TIMEOUT,
+            crate::post_restore::POST_RESTORE_CLAIM_READY_TIMEOUT,
         )
     }
 
@@ -312,11 +351,40 @@ pub trait RunningVm: Send {
     fn terminate_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
         self.kill().map(|_| None)
     }
+    /// Stop once and preserve any real instance-bound lifetime evidence.
+    /// An ordinary successful stop is not proof that a kernel generation can
+    /// be deleted. Backends without such evidence return `None`.
+    fn terminate_with_kernel_exit(&self) -> Result<KernelStopOutcome> {
+        Ok(KernelStopOutcome {
+            timing: self.terminate_with_timing()?,
+            #[cfg(unix)]
+            hvf_exit: None,
+        })
+    }
+    #[cfg(unix)]
+    fn authenticated_hvf_instance(
+        &self,
+    ) -> Result<Option<mvm_core::protocol::hvf_control::HvfInstance>> {
+        Ok(None)
+    }
+    /// Kernel-observed identity of the host process that owns this VM, for
+    /// backends whose lifetime evidence is the process table. `None` when the
+    /// backend has no such process or is not this kind of backend.
+    fn process_identity(&self) -> Result<Option<crate::host::process_identity::ProcessIdentity>> {
+        Ok(None)
+    }
     fn pause(&self) -> Result<()>;
     fn resume(&self) -> Result<()>;
     fn status(&self) -> Result<VmStatus>;
     /// Open a host->guest vsock connection to `guest_port`.
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>>;
+}
+
+/// In-process driver outcome, not a serialized receipt or author assertion.
+pub struct KernelStopOutcome {
+    pub timing: Option<RunningVmStopTiming>,
+    #[cfg(unix)]
+    pub hvf_exit: Option<crate::host::hvf_stop::ConfirmedExit>,
 }
 
 /// Backend-specific phases observed while terminating a running VM.

@@ -187,6 +187,13 @@ impl FlowMuxIdentityMaterial {
         self.write_drive_with(path, &IdentityDriveContents::default())
     }
 
+    /// Write a fresh identity and return the digest of the exact assembled
+    /// buffer, so a fork can bind the replacement without reopening its path.
+    pub fn write_drive_measured(&self, path: &Path) -> Result<String> {
+        self.guest
+            .write_drive_with_digest(path, &IdentityDriveContents::default())
+    }
+
     /// Build the identity drive carrying `contents` alongside this boot's keys.
     ///
     /// The ingress projection is the signed plan's guest-loopback targets only;
@@ -212,6 +219,14 @@ impl GuestIdentityMaterial {
         path: &Path,
         contents: &IdentityDriveContents<'_>,
     ) -> Result<()> {
+        self.write_drive_with_digest(path, contents).map(|_| ())
+    }
+
+    fn write_drive_with_digest(
+        &self,
+        path: &Path,
+        contents: &IdentityDriveContents<'_>,
+    ) -> Result<String> {
         use mvm_fs::ext4::{BuildOptions, Node, Owner, build_image};
 
         if let Some(parent) = path.parent() {
@@ -281,7 +296,9 @@ impl GuestIdentityMaterial {
         // syncing it only added two fsyncs to every cold boot.
         write_private_ephemeral(path, &image)
             .with_context(|| format!("writing the FlowMux identity drive to {}", path.display()))?;
-        Ok(())
+        Ok(mvm_core::crypto::image_verify::sha256_reader(
+            image.as_slice(),
+        )?)
     }
 }
 
@@ -421,6 +438,23 @@ mod tests {
             a.spawn_config().guest_verifying_key_base64,
             b.spawn_config().guest_verifying_key_base64,
             "a per-boot identity must not repeat across boots"
+        );
+    }
+
+    #[test]
+    fn measured_identity_digest_binds_the_written_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(IDENTITY_DRIVE_FILE);
+        let material = FlowMuxIdentityMaterial::mint("child-generation", &host_key()).unwrap();
+        let digest = material.write_drive_measured(&path).unwrap();
+        assert_eq!(
+            digest,
+            mvm_core::crypto::image_verify::sha256_file(&path).unwrap()
+        );
+        std::fs::write(&path, b"changed after mint").unwrap();
+        assert_ne!(
+            digest,
+            mvm_core::crypto::image_verify::sha256_file(&path).unwrap()
         );
     }
 

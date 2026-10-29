@@ -22,6 +22,12 @@ pub enum MvmError {
     Rejected { reason: String },
     #[error("service unavailable: {reason}")]
     Unavailable { reason: String },
+    #[error("machine {machine_id} requires recovery for plan {plan_id}: {reason}")]
+    RecoveryRequired {
+        machine_id: String,
+        plan_id: String,
+        reason: String,
+    },
 }
 
 impl MvmError {
@@ -38,6 +44,7 @@ impl MvmError {
             Self::Conflict { .. } => crate::error_codes::CONFLICT,
             Self::Rejected { .. } => crate::error_codes::REJECTED,
             Self::Unavailable { .. } => crate::error_codes::UNAVAILABLE,
+            Self::RecoveryRequired { .. } => crate::error_codes::RECOVERY_REQUIRED,
         }
     }
 
@@ -64,7 +71,7 @@ mod tests {
     /// compiler does not tie it to the `match`, so a new variant must bump it
     /// by hand. When it is bumped, a walk that stops short of the new variant
     /// fails below; when it is not, the new variant can go unwalked.
-    const PINNED_VARIANTS: usize = 7;
+    const PINNED_VARIANTS: usize = 8;
 
     /// The code and retryability each variant is documented to carry,
     /// written as literals in a `match` with no wildcard arm and kept apart
@@ -80,6 +87,7 @@ mod tests {
             MvmError::Conflict { .. } => ("CONFLICT", false),
             MvmError::Rejected { .. } => ("REJECTED", false),
             MvmError::Unavailable { .. } => ("UNAVAILABLE", true),
+            MvmError::RecoveryRequired { .. } => ("RECOVERY_REQUIRED", false),
         }
     }
 
@@ -99,7 +107,12 @@ mod tests {
             MvmError::Unauthorized { .. } => Some(MvmError::Conflict { reason: reason() }),
             MvmError::Conflict { .. } => Some(MvmError::Rejected { reason: reason() }),
             MvmError::Rejected { .. } => Some(MvmError::Unavailable { reason: reason() }),
-            MvmError::Unavailable { .. } => None,
+            MvmError::Unavailable { .. } => Some(MvmError::RecoveryRequired {
+                machine_id: "m1".into(),
+                plan_id: "p1".into(),
+                reason: reason(),
+            }),
+            MvmError::RecoveryRequired { .. } => None,
         }
     }
 

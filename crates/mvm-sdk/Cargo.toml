@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-mvm-core = { workspace = true }
+mvm-core = { workspace = true, features = ["host-state"] }
 # In-guest host-services FFI: drives `host.audit.v1` / `host.time.v1` /
 # `host.cost.v1` over the vsock broker. The broker client and vsock primitives
 # live in the guest-agent crate; mvm-sdk only holds the C-ABI veneer.
@@ -25,7 +25,7 @@ mvm-host-services.workspace = true
 # enabling it here would switch schemars on inside `mvm-contract` for every
 # consumer and defeat the gating in `mvm-core`/`mvm-contract`/`mvm-agentd`.
 mvm-contract.workspace = true
-mvm-compiler = { workspace = true, optional = true }
+mvm-compiler = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Only the remote deploy transport (`MvmdClient::ship`) speaks HTTPS, and it is
@@ -54,15 +54,14 @@ toml = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-nix = { workspace = true }
 
-# Deployment staging and SDK language bridges.
+# Deployment staging.
 tempfile = { workspace = true }
-tree-sitter-python = { workspace = true }
-tree-sitter-typescript = { workspace = true }
 
 [features]
 default = []
-# Opt-in compatibility facade. Host tools should use mvm-compiler directly.
-compiler = ["dep:mvm-compiler"]
+# Compatibility facade. mvm-compiler is now a required dependency (decorator
+# parser lives there); this feature gates only the compile-pipeline re-exports.
+compiler = []
 # Deployment assembly and records stay outside the language-neutral compiler.
 deploy = ["compiler", "dep:blake3"]
 # The remote half of `deploy`: `MvmdClient` and the HTTPS upload. Off by

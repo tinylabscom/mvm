@@ -700,6 +700,7 @@ mod tests {
                 status: "collecting".into(),
                 generation: Some(2),
                 shed: 0,
+                losses: Default::default(),
             })
             .unwrap(),
         )

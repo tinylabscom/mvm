@@ -242,7 +242,7 @@ struct ReadmeExampleWitness {
     witness: Option<String>,
     /// A scenario that really executes this shape but boots no guest, for
     /// commands where there is no guest to boot: `template list` reads a
-    /// registry, `build compile` writes a directory. Structurally checked
+    /// registry, `dev compile` writes a directory. Structurally checked
     /// exactly like `witness`, minus the `@live` requirement, and it must say
     /// why a live lane has nothing to add.
     #[serde(default)]

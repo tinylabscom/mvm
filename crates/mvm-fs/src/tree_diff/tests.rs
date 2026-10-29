@@ -204,6 +204,7 @@ fn a_file_turned_directory_is_a_type_change() {
 
 /// The ext4 side end to end: two images built from two directories, read back
 /// by the reader the diff uses in production.
+#[cfg(unix)]
 mod images {
     use super::*;
     use std::path::Path;
@@ -266,13 +267,13 @@ mod images {
             }
         );
     }
+}
 
-    #[test]
-    fn a_file_that_is_not_an_image_is_unreadable_not_empty() {
-        let root = tempfile::tempdir().unwrap();
-        let junk = root.path().join("junk.ext4");
-        std::fs::write(&junk, b"not an image").unwrap();
-        let err = diff_images(&junk, &junk, DiffLimits::default()).unwrap_err();
-        assert!(matches!(err, TreeDiffError::Unreadable { .. }), "{err}");
-    }
+#[test]
+fn a_file_that_is_not_an_image_is_unreadable_not_empty() {
+    let root = tempfile::tempdir().unwrap();
+    let junk = root.path().join("junk.ext4");
+    std::fs::write(&junk, b"not an image").unwrap();
+    let err = diff_images(&junk, &junk, DiffLimits::default()).unwrap_err();
+    assert!(matches!(err, TreeDiffError::Unreadable { .. }), "{err}");
 }

@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use mvm_client::policy_profiles::{
     LaunchFlags, Platform, PolicyRef, PolicySelection, PolicyStore, ProjectPolicy,
-    ResolvedManifest, fold, resolve,
+    ResolvedManifest, ResolvedPolicy, fold, resolve,
 };
 
 use super::exec::RunArgs;
@@ -68,28 +68,43 @@ pub(in crate::commands) fn select_pack_image(args: &mut RunArgs) -> Result<()> {
         let Some(image) = &verified.manifest().image else {
             continue;
         };
-        let mvm_core::registry_pack::RegistryPackImage::Source(image) = image else {
-            anyhow::bail!("built pack image release assets are not yet installed or admitted");
-        };
         anyhow::ensure!(
             selected.is_none(),
             "more than one --policy pack declares an image; select an explicit boot source"
         );
-        let manifest_path = installed.payload_root().join(&image.manifest);
-        let manifest = mvm_core::domain::manifest::Manifest::read_file(&manifest_path)
-            .context("reading verified pack image manifest")?;
-        let flake_dir = manifest_path
-            .parent()
-            .context("pack image manifest has no parent directory")?;
         let pin = mvm_core::registry_pack::PackPin::new(
             verified.manifest().reference.clone(),
             verified.manifest_sha256().clone(),
         )?;
-        selected = Some((flake_dir.display().to_string(), manifest.profile, pin));
+        let source = match image {
+            mvm_core::registry_pack::RegistryPackImage::Source(image) => {
+                let manifest_path = installed.payload_root().join(&image.manifest);
+                let manifest = mvm_core::domain::manifest::Manifest::read_file(&manifest_path)
+                    .context("reading verified pack image manifest")?;
+                let flake_dir = manifest_path
+                    .parent()
+                    .context("pack image manifest has no parent directory")?;
+                Some((flake_dir.display().to_string(), manifest.profile))
+            }
+            mvm_core::registry_pack::RegistryPackImage::Built(_) => {
+                anyhow::ensure!(
+                    matches!(
+                        args.profile,
+                        mvm_client::profile::RunProfile::Restrictive
+                            | mvm_client::profile::RunProfile::Standard
+                    ),
+                    "built registry images require a restrictive or standard workload profile"
+                );
+                None
+            }
+        };
+        selected = Some((source, pin));
     }
-    if let Some((flake, profile, pin)) = selected {
-        args.flake = Some(flake);
-        args.flake_profile = Some(profile);
+    if let Some((source, pin)) = selected {
+        if let Some((flake, profile)) = source {
+            args.flake = Some(flake);
+            args.flake_profile = Some(profile);
+        }
         args.registry_pack_image = Some(pin);
     }
     Ok(())
@@ -98,59 +113,16 @@ pub(in crate::commands) fn select_pack_image(args: &mut RunArgs) -> Result<()> {
 /// The authored policy a launch runs under, if it names one.
 struct Selected {
     label: String,
-    policy: mvm_client::policy_profiles::PolicyBody,
-    notes: Vec<String>,
-    backend_conditioned: bool,
+    resolved: ResolvedPolicy,
 }
 
 fn select(args: &RunArgs) -> Result<Option<Selected>> {
-    let local = select_local(args)?;
-    let Some(reference) = &args.application_policy else {
-        return Ok(local);
-    };
-    let reference = PolicyRef::parse(reference).map_err(anyhow::Error::msg)?;
-    anyhow::ensure!(
-        matches!(
-            &reference,
-            PolicyRef::Pack {
-                version: Some(_),
-                ..
-            }
-        ),
-        "application policy must be an exact signed registry pack reference"
-    );
-    let package = resolve(
-        &PolicyStore::from_config(),
-        &PolicySelection::profile(reference),
-        run_platform(args),
-    )?;
-    let mut authority = mvm_client::policy_profiles::ResolvedPolicy::empty();
-    if let Some(local) = &local {
-        authority.policy = local.policy.clone();
-        authority.notes = local.notes.clone();
-        authority.backend_conditioned = local.backend_conditioned;
-    }
-    let composed = mvm_client::policy_profiles::compose_package(&package, &authority)?;
-    Ok(Some(Selected {
-        label: format!(
-            "application policy {}",
-            args.application_policy.as_deref().unwrap_or_default()
-        ),
-        policy: composed.policy,
-        notes: composed.notes,
-        backend_conditioned: composed.backend_conditioned,
-    }))
-}
-
-fn select_local(args: &RunArgs) -> Result<Option<Selected>> {
     let config = mvm_core::user_config::load_strict(None)?;
     if let Some(path) = &args.plan {
         let manifest = ResolvedManifest::read(path)?;
         return Ok(Some(Selected {
             label: format!("resolved manifest {}", path.display()),
-            policy: manifest.policy,
-            notes: Vec::new(),
-            backend_conditioned: false,
+            resolved: manifest.into_resolved("resolved manifest", Some(path))?,
         }));
     }
     let project = super::run_routes::project_manifest(args)?
@@ -168,12 +140,7 @@ fn select_local(args: &RunArgs) -> Result<Option<Selected>> {
         "policy".to_string()
     };
     let resolved = resolve(&PolicyStore::from_config(), &selection, run_platform(args))?;
-    Ok(Some(Selected {
-        label,
-        policy: resolved.policy,
-        notes: resolved.notes,
-        backend_conditioned: resolved.backend_conditioned,
-    }))
+    Ok(Some(Selected { label, resolved }))
 }
 
 /// This host, and the backend the run asks for or the host would pick.
@@ -269,14 +236,33 @@ fn launch_flags(args: &RunArgs) -> Result<LaunchFlags> {
 /// A policy that does not resolve, or a flag that asks for something the
 /// policy denies, blocks, or bounds — named.
 pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
-    let Some(selected) = select(args)? else {
+    let selected = select(args)?;
+    let environment = super::exec::application_source::environment(args)?;
+    if selected.is_none() && environment.as_ref().is_none_or(|env| env.policy.is_none()) {
         return Ok(());
-    };
-    for note in &selected.notes {
+    }
+    let mut selected = selected.unwrap_or_else(|| Selected {
+        label: "signed application environment".into(),
+        resolved: ResolvedPolicy::empty(),
+    });
+    for note in &selected.resolved.notes {
         ui::warn(&format!("policy: {note}"));
     }
-    let folded = fold(&selected.policy, &launch_flags(args)?)
+    let flags = launch_flags(args)?;
+    let folded = if let Some(environment) = environment {
+        let (policy, folded) = mvm_client::policy_profiles::environment::fold_environment_policy(
+            &environment,
+            Some(&selected.resolved),
+            &flags,
+            args.network_preset,
+        )
         .with_context(|| format!("applying {}", selected.label))?;
+        selected.resolved.policy = policy;
+        folded
+    } else {
+        fold(&selected.resolved.policy, &flags)
+            .with_context(|| format!("applying {}", selected.label))?
+    };
     args.allow_host = folded.allow_host;
     args.policy_routes = folded.routes;
     args.cpu_limit = folded.cpu_limit;
@@ -285,10 +271,11 @@ pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
     args.mounts = folded.mounts;
     args.allow_env = folded.allow_env;
     args.policy_backend = selected
+        .resolved
         .backend_conditioned
         .then_some(run_platform(args).backend)
         .flatten();
-    args.applied_policy = Some(selected.policy);
+    args.applied_policy = Some(selected.resolved.policy);
     tracing::info!(policy = %selected.label, "running under an authored policy");
     Ok(())
 }
@@ -300,7 +287,7 @@ mod tests {
 
     #[test]
     fn configured_policy_applies_without_sources_and_flags_or_plan_replace_it() {
-        let (_env, _home) = isolated();
+        let (_env, home) = isolated();
         mvm_core::user_config::save(
             &mvm_core::user_config::MvmConfig {
                 default_policy: vec!["offline".into()],
@@ -311,10 +298,16 @@ mod tests {
         .unwrap();
         let args = RunArgs::default();
         assert_eq!(
-            select_local(&args).unwrap().unwrap().policy.network.block,
+            select(&args)
+                .unwrap()
+                .unwrap()
+                .resolved
+                .policy
+                .network
+                .block,
             Some(true)
         );
-        let selected = select_local(&RunArgs {
+        let selected = select(&RunArgs {
             policy: vec!["agent-apis".into()],
             ..RunArgs::default()
         })
@@ -322,21 +315,22 @@ mod tests {
         .unwrap();
         assert!(
             selected
+                .resolved
                 .policy
                 .network
                 .allow
                 .contains(&"api.openai.com:443".into())
         );
-        let plan = _home.path().join("plan.json");
+        let plan = home.path().join("plan.json");
         std::fs::write(&plan, r#"{"policy":{"network":{"allow":["plan.test"]}}}"#).unwrap();
-        let selected = select_local(&RunArgs {
+        let selected = select(&RunArgs {
             plan: Some(plan),
             policy: vec!["absent".into()],
             ..RunArgs::default()
         })
         .unwrap()
         .unwrap();
-        assert_eq!(selected.policy.network.allow, ["plan.test:443"]);
+        assert_eq!(selected.resolved.policy.network.allow, ["plan.test:443"]);
     }
 
     #[test]
@@ -344,31 +338,36 @@ mod tests {
         let (_env, home) = isolated();
         std::fs::create_dir_all(home.path().join("config")).unwrap();
         std::fs::write(home.path().join("config/config.toml"), "default_policy = 7").unwrap();
-        assert!(select_local(&RunArgs::default()).is_err());
+        assert!(select(&RunArgs::default()).is_err());
     }
 
     #[test]
-    fn package_requirements_are_checked_against_configured_local_authority() {
+    fn configured_network_restriction_is_not_replaced_by_signed_defaults() {
         let (_env, _home) = isolated();
-        let mut package = mvm_client::policy_profiles::ResolvedPolicy::empty();
-        package.policy.network.allow = vec!["api.openai.com:443".into()];
-        for (profile, compatible) in [("agent-apis", true), ("offline", false)] {
-            mvm_core::user_config::save(
-                &mvm_core::user_config::MvmConfig {
-                    default_policy: vec![profile.into()],
-                    ..Default::default()
-                },
-                None,
-            )
-            .unwrap();
-            let selected = select_local(&RunArgs::default()).unwrap().unwrap();
-            let mut local = mvm_client::policy_profiles::ResolvedPolicy::empty();
-            local.policy = selected.policy;
-            assert_eq!(
-                mvm_client::policy_profiles::compose_package(&package, &local).is_ok(),
-                compatible
-            );
-        }
+        mvm_core::user_config::save(
+            &mvm_core::user_config::MvmConfig {
+                default_policy: vec!["offline".into()],
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let local = select(&RunArgs::default()).unwrap().unwrap();
+        let environment = serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": "aarch64-linux",
+            "entrypoint": {"argv": ["/app/start"]},
+            "policy": {"allow_hosts": ["api.example.test:443"]}
+        }))
+        .unwrap();
+        let (_, folded) = mvm_client::policy_profiles::environment::fold_environment_policy(
+            &environment,
+            Some(&local.resolved),
+            &LaunchFlags::default(),
+            None,
+        )
+        .unwrap();
+        assert!(folded.allow_host.is_empty());
     }
 
     #[cfg(feature = "manifest-verify")]
@@ -442,6 +441,43 @@ mod tests {
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
         (env, home)
+    }
+
+    #[test]
+    fn policy_and_plan_selection_keep_distinct_empty_network_provenance() {
+        let (_env, home) = isolated();
+        for (profile, selected_network) in [
+            (
+                "[overrides.network]\nallow = [\"a.test:443\"]\ndeny = [\"a.test:443\"]\n",
+                true,
+            ),
+            ("[overrides.network]\ndeny = [\"a.test:443\"]\n", false),
+            ("[overrides.resources]\nmax_cpus = 2\n", false),
+        ] {
+            let path = home.path().join("operator.toml");
+            std::fs::write(&path, profile).unwrap();
+            let args = RunArgs {
+                policy: vec![path.display().to_string()],
+                ..Default::default()
+            };
+            let selected = select(&args).unwrap().unwrap();
+            assert_eq!(selected.resolved.network_selected(), selected_network);
+            assert!(selected.resolved.policy.network.allow.is_empty());
+            let plan = home.path().join("resolved.json");
+            std::fs::write(
+                &plan,
+                serde_json::to_vec(&ResolvedManifest::from_resolved(&selected.resolved)).unwrap(),
+            )
+            .unwrap();
+            let args = RunArgs {
+                plan: Some(plan),
+                ..Default::default()
+            };
+            let selected = select(&args).unwrap().unwrap();
+            assert!(selected.resolved.network_selected());
+            assert!(selected.resolved.policy.network.allow.is_empty());
+            assert_ne!(selected.resolved.policy.network.block, Some(true));
+        }
     }
 
     #[test]
@@ -568,22 +604,6 @@ mod tests {
         let before = format!("{args:?}");
         apply_run_policy(&mut args).unwrap();
         assert_eq!(format!("{args:?}"), before);
-    }
-
-    #[test]
-    fn application_policy_is_required_even_without_policy_flags_or_with_a_plan() {
-        let (_env, home) = isolated();
-        let plan = home.path().join("local.json");
-        std::fs::write(&plan, r#"{"policy":{}}"#).unwrap();
-        for plan in [None, Some(plan)] {
-            let mut args = RunArgs {
-                application_policy: Some("runtime/absent@1.0.0".into()),
-                plan,
-                ..RunArgs::default()
-            };
-            assert!(apply_run_policy(&mut args).is_err());
-            assert!(args.applied_policy.is_none());
-        }
     }
 
     #[test]

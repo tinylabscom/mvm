@@ -10,6 +10,7 @@ interface Props {
 }
 
 const { title, description } = Astro.props;
+const canonicalUrl = new URL(Astro.url.pathname, Astro.site);
 ---
 
 <!doctype html>
@@ -19,7 +20,11 @@ const { title, description } = Astro.props;
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="generator" content={Astro.generator} />
     <title>{title} | mvm</title>
+    <link rel="canonical" href={canonicalUrl} />
+    <meta property="og:url" content={canonicalUrl.href} />
+    <meta property="og:title" content={title} />
     {description && <meta name="description" content={description} />}
+    {description && <meta property="og:description" content={description} />}
     <script is:inline>
       try {
         const storedTheme = localStorage.getItem("starlight-theme");
@@ -45,6 +50,7 @@ const { title, description } = Astro.props;
         <p>Secure, reproducible microVMs for running untrusted code.</p>
       </div>
       <nav aria-label="Footer">
+        <a href="/use-cases/">Use cases</a>
         <a href="/blog/">Blog</a>
         <a href="/getting-started/installation/">Docs</a>
         <a href="https://this-week-in-microvms.com">This Week in MicroVMs</a>

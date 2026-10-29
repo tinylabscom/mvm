@@ -544,15 +544,24 @@ fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, Runtime
             } else if file_type.is_dir() {
                 out.push(mvm_fs::ext4::Node::Dir {
                     path: overlay_guest_path(root, &path),
-                    mode: overlay_mode_of(&path, 0o755),
+                    // Guest directories belong to the assembly recipe, not the
+                    // host's umask used to create the temporary staging tree.
+                    mode: 0o755,
                     xattrs: Vec::new(),
                     owner: mvm_fs::ext4::Owner::ROOT,
                 });
                 stack.push(path);
             } else if file_type.is_file() {
+                let guest_path = overlay_guest_path(root, &path);
+                let mode = if guest_path == "/VERSION" {
+                    // This generated file has no archive-member mode to inherit.
+                    0o644
+                } else {
+                    overlay_mode_of(&path, 0o644)
+                };
                 out.push(mvm_fs::ext4::Node::File {
-                    path: overlay_guest_path(root, &path),
-                    mode: overlay_mode_of(&path, 0o644),
+                    path: guest_path,
+                    mode,
                     data: std::fs::read(&path)?,
                     xattrs: Vec::new(),
                     owner: mvm_fs::ext4::Owner::ROOT,
@@ -980,9 +989,7 @@ fn stage_runtime_overlay_archive(
     arch: GuestArch,
     cache_root: &Path,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    extract_release_archive(archive, stage, &OVERLAY_ARCHIVE_MEMBERS)?;
-    verify_overlay_dir_integrity(stage)?;
-    verify_release_guest_runtime(stage)?;
+    let artifact = parse_authenticated_legacy_overlay(archive, stage, arch)?;
 
     crate::guest_agent_build::install_into_cache(
         crate::guest_agent_build::GuestRuntimeBinaryPaths {
@@ -996,6 +1003,20 @@ fn stage_runtime_overlay_archive(
         arch,
     )?;
 
+    Ok(artifact)
+}
+
+/// Parse already-authenticated legacy payloads into a caller-owned empty private
+/// directory. This checks payload integrity, not publisher provenance, and does
+/// not install anything into an ambient cache.
+pub fn parse_authenticated_legacy_overlay(
+    archive: &Path,
+    stage: &Path,
+    arch: GuestArch,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    extract_release_archive(archive, stage, &OVERLAY_ARCHIVE_MEMBERS)?;
+    verify_overlay_dir_integrity(stage)?;
+    verify_release_guest_runtime(stage)?;
     Ok(read_overlay_artifact_from_dir(stage, &arch.to_string())?)
 }
 
@@ -1029,7 +1050,7 @@ fn verify_release_guest_runtime(stage: &Path) -> Result<(), RuntimeOverlayError>
                     name: name.to_string(),
                     checksums_url: manifest_path.display().to_string(),
                 })?;
-        verify_file_sha256(&stage.join(name), name, Some(expected_hash))?;
+        verify_file_sha256_strict(&stage.join(name), name, Some(expected_hash))?;
     }
     Ok(())
 }
@@ -1160,7 +1181,10 @@ fn extract_release_archive_with_limits(
                     });
                 }
                 let dest = stage.join(name);
-                let mut out = std::fs::File::create(&dest)?;
+                let mut out = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&dest)?;
                 limits
                     .copy_entry(&mut entry, &mut out, &mut remaining)
                     .map_err(|e| RuntimeOverlayError::InvalidArchive {
@@ -1255,6 +1279,14 @@ pub(crate) fn verify_file_sha256(
         );
         return Ok(());
     }
+    verify_file_sha256_strict(path, name, expected)
+}
+
+fn verify_file_sha256_strict(
+    path: &Path,
+    name: &str,
+    expected: Option<&String>,
+) -> Result<(), RuntimeOverlayError> {
     let Some(expected) = expected else {
         // `fetch_expected_hashes` already enforces presence —
         // surface a clear internal-error message if a refactor
@@ -1285,7 +1317,9 @@ pub(crate) fn verify_file_sha256(
 /// (dev image, builder VM image, runtime overlay).
 pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlayError> {
     let output = mvm_core::env_hygiene::helper_command("curl")
-        .args(["-fSL", "--silent", "--show-error", "-o"])
+        .args(["-fSL", "--silent", "--show-error"])
+        .args(mvm_core::util::curl::curl_transport_args(url))
+        .arg("-o")
         .arg(dest)
         .arg(url)
         .output();
@@ -1511,6 +1545,7 @@ mod tests {
         let runtime = crate::guest_runtime::GuestRuntime {
             root: dir.path().to_path_buf(),
             digest: "d".repeat(64),
+            release_proof: None,
             manifest: crate::guest_bins::GuestBinsManifest {
                 schema_version: crate::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
                 version: "1.2.3".into(),
@@ -1521,6 +1556,7 @@ mod tests {
                     worktree: WorktreeState::Clean,
                 },
                 files,
+                assemblies: Default::default(),
             },
         };
         (dir, runtime)
@@ -1733,6 +1769,110 @@ mod tests {
             vec!["d".repeat(64)],
             "no partial tree and no staging left"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn guest_runtime_artifacts_are_identical_across_process_umasks() {
+        let dir = TempDir::new().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        for mask in ["022", "077"] {
+            let output = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "umask \"$1\"; exec \"$2\" --exact runtime_overlay::tests::guest_runtime_umask_child --nocapture --test-threads=1",
+                    "runtime-overlay-umask",
+                    mask,
+                ])
+                .arg(&executable)
+                .env("MVM_TEST_RUNTIME_UMASK_OUTPUT", dir.path().join(mask))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "umask {mask} child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        for name in [
+            "overlay.ext4",
+            "overlay.verity",
+            "overlay.roothash",
+            "VERSION",
+            "initramfs.cpio.gz",
+            "initramfs.hash",
+            "initramfs.size",
+        ] {
+            assert_eq!(
+                std::fs::read(dir.path().join("022").join(name)).unwrap(),
+                std::fs::read(dir.path().join("077").join(name)).unwrap(),
+                "{name} must not depend on the producer's umask"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn guest_runtime_umask_child() {
+        let Some(output) = std::env::var_os("MVM_TEST_RUNTIME_UMASK_OUTPUT") else {
+            return;
+        };
+        // The parent sets umask in an isolated shell before this process starts.
+        // Never change process-global umask in the parallel test runner.
+        let output = PathBuf::from(output);
+        std::fs::create_dir_all(&output).unwrap();
+        let (_source, mut runtime) = guest_runtime_fixture();
+        let member = "x86_64/initramfs/mvm-guest-agent";
+        let agent = b"sealed-agent";
+        let agent_path = runtime.root.join(member);
+        std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+        std::fs::write(&agent_path, agent).unwrap();
+        runtime
+            .manifest
+            .files
+            .insert(member.into(), compute_file_sha256(&agent_path).unwrap());
+        let cache = output.join("cache");
+        let overlay =
+            build_runtime_overlay_from_guest_runtime(&cache, "1.2.3", GuestArch::X86_64, &runtime)
+                .unwrap();
+        let initramfs = crate::initramfs::build_initramfs_from_guest_runtime(
+            &cache,
+            "1.2.3",
+            GuestArch::X86_64,
+            &runtime,
+        )
+        .unwrap();
+        let fs = ext4_view::Ext4::load_from_path(&overlay.overlay_ext4).unwrap();
+        for directory in [
+            "/",
+            "/gpu",
+            "/gpu/glibc",
+            "/gpu/musl",
+            "/sdk-py",
+            "/sdk-py/mvm",
+        ] {
+            assert_eq!(fs.metadata(directory).unwrap().mode() & 0o777, 0o755);
+        }
+        for (path, mode) in [
+            ("/VERSION", 0o644),
+            ("/agent", 0o555),
+            ("/gpu/glibc/libcuda.so.1", 0o555),
+            ("/sdk-py/mvm/host.py", 0o644),
+        ] {
+            assert_eq!(fs.metadata(path).unwrap().mode() & 0o777, mode);
+        }
+        for (path, name) in [
+            (&overlay.overlay_ext4, "overlay.ext4"),
+            (&overlay.sidecar, "overlay.verity"),
+            (&overlay.roothash_file, "overlay.roothash"),
+            (&initramfs.image_path, "initramfs.cpio.gz"),
+            (&initramfs.hash_path, "initramfs.hash"),
+            (&initramfs.size_path, "initramfs.size"),
+        ] {
+            std::fs::copy(path, output.join(name)).unwrap();
+        }
+        std::fs::write(output.join("VERSION"), fs.read("/VERSION").unwrap()).unwrap();
     }
 
     #[test]
@@ -2512,6 +2652,105 @@ mod tests {
             install_runtime_overlay_archive(&local, "9.9.9", GuestArch::Aarch64, cache.path())
                 .unwrap();
         assert_eq!(installed.roothash, FAKE_ROOTHASH);
+    }
+
+    #[test]
+    fn pure_legacy_overlay_parser_preserves_version_without_cache_install() {
+        let archive_dir = TempDir::new().unwrap();
+        let archive = archive_dir.path().join("overlay.tar.gz");
+        std::fs::write(&archive, member_overlay_archive(MEMBER_VERSION)).unwrap();
+        let stage = TempDir::new().unwrap();
+        let parsed =
+            parse_authenticated_legacy_overlay(&archive, stage.path(), GuestArch::Aarch64).unwrap();
+        assert_eq!(parsed.version, MEMBER_VERSION);
+        assert_eq!(parsed.overlay_ext4, stage.path().join("overlay.ext4"));
+        assert_eq!(parsed.roothash, FAKE_ROOTHASH);
+        assert!(!stage.path().join("oci").exists());
+        assert!(
+            parse_authenticated_legacy_overlay(&archive, stage.path(), GuestArch::Aarch64).is_err(),
+            "a populated stage must never be overwritten"
+        );
+    }
+
+    #[test]
+    fn legacy_overlay_parser_never_accepts_preexisting_members() {
+        let archive_dir = TempDir::new().unwrap();
+        let archive = archive_dir.path().join("empty.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let tar = tar::Builder::new(encoder);
+        std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
+        let stage = TempDir::new().unwrap();
+        for name in OVERLAY_ARCHIVE_MEMBERS {
+            std::fs::write(stage.path().join(name), b"preexisting").unwrap();
+        }
+        assert!(
+            parse_authenticated_legacy_overlay(&archive, stage.path(), GuestArch::Aarch64).is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_archive_extraction_refuses_duplicate_links_and_unsafe_paths() {
+        for (name, kind, copies) in [
+            ("overlay.ext4", tar::EntryType::Regular, 2),
+            ("overlay.ext4", tar::EntryType::Symlink, 1),
+            ("../outside", tar::EntryType::Regular, 1),
+            ("/outside", tar::EntryType::Regular, 1),
+            ("nested/overlay.ext4", tar::EntryType::Regular, 1),
+        ] {
+            let home = TempDir::new().unwrap();
+            let archive = home.path().join("bad.tar.gz");
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut tar = tar::Builder::new(encoder);
+            for _ in 0..copies {
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(0o644);
+                header.set_size(0);
+                header.set_entry_type(kind);
+                header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
+                header.set_cksum();
+                tar.append(&header, std::io::empty()).unwrap();
+            }
+            std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
+            let stage = TempDir::new().unwrap();
+            assert!(
+                extract_release_archive(&archive, stage.path(), &["overlay.ext4"]).is_err(),
+                "{name} {kind:?} {copies}"
+            );
+            assert!(!home.path().join("outside").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_archive_extraction_does_not_follow_preexisting_symlinks() {
+        let home = TempDir::new().unwrap();
+        let archive = home.path().join("overlay.tar.gz");
+        std::fs::write(&archive, fixture_overlay_archive()).unwrap();
+        let outside = home.path().join("outside");
+        std::fs::write(&outside, b"unchanged").unwrap();
+        let stage = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(&outside, stage.path().join("overlay.ext4")).unwrap();
+        assert!(
+            parse_authenticated_legacy_overlay(&archive, stage.path(), GuestArch::Aarch64).is_err()
+        );
+        assert_eq!(std::fs::read(outside).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn legacy_guest_integrity_ignores_the_ambient_hash_escape() {
+        let mut env = TestEnv::new();
+        env.set(SKIP_HASH_VERIFY_ENV, "1");
+        let stage = TempDir::new().unwrap();
+        let mut checksums = String::new();
+        for name in RELEASE_GUEST_RUNTIME_FILES {
+            std::fs::write(stage.path().join(name), b"tampered").unwrap();
+            checksums.push_str(&format!("{}  {name}\n", sha256_hex(b"original")));
+        }
+        std::fs::write(stage.path().join(CHECKSUM_MANIFEST_FILE), checksums).unwrap();
+        assert!(matches!(
+            verify_release_guest_runtime(stage.path()),
+            Err(RuntimeOverlayError::ChecksumMismatch { .. })
+        ));
     }
 
     /// A CLI release archive with no signature beside it is refused even

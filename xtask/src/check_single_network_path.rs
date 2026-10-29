@@ -19,6 +19,27 @@ const BACKEND_RS: &str = "crates/mvm-runtime/src/backend.rs";
 const APPLE_CONTAINER_RS: &str = "crates/mvm-runtime/src/apple_container_backend.rs";
 const SPAWNER_RS: &str = "crates/mvm-runtime/src/workload_runner/runner/spawner.rs";
 const SPAWN_RS: &str = "crates/mvm-vmm/src/host/network_endpoint_spawn.rs";
+const OWNED_SPAWN_RS: &str = "crates/mvm-vmm/src/host/network_endpoint_spawn/owned.rs";
+
+/// Every production definition of an endpoint spawn seam, by file and name.
+///
+/// The detached seam is the one every workload runner reaches. The owned seam
+/// keeps the endpoint a child of the process that spawned it, for a supervisor
+/// that must confirm its exit; it lives inside the same module, builds the same
+/// configuration and runs the same binary. A third definition, or either one in
+/// another file, is a second endpoint implementation.
+const SPAWN_SEAMS: &[(&str, &str)] = &[
+    (SPAWN_RS, "spawn_network_endpoint"),
+    (OWNED_SPAWN_RS, "spawn_network_endpoint_owned"),
+];
+
+/// What the owned seam must share with the detached one: the configuration it
+/// hands the endpoint, the binary it runs, and the command it assembles.
+const OWNED_SEAM_SHARES: &[&str] = &[
+    "build_endpoint_config_json(",
+    "resolve_network_endpoint_path(",
+    "endpoint_command(",
+];
 const ENDPOINT_BIN: &str = "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs";
 const SPEC_MAP_RS: &str = "crates/mvm-vmm/src/host/spec_map.rs";
 const RUNNER_RS: &str = "crates/mvm-runtime/src/workload_runner/runner.rs";
@@ -92,7 +113,7 @@ const NIC_GUARDED_PATHS: &[&str] = &[
 /// compatibility decoders that return a migration error.
 const LEGACY_INPUT_BOUNDARIES: &[&str] = &[
     "crates/mvm-contract/src/ir/workload.rs",
-    "crates/mvm-sdk/src/decorator/value.rs",
+    "crates/mvm-compiler/src/decorator/value.rs",
 ];
 
 const ENDPOINT_SOCKET_OWNERS: &[&str] = &[
@@ -131,7 +152,7 @@ const BUILDER_LISTEN_TOKENS: &[&str] = &["TcpListener::bind(", "UdpSocket::bind(
 /// never reappear in one.
 const RETIRED_BUILDER_BINARIES: &[&str] = &["mvm-egress-proxy"];
 const BUILDER_BINARY_MANIFESTS: &[&str] = &[
-    "crates/mvm-build/src/host_payload_manifest.rs",
+    "crates/mvm-builder-guest/src/host_payload_manifest.rs",
     "nix/lib/mvm-host-binaries.nix",
 ];
 
@@ -244,22 +265,26 @@ fn check_single_endpoint_implementation(workspace: &Path) -> Result<()> {
         &workspace.join("crates"),
         Some("rs"),
         &mut |path, source| {
-            let code = production_code(source);
-            for (index, line) in code.lines().enumerate() {
-                if line.contains("pub fn spawn_network_endpoint") {
-                    spawn_defs.push(format!("{}:{}", display(workspace, path), index + 1));
-                }
-            }
+            let file = display(workspace, path);
+            spawn_defs.extend(
+                spawn_seam_definitions(&production_code(source))
+                    .into_iter()
+                    .map(|(line, name)| SpawnDef {
+                        file: file.clone(),
+                        line,
+                        name,
+                    }),
+            );
         },
     )?;
-    let owners = spawn_defs
+    check_spawn_seams(&spawn_defs)?;
+    let owned = production_code(&read(workspace, OWNED_SPAWN_RS)?);
+    if let Some(missing) = OWNED_SEAM_SHARES
         .iter()
-        .map(|hit| hit.split(':').next().unwrap_or(hit).to_string())
-        .collect::<Vec<_>>();
-    if owners != [SPAWN_RS] {
+        .find(|shared| !owned.contains(**shared))
+    {
         bail!(
-            "check-single-network-path: expected exactly one production spawn_network_endpoint definition in {SPAWN_RS}, found {:?}",
-            spawn_defs
+            "check-single-network-path: {OWNED_SPAWN_RS} must assemble the endpoint through the shared `{missing}`"
         );
     }
 
@@ -281,6 +306,49 @@ fn check_single_endpoint_implementation(workspace: &Path) -> Result<()> {
     if !endpoint.contains("FlowMuxSession::accept_with(") {
         bail!(
             "check-single-network-path: {ENDPOINT_BIN} no longer serves the authenticated FlowMux session"
+        );
+    }
+    Ok(())
+}
+
+/// One production `pub fn spawn_network_endpoint*` definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnDef {
+    file: String,
+    line: usize,
+    name: String,
+}
+
+/// The `(line, name)` of every `pub fn spawn_network_endpoint*` in `code`.
+fn spawn_seam_definitions(code: &str) -> Vec<(usize, String)> {
+    let definition =
+        Regex::new(r"pub\s+fn\s+(spawn_network_endpoint\w*)\s*[(<]").expect("static spawn regex");
+    code.lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            definition
+                .captures(line)
+                .map(|found| (index + 1, found[1].to_string()))
+        })
+        .collect()
+}
+
+/// Exactly the seams in [`SPAWN_SEAMS`], each once and in its own file.
+fn check_spawn_seams(found: &[SpawnDef]) -> Result<()> {
+    let mut seen: Vec<(&str, &str)> = found
+        .iter()
+        .map(|def| (def.file.as_str(), def.name.as_str()))
+        .collect();
+    seen.sort_unstable();
+    let mut expected = SPAWN_SEAMS.to_vec();
+    expected.sort_unstable();
+    if seen != expected {
+        bail!(
+            "check-single-network-path: expected exactly the endpoint spawn seams {SPAWN_SEAMS:?}, found {:?}",
+            found
+                .iter()
+                .map(|def| format!("{}:{} {}", def.file, def.line, def.name))
+                .collect::<Vec<_>>()
         );
     }
     Ok(())
@@ -907,6 +975,62 @@ fn display(workspace: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn def(file: &str, name: &str) -> SpawnDef {
+        SpawnDef {
+            file: file.into(),
+            line: 1,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn the_detached_and_owned_seams_in_their_own_files_pass() {
+        check_spawn_seams(&[
+            def(OWNED_SPAWN_RS, "spawn_network_endpoint_owned"),
+            def(SPAWN_RS, "spawn_network_endpoint"),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn a_third_spawn_seam_or_a_moved_one_is_refused() {
+        let mut third = vec![
+            def(SPAWN_RS, "spawn_network_endpoint"),
+            def(OWNED_SPAWN_RS, "spawn_network_endpoint_owned"),
+        ];
+        third.push(def(SPAWN_RS, "spawn_network_endpoint_fast"));
+        assert!(check_spawn_seams(&third).is_err());
+        let moved = [
+            def(SPAWN_RS, "spawn_network_endpoint"),
+            def(
+                "crates/mvm-hostd/src/bin/other.rs",
+                "spawn_network_endpoint_owned",
+            ),
+        ];
+        assert!(check_spawn_seams(&moved).is_err());
+        let duplicated = [
+            def(SPAWN_RS, "spawn_network_endpoint"),
+            def(SPAWN_RS, "spawn_network_endpoint"),
+            def(OWNED_SPAWN_RS, "spawn_network_endpoint_owned"),
+        ];
+        assert!(check_spawn_seams(&duplicated).is_err());
+        assert!(check_spawn_seams(&[def(SPAWN_RS, "spawn_network_endpoint")]).is_err());
+    }
+
+    #[test]
+    fn spawn_seam_definitions_reads_names_not_callers() {
+        let found = spawn_seam_definitions(
+            "pub fn spawn_network_endpoint(p: P) {}\nlet x = spawn_network_endpoint(p);\npub fn spawn_network_endpoint_owned<'a>(p: P) {}",
+        );
+        assert_eq!(
+            found,
+            vec![
+                (1, "spawn_network_endpoint".to_string()),
+                (3, "spawn_network_endpoint_owned".to_string())
+            ]
+        );
+    }
 
     #[test]
     fn production_code_drops_comments_strings_and_test_modules() {

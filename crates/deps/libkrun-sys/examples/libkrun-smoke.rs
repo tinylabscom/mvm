@@ -67,13 +67,12 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // macOS Hypervisor.framework rejects any process that lacks the
-    // `com.apple.security.hypervisor` entitlement (the joint virtualization +
-    // Hypervisor entitlement set). `ensure_signed`
-    // ad-hoc codesigns the current binary on first run and re-spawns
-    // with `MVM_SIGNED=1`; subsequent runs are silent. Without this
-    // call, `krun_start_enter` fails at VM creation with rc -22.
-    mvm_runtime::codesign::ensure_signed();
+    // Refuse before VM creation unless this loaded process has its entitlement.
+    // Executable preparation must happen before launch, not by self-signing.
+    if let Err(error) = mvm_runtime::codesign::ensure_signed() {
+        eprintln!("error: {error}");
+        return ExitCode::FAILURE;
+    }
 
     // Sanity-check every path that has to exist before we hand it to
     // libkrun. The C wrapper would fail later anyway, but failing here

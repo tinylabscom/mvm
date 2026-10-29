@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list maint
+
 # ── Development ──────────────────────────────────────────────────────────
 
 # Wire core.hooksPath at .githooks/ (one-time per clone)

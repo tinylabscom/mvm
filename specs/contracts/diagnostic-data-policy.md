@@ -95,7 +95,202 @@ load its existing key without creating a replacement. Missing keys, malformed
 envelopes, incorrect keys or failed integrity checks refuse decryption; they
 never authorize plaintext fallback.
 
+### Cold entrypoint caller-registration prerequisite
+
+An explicitly opted-in cold HVF entrypoint launch can install one immutable
+caller registration in its existing supervisor-owned capture owner. The client
+uses `EntrypointAdmissionBuilder::producer_identity` with a previously enrolled
+public identity and a macOS build enabling `native-caller-identity`. Other
+platforms and feature-disabled builds refuse this opt-in before admission or
+VM-state effects; they do not fall back to an unregistered launch. This bounded
+prerequisite does not implement cross-platform native custody. Admission loads
+only that exact native-custody pin; it does not enroll, rotate, or select a
+plaintext, mock, or generic keyring fallback during launch.
+
+The trusted launcher derives a fresh concrete instance, run, producer, session,
+and canonical registration challenge from the actual admitted plan. The cold
+startup record carries this fixed expectation separately from the caller's
+possession proof. Before publishing startup state or entering the guest, the
+supervisor verifies the signed plan against the canonical local host public key,
+checks its content identity and validity, and checks the proof against the
+unchanged launch expectation. The caller-selected audit signing-key path is not
+a trust root. Generic plan signatures and guest verb grants are not producer
+registration authority.
+
+The startup configuration remains part of the trusted authorized-launcher
+boundary. Putting an expectation beside a proof is not an independent trust
+anchor against replacement of both by a compromised launcher. Later producer
+input cannot install or replace the owner's caller identity.
+
+A bounded private consumed-registration ledger lives outside runtime VM state,
+under the configured MVM home's `caller-registration` directory. It stores
+only purpose-domain-separated commitments to the canonical challenge and signed
+expiry times, not keys or raw plans. Exclusive directory locking, bounded reads,
+and a synced atomic replacement complete before startup status, boot-input reads,
+or owner activation. The replay directory's canonical ancestor chain is synced
+as well, so first-use creation does not rely only on syncing files inside an
+unanchored directory. At 4096
+unexpired entries or 1 MiB the ledger refuses new consumption rather than evicting
+an unexpired record. Expiry pruning and a persistent clock high-water advance
+are one transaction; a backward clock refuses instead of reviving pruned records.
+Corrupt storage, or missing storage after recorded initialization, is never
+silently reset.
+
+A non-cloneable consumed-launch capability is passed to the capture owner;
+the owner cannot substitute verification-only state or consume it a second time.
+Missing kernel or initramfs failures after successful consumption remain spent
+even though no capture owner or guest has yet started.
+Owner installation rechecks both the signed plan window and the exact caller
+registration deadline after setup, without rounding that deadline up. A clock
+earlier than the observed consumption time refuses activation; consumption never
+extends validity.
+
+A private, create-only `caller-registration.used` slot in each managed VM
+directory separately guards immutable installation in that instance. Both
+mechanisms are replay bookkeeping, not authorization permits. Failed setup may
+remain spent; recovery requires repairing the underlying failure, normal instance
+teardown, and fresh admission. Ordinary teardown removes the per-instance slot
+but not the durable ledger, so the old still-valid registration remains refused
+while a fresh registration can be admitted. Never erase replay bookkeeping to
+retry the same launch bytes.
+
+Caller registration is currently cold-only. Opted-in standby preparation and
+warm claims are refused before changing pool or guest state, and restoring a
+checkpoint that carries caller registration is refused before rewriting child
+configuration or spawning a supervisor. Snapshot creation alone does not make
+such a checkpoint restorable; it requires a fresh cold launch. No legacy standby
+bootstraps a caller key from a supplied signed plan. Opted-out launch defaults,
+restore behavior, and handoff bytes remain unchanged.
+
+Registration is a prerequisite, not producer ingress, producer readiness,
+guest readiness, or evidence of protected entrypoint stdout/stderr capture.
+It creates no readiness ACK. Any full startup measurement must begin before
+resolution and include admission, native custody, verification, durable replay
+bookkeeping, producer readiness, and guest readiness. Registration-only timing
+cannot establish that full-readiness target.
+
+The real cold-launch witness and startup-performance measurement are blocked by
+[lifetime-safe HVF stop and fail-closed cleanup](https://github.com/tinylabscom/mvm/issues/4276).
+The current driver drops its owned supervisor child after readiness, while the
+public stop path signals a numeric PID. Best-effort transient cleanup may remove
+process evidence after a failed stop. The ignored caller-registration witness
+therefore returns `Unsupported` before launch, and its cleanup companion refuses
+to erase an existing ownership record without proof of quiescence. These refusals
+are not native-boot passes. Scoped admission/owner/replay tests and separate
+native-custody tests do not establish a full native launch or readiness latency.
+
 ## Private creation and replacement
+
+### Opt-in launch failure observations
+
+`MVM_FAILURE_DIAGNOSTICS=1` enables payload-free `MVM_FAILURE_V1 ` records on
+the existing child stderr channel. Each newline-terminated JSON record has
+exactly `phase`, `category`, `stage`, and `exit_code`. The first three fields
+are closed enums; `exit_code` is an integer or explicit `null` when not
+observed. No error text, builder detail, console payload, paths, names,
+arguments, environment values, identifiers, or digests enter this schema.
+
+Phases are `transient_boot`, `transient_command`, `builder_job`, and
+`hvf_readiness`. Categories are `unknown`, `internal`, `invalid_request`,
+`unsupported`, `version`, `fetch`, `nix_build`, `nix_eval`, `timeout`, and
+`output_contract`. Stages are `absent`, `unknown`, `sign_check`,
+`signing_lock`, `signing`, `reexec`, `config_read`, `config_parse`,
+`status_publish`, `startup_inputs`, `capture_policy`, `capture_setup`,
+`pid_publish`, and `pid_published`.
+
+The documented-launch conformance command runner opts in when
+`MVM_E2E_FAILURE_MANIFEST` names an operator-selected output file in an existing
+trusted parent directory. It scans at most the first 65536 stderr bytes,
+rejects malformed records, unknown fields/enums and records exceeding 512
+bytes, and retains at most 16 records per command, 128 commands, and 262144
+serialized manifest bytes. Saturating counters explicitly report rejected,
+oversize, dropped records, skipped bytes, and dropped commands. Unscanned
+bytes are not claimed to contain zero records.
+
+The manifest correlates commands using harness-local scenario and command
+ordinals, not source job names or identifiers. Each command reports success
+and exit (or `null` on spawn failure), plus `collected`, `absent`, or
+`unreadable` status. `absent` means no accepted record, not successful capture.
+The aggregate has `schema_version: 1` and a closed lifecycle `state`:
+`not_started`, `in_progress`, `complete`, `loss`, or `unreadable`. Before any
+suite build or bootstrap, the script creates a fresh `0600` destination using
+create-new semantics. An existing file or symlink is refused, never reused.
+The empty `not_started` record explicitly covers failure before the first
+scenario. A bounded no-follow read verifies the initializer's inode handoff
+and exact empty schema; file existence alone does not authorize collection.
+Direct conformance invocations also require a fresh destination.
+
+Snapshots remain `in_progress` until the runner explicitly finalizes after its
+scenario loop, before normal test-failure exits. Interruption or an earlier
+runner failure leaves a partial state. Finalization records `loss` for counted
+rejections, truncation or dropped observations, and `unreadable` for command
+capture or any prior persistence failure. Persistence failure is sticky even
+if later writes succeed. A failed write attempts one best-effort `unreadable`
+repair without replacing the original failure. Atomic replacement can rename
+before its parent-directory sync fails; if repair also fails, even terminal
+source bytes may remain. Source `complete` is only a reported collector-loop
+observation, never durable-finalization evidence or a passing suite.
+
+Initialization reports fixed `initialized`, `refused`, or `unreadable` status;
+the initializer returns 2 for refusal and 3 for I/O failure. On failure the
+script disables diagnostic collection without changing test or cleanup outcomes.
+The workflow passes the original suite initialization output as
+`MVM_E2E_FAILURE_AUTHORIZATION` to `scripts/e2e-failure-manifest.py --export`,
+in one always-run step before the existing upload. It must exactly match
+`MVM_E2E_FAILURE_MANIFEST`; file existence is never authorization. The exporter
+does not require the initializer's inode: legitimate Rust atomic replacements
+are expected. It opens the selected source with no-follow/nonblocking flags,
+requires a regular current-owner `0600` single-link file by `fstat`, and reads
+at most 262145 bytes, rejecting anything over 262144. UTF-8 decoding, duplicate
+key rejection and full closed-schema validation precede canonical
+reserialization. Unknown or missing fields, unknown enums, booleans where
+integers are required, non-integer numbers and out-of-range values are refused.
+All counters/ordinals are unsigned 32-bit; exits are signed 32-bit or explicit
+null, and command success is a boolean or explicit null. The same 128-command,
+16-record and 512-byte canonical-record limits apply.
+
+The separately exported schema retains these bounded observations but maps
+source `complete` to `observed` and `loss` to `observed_loss`; `not_started`,
+`in_progress`, and `unreadable` remain explicit. Every export has
+`finalization: "unverified"`. Neither a terminal state nor a command success
+field establishes suite success, authenticity, durable finalization, or complete
+coverage. Missing authorization or a missing source produces a fresh empty
+`absent` diagnostic; invalid/refused source data produces a fresh empty
+`unreadable` diagnostic. Neither exports raw source bytes or error details.
+No completion receipt or acknowledgment protocol is used.
+
+`MVM_E2E_FAILURE_EXPORT` names the exact run/attempt/shard-isolated snapshot in
+`RUNNER_TEMP`, created exclusively as a new `0600` file. Output is canonical
+sorted compact JSON, bounded to 262144 bytes including the additional export
+field. Only successful fresh snapshot writes publish the export step's path
+output; upload uses only that output for this diagnostic, never the mutable
+source and never a static fallback. Export failure does not alter suite or
+cleanup outcomes. Existing legacy suite/VM log uploads are unchanged: the
+combined artifact is **not** claimed to be payload-free or sanitized.
+
+Path outputs reject CR/LF and non-UTF-8 destinations. Python/Rust schema-parity
+regressions cover fields, integer types, all record enums, and limits. Existing
+parent directories must be trusted; same-user hostile mutation of those
+directories is outside this boundary. Exclusive snapshot creation refuses
+stale snapshots rather than reusing them.
+
+Collection and private atomic manifest replacement happen before returning
+to scenario cleanup. Non-regular destinations, including symlinks, are
+refused; failures report only the fixed `failure-manifest: unreadable` marker.
+The collector never traverses runtime state or exports raw artifacts.
+
+These records are unauthenticated observations: a child can spoof them.
+They never gate acceptance or prove custody, readiness, or protected capture.
+JSON, allowlisting, and private permissions do not establish confidentiality
+or permission to publish. Select only this manifest for a separately reviewed
+export; never upload stderr, runtime directories, or an entire home.
+
+Emission uses one best-effort blocking stderr write, without retrying or
+replacing the original error. A small record is **not** a nonblocking or
+latency guarantee. The existing `command.output()` stdout/stderr buffering
+remains unbounded and is **not fixed** by this collector. Lost/partial source
+writes cannot be counted reliably; absence is not completeness. Interactive
+PTY commands and other harness command paths are not covered.
 
 Managed payload files and key material must be created at `0600`; managed
 directories must be created at `0700`. Restriction must hold before publication
@@ -237,6 +432,23 @@ by the authenticated manifest. The manifest, original root and key envelope are
 unchanged. Cooperating writers hold the same lease. This is not an adversarial
 same-user namespace guarantee: hostile host-user processes that ignore the lease,
 storage snapshots and open descriptors remain outside this trusted-host boundary.
+
+## Acceptance evidence and its limits
+
+Reconciliation of the six criteria of the parent issue against landed code.
+"Witnessed" names a test that exists; every limit is stated rather than implied.
+
+| Criterion | Evidence | Limit |
+|---|---|---|
+| Classify diagnostics, telemetry, configuration, audit metadata and exports | Classification and surface inventory above; `xtask check-private-diagnostic-files` pins the writers | The inventory is a document, not generated from the code. A new writer outside the gate's scan is not covered. |
+| Which payloads need encrypted capture, which metadata may stay visible | Classification table; transcript manifest carries only digests, counts, timestamps and the wrapped key | Firecracker, libkrun and QEMU `console.log` and the other instance-scoped logs are private plaintext, not encrypted. |
+| Reuse the encrypted transcript facility | HVF console and workload output use the transcript envelope | Producer integration is per surface; surfaces outside it are not protected capture. |
+| Private creation for managed state | Private-creation helpers and the gate above | Builder console files are created by the VMM and are not individually narrowed. Private permissions are not encryption. |
+| Byte and time retention separate; audit verification preserved | Independent retention dimensions; `protected_lifetime_is_terminal_bound_and_immutable` witnesses that an expired payload is refused on both export paths and leaves ciphertext and manifest bytes unchanged; `operator_reconcile_expires_only_authorized_payload_and_preserves_evidence` witnesses that reconciliation removes only authorized ciphertext, keeps the manifest, wrapped key and sealed root verifiable, and turns the read refusal from "deadline passed" into "authenticated retirement" | Stopped, never-restarted captures are not physically deleted automatically. Expiry is a read refusal first and a deletion only after reconciliation. |
+| Validate with synthetic markers and lifecycle tests | Tests above use synthetic markers and assert the audit log carries none | No end-to-end witness boots a native workload through capture, expiry and reconciliation; the cold-launch witness is blocked as described above. Removing a file is not secure erasure. |
+
+This policy protects against unintended persistence under a trusted host. It
+does not describe confidential execution and gives no protection from the host.
 
 ## Required witnesses
 

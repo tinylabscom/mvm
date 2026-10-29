@@ -1,22 +1,21 @@
+# Build output and generated assets.
 /target
 # Local ad-hoc tool downloads (e.g. act binary).
 /.bin/
 # Swift Package Manager build output (mvm-providers/swift, mvm-vz-supervisor).
 **/.build/
+
+# Local tool state.
 .playwright-mcp/
 .superpowers/
 .codex/
-/.cursor/*
-!/.cursor/rules
-/.cursor/rules/*
-# Signature sidecars committed by the reviewed instruction-bundle PR (the
-# rule files they sign are tracked; only the sidecars are re-included).
-!/.cursor/rules/*.sigstore.json
+/.cursor/
+/.mcp.json
+/.trail/
 /.delta/
 .claude/*
 /.serena/
 **/node_modules
-specs/scratch.md
 # Astro+Starlight docs build output (public/dist) — built by `pnpm build`
 # in public/, deployed elsewhere.
 public/dist/
@@ -51,9 +50,13 @@ keys
 !crates/mvm-cli/src/commands/env/
 !crates/mvm-cli/src/commands/env/**
 
-# Worktree-local dev env (use .envrc.example as template)
+# Local environments and operating-system metadata.
+.DS_Store
+/.direnv/
+/.env
+/.env.local
+# Worktree-local dev env (use .envrc.example as template).
 /.envrc
-/.codex/
 /.wrangler/
 /.codex-transfer/
 /.mvm-test/
@@ -68,11 +71,6 @@ specs/notes.md
 # Default `mvmctl compile` output dir — generated flake + bundled src,
 # regenerable, never committed (header says "re-run `mvmctl compile`").
 /out/
-
-# cargo-mutants drops its per-run report tree here unless `--output` points
-# elsewhere. `xtask check-mutation-witnesses` always redirects it to a temp
-# dir; this guards a hand-run from leaving a report in the tree.
-mutants.out/
 
 # Python bytecode caches (SDK test runs)
 __pycache__/
@@ -95,7 +93,8 @@ __pycache__/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 graft/
-./weblinux-pack-out/
+/.graft/
+/weblinux-pack-out/
 
 # Qwen Code session directory
 .qwen/
@@ -105,7 +104,7 @@ graft/
 # cannot swallow a source module that happens to be named `output`.
 /output/
 
-# Local generated output and QA scratch data.
+# Local scratch and generated output.
 /artifacts/
 /qa/
 
@@ -115,6 +114,7 @@ outputs/
 # Local agent memory — findings stay on the author's machine, not in the repo.
 .agent-memory/
 
-# Local scratch documentation — drafts and machine-specific runbooks that stay
-# on the author's machine rather than in the repo.
-/docs/
+# Local drafts stay ignored; these maintained documents are shared.
+/docs/*
+!/docs/DEMO-BUILD-GUIDE.md
+!/docs/CONFORMANCE.md

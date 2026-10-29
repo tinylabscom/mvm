@@ -1296,6 +1296,7 @@ mod tests {
     use std::path::Path;
 
     use super::super::opts::KindFilter;
+    #[cfg(unix)]
     use super::super::wire::{StreamBatch, write_batch};
 
     fn bounds() -> CaptureBounds {
@@ -1538,6 +1539,7 @@ mod tests {
 
     /// A live chain of `count` records starting at `from`, framed on the wire
     /// the way a broker sends them.
+    #[cfg(unix)]
     fn framed_live(from: u64, count: u64) -> Vec<u8> {
         let mut prev = [0u8; 32];
         let mut records = Vec::new();
@@ -1594,10 +1596,12 @@ mod tests {
     /// production path takes, rather than reaching past it into the struct.
     /// The broker's own behaviour is exercised against a real broker in
     /// `mvm-hostd`'s serve tests; what is under test here is the splice.
+    #[cfg(unix)]
     struct FakeBroker {
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
+    #[cfg(unix)]
     impl FakeBroker {
         fn serve(path: &Path, frames: Vec<u8>) -> Self {
             use std::io::Write as _;
@@ -1614,6 +1618,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for FakeBroker {
         fn drop(&mut self) {
             if let Some(thread) = self.thread.take() {
@@ -1623,6 +1628,7 @@ mod tests {
     }
 
     /// `locator` pointed at a socket this fake broker is serving.
+    #[cfg(unix)]
     fn live_locator(
         root: &Path,
         mut locator: OutputLocator,
@@ -1635,6 +1641,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_idle_vm_returns_history_rather_than_the_empty_live_head() {
         // A broker attaches a follower at the live head, so without the splice
         // an idle VM's `logs` is silent however much it has already printed.
@@ -1650,6 +1657,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn live_records_the_history_already_carried_are_not_printed_twice() {
         // Dialling before reading the transcript means the overlap window is
         // delivered by both sources. Suppressing by sequence is what keeps the
@@ -1667,6 +1675,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_chain_break_on_the_live_half_is_an_error_not_the_end_of_history() {
         // History already flowed, so the tempting failure is to treat the
         // broken live window as "that's all there was".
@@ -1690,6 +1699,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_live_broker_with_no_transcript_is_live_only_not_a_failure() {
         let root = tempfile::tempdir().expect("tempdir");
         let locator = OutputLocator {
@@ -2313,6 +2323,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_hole_between_the_sealed_history_and_the_live_head_is_reported() {
         // The manifest is written at seal, so a running VM's recorded half
         // stops well before a follower attaches. Rendering seq 0..2 straight
@@ -2333,6 +2344,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn halves_that_meet_report_no_hole() {
         let root = tempfile::tempdir().expect("tempdir");
         let capture = stdout_capture(root.path(), &["h-0", "h-1", "h-2"]);
@@ -2347,6 +2359,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_overlap_the_dedup_suppressed_is_not_a_hole() {
         let root = tempfile::tempdir().expect("tempdir");
         let capture = stdout_capture(root.path(), &["live-0", "live-1", "live-2"]);
@@ -2358,6 +2371,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_narrowed_read_does_not_claim_a_hole_its_own_filter_created() {
         // Under a channel filter the reader drops records before the consumer
         // sees them, so a jump in sequence numbers is the ordinary shape of

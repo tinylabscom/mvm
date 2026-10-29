@@ -1,10 +1,9 @@
 //! Materialize OCI content once, then sign a portable package on the caller.
 //!
 //! Acquisition uses the ordinary OCI fetch/unpack/materialization pipeline.
-//! Runtime assets come from the existing authenticated image-set pin. Neither
+//! The kernel comes from the authenticated Linux image-set pin; runtime assets
+//! come from the signed CLI release and travel with their original proofs. Neither
 //! the OCI materializer nor the builder receives the caller's signing key.
-
-mod assets;
 
 use std::path::{Path, PathBuf};
 
@@ -12,15 +11,14 @@ use anyhow::{Context, Result, bail};
 use mvm_build::builder_vm::GuestSidecar;
 use mvm_core::arch::GuestArch;
 use mvm_core::crypto::image_verify::sha256_file;
+use mvm_core::plan::EnvironmentDescriptor;
 use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::security::AgentProfile;
 use mvm_fs::oci::ImageReference;
 
-use crate::bundle::{
-    BundleExportInputs, BundleSigner, DebugOutput, PostureInputs, export_bundle_with_signer,
-};
+use crate::bundle::{BundleExportInputs, BundleSigner, DebugOutput, PostureInputs};
 use crate::local::oci::{OciMaterialization, OciMaterializeRequest, materialize_oci_image};
-use assets::{BootAssets, utf8};
+use crate::portable_boot_assets::{PreparedPortableBootAssets as BootAssets, utf8};
 
 /// OCI input and host-side package destination.
 #[derive(Debug, Clone)]
@@ -31,6 +29,10 @@ pub struct OciBundleRequest {
     bundle_out: PathBuf,
     label: Option<String>,
     debug_out: Option<DebugOutput>,
+    cmdline: Option<String>,
+    posture: Option<PostureInputs>,
+    environment: Option<EnvironmentDescriptor>,
+    local_build: bool,
 }
 
 impl OciBundleRequest {
@@ -43,6 +45,10 @@ impl OciBundleRequest {
             bundle_out: bundle_out.into(),
             label: None,
             debug_out: None,
+            cmdline: None,
+            posture: None,
+            environment: None,
+            local_build: false,
         }
     }
 
@@ -64,6 +70,26 @@ impl OciBundleRequest {
 
     pub fn debug_out(mut self, output: DebugOutput) -> Self {
         self.debug_out = Some(output);
+        self
+    }
+
+    pub fn cmdline(mut self, cmdline: impl Into<String>) -> Self {
+        self.cmdline = Some(cmdline.into());
+        self
+    }
+
+    pub fn posture(mut self, posture: PostureInputs) -> Self {
+        self.posture = Some(posture);
+        self
+    }
+
+    pub fn environment(mut self, environment: EnvironmentDescriptor) -> Self {
+        self.environment = Some(environment);
+        self
+    }
+
+    pub fn local_build(mut self, local_build: bool) -> Self {
+        self.local_build = local_build;
         self
     }
 
@@ -175,7 +201,6 @@ pub fn export_materialized_oci_bundle(
     }
     let verity = read_verity(directory, request.production)?;
     let arch = request.arch.to_string();
-    let set = assets.image_set.member_cache();
     let mut inputs = BundleExportInputs::new(
         utf8(&assets.kernel)?,
         utf8(rootfs)?,
@@ -184,10 +209,12 @@ pub fn export_materialized_oci_bundle(
     )
     .initrd(utf8(&assets.initrd)?)
     .profile(if request.production { "prod" } else { "dev" })
-    .posture(PostureInputs::new(if request.production {
-        AgentProfile::SealedProd
-    } else {
-        AgentProfile::Dev
+    .posture(request.posture.unwrap_or_else(|| {
+        PostureInputs::new(if request.production {
+            AgentProfile::SealedProd
+        } else {
+            AgentProfile::Dev
+        })
     }))
     .provenance(BuildProvenance {
         input_kind: InputKind::Oci,
@@ -196,22 +223,25 @@ pub fn export_materialized_oci_bundle(
         builder_id: None,
         artifacts: Default::default(),
     });
-    inputs.boot_assets = Some(mvm_bundler::BootAssetsInputs {
-        manifest_bytes: assets.image_set.manifest_bytes(),
-        manifest_sha256: set.root(),
-        runtime_overlay: &assets.runtime_overlay,
-        initramfs: &assets.initramfs_archive,
-    });
     if let Some((bytes, roothash)) = &verity {
         inputs = inputs.verity(bytes, roothash);
     }
     if let Some(label) = &request.label {
         inputs = inputs.label(label);
     }
+    if let Some(cmdline) = &request.cmdline {
+        inputs = inputs.cmdline(cmdline);
+    }
+    if let Some(environment) = &request.environment {
+        inputs = inputs.environment(environment.clone());
+    }
+    if request.local_build {
+        inputs = inputs.local_build();
+    }
     if let Some(debug) = &request.debug_out {
         inputs = inputs.debug_out(debug.clone());
     }
-    let exported = export_bundle_with_signer(&inputs, signer)?;
+    let exported = assets.export(&inputs, signer)?;
     materialization.verify_integrity()?;
     assets.verify_integrity()?;
     Ok(OciBundleResult {
@@ -260,6 +290,21 @@ fn read_verity(directory: &Path, production: bool) -> Result<Option<(Vec<u8>, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_builder_retains_archive_metadata() {
+        let posture = PostureInputs::new(AgentProfile::Dev)
+            .allows_egress(true)
+            .requires_auth(false);
+        let request = OciBundleRequest::new("alpine:3.20", "a.mvmpkg")
+            .cmdline("console=ttyS0")
+            .posture(posture)
+            .local_build(true);
+
+        assert_eq!(request.cmdline.as_deref(), Some("console=ttyS0"));
+        assert_eq!(request.posture, Some(posture));
+        assert!(request.local_build);
+    }
 
     #[test]
     fn production_requires_an_immutable_reference_before_acquisition() {

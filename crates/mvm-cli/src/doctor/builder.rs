@@ -457,7 +457,7 @@ fn yes_no(v: bool) -> &'static str {
 ///
 /// The check never fails — the routing choice is always observable via
 /// `MVM_RESIDENCY` and the session state is a best-effort filesystem probe.
-/// The two axes together let an operator understand what `mvmctl build image`
+/// The two axes together let an operator understand what `mvmctl machine build`
 /// will do before invoking it.
 pub(super) fn builder_residency_check() -> Check {
     let (policy, _source) = mvm_core::residency::resolve_residency();

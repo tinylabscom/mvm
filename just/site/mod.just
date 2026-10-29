@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list site
+
 # ── Documentation ────────────────────────────────────────────────────────
 
 # Install docs site dependencies

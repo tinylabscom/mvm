@@ -1,48 +1,11 @@
 use std::path::Path;
-use std::process::Command;
 
 use mvm_core::util::test_env::TestEnv;
 
 use super::*;
 use mvm_core::image_set::ImageTrustTier;
 
-/// Runs `git` in `dir` isolated from the developer's configuration and from
-/// any repository the test process itself runs inside.
-fn git(dir: &Path, args: &[&str]) {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args([
-            "-c",
-            "user.name=mvm-test",
-            "-c",
-            "user.email=mvm-test@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "init.defaultBranch=main",
-        ])
-        .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null");
-    for var in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_COMMON_DIR",
-    ] {
-        cmd.env_remove(var);
-    }
-    let out = cmd.output().expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+use super::repository_fixture as repository;
 
 fn write(path: &Path, body: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -55,9 +18,7 @@ fn images_checkout(dir: &Path) {
     for marker in IMAGES_CHECKOUT_MARKERS {
         write(&dir.join(marker), &format!("# {marker}\n"));
     }
-    git(dir, &["init", "-q"]);
-    git(dir, &["add", "-A"]);
-    git(dir, &["commit", "-q", "-m", "images"]);
+    repository::commit_all(dir, "images");
 }
 
 fn open(path: &Path) -> Result<LocalImageCheckout, ImageSourceError> {
@@ -66,6 +27,7 @@ fn open(path: &Path) -> Result<LocalImageCheckout, ImageSourceError> {
 
 #[test]
 fn a_configured_checkout_is_selected_and_stays_strict() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let chosen = tmp.path().join("chosen-images");
     images_checkout(&chosen);
@@ -97,6 +59,7 @@ fn the_process_resolver_defaults_to_released_without_an_explicit_selector() {
 }
 
 #[test]
+#[cfg(unix)]
 fn recorded_tier_reads_the_default_image_sidecar_and_fails_closed() {
     let mut env = mvm_core::util::test_env::TestEnv::new();
     let home = tempfile::tempdir().unwrap();
@@ -130,6 +93,7 @@ fn recorded_tier_reads_the_default_image_sidecar_and_fails_closed() {
 }
 
 #[test]
+#[cfg(unix)]
 fn recorded_tier_reads_the_builder_cache_provenance_and_scopes_to_the_caches() {
     let mut env = mvm_core::util::test_env::TestEnv::new();
     let home = tempfile::tempdir().unwrap();
@@ -189,6 +153,7 @@ fn an_mvm_checkout_is_the_workspace_manifest_not_the_image_flakes() {
 
 #[test]
 fn a_clean_checkout_records_its_canonical_root_commit_and_state() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mvm-images");
     images_checkout(&dir);
@@ -203,6 +168,7 @@ fn a_clean_checkout_records_its_canonical_root_commit_and_state() {
 
 #[test]
 fn a_dirty_checkout_is_fingerprinted_by_what_changed() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mvm-images");
     images_checkout(&dir);
@@ -222,6 +188,7 @@ fn a_dirty_checkout_is_fingerprinted_by_what_changed() {
 
 #[test]
 fn an_untracked_file_contributes_its_contents() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mvm-images");
     images_checkout(&dir);
@@ -259,6 +226,7 @@ fn a_file_is_not_a_checkout() {
 
 #[test]
 fn a_directory_without_the_image_sources_is_not_a_checkout() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mvm");
     // What an mvm checkout looks like from here: a flake, but its images live
@@ -266,7 +234,7 @@ fn a_directory_without_the_image_sources_is_not_a_checkout() {
     write(&dir.join("flake.nix"), "{}\n");
     write(&dir.join("flake.lock"), "{}\n");
     write(&dir.join("nix/images/builder-vm/flake.nix"), "{}\n");
-    git(&dir, &["init", "-q"]);
+    repository::init(&dir);
 
     let err = open(&dir).unwrap_err();
     assert!(
@@ -283,6 +251,7 @@ fn a_directory_without_the_image_sources_is_not_a_checkout() {
 
 #[test]
 fn traversal_is_resolved_before_the_checkout_is_judged() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mvm-images");
     images_checkout(&dir);
@@ -310,13 +279,14 @@ fn traversal_is_resolved_before_the_checkout_is_judged() {
 
 #[test]
 fn a_subdirectory_of_a_checkout_is_not_its_root() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let outer = tmp.path().join("outer");
     // A tree that carries the markers but sits inside another repository.
     for marker in IMAGES_CHECKOUT_MARKERS {
         write(&outer.join("nested").join(marker), "#\n");
     }
-    git(&outer, &["init", "-q"]);
+    repository::init(&outer);
 
     let err = open(&outer.join("nested")).unwrap_err();
     assert!(
@@ -349,6 +319,7 @@ fn markers_without_a_repository_are_not_a_checkout() {
 #[cfg(unix)]
 #[test]
 fn a_symlinked_marker_is_refused() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mvm-images");
     images_checkout(&dir);
@@ -373,6 +344,7 @@ fn a_symlinked_marker_is_refused() {
 #[cfg(unix)]
 #[test]
 fn a_retargeted_selection_symlink_is_caught_on_reverify() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let first = tmp.path().join("first");
     let second = tmp.path().join("second");
@@ -393,6 +365,7 @@ fn a_retargeted_selection_symlink_is_caught_on_reverify() {
 
 #[test]
 fn an_edit_after_selection_is_caught_on_reverify() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mvm-images");
     images_checkout(&dir);
@@ -432,6 +405,7 @@ fn a_build_without_an_image_checkout_names_where_the_sources_live() {
 
 #[test]
 fn a_contributor_build_selects_a_valid_checkout_as_local_dev() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mvm-images");
     images_checkout(&dir);
@@ -454,6 +428,7 @@ fn a_bad_configured_path_is_an_error_not_the_released_set() {
 
 #[test]
 fn a_release_build_refuses_even_a_valid_checkout() {
+    let _env = TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mvm-images");
     images_checkout(&dir);
@@ -514,14 +489,13 @@ fn a_contributor_build_knows_its_own_checkout() {
 #[cfg(unix)]
 #[test]
 fn the_dirty_fingerprint_matches_the_emitters_for_a_fixed_tree() {
+    let _env = TestEnv::new();
     const EMITTER_FINGERPRINT: &str =
-        "952dbae933d34ca2625e9964a3e919b48271a821117b03daf9a606382f7490f1";
+        "62287e21e3b30dc2978c2e7e05f65e9770e6a641048161493425b0799c734bae";
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("r");
     write(&dir.join("a.txt"), "tracked\n");
-    git(&dir, &["init", "-q"]);
-    git(&dir, &["add", "-A"]);
-    git(&dir, &["commit", "-q", "-m", "fixture"]);
+    repository::commit_all(&dir, "fixture");
     write(&dir.join("a.txt"), "tracked\nchanged\n");
     write(&dir.join("u.txt"), "untracked\n");
     std::os::unix::fs::symlink("a.txt", dir.join("link")).unwrap();

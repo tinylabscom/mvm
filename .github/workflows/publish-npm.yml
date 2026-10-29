@@ -58,6 +58,21 @@ jobs:
         with:
           platform: ${{ matrix.platform }}
 
+      - name: Mandatory ad-hoc producer signing
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          python3 scripts/release/sign_macos.py --producer-adhoc \
+            --payload hostlib-out \
+            --report "${RUNNER_TEMP}/npm-producer-signing.json"
+
+      - name: Retain macOS producer signing evidence
+        if: ${{ always() && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-producer-signing-${{ matrix.platform }}
+          path: ${{ runner.temp }}/npm-producer-signing.json
+          if-no-files-found: warn
+
       - name: Developer ID sign and notarize macOS native payload
         if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
         env:
@@ -198,7 +213,9 @@ jobs:
         with:
           name: npm-dist
           path: crates/mvm-sdk/sdks/typescript/packed/*.tgz
-          retention-days: 1
+          # Keep the actual package bytes available for release evidence review.
+          retention-days: 30
+          if-no-files-found: error
 
   smoke:
     name: ${{ matrix.platform }}
@@ -239,6 +256,44 @@ jobs:
         with:
           name: npm-dist
           path: npm-dist
+
+      - name: Download Darwin producer signing report
+        if: ${{ runner.os == 'macOS' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-producer-signing-darwin-arm64
+          path: signing-reports
+
+      - name: Download Darwin final signing report
+        if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-notarization-darwin-arm64
+          path: signing-reports
+
+      - name: Inspect actual packed Darwin npm bytes
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages=(npm-dist/runmvm-mvm-darwin-arm64-[0-9]*.tgz)
+          [[ "${#packages[@]}" -eq 1 ]]
+          cmd=(python3 scripts/release/verify_macos_package.py
+            --archive "${packages[0]}" --envelope package --sdk-layout
+            --producer-report signing-reports/npm-producer-signing.json
+            --report "${RUNNER_TEMP}/npm-final-package.json")
+          if [[ "${{ !inputs.dry_run || github.ref_type == 'tag' }}" == true ]]; then
+            cmd+=(--notary-report signing-reports/npm-notarization.json)
+          fi
+          "${cmd[@]}"
+
+      - name: Retain final Darwin npm package inspection
+        if: ${{ always() && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-final-package-darwin-arm64
+          path: ${{ runner.temp }}/npm-final-package.json
+          if-no-files-found: warn
 
       - name: Install and load on ${{ matrix.platform }}
         env:

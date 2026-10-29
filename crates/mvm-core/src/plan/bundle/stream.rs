@@ -8,30 +8,101 @@
 //! Only the embedded image-set manifests, which verification has to parse,
 //! are read whole, and they are capped at [`MAX_IMAGE_SET_MANIFEST_BYTES`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(feature = "host-state")]
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+#[cfg(feature = "host-state")]
 use ed25519_dalek::{Signature, Verifier};
 use sha2::{Digest, Sha256};
 
+use super::{BundleArtifact, BundleManifest, BundleVerifyError};
+#[cfg(feature = "host-state")]
 use super::{
-    BundleArtifact, BundleInstallError, BundleManifest, BundleMember, BundleRegistry,
-    BundleSizeBudget, BundleVerifyError, ImageSetSource, InstalledBundle, KeyId, MANIFEST_FILENAME,
-    ManifestSigner, SIGNATURE_FILENAME, TrustStore, VerifiedEmbeddedImageSet,
-    canonical_manifest_bytes, declarations, ensure_safe_path, install_embedded_image_set_cache,
-    key_id_from_pubkey, read_manifest_entries, verify_embedded_image_sets, verify_signed_manifest,
+    BundleInstallError, BundleMember, BundleRegistry, BundleSizeBudget, ImageSetSource,
+    InstalledBundle, KeyId, MANIFEST_FILENAME, ManifestSigner, SIGNATURE_FILENAME, TrustStore,
+    VerifiedEmbeddedImageSet, canonical_manifest_bytes, declarations, ensure_safe_path,
+    install_embedded_image_set_cache, key_id_from_pubkey, verify_embedded_image_sets,
+    verify_signed_manifest,
 };
+
+/// Read `manifest.json` and `manifest.sig` out of an archive, stopping as soon
+/// as both are found. A bundle writes them first, so a multi-GiB archive is
+/// read only as far as its first two entries.
+#[cfg(feature = "host-state")]
+pub(super) fn read_manifest_entries(
+    archive: impl Read,
+) -> Result<(Vec<u8>, Vec<u8>), BundleVerifyError> {
+    let (manifest, signature) = read_manifest_entries_inner(archive, true)?;
+    let missing = |name: &str| BundleVerifyError::ManifestParse(format!("{name} missing"));
+    Ok((
+        manifest,
+        signature.ok_or_else(|| missing(SIGNATURE_FILENAME))?,
+    ))
+}
+
+/// Read only the manifest for denial-only classification. A missing signature
+/// is left to the mandatory verification path, which reports that failure.
+#[cfg(feature = "host-state")]
+pub(super) fn read_manifest_entry(archive: impl Read) -> Result<Vec<u8>, BundleVerifyError> {
+    read_manifest_entries_inner(archive, false).map(|(manifest, _)| manifest)
+}
+
+#[cfg(feature = "host-state")]
+fn read_manifest_entries_inner(
+    archive: impl Read,
+    require_signature: bool,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), BundleVerifyError> {
+    let tar_error = |e: std::io::Error| BundleVerifyError::ManifestParse(format!("tar read: {e}"));
+    let mut manifest = None;
+    let mut signature = None;
+    let mut budget = declarations::BundleSizeBudget::default();
+    for entry in tar::Archive::new(archive).entries().map_err(tar_error)? {
+        let mut entry = entry.map_err(tar_error)?;
+        let path = entry
+            .path()
+            .map_err(tar_error)?
+            .to_string_lossy()
+            .into_owned();
+        let slot = match path.as_str() {
+            MANIFEST_FILENAME => &mut manifest,
+            SIGNATURE_FILENAME => &mut signature,
+            _ => continue,
+        };
+        budget.admit(&path, entry.size())?;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(tar_error)?;
+        *slot = Some(bytes);
+        if manifest.is_some() && (signature.is_some() || !require_signature) {
+            break;
+        }
+    }
+    let missing = |name: &str| BundleVerifyError::ManifestParse(format!("{name} missing"));
+    Ok((
+        manifest.ok_or_else(|| missing(MANIFEST_FILENAME))?,
+        signature,
+    ))
+}
 
 /// Largest embedded image-set manifest verification will read. The manifest
 /// is JSON naming a handful of artifacts; anything near this size is not one.
 pub const MAX_IMAGE_SET_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Keep cooperating bundle removal excluded through a caller's reference commit.
+#[cfg(feature = "host-state")]
+pub(crate) struct BundleInstallLease {
+    pub(crate) bundle: InstalledBundle,
+    _lease: File,
+}
+
 /// Where verified artifact bytes can be read back from, by archive-relative
 /// path: memory for a bundle verified from bytes, a staging directory for one
 /// verified from a file.
+#[cfg(feature = "host-state")]
 pub(super) trait ArtifactSource {
     fn reader(&self, bundle_path: &str) -> io::Result<Box<dyn Read + '_>>;
 
@@ -64,8 +135,10 @@ pub(super) trait ArtifactSource {
 }
 
 /// Artifacts held in memory, keyed by archive-relative path.
+#[cfg(feature = "host-state")]
 pub(super) struct InMemoryArtifacts<'a>(pub &'a BTreeMap<String, Vec<u8>>);
 
+#[cfg(feature = "host-state")]
 impl ArtifactSource for InMemoryArtifacts<'_> {
     fn reader(&self, bundle_path: &str) -> io::Result<Box<dyn Read + '_>> {
         self.0
@@ -76,8 +149,10 @@ impl ArtifactSource for InMemoryArtifacts<'_> {
 }
 
 /// Artifacts extracted under a directory at their archive-relative paths.
+#[cfg(feature = "host-state")]
 pub(super) struct StagedArtifacts<'a>(pub &'a Path);
 
+#[cfg(feature = "host-state")]
 impl ArtifactSource for StagedArtifacts<'_> {
     fn reader(&self, bundle_path: &str) -> io::Result<Box<dyn Read + '_>> {
         Ok(Box::new(File::open(self.0.join(bundle_path))?))
@@ -85,14 +160,14 @@ impl ArtifactSource for StagedArtifacts<'_> {
 }
 
 /// A writer that hashes and counts what passes through it.
-struct HashingWriter<W> {
+pub(crate) struct HashingWriter<W> {
     inner: W,
     hasher: Sha256,
     written: u64,
 }
 
 impl<W: Write> HashingWriter<W> {
-    fn new(inner: W) -> Self {
+    pub(crate) fn new(inner: W) -> Self {
         Self {
             inner,
             hasher: Sha256::new(),
@@ -100,7 +175,7 @@ impl<W: Write> HashingWriter<W> {
         }
     }
 
-    fn finish(self) -> (u64, String) {
+    pub(crate) fn finish(self) -> (u64, String) {
         (self.written, hex::encode(self.hasher.finalize()))
     }
 }
@@ -142,6 +217,7 @@ pub(super) fn check_artifact_digest(
 }
 
 /// Where [`stream_artifacts`] sends each declared artifact.
+#[cfg(feature = "host-state")]
 enum Destination<'a> {
     /// Hash and discard.
     Discard,
@@ -158,6 +234,7 @@ enum Destination<'a> {
 /// Entries the manifest does not declare are skipped, as the in-memory
 /// verifier skips them; a declared artifact that appears twice or never is
 /// refused.
+#[cfg(feature = "host-state")]
 fn stream_artifacts<'p>(
     archive: impl Read,
     manifest: &BundleManifest,
@@ -187,6 +264,13 @@ fn stream_artifacts<'p>(
         let Some(artifact) = declared.get(path.as_str()) else {
             continue;
         };
+        if entry.size() != artifact.size_bytes {
+            return Err(BundleVerifyError::ArtifactSizeMismatch {
+                name: artifact.name.clone(),
+                declared: artifact.size_bytes,
+                actual: entry.size(),
+            });
+        }
         if !seen.insert(path.clone()) {
             return Err(BundleVerifyError::ManifestParse(format!(
                 "archive carries {path} more than once"
@@ -243,6 +327,7 @@ fn stream_artifacts<'p>(
 }
 
 /// The archive paths of every embedded image-set manifest a bundle declares.
+#[cfg(feature = "host-state")]
 fn image_set_manifest_paths(manifest: &BundleManifest) -> BTreeSet<String> {
     manifest
         .members
@@ -251,6 +336,12 @@ fn image_set_manifest_paths(manifest: &BundleManifest) -> BTreeSet<String> {
             BundleMember::EmbeddedImageSet { manifest_artifact }
             | BundleMember::EmbeddedBootAssets { manifest_artifact } => {
                 manifest.find_by_name(manifest_artifact)
+            }
+            BundleMember::EmbeddedCliBootAssets(runtime) => {
+                manifest.find_by_name(&runtime.manifest_artifact)
+            }
+            BundleMember::CanonicalLinuxProof(proof) => {
+                manifest.find_by_name(&proof.manifest_artifact)
             }
             _ => None,
         })
@@ -261,6 +352,7 @@ fn image_set_manifest_paths(manifest: &BundleManifest) -> BTreeSet<String> {
 /// A bundle archive on disk that passed every check
 /// [`super::read_and_verify_bundle`] makes, verified without loading it.
 #[derive(Debug)]
+#[cfg(feature = "host-state")]
 pub struct VerifiedBundleFile {
     pub manifest: BundleManifest,
     pub key_id: KeyId,
@@ -268,14 +360,357 @@ pub struct VerifiedBundleFile {
     pub bundle_sha256: String,
     pub embedded_image_sets: Vec<VerifiedEmbeddedImageSet>,
     pub boot_assets: Option<super::VerifiedBootAssets>,
+    manifest_signature: [u8; 64],
 }
 
+#[cfg(feature = "host-state")]
+impl VerifiedBundleFile {
+    /// Internal bounded selection over an independently positioned owned file.
+    /// The application facade supplies only its identity-safe retained snapshot.
+    pub(crate) fn read_small_verified_member(
+        &self,
+        mut archive: File,
+        name: &str,
+        maximum: u64,
+    ) -> Result<Vec<u8>, BundleVerifyError> {
+        use std::io::{Seek, SeekFrom};
+        let invalid = |reason: &str| BundleVerifyError::ManifestParse(reason.to_owned());
+        let mut matches = self
+            .manifest
+            .artifacts
+            .iter()
+            .filter(|member| member.name == name);
+        let member = matches
+            .next()
+            .ok_or_else(|| BundleVerifyError::ArtifactMissing {
+                name: name.to_owned(),
+            })?;
+        if matches.next().is_some()
+            || self
+                .manifest
+                .artifacts
+                .iter()
+                .filter(|other| other.path == member.path)
+                .count()
+                != 1
+        {
+            return Err(invalid("selected signed member is ambiguous"));
+        }
+        if member.size_bytes > maximum || member.size_bytes > MAX_IMAGE_SET_MANIFEST_BYTES {
+            return Err(invalid("selected signed member exceeds its capture bound"));
+        }
+        let metadata = archive
+            .metadata()
+            .map_err(|error| invalid(&format!("snapshot metadata: {error}")))?;
+        if !metadata.is_file() || metadata.len() > super::MAX_BUNDLE_TOTAL_BYTES + 64 * 1024 * 1024
+        {
+            return Err(invalid("snapshot is not a bounded regular archive"));
+        }
+        archive
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| invalid(&format!("snapshot rewind: {error}")))?;
+        let mut digest = HashingWriter::new(io::sink());
+        io::copy(
+            &mut Read::by_ref(&mut archive).take(metadata.len() + 1),
+            &mut digest,
+        )
+        .map_err(|error| invalid(&format!("snapshot hash: {error}")))?;
+        let (size, hash) = digest.finish();
+        if size != metadata.len() || hash != self.bundle_sha256 {
+            return Err(invalid(
+                "retained snapshot differs from its original archive pin",
+            ));
+        }
+        archive
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| invalid(&format!("snapshot rewind: {error}")))?;
+        let mut captured = stream_artifacts(archive, &self.manifest, |artifact| {
+            if artifact.path == member.path {
+                Destination::Capture
+            } else {
+                Destination::Discard
+            }
+        })?;
+        captured
+            .remove(&member.path)
+            .ok_or_else(|| BundleVerifyError::ArtifactMissing {
+                name: name.to_owned(),
+            })
+    }
+
+    /// The original archive, signature and publisher identity for independent
+    /// plan admission. This is a pin, not permission to skip re-verification.
+    pub fn plan_artifact(&self) -> super::PlanArtifact {
+        super::PlanArtifact::new(
+            self.bundle_sha256.clone(),
+            &self.manifest_signature,
+            self.key_id.clone(),
+        )
+    }
+}
+
+/// Owns only the selected kernel/proof files from one pinned private archive
+/// snapshot. This is application-envelope integrity, not canonical Linux
+/// authority or permission to start a VM.
+#[derive(Debug)]
+pub struct CapturedCanonicalLinuxInputs {
+    _archive: File,
+    directory_path: PathBuf,
+    directory_guard: std::sync::Mutex<Option<tempfile::TempDir>>,
+    manifest: BundleManifest,
+    pin: super::PlanArtifact,
+    proof: super::CanonicalLinuxProof,
+    kernel: BundleArtifact,
+    selected: BTreeMap<String, PathBuf>,
+}
+
+impl CapturedCanonicalLinuxInputs {
+    /// Resource location only, not execution or cleanup authority.
+    pub fn generation_dir(&self) -> &Path {
+        &self.directory_path
+    }
+
+    /// One-way retention before a native reader can exist.
+    pub fn retain_generation(&self) -> Result<()> {
+        if let Some(directory) = self
+            .directory_guard
+            .lock()
+            .map_err(|_| anyhow::anyhow!("kernel generation guard poisoned"))?
+            .take()
+        {
+            let retained = directory.keep();
+            anyhow::ensure!(
+                retained == self.directory_path,
+                "kernel generation retention changed its identity"
+            );
+        }
+        Ok(())
+    }
+    pub fn manifest(&self) -> &BundleManifest {
+        &self.manifest
+    }
+    pub fn pin(&self) -> &super::PlanArtifact {
+        &self.pin
+    }
+    pub fn proof(&self) -> &super::CanonicalLinuxProof {
+        &self.proof
+    }
+    pub fn kernel(&self) -> &BundleArtifact {
+        &self.kernel
+    }
+
+    /// Reopen a retained regular file without following a link and verify the
+    /// actual stream against its signed inventory. No ambient path is returned.
+    pub fn open_artifact(&self, name: &str) -> Result<File> {
+        use std::io::{Seek, SeekFrom};
+        let path = self
+            .selected
+            .get(name)
+            .context("artifact was not retained")?;
+        let declaration = self
+            .manifest
+            .find_by_name(name)
+            .context("artifact declaration missing")?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let mut file = options.open(path)?;
+        let metadata = file.metadata()?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.len() == declaration.size_bytes,
+            "retained artifact is not regular or has changed size"
+        );
+        let mut digest = HashingWriter::new(io::sink());
+        io::copy(
+            &mut Read::by_ref(&mut file).take(declaration.size_bytes + 1),
+            &mut digest,
+        )?;
+        let (size, hash) = digest.finish();
+        check_artifact_digest(declaration, size, hash)?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
+}
+
+/// Snapshot a pinned archive with bounded streaming I/O, then retain only the
+/// canonical-proof inputs. Re-verification runs on our private snapshot, not
+/// multiple independently mutable reads of the caller's path.
+///
+/// The caller must still apply the canonical Linux lock/signature/revocation
+/// verifier and bind the selected kernel to an admitted native operation.
+#[cfg(feature = "host-state")]
+pub fn capture_canonical_linux_inputs(
+    archive: &Path,
+    pin: &super::PlanArtifact,
+    trust: &dyn TrustStore,
+) -> Result<CapturedCanonicalLinuxInputs> {
+    use std::io::{Seek, SeekFrom};
+    anyhow::ensure!(
+        cfg!(unix),
+        "canonical Linux proof capture is unsupported on this platform"
+    );
+    const MAX_RAW_ARCHIVE: u64 = super::MAX_BUNDLE_TOTAL_BYTES + 64 * 1024 * 1024;
+    const MAX_KERNEL: u64 = 256 * 1024 * 1024;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut input = options.open(archive)?;
+    let metadata = input.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= MAX_RAW_ARCHIVE,
+        "bundle archive is not regular or exceeds the capture bound"
+    );
+    // An authenticated metadata preflight can refuse an oversized selected
+    // kernel before copying a multi-GiB workload archive. It is not authority
+    // for the later snapshot: that exact snapshot is independently verified.
+    let (head, signature) = read_manifest_entries(input.try_clone()?)?;
+    let (head, key) = verify_signed_manifest(&head, &signature, trust)?;
+    let pinned_signature = pin.signature_bytes().context("invalid pinned signature")?;
+    anyhow::ensure!(
+        key == pin.key_id && signature.as_slice() == pinned_signature.as_slice(),
+        "archive preflight publisher or signature differs from its pin"
+    );
+    anyhow::ensure!(
+        head.members
+            .iter()
+            .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_))),
+        "canonical Linux proof is required"
+    );
+    let preflight_kernel = head
+        .find_by_role(&super::ArtifactRole::Kernel)
+        .context("kernel missing")?;
+    anyhow::ensure!(
+        preflight_kernel.size_bytes > 0 && preflight_kernel.size_bytes <= MAX_KERNEL,
+        "selected kernel exceeds the capture bound"
+    );
+    input.seek(SeekFrom::Start(0))?;
+    let parent = crate::config::mvm_home_strict()?.join("canonical-kernel-generations");
+    crate::config::create_private_dir(&parent)?;
+    anyhow::ensure!(
+        !std::fs::symlink_metadata(&parent)?.file_type().is_symlink(),
+        "canonical kernel generation parent cannot be a symlink"
+    );
+    let directory = tempfile::Builder::new()
+        .prefix("kernel-")
+        .tempdir_in(&parent)?;
+    crate::config::create_private_dir(directory.path())?;
+    let snapshot_path = directory.path().join("archive.mvmpkg");
+    let mut snapshot = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&snapshot_path)?;
+    let mut writer = HashingWriter::new(&mut snapshot);
+    io::copy(&mut input.take(MAX_RAW_ARCHIVE + 1), &mut writer)?;
+    let (size, digest) = writer.finish();
+    anyhow::ensure!(
+        size <= MAX_RAW_ARCHIVE && digest == pin.bundle_sha256,
+        "captured archive differs from its exact pin or exceeds the capture bound"
+    );
+    snapshot.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&snapshot_path, std::fs::Permissions::from_mode(0o400))?;
+    }
+    let verified = verify_bundle_file(&snapshot_path, trust)?;
+    anyhow::ensure!(
+        &verified.plan_artifact() == pin,
+        "captured archive publisher or signature pin differs"
+    );
+    let proof = verified
+        .manifest
+        .members
+        .iter()
+        .find_map(|member| match member {
+            BundleMember::CanonicalLinuxProof(proof) => Some(proof.clone()),
+            _ => None,
+        })
+        .context("canonical Linux proof is required")?;
+    let kernel = verified
+        .manifest
+        .find_by_role(&super::ArtifactRole::Kernel)
+        .context("selected kernel is missing")?
+        .clone();
+    anyhow::ensure!(
+        kernel.size_bytes > 0 && kernel.size_bytes <= MAX_KERNEL,
+        "selected kernel exceeds the capture bound"
+    );
+    let mut selected = BTreeMap::new();
+    for (index, name) in [
+        &kernel.name,
+        &proof.manifest_artifact,
+        &proof.signature_bundle_artifact,
+        &proof.revocation_document_artifact,
+        &proof.revocation_signature_bundle_artifact,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        anyhow::ensure!(
+            verified
+                .manifest
+                .artifacts
+                .iter()
+                .filter(|a| a.name == *name)
+                .count()
+                == 1,
+            "selected artifact declaration is missing or ambiguous"
+        );
+        anyhow::ensure!(
+            selected
+                .insert(
+                    name.clone(),
+                    directory.path().join(format!("member-{index}"))
+                )
+                .is_none(),
+            "selected canonical inputs alias"
+        );
+    }
+    stream_artifacts(
+        open_archive(&snapshot_path)?,
+        &verified.manifest,
+        |artifact| {
+            selected
+                .get(&artifact.name)
+                .map_or(Destination::Discard, |path| Destination::File(path))
+        },
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in selected.values() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))?;
+        }
+    }
+    Ok(CapturedCanonicalLinuxInputs {
+        _archive: snapshot,
+        directory_path: directory.path().to_owned(),
+        directory_guard: std::sync::Mutex::new(Some(directory)),
+        manifest: verified.manifest,
+        pin: pin.clone(),
+        proof,
+        kernel,
+        selected,
+    })
+}
+
+#[cfg(feature = "host-state")]
 fn open_archive(path: &Path) -> Result<File, BundleVerifyError> {
     File::open(path).map_err(|e| {
         BundleVerifyError::ManifestParse(format!("opening bundle archive {}: {e}", path.display()))
     })
 }
 
+#[cfg(feature = "host-state")]
 fn archive_sha256(path: &Path) -> Result<String, BundleVerifyError> {
     crate::crypto::image_verify::sha256_reader(open_archive(path)?).map_err(|e| {
         BundleVerifyError::ManifestParse(format!("hashing bundle archive {}: {e}", path.display()))
@@ -283,6 +718,7 @@ fn archive_sha256(path: &Path) -> Result<String, BundleVerifyError> {
 }
 
 /// Verify the manifest at the head of the archive at `path`.
+#[cfg(feature = "host-state")]
 fn verify_head(
     path: &Path,
     trust_store: &dyn TrustStore,
@@ -296,11 +732,15 @@ fn verify_head(
 /// verifies bytes — signature, declarations, every artifact's size and
 /// digest, embedded image sets — reading each artifact once through a fixed
 /// buffer.
+#[cfg(feature = "host-state")]
 pub fn verify_bundle_file(
     path: &Path,
     trust_store: &dyn TrustStore,
 ) -> Result<VerifiedBundleFile, BundleVerifyError> {
-    let (manifest, key_id, _, _) = verify_head(path, trust_store)?;
+    let (manifest, key_id, _, signature) = verify_head(path, trust_store)?;
+    let manifest_signature = signature.try_into().map_err(|_| {
+        BundleVerifyError::ManifestParse("verified manifest signature has invalid length".into())
+    })?;
     let capture = image_set_manifest_paths(&manifest);
     let captured = stream_artifacts(open_archive(path)?, &manifest, |artifact| {
         if capture.contains(&artifact.path) {
@@ -317,9 +757,11 @@ pub fn verify_bundle_file(
         key_id,
         embedded_image_sets,
         boot_assets,
+        manifest_signature,
     })
 }
 
+#[cfg(feature = "host-state")]
 impl BundleRegistry {
     /// Install the `.mvmpkg` at `archive`, streaming.
     ///
@@ -337,25 +779,24 @@ impl BundleRegistry {
         trust: &dyn TrustStore,
         force: bool,
     ) -> Result<InstalledBundle, BundleInstallError> {
-        self.install_file_with_preflight(archive, trust, force, |_, _, _| Ok(()))
+        self.install_leased_file(archive, trust, force)
+            .map(|installed| installed.bundle)
     }
 
-    /// Apply additional consumer requirements after verified extraction, before
-    /// promoting a new installation or replacing an existing one. The check
-    /// must not mutate the staged members. An `AlreadyInstalled` result retains
-    /// the ordinary no-install behavior and does not invoke the check.
-    pub fn install_file_with_preflight(
+    pub(crate) fn install_leased_file(
         &self,
         archive: &Path,
         trust: &dyn TrustStore,
         force: bool,
-        preflight: impl FnOnce(&Path, &BundleManifest, &str) -> Result<()>,
-    ) -> Result<InstalledBundle, BundleInstallError> {
+    ) -> Result<BundleInstallLease, BundleInstallError> {
         let sha = archive_sha256(archive).map_err(BundleInstallError::Verify)?;
         let io_error = |reason: String| BundleInstallError::Io {
             bundle_sha256: sha.clone(),
             reason,
         };
+        let (manifest, _, manifest_bytes, sig_bytes) =
+            verify_head(archive, trust).map_err(BundleInstallError::Verify)?;
+        let lease = self.lock_entry(&sha).map_err(io_error)?;
         let install_dir = self.install_dir(&sha);
         if install_dir.exists() && !force {
             verify_bundle_file(archive, trust).map_err(BundleInstallError::Verify)?;
@@ -363,10 +804,6 @@ impl BundleRegistry {
                 bundle_sha256: sha.clone(),
             });
         }
-        let (manifest, _, manifest_bytes, sig_bytes) =
-            verify_head(archive, trust).map_err(BundleInstallError::Verify)?;
-
-        self.create_root().map_err(io_error)?;
         let staging = self.root.join(format!("{sha}.partial"));
         if staging.exists() {
             std::fs::remove_dir_all(&staging).map_err(|e| {
@@ -399,10 +836,6 @@ impl BundleRegistry {
                 return Err(error);
             }
         };
-        if let Err(error) = preflight(&staging, &manifest, &sha) {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(io_error(format!("bundle preflight refused: {error:#}")));
-        }
         install_embedded_image_set_cache(
             &ImageSetSource {
                 manifest: &manifest,
@@ -413,27 +846,30 @@ impl BundleRegistry {
             &sha,
         )?;
 
-        if install_dir.exists() {
-            std::fs::remove_dir_all(&install_dir).map_err(|e| {
-                io_error(format!(
-                    "removing existing install at {}: {e}",
-                    install_dir.display()
-                ))
-            })?;
-        }
-        std::fs::rename(&staging, &install_dir).map_err(|e| {
+        sync_staging(&staging, &manifest).map_err(io_error)?;
+        publish_install_with(&staging, &install_dir, exchange_directories).map_err(|e| {
             io_error(format!(
                 "promoting staging {} → install {}: {e}",
                 staging.display(),
                 install_dir.display()
             ))
         })?;
+        crate::private_fs::sync_managed_directory_chain(&self.root, &self.root)
+            .map_err(|error| io_error(error.to_string()))?;
+        // After an exchange, staging holds only the obsolete generation.
+        // Interrupted cleanup cannot damage the newly published directory.
+        if std::fs::symlink_metadata(&staging).is_ok() {
+            let _ = std::fs::remove_dir_all(&staging);
+        }
         self.persist_archive(archive, &sha).map_err(io_error)?;
 
-        Ok(InstalledBundle {
-            sha256: sha,
-            root: install_dir,
-            manifest,
+        Ok(BundleInstallLease {
+            bundle: InstalledBundle {
+                sha256: sha,
+                root: install_dir,
+                manifest,
+            },
+            _lease: lease,
         })
     }
 
@@ -491,15 +927,52 @@ impl BundleRegistry {
 
     /// Create the registry root, owner-only.
     fn create_root(&self) -> Result<(), String> {
-        std::fs::create_dir_all(&self.root)
-            .map_err(|e| format!("creating registry root {}: {e}", self.root.display()))?;
+        if let Ok(metadata) = std::fs::symlink_metadata(&self.root) {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err("bundle registry root must be a real directory".to_string());
+            }
+            crate::private_fs::require_current_owner(&metadata)
+                .map_err(|error| error.to_string())?;
+        }
+        crate::config::create_private_dir(&self.root).map_err(|error| error.to_string())
+    }
+
+    /// Every installer and remover shares one stable content-addressed lease.
+    pub(super) fn lock_entry(&self, sha: &str) -> Result<File, String> {
+        if sha.len() != 64
+            || !sha
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("bundle address must be canonical SHA-256".to_string());
+        }
+        self.create_root()?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("restricting registry root {}: {e}", self.root.display()))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
-        Ok(())
+        let file = options
+            .open(self.root.join(format!(".{sha}.lock")))
+            .map_err(|error| error.to_string())?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("bundle lease must be a regular file".to_string());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() != 1 {
+                return Err("bundle lease cannot have multiple links".to_string());
+            }
+        }
+        crate::private_fs::require_current_owner(&metadata).map_err(|error| error.to_string())?;
+        file.lock().map_err(|error| error.to_string())?;
+        Ok(file)
     }
 
     /// Copy the archive to `<sha>.mvmpkg`, atomically.
@@ -525,6 +998,72 @@ impl BundleRegistry {
     }
 }
 
+#[cfg(feature = "host-state")]
+fn sync_staging(staging: &Path, manifest: &BundleManifest) -> Result<(), String> {
+    let sync = || -> io::Result<()> {
+        for name in [MANIFEST_FILENAME, SIGNATURE_FILENAME] {
+            File::open(staging.join(name))?.sync_all()?;
+        }
+        let mut directories = BTreeSet::new();
+        for artifact in &manifest.artifacts {
+            let path = staging.join(&artifact.path);
+            for parent in path
+                .ancestors()
+                .skip(1)
+                .take_while(|parent| parent.starts_with(staging))
+            {
+                directories.insert(parent.to_path_buf());
+            }
+        }
+        for directory in directories.iter().rev() {
+            File::open(directory)?.sync_all()?;
+        }
+        File::open(staging)?.sync_all()
+    };
+    sync().map_err(|error| format!("syncing bundle staging: {error}"))
+}
+
+#[cfg(feature = "host-state")]
+fn publish_install_with(
+    staging: &Path,
+    destination: &Path,
+    exchange: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            exchange(staging, destination)
+        }
+        Ok(_) => Err(io::Error::other(
+            "existing bundle install is not a real directory",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            std::fs::rename(staging, destination)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(feature = "host-state")]
+fn exchange_directories(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            source,
+            rustix::fs::CWD,
+            destination,
+            rustix::fs::RenameFlags::EXCHANGE,
+        )
+        .map_err(Into::into)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (source, destination);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+#[cfg(feature = "host-state")]
 enum StageError {
     Verify(BundleVerifyError),
     Io(String),
@@ -532,6 +1071,7 @@ enum StageError {
 
 /// Extract and verify every artifact into `staging`, write the manifest and
 /// signature beside them, and verify the embedded image sets.
+#[cfg(feature = "host-state")]
 fn stage(
     archive: &Path,
     manifest: &BundleManifest,
@@ -565,6 +1105,7 @@ fn stage(
 
 /// The bytes of one artifact being sealed into a bundle.
 #[derive(Debug, Clone)]
+#[cfg(feature = "host-state")]
 pub enum BundlePayload {
     /// Bytes already in memory.
     Bytes(Vec<u8>),
@@ -572,6 +1113,7 @@ pub enum BundlePayload {
     File(PathBuf),
 }
 
+#[cfg(feature = "host-state")]
 impl BundlePayload {
     fn len(&self) -> io::Result<u64> {
         match self {
@@ -589,12 +1131,14 @@ impl BundlePayload {
 }
 
 /// A reader that hashes and counts what is read through it.
+#[cfg(feature = "host-state")]
 struct HashingReader<R> {
     inner: R,
     hasher: Sha256,
     read: u64,
 }
 
+#[cfg(feature = "host-state")]
 impl<R: Read> Read for HashingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
@@ -613,6 +1157,7 @@ impl<R: Read> Read for HashingReader<R> {
 /// file that changed between hashing and sealing fails the write rather than
 /// producing a bundle that installs nowhere. A caller writing to a file
 /// should write to a temporary path and rename it on success.
+#[cfg(feature = "host-state")]
 pub fn write_bundle_to(
     manifest: &BundleManifest,
     signer: &dyn ManifestSigner,
@@ -724,6 +1269,7 @@ pub fn write_bundle_to(
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn append_entry<W: Write>(
     tar: &mut tar::Builder<W>,
     path: &str,
@@ -738,7 +1284,7 @@ fn append_entry<W: Write>(
         .with_context(|| format!("write tar entry {path:?}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-state"))]
 mod tests {
     use super::*;
     use crate::plan::bundle::{
@@ -820,58 +1366,6 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_preflight_publishes_nothing_and_preserves_an_existing_install() {
-        for existing in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = sealed_from_files(dir.path());
-            let registry = BundleRegistry::new(dir.path().join("registry"));
-            let sha = archive_sha256(&path).unwrap();
-            if existing {
-                registry.install_file(&path, &trust(), false).unwrap();
-            }
-            let error = registry
-                .install_file_with_preflight(&path, &trust(), true, |root, manifest, digest| {
-                    assert_eq!(digest, sha);
-                    assert_eq!(manifest.artifacts.len(), 2);
-                    assert_eq!(
-                        std::fs::read(root.join("artifacts/rootfs.ext4")).unwrap(),
-                        b"rootfs bytes"
-                    );
-                    anyhow::bail!("runtime compatibility refused")
-                })
-                .unwrap_err();
-            assert!(error.to_string().contains("runtime compatibility refused"));
-            assert_eq!(registry.find(&sha).unwrap().is_some(), existing);
-            assert_eq!(registry.archive_path(&sha).exists(), existing);
-            assert!(!registry.root.join(format!("{sha}.partial")).exists());
-        }
-    }
-
-    #[test]
-    fn tampered_members_never_reach_an_install_preflight() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = sealed_from_files(dir.path());
-        let mut bytes = std::fs::read(&path).unwrap();
-        let offset = bytes
-            .windows(b"rootfs bytes".len())
-            .position(|part| part == b"rootfs bytes")
-            .unwrap();
-        bytes[offset] ^= 1;
-        std::fs::write(&path, bytes).unwrap();
-        let registry = BundleRegistry::new(dir.path().join("registry"));
-        let called = std::cell::Cell::new(false);
-        assert!(
-            registry
-                .install_file_with_preflight(&path, &trust(), false, |_, _, _| {
-                    called.set(true);
-                    Ok(())
-                })
-                .is_err()
-        );
-        assert!(!called.get());
-    }
-
-    #[test]
     fn a_bundle_sealed_from_files_matches_one_sealed_from_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let path = sealed_from_files(dir.path());
@@ -918,6 +1412,30 @@ mod tests {
     }
 
     #[test]
+    fn failed_replacement_preserves_the_previously_committed_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("installed");
+        let staging = directory.path().join("staging");
+        std::fs::create_dir(&current).unwrap();
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(current.join("rootfs"), b"committed").unwrap();
+        std::fs::write(staging.join("rootfs"), b"replacement").unwrap();
+        let fail = |_: &Path, _: &Path| Err(io::Error::other("injected exchange failure"));
+        assert!(publish_install_with(&staging, &current, fail).is_err());
+        assert_eq!(std::fs::read(current.join("rootfs")).unwrap(), b"committed");
+        assert_eq!(
+            std::fs::read(staging.join("rootfs")).unwrap(),
+            b"replacement"
+        );
+        publish_install_with(&staging, &current, exchange_directories).unwrap();
+        assert_eq!(
+            std::fs::read(current.join("rootfs")).unwrap(),
+            b"replacement"
+        );
+        assert_eq!(std::fs::read(staging.join("rootfs")).unwrap(), b"committed");
+    }
+
+    #[test]
     fn a_tampered_artifact_is_refused_when_streamed() {
         let dir = tempfile::tempdir().unwrap();
         let path = sealed_from_files(dir.path());
@@ -934,8 +1452,17 @@ mod tests {
                 BundleVerifyError::ArtifactSha256Mismatch { .. }
             ))
         ));
+        let lease_path = registry
+            .root()
+            .join(format!(".{}.lock", archive_sha256(&path).unwrap()));
         let leftovers: Vec<_> = std::fs::read_dir(registry.root())
-            .map(|entries| entries.filter_map(Result::ok).map(|e| e.path()).collect())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|path| path != &lease_path)
+                    .collect()
+            })
             .unwrap_or_default();
         assert!(leftovers.is_empty(), "refused install left {leftovers:?}");
     }

@@ -15,10 +15,13 @@
 
 mod emit;
 mod state;
+mod stdio_tap;
 mod subscriber;
 
 pub use emit::{EmitOutcome, ShedReason};
 pub use state::{CaptureState, LossTally, ProducerId, SourceLosses};
+pub(crate) use stdio_tap::offer as offer_stdio;
+pub use stdio_tap::{install_stdio_tap, offer_to as offer_stdio_to};
 pub use subscriber::AgentSubscriber;
 
 pub mod session;

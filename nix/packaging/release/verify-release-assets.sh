@@ -21,6 +21,8 @@
 # --targets defaults to the release.yml build matrix. --cosign additionally
 # runs `cosign verify-blob` against each bundle (needs cosign on PATH and the
 # expected OIDC identity in COSIGN_IDENTITY / COSIGN_OIDC_ISSUER).
+# Safe archive validation requires python3. A host --expect-version probe
+# requires --cosign; cross-target version checks never execute binaries.
 set -euo pipefail
 
 ASSETS_DIR=""
@@ -36,7 +38,8 @@ while [ $# -gt 0 ]; do
     --targets)        TARGETS="$2"; shift 2 ;;
     --cosign)         DO_COSIGN=1; shift ;;
     # Assert the packaged binary reports this version. Only the target that
-    # matches the host can be executed; cross-arch targets are skipped (their
+    # matches the host can be executed, after --cosign authenticates the whole
+    # inventory; cross-arch targets are skipped (their
     # `--version` is covered by the build-job smoke test before packaging).
     --expect-version) EXPECT_VERSION="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -59,6 +62,18 @@ HOST_TARGET="$(host_target)"
 
 fail() { echo "::error::$*" >&2; FAILED=1; }
 FAILED=0
+
+# Keep validated packages until the complete inventory has passed. No archive
+# member is executed during inventory validation.
+PACKAGES_DIR="$(mktemp -d)"
+trap 'rm -rf "$PACKAGES_DIR"' EXIT
+
+# Reject links, special files, duplicate paths and paths outside the expected
+# envelope before writing anything. Extract regular files ourselves rather than
+# letting tar interpret a downloaded archive's paths or link targets.
+extract_package() {
+  python3 "$(dirname "${BASH_SOURCE[0]}")/archive_envelope.py" "$1" "$2" "$3"
+}
 
 # Prefer sha256sum (Linux), fall back to shasum -a 256 (macOS).
 sha256_of() {
@@ -254,29 +269,23 @@ for target in $TARGETS; do
   fi
 
   if [ -f "$tarball" ]; then
-    tmp=$(mktemp -d)
-    if tar xzf "$tarball" -C "$tmp" 2>/dev/null; then
-      package_dir="$tmp/mvmctl-${target}"
+    if extract_package "$tarball" "$PACKAGES_DIR" "mvmctl-${target}"; then
+      package_dir="$PACKAGES_DIR/mvmctl-${target}"
       if [ -d "$package_dir" ]; then
         for bin_name in $(required_bins_for_target "$target"); do
           [ -x "$package_dir/$bin_name" ] \
             || fail "[$target] required packaged binary missing or not executable: $bin_name"
         done
+        # install.sh reads the generated backend component table from the
+        # archive; a tarball without it cannot select backend components.
+        [ -f "$package_dir/components.tsv" ] \
+          || fail "[$target] archive missing components.tsv"
       else
         fail "[$target] archive missing top-level directory mvmctl-${target}"
-      fi
-      bin="$package_dir/mvmctl"
-      if [ -n "$EXPECT_VERSION" ] && [ "$target" = "$HOST_TARGET" ] && [ -x "$bin" ]; then
-        ver=$("$bin" --version 2>/dev/null || true)
-        case "$ver" in
-          *"$EXPECT_VERSION"*) : ;;
-          *) fail "[$target] --version mismatch: expected to contain '$EXPECT_VERSION', got '$ver'" ;;
-        esac
       fi
     else
       fail "[$target] tarball failed to extract"
     fi
-    rm -rf "$tmp"
   fi
 
   check_distro_packages "$target"
@@ -287,6 +296,26 @@ check_guest_runtime
 # The SBOM ships signed alongside the binaries on every release.
 [ -f "$ASSETS_DIR/sbom.cdx.json" ]        || fail "SBOM missing: sbom.cdx.json"
 [ -f "$ASSETS_DIR/sbom.cdx.json.bundle" ] || fail "SBOM signature bundle missing: sbom.cdx.json.bundle"
+cosign_verify_blob "[SBOM]" "$ASSETS_DIR/sbom.cdx.json"
+
+# This is the only downloaded-code execution boundary. A failure anywhere in
+# the required inventory, including later targets and runtime sidecars, must
+# prevent every probe while retaining all validation diagnostics.
+if [ "$FAILED" = 0 ] && [ -n "$EXPECT_VERSION" ]; then
+  for target in $TARGETS; do
+    [ "$target" = "$HOST_TARGET" ] || continue
+    if [ "$DO_COSIGN" != 1 ]; then
+      fail "--expect-version requires --cosign before executing packaged binaries"
+      break
+    fi
+    bin="$PACKAGES_DIR/mvmctl-${target}/mvmctl"
+    probe_status=0
+    ver=$("$bin" --version 2>/dev/null) || probe_status=$?
+    if [ "$probe_status" != 0 ] || [ "$ver" != "mvmctl $EXPECT_VERSION" ]; then
+      fail "[$target] --version mismatch: expected exactly 'mvmctl $EXPECT_VERSION' with exit status 0; exit status $probe_status"
+    fi
+  done
+fi
 
 if [ "$FAILED" = 0 ]; then
   echo "ok: all $(echo "$TARGETS" | wc -w | tr -d ' ') target(s) have tarball + matching sha256 + signature bundle + manifest entry, Linux targets one signed .deb and .rpm; guest runtime signed and listed; SBOM signed."

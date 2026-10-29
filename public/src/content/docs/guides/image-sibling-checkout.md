@@ -48,22 +48,22 @@ nothing written at runtime changes either one's recorded identity.
 
 ## Building one image
 
-`mvmctl build image-set` builds one role of the selected checkout inside
+`mvmctl dev image-set` builds one role of the selected checkout inside
 the builder VM (never host Nix) and publishes it to the local image cache:
 
 ```sh
-MVM_IMAGES_DIR=../mvm-images bin/dev build image-set builder-vm
-MVM_IMAGES_DIR=../mvm-images bin/dev build image-set default-tenant
-MVM_IMAGES_DIR=../mvm-images bin/dev build image-set rootless-tenant
-MVM_IMAGES_DIR=../mvm-images bin/dev build image-set runtime-overlay
+MVM_IMAGES_DIR=../mvm-images bin/dev dev image-set builder-vm
+MVM_IMAGES_DIR=../mvm-images bin/dev dev image-set default-tenant
+MVM_IMAGES_DIR=../mvm-images bin/dev dev image-set rootless-tenant
+MVM_IMAGES_DIR=../mvm-images bin/dev dev image-set runtime-overlay
 ```
 
 The SDK sidecars are attributes of the runtime-overlay role:
 
 ```sh
-MVM_IMAGES_DIR=../mvm-images bin/dev build image-set runtime-overlay \
+MVM_IMAGES_DIR=../mvm-images bin/dev dev image-set runtime-overlay \
   --attr sdk-sidecar-image        # glibc
-MVM_IMAGES_DIR=../mvm-images bin/dev build image-set runtime-overlay \
+MVM_IMAGES_DIR=../mvm-images bin/dev dev image-set runtime-overlay \
   --attr sdk-sidecar-image-musl   # musl
 ```
 
@@ -119,7 +119,7 @@ MVM_IMAGES_DIR=../mvm-images bin/dev machine run --flake ./examples/exit_code
 # 2. Edit an image — say the default workload rootfs in
 #    ~/work/mvm-images/images/default-tenant/image.nix — and rebuild only
 #    that role.
-MVM_IMAGES_DIR=../mvm-images bin/dev build image-set default-tenant
+MVM_IMAGES_DIR=../mvm-images bin/dev dev image-set default-tenant
 
 # 3. Boot again; the just-built bytes are what runs.
 MVM_IMAGES_DIR=../mvm-images bin/dev machine run --flake ./examples/exit_code

@@ -1,0 +1,1832 @@
+//! PID 1 of the Stage 0 bootstrap VM — the **nix-tarball seed**.
+//! Boots under **two** builder backends (selected by the `mvm.backend=qemu`
+//! kernel cmdline marker), carrying the official Nix release tarball's
+//! `/nix/store` + this binary as `/init` — no Alpine, no apk, no busybox.
+//!
+//! **libkrun** (macOS/aarch64): the seed is an ext4 root on libkrunfw's bundled
+//! kernel. `/work`, `/mvm-bins`, the optional closure, and `/out` use the
+//! builder's raw-tar block transport; no host directory is exported to the
+//! guest. Outbound fetches go through the shared vsock egress proxy.
+//!
+//! **QEMU** (Linux/x86_64): the stock distro kernel +
+//! initramfs mount the seed as an **ext4** root (`/dev/vda`, writable — so
+//! `/nix` needs no tmpfs copy), shares are ext4 block disks (`vdb`/`vdc`/`vdd`),
+//! and outbound fetches go through the same vsock egress proxy as every other
+//! backend. Proven E2E on x86_64 (kernel built + copied to `/out`).
+//!
+//! Either way: `nix build` the flake the host staged at `/work` and named in the
+//! build config, copy the artifacts to `/out`, and power off. The host side (`stage0::materialize_root_dir` /
+//! `qemu_builder`) lays down the seed and writes this binary as `/init`.
+
+use std::process::ExitCode;
+
+#[cfg(target_os = "linux")]
+#[path = "stage0-init/build_config.rs"]
+mod build_config;
+// Guest-side only: both the emit path and its streaming helper depend on
+// the linux-gated build orchestration; the host-side tests that exercise
+// them are linux-gated the same way.
+#[cfg(target_os = "linux")]
+#[path = "stage0-init/kernel_emit.rs"]
+mod kernel_emit;
+
+#[cfg(any(target_os = "linux", test))]
+#[path = "stage0-init/store_gc.rs"]
+mod store_gc;
+
+#[cfg(any(target_os = "linux", test))]
+#[path = "stage0-init/seed.rs"]
+mod seed;
+
+fn main() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        linux::run()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // The seed init only ever runs inside the Linux Stage 0 guest. The
+        // crate still compiles on macOS/Windows contributor hosts (the bin
+        // is cross-compiled to aarch64-musl + embedded by
+        // mvm-cli/build.rs) so workspace builds stay green.
+        eprintln!("stage0-init: only runs as PID 1 inside the Linux Stage 0 guest");
+        ExitCode::FAILURE
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::net::{SocketAddr, TcpStream};
+    use std::os::fd::AsRawFd;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, ExitCode, ExitStatus};
+    use std::time::{Duration, Instant};
+
+    use crate::seed::{find_seed_bin, find_seed_cacert, seed_store_has_required_runtime};
+    use mvm_builder_guest::seed_store_entries::seed_store_entries_hash;
+
+    const VSOCK_EGRESS_PROXY_URL: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL;
+    const VSOCK_EGRESS_NO_PROXY: &str = "127.0.0.1,localhost";
+    const VSOCK_EGRESS_PROXY_LISTEN_ADDR: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN;
+    const VSOCK_EGRESS_PROXY_READY_TIMEOUT: Duration = Duration::from_secs(5);
+    const VSOCK_EGRESS_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
+    /// Marks a store error the tmpfs fallback must not swallow.
+    const FATAL_STORE_PREFIX: &str = "FATAL-STORE: ";
+    const VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";
+    const QEMU_STAGE0_VSOCK_MODULES: &[&str] = &[
+        "/mvm-bins/vsock-modules/vsock.ko",
+        "/mvm-bins/vsock-modules/vmw_vsock_virtio_transport_common.ko",
+        "/mvm-bins/vsock-modules/vmw_vsock_virtio_transport.ko",
+    ];
+
+    /// Where nix runs from (its store paths are absolute `/nix/store/...`).
+    pub(crate) const NIX_TARGET: &str = "/nix";
+    /// Bind of the original seed `/nix` so we can still read the seed store
+    /// after mounting a fresh tmpfs over `/nix`.
+    const NIX_SEED_RO: &str = "/nix-seed-ro";
+    /// Stage 0's dedicated persistent Nix-store block device. libkrun attaches
+    /// it after the ext4 root, so it enumerates as `/dev/vdb`.
+    const LIBKRUN_STAGE0_NIX_STORE_DEV: &str = "/dev/vdb";
+    /// QEMU attaches seed, work, output, and host binaries first, then the
+    /// read-only FlowMux identity. The persistent store follows as `/dev/vdf`.
+    const QEMU_STAGE0_NIX_STORE_DEV: &str = "/dev/vdf";
+    /// Mount point for the persistent Stage 0 Nix store before binding it over
+    /// `/nix`.
+    pub(crate) const STAGE0_NIX_STORE_MOUNT: &str = "/nix-stage0-store";
+    /// Marker written next to `store/` and `var/` on the persistent Stage 0
+    /// store. It binds reuse to the seed store fingerprint, not to mutable Nix
+    /// build output added later.
+    pub(crate) const STAGE0_NIX_STORE_MARKER: &str = "/nix-stage0-store/.mvm-stage0-nix-store";
+    const STAGE0_NIX_STORE_MARKER_SCHEMA_VERSION: u32 = 1;
+    const STAGE0_INPUT_STAGE: &str = "/nix-stage0-store/stage0-input";
+    const STAGE0_OUTPUT_STAGE: &str = "/nix-stage0-store/stage0-output";
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct DiskTransport {
+        input_dev: String,
+        output_dev: String,
+    }
+
+    fn disk_transport_from_cmdline(cmdline: &str) -> Option<DiskTransport> {
+        let mut enabled = false;
+        let mut input = None;
+        let mut output = None;
+        for token in cmdline.split_whitespace() {
+            if let Some(value) = token.strip_prefix("mvm.builder_transport=") {
+                enabled = value == "disk";
+            } else if let Some(value) = token.strip_prefix("mvm.builder_input=") {
+                input = Some(value.to_string());
+            } else if let Some(value) = token.strip_prefix("mvm.builder_output=") {
+                output = Some(value.to_string());
+            }
+        }
+        enabled.then(|| DiskTransport {
+            input_dev: input.unwrap_or_else(|| "/dev/vdc".to_string()),
+            output_dev: output.unwrap_or_else(|| "/dev/vdd".to_string()),
+        })
+    }
+
+    pub fn run() -> ExitCode {
+        // libkrunfw's bundled kernel hands PID 1 a low RLIMIT_NOFILE on some
+        // arches (x86_64 hit EMFILE copying the seed store to tmpfs). As PID 1
+        // / root we can raise both soft and hard limits; do it before any
+        // fd-heavy work.
+        raise_fd_limit();
+        if let Err(e) = setup() {
+            eprintln!("stage0-init: FATAL: {e}");
+            // Best-effort power off so the host sees the VM exit rather than
+            // hang; the absence of /out artifacts is the failure signal.
+            return power_off();
+        }
+        let build_result = build_and_copy();
+        let output_result = collect_disk_transport_output_if_requested();
+        if build_result.is_ok() && output_result.is_ok() {
+            crate::store_gc::collect::collect_stage0_store_garbage();
+        }
+        let store_result = finalize_persistent_nix_store();
+        let result = stage0_result(build_result.and(output_result), store_result);
+        match result {
+            Ok(()) => {
+                eprintln!("stage0-init: done; halting");
+                power_off()
+            }
+            Err(e) => {
+                eprintln!("stage0-init: build failed: {e}");
+                power_off()
+            }
+        }
+    }
+
+    /// The run's one result line. A store fault must survive a build failure
+    /// rather than be hidden behind it: the host discards the store only when
+    /// it sees the fault reported, and a store that corrupted mid-build is
+    /// exactly the one whose build also failed.
+    fn stage0_result(build: Result<(), String>, store: Result<(), String>) -> Result<(), String> {
+        match (build, store) {
+            (Err(build), Err(store)) => Err(format!("{build}; {store}")),
+            (build, store) => build.and(store),
+        }
+    }
+
+    /// Raise `RLIMIT_NOFILE` so the recursive seed-store copy (and `nix`
+    /// itself) don't hit `EMFILE` under the bundled kernel's low default.
+    /// Best-effort: as PID 1/root we can lift the hard limit, but a kernel
+    /// ceiling below 65536 just clamps — we then take whatever the hard
+    /// limit allows. Never fatal.
+    fn raise_fd_limit() {
+        // SAFETY: getrlimit/setrlimit with a valid resource id + struct ptr.
+        unsafe {
+            let want = libc::rlimit {
+                rlim_cur: 65536,
+                rlim_max: 65536,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &want) == 0 {
+                return;
+            }
+            // Hard ceiling below 65536: raise the soft limit to the hard limit.
+            let mut cur = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut cur) == 0 {
+                cur.rlim_cur = cur.rlim_max;
+                let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &cur);
+            }
+        }
+    }
+
+    /// True when stage0-init runs under the **QEMU** builder backend
+    /// (Linux) vs **libkrun**. The QEMU launcher passes `mvm.backend=qemu`
+    /// on the kernel cmdline; libkrun does not. This drives the remaining
+    /// host-vs-VMM differences: ext4 trees versus raw-tar transport disks and
+    /// the persistent Nix-store device position.
+    pub(crate) fn is_qemu() -> bool {
+        std::fs::read_to_string("/proc/cmdline")
+            .map(|c| c.contains("mvm.backend=qemu"))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn should_enable_vsock_egress(qemu: bool, cmdline: &str) -> bool {
+        !qemu
+            || cmdline
+                .split_whitespace()
+                .any(|tok| tok == "mvm.vsock_egress=1")
+    }
+
+    fn vsock_egress_port_from_cmdline(cmdline: &str) -> Option<u32> {
+        cmdline
+            .split_whitespace()
+            .find_map(|tok| tok.strip_prefix(VSOCK_EGRESS_PORT_TOKEN_PREFIX))
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|port| *port > 0)
+    }
+
+    pub(crate) fn apply_vsock_egress_proxy_env(cmd: &mut Command) {
+        cmd.env("ALL_PROXY", VSOCK_EGRESS_PROXY_URL)
+            .env("HTTP_PROXY", VSOCK_EGRESS_PROXY_URL)
+            .env("HTTPS_PROXY", VSOCK_EGRESS_PROXY_URL)
+            .env("http_proxy", VSOCK_EGRESS_PROXY_URL)
+            .env("https_proxy", VSOCK_EGRESS_PROXY_URL)
+            .env("NO_PROXY", VSOCK_EGRESS_NO_PROXY)
+            .env("no_proxy", VSOCK_EGRESS_NO_PROXY);
+    }
+
+    fn stage0_nix_config() -> String {
+        "experimental-features = nix-command flakes\n\
+         sandbox = false\n\
+         build-users-group =\n\
+         max-jobs = 1\n\
+         cores = 0\n\
+         connect-timeout = 30\n"
+            .to_string()
+    }
+
+    fn best_effort_raise_loopback() {
+        match mvm_agentd::guest_net::bring_iface_up("lo") {
+            Ok(mvm_agentd::guest_net::GuestNetwork::Configured) => {
+                eprintln!("stage0-init: brought loopback interface up")
+            }
+            // Unlike eth0 on a workload guest, a kernel with no `lo` is not a
+            // tier — it is a kernel built without loopback. Say which it is
+            // rather than reporting a generic bring-up failure.
+            Ok(mvm_agentd::guest_net::GuestNetwork::NoInterface) => {
+                eprintln!("stage0-init: no loopback interface exists in this guest")
+            }
+            Err(e) => eprintln!("stage0-init: bring_iface_up lo failed: {e}"),
+        }
+        let busybox = Path::new("/mvm-bins/busybox");
+        if !busybox.is_file() {
+            eprintln!(
+                "stage0-init: {} missing; skipping loopback address helper",
+                busybox.display()
+            );
+            return;
+        }
+        let ip_link_status = Command::new(busybox)
+            .args(["ip", "link", "set", "lo", "up"])
+            .status();
+        if let Ok(status) = &ip_link_status
+            && !status.success()
+        {
+            eprintln!(
+                "stage0-init: busybox ip link set lo up exited {}",
+                status.code().unwrap_or(-1)
+            );
+        }
+        let _ = Command::new(busybox)
+            .args(["ip", "addr", "add", "127.0.0.1/8", "dev", "lo"])
+            .status();
+    }
+
+    fn af_vsock_available() -> bool {
+        const AF_VSOCK: libc::c_int = 40;
+        // SAFETY: socket(2) returns -1 on error or a valid fd we close immediately.
+        let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
+        if fd < 0 {
+            return false;
+        }
+        // SAFETY: `fd` came from `socket` above and is still owned here.
+        unsafe {
+            libc::close(fd);
+        }
+        true
+    }
+
+    fn best_effort_load_qemu_vsock_modules() {
+        if af_vsock_available() {
+            eprintln!("stage0-init: AF_VSOCK already available");
+            return;
+        }
+        for module in QEMU_STAGE0_VSOCK_MODULES {
+            if !Path::new(module).is_file() {
+                eprintln!("stage0-init: guest vsock module missing at {module}");
+                continue;
+            }
+            match std::fs::OpenOptions::new().read(true).open(module) {
+                Ok(file) => {
+                    // SAFETY: `finit_module(2)` reads the owned module fd and never
+                    // outlives `file`; flags=0, empty params string.
+                    let rc = unsafe {
+                        libc::syscall(libc::SYS_finit_module, file.as_raw_fd(), c"".as_ptr(), 0)
+                    };
+                    if rc == 0 {
+                        eprintln!("stage0-init: loaded guest vsock module {module}");
+                    } else {
+                        eprintln!(
+                            "stage0-init: finit_module {module} failed: {}",
+                            std::io::Error::last_os_error()
+                        );
+                    }
+                }
+                Err(e) => eprintln!("stage0-init: open {module} for finit_module failed: {e}"),
+            }
+        }
+        if af_vsock_available() {
+            eprintln!("stage0-init: AF_VSOCK became available after loading guest modules");
+        } else {
+            eprintln!("stage0-init: AF_VSOCK still unavailable after loading guest modules");
+        }
+    }
+
+    fn dump_vsock_egress_diagnostics() {
+        if let Ok(state) = std::fs::read_to_string("/sys/class/net/lo/operstate") {
+            eprintln!("stage0-init: lo operstate = {}", state.trim());
+        }
+        if let Ok(flags) = std::fs::read_to_string("/sys/class/net/lo/flags") {
+            eprintln!("stage0-init: lo flags = {}", flags.trim());
+        }
+        if let Ok(net_dev) = std::fs::read_to_string("/proc/net/dev")
+            && let Some(lo_line) = net_dev.lines().find(|line| line.contains("lo:"))
+        {
+            eprintln!("stage0-init: /proc/net/dev {}", lo_line.trim());
+        }
+        if let Ok(tcp_table) = std::fs::read_to_string("/proc/net/tcp") {
+            let mut matched = false;
+            for line in tcp_table.lines().filter(|line| line.contains(":0438")) {
+                matched = true;
+                eprintln!("stage0-init: /proc/net/tcp {line}");
+            }
+            if !matched {
+                eprintln!("stage0-init: /proc/net/tcp has no listener/flow for :0438");
+            }
+        }
+    }
+
+    /// Fork the guest-local egress proxy. `Err` carries the probe the readiness
+    /// decision will refuse on, so a client that never started and one that
+    /// started and died reach the same single decision point.
+    fn fork_vsock_egress_client(cmdline: &str) -> Result<Child, EgressProbe> {
+        let egress_client = Path::new("/mvm-bins/mvm-egress-client");
+        if !egress_client.is_file() {
+            return Err(EgressProbe::ClientMissing(
+                egress_client.display().to_string(),
+            ));
+        }
+        if is_qemu() {
+            best_effort_load_qemu_vsock_modules();
+        }
+        // The client parses every proxy and DNS request the bootstrap build
+        // sends, so it runs under its own identity rather than PID 1's root.
+        let mut cmd = mvm_agentd::guest_bootstrap::egress_client_command(egress_client);
+        if let Some(port) = vsock_egress_port_from_cmdline(cmdline) {
+            cmd.env(VSOCK_EGRESS_PORT_ENV, port.to_string());
+        }
+        match cmd.spawn() {
+            Ok(child) => {
+                eprintln!(
+                    "stage0-init: forked mvm-egress-client pid={} uid={} from {}",
+                    child.id(),
+                    mvm_agentd::guest_mount::EGRESS_CLIENT_IDENTITY.uid(),
+                    egress_client.display()
+                );
+                Ok(child)
+            }
+            Err(e) => Err(EgressProbe::ClientExited(format!("spawn failed: {e}"))),
+        }
+    }
+
+    fn egress_child_exit_message(status: ExitStatus) -> String {
+        if let Some(code) = status.code() {
+            return format!("exit code {code}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return format!("signal {signal}");
+            }
+        }
+        "unknown termination".to_string()
+    }
+
+    use mvm_builder_guest::egress_readiness::{EgressProbe, egress_readiness_outcome};
+
+    fn probe_vsock_egress_proxy(mut child: Option<&mut Child>) -> EgressProbe {
+        let Ok(proxy_addr) = VSOCK_EGRESS_PROXY_LISTEN_ADDR.parse::<SocketAddr>() else {
+            return EgressProbe::BadListenAddr(VSOCK_EGRESS_PROXY_LISTEN_ADDR.to_string());
+        };
+        let deadline = Instant::now() + VSOCK_EGRESS_PROXY_READY_TIMEOUT;
+        while Instant::now() < deadline {
+            if TcpStream::connect_timeout(&proxy_addr, Duration::from_millis(200)).is_ok() {
+                return EgressProbe::Ready;
+            }
+            if let Some(child) = child.as_deref_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        return EgressProbe::ClientExited(egress_child_exit_message(status));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("stage0-init: could not poll mvm-egress-client readiness: {e}")
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        EgressProbe::TimedOut
+    }
+
+    /// Start the egress proxy and refuse to build without it. The returned
+    /// child is kept alive by the caller for the rest of the boot.
+    fn start_vsock_egress_if_requested(cmdline: &str) -> Result<Option<Child>, String> {
+        if !should_enable_vsock_egress(is_qemu(), cmdline) {
+            return Ok(None);
+        }
+        // The identity must be in /run/mvm before the client starts: it loads
+        // both keys before it binds, so a missing drive surfaces as a proxy
+        // that never came up rather than as anything naming the drive. The
+        // key is handed to the client's uid while PID 1 is still root.
+        if let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive_for_uid(
+            mvm_agentd::guest_mount::EGRESS_CLIENT_IDENTITY.uid(),
+        ) {
+            let why = egress_readiness_outcome(EgressProbe::IdentityMissing(e.to_string()))
+                .expect_err("IdentityMissing is a refusing probe");
+            eprintln!("stage0-init: {why}");
+            return Err(why);
+        }
+        let (child, probe) = match fork_vsock_egress_client(cmdline) {
+            Ok(mut child) => {
+                let probe = probe_vsock_egress_proxy(Some(&mut child));
+                (Some(child), probe)
+            }
+            Err(probe) => (None, probe),
+        };
+        match egress_readiness_outcome(probe) {
+            Ok(()) => {
+                eprintln!(
+                    "stage0-init: local vsock egress proxy ready at {}",
+                    VSOCK_EGRESS_PROXY_LISTEN_ADDR
+                );
+                Ok(child)
+            }
+            Err(why) => {
+                eprintln!("stage0-init: {why}");
+                dump_vsock_egress_diagnostics();
+                Err(why)
+            }
+        }
+    }
+
+    /// Mounts the pseudo-filesystems + the host shares, then makes `/nix` a
+    /// writable store.
+    fn setup() -> Result<(), String> {
+        mount_pseudofs()?;
+        release_root_runtime_reserve()?;
+        let cmdline = std::fs::read_to_string("/proc/cmdline")
+            .map_err(|e| format!("read /proc/cmdline after mounting procfs: {e}"))?;
+        sync_clock_from_host_epoch(&cmdline)?;
+        // `/dev/null` insurance for minimal Stage 0 roots; without it every
+        // downstream `2>/dev/null` failure is masked. devtmpfs usually creates
+        // it, so the manual node is a compatibility fallback.
+        if !Path::new("/dev/null").exists() {
+            mknod_null();
+        }
+
+        let qemu = is_qemu();
+        eprintln!(
+            "stage0-init: backend = {}",
+            if qemu { "qemu" } else { "libkrun" }
+        );
+
+        // QEMU presents all three inputs as ext4 block disks (the
+        // initramfs already loaded virtio_blk for the ext4 root, so
+        // vdb/vdc/vdd enumerate with no extra modules); order matches the
+        // device order on the QEMU cmdline. libkrun uses one raw input tar and
+        // one raw output tar instead.
+        if qemu {
+            mount_shares(&[
+                ("/dev/vdb", "/work", "ext4"),
+                ("/dev/vdc", "/out", "ext4"),
+                ("/dev/vdd", "/mvm-bins", "ext4"),
+            ])?;
+        }
+
+        crate::store_gc::collect::stash_seed_reginfo();
+        setup_nix_store(qemu)?;
+        if !qemu {
+            let transport = disk_transport_from_cmdline(&cmdline)
+                .ok_or_else(|| "libkrun Stage 0 requires mvm.builder_transport=disk".to_string())?;
+            stage_disk_transport_input(&transport)?;
+        }
+        if should_enable_vsock_egress(qemu, &cmdline) {
+            best_effort_raise_loopback();
+            mvm_agentd::guest_net::seed_loopback_resolver()
+                .map_err(|e| format!("seed loopback DNS resolver: {e}"))?;
+        }
+        // Held for the rest of the boot: dropping the handle would not kill the
+        // proxy, but keeping it lets a later reaper see the same child.
+        let _egress_child = start_vsock_egress_if_requested(&cmdline)?;
+        configure_nix_runtime()?;
+        Ok(())
+    }
+
+    fn release_root_runtime_reserve() -> Result<(), String> {
+        let path = Path::new(mvm_builder_guest::stage0_guest::ROOT_RUNTIME_RESERVE_PATH);
+        release_root_runtime_reserve_at(path)
+    }
+
+    fn release_root_runtime_reserve_at(path: &Path) -> Result<(), String> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "release Stage 0 root runtime reserve {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
+    /// Seed the RTC-less Stage 0 guest clock before starting the egress client
+    /// or Nix. Without this, TLS validation observes 1970 and every fresh
+    /// bootstrap download fails with a misleading certificate error.
+    fn sync_clock_from_host_epoch(cmdline: &str) -> Result<(), String> {
+        let Some(epoch_seconds) = mvm_core::vm_backend::decode_host_epoch_cmdline(cmdline) else {
+            return Ok(());
+        };
+        mvm_agentd::restore_clock::resync(epoch_seconds)
+            .map_err(|error| format!("set wall clock from host epoch: {error}"))?;
+        eprintln!("stage0-init: wall clock set from host epoch {epoch_seconds}");
+        Ok(())
+    }
+
+    /// Seed the local Nix store directories the bootstrap rootfs doesn't ship.
+    fn configure_nix_runtime() -> Result<(), String> {
+        std::fs::create_dir_all("/etc").map_err(|e| format!("create /etc: {e}"))?;
+        for d in ["/nix/var", "/nix/var/nix", "/nix/var/log/nix"] {
+            std::fs::create_dir_all(d).map_err(|e| format!("create {d}: {e}"))?;
+        }
+        ensure_bin_sh_from_seed()?;
+        Ok(())
+    }
+
+    fn ensure_bin_sh_from_seed() -> Result<(), String> {
+        if Path::new("/bin/sh").exists() {
+            return Ok(());
+        }
+        std::fs::create_dir_all("/bin").map_err(|e| format!("create /bin: {e}"))?;
+        let seed_sh = find_seed_bin("sh").or_else(|_| find_seed_bin("bash"))?;
+        std::os::unix::fs::symlink(&seed_sh, "/bin/sh")
+            .map_err(|e| format!("symlink /bin/sh -> {}: {e}", seed_sh.display()))?;
+        eprintln!(
+            "stage0-init: installed /bin/sh shim from {}",
+            seed_sh.display()
+        );
+        Ok(())
+    }
+
+    /// Standard PID-1 pseudo-filesystems. libkrun's kernel pre-mounts some;
+    /// `mount_fs_idempotent` treats EBUSY as success.
+    fn mount_pseudofs() -> Result<(), String> {
+        mount_fs_idempotent("proc", "/proc", "proc")?;
+        mount_fs_idempotent("sysfs", "/sys", "sysfs")?;
+        mount_fs_idempotent("devtmpfs", "/dev", "devtmpfs")?;
+        let dev_fd_failures = mvm_agentd::guest_mount::link_dev_fd_family();
+        if !dev_fd_failures.is_empty() {
+            return Err(format!(
+                "create Stage 0 /dev/fd links: {}",
+                dev_fd_failures.join(", ")
+            ));
+        }
+        mount_fs_idempotent("tmpfs", "/tmp", "tmpfs")?;
+        mount_fs_idempotent("tmpfs", "/run", "tmpfs")?;
+        let _ = std::fs::create_dir_all("/dev/shm");
+        mount_fs_idempotent("tmpfs", "/dev/shm", "tmpfs")?;
+        // nix's build sandbox opens /dev/ptmx → needs devpts at /dev/pts.
+        let _ = std::fs::create_dir_all("/dev/pts");
+        mount_fs_idempotent("devpts", "/dev/pts", "devpts")?;
+        Ok(())
+    }
+
+    /// Make `/nix` a writable store, preserving the immutable seed in the root
+    /// disk as the source of truth for first initialization.
+    ///
+    /// Fast path: mount the dedicated persistent ext4 store device, seed it once
+    /// from the verified RootDir store, then bind it over `/nix` on every later
+    /// boot. If the current seed lacks `mkfs.ext4` and the disk is still blank,
+    /// fall back to the old tmpfs copy so the bootstrap remains functional.
+    fn setup_nix_store(qemu: bool) -> Result<(), String> {
+        match setup_persistent_nix_store(qemu) {
+            Ok(()) => return Ok(()),
+            // A fatal store fault is not something to degrade around: the tmpfs
+            // is sized by guest RAM, so continuing turns a nameable disk problem
+            // into an out-of-space error far from its cause.
+            Err(e) if e.starts_with(FATAL_STORE_PREFIX) => {
+                return Err(e.trim_start_matches(FATAL_STORE_PREFIX).to_string());
+            }
+            Err(e) => eprintln!(
+                "stage0-init: persistent Stage 0 /nix store unavailable ({e}); falling back to tmpfs seed copy"
+            ),
+        }
+
+        // Copy BEFORE hiding the seed: mount a tmpfs at NIX_SEED_RO, copy the
+        // seed `/nix/store` (still directly readable on the ext4 root)
+        // into it, then bind it over `/nix`. nix then runs from the tmpfs.
+        std::fs::create_dir_all(NIX_SEED_RO).map_err(|e| format!("create {NIX_SEED_RO}: {e}"))?;
+        mount_fs("tmpfs", NIX_SEED_RO, "tmpfs")?;
+        let seed_store = Path::new(NIX_TARGET).join("store");
+        let dst_store = Path::new(NIX_SEED_RO).join("store");
+        std::fs::create_dir_all(&dst_store)
+            .map_err(|e| format!("create {}: {e}", dst_store.display()))?;
+        let n_src = std::fs::read_dir(&seed_store)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        copy_tree(&seed_store, &dst_store)
+            .map_err(|e| format!("copying seed nix store to tmpfs: {e}"))?;
+        let n_dst = std::fs::read_dir(&dst_store)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        eprintln!("stage0-init: copied seed store: {n_src} -> {n_dst} entries");
+        // Now make the tmpfs copy be `/nix`.
+        bind_mount(NIX_SEED_RO, NIX_TARGET)?;
+        Ok(())
+    }
+
+    fn stage0_nix_store_device(qemu: bool) -> &'static str {
+        if qemu {
+            QEMU_STAGE0_NIX_STORE_DEV
+        } else {
+            LIBKRUN_STAGE0_NIX_STORE_DEV
+        }
+    }
+
+    /// Size of a block device in bytes, via its sysfs 512-byte block count.
+    ///
+    /// Read from sysfs rather than by seeking the device: a seek would need the
+    /// device open, and the point of this check is to refuse it before trusting
+    /// it enough to mount.
+    fn block_device_bytes(device: &str) -> Option<u64> {
+        let name = Path::new(device).file_name()?.to_str()?;
+        let raw = std::fs::read_to_string(format!("/sys/class/block/{name}/size")).ok()?;
+        raw.trim().parse::<u64>().ok().map(|blocks| blocks * 512)
+    }
+
+    fn setup_persistent_nix_store(qemu: bool) -> Result<(), String> {
+        // Prefer the ext4 label. The device letter is a function of how many
+        // block devices the backend attached ahead of this one, so adding a
+        // drive silently re-letters every disk behind it — which is how this
+        // guest came to mount a 32 KiB identity image as its Nix store, fail,
+        // and fall back to a tmpfs too small for a kernel source tree. The
+        // letter stays as a fallback for a store image formatted before it
+        // carried a label.
+        let label = mvm_builder_guest::stage0_guest::STAGE0_NIX_STORE_EXT4_LABEL;
+        // Every attached virtio disk, not a fixed prefix of them. The QEMU path
+        // attaches seed, work, out, mvm-bins and the FlowMux identity ahead of
+        // the store, so a four-entry list stopped two devices short of the disk
+        // it was looking for — the lookup could never succeed there, fell back
+        // to enumeration order, and picked the 32 KiB identity image.
+        let by_label = find_labeled_ext4_disk_among(virtio_block_devices(), label)
+            .map(|d| d.to_string_lossy().into_owned());
+        let device: &str = match by_label.as_deref() {
+            Some(dev) => {
+                eprintln!("stage0-init: Stage 0 Nix store is {dev} (label {label:?})");
+                dev
+            }
+            None => {
+                let dev = stage0_nix_store_device(qemu);
+                eprintln!(
+                    "stage0-init: no disk carries the ext4 label {label:?}; \
+                     falling back to {dev} by enumeration order"
+                );
+                dev
+            }
+        };
+        if !Path::new(device).exists() {
+            return Err(format!("{device} is not present"));
+        }
+
+        // A device that is present but far too small is a misidentified disk,
+        // not an empty store. Refuse it here rather than letting the caller
+        // degrade to a RAM-sized tmpfs whose exhaustion surfaces thousands of
+        // lines later as an unrelated-looking build error.
+        if let Some(bytes) = block_device_bytes(device)
+            && bytes < mvm_builder_guest::store_readiness::MIN_PLAUSIBLE_STORE_BYTES
+        {
+            return Err(FATAL_STORE_PREFIX.to_string()
+                + &mvm_builder_guest::store_readiness::store_readiness_outcome(
+                    mvm_builder_guest::store_readiness::StoreProbe::ImplausiblySmall {
+                        device: device.to_string(),
+                        bytes,
+                    },
+                )
+                .expect_err("an undersized store device must refuse"));
+        }
+
+        std::fs::create_dir_all(STAGE0_NIX_STORE_MOUNT)
+            .map_err(|e| format!("create {STAGE0_NIX_STORE_MOUNT}: {e}"))?;
+        mount_stage0_nix_store(device)?;
+
+        let seed_store = Path::new(NIX_TARGET).join("store");
+        let expected_marker = stage0_nix_store_marker(&seed_store)?;
+        if persistent_nix_store_matches(&expected_marker)? {
+            eprintln!("stage0-init: reusing persistent Stage 0 Nix store at {device}");
+            bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
+            return Ok(());
+        }
+        if persistent_nix_store_matches_seed(&seed_store)? {
+            std::fs::write(STAGE0_NIX_STORE_MARKER, expected_marker)
+                .map_err(|e| format!("write {STAGE0_NIX_STORE_MARKER}: {e}"))?;
+            eprintln!("stage0-init: adopting host-prepopulated Stage 0 Nix store at {device}");
+            bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
+            return Ok(());
+        }
+
+        eprintln!("stage0-init: initializing persistent Stage 0 Nix store at {device}");
+        clear_dir_children(Path::new(STAGE0_NIX_STORE_MOUNT))
+            .map_err(|e| format!("clearing {STAGE0_NIX_STORE_MOUNT}: {e}"))?;
+        let dst_store = Path::new(STAGE0_NIX_STORE_MOUNT).join("store");
+        std::fs::create_dir_all(&dst_store)
+            .map_err(|e| format!("create {}: {e}", dst_store.display()))?;
+        let n_src = std::fs::read_dir(&seed_store)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        copy_tree(&seed_store, &dst_store)
+            .map_err(|e| format!("copying seed nix store to persistent disk: {e}"))?;
+        let n_dst = std::fs::read_dir(&dst_store)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        std::fs::write(STAGE0_NIX_STORE_MARKER, expected_marker)
+            .map_err(|e| format!("write {STAGE0_NIX_STORE_MARKER}: {e}"))?;
+        eprintln!("stage0-init: seeded persistent store: {n_src} -> {n_dst} entries");
+        bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
+        Ok(())
+    }
+
+    /// Flush and cleanly unmount the persistent store before reporting Stage 0
+    /// success. `reboot(RB_POWER_OFF)` alone can surface delayed ext4 failures
+    /// only after the success marker has reached the console, which makes the
+    /// host accept a corrupt cache. The explicit unmount moves all filesystem
+    /// writeback ahead of that marker and makes kernel error accounting part of
+    /// the guest result.
+    ///
+    /// Every backend, QEMU included. The store is ext4 without a journal when
+    /// the host formatted it, and such a filesystem only records a clean
+    /// unmount at unmount time; the host discards a store that lacks one, so a
+    /// backend that skipped this would rebuild its store from the seed on
+    /// every bootstrap.
+    fn finalize_persistent_nix_store() -> Result<(), String> {
+        if !is_mountpoint(STAGE0_NIX_STORE_MOUNT) {
+            return Ok(());
+        }
+
+        // SAFETY: sync() takes no arguments and only flushes filesystem state.
+        unsafe {
+            libc::sync();
+        }
+        let store_device = find_labeled_ext4_disk_among(
+            virtio_block_devices(),
+            mvm_builder_guest::stage0_guest::STAGE0_NIX_STORE_EXT4_LABEL,
+        )
+        .unwrap_or_else(|| PathBuf::from(stage0_nix_store_device(is_qemu())));
+        let store_device = store_device
+            .file_name()
+            .ok_or_else(|| format!("{} names no device", store_device.display()))?;
+        reject_ext4_errors(
+            &Path::new("/sys/fs/ext4")
+                .join(store_device)
+                .join("errors_count"),
+        )?;
+        unmount(NIX_TARGET)?;
+        unmount(STAGE0_NIX_STORE_MOUNT)?;
+        Ok(())
+    }
+
+    fn reject_ext4_errors(errors_count_path: &Path) -> Result<(), String> {
+        let raw = std::fs::read_to_string(errors_count_path)
+            .map_err(|e| format!("read {}: {e}", errors_count_path.display()))?;
+        let count = raw.trim().parse::<u64>().map_err(|e| {
+            format!(
+                "parse {} value {raw:?} as an ext4 error count: {e}",
+                errors_count_path.display()
+            )
+        })?;
+        if count == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "persistent Stage 0 ext4 store reported {count} filesystem error(s)"
+            ))
+        }
+    }
+
+    fn mount_stage0_nix_store(device: &str) -> Result<(), String> {
+        match mount_fs(device, STAGE0_NIX_STORE_MOUNT, "ext4") {
+            Ok(()) => return Ok(()),
+            Err(first_mount_err) => {
+                let Some(mkfs) = find_mkfs_ext4() else {
+                    return Err(format!(
+                        "{first_mount_err}; mkfs.ext4 not available in seed"
+                    ));
+                };
+                eprintln!(
+                    "stage0-init: formatting {device} for persistent Stage 0 store ({first_mount_err})"
+                );
+                format_ext4_with(&mkfs, device)?;
+            }
+        }
+        mount_fs(device, STAGE0_NIX_STORE_MOUNT, "ext4")
+    }
+
+    fn find_mkfs_ext4() -> Option<PathBuf> {
+        [
+            "/sbin/mkfs.ext4",
+            "/bin/mkfs.ext4",
+            "/usr/sbin/mkfs.ext4",
+            "/usr/bin/mkfs.ext4",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+    }
+
+    fn format_ext4_with(mkfs: &Path, dev: &str) -> Result<(), String> {
+        let blocks_4k = device_size_4k_blocks(dev)?;
+        let status = ext4_format_command(mkfs, dev, blocks_4k)
+            .status()
+            .map_err(|e| format!("spawn {}: {e}", mkfs.display()))?;
+        if !status.success() {
+            return Err(format!(
+                "{} exit {}",
+                mkfs.display(),
+                status.code().unwrap_or(-1)
+            ));
+        }
+        Ok(())
+    }
+
+    fn ext4_format_command(mkfs: &Path, dev: &str, blocks_4k: u64) -> Command {
+        let mut command = Command::new(mkfs);
+        command
+            .args(["-F", "-q", "-b", "4096", "-L"])
+            .arg(mvm_builder_guest::stage0_guest::STAGE0_NIX_STORE_EXT4_LABEL)
+            .arg(dev)
+            .arg(blocks_4k.to_string());
+        command
+    }
+
+    fn device_size_4k_blocks(dev: &str) -> Result<u64, String> {
+        let basename = Path::new(dev)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("device path {dev} has no basename"))?;
+        let sys_path = format!("/sys/class/block/{basename}/size");
+        let sectors_str =
+            std::fs::read_to_string(&sys_path).map_err(|e| format!("read {sys_path}: {e}"))?;
+        let sectors: u64 = sectors_str
+            .trim()
+            .parse()
+            .map_err(|e| format!("parse {sys_path} = {sectors_str:?}: {e}"))?;
+        Ok(sectors / 8)
+    }
+
+    fn persistent_nix_store_matches(expected_marker: &str) -> Result<bool, String> {
+        let mounted_store = Path::new(STAGE0_NIX_STORE_MOUNT).join("store");
+        if !mounted_store.is_dir() {
+            return Ok(false);
+        }
+        if !std::fs::read_to_string(STAGE0_NIX_STORE_MARKER)
+            .is_ok_and(|marker| marker == expected_marker)
+        {
+            return Ok(false);
+        }
+        if !seed_store_has_required_runtime(&mounted_store)? {
+            eprintln!(
+                "stage0-init: persistent Stage 0 store marker matches but the reused seed \
+                 runtime is incomplete; re-seeding the store"
+            );
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn persistent_nix_store_matches_seed(seed_store: &Path) -> Result<bool, String> {
+        let mounted_store = Path::new(STAGE0_NIX_STORE_MOUNT).join("store");
+        if !mounted_store.is_dir() {
+            return Ok(false);
+        }
+        Ok(seed_store_entries_hash(&mounted_store)? == seed_store_entries_hash(seed_store)?)
+    }
+
+    fn stage0_nix_store_marker(seed_store: &Path) -> Result<String, String> {
+        Ok(format!(
+            "schema_version={STAGE0_NIX_STORE_MARKER_SCHEMA_VERSION}\nseed_store_entries_sha256={}\n",
+            seed_store_entries_hash(seed_store)?
+        ))
+    }
+
+    fn clear_dir_children(dir: &Path) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else {
+                std::fs::remove_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Nix builds unsandboxed inside the Stage 0 guest (no user namespaces
+    /// available), so it uses `/homeless-shelter` as the builder's HOME and
+    /// **refuses to run** if that directory already exists — its no-sandbox
+    /// purity check. A build that was interrupted mid-flight (power-off, OOM, a
+    /// store fault) leaves the dir behind on the persistent guest root, and
+    /// because the root is reused across boots whenever its seed marker matches,
+    /// every later bootstrap then fails with
+    /// `error: home directory "/homeless-shelter" exists`. Remove a stale one
+    /// before invoking nix so a crashed prior run self-heals instead of wedging
+    /// the bootstrap. `root` is the filesystem root (`/` in the guest; a tempdir
+    /// under test). A `NotFound` is the normal clean-boot case, not an error.
+    fn purge_stale_nix_builder_home(root: &Path) -> std::io::Result<()> {
+        let home = root.join("homeless-shelter");
+        match std::fs::remove_dir_all(&home) {
+            Ok(()) => {
+                eprintln!(
+                    "stage0-init: removed stale nix builder home {}",
+                    home.display()
+                );
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    const STAGE0_NIX_CACHE_HOME: &str = "/run/nix-cache";
+
+    fn prepare_nix_cache(cache_home: &Path) -> Result<(), String> {
+        let cache = cache_home.join("nix");
+        std::fs::create_dir_all(&cache).map_err(|error| {
+            format!(
+                "create Stage 0 nix cache directory {}: {error}",
+                cache.display()
+            )
+        })
+    }
+
+    /// Recursively copy `src` -> `dst` preserving symlinks + file modes
+    /// (the seed has no `cp`). Iterative to avoid deep-tree recursion limits.
+    /// Hardlinks degrade to copies — fine for a one-shot bootstrap store.
+    fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+        let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
+        while let Some((from_dir, to_dir)) = stack.pop() {
+            std::fs::create_dir_all(&to_dir)?;
+            for entry in std::fs::read_dir(&from_dir)? {
+                let entry = entry?;
+                let ft = entry.file_type()?;
+                let from = entry.path();
+                let to = to_dir.join(entry.file_name());
+                if ft.is_symlink() {
+                    let target = std::fs::read_link(&from)?;
+                    let _ = std::fs::remove_file(&to);
+                    std::os::unix::fs::symlink(&target, &to)?;
+                } else if ft.is_dir() {
+                    stack.push((from, to));
+                } else {
+                    std::fs::copy(&from, &to)?; // preserves permissions
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `nix build` the builder-VM flake, then copy kernel + rootfs to /out.
+    /// The host-side contract (`/out/stage0-build.conf`, output modes) is the
+    /// same one `mvmctl bootstrap` / `kernel build` write.
+    fn build_and_copy() -> Result<(), String> {
+        let nix = find_seed_bin("nix")?;
+        let cacert = find_seed_cacert()?;
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+
+        // Env: HOME / MVM_WORKSPACE_PATH / MVM_HOST_BIN_DIR for the nix build.
+        prepare_nix_cache(Path::new(STAGE0_NIX_CACHE_HOME))?;
+        let nix_path = nix
+            .parent()
+            .map(|bindir| {
+                let path = std::env::var("PATH").unwrap_or_default();
+                format!("{}:{path}", bindir.display())
+            })
+            .unwrap_or_default();
+        // SAFETY: this is PID 1, single-threaded at this point — no other
+        // thread can observe a torn environment. `set_var` is `unsafe` in
+        // edition 2024 only for that thread-safety reason.
+        // CA bundle = HTTPS trust for cache.nixos.org / flake inputs (libkrun
+        // gives us DNS; `nss-cacert` from the seed gives the trust roots).
+        // PATH = the seed nix's own bin dir (curl/xz/etc. live beside `nix`).
+        unsafe {
+            std::env::set_var("HOME", "/root");
+            std::env::set_var("XDG_CACHE_HOME", STAGE0_NIX_CACHE_HOME);
+            std::env::set_var("MVM_WORKSPACE_PATH", "/work");
+            std::env::set_var("MVM_HOST_BIN_DIR", "/mvm-bins");
+            std::env::set_var("NIX_SSL_CERT_FILE", &cacert);
+            // Force single-user (local store) — the seed has no nix-daemon;
+            // an empty NIX_REMOTE makes nix build directly as root.
+            std::env::set_var("NIX_REMOTE", "");
+            // The Stage 0 VM is already the isolation boundary. Disabling the
+            // in-guest Nix sandbox keeps fixed-output fetchers on the same
+            // proxy-aware environment as the top-level `nix build`, instead of
+            // dropping the egress proxy vars inside sandboxed derivations.
+            std::env::set_var("NIX_CONFIG", stage0_nix_config());
+            if !nix_path.is_empty() {
+                std::env::set_var("PATH", nix_path);
+            }
+        }
+
+        // Console diagnostics (the console.log persists across the power-off;
+        // /out gets cleaned up on failure). Confirms the seed nix is runnable
+        // before the long build.
+        eprintln!("stage0-init: nix = {}", nix.display());
+        match Command::new(&nix).arg("--version").output() {
+            Ok(o) => eprintln!(
+                "stage0-init: nix --version: {}{}",
+                String::from_utf8_lossy(&o.stdout).trim(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!("stage0-init: nix --version failed to spawn: {e}"),
+        }
+
+        // The host's build config: which attr to build, and in which output
+        // mode. It rides the input disk under the disk transport; the QEMU path
+        // still shares a directory and drops it in `/out`.
+        //
+        // Not optional in practice, whatever the fallbacks below suggest: the
+        // host writes one for every Stage 0 build. When the disk transport
+        // stopped carrying it, those fallbacks turned a delivery failure into a
+        // *different build* — `default`/`image` instead of the workload kernel
+        // that was asked for — which surfaced only as a missing
+        // `mvm-kernel.config` on the host five minutes later. Say so here
+        // instead, where the reason is.
+        let conf_path = crate::build_config::locate(
+            Path::new(STAGE0_INPUT_STAGE),
+            Path::new("/out/stage0-build.conf"),
+        );
+        let conf = crate::build_config::read(&conf_path);
+        if conf.is_empty() {
+            eprintln!(
+                "stage0-init: no build config at {}; nothing names what to build",
+                conf_path.display()
+            );
+        }
+        let attr = conf
+            .get("MVM_STAGE0_BUILD_ATTR")
+            .cloned()
+            .unwrap_or_else(|| "default".into());
+        let mode = conf
+            .get("MVM_STAGE0_OUTPUT_MODE")
+            .cloned()
+            .unwrap_or_else(|| "image".into());
+        let arch = machine_arch()?;
+        // The host names the flake it staged at /work. There is no default:
+        // mvm carries no image flake of its own for the guest to fall back
+        // on, and building some other tree than the one staged would only
+        // surface later as a missing artifact.
+        let flake_base = conf.get("MVM_STAGE0_FLAKE").cloned().ok_or_else(|| {
+            format!(
+                "the build config at {} names no flake (MVM_STAGE0_FLAKE); \
+                 the host must name the flake it staged at /work",
+                conf_path.display()
+            )
+        })?;
+        let flake_ref = format!("{flake_base}.{arch}-linux.{attr}");
+
+        // Clear a `/homeless-shelter` left by a crashed prior build before nix's
+        // unsandboxed purity check trips on it and wedges the bootstrap.
+        purge_stale_nix_builder_home(Path::new("/"))
+            .map_err(|e| format!("clearing stale nix builder home: {e}"))?;
+
+        eprintln!("stage0-init: building {flake_ref} (output_mode={mode})");
+        let mut cmd = Command::new(&nix);
+        cmd.args([
+            "build",
+            &flake_ref,
+            "--extra-experimental-features",
+            "nix-command flakes",
+            // Single-user root bootstrap: the seed has no `nixbld` build
+            // users + no daemon, so build directly as root (empty
+            // build-users-group). Keep the DEFAULT sandbox — it gives
+            // each build a clean env (its own /bin/sh + toolchain),
+            // independent of the minimal seed rootfs; disabling it makes
+            // builds fail on the seed's missing `/bin`, `gcc`, etc.
+            "--option",
+            "build-users-group",
+            "",
+            "--option",
+            "connect-timeout",
+            "30",
+            "--max-jobs",
+            "1",
+            "--no-link",
+            "--no-write-lock-file",
+            "--impure",
+            "--print-out-paths",
+            "--print-build-logs",
+        ]);
+        if should_enable_vsock_egress(is_qemu(), &cmdline) {
+            apply_vsock_egress_proxy_env(&mut cmd);
+        }
+        // Echo nix's `--print-build-logs` to the guest's own stderr, which the
+        // host captures to `console.log` live — that's what makes the otherwise-
+        // silent multi-minute build tailable from the host.
+        let (status, stderr_log, stdout) =
+            crate::kernel_emit::run_streaming(cmd, &mut std::io::stderr())
+                .map_err(|e| format!("nix build: {e}"))?;
+
+        // Persist the full log to /out for output-disk collection and host-side
+        // post-mortem at ~/.mvm/cache/builder-vm/.../nix-stderr.log.
+        let _ = std::fs::write("/out/nix-stderr.log", &stderr_log);
+        if !status.success() {
+            return Err(format!("nix build exit {}", status.code().unwrap_or(-1)));
+        }
+        let store_path = stdout.trim().to_string();
+        if store_path.is_empty() {
+            return Err("nix build emitted no /nix/store path".into());
+        }
+        copy_artifacts(Path::new(&store_path), &mode)?;
+        crate::store_gc::collect::root_stage0_output(Path::new(&store_path), &mode);
+
+        // Best-effort: also emit the resolved `.config` so the host can report
+        // the `=y` symbol count without a CI round-trip. The configfile is a
+        // cached build dep of the kernel just built, so this realises instantly.
+        // A failure here never fails the kernel build — the kernel is the
+        // artifact that matters.
+        if mode == "kernel"
+            && let Some(config_attr) = conf.get("MVM_STAGE0_CONFIG_ATTR")
+            && let Err(e) =
+                crate::kernel_emit::emit_resolved_config(&nix, &arch, config_attr, &flake_base)
+        {
+            eprintln!("stage0-init: skipping kernel-config emit: {e}");
+        }
+        Ok(())
+    }
+
+    /// Output by mode: image = kernel + rootfs.ext4 + cmdline + manifest;
+    /// kernel = kernel only; rootfs = rootfs + cmdline (+ manifest when
+    /// present); sdk-sidecar = the resolver's three-file sidecar contract.
+    fn copy_artifacts(out: &Path, mode: &str) -> Result<(), String> {
+        copy_artifacts_into(out, mode, Path::new("/out"))
+    }
+
+    fn copy_artifacts_into(out: &Path, mode: &str, out_root: &Path) -> Result<(), String> {
+        if mode == "sdk-sidecar" {
+            for name in mvm_builder_guest::stage0_guest::SDK_SIDECAR_OUTPUT_FILES {
+                let source = out.join(name);
+                if !source.is_file() {
+                    return Err(format!(
+                        "SDK sidecar output {} is missing {name}",
+                        out.display()
+                    ));
+                }
+                copy_deref(&source, &out_root.join(name))?;
+            }
+            return Ok(());
+        }
+        if mode != "rootfs" {
+            let kernel = ["vmlinux", "Image", "bzImage"]
+                .iter()
+                .map(|n| out.join(n))
+                .find(|p| p.is_file())
+                .ok_or_else(|| format!("no kernel in {}", out.display()))?;
+            copy_deref(&kernel, &out_root.join("vmlinux"))?;
+            // x86_64's kernel package carries two intentionally different
+            // loader formats: Firecracker consumes the uncompressed ELF while
+            // QEMU's Linux boot protocol consumes bzImage. Keep the second
+            // format when a kernel-only build exposes it; renaming one format
+            // over the other makes one of those backends fail before init.
+            let bzimage = out.join("bzImage");
+            if mode == "kernel" && bzimage.is_file() {
+                copy_deref(&bzimage, &out_root.join("bzImage"))?;
+            }
+        }
+        if mode != "kernel" {
+            let rootfs = out.join("rootfs.ext4");
+            if !rootfs.is_file() {
+                return Err(format!("no rootfs.ext4 in {}", out.display()));
+            }
+            copy_deref(&rootfs, &out_root.join("rootfs.ext4"))?;
+            let cmdline = out.join("cmdline.txt");
+            if cmdline.is_file() {
+                let _ = copy_deref(&cmdline, &out_root.join("cmdline.txt"));
+            }
+            let manifest = out.join("manifest.json");
+            if manifest.is_file() {
+                let _ = copy_deref(&manifest, &out_root.join("manifest.json"));
+            }
+        }
+        Ok(())
+    }
+
+    // ---- helpers ----------------------------------------------------------
+
+    fn mount_fs(source: &str, target: &str, fstype: &str) -> Result<(), String> {
+        use nix::mount::{MsFlags, mount};
+        mount(
+            Some(source),
+            target,
+            Some(fstype),
+            MsFlags::empty(),
+            None::<&str>,
+        )
+        .map_err(|e| format!("mount {source} -> {target} ({fstype}): {e}"))
+    }
+
+    // The ext4 label probe is shared with every other guest init through
+    // `mvm_agentd::flowmux_drive`; a second copy of the superblock layout is
+    // exactly the kind of duplicate that drifts.
+    use mvm_agentd::flowmux_drive::{find_labeled_ext4_disk_among, virtio_block_devices};
+
+    /// Create + mount each `(source, target, fstype)` share in order,
+    /// verifying the mount took. QEMU Stage 0 still uses three ext4 input and
+    /// output disks; libkrun uses the raw-tar transport below.
+    fn mount_shares(shares: &[(&str, &str, &str)]) -> Result<(), String> {
+        for (source, target, fstype) in shares {
+            std::fs::create_dir_all(target).map_err(|e| format!("create {target}: {e}"))?;
+            mount_fs(source, target, fstype)?;
+            if !is_mountpoint(target) {
+                return Err(format!("{target} ({fstype}) mount did not take"));
+            }
+        }
+        Ok(())
+    }
+
+    fn reset_stage_dir(path: &Path) -> Result<(), String> {
+        if path.exists() {
+            clear_dir_children(path).map_err(|e| format!("clear {}: {e}", path.display()))?;
+        } else {
+            std::fs::create_dir_all(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Extract the raw input tar onto the persistent store and bind its trees
+    /// at the paths the Stage 0 build already consumes. `/out` is a separate
+    /// writable directory whose contents are archived onto the output device
+    /// after the build.
+    fn stage_disk_transport_input(transport: &DiskTransport) -> Result<(), String> {
+        let input_stage = Path::new(STAGE0_INPUT_STAGE);
+        reset_stage_dir(input_stage)?;
+        mvm_builder_guest::builder_disk_transport::read_output_disk(
+            Path::new(&transport.input_dev),
+            input_stage,
+        )
+        .map_err(|e| format!("extract input tar from {}: {e}", transport.input_dev))?;
+        for (name, target) in [("work", "/work"), ("mvm-bins", "/mvm-bins")] {
+            let source = input_stage.join(name);
+            if !source.is_dir() {
+                return Err(format!(
+                    "Stage 0 input disk is missing required tree {}",
+                    source.display()
+                ));
+            }
+            std::fs::create_dir_all(target).map_err(|e| format!("create {target}: {e}"))?;
+            bind_mount(&source.to_string_lossy(), target)?;
+        }
+        // The egress client is executed from `/mvm-bins` under its own uid, and
+        // the host's 0700 payload cache mode rode in with the archive.
+        let bins = input_stage.join("mvm-bins");
+        mvm_builder_guest::builder_disk_transport::grant_search(&[
+            Path::new(STAGE0_NIX_STORE_MOUNT),
+            input_stage,
+            &bins,
+        ])
+        .map_err(|e| format!("open the Stage 0 helper path to the egress client: {e:#}"))?;
+        let output_stage = Path::new(STAGE0_OUTPUT_STAGE);
+        reset_stage_dir(output_stage)?;
+        std::fs::create_dir_all("/out").map_err(|e| format!("create /out: {e}"))?;
+        bind_mount(STAGE0_OUTPUT_STAGE, "/out")?;
+        Ok(())
+    }
+
+    /// Archive `/out` onto the raw output device when this is the libkrun
+    /// disk-transport boot. The QEMU Stage 0 path retains its ext4 output disk.
+    fn collect_disk_transport_output_if_requested() -> Result<(), String> {
+        if is_qemu() {
+            return Ok(());
+        }
+        let cmdline = std::fs::read_to_string("/proc/cmdline")
+            .map_err(|e| format!("read /proc/cmdline: {e}"))?;
+        let transport = disk_transport_from_cmdline(&cmdline)
+            .ok_or_else(|| "libkrun Stage 0 requires mvm.builder_transport=disk".to_string())?;
+        mvm_builder_guest::builder_disk_transport::write_output_disk(
+            Path::new(STAGE0_OUTPUT_STAGE),
+            Path::new(&transport.output_dev),
+        )
+        .map_err(|e| format!("archive output tar onto {}: {e}", transport.output_dev))
+    }
+
+    fn mount_fs_idempotent(source: &str, target: &str, fstype: &str) -> Result<(), String> {
+        // The nix seed rootfs is minimal (no /tmp, /run, …) and `mount(2)`
+        // needs the target dir to exist — create it first.
+        ensure_mount_target(Path::new(target))?;
+        match mount_fs(source, target, fstype) {
+            Ok(()) => Ok(()),
+            Err(e) if e.contains("EBUSY") => {
+                eprintln!("stage0-init: {target} ({fstype}) already mounted (EBUSY) — continuing");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn ensure_mount_target(target: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(target)
+            .map_err(|e| format!("create mount target {}: {e}", target.display()))
+    }
+
+    fn bind_mount(source: &str, target: &str) -> Result<(), String> {
+        use nix::mount::{MsFlags, mount};
+        mount(
+            Some(source),
+            target,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .map_err(|e| format!("bind {source} -> {target}: {e}"))
+    }
+
+    fn unmount(target: &str) -> Result<(), String> {
+        nix::mount::umount(target).map_err(|e| format!("unmount {target}: {e}"))
+    }
+
+    pub(crate) fn is_mountpoint(target: &str) -> bool {
+        // A path is a mountpoint when its st_dev differs from its parent's.
+        let (Ok(here), Some(parent)) = (std::fs::metadata(target), Path::new(target).parent())
+        else {
+            return false;
+        };
+        let Ok(up) = std::fs::metadata(parent) else {
+            return false;
+        };
+        use std::os::unix::fs::MetadataExt;
+        here.dev() != up.dev()
+    }
+
+    fn mknod_null() {
+        // mknod /dev/null c 1 3; ignore errors (libkrun may already have it).
+        use std::ffi::CString;
+        if let Ok(path) = CString::new("/dev/null") {
+            // SAFETY: standard char-device node, fixed major/minor 1/3.
+            unsafe {
+                libc::mknod(path.as_ptr(), libc::S_IFCHR | 0o666, libc::makedev(1, 3));
+            }
+        }
+    }
+
+    /// Glob the seed store for a `*-<pkg>-*/bin/<bin>` executable. Store
+    /// paths are hash-prefixed, so we discover rather than hardcode.
+    fn nul_terminated_c_chars(chars: &[libc::c_char]) -> Vec<u8> {
+        chars
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| u8::from_ne_bytes(c.to_ne_bytes()))
+            .collect()
+    }
+
+    /// `uname -m` via libc (no coreutils in the seed). aarch64 / x86_64.
+    fn machine_arch() -> Result<String, String> {
+        let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
+        // SAFETY: uname writes into the provided utsname struct.
+        if unsafe { libc::uname(&mut uts) } != 0 {
+            return Err("uname() failed".into());
+        }
+        let bytes = nul_terminated_c_chars(&uts.machine);
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    pub(crate) fn copy_deref(src: &Path, dst: &Path) -> Result<(), String> {
+        mvm_builder_guest::stage0_guest::copy_nonempty_file(src, dst)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn power_off() -> ExitCode {
+        use nix::sys::reboot::{RebootMode, reboot};
+        // Let the console finish sending what was written to it. The kernel
+        // halts from inside reboot(2) without draining the tty, so the last
+        // line — the result marker the host reads — was being cut off
+        // mid-word (`stage0-init: don`) and a finished build read as an
+        // unclean halt. tcdrain on a non-tty fails harmlessly.
+        // SAFETY: tcdrain and sync take no pointers; tcdrain only blocks until
+        // the descriptor's queued output is transmitted.
+        unsafe {
+            libc::tcdrain(libc::STDERR_FILENO);
+            libc::tcdrain(libc::STDOUT_FILENO);
+            libc::sync();
+        }
+        match reboot(RebootMode::RB_POWER_OFF) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("stage0-init: reboot syscall failed: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{
+            STAGE0_NIX_CACHE_HOME, VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL,
+            copy_artifacts_into, disk_transport_from_cmdline, prepare_nix_cache,
+            stage0_nix_store_device,
+        };
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        #[test]
+        fn stage0_nix_store_device_matches_backend_disk_order() {
+            assert_eq!(stage0_nix_store_device(false), "/dev/vdb");
+            assert_eq!(stage0_nix_store_device(true), "/dev/vdf");
+        }
+
+        #[test]
+        fn disk_transport_cmdline_defaults_to_stage0_device_slots() {
+            let transport = disk_transport_from_cmdline(
+                "console=hvc0 root=/dev/vda mvm.builder_transport=disk",
+            )
+            .expect("disk transport token is present");
+            assert_eq!(transport.input_dev, "/dev/vdc");
+            assert_eq!(transport.output_dev, "/dev/vdd");
+        }
+
+        #[test]
+        fn disk_transport_cmdline_honours_explicit_devices_and_refuses_other_modes() {
+            let transport = disk_transport_from_cmdline(
+                "mvm.builder_transport=disk mvm.builder_input=/dev/vdx mvm.builder_output=/dev/vdy",
+            )
+            .expect("explicit disk transport is present");
+            assert_eq!(transport.input_dev, "/dev/vdx");
+            assert_eq!(transport.output_dev, "/dev/vdy");
+            assert!(disk_transport_from_cmdline("mvm.builder_transport=virtiofs").is_none());
+            assert!(disk_transport_from_cmdline("console=hvc0 root=/dev/vda").is_none());
+        }
+
+        #[test]
+        fn mount_target_creation_reports_an_unusable_parent() {
+            let scratch = tempfile::TempDir::new().unwrap();
+            let parent = scratch.path().join("file");
+            std::fs::write(&parent, b"not a directory").unwrap();
+            let target = parent.join("child");
+
+            let error = super::ensure_mount_target(&target)
+                .expect_err("a file cannot contain a mount target");
+            assert!(error.contains("create mount target"));
+            assert!(error.contains(&target.display().to_string()));
+        }
+
+        #[test]
+        fn nix_cache_uses_the_runtime_tmpfs() {
+            let scratch = tempfile::TempDir::new().unwrap();
+            let cache_home = scratch.path().join("run/nix-cache");
+
+            prepare_nix_cache(&cache_home).expect("prepare nix cache");
+
+            assert_eq!(STAGE0_NIX_CACHE_HOME, "/run/nix-cache");
+            assert!(cache_home.join("nix").is_dir());
+        }
+
+        #[test]
+        fn root_runtime_reserve_release_is_idempotent() {
+            let scratch = tempfile::TempDir::new().unwrap();
+            let reserve = scratch.path().join("reserve");
+            std::fs::write(&reserve, b"space").unwrap();
+            super::release_root_runtime_reserve_at(&reserve).unwrap();
+            assert!(!reserve.exists());
+            super::release_root_runtime_reserve_at(&reserve)
+                .expect("a missing reserve is the idempotent success case");
+        }
+
+        #[test]
+        fn c_char_bytes_preserve_bytes_and_stop_at_nul() {
+            let chars: [libc::c_char; 5] = [109, 118, 109, 0, 120];
+            assert_eq!(super::nul_terminated_c_chars(&chars), b"mvm");
+        }
+
+        #[test]
+        fn guest_ext4_format_pins_stage0_store_label_and_block_count() {
+            let command = super::ext4_format_command(
+                std::path::Path::new("/sbin/mkfs.ext4"),
+                "/dev/vda",
+                4096,
+            );
+            assert_eq!(command.get_program(), "/sbin/mkfs.ext4");
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                [
+                    "-F",
+                    "-q",
+                    "-b",
+                    "4096",
+                    "-L",
+                    mvm_builder_guest::stage0_guest::STAGE0_NIX_STORE_EXT4_LABEL,
+                    "/dev/vda",
+                    "4096",
+                ]
+            );
+        }
+
+        #[test]
+        fn purge_stale_nix_builder_home_removes_leftover_and_tolerates_absence() {
+            let root = tempfile::tempdir().expect("tempdir");
+            // Clean boot: no `/homeless-shelter` present — a no-op, never an error.
+            super::purge_stale_nix_builder_home(root.path()).expect("absent home is ok");
+            // Crashed prior build: a populated leftover must be removed wholesale
+            // so nix's unsandboxed purity check doesn't wedge the next build.
+            let home = root.path().join("homeless-shelter");
+            std::fs::create_dir_all(home.join(".cargo")).expect("seed leftover tree");
+            std::fs::write(home.join(".cargo/config"), b"stale").expect("seed leftover file");
+            super::purge_stale_nix_builder_home(root.path()).expect("removes leftover");
+            assert!(!home.exists(), "stale nix builder home must be gone");
+        }
+
+        #[test]
+        fn ext4_error_count_must_be_zero_before_success() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let errors = root.path().join("errors_count");
+            std::fs::write(&errors, "0\n").expect("write zero count");
+            super::reject_ext4_errors(&errors).expect("zero errors are clean");
+
+            std::fs::write(&errors, "7\n").expect("write nonzero count");
+            let error = super::reject_ext4_errors(&errors).expect_err("errors must fail");
+            assert!(error.contains("7 filesystem error(s)"), "{error}");
+        }
+
+        #[test]
+        fn a_store_fault_is_reported_alongside_a_build_failure() {
+            let store_fault = "persistent Stage 0 ext4 store reported 3 filesystem error(s)";
+
+            let both = super::stage0_result(
+                Err("nix build exit 1".to_string()),
+                Err(store_fault.to_string()),
+            )
+            .expect_err("two failures are a failure");
+            assert!(both.starts_with("nix build exit 1"), "{both}");
+            assert!(both.contains(store_fault), "{both}");
+
+            assert_eq!(
+                super::stage0_result(Ok(()), Err(store_fault.to_string())),
+                Err(store_fault.to_string())
+            );
+            assert_eq!(
+                super::stage0_result(Err("nix build exit 1".to_string()), Ok(())),
+                Err("nix build exit 1".to_string())
+            );
+            assert_eq!(super::stage0_result(Ok(()), Ok(())), Ok(()));
+        }
+
+        #[test]
+        fn streams_stderr_live_keeps_full_log_and_captures_stdout() {
+            // Mimic nix: build logs to stderr, the out-path to stdout.
+            let mut cmd = Command::new("sh");
+            cmd.args([
+                "-c",
+                "printf 'log1\\nlog2\\n' >&2; printf '/nix/store/abc\\n'",
+            ]);
+            let mut live: Vec<u8> = Vec::new();
+            let (status, stderr_log, stdout) =
+                crate::kernel_emit::run_streaming(cmd, &mut live).unwrap();
+            assert!(status.success());
+            // Echoed live to the console sink…
+            assert_eq!(live, b"log1\nlog2\n");
+            // …and accumulated for the post-mortem log.
+            assert_eq!(stderr_log, b"log1\nlog2\n");
+            // out-path captured from stdout.
+            assert_eq!(stdout.trim(), "/nix/store/abc");
+        }
+
+        #[test]
+        fn propagates_nonzero_exit_with_log() {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "echo boom >&2; exit 7"]);
+            let mut live: Vec<u8> = Vec::new();
+            let (status, stderr_log, _stdout) =
+                crate::kernel_emit::run_streaming(cmd, &mut live).unwrap();
+            assert_eq!(status.code(), Some(7));
+            assert_eq!(stderr_log, b"boom\n");
+        }
+
+        #[test]
+        fn should_enable_vsock_egress_honors_qemu_cmdline_token() {
+            assert!(super::should_enable_vsock_egress(
+                true,
+                "console=hvc0 mvm.vsock_egress=1 root=/dev/vda"
+            ));
+            assert!(!super::should_enable_vsock_egress(
+                true,
+                "console=hvc0 mvm.vsock_egress=0 root=/dev/vda"
+            ));
+        }
+
+        #[test]
+        fn should_enable_vsock_egress_always_on_for_libkrun_stage0() {
+            assert!(super::should_enable_vsock_egress(
+                false,
+                "console=hvc0 root=/dev/vda"
+            ));
+        }
+
+        #[test]
+        fn vsock_egress_port_from_cmdline_reads_positive_port() {
+            assert_eq!(
+                super::vsock_egress_port_from_cmdline(
+                    "console=hvc0 mvm.vsock_egress=1 mvm.vsock_egress_port=45253 root=/dev/vda"
+                ),
+                Some(45253)
+            );
+            assert_eq!(
+                super::vsock_egress_port_from_cmdline(
+                    "console=hvc0 mvm.vsock_egress_port=0 root=/dev/vda"
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn apply_vsock_egress_proxy_env_sets_proxy_contract() {
+            let mut cmd = Command::new("env");
+            super::apply_vsock_egress_proxy_env(&mut cmd);
+            let envs: std::collections::HashMap<_, _> = cmd
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.expect("proxy vars are always set")
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                envs.get("ALL_PROXY").map(String::as_str),
+                Some(VSOCK_EGRESS_PROXY_URL)
+            );
+            assert_eq!(
+                envs.get("HTTP_PROXY").map(String::as_str),
+                Some(VSOCK_EGRESS_PROXY_URL)
+            );
+            assert_eq!(
+                envs.get("HTTPS_PROXY").map(String::as_str),
+                Some(VSOCK_EGRESS_PROXY_URL)
+            );
+            assert_eq!(
+                envs.get("NO_PROXY").map(String::as_str),
+                Some(VSOCK_EGRESS_NO_PROXY)
+            );
+        }
+
+        #[test]
+        fn stage0_nix_config_disables_in_guest_sandbox() {
+            let cfg = super::stage0_nix_config();
+            assert!(cfg.contains("experimental-features = nix-command flakes"));
+            assert!(cfg.contains("sandbox = false"));
+            assert!(cfg.contains("build-users-group ="));
+            assert!(cfg.contains("max-jobs = 1"));
+            assert!(cfg.contains("connect-timeout = 30"));
+        }
+
+        #[test]
+        fn egress_child_exit_message_reports_exit_code() {
+            let status = Command::new("sh")
+                .args(["-c", "exit 7"])
+                .status()
+                .expect("spawn shell");
+            assert_eq!(super::egress_child_exit_message(status), "exit code 7");
+        }
+
+        #[test]
+        fn copy_artifacts_promotes_manifest_for_image_outputs() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let out = temp.path().join("builder-out");
+            let copied = temp.path().join("copied");
+            std::fs::create_dir_all(&out).expect("create out dir");
+            std::fs::create_dir_all(&copied).expect("create copied dir");
+            std::fs::write(out.join("vmlinux.real"), b"kernel").expect("write kernel");
+            symlink(out.join("vmlinux.real"), out.join("vmlinux")).expect("symlink kernel");
+            std::fs::write(out.join("rootfs.ext4"), b"rootfs").expect("write rootfs");
+            std::fs::write(out.join("cmdline.txt"), b"console=hvc0\n").expect("write cmdline");
+            std::fs::write(
+                out.join("manifest.json"),
+                br#"{"cache_contract_version":2,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+            )
+            .expect("write manifest");
+
+            copy_artifacts_into(&out, "image", &copied).expect("copy image outputs");
+
+            assert_eq!(
+                std::fs::read(copied.join("manifest.json")).expect("read copied manifest"),
+                std::fs::read(out.join("manifest.json")).expect("read source manifest")
+            );
+        }
+
+        #[test]
+        fn copy_artifacts_preserves_both_x86_kernel_formats() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let out = temp.path().join("kernel-out");
+            let copied = temp.path().join("copied");
+            std::fs::create_dir_all(&out).expect("create out dir");
+            std::fs::create_dir_all(&copied).expect("create copied dir");
+            std::fs::write(out.join("vmlinux"), b"elf-kernel").expect("write ELF kernel");
+            std::fs::write(out.join("bzImage"), b"boot-protocol-kernel")
+                .expect("write bzImage kernel");
+
+            copy_artifacts_into(&out, "kernel", &copied).expect("copy kernel outputs");
+
+            assert_eq!(
+                std::fs::read(copied.join("vmlinux")).expect("read copied ELF kernel"),
+                b"elf-kernel"
+            );
+            assert_eq!(
+                std::fs::read(copied.join("bzImage")).expect("read copied bzImage kernel"),
+                b"boot-protocol-kernel"
+            );
+        }
+
+        #[test]
+        fn copy_artifacts_promotes_only_the_sdk_sidecar_contract() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let out = temp.path().join("sidecar-out");
+            let copied = temp.path().join("copied");
+            std::fs::create_dir_all(&out).expect("create out dir");
+            std::fs::create_dir_all(&copied).expect("create copied dir");
+            std::fs::write(out.join("sdk.ext4"), b"sidecar").expect("write sidecar image");
+            std::fs::write(out.join("VERSION"), b"0.18.0\n").expect("write version");
+            std::fs::write(
+                out.join("checksums-sha256.txt"),
+                b"digest  sdk.ext4\ndigest  VERSION\n",
+            )
+            .expect("write checksum manifest");
+            std::fs::write(out.join("rootfs.ext4"), b"must not copy")
+                .expect("write unrelated rootfs");
+
+            copy_artifacts_into(&out, "sdk-sidecar", &copied).expect("copy SDK sidecar outputs");
+
+            assert_eq!(std::fs::read(copied.join("sdk.ext4")).unwrap(), b"sidecar");
+            assert_eq!(std::fs::read(copied.join("VERSION")).unwrap(), b"0.18.0\n");
+            assert!(copied.join("checksums-sha256.txt").is_file());
+            assert!(!copied.join("vmlinux").exists());
+            assert!(!copied.join("rootfs.ext4").exists());
+        }
+    }
+}
+
+/// The egress start-up lives in the Linux-only module, so its identity
+/// handling is pinned from the source, where every host can check it.
+#[cfg(test)]
+mod egress_identity_tests {
+    fn body_of(name: &str) -> String {
+        include_str!("stage0-init.rs")
+            .split_once(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("fn {name} must exist"))
+            .1
+            .split("\n    }\n")
+            .next()
+            .expect("the body ends at the first closing brace")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// PID 1 is root. A client it starts as-is keeps root for the whole
+    /// bootstrap build while parsing every proxy and DNS request that build
+    /// makes.
+    #[test]
+    fn the_egress_client_runs_under_its_own_identity() {
+        let body = body_of("fork_vsock_egress_client");
+        assert!(
+            body.contains("guest_bootstrap::egress_client_command("),
+            "{body}"
+        );
+        assert!(!body.contains("Command::new("), "{body}");
+    }
+
+    /// The key is mode 0400, so it has to belong to the uid the client runs
+    /// as, and it has to be handed over before the client starts.
+    #[test]
+    fn the_signing_key_is_handed_to_the_egress_client_before_it_starts() {
+        let body = body_of("start_vsock_egress_if_requested");
+        let provision = body
+            .find("provision_identity_from_drive_for_uid(")
+            .expect("the key is provisioned for the client's uid");
+        let fork = body
+            .find("fork_vsock_egress_client(")
+            .expect("the client is started");
+        assert!(provision < fork, "{body}");
+        assert!(body.contains("EGRESS_CLIENT_IDENTITY.uid()"), "{body}");
+    }
+
+    /// The client runs as a non-root uid from the unpacked `mvm-bins`, which
+    /// arrives at the host cache's 0700. Without search permission on that
+    /// tree the exec fails with `EACCES` and Stage 0 refuses to build.
+    #[test]
+    fn the_unpacked_bins_tree_is_searchable_by_the_egress_client() {
+        let body = body_of("stage_disk_transport_input");
+        let grant = body
+            .find("grant_search(")
+            .expect("search is granted on the unpacked tree");
+        assert!(body[grant..].contains("&bins"), "{body}");
+        assert!(body[grant..].contains("input_stage"), "{body}");
+        assert!(body[grant..].contains("STAGE0_NIX_STORE_MOUNT"), "{body}");
+    }
+}

@@ -255,6 +255,7 @@ impl BindingStore for FileBindingStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
@@ -336,6 +337,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn binding_file_is_0600() {
         let dir = tempdir().unwrap();
         let store = FileBindingStore::with_dir(dir.path());

@@ -273,6 +273,38 @@ pub(crate) fn atomically_populate_dir_at<E>(
 where
     E: From<PackCacheError>,
 {
+    atomically_populate_dir_at_with(cache_root, final_dir, populate, |source, output| {
+        std::fs::rename(source, output)
+    })
+}
+
+// Sole caller is the host-state registry-pack installer; gated with it.
+#[cfg(feature = "host-state")]
+pub(crate) fn atomically_populate_dir_at_no_replace<E>(
+    cache_root: &Path,
+    final_dir: &Path,
+    populate: impl FnOnce(&Path) -> Result<(), E>,
+) -> Result<(), E>
+where
+    E: From<PackCacheError>,
+{
+    atomically_populate_dir_at_with(
+        cache_root,
+        final_dir,
+        populate,
+        crate::registry_pack::local_input::publish_noclobber,
+    )
+}
+
+fn atomically_populate_dir_at_with<E>(
+    cache_root: &Path,
+    final_dir: &Path,
+    populate: impl FnOnce(&Path) -> Result<(), E>,
+    publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), E>
+where
+    E: From<PackCacheError>,
+{
     let quarantine = new_quarantine_dir_at(cache_root).map_err(E::from)?;
     let result = (|| {
         harden_dir(&quarantine).map_err(E::from)?;
@@ -280,7 +312,7 @@ where
         if let Some(parent) = final_dir.parent() {
             harden_dir(parent).map_err(E::from)?;
         }
-        std::fs::rename(&quarantine, final_dir)
+        publish(&quarantine, final_dir)
             .map_err(io_at(final_dir))
             .map_err(E::from)?;
         harden_dir(final_dir).map_err(E::from)?;

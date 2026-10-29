@@ -48,7 +48,7 @@ def detect(path: str) -> int:
 ```
 
 ```bash
-mvmctl build compile app.py --out ./out
+mvmctl dev compile app.py --out ./out
 mvmctl machine build --flake ./out
 ```
 

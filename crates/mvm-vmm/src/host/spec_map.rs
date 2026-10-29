@@ -330,7 +330,9 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
 /// the supervisor's read of `resources.timeouts.exec_secs`; this only makes one
 /// enforceable.
 fn workload_plan_binding(config: &VmStartConfig) -> Option<PlanBinding> {
-    plan_binding_for(config.plan_json.as_deref()?)
+    let mut binding = plan_binding_for(config.plan_json.as_deref()?)?;
+    binding.caller_registration = config.caller_registration.clone();
+    Some(binding)
 }
 
 /// The binding a supervisor enforces `plan_json` under: the plan, and the
@@ -339,6 +341,7 @@ fn workload_plan_binding(config: &VmStartConfig) -> Option<PlanBinding> {
 pub fn plan_binding_for(plan_json: &str) -> Option<PlanBinding> {
     Some(PlanBinding {
         plan_json: serde_json::from_str(plan_json).ok()?,
+        caller_registration: None,
         audit_dir: mvm_core::config::mvm_audit_dir(),
         signing_key_path: mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY_FILE),
     })

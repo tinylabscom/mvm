@@ -3,21 +3,27 @@
  * otherwise.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as mvm from "../src/index.js";
 import { MAX_RESULT_NESTING_DEPTH } from "../src/_remote.js";
 import { HostRecorder, failure, uninstallRecorder } from "./_recorder.js";
+import { NativeContext } from "../src/_hostlib.js";
 
 let host: HostRecorder;
+let previousNoVm: string | undefined;
 
 beforeEach(() => {
   host = new HostRecorder().install();
+  previousNoVm = process.env.MVM_NO_VM;
+  delete process.env.MVM_NO_VM;
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   uninstallRecorder();
-  delete process.env.MVM_NO_VM;
+  if (previousNoVm === undefined) delete process.env.MVM_NO_VM;
+  else process.env.MVM_NO_VM = previousNoVm;
   delete process.env.MVM_EMITTING;
   delete process.env.MVM_MAX_PAYLOAD_BYTES;
   delete process.env.MVM_MAX_OUTPUT_BYTES;
@@ -38,6 +44,18 @@ function reply(exitCode: number, stdout = "", stderr = "", extra: Record<string,
 }
 
 describe("without MVM_NO_VM", () => {
+  it("keeps typed terminal error as failure after actual consumer cleanup", () => {
+    const close = vi.spyOn(NativeContext.prototype, "close");
+    const free = vi.spyOn(NativeContext.prototype, "free");
+    host.on("entrypoint.call", reply(124, "", "", {
+      agent_error: { kind: "timeout", message: "local fixture" },
+    }));
+    expect(() => add.sync(1, 2)).toThrow();
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(free).toHaveBeenCalledTimes(1);
+    // The recorder has no C/native owner; this tests the real SDK consumer.
+  });
+
   it("dispatches into the workload and decodes the result", () => {
     let ran = false;
     const fn = mvm.func("adder", () => {

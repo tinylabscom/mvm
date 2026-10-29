@@ -12,7 +12,7 @@
 //!   Each secret lives at `<base>/<tenant>/<name>` with mode 0600,
 //!   parent dirs mode 0700, and AES-256-GCM encrypted contents.
 //!   Enumeration is a directory scan.
-//! - [`KeyringSecretStore`] — used when the OS-native keystore is
+//! - `KeyringSecretStore` (with the `os-keyring` feature) — used when the OS-native keystore is
 //!   reachable. Each secret lives at the keyring entry
 //!   `(service="mvm-secrets", user="<tenant>:<name>")`. An index
 //!   sidecar at `<base>/<tenant>.json` mirrors the names so `ls`
@@ -52,7 +52,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rand::Rng;
 use secrecy::{ExposeSecret, SecretBox};
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::crypto::keystore::validate_shell_id;
@@ -61,8 +60,9 @@ use crate::crypto::snapshot_crypto;
 /// Service name for OS-native keyring entries. Distinct from
 /// `crate::crypto::keystore::KEYRING_SERVICE` so per-tenant master
 /// keys and per-name tenant secrets don't collide.
+#[cfg(feature = "os-keyring")]
 pub const KEYRING_SERVICE: &str = "mvm-secrets";
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "os-keyring", target_os = "macos"))]
 const KEYRING_TARGET: &str = "mvm-tenant-secrets";
 
 /// Default base dir for [`FileSecretStore`]:
@@ -82,10 +82,6 @@ fn fallback_secrets_dir() -> PathBuf {
 
 const FILE_SECRET_MAGIC: &[u8] = b"MVMS1\0";
 const FILE_STORE_KEY_FILENAME: &str = ".secret-store.key";
-const FILE_STORE_KEYRING_SERVICE: &str = "mvm-secret-store";
-#[cfg(target_os = "macos")]
-const FILE_STORE_KEYRING_TARGET: &str = "mvm-file-secret-store";
-const FILE_STORE_KEYRING_USER: &str = "file-backend-key";
 
 /// Multi-key tenant-scoped secret store. Separate from
 /// [`crate::crypto::keystore::KeyProvider`] (which is single-key, tenant-
@@ -120,25 +116,13 @@ pub trait SecretStore: Send + Sync {
 pub struct FileSecretStore {
     base: PathBuf,
     key_path: PathBuf,
-    keyring_user: String,
-    use_keyring_key: bool,
 }
 
 impl FileSecretStore {
     pub fn with_dir(base: impl Into<PathBuf>) -> Self {
-        Self::with_dir_and_keyring(base, false)
-    }
-
-    fn with_dir_and_keyring(base: impl Into<PathBuf>, use_keyring_key: bool) -> Self {
         let base = base.into();
         let key_path = default_key_path_for_base(&base);
-        let keyring_user = keyring_user_for_base(&base);
-        Self {
-            base,
-            key_path,
-            keyring_user,
-            use_keyring_key,
-        }
+        Self { base, key_path }
     }
 
     fn tenant_dir(&self, tenant: &str) -> Result<PathBuf> {
@@ -163,11 +147,6 @@ impl FileSecretStore {
     }
 
     fn load_or_init_key(&self) -> Result<SecretBox<Vec<u8>>> {
-        if self.use_keyring_key
-            && let Ok(key) = load_or_init_keyring_key(&self.keyring_user)
-        {
-            return Ok(key);
-        }
         load_or_init_file_key(&self.key_path)
     }
 }
@@ -265,56 +244,6 @@ pub fn file_store_key_path_for_base(base: &Path) -> PathBuf {
     default_key_path_for_base(base)
 }
 
-fn keyring_user_for_base(base: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(base.as_os_str().as_encoded_bytes());
-    format!(
-        "{}:{}",
-        FILE_STORE_KEYRING_USER,
-        hex_encode(&hasher.finalize())
-    )
-}
-
-fn load_or_init_keyring_key(user: &str) -> Result<SecretBox<Vec<u8>>> {
-    let entry = file_store_keyring_entry(user)?;
-    match entry.get_password() {
-        Ok(hex) => {
-            let key = hex_decode(&hex).context("decoding file secret-store key")?;
-            validate_file_store_key_len(&key)?;
-            Ok(SecretBox::new(Box::new(key)))
-        }
-        Err(keyring::Error::NoEntry) => {
-            let mut key = Zeroizing::new(vec![0u8; snapshot_crypto::KEY_SIZE]);
-            rand::rng().fill_bytes(&mut key);
-            let encoded = hex_encode(&key);
-            entry
-                .set_password(&encoded)
-                .context("writing file secret-store keyring entry")?;
-            let stored = entry
-                .get_password()
-                .context("verifying file secret-store keyring entry")?;
-            if stored != encoded {
-                anyhow::bail!("file secret-store keyring entry failed read-after-write check");
-            }
-            Ok(SecretBox::new(Box::new(key.to_vec())))
-        }
-        Err(err) => Err(err).context("reading file secret-store keyring entry"),
-    }
-}
-
-fn file_store_keyring_entry(user: &str) -> Result<keyring::Entry> {
-    #[cfg(target_os = "macos")]
-    {
-        keyring::Entry::new_with_target(FILE_STORE_KEYRING_TARGET, FILE_STORE_KEYRING_SERVICE, user)
-            .context("opening macOS file secret-store keyring entry")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        keyring::Entry::new(FILE_STORE_KEYRING_SERVICE, user)
-            .context("opening file secret-store keyring entry")
-    }
-}
-
 /// Load the file-backed store key, minting it on first use.
 ///
 /// Concurrent first uses agree on one key: the key file is published whole
@@ -392,34 +321,12 @@ fn decrypt_file_secret(encoded: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     snapshot_crypto::decrypt(ciphertext, key)
 }
 
-fn hex_decode(hex: &str) -> Result<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        anyhow::bail!("hex string has odd length: {}", hex.len());
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for chunk in hex.as_bytes().chunks(2) {
-        let s = std::str::from_utf8(chunk)?;
-        let byte = u8::from_str_radix(s, 16).with_context(|| format!("invalid hex byte: {s}"))?;
-        bytes.push(byte);
-    }
-    Ok(bytes)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
 /// OS-native keystore backend. Each secret entry lives at
 /// `(KEYRING_SERVICE, "<tenant>:<name>")`. Names are mirrored to a
 /// sidecar JSON index at `<index_dir>/<tenant>.json` so [`SecretStore::list`]
 /// returns a deterministic answer independent of backend-specific
 /// enumeration behavior.
+#[cfg(feature = "os-keyring")]
 pub struct KeyringSecretStore {
     /// Where the per-tenant name-index JSON lives. v0 reuses the
     /// same `~/.mvm/secrets/` root as `FileSecretStore` — switching
@@ -428,6 +335,7 @@ pub struct KeyringSecretStore {
     index_dir: PathBuf,
 }
 
+#[cfg(feature = "os-keyring")]
 impl KeyringSecretStore {
     pub fn with_dir(index_dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -483,6 +391,7 @@ impl KeyringSecretStore {
     }
 }
 
+#[cfg(feature = "os-keyring")]
 impl Default for KeyringSecretStore {
     fn default() -> Self {
         let base = default_secrets_dir().unwrap_or_else(|_| fallback_secrets_dir());
@@ -490,6 +399,7 @@ impl Default for KeyringSecretStore {
     }
 }
 
+#[cfg(feature = "os-keyring")]
 impl SecretStore for KeyringSecretStore {
     fn put(&self, tenant: &str, name: &str, value: &SecretBox<String>) -> Result<()> {
         let entry = Self::entry(tenant, name)?;
@@ -544,11 +454,13 @@ impl SecretStore for KeyringSecretStore {
 /// when the keyring reachability probe changes across invocations
 /// or an older secret already exists in the file backend.
 #[derive(Default)]
+#[cfg(feature = "os-keyring")]
 struct AutoSecretStore {
     keyring: KeyringSecretStore,
     file: FileSecretStore,
 }
 
+#[cfg(feature = "os-keyring")]
 impl SecretStore for AutoSecretStore {
     fn put(&self, tenant: &str, name: &str, value: &SecretBox<String>) -> Result<()> {
         match self.keyring.put(tenant, name, value) {
@@ -596,6 +508,7 @@ impl SecretStore for AutoSecretStore {
 /// why it does not go through [`KeyringSecretStore`]: that store owns a fixed
 /// service name and keychain of its own. The error names the item, never its
 /// value.
+#[cfg(feature = "os-keyring")]
 pub fn read_os_keychain_item(service: &str, account: &str) -> Result<SecretBox<String>> {
     let entry = keyring::Entry::new(service, account).with_context(|| {
         format!("opening keychain item service {service:?} account {account:?}")
@@ -611,6 +524,7 @@ pub fn read_os_keychain_item(service: &str, account: &str) -> Result<SecretBox<S
     }
 }
 
+#[cfg(feature = "os-keyring")]
 fn is_missing_secret_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
@@ -621,8 +535,9 @@ fn is_missing_secret_error(err: &anyhow::Error) -> bool {
 }
 
 /// Env-var override for [`default_secret_store`]. Accepted values
-/// (case-insensitive): `file`, `keyring`, `auto`. Anything else is
-/// treated as `auto` with a `tracing::warn`. Documented in the
+/// (case-insensitive): `file`, `auto`, and `keyring` when the
+/// `os-keyring` feature is enabled. Anything else is treated as
+/// `auto` with a `tracing::warn`. Documented in the
 /// security model section of CLAUDE.md as the escape hatch for
 /// hosts where the keyring backend is unreliable (CI Linux runners
 /// without a Secret Service, headless servers, etc).
@@ -631,11 +546,12 @@ pub const BACKEND_ENV: &str = "MVM_SECRET_STORE_BACKEND";
 /// Auto-pick the best available SecretStore for the current host,
 /// honoring the [`BACKEND_ENV`] override.
 ///
-/// Order (when env is `auto` or unset): an aggregate store that
-/// prefers KeyringSecretStore but keeps FileSecretStore entries
-/// visible if the OS keystore backend is reachable, else
-/// FileSecretStore. Mirrors [`crate::crypto::keystore::default_provider`]
-/// while avoiding backend split-brain across CLI invocations.
+/// Order (when env is `auto` or unset): with the `os-keyring` feature,
+/// an aggregate store that prefers `KeyringSecretStore` but keeps
+/// `FileSecretStore` entries visible if the OS keystore backend is
+/// reachable; otherwise `FileSecretStore`. Mirrors
+/// [`crate::crypto::keystore::default_provider`] while avoiding backend
+/// split-brain across CLI invocations.
 ///
 /// On a host whose keyring's `Entry::new` succeeds but `set_password`
 /// later fails (Linux runner with `libsecret` headers but no
@@ -647,6 +563,7 @@ pub fn default_secret_store() -> Box<dyn SecretStore> {
             let base = default_secrets_dir().unwrap_or_else(|_| fallback_secrets_dir());
             return Box::new(FileSecretStore::with_dir(base));
         }
+        #[cfg(feature = "os-keyring")]
         Some(v) if v.eq_ignore_ascii_case("keyring") => {
             return Box::new(KeyringSecretStore::default());
         }
@@ -659,8 +576,11 @@ pub fn default_secret_store() -> Box<dyn SecretStore> {
         }
         _ => {}
     }
-    if crate::crypto::keystore::KeyringProvider::backend_reachable() {
-        return Box::new(AutoSecretStore::default());
+    #[cfg(feature = "os-keyring")]
+    {
+        if crate::crypto::keystore::KeyringProvider::backend_reachable() {
+            return Box::new(AutoSecretStore::default());
+        }
     }
     Box::new(FileSecretStore::default())
 }
@@ -668,6 +588,7 @@ pub fn default_secret_store() -> Box<dyn SecretStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn mk_value(s: &str) -> SecretBox<String> {
@@ -727,6 +648,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("k");
         fs::write(&path, b"plaintext").unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let err = store.get("acme", "k").unwrap_err();
         let err = format!("{err:#}");
@@ -737,6 +659,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_store_key_is_created_at_0600() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp.path());
@@ -750,6 +673,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_store_key_with_loose_permissions_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let key_path = tmp.path().join(FILE_STORE_KEY_FILENAME);
@@ -761,22 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn file_store_key_hex_round_trips() {
-        let bytes = [0x00, 0x7f, 0x80, 0xff];
-        let encoded = hex_encode(&bytes);
-        assert_eq!(encoded, "007f80ff");
-        assert_eq!(hex_decode(&encoded).unwrap(), bytes);
-    }
-
-    #[test]
-    fn file_store_keyring_user_is_scoped_to_base_path() {
-        let first = keyring_user_for_base(Path::new("/tmp/mvm-a/secrets"));
-        let second = keyring_user_for_base(Path::new("/tmp/mvm-b/secrets"));
-        assert_ne!(first, second);
-        assert!(first.starts_with(FILE_STORE_KEYRING_USER));
-    }
-
-    #[test]
+    #[cfg(feature = "os-keyring")]
     fn auto_store_reads_file_backed_secret_when_keyring_misses() {
         let tmp = tempfile::tempdir().unwrap();
         let file_dir = tmp.path().join("file");
@@ -790,6 +699,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "os-keyring")]
     fn auto_store_lists_file_backed_secret_when_keyring_index_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let store = AutoSecretStore {
@@ -822,6 +732,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_get_refuses_world_readable() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp.path());
@@ -900,6 +811,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_put_creates_tenant_dir_at_0700() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp.path());
@@ -913,6 +825,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_put_creates_secret_at_0600() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp.path());
@@ -955,6 +868,7 @@ mod tests {
     // ──────────────────────────────────────────────────────────────
 
     #[test]
+    #[cfg(feature = "os-keyring")]
     fn keyring_index_round_trips_through_save_load() {
         let tmp = tempfile::tempdir().unwrap();
         let store = KeyringSecretStore::with_dir(tmp.path());
@@ -966,6 +880,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "os-keyring")]
     fn keyring_index_is_empty_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = KeyringSecretStore::with_dir(tmp.path());
@@ -973,6 +888,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "os-keyring")]
     fn keyring_entry_validates_tenant_and_name() {
         // The shape validator runs before any keyring backend call,
         // so these reject without needing a live keystore.

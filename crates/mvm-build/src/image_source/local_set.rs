@@ -111,7 +111,7 @@ impl LocalImageCheckout {
         } else {
             self.current_checkouts(request.mvm_checkout)?
         };
-        let host = crate::stage0_kernel::current_image_set_protocol_support();
+        let host = crate::image_protocol::current_image_set_protocol_support();
         let verification = LocalImageSetVerification::new(
             &manifest_bytes,
             request.set_dir,
@@ -142,7 +142,7 @@ impl LocalImageCheckout {
                         })
                 })
             {
-                crate::published_image_set::verify_base_image_contract(
+                crate::base_image_contract::verify_base_image_contract(
                     &artifact.path,
                     &set.manifest.compatibility,
                 )

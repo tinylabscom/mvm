@@ -275,6 +275,38 @@ Restore fails closed. A checkpoint whose content has drifted, whose record disag
 
 On `hvf`, guest memory is not copied back into the restored VM. The RAM image is cloned into a private file in the VM's state directory, which must be on a local filesystem. The clone is opened read-only and its name removed, then it is hashed against the recorded digest, and the supervisor maps that same descriptor copy-on-write. The image is read once, to hash it. A page enters the restored VM's memory only when the guest touches it, and a page becomes private to that VM only when the guest writes it. Editing or replacing the checkpoint after verification does not reach the restored guest, because the guest maps the clone, not the checkpoint. Other users cannot write the clone either. This does not protect against a process running as your own user: in the moment between creating the clone and removing its name, such a process can open it for writing. That is outside the current threat model, because the VM supervisor already runs as your user, unsandboxed, and can read the host signing key. Each restore gets its own clone, so restored VMs share no memory pages with each other, even within one tenant. One limit: memory a restored VM frees is not handed back to the host while it runs. Free page reporting returns freed memory only for anonymous RAM, and a restored VM's RAM is a mapping of its clone, so pages it wrote stay charged to it until it stops. The restorer only ever maps plaintext: an encrypted checkpoint is opened into private staging first, as described above, and a RAM image still in ciphertext is refused, because mapping it would boot noise. On a filesystem that cannot clone files, the image is copied byte for byte on every restore, which costs a full write of the guest's memory. Checkpoints taken before this layout (with guest RAM inside the frame file) are refused with a message asking you to capture them again.
 
+### HVF runtime identity evidence
+
+The HVF supervisor answers a local runtime-artifact query only while every vCPU
+is parked. The observation records the initramfs bytes supplied to the loader,
+the final kernel command line, and SHA-256 hashes of the read-only disk files
+actually opened for that boot. Disk hashes are captured once from held file
+handles, not by reopening their paths on every query. Writable disks are not
+included. Editing `supervisor.json` cannot alter this observation.
+
+The query uses an owner-only Unix socket in the supervisor state directory.
+The client checks the kernel-reported peer user and process identity and a fresh
+query challenge. Request and response sizes and elapsed I/O time are bounded.
+Evidence is serialized while the primary vCPU is stopped and the secondary
+vCPUs are held; the hold is released before transmitting the response. A response
+is an observation at that boundary, not a lease that prevents a later resume.
+
+New HVF snapshots also retain this evidence inside the authenticated frame.
+On restore, the supervisor consumes the verified, descriptor-owned frame rather
+than mutable metadata. It checks the inherited initramfs identity against the
+selected runtime, retains the inherited command line, and measures the newly
+opened read-only disks. Recapture preserves that lineage. The wire response and
+retained frame distinguish a loaded boot from inherited snapshot evidence.
+An older frame without this evidence can still be loaded by the low-level
+restore path, but its runtime-artifact query reports unsupported; it cannot
+supply evidence for a checkpoint admission that requires it.
+
+This proves **boot-input identity or authenticated boot lineage**, not the
+contents of current guest RAM. It does not detect a guest modifying its runtime
+in memory, host writes to a backing file after its boot-time measurement, or a
+hostile process running as the supervisor's own user. Release-generation and
+checkpoint-content verification remain separate required checks.
+
 List and remove checkpoints:
 
 ```sh

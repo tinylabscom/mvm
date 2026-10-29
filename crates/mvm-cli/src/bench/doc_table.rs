@@ -50,7 +50,7 @@ pub fn sample_contract_sentence() -> String {
          version {COLD_LAUNCH_SCHEMA_VERSION}. A report that misses any of \
          those is refused rather than published with a caveat. Prepared-cold \
          lanes additionally require every measured dispatch to be strictly \
-         under {PREPARED_COLD_HARD_MAX_MS:.0} ms, and the warm-claim lane every \
+         under {PREPARED_COLD_HARD_MAX_MS:.0} ms, and the warm-claim lanes every \
          measured claim to be strictly under {WARM_CLAIM_HARD_MAX_MS:.0} ms, \
          even below the publication sample floor. Every prepared and warm \
          sample must also reach the guest strictly under \

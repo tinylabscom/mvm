@@ -46,7 +46,7 @@ impl WarmSource {
             }
             Self::Manifest(arg) => {
                 let mut manifest = Some(arg.clone());
-                bundle::settle_manifest_archive(&mut manifest, false)?;
+                bundle::settle_manifest_archive(&mut manifest, false, false)?;
                 let settled = manifest.unwrap_or_else(|| arg.clone());
                 manifest_template_source(&settled)
             }
@@ -104,10 +104,11 @@ impl WarmRequest {
 /// that the launch path cannot claim.
 pub(super) fn warm_if_eligible<T>(
     config: &VmStartConfig,
+    late_volume_slots: u8,
     warm: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     anyhow::ensure!(
-        warm_eligible_launch(config),
+        warm_eligible_launch(config, late_volume_slots),
         "pool warm: this launch cannot claim a standby; bundles with pinned boot assets \
          must use their verified cold launch path"
     );

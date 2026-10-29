@@ -239,11 +239,27 @@ pub fn start_machine_spec(
     params: MachineStartParams<'_>,
 ) -> Result<MachineStart> {
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
+    super::discard_stopped_runtime_state(params.hypervisor, &spec.name)?;
     validate_registry_pack_source(spec)?;
     let network_policy = persisted_network_policy(spec)?;
     let (memory_mib, mem_initial_mib) =
         mp::validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
-    let boot = resolve_boot_source(spec, host)?;
+    let boot = if let Some(pin) = spec
+        .registry_pack_image
+        .as_ref()
+        .filter(|_| spec.manifest.is_none())
+    {
+        let image =
+            super::built_pack::resolve_built_pack_image(pin, params.hypervisor, &spec.profile)?;
+        BootSource {
+            kernel: image.kernel_path,
+            label: format!("pack:{}", pin.reference()),
+            rootfs: PathBuf::from(image.rootfs_path),
+            digest: image.revision_hash,
+        }
+    } else {
+        resolve_boot_source(spec, host)?
+    };
     let kernel_path = match boot.kernel {
         Some(kernel) => Some(kernel),
         None => host.workload_kernel(params.hypervisor)?,
@@ -288,15 +304,15 @@ pub fn start_machine_spec(
     })
 }
 
-fn validate_registry_pack_source(spec: &mp::MachineSpec) -> Result<()> {
-    if spec.registry_pack_image.is_some() {
+pub(super) fn validate_registry_pack_source(spec: &mp::MachineSpec) -> Result<()> {
+    if let Some(pin) = &spec.registry_pack_image {
         anyhow::ensure!(
-            spec.manifest.is_some()
-                && spec.image.is_none()
-                && spec.deployment.is_none()
-                && !spec.runtime_pack,
-            "a pinned registry pack image requires exactly a built manifest source"
+            spec.image.is_none() && spec.deployment.is_none() && !spec.runtime_pack,
+            "a pinned registry pack image cannot be combined with an explicit image, deployment or runtime pack"
         );
+        if let Some(manifest) = &spec.manifest {
+            super::built_pack::validate_source_pack_slot(pin, manifest)?;
+        }
     }
     Ok(())
 }
@@ -497,7 +513,24 @@ mod tests {
     }
 
     #[test]
-    fn a_persistent_pack_pin_requires_a_manifest_source() {
+    fn a_stopped_machines_leftover_runtime_state_is_cleared_before_it_starts_again() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let state = mvm_core::config::vm_state_dir("restarted");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("hvf-instance.json"), "{}").unwrap();
+
+        super::super::discard_stopped_runtime_state("firecracker", "restarted").unwrap();
+
+        assert!(!state.exists());
+    }
+
+    #[test]
+    fn a_persistent_pack_pin_is_a_built_marker_or_a_verified_source_slot() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let mut machine = spec("pack-image");
         machine.registry_pack_image = Some(
             mvm_core::registry_pack::PackPin::new(
@@ -506,10 +539,20 @@ mod tests {
             )
             .expect("pin"),
         );
-        assert!(validate_registry_pack_source(&machine).is_err());
+        validate_registry_pack_source(&machine).expect("pin-only built source shape");
         machine.manifest = Some("built-slot".to_string());
-        validate_registry_pack_source(&machine).expect("pack with manifest source");
+        assert!(
+            validate_registry_pack_source(&machine).is_err(),
+            "a Source slot requires the actual signed installed descriptor"
+        );
         machine.image = Some("alpine:3.20".to_string());
+        assert!(validate_registry_pack_source(&machine).is_err());
+        machine.image = None;
+        machine.manifest = None;
+        machine.runtime_pack = true;
+        assert!(validate_registry_pack_source(&machine).is_err());
+        machine.runtime_pack = false;
+        machine.deployment = Some("/unrelated/deployment".into());
         assert!(validate_registry_pack_source(&machine).is_err());
     }
 

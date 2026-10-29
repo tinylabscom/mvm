@@ -1,8 +1,9 @@
 //! Build pipeline — Nix-based image builds for pools and dev mode.
 
 pub mod build;
-pub mod build_cache;
+pub use crate::build_cache;
 pub mod dev_build;
+pub mod frozen;
 pub mod orchestrator;
 pub mod vsock_builder;
 

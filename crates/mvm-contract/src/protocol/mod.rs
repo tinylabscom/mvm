@@ -21,6 +21,9 @@ pub mod host_kv;
 pub mod host_signer;
 pub mod host_time;
 pub mod host_tool;
+pub mod hvf_control;
+/// Capability-bound, transport-neutral mailbox identities and wire DTOs.
+pub mod mailbox;
 /// Bounded, flow-aware guest/host networking wire contract: framing,
 /// opcodes, and the session/stream state machine shared by guest and host.
 pub mod network_flow;

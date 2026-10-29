@@ -1295,6 +1295,24 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
+    /// Every backend kind, in declaration order.
+    ///
+    /// For surfaces that must cover every backend — per-backend tables,
+    /// matrices, selection docs — iterating this slice is what turns "the
+    /// enum grew" into a failing test rather than a missing row. The
+    /// exhaustive `match` in [`as_str`](Self::as_str) still breaks the build
+    /// first; this slice is the second tripwire.
+    pub const ALL: &[BackendKind] = &[
+        Self::Firecracker,
+        Self::Libkrun,
+        Self::Qemu,
+        Self::Mock,
+        Self::Hvf,
+        Self::Wasm,
+        Self::WebLinux,
+        Self::AppleContainer,
+    ];
+
     /// A stable label for this backend, for diagnostics and reports.
     ///
     /// This renders the typed discriminant; it is not a selector. Nothing may
@@ -1402,19 +1420,10 @@ mod tests {
 
     #[test]
     fn every_label_parses_back_to_the_kind_that_rendered_it() {
-        for kind in [
-            BackendKind::Firecracker,
-            BackendKind::Libkrun,
-            BackendKind::Qemu,
-            BackendKind::Mock,
-            BackendKind::Hvf,
-            BackendKind::Wasm,
-            BackendKind::WebLinux,
-            BackendKind::AppleContainer,
-        ] {
+        for kind in BackendKind::ALL {
             assert_eq!(
                 BackendKind::from_label(kind.as_str()),
-                Some(kind),
+                Some(*kind),
                 "{kind:?} does not survive a label round trip"
             );
         }
@@ -1431,27 +1440,38 @@ mod tests {
 
     #[test]
     fn every_backend_kind_has_a_distinct_stable_label() {
-        let kinds = [
-            BackendKind::Firecracker,
-            BackendKind::Libkrun,
-            BackendKind::Qemu,
-            BackendKind::Mock,
-            BackendKind::Hvf,
-            BackendKind::Wasm,
-            BackendKind::WebLinux,
-            BackendKind::AppleContainer,
-        ];
         // Pin the labels a report is read against.
         assert_eq!(BackendKind::Hvf.as_str(), "hvf");
         assert_eq!(BackendKind::Firecracker.as_str(), "firecracker");
         assert_eq!(BackendKind::AppleContainer.as_str(), "apple-container");
         assert_eq!(BackendKind::WebLinux.as_str(), "web-linux");
         // Two backends sharing a label would silently merge their samples.
-        for (i, a) in kinds.iter().enumerate() {
-            for b in &kinds[i + 1..] {
+        for (i, a) in BackendKind::ALL.iter().enumerate() {
+            for b in &BackendKind::ALL[i + 1..] {
                 assert_ne!(a.as_str(), b.as_str(), "{a:?} and {b:?} share a label");
             }
         }
+    }
+
+    /// `ALL` is the iteration surface tables and matrices rely on; pin its
+    /// contents so a variant added to the enum but not to `ALL` fails here
+    /// the moment the exhaustive `as_str` match is extended without it.
+    #[test]
+    fn all_covers_every_kind_in_declaration_order() {
+        assert_eq!(
+            BackendKind::ALL,
+            [
+                BackendKind::Firecracker,
+                BackendKind::Libkrun,
+                BackendKind::Qemu,
+                BackendKind::Mock,
+                BackendKind::Hvf,
+                BackendKind::Wasm,
+                BackendKind::WebLinux,
+                BackendKind::AppleContainer,
+            ]
+            .as_slice()
+        );
     }
 
     #[test]

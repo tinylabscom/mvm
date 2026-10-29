@@ -1,21 +1,24 @@
 //! Signed `ExecutionPlan` admission for a boot — synthesize, sign, verify,
-//! and audit-emit the plan right before a backend `start()`, plus the guest
-//! boot-config attachments (host-signer pubkey, security policy) that ride
-//! along with an admitted plan.
+//! and audit-emit the plan right before a backend `start()`.
 //!
 //! Every boot path admits through here: the CLI's transient runs, entrypoints,
 //! sessions, checkpoint forks and persistent starts, and the host library the
 //! SDKs load. It lives in the client rather than the CLI so that one request is
 //! admitted under one plan whoever makes it.
+//!
+//! The pieces a boot needs around admission itself sit in sibling modules and
+//! are re-exported here: the guest boot-config attachments (host-signer
+//! pubkey, security policy) in `boot_config`, the launch-outcome audit
+//! records in `outcome`, and the boot-time share/kernel enforcement gates in
+//! `enforce`.
 
 use anyhow::{Context, Result, bail};
 
 use mvm_core::plan::{StreamRetention, SynthesisInput, Variant};
 use mvm_core::policy::PolicyBundle;
-use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, InMemoryNonceLedger,
-    RunPosture, SystemClock, admit_for_run,
+    SystemClock, admit_for_run,
 };
 use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
@@ -24,24 +27,27 @@ use crate::admission::policy_resolver::{
     PolicyResolutionKind, ValidatedPolicy, validate_policy_refs,
 };
 use mvm_hostd::audit::emitter::AuditEmitter;
-use mvm_hostd::audit::host_keypair::{PUBLIC_FILENAME, load_or_init_at};
+use mvm_hostd::audit::host_keypair::load_or_init_at;
 
 use self::audit::{
     build_default_audit_emitter, build_policy_audit_emitter, emit_bundle_environment_refused,
     emit_bundle_posture_refused, emit_policy_audit_invalid, emit_policy_resolve_failure,
     emit_policy_resolved,
 };
-use self::policy::{
-    InMemoryBundleResolver, bundle_pin_from_archive, generated_policy_bundle_for_network_policy,
-};
+use self::policy::generated_policy_bundle_for_network_policy;
 
 pub mod agent_verbs;
 mod audit;
+mod boot_config;
 mod bundle_binding;
 pub mod bundle_environment;
 pub mod bundle_posture;
+mod durability;
+mod enforce;
 pub mod entrypoint_resolve;
 pub mod instructions;
+mod outcome;
+mod pinned_bundle;
 pub mod policy;
 pub mod policy_resolver;
 pub mod run_grants;
@@ -50,8 +56,20 @@ pub mod run_routes;
 pub mod run_secrets;
 pub mod secrets;
 
+pub use boot_config::{
+    SECURITY_POLICY_FILENAME, attach_guest_boot_config, attach_guest_boot_config_for_plan,
+    attach_guest_security_policy_config, attach_host_signer_pubkey_config_for_plan,
+    guest_profile_for_boot,
+};
 pub use bundle_binding::{BundlePin, InheritedBundle};
+pub use durability::admit_plan_for_boot_syncing_beside_boot;
+pub use enforce::{enforce_kernel, enforce_shares, enforce_shares_for_claim};
 pub use instructions::InstructionSources;
+pub use outcome::{BootPosture, StartMode, emit_failed, emit_launched, record_transient_outcome};
+// Directly exercised by `admit_plan_tests` alongside the fixture helpers it
+// shares with that family.
+#[cfg(test)]
+pub(crate) use outcome::emit_boot_posture;
 
 /// A content-bound asset. Operator-declared files and internally selected
 /// signed packs are recorded in the plan without sharing them with the guest.
@@ -65,8 +83,6 @@ pub enum AssetSpec {
     /// An internally selected signed pack; never accepted from `--asset`.
     RegistryPack(mvm_core::registry_pack::PackPin),
 }
-
-pub const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
 
 /// Add the tool-decision service binding when the plan declares tools.
 ///
@@ -121,6 +137,8 @@ pub struct AdmitPlanForBootParams<'a> {
     /// boot. When present, both labeled digests and the byte count are
     /// reverified before plan synthesis.
     pub boot_artifact_identity: Option<&'a BootArtifactIdentity>,
+    /// The exact selected runtime, verified before it can contribute assurance.
+    pub runtime_config: Option<&'a mvm_core::vm_backend::VmStartConfig>,
     pub cpus: u32,
     pub mem_mib: u64,
     /// The transport this launch gives the guest, recorded on the plan.
@@ -404,6 +422,22 @@ pub fn admit_plan_for_boot_configured_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
 ) -> Result<AdmissionContext> {
+    let (context, durability) = admit(p, ingress, durability::AdmissionSync::Inline)?;
+    debug_assert!(
+        durability.is_settled(),
+        "an inline admission is already durable"
+    );
+    Ok(context)
+}
+
+fn admit(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+    sync: durability::AdmissionSync,
+) -> Result<(
+    AdmissionContext,
+    mvm_core::admission_durability::AdmissionDurability,
+)> {
     // A production boot runs only verified released images, for every
     // managed artifact it resolves. The tiers recorded with those images
     // decide (below): a local-dev managed image is refused however it was
@@ -495,73 +529,38 @@ pub fn admit_plan_for_boot_configured_ingress(
     let bundle_host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
     let mut postures: Vec<mvm_core::plan::BundleSecurityPosture> =
         p.bundle_posture.into_iter().collect();
-    // The pinned bundle's signed environment, checked against this launch
-    // once the plan is admitted (below), beside the posture.
-    let mut pinned_environment: Option<mvm_core::plan::EnvironmentDescriptor> = None;
-    let (bundle_pin, bundle_resolver, bundle_trust, bundle_has_embedded_images, pinned_bundle) =
-        match p.bundle_pin {
-            Some(bundle) => {
-                let path = bundle.archive();
-                let bytes = std::fs::read(path)
-                    .with_context(|| format!("reading bundle archive at {}", path.display()))?;
-                let trust = mvm_core::plan::FsTrustStore::default_path()
-                    .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?;
-                let verified = mvm_core::plan::read_and_verify_bundle(&bytes, &trust)
-                    .with_context(|| format!("verifying bundle at {}", path.display()))?;
-                if !verified.embedded_image_sets.is_empty() {
-                    let kind = p.backend_kind.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "bundle {} embeds an image set but no boot backend was selected",
-                            path.display()
-                        )
-                    })?;
-                    let support = bundle_image_support.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "backend {} has no Linux-direct embedded image-set contract",
-                            kind.as_str()
-                        )
-                    })?;
-                    for embedded in &verified.embedded_image_sets {
-                        mvm_core::plan::check_embedded_image_set_for_backend(
-                            embedded,
-                            mvm_core::arch::GuestArch::host(),
-                            support,
-                            &bundle_host_protocols,
-                        )
-                        .with_context(|| {
-                            format!(
-                                "backend {} refuses embedded image set in {}",
-                                kind.as_str(),
-                                path.display()
-                            )
-                        })?;
-                    }
-                }
-                let has_embedded_images = !verified.embedded_image_sets.is_empty();
-                postures.extend(verified.manifest.security_posture().copied());
-                pinned_environment = verified.manifest.environment().cloned();
-                let pin = bundle_pin_from_archive(&bytes, verified.key_id.clone()).with_context(
-                    || format!("extracting signature from bundle at {}", path.display()),
-                )?;
-                // Use an in-memory resolver scoped to this admission —
-                // the caller supplied the path, so we already have the
-                // bytes; no need to walk the FS registry again.
-                let resolver = InMemoryBundleResolver::new(bytes);
-                let pinned = bundle_binding::PinnedBundle {
-                    pin: bundle,
-                    sha256: pin.bundle_sha256.clone(),
-                    signed: verified.manifest,
-                };
-                (
-                    Some(pin),
-                    Some(resolver),
-                    Some(trust),
-                    has_embedded_images,
-                    Some(pinned),
-                )
-            }
-            None => (None, None, None, false, None),
-        };
+    let (
+        bundle_pin,
+        bundle_resolver,
+        bundle_trust,
+        bundle_has_embedded_images,
+        pinned_bundle,
+        pinned_bundle_origin,
+        pinned_environment,
+    ) = match p.bundle_pin {
+        Some(pin) => {
+            let prepared =
+                pinned_bundle::prepare_pinned_bundle(pinned_bundle::PreparePinnedBundleParams {
+                    pin,
+                    keys_dir: p.keys_dir,
+                    backend_kind: p.backend_kind,
+                    image_support: bundle_image_support.as_ref(),
+                    host_protocols: &bundle_host_protocols,
+                })?;
+            postures.extend(prepared.posture);
+            let pinned_environment = prepared.environment;
+            (
+                Some(prepared.plan_pin),
+                Some(prepared.resolver),
+                Some(prepared.trust),
+                prepared.has_embedded_images,
+                Some(prepared.pinned),
+                Some(prepared.origin),
+                pinned_environment,
+            )
+        }
+        None => (None, None, None, false, None, None, None),
+    };
 
     // Pin the kernel alongside the image. Through the shared digest cache, the
     // same way `image_sha256` above is derived — a pin that re-read the whole
@@ -650,6 +649,7 @@ pub fn admit_plan_for_boot_configured_ingress(
                 caller_assets.push(mvm_core::plan::AssetIdentity::new(*kind, name, digest)?);
             }
             AssetSpec::RegistryPack(pin) => {
+                use mvm_core::registry_pack::AuthenticatedRegistryManifest as _;
                 let lock = mvm_core::registry_pack_store::load_pack_lockfile(
                     &mvm_core::config::pack_lockfile_path(),
                 )?;
@@ -658,12 +658,13 @@ pub fn admit_plan_for_boot_configured_ingress(
                         &mvm_core::config::registry_pack_publisher_policy_path(),
                     )?
                     .policy;
-                let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
-                    &mvm_core::config::registry_pack_cache_dir(),
-                    &lock,
-                    &publisher,
-                    pin.reference(),
-                )?;
+                let (_, verified) =
+                    mvm_core::registry_pack_store::open_installed_registry_manifest(
+                        &mvm_core::config::registry_pack_cache_dir(),
+                        &lock,
+                        &publisher,
+                        pin.reference(),
+                    )?;
                 anyhow::ensure!(
                     verified.manifest_sha256() == pin.manifest_sha256(),
                     "registry pack {} changed after source selection",
@@ -671,7 +672,7 @@ pub fn admit_plan_for_boot_configured_ingress(
                 );
                 caller_assets.push(mvm_core::plan::AssetIdentity::new(
                     mvm_core::plan::AssetKind::RegistryPack,
-                    verified.manifest().reference.to_string(),
+                    verified.reference().to_string(),
                     verified.manifest_sha256().as_str(),
                 )?);
             }
@@ -698,6 +699,18 @@ pub fn admit_plan_for_boot_configured_ingress(
         &p.services,
         p.gpu,
     );
+    let mut bundle_audit_labels = std::collections::BTreeMap::new();
+    if pinned_bundle_origin == Some(mvm_core::plan::bundle::BundleOrigin::LocalBuild) {
+        bundle_audit_labels.insert("origin".to_string(), "local-build".to_string());
+        bundle_audit_labels.insert(
+            "bundle_sha256".to_string(),
+            bundle_pin
+                .as_ref()
+                .expect("a classified bundle has a pin")
+                .bundle_sha256
+                .clone(),
+        );
+    }
     let input = SynthesisInput {
         outputs: p.outputs.clone(),
         // The resolved permission set rides into the plan body, so the ceiling
@@ -747,7 +760,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         tools: p.tools.clone(),
         caller_commitment: p.caller_commitment.clone(),
-        audit_labels: Default::default(),
+        audit_labels: bundle_audit_labels,
         agent_verbs: crate::admission::agent_verbs::parse_agent_verb_override(
             &p.agent_verb_override,
         )?
@@ -804,18 +817,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         p.ledger,
         p.keys_dir,
         admission_ctx.as_ref(),
-        // A caller that already resolved its backend hands the typed kind over,
-        // and the grant gate measures against the mechanisms that tier really
-        // has. A caller that has not resolved one yet passes `None` and gets
-        // the fail-closed answer: a sealed run refuses a grant whose
-        // enforceability nothing can confirm, a dev run is warned. The plan's
-        // own `runtime_profile` is never consulted for this — it is a label its
-        // author chose, and believing it would let a mislabelled plan pick the
-        // controls it is measured against.
-        match p.backend_kind {
-            Some(kind) => RunPosture::on_backend(variant, kind),
-            None => RunPosture::without_backend(variant),
-        },
+        crate::admission::run_grants::run_posture(variant, p.backend_kind, p.runtime_config),
     )
     .or_else(|err| -> Result<_> {
         if let Some(refused) =
@@ -900,6 +902,7 @@ pub fn admit_plan_for_boot_configured_ingress(
                 secrets: &p.secrets,
                 entrypoint: &p.entrypoint,
                 postures: &postures,
+                network_policy: &p.network_policy,
             },
         );
         if !refused.is_empty() {
@@ -984,14 +987,29 @@ pub fn admit_plan_for_boot_configured_ingress(
         ms = (t_emitter - t_signer).as_secs_f64() * 1000.0,
         "admit: policy + emitter build"
     );
-    // One batch, one fsync. These entries all have to be durable before the
-    // same thing — this plan booting — and nothing between them acts on the
-    // one before it, so syncing each separately bought no ordering. It cost
-    // one `F_FULLFSYNC` each, which is 7.4ms on an Apple-silicon host and
-    // ~42ms on the KVM box's array. The batch closes here, before the caller
-    // gets an `AdmissionContext` to boot from, and a failed flush is an error
-    // rather than a warning.
-    emitter.batched(|| {
+    // The validated tenant bundle is loaded once and delivered to the bridge
+    // for the live L4 enforcement path. Local-default plans retain the bridge's
+    // mandatory-deny posture by carrying no bundle.
+    let policy_bundle = resolved.bundle;
+
+    // The admitted L7 egress boundary recorded in the chain-signed log so a
+    // receipt can name the destinations without re-resolving policy refs.
+    let egress_destinations = policy_bundle
+        .as_ref()
+        .map(|b| b.egress.allow_list.clone())
+        .unwrap_or_default();
+
+    // One batch, one fsync. Every admission-path entry has to be durable
+    // before the same thing — this plan's workload running — and nothing
+    // between them acts on the one before it, so syncing each separately
+    // bought no ordering. The batch covers the admission record, its decision
+    // record, the grant, the shares, the asset identities, the policy
+    // resolution and the egress destinations: all entries that used to
+    // trigger their own fsync now share the single flush. A failed write
+    // inside the batch is an error here; a failed sync is an error wherever
+    // the caller waits for it, which is here unless it asked to sync beside
+    // the boot.
+    let record = || {
         mvm_hostd::audit::durability::record_admission(
             Some(&emitter),
             admitted.plan(),
@@ -1016,29 +1034,28 @@ pub fn admit_plan_for_boot_configured_ingress(
         emitter
             .emit_asset_identities(admitted.plan())
             .context("recording admitted asset identities in the audit chain")?;
+        // Policy resolution and egress destinations are non-fatal records
+        // that used to live outside the batch, each triggering its own
+        // fsync. Folding them in saves two serial F_FULLFSYNCs (~15ms on
+        // Apple silicon, ~84ms on KVM arrays) with no ordering loss.
+        emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
+        if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
+            tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
+        }
         Ok(())
-    })?;
+    };
+    let durability = match sync {
+        durability::AdmissionSync::Inline => {
+            emitter.batched(record)?;
+            mvm_core::admission_durability::AdmissionDurability::settled(Ok(()))
+        }
+        durability::AdmissionSync::BesideBoot => emitter.batched_sync_detached(record)?.1,
+    };
     tracing::debug!(
         ms = t_emitter.elapsed().as_secs_f64() * 1000.0,
+        ?sync,
         "admit: record_admission (batched fsync)"
     );
-
-    emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
-
-    // The validated tenant bundle is loaded once and delivered to the bridge
-    // for the live L4 enforcement path. Local-default plans retain the bridge's
-    // mandatory-deny posture by carrying no bundle.
-    let policy_bundle = resolved.bundle;
-
-    // Record the admitted L7 egress boundary in the chain-signed log so a
-    // receipt can name the destinations without re-resolving policy refs.
-    let egress_destinations = policy_bundle
-        .as_ref()
-        .map(|b| b.egress.allow_list.clone())
-        .unwrap_or_default();
-    if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
-        tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
-    }
 
     let context = AdmissionContext {
         admitted,
@@ -1060,7 +1077,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         return Err(err);
     }
 
-    Ok(context)
+    Ok((context, durability))
 }
 
 /// Resolve a local deployment record only when it sits beside the exact
@@ -1131,108 +1148,6 @@ fn resolve_image_sha256(
     }
 }
 
-pub fn guest_profile_for_boot(is_dev_mode: bool, rootfs_path: &std::path::Path) -> AgentProfile {
-    if is_dev_mode || !crate::admission::agent_verbs::image_is_sealed(rootfs_path) {
-        AgentProfile::Dev
-    } else {
-        AgentProfile::SealedProd
-    }
-}
-
-fn security_policy_for_profile(profile: AgentProfile) -> SecurityPolicy {
-    match profile {
-        AgentProfile::SealedProd => SecurityPolicy::default(),
-        AgentProfile::Dev => SecurityPolicy::dev_defaults(),
-        AgentProfile::Builder => SecurityPolicy {
-            profile: AgentProfile::Builder,
-            ..SecurityPolicy::default()
-        },
-    }
-}
-
-pub fn attach_guest_security_policy_config(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    profile: AgentProfile,
-) -> Result<()> {
-    let content = serde_json::to_string(&security_policy_for_profile(profile))
-        .context("serializing guest security policy for config drive")?;
-    start_config
-        .config_files
-        .retain(|f| f.name != SECURITY_POLICY_FILENAME);
-    start_config
-        .config_files
-        .push(mvm_core::vm_backend::VmFile {
-            name: SECURITY_POLICY_FILENAME.to_string(),
-            content,
-            mode: 0o444,
-        });
-    Ok(())
-}
-
-pub fn attach_guest_boot_config_for_plan(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    plan: &mvm_core::plan::ExecutionPlan,
-    host_signer_public_path: &std::path::Path,
-    profile: AgentProfile,
-) -> Result<()> {
-    attach_host_signer_pubkey_config_for_plan(start_config, plan, host_signer_public_path)?;
-    attach_guest_security_policy_config(start_config, profile)
-}
-
-pub fn attach_guest_boot_config(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    admission: &AdmissionContext,
-    profile: AgentProfile,
-) -> Result<()> {
-    attach_guest_boot_config_for_plan(
-        start_config,
-        admission.admitted.plan(),
-        &admission.host_signer_public_path,
-        profile,
-    )
-}
-
-pub fn attach_host_signer_pubkey_config_for_plan(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    plan: &mvm_core::plan::ExecutionPlan,
-    host_signer_public_path: &std::path::Path,
-) -> Result<()> {
-    if plan.agent_verbs.is_none() {
-        return Ok(());
-    }
-    let public_bytes = std::fs::read(host_signer_public_path).with_context(|| {
-        format!(
-            "reading host-signer public key for config drive at {}",
-            host_signer_public_path.display()
-        )
-    })?;
-    let public_array: [u8; 32] = public_bytes.as_slice().try_into().map_err(|_| {
-        anyhow::anyhow!(
-            "host-signer public key at {} must be 32 bytes, got {}",
-            host_signer_public_path.display(),
-            public_bytes.len()
-        )
-    })?;
-    ed25519_dalek::VerifyingKey::from_bytes(&public_array).with_context(|| {
-        format!(
-            "parsing host-signer public key at {}",
-            host_signer_public_path.display()
-        )
-    })?;
-    let content = format!("{}\n", hex::encode(public_bytes));
-    start_config
-        .config_files
-        .retain(|f| f.name != PUBLIC_FILENAME);
-    start_config
-        .config_files
-        .push(mvm_core::vm_backend::VmFile {
-            name: PUBLIC_FILENAME.to_string(),
-            content,
-            mode: 0o444,
-        });
-    Ok(())
-}
-
 /// Run the policy resolver against the admitted plan and return the
 /// validated bundle for audit configuration and bridge enforcement.
 ///
@@ -1257,354 +1172,6 @@ pub fn resolve_policy_for_admission(
     }
 }
 
-/// Emit `plan.launched` against the supplied admission context. Tolerates
-/// emission failure with a `tracing::warn` so a flaky audit fs can't block a
-/// VM that already booted.
-///
-/// Also persists the admitted plan into the VM state dir so
-/// out-of-process lifecycle verbs (e.g. `mvmctl checkpoint create`) can
-/// rehydrate it and bind their audit events to the same plan_id.
-/// Plan persistence failure is non-fatal — the launch already
-/// succeeded; the cost is that lifecycle audit will be unbound on
-/// this VM until the next launch.
-pub fn emit_launched(ctx: &AdmissionContext, backend: &str, persist_plan: bool) {
-    if let Err(e) = ctx.emitter.emit_launched(ctx.admitted.plan(), backend) {
-        tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
-    }
-    if persist_plan
-        && let Err(e) = mvm_hostd::audit::plan_persist::write_plan(
-            &ctx.admitted.plan().workload.0,
-            ctx.admitted.plan(),
-        )
-    {
-        tracing::warn!(
-            error = %e,
-            "persisting admitted plan to ~/.mvm/vms/<vm>/plan.json failed (non-fatal)"
-        );
-    }
-}
-
-/// Record the resolved boot posture (which rootfs strategy the run-path tier
-/// gate actually selected) on the chain-signed admission log. Fires alongside
-/// `plan.launched`, reflecting the decision `run_inner` made — never a
-/// re-derivation — so a virtiofs-root dev boot and an Option-B block boot are
-/// distinguishable in the tamper-evident chain.
-fn emit_boot_posture(ctx: &AdmissionContext, strategy: mvm_build::run_image::RootStrategy) {
-    let label = match strategy {
-        mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
-    };
-    if let Err(e) = ctx.emitter.emit_boot_posture(ctx.admitted.plan(), label) {
-        tracing::warn!(error = %e, "audit emit_boot_posture failed (non-fatal)");
-    }
-}
-
-/// How a transient launch came to be running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartMode {
-    /// It claimed a prepared standby.
-    Warm,
-    /// It booted from nothing, for the reason the label names.
-    Cold { reason: &'static str },
-}
-
-/// What a transient launch reports back about how it booted, for the
-/// chain-signed log: the rootfs strategy, and whether it was warm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BootPosture {
-    pub root_strategy: mvm_build::run_image::RootStrategy,
-    /// `None` for a launch that never reached the claim-or-boot decision.
-    pub start: Option<StartMode>,
-}
-
-impl BootPosture {
-    /// A posture with no start mode yet, as the run path seeds it.
-    #[must_use]
-    pub fn block() -> Self {
-        Self {
-            root_strategy: mvm_build::run_image::RootStrategy::BlockExt4,
-            start: None,
-        }
-    }
-}
-
-fn emit_start_mode(ctx: &AdmissionContext, start: StartMode) {
-    let (mode, reason) = match start {
-        StartMode::Warm => ("warm", None),
-        StartMode::Cold { reason } => ("cold", Some(reason)),
-    };
-    if let Err(e) = ctx
-        .emitter
-        .emit_start_mode(ctx.admitted.plan(), mode, reason)
-    {
-        tracing::warn!(error = %e, "audit emit_start_mode failed (non-fatal)");
-    }
-}
-
-/// Tier A.1 admission enforcement: refuse to boot if any volume about to
-/// be attached isn't named in the verified `ExecutionPlan.shares`, so no
-/// host-fs grant reaches a guest unless the signed plan admitted it
-/// (claim 1 / claim 8).
-pub fn enforce_shares(
-    ctx: &AdmissionContext,
-    volumes: &[mvm_core::vm_backend::VmVolume],
-) -> Result<()> {
-    mvm_hostd::plan_admission::enforce_admitted_shares(volumes, ctx.admitted.plan())
-        .context("admission share check")
-}
-
-/// Refuse to boot if the kernel about to be loaded is not the one the verified
-/// `ExecutionPlan` pinned.
-///
-/// The sibling of [`enforce_shares`], called at the same point for the same
-/// reason: `mvmctl` admits its plan and then starts the backend itself rather
-/// than going through `start_admitted`, so every gate that path runs has to be
-/// run here too or it does not run at all. The admitted-environment gate was
-/// the one nobody called.
-pub fn enforce_kernel(ctx: &AdmissionContext, kernel_path: Option<&std::path::Path>) -> Result<()> {
-    mvm_hostd::plan_admission::enforce_admitted_environment(kernel_path, ctx.admitted.plan())
-        .context("admission kernel check")
-}
-
-/// Close a transient run's audit narrative against the plan it booted under:
-/// `plan.launched`, the boot posture and the start mode when the run
-/// succeeded, `plan.failed` when it did not.
-///
-/// `admitted` is `None` only when the run failed before admission was reached —
-/// resolving the image, say. There is no plan to bind that failure to, so
-/// nothing is recorded. It is never `None` for a run that booted: admission is
-/// unconditional, and the admit closure fills this before the backend starts.
-///
-/// Both transient paths close the same way, so they share this rather than each
-/// carrying its own copy of the two branches.
-pub fn record_transient_outcome<T>(
-    admitted: Option<&AdmissionContext>,
-    backend: &str,
-    posture: BootPosture,
-    outcome: &Result<T>,
-) {
-    let Some(ctx) = admitted else { return };
-    match outcome {
-        Ok(_) => {
-            emit_launched(ctx, backend, false);
-            emit_boot_posture(ctx, posture.root_strategy);
-            if let Some(start) = posture.start {
-                emit_start_mode(ctx, start);
-            }
-        }
-        Err(e) => emit_failed(
-            ctx,
-            crate::launch::startup_budget::failure_class(e, "launch"),
-            e,
-        ),
-    }
-}
-
-/// Emit `plan.failed` against the supplied admission context. `class` is a short grep-friendly tag
-/// (e.g. `backend-start`, `snapshot-restore`); `err` becomes the
-/// rendered error chain.
-pub fn emit_failed(ctx: &AdmissionContext, class: &str, err: &anyhow::Error) {
-    let msg = format!("{err:#}");
-    if let Err(e) = ctx.emitter.emit_failed(ctx.admitted.plan(), class, &msg) {
-        tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
-    }
-    // A failed boot is the end of its session.
-    if let Err(e) = ctx.emitter.seal_session(
-        ctx.admitted.plan(),
-        mvm_hostd::audit::session::SealReason::Failed,
-    ) {
-        crate::launch::record_unsealed_end(
-            Some((&ctx.emitter, ctx.admitted.plan())),
-            crate::launch::UnsealedEnd::new(
-                &ctx.admitted.plan().workload.0,
-                crate::launch::UnsealedReason::SealFailed,
-            )
-            .error(format!("{e:#}")),
-        );
-    }
-}
-
-#[cfg(test)]
-mod host_signer_pubkey_config_tests {
-    use super::*;
-    use mvm_core::plan::{VerbId, test_support::PlanFixture};
-    use mvm_core::vm_backend::VmStartConfig;
-
-    #[test]
-    fn attaches_pubkey_when_plan_has_agent_verbs() {
-        let dir = tempfile::tempdir().unwrap();
-        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let pubkey = signer.verifying_key().to_bytes();
-        std::fs::write(&pubkey_path, pubkey).unwrap();
-        let mut plan = PlanFixture::new().build();
-        plan.agent_verbs = Some(vec![VerbId::new("ping").unwrap()]);
-        let mut start_config = VmStartConfig::default();
-
-        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
-
-        assert_eq!(start_config.config_files.len(), 1);
-        let file = &start_config.config_files[0];
-        assert_eq!(file.name, PUBLIC_FILENAME);
-        assert_eq!(file.content, format!("{}\n", hex::encode(pubkey)));
-        assert_eq!(file.mode, 0o444);
-    }
-
-    #[test]
-    fn replacing_pubkey_preserves_other_config_files_and_removes_duplicates() {
-        let dir = tempfile::tempdir().unwrap();
-        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
-        let pubkey = signer.verifying_key().to_bytes();
-        std::fs::write(&pubkey_path, pubkey).unwrap();
-        let mut plan = PlanFixture::new().build();
-        plan.agent_verbs = Some(vec![VerbId::new("ping").unwrap()]);
-        let mut start_config = VmStartConfig {
-            config_files: vec![
-                mvm_core::vm_backend::VmFile {
-                    name: "other-config".into(),
-                    content: "keep".into(),
-                    mode: 0o444,
-                },
-                mvm_core::vm_backend::VmFile {
-                    name: PUBLIC_FILENAME.into(),
-                    content: "stale".into(),
-                    mode: 0o444,
-                },
-            ],
-            ..VmStartConfig::default()
-        };
-
-        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
-
-        assert_eq!(
-            start_config
-                .config_files
-                .iter()
-                .filter(|file| file.name == PUBLIC_FILENAME)
-                .count(),
-            1
-        );
-        assert!(
-            start_config
-                .config_files
-                .iter()
-                .any(|file| file.name == "other-config" && file.content == "keep")
-        );
-    }
-
-    #[test]
-    fn skips_pubkey_when_plan_has_no_agent_verbs() {
-        let dir = tempfile::tempdir().unwrap();
-        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
-        let mut plan = PlanFixture::new().build();
-        plan.agent_verbs = None;
-        let mut start_config = VmStartConfig::default();
-
-        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
-
-        assert!(start_config.config_files.is_empty());
-    }
-
-    #[test]
-    fn attaches_sealed_security_policy_for_prod_boots() {
-        let mut start_config = VmStartConfig::default();
-
-        attach_guest_security_policy_config(&mut start_config, AgentProfile::SealedProd).unwrap();
-
-        let file = start_config
-            .config_files
-            .iter()
-            .find(|file| file.name == SECURITY_POLICY_FILENAME)
-            .expect("security policy file attached");
-        let policy: SecurityPolicy =
-            serde_json::from_str(&file.content).expect("parse security policy");
-        assert_eq!(policy.profile, AgentProfile::SealedProd);
-        assert!(policy.require_auth);
-        assert!(!policy.access.console);
-    }
-
-    /// The policy attach must replace a stale policy file, keep every
-    /// unrelated config file, and never duplicate the policy. The retain
-    /// predicate is the whole guarantee: inverted, every sibling config file
-    /// is dropped and the policy multiplies.
-    #[test]
-    fn attaching_the_security_policy_replaces_only_the_policy_file() {
-        let mut start_config = VmStartConfig::default();
-        start_config
-            .config_files
-            .push(mvm_core::vm_backend::VmFile {
-                name: "other-config".to_string(),
-                content: "keep".to_string(),
-                mode: 0o444,
-            });
-
-        attach_guest_security_policy_config(&mut start_config, AgentProfile::SealedProd).unwrap();
-        attach_guest_security_policy_config(&mut start_config, AgentProfile::SealedProd).unwrap();
-
-        assert_eq!(
-            start_config
-                .config_files
-                .iter()
-                .filter(|file| file.name == SECURITY_POLICY_FILENAME)
-                .count(),
-            1,
-            "a second attach replaces the stale policy instead of stacking another"
-        );
-        assert!(
-            start_config
-                .config_files
-                .iter()
-                .any(|file| file.name == "other-config" && file.content == "keep"),
-            "an unrelated config file must survive the policy attach"
-        );
-    }
-
-    #[test]
-    fn attaches_dev_security_policy_for_dev_boots() {
-        let mut start_config = VmStartConfig::default();
-
-        attach_guest_security_policy_config(&mut start_config, AgentProfile::Dev).unwrap();
-
-        let file = start_config
-            .config_files
-            .iter()
-            .find(|file| file.name == SECURITY_POLICY_FILENAME)
-            .expect("security policy file attached");
-        let policy: SecurityPolicy =
-            serde_json::from_str(&file.content).expect("parse security policy");
-        assert_eq!(policy.profile, AgentProfile::Dev);
-        assert!(!policy.require_auth);
-        assert!(policy.access.console);
-    }
-
-    #[test]
-    fn builder_security_policy_preserves_the_builder_profile() {
-        assert_eq!(
-            security_policy_for_profile(AgentProfile::Builder).profile,
-            AgentProfile::Builder
-        );
-    }
-
-    #[test]
-    fn guest_profile_requires_both_dev_override_and_sealed_image_checks() {
-        use mvm_build::builder_vm::GuestSidecar;
-
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        let mut sidecar = GuestSidecar::for_oci_run("test", false, false);
-        sidecar.accessible = false;
-        sidecar.sealed = true;
-        sidecar.write_to_dir(dir.path()).unwrap();
-
-        assert_eq!(
-            guest_profile_for_boot(false, &rootfs),
-            AgentProfile::SealedProd
-        );
-        assert_eq!(guest_profile_for_boot(true, &rootfs), AgentProfile::Dev);
-    }
-}
-
 // ── admit_plan_for_boot tests ────────────────────────────
 //
 // These tests stay scoped to the helper rather than `cmd_run` itself
@@ -1618,6 +1185,44 @@ mod host_signer_pubkey_config_tests {
 pub(crate) mod admit_plan_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn tool_decision_service_is_appended_once_without_reordering_callers() {
+        use mvm_contract::policy::tool_rules::ToolRules;
+        use mvm_contract::protocol::broker::ServiceId;
+
+        let caller = ServiceId::parse(mvm_contract::stream::input::INPUT_GRANT_SERVICE)
+            .expect("valid caller service");
+        let decision = ServiceId::parse(mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE)
+            .expect("valid tool service");
+        let tools = ToolRules {
+            allow: vec!["shell".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            services_with_tool_decision(vec![caller.clone()], &tools),
+            vec![caller.clone(), decision.clone()],
+            "declared tools need their decision endpoint"
+        );
+        assert_eq!(
+            services_with_tool_decision(vec![decision.clone(), caller.clone()], &tools),
+            vec![decision, caller.clone()],
+            "an existing endpoint keeps its position and is not duplicated"
+        );
+        assert_eq!(
+            services_with_tool_decision(vec![caller.clone()], &ToolRules::default()),
+            vec![caller],
+            "an unused tool dimension adds no endpoint"
+        );
+    }
+
+    fn isolated_home() -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        (env, home)
+    }
 
     pub(super) fn write_rootfs(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join("rootfs.ext4");
@@ -1684,6 +1289,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-pinned",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: rootfs,
@@ -1719,6 +1325,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admission_binds_the_caller_commitment_into_the_plan() {
+        let _home = isolated_home();
         let dir = tempfile::tempdir().expect("tempdir");
         let rootfs = write_rootfs(dir.path(), b"committed rootfs");
         let keys_dir = dir.path().join("keys");
@@ -1732,6 +1339,68 @@ pub(crate) mod admit_plan_tests {
 
         let admitted = admit_plan_for_boot(params).expect("admission succeeds");
         assert_eq!(admitted.admitted.plan().caller_commitment, Some(commitment));
+    }
+
+    /// Admission that leaves its sync beside the boot still writes the whole
+    /// admission before it returns; the handle it hands back is only the sync.
+    #[test]
+    fn a_beside_boot_admission_is_written_before_it_returns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path().join("home"));
+        let rootfs = write_rootfs(dir.path(), b"beside-boot rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+
+        let (context, durability) =
+            admit_plan_for_boot_syncing_beside_boot(params).expect("admission succeeds");
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).expect("chain");
+        assert!(
+            chain.contains("plan.admitted")
+                && chain.contains(context.admitted.plan_id().0.as_str()),
+            "the admission is on the chain before the sync is waited for: {chain}"
+        );
+        durability.wait().expect("the sync succeeds");
+    }
+
+    /// The host budget is a refusal, and refusals do not wait for a boot: a
+    /// beside-boot admission over budget fails before it returns, so there is
+    /// no config for a VMM to start from and nothing is recorded as admitted.
+    #[test]
+    fn a_beside_boot_admission_refuses_an_over_budget_boot_before_returning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path().join("home"));
+        let config = mvm_core::user_config::MvmConfig {
+            host_budget_memory_mib: Some(64),
+            ..Default::default()
+        };
+        mvm_core::user_config::save(&config, None).expect("host config");
+        let rootfs = write_rootfs(dir.path(), b"over-budget rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+
+        let error = match admit_plan_for_boot_syncing_beside_boot(params) {
+            Ok(_) => panic!("a 512 MiB boot must not fit a 64 MiB host budget"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("budget"),
+            "the refusal names the budget: {error:#}"
+        );
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).unwrap_or_default();
+        assert!(
+            !chain.contains("plan.admitted"),
+            "a refused boot is not recorded as admitted: {chain}"
+        );
     }
 
     #[test]
@@ -1761,6 +1430,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn asset_identity_audit_failure_refuses_admission_before_boot() {
+        let _home = isolated_home();
         let dir = tempfile::tempdir().expect("tempdir");
         let rootfs = write_rootfs(dir.path(), b"asset audit rootfs");
         let declared = dir.path().join("declared-input.txt");
@@ -1851,6 +1521,7 @@ pub(crate) mod admit_plan_tests {
         params.keys_dir = Some(&keys_dir);
         params.audit_dir = Some(&audit_dir);
         params.assets = vec![AssetSpec::RegistryPack(pin)];
+        params.backend_kind = Some(mvm_core::vm_backend::BackendKind::Firecracker);
 
         let admitted = admit_plan_for_boot(params).expect("signed pack admission");
         let asset = admitted
@@ -1862,6 +1533,43 @@ pub(crate) mod admit_plan_tests {
             .expect("signed plan pins pack identity");
         assert_eq!(asset.name, reference.to_string());
         assert_eq!(asset.digest, digest.as_str());
+
+        let mut substrate = crate::entrypoint::SessionAuditSubstrate {
+            tenant_id: admitted.admitted.plan().tenant.0.clone(),
+            plan_json: serde_json::to_string(admitted.admitted.signed()).unwrap(),
+            caller_registration: None,
+            bundle_json: None,
+            config_files: Vec::new(),
+            read_only_materialized_images: vec!["admitted-image.ext4".into()],
+            built_pack_check: admitted.admitted.built_pack_boot_check().unwrap(),
+            durability: Some(
+                mvm_core::admission_durability::AdmissionDurability::settled(Err(anyhow::anyhow!(
+                    "audit sync refused"
+                ))),
+            ),
+        };
+        let check = substrate
+            .built_pack_check
+            .take()
+            .expect("admitted pack check");
+        let mut config = mvm_core::vm_backend::VmStartConfig::default();
+        assert_eq!(substrate.apply_to(&mut config), vec!["admitted-image.ext4"]);
+        assert!(
+            check
+                .prepare(&mut config, mvm_core::vm_backend::BackendKind::Firecracker)
+                .unwrap()
+                .is_none(),
+            "a signed Source pack retains its existing non-built launch path"
+        );
+        assert!(
+            config
+                .admission_durability
+                .as_ref()
+                .unwrap()
+                .wait()
+                .is_err(),
+            "carrying the image check must not drop a failed admission sync"
+        );
 
         let chain = std::fs::read_to_string(audit_dir.join("local.jsonl"))
             .expect("read admitted audit chain");
@@ -1877,6 +1585,7 @@ pub(crate) mod admit_plan_tests {
     /// the CLI's only admission seam.
     #[test]
     fn the_booting_kernel_is_pinned_into_the_signed_plan() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -1920,6 +1629,7 @@ pub(crate) mod admit_plan_tests {
     /// name rather than sign a plan for a boot QEMU will reject.
     #[test]
     fn qemu_admission_refuses_an_elf_kernel_qemu_cannot_load() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -1964,6 +1674,7 @@ pub(crate) mod admit_plan_tests {
     /// visible.
     #[test]
     fn a_kernel_swapped_after_admission_is_refused() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -1998,6 +1709,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admits_real_rootfs_and_returns_plan_id() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2011,6 +1723,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-happy",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2069,6 +1782,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admission_failure_when_rootfs_missing() {
+        let _home = isolated_home();
         // sha256_file fails when the file does not exist; the helper
         // must propagate the error with context naming the rootfs path.
         let keys_dir = tempfile::tempdir().unwrap();
@@ -2081,6 +1795,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-missing",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: std::path::Path::new("/nonexistent/rootfs.ext4"),
@@ -2149,6 +1864,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn the_admitted_plan_records_the_transport_the_launch_derived() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2168,6 +1884,7 @@ pub(crate) mod admit_plan_tests {
                 backend_kind: None,
                 tenant: "local",
                 vm_name: "vm-transport",
+                runtime_config: None,
                 backend_name: "firecracker",
                 configured_images_dir: None,
                 rootfs_path: &rootfs,
@@ -2211,6 +1928,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn two_admissions_in_same_run_produce_distinct_plan_ids() {
+        let _home = isolated_home();
         // The shared ledger is the per-`cmd_run` replay-store. Two
         // admissions with different rootfs hashes (or even same hash —
         // synthesize_plan generates fresh nonces) must both succeed.
@@ -2227,6 +1945,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-1",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2266,6 +1985,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-2",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2320,6 +2040,7 @@ pub(crate) mod admit_plan_tests {
             tenant: "local",
             vm_name,
             backend_name: "firecracker",
+            runtime_config: None,
             configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
@@ -2355,6 +2076,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn emit_boot_posture_audits_the_root_strategy_label() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-boot-posture");
@@ -2378,6 +2100,7 @@ pub(crate) mod admit_plan_tests {
     /// each branch is pinned to the entries it alone writes.
     #[test]
     fn a_transient_run_that_booted_records_launched_and_posture() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-ok");
@@ -2407,6 +2130,7 @@ pub(crate) mod admit_plan_tests {
     /// of an image can be told apart from a run that should have been warm.
     #[test]
     fn a_cold_transient_run_records_why_it_was_cold() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-cold");
@@ -2435,6 +2159,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn a_transient_run_that_failed_records_failed_and_not_launched() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-err");
@@ -2476,6 +2201,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admission_emits_policy_resolved_for_default_local_default_refs() {
+        let _home = isolated_home();
         // The synthesized plan defaults to `local-default` on every
         // ref; validation succeeds without a bundle. The hook must
         // record that resolution without implying a live control.
@@ -2492,6 +2218,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-local-default",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2543,6 +2270,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admission_weaves_allow_list_into_signed_generated_policy_bundle() {
+        let _home = isolated_home();
         use mvm_core::network_policy::{HostPort, NetworkPolicy};
 
         let keys_dir = tempfile::tempdir().unwrap();
@@ -2557,6 +2285,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-allow-list",
+            runtime_config: None,
             backend_name: "libkrun",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2627,6 +2356,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admission_weaves_unrestricted_policy_into_signed_generated_policy_bundle() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2639,6 +2369,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-unrestricted",
+            runtime_config: None,
             backend_name: "hvf",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2738,6 +2469,7 @@ pub(crate) mod admit_plan_tests {
     /// not.
     #[test]
     fn admission_hashes_directory_shares_and_leaves_disk_shares_alone() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2801,6 +2533,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn a_non_shell_entrypoint_with_the_grant_is_admitted_under_prod() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2819,6 +2552,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-non-shell-granted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2874,6 +2608,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn a_shell_entrypoint_without_the_grant_is_admitted_output_streaming_is_unconditional() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2888,6 +2623,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-shell-ungranted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2932,6 +2668,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2946,6 +2683,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-shell-granted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2994,6 +2732,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn an_ad_hoc_override_does_not_bypass_the_sealed_input_grant_gate() {
+        let _home = isolated_home();
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"unit-only rootfs");
         let ledger = InMemoryNonceLedger::new();
@@ -3012,6 +2751,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn an_unresolved_entrypoint_with_the_grant_is_refused() {
+        let _home = isolated_home();
         // The gate's fail-closed arm. Before it, every launch path passed an
         // empty argv and the shell refusal could never fire — a control that
         // reported present and was structurally dormant. An entrypoint nobody
@@ -3031,6 +2771,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-entrypoint-unknown",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3076,6 +2817,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn an_unresolved_entrypoint_without_the_grant_still_boots() {
+        let _home = isolated_home();
         // Every launch path that never asks for streamed stdin passes an
         // unresolved entrypoint, so the fail-closed arm above must be
         // reachable only through the grant — otherwise this would refuse to
@@ -3094,6 +2836,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-entrypoint-unknown-ungranted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3131,6 +2874,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn a_dev_profile_shell_entrypoint_with_the_grant_is_not_refused() {
+        let _home = isolated_home();
         // The refusal is scoped to the sealed-production tier
         // (restrict_agent_verbs). A dev/interactive/ad-hoc run already carries
         // a DevOnly Exec grant, so it must not fire there — it would be a
@@ -3149,6 +2893,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-dev-shell",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3289,6 +3034,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn parallel_admissions_keep_their_captured_image_source_contexts() {
+        let _home = isolated_home();
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"parallel admission image");
         let configured = std::path::Path::new("/nonexistent/mvm-images");
@@ -3329,6 +3075,7 @@ pub(crate) mod admit_plan_tests {
     #[cfg(not(feature = "release-channel"))]
     #[test]
     fn a_contributor_sealed_boot_with_a_configured_checkout_and_an_unmanaged_image_is_admitted() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -3351,6 +3098,7 @@ pub(crate) mod admit_plan_tests {
     /// scoped to the production tier, not to the variable.
     #[test]
     fn a_development_admission_is_not_refused_for_a_configured_local_image_checkout() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -3562,6 +3310,7 @@ allow_hosts = ["localhost:8443"]
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-shares",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3673,6 +3422,7 @@ allow_hosts = ["localhost:8443"]
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-granted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3850,6 +3600,7 @@ allow_hosts = ["localhost:8443"]
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-over-ceiling",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3921,6 +3672,7 @@ allow_hosts = ["localhost:8443"]
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-ungranted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3969,3 +3721,51 @@ mod instruction_admission_tests;
 #[cfg(test)]
 #[path = "bundle_admission_tests.rs"]
 mod bundle_admission_tests;
+
+#[cfg(test)]
+mod tool_decision_binding_tests {
+    use super::services_with_tool_decision;
+    use mvm_contract::policy::tool_rules::ToolRules;
+    use mvm_contract::protocol::broker::ServiceId;
+    use mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE;
+
+    fn tool_decision() -> ServiceId {
+        ServiceId::parse(HOST_TOOL_SERVICE).unwrap()
+    }
+
+    fn rules_with_a_tool() -> ToolRules {
+        ToolRules {
+            allow: vec!["read_file".into()],
+            ..ToolRules::default()
+        }
+    }
+
+    /// A plan that declares tools gets the tool-decision binding, once,
+    /// whether or not the caller already bound it. The deleted `!` survived
+    /// because nothing checked that the binding is *added* when absent, only
+    /// that a present one is not duplicated; the mutant keeps the second
+    /// promise while breaking the first, leaving every tool call unbound and
+    /// refused by the broker's binding gate.
+    #[test]
+    fn declaring_tools_binds_the_tool_decision_service_exactly_once() {
+        let other = ServiceId::parse("host.other.v1").unwrap();
+        let bound = services_with_tool_decision(vec![other.clone()], &rules_with_a_tool());
+        assert_eq!(bound, vec![other.clone(), tool_decision()]);
+
+        let already_bound =
+            services_with_tool_decision(vec![tool_decision(), other.clone()], &rules_with_a_tool());
+        assert_eq!(already_bound, vec![tool_decision(), other]);
+    }
+
+    /// Without tools there is nothing to decide, so no binding is minted and
+    /// the caller's services come back untouched.
+    #[test]
+    fn a_plan_without_tools_keeps_its_services_unchanged() {
+        let other = ServiceId::parse("host.other.v1").unwrap();
+        assert_eq!(
+            services_with_tool_decision(vec![other.clone()], &ToolRules::default()),
+            vec![other]
+        );
+        assert!(services_with_tool_decision(Vec::new(), &ToolRules::default()).is_empty());
+    }
+}

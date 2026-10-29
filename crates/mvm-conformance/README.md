@@ -26,6 +26,7 @@ scenario or reports a deliberate capability skip. Important tags include:
 | `@live` | Boots or reaches a real external/runtime resource; opt in explicitly |
 | `@ci_live` | Narrow live lifecycle the merge queue selects with `MVM_BDD_ONLY_TAG=ci_live` |
 | Firecracker capability tags | Require usable KVM and Firecracker |
+| `@runtime_candidate` | Creates portable artifacts with the exact signed candidate supplied to the release workflow |
 
 Each scenario receives isolated `MVM_HOME`, Cargo state, and process cleanup so
 parallel runs cannot reuse a developer's machines or credentials. Source
@@ -48,3 +49,13 @@ target with the repository's `just bdd::run` workflow or
 `cargo test -p mvm-conformance --features bdd`. Live microVM scenarios must run
 only in their approved environment and must never be silently substituted for
 hermetic coverage.
+
+A name, input-glob, tag, or shard selection that matches no scenarios fails
+with a diagnostic instead of reporting green validation. If selected scenarios
+are all intentionally capability-gated, the existing clean-skip exit status
+remains, but the runner explicitly reports that no scenarios executed and the
+run is not passing execution evidence. `MVM_BDD_STRICT_SKIPS` and
+`MVM_BDD_ALLOWED_SKIPS` still determine which reported skips a lane tolerates.
+Consumers requiring a real witness must check for a nonzero executed count.
+Name and tag filters narrow the existing shard and capability gates; they do
+not replace them.

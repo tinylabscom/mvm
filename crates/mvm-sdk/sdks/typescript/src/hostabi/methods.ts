@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 7;
+export const ABI_MINOR = 10;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -17,6 +17,30 @@ export interface HostAbiMethod {
   classification: Classification;
   summary: string;
 }
+
+/**
+ * Lists complete local checkpoint metadata in deterministic ID
+ * order.
+ */
+export const CHECKPOINT_LIST = "checkpoint.list";
+
+/**
+ * Export a host-signed v0 identity report, not measured-boot
+ * evidence.
+ */
+export const ATTESTATION_EXPORT = "attestation.export";
+
+/** Verify a bounded report file under explicitly selected trust. */
+export const ATTESTATION_VERIFY = "attestation.verify";
+
+/** Inspect public identity metadata, initializing identity if needed. */
+export const ATTESTATION_STATUS = "attestation.status";
+
+/** Apply bounded signed revocation files through the canonical store. */
+export const IMAGE_REVOCATIONS_UPDATE = "image_revocations.update";
+
+/** Reauthenticate the applied image-set revocation list. */
+export const IMAGE_REVOCATIONS_STATUS = "image_revocations.status";
 
 /** Inspect a built manifest slot and its optional snapshot. */
 export const MANIFEST_INFO = "manifest.info";
@@ -181,6 +205,12 @@ export const TELEMETRY_RECORDS = "telemetry.records";
 export const TELEMETRY_STATUS = "telemetry.status";
 
 export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
+  "checkpoint.list": { key: "checkpoint_list", classification: "prod_safe", summary: "Lists complete local checkpoint metadata in deterministic ID order." },
+  "attestation.export": { key: "attestation_export", classification: "prod_safe", summary: "Export a host-signed v0 identity report, not measured-boot evidence." },
+  "attestation.verify": { key: "attestation_verify", classification: "prod_safe", summary: "Verify a bounded report file under explicitly selected trust." },
+  "attestation.status": { key: "attestation_status", classification: "prod_safe", summary: "Inspect public identity metadata, initializing identity if needed." },
+  "image_revocations.update": { key: "image_revocations_update", classification: "prod_safe", summary: "Apply bounded signed revocation files through the canonical store." },
+  "image_revocations.status": { key: "image_revocations_status", classification: "prod_safe", summary: "Reauthenticate the applied image-set revocation list." },
   "manifest.info": { key: "manifest_info", classification: "prod_safe", summary: "Inspect a built manifest slot and its optional snapshot." },
   "manifest.list": { key: "manifest_list", classification: "prod_safe", summary: "List built manifest slots with orphan and tag-intersection filters." },
   "manifest.verify": { key: "manifest_verify", classification: "prod_safe", summary: "Verify built manifest artifact checksums; signature verification is refused." },

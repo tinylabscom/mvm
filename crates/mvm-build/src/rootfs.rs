@@ -30,15 +30,7 @@ const DEFAULT_GUEST_OUTPUT_DEVICE: &str = "/dev/vdc";
 /// guest binary shares this string with the host-side writer.
 pub const STAGE0_WORK_EXT4_LABEL: &str = "mvm-work";
 
-/// ext4 volume label on the persistent Stage 0 Nix store image.
-///
-/// The store used to be located by device letter, which couples it to how many
-/// block devices the backend happens to attach ahead of it. Adding one drive —
-/// the FlowMux identity disk — shifted every device behind it, so the guest
-/// mounted a 32 KiB identity image as its Nix store, failed, and silently fell
-/// back to a RAM-backed tmpfs that cannot hold a kernel source tree. The build
-/// then died thousands of lines later on `No space left on device`.
-pub const STAGE0_NIX_STORE_EXT4_LABEL: &str = "mvm-nix-store";
+pub use mvm_builder_guest::stage0_guest::STAGE0_NIX_STORE_EXT4_LABEL;
 
 /// Inputs for [`materialize_ext4`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,6 +362,9 @@ impl BuilderVmRoute {
 
 #[derive(Debug, Error)]
 pub enum RootfsError {
+    #[error("{path} is not an ext4 image with a 1, 2 or 4 KiB block size; it cannot be sealed")]
+    UnsealableImage { path: PathBuf },
+
     #[error("unpacked root is not a directory: {0}")]
     UnpackedRootNotDirectory(PathBuf),
 
@@ -1060,14 +1055,19 @@ fn emit_verity_sidecars_for_image(
     image_path: &std::path::Path,
     image: &[u8],
 ) -> Result<String, RootfsError> {
-    // dm-verity, computed in-process (no `veritysetup`). The block sizes and
-    // salt must match the pinned `mvm-verity-init` / `veritysetup` contract or
-    // the guest will panic at boot with a mismatched hash-tree geometry.
+    // dm-verity, computed in-process (no `veritysetup`). The guest agent
+    // builds its table at the image's own ext4 block size, read from the
+    // superblock, with 4 KiB hash blocks and a zero salt, so the tree is
+    // formatted at exactly that geometry. An image the pure writer produced
+    // uses the pinned 4 KiB data block; a Nix-built one may use 1 KiB.
+    let data_block_size = ext4_block_size(image).ok_or_else(|| RootfsError::UnsealableImage {
+        path: image_path.to_path_buf(),
+    })?;
     let salt = [0u8; 32];
     let verity = mvm_fs::ext4::verity::format(
         image,
         &salt,
-        mvm_fs::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE as usize,
+        data_block_size,
         mvm_fs::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE as usize,
     );
     let dir = image_path
@@ -1081,6 +1081,32 @@ fn emit_verity_sidecars_for_image(
         format!("{root_hex}\n").as_bytes(),
     )?;
     Ok(root_hex)
+}
+
+/// The logical block size an ext4 superblock declares: 1, 2 or 4 KiB, or
+/// `None` when `image` carries no ext4 superblock, declares another size, or
+/// is not a whole number of its blocks.
+fn ext4_block_size(image: &[u8]) -> Option<usize> {
+    const SUPERBLOCK: usize = 1024;
+    const LOG_BLOCK_SIZE: usize = SUPERBLOCK + 24;
+    const MAGIC: usize = SUPERBLOCK + 56;
+    let magic = u16::from_le_bytes(image.get(MAGIC..MAGIC + 2)?.try_into().ok()?);
+    if magic != 0xEF53 {
+        return None;
+    }
+    let log = u32::from_le_bytes(
+        image
+            .get(LOG_BLOCK_SIZE..LOG_BLOCK_SIZE + 4)?
+            .try_into()
+            .ok()?,
+    );
+    let size = match log {
+        0 => 1024,
+        1 => 2048,
+        2 => 4096,
+        _ => return None,
+    };
+    image.len().is_multiple_of(size).then_some(size)
 }
 
 fn shell_single_quote_escape(s: &str) -> String {
@@ -1266,6 +1292,35 @@ mod tests {
             std::fs::read_to_string(out.path().join("rootfs.roothash")).unwrap(),
             format!("{root_hex}\n")
         );
+    }
+
+    fn superblock_image(log_block_size: u32, len: usize) -> Vec<u8> {
+        let mut image = vec![0u8; len];
+        image[1024 + 24..1024 + 28].copy_from_slice(&log_block_size.to_le_bytes());
+        image[1024 + 56..1024 + 58].copy_from_slice(&0xEF53u16.to_le_bytes());
+        image
+    }
+
+    #[test]
+    fn a_one_kib_image_is_sealed_at_the_block_size_the_guest_reads() {
+        let out = tempfile::tempdir().unwrap();
+        let path = out.path().join("rootfs.ext4");
+        let image = superblock_image(0, 64 * 1024);
+        emit_verity_sidecars_for_image(&path, &image).expect("seal");
+        let tree = std::fs::read(out.path().join("rootfs.verity")).unwrap();
+        let one_kib = mvm_fs::ext4::verity::format(&image, &[0u8; 32], 1024, 4096);
+        assert_eq!(tree, one_kib.hash_tree);
+    }
+
+    #[test]
+    fn an_image_without_an_ext4_superblock_is_not_sealed() {
+        let out = tempfile::tempdir().unwrap();
+        let path = out.path().join("rootfs.ext4");
+        let err = emit_verity_sidecars_for_image(&path, &vec![0u8; 8192]).unwrap_err();
+        assert!(matches!(err, RootfsError::UnsealableImage { .. }), "{err}");
+        assert!(ext4_block_size(&superblock_image(3, 16384)).is_none());
+        assert!(ext4_block_size(&superblock_image(2, 4096 + 1024)).is_none());
+        assert_eq!(ext4_block_size(&superblock_image(1, 8192)), Some(2048));
     }
 
     #[test]

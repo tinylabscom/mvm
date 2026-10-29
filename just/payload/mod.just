@@ -1,8 +1,13 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list payload
+
 # The Linux host binaries are built with it — by a release `cargo build`, or by an `mvmctl` built without them: the
 # exact zig from the `ziglang` PyPI package, the musl and glibc rust targets
-# (glibc for the guest shared objects `mvmctl build guest-bins` packages), and
+# (glibc for the guest shared objects `mvmctl dev guest-bins` packages), and
 # the pinned cargo-zigbuild. Homebrew's `zig` drifts to newer, incompatible releases
 # (fails downstream with `CacheCheckFailed`); the `ziglang`-installed zig is
 # auto-detected instead. Run once per machine (or after a toolchain pin bump).

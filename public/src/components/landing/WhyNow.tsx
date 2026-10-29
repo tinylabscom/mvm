@@ -1,25 +1,19 @@
 import { Reveal } from "./primitives/Reveal";
 import { Section } from "./primitives/Section";
 
-// The problem narrative, per the one-pager: AI is proliferating and
-// exploits are growing alongside it; teams want to lean on agents harder
-// but fear going hands-off, because the non-determinism that makes agents
-// useful is exactly what makes them dangerous. This is the emotional core
-// of the page — the sections around it supply the mechanism (demo,
-// boundary, claims). Kept qualitative on purpose: no third-party breach
-// stats, no regulator names.
+// Explain the workload boundary before introducing execution plans.
 const SHIFTS = [
   {
-    label: "non-deterministic",
-    body: "LLMs don't do the same thing twice. The creativity that makes agents useful is exactly what makes them dangerous.",
+    label: "AI agents",
+    body: "Agents write code and call tools. Run that code in a microVM rather than directly on your host.",
   },
   {
-    label: "hands-off",
-    body: "Teams want to lean on agents harder — and fear what happens when nobody is watching.",
+    label: "Customer code",
+    body: "Give each customer's workload its own kernel instead of sharing the host kernel across tenants.",
   },
   {
-    label: "exploitable",
-    body: "Exploits and CVEs are growing as fast as the AI that ships the code.",
+    label: "Build jobs",
+    body: "Run build tools and dependencies in a microVM without giving them direct access to your host.",
   },
 ];
 
@@ -31,8 +25,8 @@ export function WhyNow() {
     <Section id="why-now" rule className="bg-raised">
       <Reveal>
         <h2 className="lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl">
-          ai is proliferating.{" "}
-          <span className="text-accent-2">so are exploits.</span>
+          Run code you didn&rsquo;t write{" "}
+          <span className="text-accent-2">without sharing your kernel.</span>
         </h2>
       </Reveal>
 
@@ -57,20 +51,9 @@ export function WhyNow() {
       </div>
 
       <Reveal delay={160}>
-        {/* No max-width cap: the first line needs the section's full
-            column to stay on one line at desktop sizes. */}
-        <p
-          className="font-display tracking-tight text-lg font-semibold leading-snug text-title sm:text-2xl"
-          style={{ marginTop: "2.5rem" }}
-        >
-          With MVM{" "}
-          <span className="text-accent-2">
-            Security first isn&rsquo;t a tier, it&rsquo;s the default.
-          </span>
-        </p>
         <div
           className="flex flex-wrap gap-x-6 gap-y-2"
-          style={{ marginTop: "1.5rem" }}
+          style={{ marginTop: "2.5rem" }}
         >
           <a
             href={`${base}security/threat-model/`}

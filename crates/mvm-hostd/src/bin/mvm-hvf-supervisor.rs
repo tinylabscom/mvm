@@ -17,6 +17,229 @@ fn main() {
     std::process::exit(1);
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const CONFIG_LIMIT: usize = 8 * 1024 * 1024;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const REPLAY_HINT: &str = "MVM_HVF_LEGACY_CONFIG_REPLAY";
+
+/// Mapping only; the descriptor remains independently owned.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+struct ConfigMapping {
+    address: *mut libc::c_void,
+    len: usize,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl ConfigMapping {
+    fn map(fd: i32, len: usize, protection: i32) -> std::io::Result<Self> {
+        // SAFETY: no fixed address; caller checked positive bounded length and
+        // owns/borrows a descriptor supporting the requested access.
+        let address = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                protection,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        if address == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self { address, len })
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl Drop for ConfigMapping {
+    fn drop(&mut self) {
+        // SAFETY: this object exclusively owns this successful mapping.
+        unsafe {
+            libc::munmap(self.address, self.len);
+        }
+    }
+}
+
+/// Only an EMPTY shared-memory name can exist; all writes follow unlink.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+struct EmptyReplayName(Option<std::ffi::CString>);
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl Drop for EmptyReplayName {
+    fn drop(&mut self) {
+        // SAFETY: own exclusive random name; unlink never follows a disk path.
+        if let Some(name) = &self.0 {
+            unsafe {
+                libc::shm_unlink(name.as_ptr());
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn legacy_replay(raw: &[u8]) -> anyhow::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    anyhow::ensure!(
+        !raw.is_empty() && raw.len() <= CONFIG_LIMIT,
+        "config exceeds replay bound"
+    );
+    let name = std::ffi::CString::new(format!("/mvm-cfg-{:016x}", rand::random::<u64>()))?;
+    // SAFETY: exclusive EMPTY object; no configuration has been written.
+    let writable = unsafe {
+        libc::shm_open(
+            name.as_ptr(),
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o600,
+        )
+    };
+    anyhow::ensure!(writable >= 0, "could not create anonymous config replay");
+    let mut name = EmptyReplayName(Some(name));
+    // SAFETY: newly created descriptor has no other Rust owner.
+    let writable = unsafe { std::fs::File::from_raw_fd(writable) };
+    // SAFETY: acquire the read-only handle while the exclusively owned name is EMPTY.
+    let readonly = unsafe {
+        libc::shm_open(
+            name.0.as_ref().expect("owned empty name").as_ptr(),
+            libc::O_RDONLY,
+            0,
+        )
+    };
+    anyhow::ensure!(readonly >= 0, "could not open read-only config replay");
+    // SAFETY: successful shm_open transferred this descriptor exclusively.
+    let readonly = unsafe { std::fs::File::from_raw_fd(readonly) };
+    // SAFETY: the name is ours; failure occurs BEFORE any secret bytes are written.
+    anyhow::ensure!(
+        unsafe { libc::shm_unlink(name.0.as_ref().expect("owned empty name").as_ptr()) } == 0,
+        "could not unlink empty config replay"
+    );
+    // Disarm immediately: never unlink a later unrelated object at that name.
+    name.0.take();
+    drop(name);
+    writable.set_len(u64::try_from(raw.len())?)?;
+    let mapping = ConfigMapping::map(
+        writable.as_raw_fd(),
+        raw.len(),
+        libc::PROT_READ | libc::PROT_WRITE,
+    )?;
+    // SAFETY: live writable mapping exactly raw.len(); buffers do not overlap.
+    unsafe {
+        std::ptr::copy_nonoverlapping(raw.as_ptr(), mapping.address.cast::<u8>(), raw.len());
+    }
+    drop(mapping);
+    drop(writable);
+    // POSIX shm descriptors start CLOEXEC; explicitly enforce it for this temporary.
+    // SAFETY: the read-only descriptor is live and owned.
+    anyhow::ensure!(
+        unsafe { libc::fcntl(readonly.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == 0,
+        "could not protect config replay descriptor"
+    );
+    Ok(readonly)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn read_config_input(fd: i32, hint: Option<&std::ffi::OsStr>) -> anyhow::Result<String> {
+    use anyhow::Context;
+    if let Some(hint) = hint {
+        let text = hint
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid config replay hint"))?;
+        let length = text
+            .strip_prefix("shm-v1:")
+            .ok_or_else(|| anyhow::anyhow!("invalid config replay format"))?;
+        let len: usize = length
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid config replay length"))?;
+        anyhow::ensure!(
+            len > 0 && len <= CONFIG_LIMIT && length == len.to_string(),
+            "invalid config replay bound"
+        );
+        // SAFETY: metadata and access inspection only; no ownership conversion.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: caller supplies a live borrowed input descriptor.
+        let flags = unsafe {
+            if libc::fstat(fd, &mut stat) != 0 {
+                -1
+            } else {
+                libc::fcntl(fd, libc::F_GETFL)
+            }
+        };
+        // Darwin pshm_stat has permission bits, no S_IFREG file type, and no
+        // links. The hint remains untrusted; normal JSON/admission checks follow.
+        // SAFETY: sysconf/geteuid only inspect process/platform state.
+        let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })?;
+        anyhow::ensure!(page > 0, "invalid config replay page size");
+        let rounded = len
+            .checked_add(page - 1)
+            .context("config replay size overflow")?
+            / page
+            * page;
+        anyhow::ensure!(
+            flags >= 0
+                && flags & libc::O_ACCMODE == libc::O_RDONLY
+                && stat.st_mode & libc::S_IFMT == 0
+                && stat.st_mode & 0o777 == 0o600
+                && stat.st_nlink == 0
+                && stat.st_uid == unsafe { libc::geteuid() }
+                && usize::try_from(stat.st_size)? == rounded,
+            "invalid anonymous config replay descriptor"
+        );
+        let mapping = ConfigMapping::map(fd, len, libc::PROT_READ)?;
+        // SAFETY: read-only mapping remains live for this bounded copy.
+        let bytes = unsafe { std::slice::from_raw_parts(mapping.address.cast::<u8>(), len) };
+        return String::from_utf8(bytes.to_vec())
+            .map_err(|_| anyhow::anyhow!("config replay is not UTF-8"));
+    }
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let available = (CONFIG_LIMIT + 1 - bytes.len()).min(buffer.len());
+        // SAFETY: borrowed descriptor; output is a live, exclusive buffer.
+        let count = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), available) };
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.into());
+        }
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..usize::try_from(count)?]);
+        anyhow::ensure!(
+            bytes.len() <= CONFIG_LIMIT,
+            "supervisor config exceeds 8 MiB"
+        );
+    }
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("supervisor config is not UTF-8"))
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[derive(Clone, Copy)]
+enum StartupMode {
+    Legacy,
+    Checked,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn startup_mode(
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+) -> anyhow::Result<StartupMode> {
+    if cfg.boot_image_fds.is_some() || cfg.kernel_fd.is_some() || cfg.caller_registration.is_some()
+    {
+        anyhow::ensure!(
+            cfg.boot_image_fds.is_some()
+                && cfg.kernel_fd.is_some()
+                && cfg.caller_registration.is_some(),
+            "incomplete checked boot cannot use legacy startup"
+        );
+        Ok(StartupMode::Checked)
+    } else {
+        Ok(StartupMode::Legacy)
+    }
+}
+
 /// Ad-hoc entitlement applied at first launch — `Hypervisor.framework` rejects an
 /// unsigned process. Hypervisor-only — no virtualization entitlement.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -89,10 +312,12 @@ fn record_signed_marker(exe: &std::path::Path) {
 /// serializes concurrent launches (codesign --force rewrites the shared binary
 /// in place). Mirrors the libkrun supervisor's `ensure_self_signed`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn ensure_self_signed() {
+fn ensure_self_signed(diagnostics: &mut mvm_vmm::host::hvf_supervisor::StartupReporter) {
+    use mvm_vmm::host::hvf_supervisor::StartupStage;
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
+    diagnostics.stage(StartupStage::SignCheck);
     if std::env::var("MVM_HVF_SIGNED").as_deref() == Ok("1") {
         return;
     }
@@ -111,6 +336,7 @@ fn ensure_self_signed() {
         return;
     }
 
+    diagnostics.stage(StartupStage::SigningLock);
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -125,6 +351,7 @@ fn ensure_self_signed() {
     }
 
     if !exe_has_hypervisor_entitlement(&exe) {
+        diagnostics.stage(StartupStage::Signing);
         let ent = std::env::temp_dir().join("mvm-hvf-supervisor-entitlements.plist");
         if std::fs::write(&ent, HVF_ENTITLEMENTS_PLIST).is_err() {
             return;
@@ -150,10 +377,13 @@ fn ensure_self_signed() {
     }
     drop(lock);
 
-    let err = mvm_core::env_hygiene::helper_command(&exe)
+    diagnostics.stage(StartupStage::Reexec);
+    let mut command = mvm_core::env_hygiene::helper_command(&exe);
+    command
         .args(std::env::args_os().skip(1))
-        .env("MVM_HVF_SIGNED", "1")
-        .exec();
+        .env("MVM_HVF_SIGNED", "1");
+    diagnostics.configure_reexec(&mut command);
+    let err = command.exec();
     eprintln!("mvm-hvf-supervisor: re-exec after signing failed: {err}");
     std::process::exit(1);
 }
@@ -162,6 +392,93 @@ fn ensure_self_signed() {
 mod tests {
     use super::{record_signed_marker, signed_marker_matches};
     use std::io::Write;
+
+    #[test]
+    fn legacy_replay_maps_exact_bytes_readonly_without_touching_stdin() {
+        use std::os::fd::AsRawFd;
+        let raw = b" {\"nonnative\":\"fixture\"}\n";
+        let replay = super::legacy_replay(raw).unwrap();
+        let fd = replay.as_raw_fd();
+        // SAFETY: inspect the private unit-owned descriptor, never global FD0.
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        let hint = std::ffi::OsString::from(format!("shm-v1:{}", raw.len()));
+        assert_eq!(
+            super::read_config_input(fd, Some(&hint))
+                .unwrap()
+                .as_bytes(),
+            raw
+        );
+        assert!(replay.set_len(0).is_err());
+        assert!(
+            super::ConfigMapping::map(fd, raw.len(), libc::PROT_READ | libc::PROT_WRITE).is_err()
+        );
+        assert_eq!(
+            super::read_config_input(fd, Some(&hint))
+                .unwrap()
+                .as_bytes(),
+            raw
+        );
+        // Omitted hint must fail, not pretend POSIX shm supports ordinary read.
+        assert!(super::read_config_input(fd, None).is_err());
+    }
+
+    #[test]
+    fn replay_hints_and_partial_checked_configs_fail_closed() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStringExt;
+        let replay = super::legacy_replay(b"{}").unwrap();
+        for hint in [
+            "",
+            "2",
+            "shm-v1:0",
+            "shm-v1:02",
+            "shm-v1:8388609",
+            "shm-v2:2",
+        ] {
+            assert!(
+                super::read_config_input(replay.as_raw_fd(), Some(std::ffi::OsStr::new(hint)))
+                    .is_err()
+            );
+        }
+        assert!(
+            super::read_config_input(
+                replay.as_raw_fd(),
+                Some(&std::ffi::OsString::from_vec(vec![0xff]))
+            )
+            .is_err()
+        );
+        assert!(super::legacy_replay(&[]).is_err());
+        assert!(super::legacy_replay(&vec![0; super::CONFIG_LIMIT + 1]).is_err());
+        let mut cfg: mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig =
+            serde_json::from_value(serde_json::json!({
+                "console_capture":"encrypted", "vm_name":"shape-only", "kernel":"/unused",
+                "timeout_secs":0,
+                "console_log":"/unused", "pid_file":"/unused", "workload_exit":"/unused"
+            }))
+            .unwrap();
+        assert!(matches!(
+            super::startup_mode(&cfg).unwrap(),
+            super::StartupMode::Legacy
+        ));
+        cfg.kernel_fd = Some(9);
+        assert!(super::startup_mode(&cfg).is_err());
+        cfg.boot_image_fds = Some(mvm_vmm::host::hvf_supervisor::BootImageFds {
+            rootfs: 10,
+            verity: 11,
+            metadata: 12,
+            root_hash: 13,
+        });
+        assert!(
+            super::startup_mode(&cfg).is_err(),
+            "missing actual registration cannot downgrade"
+        );
+        cfg.kernel_fd = None;
+        assert!(super::startup_mode(&cfg).is_err());
+        // Raw config shape only: no original caller/VM/checked owner is minted.
+    }
 
     #[test]
     fn signed_marker_is_bound_to_the_executable_metadata() {
@@ -225,16 +542,76 @@ fn restore_image_from(
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+/// The validated state directory, once startup has established it. A failure
+/// before this point has nowhere private to be recorded.
+static FAILURE_RECORD_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn main() -> anyhow::Result<()> {
-    use std::io::Read;
+    let outcome = run();
+    if let (Err(error), Some(dir)) = (&outcome, FAILURE_RECORD_DIR.get()) {
+        mvm_vmm::host::hvf_supervisor::failure_record::record(dir, error);
+    }
+    outcome
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn run() -> anyhow::Result<()> {
+    use std::os::fd::AsRawFd;
     use std::time::Duration;
 
     use anyhow::Context;
-    use mvm_vmm::host::hvf_supervisor::{HvfShutdownTimingRecord, HvfSupervisorConfig};
+    use mvm_vmm::host::hvf_supervisor::{
+        HvfShutdownTimingRecord, HvfSupervisorConfig, StartupReporter, StartupStage,
+    };
 
-    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
-    // Sign + re-exec before anything else (preserves the stdin config pipe).
-    ensure_self_signed();
+    // No opens or descriptor ownership conversions precede bounded parsing.
+    // A replay hint selects only input mechanics, NEVER startup authority.
+    let replay_hint = std::env::var_os(REPLAY_HINT);
+    let raw = read_config_input(libc::STDIN_FILENO, replay_hint.as_deref())?;
+    if raw.is_empty() && replay_hint.is_none() {
+        mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
+    }
+    anyhow::ensure!(
+        !mvm_vmm::host::helper_contract::probe_requested(std::env::args()),
+        "a contract probe cannot carry boot configuration"
+    );
+    let cfg: HvfSupervisorConfig =
+        serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
+    let mode = startup_mode(&cfg)?;
+    let mut diagnostics;
+    let files = match mode {
+        StartupMode::Checked => {
+            // Complete preflight precedes FIRST ownership conversion.
+            let files = mvm_hostd::supervisor::caller_registration::adopt_startup_files(&cfg)?;
+            // SAFETY: preflight established the distinct inherited diagnostics
+            // pipe; its sole ownership is transferred by the actual launcher.
+            diagnostics = unsafe { StartupReporter::inherited() };
+            mvm_vmm::host::codesign::try_ensure_signed().map_err(anyhow::Error::msg)?;
+            files
+        }
+        StartupMode::Legacy => {
+            if replay_hint.is_none() {
+                let replay = legacy_replay(raw.as_bytes())?;
+                // SAFETY: single-threaded startup replaces only standard input.
+                anyhow::ensure!(
+                    unsafe { libc::dup2(replay.as_raw_fd(), libc::STDIN_FILENO) } >= 0,
+                    "could not install read-only config replay"
+                );
+                drop(replay);
+                // SAFETY: no worker threads or foreign runtime have started.
+                // The inherited value is a locator/length only, never a secret.
+                unsafe {
+                    std::env::set_var(REPLAY_HINT, format!("shm-v1:{}", raw.len()));
+                }
+            }
+            // SAFETY: unchanged legacy launcher diagnostics ownership contract.
+            diagnostics = unsafe { StartupReporter::inherited() };
+            // Body unchanged: only legacy can sign/reexec with RAM-backed FD0.
+            ensure_self_signed(&mut diagnostics);
+            mvm_hostd::supervisor::caller_registration::adopt_startup_files(&cfg)?
+        }
+    };
 
     // Graceful stop: SIGTERM/SIGINT set STOP, which the boot watchdog observes and
     // force-exits the guest (then we flush the console + drop the PID file).
@@ -251,34 +628,49 @@ fn main() -> anyhow::Result<()> {
         libc::signal(libc::SIGUSR2, resume_h);
     }
 
-    let mut raw = String::new();
-    std::io::stdin()
-        .read_to_string(&mut raw)
-        .context("read HvfSupervisorConfig from stdin")?;
-    let cfg: HvfSupervisorConfig =
-        serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
-    if let Some(state_dir) = cfg.pid_file.parent() {
-        let _ = std::fs::remove_file(mvm_vmm::host::hvf_supervisor::shutdown_timing_path(
-            state_dir,
-        ));
-    }
-
+    diagnostics.stage(StartupStage::ConfigRead);
+    diagnostics.stage(StartupStage::ConfigParse);
+    let registered_startup = mvm_hostd::supervisor::caller_registration::prepare_startup(&cfg)?;
+    let (held_kernel, mut checked_images, registered_startup) = match mode {
+        StartupMode::Checked => {
+            let startup =
+                registered_startup.context("checked boot requires actual consumed caller")?;
+            let (launch, kernel, images) = files.bind(startup.launch, &cfg)?.into_startup();
+            (
+                Some(kernel),
+                Some(images),
+                Some(
+                    mvm_hostd::supervisor::caller_registration::PreparedCallerStartup {
+                        launch,
+                        initramfs: startup.initramfs,
+                    },
+                ),
+            )
+        }
+        StartupMode::Legacy => (files.into_legacy_kernel()?, None, registered_startup),
+    };
+    anyhow::ensure!(
+        held_kernel.is_none() || cfg.restore_descriptors()?.is_none(),
+        "canonical kernel descriptor cannot enter a restore/warm boot"
+    );
     use mvm_vmm::host::hvf_supervisor::ProtectedSupervisorStatus as CaptureStatus;
     let state_dir = cfg
         .pid_file
         .parent()
         .context("supervisor state directory missing")?;
-    CaptureStatus::Starting.publish(state_dir)?;
+    mvm_core::naming::validate_vm_name(&cfg.vm_name)?;
+    anyhow::ensure!(
+        state_dir == mvm_core::config::vm_state_dir(&cfg.vm_name),
+        "supervisor instance does not match its managed state directory"
+    );
     // Only a planless resident standby may be reassigned. An admitted
     // workload already has bounds tied to its original owner.
     if cfg.handoff_socket.is_some() && (cfg.plan.is_some() || !cfg.vsock) {
-        CaptureStatus::UnsafeHandoffRefused.publish(state_dir)?;
         anyhow::bail!("protected handoff requires a planless vsock standby");
     }
-    if let Some(path) = &cfg.pause_state {
-        let _ = std::fs::remove_file(path);
-    }
 
+    let _ = FAILURE_RECORD_DIR.set(state_dir.to_path_buf());
+    diagnostics.stage(StartupStage::StartupInputs);
     // Adopt the verified saved state before anything else can open a file, so
     // no descriptor number is reused out from under it.
     let restore = restore_image_from(&cfg)?;
@@ -286,27 +678,41 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .and(cfg.pid_file.parent())
         .map(mvm_vmm::host::hvf_supervisor::restore_ready_path);
-
-    if !cfg.kernel.is_file() {
-        anyhow::bail!("kernel {} is not a readable file", cfg.kernel.display());
+    let stop_control = mvm_hostd::supervisor::hvf_stop::StopControl::start(&cfg.vm_name, &STOP)?;
+    let _ = std::fs::remove_file(mvm_vmm::host::hvf_supervisor::shutdown_timing_path(
+        state_dir,
+    ));
+    diagnostics.stage(StartupStage::StatusPublish);
+    CaptureStatus::Starting.publish(state_dir)?;
+    if let Some(path) = &cfg.pause_state {
+        let _ = std::fs::remove_file(path);
     }
-    let initramfs = cfg
-        .initramfs
-        .as_ref()
-        .map(std::fs::read)
-        .transpose()
-        .context("read initramfs")?;
+
+    let (registered_launch, initramfs) = match registered_startup {
+        Some(startup) => (Some(startup.launch), startup.initramfs),
+        None => (
+            None,
+            mvm_hostd::supervisor::caller_registration::load_boot_inputs(&cfg)?,
+        ),
+    };
     // A VM that outlives its launcher owns its egress endpoint *here*, because
     // the endpoint self-reaps when orphaned and this process is the only one
     // whose life is the VM's. It has to run before the disks below: the
     // identity drive it writes is one of them, and the guest refuses to boot if
     // its egress proxy is unbound.
-    if let Some(endpoint) = cfg.builder_egress_endpoint.as_ref()
-        && let Err(e) = spawn_owned_builder_endpoint(endpoint)
-    {
-        eprintln!("supervisor: refusing to boot a builder with no egress endpoint: {e:#}");
-        std::process::exit(8);
-    }
+    let mut builder_endpoint = match cfg.builder_egress_endpoint.as_ref() {
+        Some(endpoint) => match spawn_owned_builder_endpoint(endpoint) {
+            Ok(owner) => Some(owner),
+            Err(error) => {
+                // The typed spawn error retains any uncertain Child. Dropping
+                // it attempts bounded owned cleanup but removes no evidence.
+                drop(error);
+                eprintln!("supervisor: HVF_BUILDER_ENDPOINT_SETUP_FAILED");
+                std::process::exit(8);
+            }
+        },
+        None => None,
+    };
 
     // Build the virtio-blk backings in `/dev/vda`… order. A read-only disk is
     // file-served (hypervisor-enforced RO, no RAM cost); a read-write disk is
@@ -314,8 +720,16 @@ fn main() -> anyhow::Result<()> {
     // its writes are dropped on exit (a workload rootfs that must not mutate its
     // shared base image).
     let mut disks = Vec::with_capacity(cfg.disks.len());
-    for d in &cfg.disks {
-        let img = if d.read_only {
+    let mut observed_disks = Vec::new();
+    for (index, d) in cfg.disks.iter().enumerate() {
+        let held = checked_images
+            .as_mut()
+            .map(|images| images.take_disk(index))
+            .transpose()?
+            .flatten();
+        let img = if let Some(file) = held {
+            mvm_runtime::backends::hvf::DiskImage::readonly_file(file)?
+        } else if d.read_only {
             mvm_runtime::backends::hvf::DiskImage::open(&d.path, true)
                 .with_context(|| format!("open read-only disk {}", d.path.display()))?
         } else if d.ephemeral {
@@ -326,8 +740,33 @@ fn main() -> anyhow::Result<()> {
             mvm_runtime::backends::hvf::DiskImage::open(&d.path, false)
                 .with_context(|| format!("open read-write disk {}", d.path.display()))?
         };
+        if let Some(artifact) =
+            mvm_vmm::runtime_artifacts::RuntimeArtifact::disk(d.path.clone(), &img)?
+        {
+            observed_disks.push(artifact);
+        }
         disks.push(img);
     }
+    // The loader replaces initramfs/cmdline evidence on restore using only
+    // the authenticated inherited frame, after checking selected identity.
+    let runtime_artifacts = Some(mvm_vmm::runtime_artifacts::RuntimeArtifacts {
+        kernel: None,
+        initramfs: cfg
+            .initramfs
+            .clone()
+            .zip(initramfs.as_deref())
+            .map(|(path, bytes)| mvm_vmm::runtime_artifacts::RuntimeArtifact::loaded(path, bytes))
+            .transpose()?,
+        disks: observed_disks,
+        kernel_cmdline: String::new(),
+        firecracker_drives: None,
+    });
+    let runtime_observer = mvm_vmm::runtime_artifacts::Observer::bind(
+        cfg.pid_file
+            .parent()
+            .context("supervisor state directory missing")?,
+        runtime_artifacts,
+    )?;
     // Take the exclusive store-image lock before the guest can attach the
     // image, and hold it for this process's life — which, for the persistent
     // builder that sets this, is the VM's life. A named binding, not `_`:
@@ -368,16 +807,28 @@ fn main() -> anyhow::Result<()> {
     // The timer records its timeout exit code beside the pid file. A plan-
     // bearing boot with nowhere to record it is refused rather than booted
     // unbounded — same fail-closed posture as an unauditable kill.
+    // A restored child's plan arrives over the spawn pipe: verify it before any
+    // timer or audit emitter exists, and arm only from the verified value.
+    let armed_plan = mvm_hostd::supervisor::restored_plan::plan_to_arm(
+        cfg.plan.as_ref(),
+        restore.is_some(),
+        &cfg.vm_name,
+        cfg.signing_key_path.as_deref(),
+    )
+    .map_err(|_| anyhow::anyhow!("restored child plan failed verification"))?;
     let _wall_clock = match cfg.pid_file.parent() {
         Some(vm_state_dir) => {
             let timer_inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
-                plan_json: cfg.plan.as_ref(),
+                plan_json: armed_plan.as_ref(),
                 audit_dir: cfg.audit_dir.as_deref(),
                 signing_key_path: cfg.signing_key_path.as_deref(),
                 vm_state_dir,
                 pid_file: &cfg.pid_file,
             };
-            let guard = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(timer_inputs) {
+            let guard = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
+                timer_inputs,
+                Box::new(timer_inputs.preserving_exit_killer()),
+            ) {
                 Ok(guard) => guard,
                 Err(e) => {
                     eprintln!(
@@ -389,7 +840,10 @@ fn main() -> anyhow::Result<()> {
             // A session's idle timeout, for the same reason as the wall clock:
             // no client is left to enforce it once the one that started the
             // session has exited.
-            mvm_hostd::supervisor::session_expiry::arm_for_supervisor(&timer_inputs);
+            mvm_hostd::supervisor::session_expiry::arm_for_supervisor(
+                &timer_inputs,
+                Box::new(timer_inputs.preserving_exit_killer()),
+            );
             guard
         }
         None if cfg.plan.is_some() => {
@@ -406,14 +860,9 @@ fn main() -> anyhow::Result<()> {
     // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
     // whole egress decision (claim-10 default-deny + secret substitution). The
     // supervisor only wires the relay socket paths through.
+    diagnostics.stage(StartupStage::CapturePolicy);
     use mvm_hostd::stream::protected::{CaptureAuthority, CaptureParams};
-    mvm_core::naming::validate_vm_name(&cfg.vm_name)?;
-    anyhow::ensure!(
-        state_dir == mvm_core::config::vm_state_dir(&cfg.vm_name),
-        "supervisor instance does not match its managed state directory"
-    );
-    let admitted_plan = cfg
-        .plan
+    let admitted_plan = armed_plan
         .as_ref()
         .map(mvm_hostd::supervisor::wall_clock::decode_admitted_plan)
         .transpose()
@@ -422,13 +871,12 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|plan| plan.redaction.clone())
         .unwrap_or_default();
-    let authority = match admitted_plan.as_ref() {
-        Some(plan) => CaptureAuthority::Admitted(plan),
-        None if cfg.trusted_builder_egress || cfg.handoff_socket.is_some() => {
-            CaptureAuthority::OperationalLiveOnly
-        }
-        None => anyhow::bail!("workload protected capture requires an admitted plan"),
-    };
+    let authority = CaptureAuthority::select(
+        registered_launch,
+        admitted_plan.as_ref(),
+        cfg.trusted_builder_egress || cfg.handoff_socket.is_some(),
+    )?;
+    diagnostics.stage(StartupStage::CaptureSetup);
     let (capture_owner, console_sink) =
         match mvm_hostd::stream::protected::CaptureOwner::start(CaptureParams {
             vm: &cfg.vm_name,
@@ -445,14 +893,33 @@ fn main() -> anyhow::Result<()> {
         capture_owner,
         cfg.pid_file.clone(),
         &STOP,
+        stop_control.authority(),
     )?;
     let capture_control = cfg.handoff_socket.as_ref().map(|_| capture_owner.control());
     // Only a provisioned capture owner may announce this boot.
+    diagnostics.stage(StartupStage::StatusPublish);
     CaptureStatus::Running.publish(state_dir)?;
+    diagnostics.stage(StartupStage::PidPublish);
     std::fs::write(&cfg.pid_file, std::process::id().to_string())
         .context("publish protected supervisor PID")?;
+    diagnostics.stage(StartupStage::PidPublished);
+    drop(diagnostics);
+    let kernel_boot = match held_kernel.as_ref() {
+        Some(kernel) => mvm_runtime::backends::hvf::KernelBootUntilParams::builder_descriptor(
+            kernel,
+            &cfg.kernel,
+            timeout,
+        ),
+        None => {
+            mvm_runtime::backends::hvf::KernelBootUntilParams::builder_file(&cfg.kernel, timeout)
+        }
+    };
+    let kernel_boot = match &checked_images {
+        Some(images) => kernel_boot.literal_bootargs(images.cmdline())?,
+        None => kernel_boot,
+    };
     let result = mvm_runtime::backends::hvf::boot_kernel_until(
-        mvm_runtime::backends::hvf::KernelBootUntilParams::builder_file(&cfg.kernel, timeout)
+        kernel_boot
             .initramfs(initramfs.as_deref())
             .disks(disks)
             .vsock(cfg.vsock)
@@ -481,6 +948,7 @@ fn main() -> anyhow::Result<()> {
                 cmdline: cfg.cmdline.clone(),
                 mem_mib: cfg.memory_mib,
                 vcpus: cfg.vcpus,
+                runtime_observer: Some(runtime_observer),
                 console_log: None,
                 console_sink: Some(Box::new(console_sink)),
                 pause_state: cfg.pause_state.clone(),
@@ -503,18 +971,26 @@ fn main() -> anyhow::Result<()> {
     let console_write_started = std::time::Instant::now();
     let complete = capture_owner.finish();
     let console_write = console_write_started.elapsed();
+    let endpoint_stopped = builder_endpoint
+        .as_mut()
+        .map(mvm_vmm::host::network_endpoint_spawn::OwnedEndpoint::shutdown)
+        .transpose();
     let status = if !complete {
         CaptureStatus::CaptureFailed
-    } else if result.is_err() {
+    } else if result.is_err() || endpoint_stopped.is_err() {
         CaptureStatus::BootFailed
     } else {
         CaptureStatus::Stopped
     };
-    let _ = status.publish(state_dir);
+    stop_control.publish_terminal_status(status)?;
+    anyhow::ensure!(
+        complete,
+        "HVF capture finalization failed; retain runtime evidence"
+    );
+    endpoint_stopped.context("HVF_BUILDER_ENDPOINT_SHUTDOWN_UNCONFIRMED")?;
     let r = match result {
         Ok(result) => result,
         Err(_) => {
-            let _ = std::fs::remove_file(&cfg.pid_file);
             anyhow::bail!("HVF boot failed; inspect protected supervisor status");
         }
     };
@@ -522,7 +998,7 @@ fn main() -> anyhow::Result<()> {
     // reads this) so it is durable before "stopped" is observable.
     let workload_exit_write_started = std::time::Instant::now();
     if let Some(code) = r.workload_exit_code {
-        let _ = std::fs::write(&cfg.workload_exit, code.to_string());
+        mvm_core::atomic_io::atomic_write_durable(&cfg.workload_exit, code.to_string().as_bytes())?;
     }
     let workload_exit_write = r
         .workload_exit_code
@@ -557,7 +1033,14 @@ fn main() -> anyhow::Result<()> {
             let _ = std::fs::write(path, json);
         }
     }
-    let _ = std::fs::remove_file(&cfg.pid_file);
+    match stop_control.publish_finalized()? {
+        mvm_hostd::supervisor::hvf_stop::FinalizationPublication::Durable => {}
+        mvm_hostd::supervisor::hvf_stop::FinalizationPublication::PublishedDurabilityUnconfirmed(
+            _,
+        ) => {
+            anyhow::bail!("HVF_CONTROL_PUBLICATION_DURABILITY_UNCONFIRMED");
+        }
+    }
     if let Some(code) = r.workload_exit_code {
         std::process::exit(code);
     }
@@ -580,7 +1063,7 @@ fn main() -> anyhow::Result<()> {
 /// field on `BuilderEgressEndpoint` can widen either.
 fn spawn_owned_builder_endpoint(
     endpoint: &mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<mvm_vmm::host::network_endpoint_spawn::OwnedEndpoint> {
     use anyhow::Context;
 
     let identity = mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(
@@ -597,7 +1080,7 @@ fn spawn_owned_builder_endpoint(
         })?;
 
     let policy = mvm_core::policy::network_policy::NetworkPolicy::trusted_build_egress();
-    mvm_vmm::host::network_endpoint_spawn::spawn_network_endpoint(
+    mvm_vmm::host::network_endpoint_spawn::spawn_network_endpoint_owned(
         mvm_vmm::host::network_endpoint_spawn::SubstitutionSpawnParams {
             // The builder VM's endpoint never collects telemetry: the
             // builder boots with no `mvm.telemetry=1` assertion, so there is

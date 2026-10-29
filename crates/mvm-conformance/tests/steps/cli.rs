@@ -21,7 +21,11 @@ use mvm_conformance::IsolatedHome;
 /// binaries built alongside `mvmctl` are visible during live boots.
 pub(crate) fn mvmctl_command() -> Command {
     let bin_path = mvmctl_path();
-    let mut cmd = Command::new(&bin_path);
+    command_for_binary(&bin_path)
+}
+
+pub(crate) fn command_for_binary(bin_path: &Path) -> Command {
+    let mut cmd = Command::new(bin_path);
     if let Some(bin_dir) = bin_path.parent() {
         let mut path = bin_dir.as_os_str().to_os_string();
         path.push(":");
@@ -158,6 +162,201 @@ fn scratch_working_directory(world: &mut CliWorld) {
     world.scratch_dir = Some(tempfile::tempdir().expect("create scratch working directory"));
 }
 
+#[when(expr = "I run the conformance runner with {string}")]
+fn run_conformance_runner(world: &mut CliWorld, args: String) {
+    run_conformance_child(world, &args, None);
+}
+
+#[when(expr = "I run the conformance runner with {string} excluding probe {string} by shard")]
+fn run_conformance_excluding_probe(world: &mut CliWorld, args: String, probe: String) {
+    let feature = include_str!("../../../../features/suites/s0_cli/conformance_selection.feature")
+        .lines()
+        .find_map(|line| line.strip_prefix("Feature:").map(str::trim))
+        .expect("selection fixture feature name");
+    let first = mvm_conformance::sharding::ScenarioShard::parse("0/2").expect("first shard");
+    let excluding = if first.contains(feature, None, &probe) {
+        "1/2"
+    } else {
+        "0/2"
+    };
+    run_conformance_child(world, &args, Some(excluding));
+}
+
+fn run_conformance_child(world: &mut CliWorld, args: &str, shard: Option<&str>) {
+    let home = tempfile::tempdir().expect("isolated child runner home");
+    let mut command = Command::new(std::env::current_exe().expect("conformance runner"));
+    command
+        .args(mvm_conformance::doc_examples::tokenize(args))
+        .isolated_home(home.path())
+        .env_remove("CUCUMBER_FILTER_TAGS")
+        .env_remove("MVM_BDD_ONLY_TAG")
+        .env_remove("MVM_BDD_SHARD")
+        .env_remove("MVM_BDD_LIVE")
+        .env_remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV)
+        .env_remove("MVM_BDD_STRICT_SKIPS")
+        .env_remove("MVM_BDD_ALLOWED_SKIPS")
+        .env_remove("MVM_E2E_FAILURE_MANIFEST")
+        .env_remove("MVM_E2E_FAILURE_INITIALIZED")
+        .stdin(std::process::Stdio::null());
+    if let Some(shard) = shard {
+        command.env("MVM_BDD_SHARD", shard);
+    }
+    let output = command
+        .output()
+        .expect("run the isolated conformance child");
+    world.last_run = Some(output);
+}
+
+#[then(expr = "the conformance live opt-in is present")]
+fn conformance_live_opt_in_is_present(_world: &mut CliWorld) {
+    assert!(
+        std::env::var_os("MVM_BDD_LIVE").is_some(),
+        "a live-tagged fixture executed without its opt-in"
+    );
+}
+
+#[given(expr = "a command launch plan in the scratch directory")]
+fn command_launch_plan_in_scratch(world: &mut CliWorld) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("scratch working directory");
+    let working_dir = scratch.path().join("workdir");
+    fs::create_dir(&working_dir).expect("create workload directory");
+    let plan = serde_json::json!({
+        "artifact_format_version": "1.1",
+        "entrypoint": {
+            "kind": "command",
+            "command": ["/bin/sh", "-c", "printf 'PORT=%s\\nAPP_ONLY=%s\\nENTRY_ONLY=%s\\n' \"$PORT\" \"$APP_ONLY\" \"$ENTRY_ONLY\"; pwd"],
+            "working_dir": working_dir,
+            "env": {
+                "PORT": {"kind": "literal", "value": "8081"},
+                "ENTRY_ONLY": {"kind": "literal", "value": "entrypoint"}
+            }
+        },
+        "env": {
+            "PORT": {"kind": "literal", "value": "8080"},
+            "APP_ONLY": {"kind": "literal", "value": "application"}
+        }
+    });
+    fs::write(
+        scratch.path().join("launch.json"),
+        serde_json::to_vec(&plan).expect("serialize launch plan"),
+    )
+    .expect("write command launch plan");
+}
+
+/// Execute only the generated wrapper, with controlled inputs and an empty
+/// host environment. This witnesses execution direction without booting a VM.
+#[when(expr = "I execute the guest wrapper for {string}")]
+fn execute_launch_plan_wrapper(world: &mut CliWorld, args: String) {
+    use mvm_cli::exec::{ExecRequest, ExecTarget, ImageSource};
+
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("scratch working directory");
+    let argv =
+        std::iter::once("mvmctl".to_string()).chain(mvm_conformance::doc_examples::tokenize(&args));
+    let matches = mvm_cli::commands::cli_command()
+        .try_get_matches_from(argv)
+        .expect("documented launch-plan command parses");
+    let run = matches.subcommand_matches("run").expect("run command");
+    let manifest = run.get_one::<String>("manifest").expect("explicit image");
+    let plan = run.get_one::<String>("launch_plan").expect("launch plan");
+    let entrypoint = mvm_cli::exec::load_launch_plan(&scratch.path().join(plan))
+        .expect("load the command launch plan");
+    let env = run
+        .get_many::<String>("env")
+        .into_iter()
+        .flatten()
+        .map(|value| {
+            let (key, value) = value.split_once('=').expect("fixture env assignment");
+            (key.to_owned(), value.to_owned())
+        })
+        .collect();
+    let request = ExecRequest {
+        name: None,
+        image: ImageSource::Template(manifest.clone()),
+        cpus: 1,
+        memory_mib: 256,
+        mem_initial_mib: None,
+        dir_shares: Vec::new(),
+        assets: Vec::new(),
+        disk_volumes: Vec::new(),
+        env,
+        target: ExecTarget::LaunchPlan { entrypoint },
+        timeout_secs: None,
+        pty: false,
+        network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        warm_pool_size: 0,
+        standby_refill: None,
+        stdin: Vec::new(),
+        healthcheck: None,
+        sdk_host_services: Vec::new(),
+        declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
+        hypervisor: None,
+        gpu: false,
+        gpu_device: None,
+    };
+    assert!(
+        matches!(&request.image, ImageSource::Template(name) if name == "minimal"),
+        "the launch plan must not replace the explicitly selected image"
+    );
+    world.last_run = Some(
+        Command::new("/bin/sh")
+            .args(["-c", &mvm_cli::exec::build_guest_wrapper(&request)])
+            .current_dir(scratch.path())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("execute the fixture's guest wrapper"),
+    );
+}
+
+#[then(expr = "the guest wrapper used the launch plan working directory")]
+fn guest_wrapper_used_plan_directory(world: &mut CliWorld) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("scratch working directory");
+    let directory = fs::canonicalize(scratch.path().join("workdir")).expect("workload directory");
+    let output = &world.last_run.as_ref().expect("wrapper output").stdout;
+    let stdout = String::from_utf8_lossy(output);
+    let actual = stdout
+        .lines()
+        .last()
+        .expect("wrapper printed its directory");
+    assert_eq!(
+        fs::canonicalize(actual).expect("resolve the printed working directory"),
+        directory
+    );
+}
+
+#[given(expr = "the scratch directory contains ambiguous manifest and flake sources")]
+fn scratch_directory_contains_ambiguous_build_sources(world: &mut CliWorld) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("`Given a scratch working directory` must run before this step");
+    fs::write(scratch.path().join("mvm.toml"), "schema_version = 1\n")
+        .expect("write scratch manifest marker");
+    fs::write(scratch.path().join("flake.nix"), "{ outputs = _: {}; }\n")
+        .expect("write scratch flake marker");
+}
+
+/// Seed the isolated home with the live suite's verified kernel and source-built
+/// guest runtime, so a verb that needs the runtime reads it from the home
+/// instead of fetching a release asset a development build has no release for.
+#[given(expr = "the isolated mvm home is prepared for live launches")]
+fn isolated_home_prepared_for_live_launches(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("`Given an isolated mvm home` must run before this step");
+    super::live_home::prepare_live_home(home.path());
+}
+
 #[when(expr = "I run mvmctl in the scratch directory with {string}")]
 fn run_mvmctl_in_scratch_directory(world: &mut CliWorld, args: String) {
     let scratch = world
@@ -168,12 +367,32 @@ fn run_mvmctl_in_scratch_directory(world: &mut CliWorld, args: String) {
         .isolated_home
         .as_ref()
         .expect("`Given an isolated mvm home` must run before this step");
-    let output = mvmctl_command()
-        .args(mvm_conformance::doc_examples::tokenize(&args))
+    let argv = mvm_conformance::doc_examples::tokenize(&args);
+    let live = super::live_home::is_prepared_live_home(home.path());
+    let producer = super::pack_build::fixture::producer_binary(
+        &argv,
+        live,
+        std::env::var_os("MVM_E2E_PRODUCER_MVMCTL"),
+    );
+    let mut command = match &producer {
+        Some(path) => command_for_binary(Path::new(path)),
+        None => mvmctl_command(),
+    };
+    if let Some(path) = &producer
+        && let Some(refused) =
+            apply_producer_revocations(Path::new(path), scratch.path(), home.path())
+    {
+        world.last_run = Some(refused);
+        return;
+    }
+    command
+        .args(argv)
         .current_dir(scratch.path())
-        .isolated_home(home.path())
-        .output()
-        .expect("failed to spawn mvmctl");
+        .isolated_home(home.path());
+    if live {
+        super::live_home::use_seeded_runtime(&mut command);
+    }
+    let output = command.output().expect("failed to spawn mvmctl");
     world.last_run = Some(output);
 }
 
@@ -540,6 +759,28 @@ pub(crate) fn seed_live_guest_runtime(home: &Path) -> mvm_build::guest_runtime::
         .expect("prewarmed guest runtime must match the current source")
 }
 
+/// Apply the published signed image-set revocation list to `home` through the
+/// producer binary, which refuses offline admission without one. Returns the
+/// refused run when the update fails.
+pub(crate) fn apply_producer_revocations(
+    binary: &Path,
+    dir: &Path,
+    home: &Path,
+) -> Option<std::process::Output> {
+    let revocations = std::env::var_os("MVM_E2E_IMAGE_REVOCATIONS_DIR").expect(
+        "MVM_E2E_IMAGE_REVOCATIONS_DIR names the downloaded signed image-set revocation list",
+    );
+    let output = command_for_binary(binary)
+        .current_dir(dir)
+        .isolated_home(home)
+        .args(super::pack_build::fixture::revocation_update_args(
+            Path::new(&revocations),
+        ))
+        .output()
+        .expect("apply the canonical signed image revocation policy for the producer");
+    (!output.status.success()).then_some(output)
+}
+
 fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
     // microVM. The working directory is the workspace root so relative flake
@@ -556,8 +797,23 @@ fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
     // create` and `machine start` in two different directories.
     let home = selected_live_home(world);
     super::live_home::prepare_live_home(&home);
-    let mut command = mvmctl_command();
+    let producer = super::pack_build::fixture::producer_binary(
+        &argv,
+        true,
+        std::env::var_os("MVM_E2E_PRODUCER_MVMCTL"),
+    );
+    let mut command = match &producer {
+        Some(path) => command_for_binary(Path::new(path)),
+        None => mvmctl_command(),
+    };
     super::live_home::use_seeded_runtime(&mut command);
+    if let Some(path) = &producer
+        && let Some(refused) = apply_producer_revocations(Path::new(path), &workspace_root(), &home)
+    {
+        world.last_live_home = Some(home);
+        world.last_run = Some(refused);
+        return;
+    }
     command
         .current_dir(workspace_root())
         .args(&argv)
@@ -748,6 +1004,24 @@ fn isolated_home_no_transient_request_dirs(world: &mut CliWorld) {
     );
 }
 
+/// How long the leak check waits, in total, for a detached standby refill to
+/// register the directories it is still populating. Each poll re-reads the
+/// pool, so a refill that registers early ends the wait early.
+const STANDBY_REFILL_POLL_DELAYS: [Duration; 6] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+];
+
+/// An unnamed run leaves a standby behind for the next run, and its refill
+/// runs detached: the record under `pool/` can land after `machine run` has
+/// returned, and a preloaded child's directory exists before the record names
+/// it. So a new directory is a leak only once the refill has had its bounded
+/// chance to register it; anything a claimable record does not account for
+/// by then fails the step.
 #[then(expr = "the live mvm home has no new transient request state directories")]
 fn live_home_no_new_transient_request_dirs(world: &mut CliWorld) {
     let home = world
@@ -758,16 +1032,35 @@ fn live_home_no_new_transient_request_dirs(world: &mut CliWorld) {
         .live_request_dirs_before
         .as_ref()
         .expect("record the live request state before running the journey");
-    let after = vm_state_dirs(home).unwrap_or_else(|error| {
-        panic!(
-            "read transient VM state under live home {}: {error}",
-            home.display()
-        )
-    });
-    let leaked = after.difference(before).cloned().collect::<Vec<_>>();
-    assert!(
-        leaked.is_empty(),
-        "new transient request state directories remain: {leaked:?}"
+    let pool = mvm_runtime::standby_pool::SupervisorStandbyPool::at(home.join("pool"));
+    let mut last = None;
+    for (attempt, delay) in STANDBY_REFILL_POLL_DELAYS.iter().enumerate() {
+        let after = vm_state_dirs(home).unwrap_or_else(|error| {
+            panic!(
+                "read transient VM state under live home {}: {error}",
+                home.display()
+            )
+        });
+        let standbys = pool.list().unwrap_or_else(|error| {
+            panic!("read the standby pool under {}: {error}", home.display())
+        });
+        let audit = mvm_conformance::standby_audit::audit_new_state_dirs(
+            after.difference(before).cloned(),
+            &standbys,
+        );
+        if audit.is_clean() {
+            return;
+        }
+        last = Some(audit);
+        if attempt + 1 < STANDBY_REFILL_POLL_DELAYS.len() {
+            std::thread::sleep(*delay);
+        }
+    }
+    let audit = last.expect("at least one poll ran");
+    panic!(
+        "new transient request state directories remain after the standby refill's grace \
+         period: {:?} (registered standbys: {:?}, preloaded children: {:?})",
+        audit.unregistered, audit.registered_standbys, audit.preloaded_children
     );
 }
 
@@ -1423,11 +1716,11 @@ fn seal_live_build(world: &mut CliWorld) {
     let bundle = dir.path().join("build.mvmpkg");
     let output = mvmctl_command()
         .current_dir(workspace_root())
-        .args(["bundle", "export", &slot, "--out"])
+        .args(["dev", "export-template", &slot, "--out"])
         .arg(&bundle)
         .isolated_home(&home)
         .output()
-        .expect("failed to spawn mvmctl bundle export");
+        .expect("failed to spawn internal template exporter");
     if output.status.success() {
         fs::copy(
             home.join("keys/host-signer.pub"),

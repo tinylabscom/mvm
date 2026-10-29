@@ -30,8 +30,43 @@ on:
         required: false
         type: string
         default: ""
+      run_attempt:
+        description: Exact attempt of the named run; required when run_id is set
+        required: false
+        type: string
+        default: ""
       tag:
         description: Version the archive's mvmctl must report; empty for a dry run
+        required: false
+        type: string
+        default: ""
+      runtime_candidate_artifact_id:
+        description: Signed runtime candidate upload ID; empty to smoke the unsigned runtime
+        required: false
+        type: string
+        default: ""
+      runtime_candidate_artifact_digest:
+        description: Signed runtime candidate artifact ZIP digest
+        required: false
+        type: string
+        default: ""
+      runtime_archive_sha256:
+        description: Candidate archive byte pin
+        required: false
+        type: string
+        default: ""
+      runtime_checksum_sha256:
+        description: Candidate checksum byte pin
+        required: false
+        type: string
+        default: ""
+      runtime_archive_bundle_sha256:
+        description: Candidate archive signature bundle byte pin
+        required: false
+        type: string
+        default: ""
+      runtime_checksum_bundle_sha256:
+        description: Candidate checksum signature bundle byte pin
         required: false
         type: string
         default: ""
@@ -39,6 +74,10 @@ on:
     inputs:
       run_id:
         description: Id of the release workflow run whose build uploaded the archive
+        required: true
+        type: string
+      run_attempt:
+        description: Exact producing attempt of the named release run
         required: true
         type: string
       tag:
@@ -55,12 +94,25 @@ permissions:
 jobs:
   release-archive-smoke:
     name: First run of the unpublished archive (Linux, Firecracker)
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     # Above the smoke's summed budgets (bootstrap 20 min, four boots 25 min),
     # so a slow step fails on its own budget with a transcript, not on this.
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v6
+
+      - name: Require explicit attempt for a named run
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+          RUN_ATTEMPT: ${{ inputs.run_attempt }}
+        run: |
+          if [ -n "$RUN_ID" ]; then
+            [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] && [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          elif [ -n "$RUN_ATTEMPT" ]; then
+            echo "::error::run_attempt requires run_id" >&2
+            exit 1
+          fi
 
       - name: Grant /dev/kvm access for the job
         run: |
@@ -78,33 +130,50 @@ jobs:
         if: inputs.run_id == ''
         uses: actions/download-artifact@v8
         with:
-          name: mvmctl-x86_64-unknown-linux-gnu
+          name: mvmctl-x86_64-unknown-linux-gnu-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-archive
 
       - name: Download the archive the named release run built
         if: inputs.run_id != ''
         uses: actions/download-artifact@v8
         with:
-          name: mvmctl-x86_64-unknown-linux-gnu
+          name: mvmctl-x86_64-unknown-linux-gnu-attempt-${{ inputs.run_attempt }}
           path: ${{ runner.temp }}/release-archive
           run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}
 
       - name: Download the guest runtime the calling release run built
-        if: inputs.run_id == ''
+        if: inputs.run_id == '' && inputs.runtime_candidate_artifact_id == ''
         uses: actions/download-artifact@v8
         with:
-          name: mvm-guest-bins
+          name: mvm-guest-bins-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/guest-runtime
 
       - name: Download the guest runtime the named release run built
-        if: inputs.run_id != ''
+        if: inputs.run_id != '' && inputs.runtime_candidate_artifact_id == ''
         uses: actions/download-artifact@v8
         with:
-          name: mvm-guest-bins
+          name: mvm-guest-bins-attempt-${{ inputs.run_attempt }}
           path: ${{ runner.temp }}/guest-runtime
           run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}
+
+      # A launch authenticates the runtime it assembled from, so the smoke
+      # stages the signed quartet the release run produced, never the bare
+      # archive.
+      - name: Fetch the exact signed release runtime candidate
+        id: candidate
+        if: inputs.runtime_candidate_artifact_id != ''
+        uses: ./.github/actions/fetch-runtime-candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          artifact-id: ${{ inputs.runtime_candidate_artifact_id }}
+          artifact-digest: ${{ inputs.runtime_candidate_artifact_digest }}
+          archive-sha256: ${{ inputs.runtime_archive_sha256 }}
+          checksum-sha256: ${{ inputs.runtime_checksum_sha256 }}
+          archive-bundle-sha256: ${{ inputs.runtime_archive_bundle_sha256 }}
+          checksum-bundle-sha256: ${{ inputs.runtime_checksum_bundle_sha256 }}
 
       - name: Check the archive against the checksum the build recorded
         run: |
@@ -117,9 +186,10 @@ jobs:
         id: guest-runtime
         env:
           TAG_NAME: ${{ inputs.tag }}
+          RUNTIME_DIR: ${{ steps.candidate.outputs.directory || format('{0}/guest-runtime', runner.temp) }}
         run: |
           set -euo pipefail
-          cd "${RUNNER_TEMP}/guest-runtime"
+          cd "${RUNTIME_DIR}"
           shopt -s nullglob
           runtimes=(mvm-guest-bins-v*.tar.gz)
           if [ "${#runtimes[@]}" -ne 1 ]; then
@@ -131,7 +201,7 @@ jobs:
             exit 1
           fi
           sha256sum --check "${runtimes[0]}.sha256"
-          echo "archive=${RUNNER_TEMP}/guest-runtime/${runtimes[0]}" >> "${GITHUB_OUTPUT}"
+          echo "archive=${RUNTIME_DIR}/${runtimes[0]}" >> "${GITHUB_OUTPUT}"
 
       - name: Unpack the archive and run the first-run smoke, egress included
         env:

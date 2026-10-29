@@ -104,6 +104,9 @@ fn resolve_default_image_source(prod: bool) -> Result<crate::exec::ImageSource> 
                 revision_hash,
             } => format!("{slot_hash}@{revision_hash}"),
             crate::exec::ImageSource::WasmModule { label, .. } => label.clone(),
+            crate::exec::ImageSource::RegistryPack { pin } => {
+                format!("pack:{}", pin.reference())
+            }
         };
         ui::info(&format!(
             "Instant boot from verified runtime pack ({label}); skipping the build."

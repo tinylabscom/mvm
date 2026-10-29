@@ -5,8 +5,8 @@
 //! has, so `mvmctl env sign` and the self-update path can sign them all.
 
 pub use mvm_vmm::host::codesign::{
-    RequiredEntitlement, SignReport, SignTarget, ensure_signed, entitlement_present,
-    entitlements_present, sign_binaries, sign_targets,
+    RequiredEntitlement, SignReport, SignTarget, entitlement_present, entitlements_present,
+    sign_binaries, sign_targets, try_ensure_signed as ensure_signed,
 };
 
 /// The binaries that need macOS entitlements to launch a VM: the running CLI
@@ -40,6 +40,11 @@ pub fn collect_sign_targets() -> Vec<SignTarget> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ensure_signed_facade_remains_fallible() {
+        let _: fn() -> std::result::Result<(), String> = ensure_signed;
+    }
 
     #[test]
     fn collect_sign_targets_includes_current_exe() {

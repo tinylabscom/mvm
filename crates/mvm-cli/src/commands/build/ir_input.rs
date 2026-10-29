@@ -1,6 +1,6 @@
 //! Shared IR-JSON input loading for the build-time verbs.
 //!
-//! Both `build address` and `build compile` accept a Workload IR document from
+//! Both `dev address` and `dev compile` accept a Workload IR document from
 //! a `--from-ir <path>`, a positional path, or `-` (stdin). This module owns
 //! the one copy of that resolution + read + parse so the two verbs can't drift.
 

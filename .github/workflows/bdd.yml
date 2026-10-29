@@ -3,13 +3,6 @@ name: BDD conformance gate
 on:
   workflow_call:
     inputs:
-      # CI's scope job sets this when a change touches the documentation corpus
-      # and nothing that compiles. Release and publish callers leave it unset
-      # and always get the full suite.
-      docs_only:
-        description: Run only the @docs features and the documented Rust examples
-        type: boolean
-        default: false
       run_ps11_live:
         description: Run the bounded PS-11 frozen-volume live witness
         type: boolean
@@ -25,13 +18,13 @@ env:
 jobs:
   bdd:
     name: BDD conformance
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
       - name: Set up uv
-        if: ${{ !inputs.docs_only }}
         uses: astral-sh/setup-uv@v8.2.0
         with:
           version: "0.12.5"
@@ -78,12 +71,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
 
       - name: Run BDD conformance suite
-        if: ${{ !inputs.docs_only }}
         run: just bdd::run
-
-      - name: Run the documentation scenarios
-        if: ${{ inputs.docs_only }}
-        run: just bdd::docs
 
       # The Python and TypeScript SDKs each carry a unit suite that no cargo
       # target reaches, so until now nothing in CI ran either. They belong on
@@ -92,17 +80,16 @@ jobs:
       # The Kotlin pack SDK compiles with kotlinc alone; the runner image
       # already carries a JDK. The installer checks a pinned archive digest.
       - name: Install the pinned Kotlin compiler
-        if: ${{ !inputs.docs_only }}
         run: crates/mvm-sdk/sdks/kotlin/scripts/install-kotlinc.sh >> "$GITHUB_PATH"
 
       - name: Run the language SDK unit suites
-        if: ${{ !inputs.docs_only }}
         run: just sdk::test
 
   ps11-live:
     name: BDD live PS-11 frozen volume (Linux, Firecracker)
     if: ${{ inputs.run_ps11_live }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       FC_VERSION: v1.17.0
@@ -145,7 +132,7 @@ jobs:
         run: just kernel::workload
       - name: Build the pinned guest binaries
         run: |
-          cargo run --locked -p mvmctl -- build guest-bins --arch x86_64 --out dist
+          cargo run --locked -p mvmctl -- dev guest-bins --arch x86_64 --out dist
           mkdir -p dist/extracted dist/staged
           tar -xzf dist/mvm-guest-bins-v*.tar.gz -C dist/extracted
           cp dist/extracted/x86_64/bin/mvm-* dist/staged/

@@ -47,10 +47,43 @@ dependency declaration: the lockfile must carry an integrity hash for every
 entry, and the generated flake builds `node_modules` from it in the builder VM,
 so nothing installs at boot.
 
-Lowering still refuses build-scoped packages, exact package versions, Python
-dependency files, other Node lockfiles and more than one dependency
-declaration, because the IR and Nix factories cannot honor them for a command
-workload yet. A successful frozen compile runs no build; `mvmctl pack lock` and
+A uv `pyproject.toml` + `uv.lock` at the source root lowers to the IR's Python
+dependency declaration. The spec must name exactly one runtime package
+`python3NN` (for example `python312`); that is the interpreter, and the lock's
+`requires-python` must hold for every patch release of it. `lock_pack` reads
+the lockfile from the snapshot and resolves it for the pack's target with
+`pack::python::resolve`: starting at the project (`source = { virtual = "." }`
+or `{ editable = "." }`, which is not installed), it follows runtime
+dependencies and the optional-dependency sets their edges name, never
+development dependencies, and evaluates each edge marker for the target
+(Linux, the target's architecture, CPython 3.NN). Each reached package must
+come from a registry and gets one wheel, chosen in pip's CPython tag order from
+glibc `manylinux` platforms no newer than the glibc of mvm's pinned nixpkgs
+(`MAX_GLIBC_MINOR`); the wheel must be an https URL with a sha256. The resolved
+set is recorded in the workload's `mvm.pack` extension, so the lock's workload
+digest binds every wheel, and `compile_frozen` writes it beside `flake.nix` as
+`pack-build.json`. The flake fetches each wheel as a fixed-output derivation,
+installs them with pypa's `installer` into one store path patched against the
+image closure, and puts it on the command's `PYTHONPATH`; nothing installs at
+boot and the guest needs no network.
+
+Build-scoped packages are not in the image. They are recorded in the same
+extension (`build_packages`, so the lock binds them), written to
+`pack-build.json`, and the flake adds them to the dependency-install
+derivations only. A pack spec has no field for a Nix module or build script,
+so the only code that runs at build time is the generated flake.
+
+Resolution refuses, by name, what it cannot decide exactly for one target: git,
+URL, path and directory sources; a marker over a variable the target does not
+fix (`platform_release`, `extra`, ...) or whose outcome depends on the
+interpreter's patch release; a dependency edge that matches several locked
+versions; and a package with no compatible wheel, since nothing is built from
+an sdist.
+
+Lowering still refuses exact package versions, Python
+dependency files other than a uv lockfile at the source root, other Node
+lockfiles and more than one dependency declaration, because the IR and Nix
+factories cannot honor them for a command workload yet. A successful frozen compile runs no build; `mvmctl pack lock` and
 `mvmctl pack compile` are the command-line surface over `lock_pack` and
 `compile_frozen`. A `pack.lock.json` at the source root is the lock itself and
 is left out of the snapshot it digests.

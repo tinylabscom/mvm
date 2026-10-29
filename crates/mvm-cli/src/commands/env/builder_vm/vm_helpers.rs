@@ -112,8 +112,15 @@ pub(in crate::commands) fn sweep_orphaned_vm_helpers_on_startup() {
 /// Idempotent: several branches can reach a materializer in one run, and the
 /// second sweep would find nothing the first left behind.
 pub(in crate::commands) fn sweep_orphaned_vm_helpers_before_spawn() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(sweep_orphaned_vm_helpers_on_startup);
+    BEFORE_SPAWN_SWEEP.call_once(sweep_orphaned_vm_helpers_on_startup);
+}
+
+static BEFORE_SPAWN_SWEEP: std::sync::Once = std::sync::Once::new();
+
+/// Whether this process has already run the pre-spawn sweep.
+#[cfg(test)]
+pub(in crate::commands) fn before_spawn_sweep_has_run() -> bool {
+    BEFORE_SPAWN_SWEEP.is_completed()
 }
 
 /// Sidecar PID file names a builder VM dir carries (libkrun + HVF).

@@ -41,9 +41,16 @@ fn check_schema_version(manifest: &ImageSetManifest) -> Result<(), ImageSetError
             manifest.compatibility.base_image_contract.is_none()
         }
         IMAGE_SET_SCHEMA_VERSION => {
-            manifest.compatibility.base_image_contract
-                == Some(super::BaseImageContract::LINUX_LAYER)
-                && manifest.compatibility.guest_agent_protocol.is_none()
+            // A set with no workload root has nothing to declare a contract
+            // for; a source build from an older checkout records none.
+            let declares = match manifest.compatibility.base_image_contract {
+                Some(contract) => contract == super::BaseImageContract::LINUX_LAYER,
+                None => !manifest
+                    .members
+                    .iter()
+                    .any(|m| matches!(m.role, ImageSetRole::WorkloadRootfs(_))),
+            };
+            declares && manifest.compatibility.guest_agent_protocol.is_none()
         }
         _ => {
             return Err(ImageSetError::UnsupportedSchemaVersion {
@@ -440,6 +447,31 @@ pub fn check_declared_protocol_compatibility(
     declared: &super::ImageSetCompatibility,
     host: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
+    check_workload_protocol_compatibility(declared, host)?;
+    if declared.builder_cache_contract != host.builder_cache_contract {
+        return Err(ImageSetError::BuilderCacheContractMismatch {
+            set: declared.builder_cache_contract,
+            host: host.builder_cache_contract,
+        });
+    }
+    let abi = declared.builder_boot_abi_or_legacy();
+    if !host.builder_boot_abi.contains(abi) {
+        return Err(ImageSetError::BuilderBootAbiUnsupported {
+            set: abi,
+            host: host.builder_boot_abi,
+        });
+    }
+    Ok(())
+}
+
+/// Check the workload base contract without requiring builder execution support.
+///
+/// Callers must still select every consumed member against the actual backend
+/// and guest architecture. This does not authorize builder execution.
+pub fn check_workload_protocol_compatibility(
+    declared: &super::ImageSetCompatibility,
+    host: &HostProtocolSupport,
+) -> Result<(), ImageSetError> {
     let base = declared.base_image_contract_or_legacy();
     if !host.base_image_contract.contains(base) {
         return Err(ImageSetError::BaseImageContractUnsupported {
@@ -453,19 +485,6 @@ pub fn check_declared_protocol_compatibility(
         return Err(ImageSetError::BaseBuilderBootAbiMismatch {
             declared: declared.builder_boot_abi,
             required: super::BuilderBootAbi::NO_MVM_BINARY,
-        });
-    }
-    if declared.builder_cache_contract != host.builder_cache_contract {
-        return Err(ImageSetError::BuilderCacheContractMismatch {
-            set: declared.builder_cache_contract,
-            host: host.builder_cache_contract,
-        });
-    }
-    let abi = declared.builder_boot_abi_or_legacy();
-    if !host.builder_boot_abi.contains(abi) {
-        return Err(ImageSetError::BuilderBootAbiUnsupported {
-            set: abi,
-            host: host.builder_boot_abi,
         });
     }
     Ok(())

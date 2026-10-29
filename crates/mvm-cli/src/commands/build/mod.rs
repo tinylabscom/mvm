@@ -9,13 +9,14 @@ pub(in crate::commands) mod build;
 pub(super) mod compile;
 #[cfg(test)]
 mod driver_builder_live;
+pub(super) mod front_door;
 pub(super) mod group;
 pub(super) mod guest_bins;
 /// Records an audited image-lineage node after a successful flake build, so
 /// every compiled image produces a tamper-evident version-chain record anchored
 /// in the host-signed audit log.
 pub(in crate::commands) mod image_lineage;
-/// `build image-set`: one target of the local image checkout, built in the
+/// `dev image-set`: one target of the local image checkout, built in the
 /// builder VM and published to the local image cache.
 pub(super) mod image_set;
 /// Shared IR-JSON input loading (`--from-ir` / positional / `-` stdin) for the
@@ -30,7 +31,7 @@ pub(super) mod kernel;
 pub(super) mod persistent_builder;
 pub(super) mod runtime_overlay;
 /// Shared helpers for the SDK record-mode auto-exec path. Used by
-/// `mvmctl compile <Sandbox-script>` and `mvmctl run --mode plan`.
+/// `mvmctl dev compile <Sandbox-script>` and `mvmctl run --mode plan`.
 pub(in crate::commands) mod sandbox_record;
 pub(super) mod sdk_sidecar;
 /// Host-side secret scan over a runtime recording. Walks every place

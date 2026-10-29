@@ -135,6 +135,9 @@ pub(in crate::commands) use vm_helpers::{
 
 pub(in crate::commands) use vm_helpers::reap_orphaned_vm_helpers;
 
+#[cfg(test)]
+pub(in crate::commands) use vm_helpers::before_spawn_sweep_has_run;
+
 pub(super) fn builder_vm_host_arch() -> &'static str {
     bootstrap::builder_vm_host_arch()
 }

@@ -227,6 +227,13 @@ pub enum GuestRequest {
         /// which fails the claim rather than leaving the child unfiltered.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+        /// Read-only volumes the claim attached to the late-volume slots this
+        /// child's parent booted, for the guest to mount before it
+        /// acknowledges. Omitted when empty, so a claim naming none reaches an
+        /// agent built before the field; an agent that predates it refuses a
+        /// request carrying volumes, which fails the claim.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        volumes: Vec<super::VolumeConfig>,
     },
     /// Request filesystem diff (changes since boot, from overlay or snapshot).
     FsDiff,
@@ -843,6 +850,7 @@ mod tests {
                 host_epoch_secs: None,
                 grant_envelope: None,
                 seccomp_tier: None,
+                volumes: Vec::new(),
             },
             GuestRequest::FsDiff,
             GuestRequest::SyncFilesystems,
@@ -980,6 +988,7 @@ mod tests {
             host_epoch_secs: Some(1_717_000_000),
             grant_envelope: None,
             seccomp_tier: None,
+            volumes: Vec::new(),
         };
         let json = serde_json::to_string(&req).unwrap();
         match serde_json::from_str::<GuestRequest>(&json).unwrap() {
@@ -1498,6 +1507,7 @@ mod tests {
                     host_epoch_secs: None,
                     grant_envelope: None,
                     seccomp_tier: None,
+                    volumes: Vec::new(),
                 },
                 "post-restore",
             ),

@@ -73,7 +73,7 @@ def main() -> str:
 Compile and build:
 
 ```sh
-mvmctl build compile ./app.py --out /tmp/hello-python
+mvmctl dev compile ./app.py --out /tmp/hello-python
 mvmctl machine build --flake /tmp/hello-python
 ```
 

@@ -11,7 +11,7 @@ name: Linux distro packages
 # guest-runtime job built; the release job then signs, attests and publishes
 # the packages with the tarballs. Anywhere else it packages a published release's
 # tarballs instead, so the packaging path is exercised without a release
-# build: on pull requests that change it, nightly from Extended CI, and on
+# build: on pull requests that change it and on
 # dispatch.
 
 on:
@@ -35,24 +35,14 @@ on:
         description: Release whose tarballs to package; empty for the newest CLI release
         type: string
         default: ""
-  pull_request:
-    paths:
-      - .github/workflows/distro-packages.yml
-      - scripts/build-distro-packages.sh
-      - scripts/distro-package-smoke.sh
-      - scripts/smoke-installed-release.py
-      - scripts/test_smoke_installed_release.py
-      - scripts/release/**
-      - nix/packaging/aur/**
-      - nix/packaging/nixpkgs/**
-      - nix/packaging/release/verify-release-assets*
 
 permissions:
   contents: read
 
 jobs:
   contracts:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
@@ -64,14 +54,20 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
+          bash scripts/pre-commit.test.sh
           python3 -m unittest discover -s scripts -p 'test_smoke_installed_release.py' -v
+          python3 -m unittest discover -s tests -p 'test_published_installed_boot.py' -v
           python3 -m unittest discover -s scripts/release -p 'test_*.py' -v
           python3 -m unittest discover -s nix/packaging/aur -p 'test_*.py' -v
           bash nix/packaging/release/verify-release-assets.test.sh
+          python3 nix/packaging/release/verify-release-assets.auth.test.py
+          python3 scripts/test_rust_registry_smoke.py
+          python3 scripts/test-sdk-release-preflight.py
 
   package:
     needs: contracts
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
       version: ${{ steps.source.outputs.version }}
@@ -107,7 +103,7 @@ jobs:
         if: ${{ !inputs.published_packages && inputs.tarballs == 'build' }}
         uses: actions/download-artifact@v8
         with:
-          pattern: mvmctl-*-unknown-linux-gnu
+          pattern: mvmctl-*-unknown-linux-gnu-attempt-${{ github.run_attempt }}
           path: tarballs
           merge-multiple: true
 
@@ -115,7 +111,7 @@ jobs:
         if: ${{ !inputs.published_packages && inputs.tarballs == 'build' }}
         uses: actions/download-artifact@v8
         with:
-          name: mvm-guest-bins
+          name: mvm-guest-bins-attempt-${{ github.run_attempt }}
           path: guest-runtime
 
       - name: Download a published release's tarballs
@@ -128,9 +124,11 @@ jobs:
           tag="${RELEASE_TAG}"
           if [ -z "${tag}" ]; then
             # CLI releases are the `v<semver>` tags; the repository also
-            # publishes SDK and revocation releases under other prefixes.
-            tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --exclude-drafts --limit 50 \
-              --json tagName --jq '[.[].tagName | select(test("^v[0-9]"))][0]')"
+            # publishes SDK, revocation and per-commit source-helper
+            # releases. Traverse every release page: source-helper releases can
+            # fill more than one API page before a stable CLI release.
+            tag="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq -rs 'first(.[][] | select((.draft | not) and (.prerelease | not) and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | .tag_name) // empty')"
           fi
           [ -n "${tag}" ] || { echo "::error::no published CLI release to package" >&2; exit 1; }
           gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
@@ -182,7 +180,7 @@ jobs:
         if: ${{ inputs.published_packages }}
         uses: actions/download-artifact@v8
         with:
-          name: distro-package-payloads
+          name: distro-package-payloads-attempt-${{ github.run_attempt }}
           path: distro-packages
 
       # A release build packages under the tree's version, which the tag
@@ -217,13 +215,12 @@ jobs:
           done
           ls -la distro-packages/
 
-      # The packages and their `.sha256` files: the release job merges every
-      # artifact of the run and builds the combined checksum manifest from
-      # the `*.sha256` files, so these join it beside the tarballs'.
+      # The release collector selects this exact attempt's package/checksum
+      # pairs. Reports and payload manifests are not release signing inputs.
       - name: Upload the packages
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ inputs.published_packages && 'published-distro-packages' || 'distro-packages' }}
+          name: ${{ format('{0}-attempt-{1}', inputs.published_packages && 'published-distro-packages' || 'distro-packages', github.run_attempt) }}
           path: |
             distro-packages/*.deb
             distro-packages/*.rpm
@@ -235,7 +232,7 @@ jobs:
         if: ${{ !inputs.published_packages }}
         uses: actions/upload-artifact@v7
         with:
-          name: distro-package-payloads
+          name: distro-package-payloads-attempt-${{ github.run_attempt }}
           path: distro-packages/*.sha256sums
           retention-days: 7
 
@@ -249,7 +246,8 @@ jobs:
         arch: [x86_64, aarch64]
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
             deb_arch: amd64
           - arch: aarch64
             runner: ubuntu-24.04-arm
@@ -262,13 +260,13 @@ jobs:
       - name: Download the packages
         uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.published_packages && 'published-distro-packages' || 'distro-packages' }}
+          name: ${{ format('{0}-attempt-{1}', inputs.published_packages && 'published-distro-packages' || 'distro-packages', github.run_attempt) }}
           path: distro-packages
 
       - name: Download the payload manifests
         uses: actions/download-artifact@v8
         with:
-          name: distro-package-payloads
+          name: distro-package-payloads-attempt-${{ github.run_attempt }}
           path: distro-packages
 
       - name: Install, run, and remove the package

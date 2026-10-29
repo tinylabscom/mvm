@@ -39,8 +39,8 @@ pub use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
 mod image_lock;
 
 pub use image_lock::{
-    DEFAULT_LOCK_WAIT, LOCK_WAIT_ENV, LockSubject, LockWait, LockWaitError, NixStoreImageLock,
-    UnlockedStoreImage, acquire_lock_waiting, acquire_nix_store_image_lock,
+    DEFAULT_LOCK_WAIT, HeldImageLock, LOCK_WAIT_ENV, LockSubject, LockWait, LockWaitError,
+    NixStoreImageLock, UnlockedStoreImage, acquire_lock_waiting, acquire_nix_store_image_lock,
     acquire_nix_store_image_lock_named, ensure_nix_store_image_unlocked, hold_image_lock,
     nix_store_image_is_contended,
 };
@@ -109,17 +109,9 @@ pub(crate) const LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES: u64 = 64 * 1024;
 /// disable the safety net.
 pub const MVM_BUILDER_VM_TIMEOUT_SECS_ENV: &str = "MVM_BUILDER_VM_TIMEOUT_SECS";
 
-/// Builder persistent `/nix` store auto-GC threshold (GiB of *used*
-/// space). When the in-guest store exceeds this after a build, the
-/// build script runs `nix-collect-garbage --delete-older-than 14d`.
-/// Default 24 GiB (above doctor's 20 GiB warning, below the 64 GiB
-/// sparse cap [`DEFAULT_NIX_STORE_MIB`](crate::builder_vm::DEFAULT_NIX_STORE_MIB)).
-/// Override: [`MVM_BUILDER_STORE_GC_GIB_ENV`].
-///
-/// Lives here because `render_flake_cmd_sh` reads it at render time;
-/// The libkrun compatibility module re-exports it near `DEFAULT_NIX_STORE_MIB` for
-/// discoverability.
-pub const DEFAULT_BUILDER_STORE_GC_GIB: u32 = 24;
+pub use mvm_builder_guest::stage0_guest::{
+    DEFAULT_BUILDER_STORE_GC_GIB, STAGE0_STORE_GC_KIB_CMDLINE_KEY, read_last_bytes_of,
+};
 
 /// Env var that overrides [`DEFAULT_BUILDER_STORE_GC_GIB`]. Plain
 /// integer GiB; a missing/garbage/zero value falls back to the
@@ -168,18 +160,6 @@ pub fn builder_store_gc_cap_kib() -> u64 {
         .unwrap_or(DEFAULT_BUILDER_STORE_GC_GIB);
     u64::from(gib) * 1024 * 1024
 }
-
-/// Kernel-cmdline token carrying [`builder_store_gc_cap_kib`] into the Stage 0
-/// guest.
-///
-/// The guest cannot read the host's environment, so without this the
-/// [`MVM_BUILDER_STORE_GC_GIB_ENV`] override would govern the steady-state
-/// store and silently not the Stage 0 one. It rides the cmdline rather than
-/// `stage0-build.conf` because the ordinary builder-image bootstrap writes no
-/// config at all — only the SDK-sidecar and external-kernel paths do — so a
-/// config-carried cap reached the guest on exactly the paths that did not need
-/// it.
-pub const STAGE0_STORE_GC_KIB_CMDLINE_KEY: &str = "mvm.store_gc_kib";
 
 /// The cmdline token every Stage 0 boot carries.
 pub fn stage0_store_gc_cmdline_token() -> String {
@@ -268,6 +248,11 @@ pub fn stage_job_dir(
         BuilderJob::Flake {
             flake_ref,
             attr_path,
+        }
+        | BuilderJob::FrozenFlakeDiagnostic {
+            flake_ref,
+            attr_path,
+            ..
         } => (flake_ref.as_str(), attr_path.as_str()),
         BuilderJob::Install { spec_path } => {
             // Copy the caller's spec into the per-job dir so the
@@ -325,7 +310,34 @@ pub fn stage_job_dir(
         None => false,
     };
 
-    let body = render_flake_cmd_sh(flake_ref, attr_path, override_mvm);
+    let body = if let BuilderJob::FrozenFlakeDiagnostic {
+        input_digest,
+        expected_mvm_revision,
+        ..
+    } = job
+    {
+        if override_mvm || workspace_src.is_some() || flake_ref != "/work" {
+            return Err(BuilderVmError::NixBuildFailed(
+                "input observation requires frozen /work without source overrides".to_string(),
+            ));
+        }
+        let job_id = job_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                BuilderVmError::ExtractionFailed(
+                    "observation job identity is not UTF-8".to_string(),
+                )
+            })?;
+        render_flake_cmd_sh_observed(
+            flake_ref,
+            attr_path,
+            override_mvm,
+            Some((input_digest, expected_mvm_revision, job_id)),
+        )
+    } else {
+        render_flake_cmd_sh(flake_ref, attr_path, override_mvm)
+    };
 
     let cmd_path = job_dir.join("cmd.sh");
     std::fs::write(&cmd_path, body).map_err(|e| {
@@ -362,37 +374,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// to it (reachable beside cmd.sh in the `/job` virtio-fs share).
 const STAGED_MVM_SRC_SUBDIR: &str = "mvm-src";
 
-/// Basenames pruned when staging the mvm-workspace snapshot — build
-/// artifacts + VCS/tooling scratch that must never enter the agent's `src`
-/// closure (they bloat it and break the source hash / caching; the Swift
-/// `.build` dirs alone are multi-GB). Kept aligned with
-/// `nix/lib/workspace-filter.nix`.
-const WORKSPACE_SNAPSHOT_SKIP: &[&str] = &[
-    "target",
-    ".build",
-    "node_modules",
-    ".direnv",
-    ".cargo",
-    "dist",
-    ".astro",
-    "dev-prebuilt",
-    ".mvm-ci",
-    ".mvm-test",
-    "graphify-out",
-    ".ur-seed-result",
-    "nixos.qcow2",
-    ".git",
-    ".claude",
-    ".worktrees",
-    ".playwright-mcp",
-    "keys",
-    "result",
-    "__pycache__",
-    ".venv",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-];
+pub(crate) use crate::source_copy::copy_dir_filtered;
 
 /// Stage an allowlisted, filtered copy of the mvm workspace into `mvm_src`:
 /// only the cargo tree — root `Cargo.{toml,lock}` + `src` + `crates` +
@@ -426,41 +408,20 @@ fn stage_filtered_workspace(workspace: &Path, mvm_src: &Path) -> std::io::Result
     Ok(())
 }
 
-/// Recursive copy that prunes `WORKSPACE_SNAPSHOT_SKIP` basenames (and
-/// `result-*` symlinks) at any depth. `pub(crate)` so the disk-transport
-/// `work` input staging (`libkrun_builder`) can reuse this exclusion
-/// instead of forking a second skip list.
-pub(crate) fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let raw = entry.file_name();
-        let name = raw.to_string_lossy();
-        if WORKSPACE_SNAPSHOT_SKIP.contains(&name.as_ref()) || name.starts_with("result-") {
-            continue;
-        }
-        let from = entry.path();
-        let to = dst.join(&raw);
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            // Copied as a link. `fs::copy` follows it, which read whatever the
-            // link named on the host — for an image tree, a link such as
-            // `../../../.ssh/id_ed25519` carried a host file into the guest.
-            std::os::unix::fs::symlink(std::fs::read_link(&from)?, &to)?;
-        } else if file_type.is_dir() {
-            copy_dir_filtered(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
 /// Render the `cmd.sh` body the in-guest `mvm-host-vm-init` runs
 /// for a [`BuilderJob::Flake`]. Inlined as a separate function so
 /// tests can assert the rendered output without touching the
 /// filesystem.
 fn render_flake_cmd_sh(flake_ref: &str, attr_path: &str, override_mvm: bool) -> String {
+    render_flake_cmd_sh_observed(flake_ref, attr_path, override_mvm, None)
+}
+
+fn render_flake_cmd_sh_observed(
+    flake_ref: &str,
+    attr_path: &str,
+    override_mvm: bool,
+    diagnostic: Option<(&str, &str, &str)>,
+) -> String {
     // Source-checkout override mode: `/work` is the workspace and the
     // user flake was staged into this job dir (reachable beside cmd.sh).
     // Resolve it relative to the script so we don't need the job dir's
@@ -487,7 +448,38 @@ fn render_flake_cmd_sh(flake_ref: &str, attr_path: &str, override_mvm: bool) -> 
     // Resolved on the host, baked as a literal into the script so
     // the in-guest `du` comparison needs no env plumbing through the VM.
     let gc_cap_kib = builder_store_gc_cap_kib();
-    format!(
+    let (observation_before, observation_after) = diagnostic
+        .map(|(digest, revision, job)| {
+            crate::pipeline::frozen::observation_script(digest, revision, job)
+        })
+        .unwrap_or_default();
+    // Nix 2.31.5 rejects lock changes only when writing is enabled. An
+    // unchanged reference graph skips the write block, preserving readonly /work.
+    let lock_flags = if diagnostic.is_some() {
+        "--reference-lock-file \"$OBS_DIR/flake.lock\" --no-update-lock-file"
+    } else {
+        "--no-write-lock-file"
+    };
+    // Sidecar fallbacks are part of the observed output and must consume the
+    // same graph, not independently resolve the readonly source again.
+    let (eval_bin, eval_lock_flags) = if diagnostic.is_some() {
+        ("\"$NIX_BIN\"", format!(" {lock_flags}"))
+    } else {
+        ("nix", String::new())
+    };
+    // `/work` is the mvm workspace only in override mode. Otherwise it is the
+    // user's (or a frozen pack's) flake, `mvm` is a pinned input that carries
+    // its own source, and pointing the workspace filter at `/work` would find
+    // no Cargo.lock.
+    let workspace_export = if override_mvm {
+        "# Flake convention: workspace-path env var so flakes that reference\n\
+         # the workspace root don't depend on relative-path resolution\n\
+         # against the store-copied flake dir.\n\
+         export MVM_WORKSPACE_PATH=/work\n"
+    } else {
+        ""
+    };
+    let body = format!(
         r#"#!/bin/sh
 # mvm-builder-vm cmd.sh — emitted by BuilderVmRuntime.
 # Runs inside the builder VM under `/bin/sh -eu`. The host wires
@@ -563,25 +555,11 @@ download-attempts = 5
 http-connections = 8
 connect-timeout = 15
 stalled-download-timeout = 90"
-# Flake convention: workspace-path env var so flakes that reference
-# the workspace root don't depend on relative-path resolution
-# against the store-copied flake dir.
-export MVM_WORKSPACE_PATH=/work
-# Host-vm binaries extracted from the mvmctl embedded payload and
+{workspace_export}# Host-vm binaries extracted from the mvmctl embedded payload and
 # mounted read-only at /mvm-bins. The builder-vm
 # flake reads this to install the correct cross-compiled binaries into
 # the rootfs without a separate nix build.
 export MVM_HOST_BIN_DIR=/mvm-bins
-
-# A frozen pack resolves every source through its declared inputs. In
-# particular, /work is the application, not the runtime source workspace.
-# Ordinary contributor flakes retain their existing environment-based mode.
-NIX_EVAL_IMPURE=--impure
-FROZEN_FLAKE_PATH=${{FLAKE_REF#path:}}
-if [ -e "$FROZEN_FLAKE_PATH/{pack_lock_file}" ]; then
-    NIX_EVAL_IMPURE=
-    unset MVM_WORKSPACE_PATH MVM_HOST_BIN_DIR
-fi
 
 echo "mvm-builder-vm: filesystem space before nix build:" >&2
 df -h /nix /tmp >&2 || true
@@ -593,9 +571,10 @@ df -h /nix /tmp >&2 || true
 # stderr inline (default nix only prints the last 10 lines and
 # cascades up). We tee stderr to /job/nix-build.log so the host
 # can read the actual root cause when a deep dependency fails.
+{observation_before}
 set +e
 "$NIX_BIN" build "${{FLAKE_REF}}#${{ATTR_PATH}}"{override_flag} \
-    --no-link --print-out-paths --no-write-lock-file $NIX_EVAL_IMPURE \
+    --no-link --print-out-paths {lock_flags} --impure \
     --print-build-logs --keep-going \
     > /job/nix-stdout.log 2> /job/nix-stderr.log
 NIX_RC=$?
@@ -713,10 +692,10 @@ chmod 0644 /out/rootfs.ext4 2>/dev/null || true
 if [ -f "$NIX_OUT/mvm-meta.json" ]; then
     cp -L "$NIX_OUT/mvm-meta.json" /out/mvm-meta.json
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (image-published sidecar)" >&2
-elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" $NIX_EVAL_IMPURE{override_flag} \
+elif {eval_bin} eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" --impure{override_flag}{eval_lock_flags} \
       > /out/mvm-meta.json 2> /job/sidecar-direct.log; then
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.mvm)" >&2
-elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.rootfs.passthru.mvm" $NIX_EVAL_IMPURE{override_flag} \
+elif {eval_bin} eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.rootfs.passthru.mvm" --impure{override_flag}{eval_lock_flags} \
       > /out/mvm-meta.json 2> /job/sidecar-rootfs.log; then
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.rootfs.passthru.mvm)" >&2
 else
@@ -762,14 +741,14 @@ fi
 "#,
         flake_ref_assign = flake_ref_assign,
         override_flag = override_flag,
-        pack_lock_file = mvm_compiler::pack::LOCK_FILE,
         attr_path = shell_single_quote_escape(attr_path),
         gc_cap_kib = gc_cap_kib,
         seal_rootfs_journal_sh = seal_rootfs_journal_sh("\"/out/rootfs.ext4\""),
         host_vm_init_sh =
             crate::builder_boot::guest_host_binary_sh("HOST_VM_INIT", "mvm-host-vm-init"),
         copy_members_sh = crate::builder_output::copy_nix_output_members_sh("\"$NIX_OUT\"", "/out"),
-    )
+    );
+    body + &observation_after
 }
 
 /// Escape a string for inclusion inside `'…'` single quotes in
@@ -888,26 +867,6 @@ pub fn stage_filtered_work_input(src: &Path) -> Result<tempfile::TempDir, Builde
 /// `artifact_out/` after the install pipeline finishes. The host
 /// reads + parses this to decide whether the install succeeded.
 pub const INSTALL_RESULT_FILENAME: &str = "result.json";
-
-/// Read the last `max_bytes` of `path` into a `String`, replacing any
-/// invalid UTF-8 lossily. Returns `Err` if the file is missing or
-/// unreadable. Used by [`finalize_flake_job`] to surface the tail of
-/// `<job_dir>/nix-stderr.log` (the cmd.sh's nix-build stderr capture)
-/// in the failure path without loading a multi-hundred-KB log into
-/// memory.
-pub fn read_last_bytes_of(path: &Path, max_bytes: u64) -> std::io::Result<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    let take = max_bytes.min(len);
-    // SeekFrom::End wants i64; max_bytes is bounded to a small constant
-    // at every call site (4 KiB today) so the cast is safe.
-    let offset = i64::try_from(take).unwrap_or(i64::MAX).saturating_neg();
-    file.seek(SeekFrom::End(offset))?;
-    let mut buf = Vec::with_capacity(take as usize);
-    file.read_to_end(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
 
 fn missing_job_result_diagnostics(job_dir: &Path, vm_state_dir: &Path) -> String {
     let console_log = vm_state_dir.join("console.log");
@@ -1262,10 +1221,18 @@ fn read_flake_job_result(
         Ok(result) => Ok(result),
         Err(BuilderVmError::NixBuildFailed(primary)) => match parse_job_result(artifact_out) {
             Ok(result) => Ok(result),
-            Err(BuilderVmError::NixBuildFailed(_)) => Err(BuilderVmError::NixBuildFailed(format!(
-                "{primary}; mirrored result was also absent at {}",
-                artifact_out.join("result").display()
-            ))),
+            Err(BuilderVmError::NixBuildFailed(_)) => {
+                // The job dir sits directly under the VM's state dir, which is
+                // where its console and supervisor logs are.
+                let diagnostics = job_dir
+                    .parent()
+                    .map(|state| missing_job_result_diagnostics(job_dir, state))
+                    .unwrap_or_default();
+                Err(BuilderVmError::NixBuildFailed(format!(
+                    "{primary}; mirrored result was also absent at {}\n{diagnostics}",
+                    artifact_out.join("result").display()
+                )))
+            }
             Err(err) => Err(err),
         },
         Err(err) => Err(err),
@@ -1306,7 +1273,7 @@ pub struct InstallResultReport {
 /// `<artifact_out>/result.json`, fail closed on
 /// `installer_exit_code != 0`, and return
 /// [`BuilderArtifacts::InstallVolume`] pointing at the directory.
-/// Sealing the volume (via `mvm_compiler::deps_audit::seal_volume`)
+/// Sealing the volume (via `mvm_core::deps_audit::seal_volume`)
 /// and renaming into the deps cache is the orchestrator's job
 /// (`mvm_build::app_deps::install_app_deps`) — keeping it out of the
 /// builder VM means the same code path covers fresh installs and
@@ -1446,6 +1413,76 @@ pub fn builder_vm_timeout() -> Result<Duration, BuilderVmError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn non_native_observation_renderer_uses_one_locked_consuming_build() {
+        let script = super::render_flake_cmd_sh_observed(
+            "/work",
+            "packages.aarch64-linux.default",
+            false,
+            Some((&"a".repeat(64), &"b".repeat(40), "job-unique")),
+        );
+        let build = script
+            .split("\"$NIX_BIN\" build")
+            .nth(1)
+            .unwrap()
+            .split("NIX_RC=$?")
+            .next()
+            .unwrap();
+        assert!(
+            build.contains("--reference-lock-file \"$OBS_DIR/flake.lock\" --no-update-lock-file")
+        );
+        assert!(!build.contains("--no-write-lock-file"));
+        assert!(!build.contains("--output-lock-file"));
+        assert!(!script.contains("--override-input"));
+        assert!(script.contains(".nodes[.root].inputs.mvm"));
+        assert!(script.contains("ulimit -f 1024"));
+        assert!(script.contains("OBS_JOB='job-unique'"));
+        let sidecars: Vec<_> = script
+            .lines()
+            .filter(|line| line.starts_with("elif ") && line.contains(" eval --json "))
+            .collect();
+        assert_eq!(sidecars.len(), 2);
+        for line in sidecars {
+            assert!(line.starts_with("elif \"$NIX_BIN\" eval "));
+            assert!(
+                line.contains(
+                    "--reference-lock-file \"$OBS_DIR/flake.lock\" --no-update-lock-file"
+                )
+            );
+            assert!(!line.contains("--no-write-lock-file"));
+            assert!(!line.contains("--output-lock-file"));
+        }
+        let plain = super::render_flake_cmd_sh("/work", "default", false);
+        assert!(!plain.contains("MVM_WORKSPACE_PATH"));
+        assert!(
+            super::render_flake_cmd_sh("/work", "default", true)
+                .contains("export MVM_WORKSPACE_PATH=/work\n")
+        );
+        assert!(!plain.contains("OBS_DIR"));
+        assert!(plain.contains("--no-write-lock-file"));
+        assert_eq!(
+            plain
+                .lines()
+                .filter(|line| line.starts_with("elif nix eval --json "))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn non_native_observation_staging_refuses_source_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let job = super::BuilderJob::FrozenFlakeDiagnostic {
+            flake_ref: "/work".to_string(),
+            attr_path: "default".to_string(),
+            input_digest: "a".repeat(64),
+            expected_mvm_revision: "b".repeat(40),
+        };
+        assert!(super::stage_job_dir(dir.path(), &job, None, Some(work.path())).is_err());
+        assert!(!dir.path().join("cmd.sh").exists());
+    }
+
     /// A guest job outcome under this build's contract.
     fn outcome_json(exit_code: i32, stderr_tail: &str) -> String {
         use crate::builder_job_contract::{
@@ -1831,7 +1868,11 @@ mod tests {
         std::fs::write(job_dir.join("result"), outcome_json(0, "")).unwrap();
         // What the guest returned: a rootfs the hook rewrote, a sealed sidecar,
         // and no verity pair, because no script copies the Nix-built one.
-        let rootfs: Vec<u8> = (0..8 * 4096).map(|i| (i % 241) as u8).collect();
+        let mut rootfs: Vec<u8> = (0..8 * 4096).map(|i| (i % 241) as u8).collect();
+        // An ext4 superblock declaring 4 KiB blocks: the seal reads its
+        // geometry from the image.
+        rootfs[1024 + 24..1024 + 28].copy_from_slice(&2u32.to_le_bytes());
+        rootfs[1024 + 56..1024 + 58].copy_from_slice(&0xEF53u16.to_le_bytes());
         std::fs::write(artifact_out.join("rootfs.ext4"), &rootfs).unwrap();
         std::fs::write(
             artifact_out.join(crate::builder_vm::SIDECAR_FILENAME),
@@ -1884,6 +1925,26 @@ mod tests {
 
         let artifacts = finalize_flake_job(&job_dir, &artifact_out, "fallback-job-id").unwrap();
         assert!(matches!(artifacts, BuilderArtifacts::Image { .. }));
+    }
+
+    #[test]
+    fn a_flake_job_with_no_result_anywhere_reports_the_vms_console() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let state = scratch.path().join("vm");
+        let job_dir = state.join("out");
+        let artifact_out = scratch.path().join("artifacts");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::create_dir_all(&artifact_out).unwrap();
+        std::fs::write(state.join("console.log"), "kernel panic: not syncing").unwrap();
+
+        let err = finalize_flake_job(&job_dir, &artifact_out, "job").unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("mirrored result was also absent"),
+            "{message}"
+        );
+        assert!(message.contains("kernel panic: not syncing"), "{message}");
     }
 
     /// `read_last_bytes_of` returns the trailing `max_bytes` of a
@@ -2345,60 +2406,6 @@ mod tests {
             warm_idx < gc_idx,
             "warm gcroot must be registered before the GC tail"
         );
-    }
-
-    #[test]
-    fn frozen_pack_evaluation_does_not_inherit_the_application_as_a_source_workspace() {
-        let body = render_flake_cmd_sh(".", "default", false);
-        assert!(body.contains(&format!(
-            "if [ -e \"$FROZEN_FLAKE_PATH/{}\" ]; then",
-            mvm_compiler::pack::LOCK_FILE
-        )));
-        assert!(body.contains("unset MVM_WORKSPACE_PATH MVM_HOST_BIN_DIR"));
-        assert!(body.contains("--no-write-lock-file $NIX_EVAL_IMPURE"));
-        assert!(body.contains(".passthru.mvm\" $NIX_EVAL_IMPURE"));
-    }
-
-    #[test]
-    fn frozen_evaluation_guard_handles_paths_and_path_uris() {
-        let body = render_flake_cmd_sh(".", "default", false);
-        let start = body.find("NIX_EVAL_IMPURE=--impure").unwrap();
-        let end = body[start..]
-            .find("\necho \"mvm-builder-vm: filesystem space")
-            .unwrap()
-            + start;
-        let script = format!(
-            "{}\nprintf '%s:%s:%s' \"$NIX_EVAL_IMPURE\" \"${{MVM_WORKSPACE_PATH-unset}}\" \"${{MVM_HOST_BIN_DIR-unset}}\"",
-            &body[start..end]
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let lock = dir.path().join(mvm_compiler::pack::LOCK_FILE);
-        for frozen in [false, true] {
-            if frozen {
-                std::fs::write(&lock, b"frozen input").unwrap();
-            }
-            for reference in [
-                dir.path().display().to_string(),
-                format!("path:{}", dir.path().display()),
-            ] {
-                let output = std::process::Command::new("/bin/sh")
-                    .args(["-eu", "-c", &script])
-                    .env("FLAKE_REF", reference)
-                    .env("MVM_WORKSPACE_PATH", "ordinary")
-                    .env("MVM_HOST_BIN_DIR", "ordinary")
-                    .output()
-                    .unwrap();
-                assert!(output.status.success());
-                assert_eq!(
-                    String::from_utf8(output.stdout).unwrap(),
-                    if frozen {
-                        ":unset:unset"
-                    } else {
-                        "--impure:ordinary:ordinary"
-                    }
-                );
-            }
-        }
     }
 
     #[test]

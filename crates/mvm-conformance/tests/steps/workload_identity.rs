@@ -1,4 +1,4 @@
-//! Steps driving `mvmctl build address` over the workload-identity fixtures.
+//! Steps driving `mvmctl dev address` over the workload-identity fixtures.
 //!
 //! Each `When` runs the real binary against a fixture and records the raw
 //! `Output` (so failing-exit scenarios can still assert). On a zero exit it
@@ -33,7 +33,7 @@ fn compute_address(world: &mut CliWorld, fixture: String) {
     let home = tempfile::tempdir().expect("create isolated workload-address home");
     let mut cmd = mvmctl_command();
     let output = cmd
-        .args(["build", "address", "--from-ir"])
+        .args(["dev", "address", "--from-ir"])
         .arg(&path)
         .arg("--json")
         .isolated_home(home.path())
@@ -43,7 +43,7 @@ fn compute_address(world: &mut CliWorld, fixture: String) {
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
-            panic!("build address --json did not emit valid JSON ({e}); stdout:\n{stdout}")
+            panic!("dev address --json did not emit valid JSON ({e}); stdout:\n{stdout}")
         });
         let addr = report["workload_address"]
             .as_str()

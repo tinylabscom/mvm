@@ -22,8 +22,11 @@ use mvm_vmm::driver::spec::{VmmSpec, VsockPort};
 use mvm_vmm::driver::traits::{PreloadChildRequest, PreloadedChild};
 use mvm_vmm::driver::{ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver};
 use mvm_vmm::post_restore::{ChildIdentity, PostRestoreOutcome};
+use mvm_vmm::runtime_artifacts::{RuntimeArtifact, RuntimeArtifacts};
 
 type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
+type BootObservation = std::result::Result<RuntimeArtifacts, String>;
+type BootObservations = Arc<Mutex<HashMap<String, BootObservation>>>;
 
 /// What a `MockDriver` reports from `deliver_child_identity`. `None` scripts a
 /// guest that never answered inside the RPC deadline (the shape a real
@@ -41,6 +44,8 @@ pub struct DeliveredChildIdentity {
     pub grant_envelope: Option<VerbGrantEnvelope>,
     /// Seccomp tier the child was told to admit.
     pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    /// Late volumes the child was told to mount.
+    pub volumes: Vec<mvm_agentd::vsock::VolumeConfig>,
 }
 
 /// A clean post-restore answer: the guest acknowledged, rotated its generation
@@ -54,6 +59,7 @@ fn rotated_child_identity() -> PostRestoreOutcome {
         clock_resynced: true,
         reseed_shortfall: None,
         seccomp_tier: None,
+        volumes_mounted: None,
     }
 }
 
@@ -68,6 +74,7 @@ pub struct MockChildFork {
     pub genid: GenerationToken,
     pub channels: Vec<VsockPort>,
     pub admitted_plan: Option<String>,
+    pub late_volumes: Vec<mvm_vmm::driver::traits::LateVolumeAttach>,
 }
 
 /// Hypervisor-free `VmmDriver` test double.
@@ -76,12 +83,16 @@ pub struct MockDriver {
     exit: VmExitStatus,
     status: VmStatus,
     booted: Arc<Mutex<Vec<VmmSpec>>>,
+    observations: BootObservations,
     forked: Arc<Mutex<Vec<MockChildFork>>>,
     guest_ends: GuestEnds,
     /// The rootfs path `vm_full_control`'s returned control reports from
     /// `rootfs_path()` — a test seeds this to a file it already wrote so the
     /// capture orchestration has something real to clone.
     vm_full_rootfs: PathBuf,
+    /// Whether a capture leaves the paused source resident, as HVF's live
+    /// hand-off does; the standby handle then keeps a real pid.
+    retain_paused: bool,
     /// Shared with every `MockVmFullControl` this driver hands out, so a test
     /// can read back the pause/save_memory/resume call order via
     /// `vm_full_calls()` regardless of which `vm_full_control()` call produced
@@ -120,6 +131,8 @@ pub struct MockDriver {
     /// When set, `fork_standby_child` answers `Unrestorable` with this reason,
     /// as a real driver does for a snapshot another VMM version wrote.
     unrestorable_fork: Option<String>,
+    /// Late-volume slots this driver's parents boot.
+    late_volume_slots: u8,
 }
 
 impl Default for MockDriver {
@@ -135,9 +148,11 @@ impl MockDriver {
             exit,
             status: VmStatus::Running,
             booted: Arc::new(Mutex::new(Vec::new())),
+            observations: Arc::new(Mutex::new(HashMap::new())),
             forked: Arc::new(Mutex::new(Vec::new())),
             guest_ends: Arc::new(Mutex::new(HashMap::new())),
             vm_full_rootfs: PathBuf::from("/mock/rootfs.ext4"),
+            retain_paused: false,
             vm_full_calls: Arc::new(Mutex::new(Vec::new())),
             child_identity: Some(rotated_child_identity()),
             child_identity_scripted: false,
@@ -148,6 +163,7 @@ impl MockDriver {
             resident_handoff: false,
             preloaded_standby: false,
             unrestorable_fork: None,
+            late_volume_slots: 0,
         }
     }
 
@@ -178,6 +194,20 @@ impl MockDriver {
     #[must_use]
     pub fn with_preloaded_standby(mut self) -> Self {
         self.preloaded_standby = true;
+        self
+    }
+
+    /// Keep the paused source resident after a capture, with a live pid on the
+    /// standby handle, as a resident hand-off backend does.
+    #[must_use]
+    pub fn with_retained_paused_source(mut self) -> Self {
+        self.retain_paused = true;
+        self
+    }
+
+    /// Boot parents with `slots` late-volume slots, as Firecracker does.
+    pub fn with_late_volume_slots(mut self, slots: u8) -> Self {
+        self.late_volume_slots = slots;
         self
     }
 
@@ -295,6 +325,9 @@ impl VmmDriver for MockDriver {
     fn supports_preloaded_standby(&self) -> bool {
         self.preloaded_standby
     }
+    fn late_volume_slots(&self) -> u8 {
+        self.late_volume_slots
+    }
     fn preload_standby_child(
         &self,
         req: &PreloadChildRequest<'_>,
@@ -323,6 +356,10 @@ impl VmmDriver for MockDriver {
         self.fork_standby_child(req)
     }
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
+        self.observations.lock().unwrap().insert(
+            spec.name.clone(),
+            observe_boot(spec).map_err(|error| format!("{error:#}")),
+        );
         self.booted.lock().unwrap().push(spec.clone());
         Ok(Box::new(MockRunningVm {
             id: VmId(spec.name.clone()),
@@ -353,7 +390,11 @@ impl VmmDriver for MockDriver {
             id: spec.id.clone(),
             template_id: spec.template_id.clone(),
             control_socket: spec.control_socket.clone(),
-            pid: 0,
+            pid: if self.retain_paused {
+                std::process::id()
+            } else {
+                0
+            },
             kernel_sha256: spec.kernel_sha256.clone(),
             vcpus: spec.vcpus,
             mem_mib: spec.mem_mib,
@@ -394,6 +435,7 @@ impl VmmDriver for MockDriver {
             genid: req.genid.clone(),
             channels: req.channels.to_vec(),
             admitted_plan: req.admitted_plan.map(str::to_string),
+            late_volumes: req.late_volumes.to_vec(),
         });
         Ok(())
     }
@@ -418,6 +460,7 @@ impl VmmDriver for MockDriver {
         identity: ChildIdentity,
     ) -> Result<PostRestoreOutcome> {
         let seccomp_tier = identity.seccomp_tier;
+        let requested_volumes = identity.volumes.len();
         self.delivered_identities
             .lock()
             .unwrap()
@@ -426,6 +469,7 @@ impl VmmDriver for MockDriver {
                 token: identity.token,
                 grant_envelope: identity.grant_envelope,
                 seccomp_tier,
+                volumes: identity.volumes,
             });
         let mut outcome = self.child_identity.clone().ok_or_else(|| {
             anyhow!("mock guest agent for '{child_vm_name}' did not answer the post-restore signal")
@@ -434,6 +478,7 @@ impl VmmDriver for MockDriver {
         // handed and says so. A scripted answer is reported exactly as written.
         if !self.child_identity_scripted {
             outcome.seccomp_tier = seccomp_tier;
+            outcome.volumes_mounted = (requested_volumes > 0).then_some(requested_volumes as u32);
         }
         Ok(outcome)
     }
@@ -442,10 +487,11 @@ impl VmmDriver for MockDriver {
         &self,
         vm_name: &str,
     ) -> Option<Box<dyn mvm_vmm::checkpoint::VmFullControl>> {
-        let _ = vm_name;
         Some(Box::new(MockVmFullControl {
             rootfs: self.vm_full_rootfs.clone(),
+            retain_paused: self.retain_paused,
             calls: Arc::clone(&self.vm_full_calls),
+            observation: self.observations.lock().unwrap().get(vm_name).cloned(),
         }))
     }
 
@@ -538,10 +584,46 @@ impl RunningVm for MockRunningVm {
 /// the pause-then-save-then-resume ordering without a live hypervisor.
 struct MockVmFullControl {
     rootfs: PathBuf,
+    retain_paused: bool,
     calls: Arc<Mutex<Vec<&'static str>>>,
+    observation: Option<BootObservation>,
+}
+
+fn observe_boot(boot: &VmmSpec) -> Result<RuntimeArtifacts> {
+    let measure = |path: &PathBuf| -> Result<RuntimeArtifact> {
+        Ok(RuntimeArtifact::loaded(
+            path.clone(),
+            &std::fs::read(path)?,
+        )?)
+    };
+    let mut disks = boot.blocks.iter().collect::<Vec<_>>();
+    disks.sort_by_key(|disk| disk.slot);
+    Ok(RuntimeArtifacts {
+        kernel: None,
+        initramfs: boot.initramfs.as_ref().map(measure).transpose()?,
+        disks: disks
+            .into_iter()
+            .filter(|disk| disk.read_only)
+            .map(|disk| measure(&disk.source))
+            .collect::<Result<_>>()?,
+        kernel_cmdline: boot.cmdline.clone(),
+        firecracker_drives: None,
+    })
 }
 
 impl mvm_vmm::checkpoint::VmFullControl for MockVmFullControl {
+    fn retain_paused_after_capture(&self) -> bool {
+        self.retain_paused
+    }
+
+    fn runtime_artifacts(&self) -> Result<RuntimeArtifacts> {
+        match &self.observation {
+            Some(Ok(actual)) => Ok(actual.clone()),
+            Some(Err(error)) => bail!("mock boot observation failed: {error}"),
+            None => bail!("mock VM has no recorded boot inputs"),
+        }
+    }
+
     fn pause(&self) -> Result<()> {
         self.calls.lock().unwrap().push("pause");
         Ok(())
@@ -560,6 +642,16 @@ impl mvm_vmm::checkpoint::VmFullControl for MockVmFullControl {
 
     fn rootfs_path(&self) -> Result<PathBuf> {
         Ok(self.rootfs.clone())
+    }
+
+    fn extra_content(&self, content_dir: &Path) -> Result<Vec<mvm_core::checkpoint::ContentBlob>> {
+        let name = mvm_core::checkpoint::HVF_FRAME_BLOB;
+        let path = content_dir.join(name);
+        std::fs::write(&path, b"mock-hvf-machine-state")?;
+        Ok(vec![mvm_core::checkpoint::ContentBlob {
+            name: name.into(),
+            sha256: mvm_core::crypto::image_verify::sha256_file(&path)?,
+        }])
     }
 
     fn device_anchors(&self) -> Result<mvm_core::checkpoint::DeviceAnchors> {
@@ -620,6 +712,86 @@ mod tests {
         );
         assert_eq!(vm.id(), &VmId("probe".into()));
         assert_eq!(driver.name(), "mock");
+    }
+
+    #[test]
+    fn mock_control_observes_boot_bytes_in_device_order_not_later_path_contents() {
+        use mvm_vmm::driver::spec::BlockDev;
+        let tmp = tempfile::tempdir().unwrap();
+        let initramfs = tmp.path().join("initramfs");
+        let first = tmp.path().join("runtime");
+        let second = tmp.path().join("verity");
+        for path in [&initramfs, &first, &second] {
+            std::fs::write(path, path.file_name().unwrap().as_encoded_bytes()).unwrap();
+        }
+        let mut spec = sample_spec("observed");
+        spec.initramfs = Some(initramfs.clone());
+        spec.cmdline = "mvm.runtime_data=/dev/vda mvm.runtime_hash=/dev/vdb".into();
+        spec.blocks = vec![
+            BlockDev {
+                source: second.clone(),
+                read_only: true,
+                ephemeral: false,
+                slot: 1,
+            },
+            BlockDev {
+                source: first.clone(),
+                read_only: true,
+                ephemeral: false,
+                slot: 0,
+            },
+            BlockDev {
+                source: tmp.path().join("writable"),
+                read_only: false,
+                ephemeral: false,
+                slot: 2,
+            },
+        ];
+        let driver = MockDriver::default();
+        assert!(
+            driver
+                .vm_full_control("observed")
+                .unwrap()
+                .runtime_artifacts()
+                .is_err()
+        );
+        driver.boot(&spec).unwrap();
+        let before = driver
+            .vm_full_control("observed")
+            .unwrap()
+            .runtime_artifacts()
+            .unwrap();
+        assert_eq!(
+            before
+                .disks
+                .iter()
+                .map(|disk| &disk.path)
+                .collect::<Vec<_>>(),
+            vec![&first, &second]
+        );
+        assert_eq!(before.kernel_cmdline, spec.cmdline);
+        assert!(before.firecracker_drives.is_none());
+        for path in [&initramfs, &first, &second] {
+            std::fs::write(path, b"replacement after boot").unwrap();
+        }
+        assert_eq!(
+            driver
+                .vm_full_control("observed")
+                .unwrap()
+                .runtime_artifacts()
+                .unwrap(),
+            before
+        );
+        let mut missing = sample_spec("missing");
+        missing.initramfs = Some(tmp.path().join("missing-initramfs"));
+        driver.boot(&missing).unwrap();
+        assert!(
+            driver
+                .vm_full_control("missing")
+                .unwrap()
+                .runtime_artifacts()
+                .is_err()
+        );
     }
 
     #[test]

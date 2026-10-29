@@ -25,6 +25,36 @@ pub const PRIVATE_DIR_MODE: u32 = 0o700;
 /// Mode of a file holding a secret.
 pub const PRIVATE_FILE_MODE: u32 = 0o600;
 
+/// Require metadata owned by the current effective user.
+///
+/// This checks ownership only. Callers must separately validate the opened
+/// object, its type, links and permissions; it does not bind a path to a handle.
+#[cfg(unix)]
+pub fn require_current_owner(metadata: &Metadata) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    require_owner_uid(metadata.uid(), rustix::process::geteuid().as_raw())
+}
+
+#[cfg(unix)]
+fn require_owner_uid(actual: u32, expected: u32) -> io::Result<()> {
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "object is not owned by the current effective user",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse ownership validation on hosts without the supported Unix model.
+#[cfg(not(unix))]
+pub fn require_current_owner(_metadata: &Metadata) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "effective-user ownership validation is unsupported on this host",
+    ))
+}
+
 /// The error every function in this module returns on a host without Unix
 /// permission bits. `subject` names what was being made private, so the
 /// refusal says which file or directory was not written.
@@ -139,6 +169,115 @@ pub fn ensure_private_dir(dir: impl AsRef<Path>) -> io::Result<()> {
     Err(unsupported_platform_error(dir.as_ref()))
 }
 
+/// Create `dir` as a private directory the current user owns, or refuse.
+///
+/// [`ensure_private_dir`] accepts whatever is already at the path. That is
+/// right under the mvm home, where every ancestor is the user's own, and wrong
+/// in a shared parent such as `/tmp`: another account that created the name
+/// first would own the directory this process then binds sockets in or hands
+/// to a privileged helper. This creates a single missing component at
+/// [`PRIVATE_DIR_MODE`] and, whether it created it or found it, requires a real
+/// directory (not a symlink) owned by the current effective user. One the user
+/// owns but left wider than [`PRIVATE_DIR_MODE`] is tightened.
+#[cfg(unix)]
+pub fn create_owned_private_dir(dir: impl AsRef<Path>) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let dir = dir.as_ref();
+    match std::fs::DirBuilder::new()
+        .mode(PRIVATE_DIR_MODE)
+        .create(dir)
+    {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is not a plain directory", dir.display()),
+        ));
+    }
+    require_current_owner(&meta)
+        .map_err(|e| io::Error::new(e.kind(), format!("refusing {}: {e}", dir.display())))?;
+    if mode_bits(dir, &meta)? != PRIVATE_DIR_MODE {
+        set_mode(dir, PRIVATE_DIR_MODE)?;
+    }
+    Ok(())
+}
+
+/// Refuse directory creation on hosts without Unix permission bits.
+#[cfg(not(unix))]
+pub fn create_owned_private_dir(dir: impl AsRef<Path>) -> io::Result<()> {
+    Err(unsupported_platform_error(dir.as_ref()))
+}
+
+/// Sync a known managed directory and its finite namespace ancestry.
+///
+/// The configured root is trusted; descendants must be at most eight normal
+/// components and are opened descriptor-relatively without following symlinks.
+/// No directory is listed. Ancestors of the configured root are also synced so
+/// first-use creation of that root's parents cannot leave an unsynced link.
+/// This relies on the filesystem honoring directory fsync; it does not certify
+/// hardware power-loss behavior.
+#[cfg(unix)]
+pub fn sync_managed_directory_chain(root: &Path, directory: &Path) -> io::Result<()> {
+    sync_managed_directory_chain_with(root, directory, |_, file| file.sync_all())
+}
+
+#[cfg(not(unix))]
+pub fn sync_managed_directory_chain(root: &Path, _directory: &Path) -> io::Result<()> {
+    Err(unsupported_platform_error(root))
+}
+
+#[cfg(unix)]
+fn sync_managed_directory_chain_with(
+    root: &Path,
+    directory: &Path,
+    mut sync: impl FnMut(&Path, &File) -> io::Result<()>,
+) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    use std::path::Component;
+    let relative = directory
+        .strip_prefix(root)
+        .map_err(|_| io::Error::other("directory is outside managed root"))?;
+    let components: Vec<_> = relative.components().collect();
+    if components.len() > 8
+        || components
+            .iter()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(io::Error::other(
+            "invalid managed directory depth or component",
+        ));
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root_file = File::from(rustix::fs::open(root, flags, Mode::empty())?);
+    let canonical_root = root.canonicalize()?;
+    if canonical_root.ancestors().count() > 128 {
+        return Err(io::Error::other("managed root ancestry exceeds bound"));
+    }
+    let mut chain = vec![(canonical_root.clone(), root_file)];
+    for component in components {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::other("invalid managed directory component"));
+        };
+        let (path, parent) = chain
+            .last()
+            .ok_or_else(|| io::Error::other("managed root missing"))?;
+        let child = File::from(rustix::fs::openat(parent, name, flags, Mode::empty())?);
+        chain.push((path.join(name), child));
+    }
+    for (path, directory) in chain.iter().rev() {
+        sync(path, directory)?;
+    }
+    for parent in canonical_root.ancestors().skip(1) {
+        let file = File::from(rustix::fs::open(parent, flags, Mode::empty())?);
+        sync(parent, &file)?;
+    }
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -146,6 +285,86 @@ mod tests {
 
     fn mode(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn ownership_predicate_accepts_owned_file_and_directory_without_repair() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        for path in [directory.path(), file.path()] {
+            let before = std::fs::metadata(path).unwrap();
+            require_current_owner(&before).unwrap();
+            assert_eq!(mode(path), before.permissions().mode() & 0o777);
+        }
+    }
+
+    #[test]
+    fn ownership_predicate_refuses_different_uid_with_static_diagnostic() {
+        for (actual, expected) in [(0, 1), (1, 0), (u32::MAX, 0)] {
+            let error = require_owner_uid(actual, expected).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                error.to_string(),
+                "object is not owned by the current effective user"
+            );
+        }
+        require_owner_uid(0, 0).unwrap();
+        require_owner_uid(u32::MAX, u32::MAX).unwrap();
+    }
+
+    #[test]
+    fn managed_namespace_sync_is_leaf_first_for_new_and_existing_directories() {
+        let home = tempfile::tempdir().unwrap();
+        let generation = home.path().join("vms/demo/protected/run/000");
+        ensure_private_dir(&generation).unwrap();
+        let expected: Vec<_> = generation
+            .canonicalize()
+            .unwrap()
+            .ancestors()
+            .map(Path::to_path_buf)
+            .collect();
+        for _ in 0..2 {
+            let mut visited = Vec::new();
+            sync_managed_directory_chain_with(home.path(), &generation, |path, file| {
+                visited.push(path.to_path_buf());
+                file.sync_all()
+            })
+            .unwrap();
+            assert_eq!(visited, expected);
+        }
+    }
+
+    #[test]
+    fn managed_namespace_sync_failure_stops_before_parent_publication() {
+        let home = tempfile::tempdir().unwrap();
+        let generation = home.path().join("run/000");
+        ensure_private_dir(&generation).unwrap();
+        let fail = home.path().join("run").canonicalize().unwrap();
+        let mut visited = Vec::new();
+        assert!(
+            sync_managed_directory_chain_with(home.path(), &generation, |path, _| {
+                visited.push(path.to_path_buf());
+                if path == fail {
+                    Err(io::Error::other("injected ancestor failure"))
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        assert_eq!(visited.len(), 2);
+        assert_eq!(visited.last(), Some(&fail));
+        assert!(generation.is_dir());
+    }
+
+    #[test]
+    fn managed_namespace_refuses_escape_and_symlink_descendants() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("link")).unwrap();
+        assert!(sync_managed_directory_chain(home.path(), outside.path()).is_err());
+        assert!(sync_managed_directory_chain(home.path(), &home.path().join("../escape")).is_err());
+        assert!(sync_managed_directory_chain(home.path(), &home.path().join("link")).is_err());
     }
 
     #[test]
@@ -244,6 +463,63 @@ mod tests {
         assert!(ensure_private_dir(file.join("leaf")).is_err());
         assert_eq!(mode(&file), 0o644);
         assert_eq!(std::fs::read(file).unwrap(), b"synthetic");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod owned_dir_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn a_missing_directory_is_created_private() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("socks");
+        create_owned_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, PRIVATE_DIR_MODE);
+    }
+
+    #[test]
+    fn an_existing_directory_we_own_is_tightened() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("socks");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap();
+        create_owned_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, PRIVATE_DIR_MODE);
+    }
+
+    #[test]
+    fn a_symlink_planted_at_the_path_is_refused_not_followed() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let link = root.path().join("socks");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        let err = create_owned_private_dir(&link).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        // The target was neither chmodded nor adopted.
+        let mode = std::fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777;
+        assert_ne!(mode, 0);
+    }
+
+    #[test]
+    fn a_regular_file_at_the_path_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("socks");
+        std::fs::write(&path, b"x").unwrap();
+        let err = create_owned_private_dir(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_missing_parent_is_an_error_not_created() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("no/such/parent");
+        assert!(create_owned_private_dir(&dir).is_err());
+        assert!(!root.path().join("no").exists());
     }
 }
 

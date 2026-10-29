@@ -2091,7 +2091,6 @@ mod tests {
         )
         .expect("fake launcher");
         let launcher = scratch.path().join("bin").join(SYSTEMD_RUN);
-        std::fs::copy("/usr/bin/yes", &launcher).expect("install executable fake launcher");
         assert!(
             launcher.is_file(),
             "fake launcher must exist before binding"
@@ -2151,7 +2150,21 @@ mod tests {
             await_detached_launcher_within(&pid_file, "mvm-abc123", Duration::from_millis(200))
                 .expect_err("a launcher that never execs fails the launch");
         assert!(format!("{err:#}").contains("did not create scope"));
-        let status = child.wait().expect("reap the launcher");
+        // Bounded, so a launcher that was not killed fails the test instead of
+        // hanging it.
+        let reaped = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll the launcher") {
+                break Some(status);
+            }
+            if reaped.elapsed() > Duration::from_secs(5) {
+                child.kill().expect("clean up the unkilled launcher");
+                child.wait().expect("reap the launcher");
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let status = status.expect("the stuck launcher must be killed at its deadline");
         assert!(!status.success(), "the stuck launcher was killed");
     }
 

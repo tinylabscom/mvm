@@ -11,6 +11,201 @@ use mvm_core::plan::bundle::{
     select_boot_asset_members,
 };
 
+#[test]
+fn cli_boot_export_preserves_linux_identity_and_refuses_incomplete_or_mixed_members() {
+    use mvm_bundler::CliBootAssetsInputs;
+    use mvm_core::plan::bundle::{BundleMember, EmbeddedCliBootAssets, select_cli_boot_kernel};
+    for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut linux = manifest();
+        linux.schema_version = IMAGE_SET_SCHEMA_VERSION;
+        linux.mvm_source_commit = None;
+        linux.compatibility.guest_agent_protocol = None;
+        linux.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+        linux.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
+        linux.members.retain(|member| !member.role.is_retired());
+        validate_structure(&linux).unwrap();
+        assert!(select_boot_asset_members(&linux, arch).is_err());
+        let selected = select_cli_boot_kernel(&linux, arch).unwrap();
+        let kernel = dir.path().join("kernel");
+        std::fs::write(&kernel, archive_bytes(selected.artifacts[0].name.as_str())).unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(dir.path().join("mvm-meta.json"), b"{}").unwrap();
+        let out = dir.path().join("portable.mvmpkg");
+        let arch_label = arch.to_string();
+        let declaration = EmbeddedCliBootAssets {
+            manifest_artifact: "boot-image-set.json".into(),
+            version: "1.2.3".into(),
+            arch: arch_label.clone(),
+            archive_artifact: "runtime.tar.gz".into(),
+            checksum_artifact: "runtime.sha256".into(),
+            signature_bundle_artifact: "runtime.bundle".into(),
+            checksum_signature_bundle_artifact: "runtime.sha256.bundle".into(),
+            overlay_artifact: "overlay.ext4".into(),
+            overlay_verity_artifact: "overlay.verity".into(),
+            initramfs_artifact: "initrd".into(),
+            overlay_roothash: "a".repeat(64),
+            protocol_version: 2,
+            min_supported_protocol_version: 2,
+        };
+        // Structural sealing only: synthetic runtime inputs must not pass release verification.
+        let paths: Vec<_> = [
+            "runtime.tar.gz",
+            "runtime.sha256",
+            "runtime.bundle",
+            "runtime.sha256.bundle",
+            "overlay.ext4",
+            "overlay.verity",
+            "initrd",
+        ]
+        .into_iter()
+        .map(|name| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, archive_bytes(name)).unwrap();
+            (name, path)
+        })
+        .collect();
+        let files: Vec<_> = paths
+            .iter()
+            .map(|(name, path)| (*name, path.as_path()))
+            .collect();
+        let bytes = serde_json::to_vec_pretty(&linux).unwrap();
+        let pin = Sha256Hex::from_bytes(&bytes);
+        let publisher = Publisher {
+            key: SigningKey::from_bytes(&[12; 32]),
+            calls: Cell::new(0),
+        };
+        let mut inputs = BundleExportInputs::new(
+            kernel.to_str().unwrap(),
+            rootfs.to_str().unwrap(),
+            &arch_label,
+            &out,
+        )
+        .initrd(paths.last().unwrap().1.to_str().unwrap());
+        inputs.cli_boot_assets = Some(CliBootAssetsInputs {
+            manifest_bytes: &bytes,
+            manifest_sha256: &pin,
+            runtime: &declaration,
+            artifacts: &files,
+        });
+        export_bundle_with_signer(&inputs, &publisher).unwrap();
+        let verified = read_and_verify_bundle(&std::fs::read(&out).unwrap(), &publisher).unwrap();
+        assert_eq!(verified.manifest.schema_version, 6);
+        assert!(verified.embedded_image_sets.is_empty());
+        let boot = verified.boot_assets.unwrap();
+        assert_eq!(boot.image_set.manifest_sha256, pin);
+        assert_eq!(boot.cli_runtime.as_ref(), Some(&declaration));
+        assert_eq!(boot.image_set.artifact_paths.len(), 1);
+        assert_eq!(verified.artifacts["artifacts/boot-image-set.json"], bytes);
+        let mut combined = inputs.clone();
+        let combined_out = dir.path().join("portable-with-environment.mvmpkg");
+        combined.out = &combined_out;
+        combined.environment = Some(
+            serde_json::from_value(serde_json::json!({
+                "descriptor_version": 1, "target": format!("{arch_label}-linux"),
+                "entrypoint": {"argv":["/bin/app"]}, "capabilities": []
+            }))
+            .unwrap(),
+        );
+        export_bundle_with_signer(&combined, &publisher).unwrap();
+        assert_eq!(
+            read_and_verify_bundle(&std::fs::read(&combined_out).unwrap(), &publisher)
+                .unwrap()
+                .manifest
+                .schema_version,
+            6
+        );
+        // A correctly signed, structurally complete new carrier is not a
+        // native kernel-custody grant. Shared plan admission must refuse it
+        // until actual backend ownership is implemented.
+        {
+            use mvm_core::plan::bundle::{
+                ArtifactRole, BundleArtifact, BundleResolveError, BundleResolver,
+                CanonicalLinuxProof, PlanBundleError, sha256_hex, verify_bundle_file,
+                verify_plan_bundle, write_bundle,
+            };
+            struct MemoryArchive(Vec<u8>);
+            impl BundleResolver for MemoryArchive {
+                fn resolve(&self, _: &str) -> Result<Vec<u8>, BundleResolveError> {
+                    Ok(self.0.clone())
+                }
+            }
+            let mut canonical = verified.manifest.clone();
+            canonical.schema_version = 7;
+            canonical
+                .members
+                .push(BundleMember::CanonicalLinuxProof(CanonicalLinuxProof {
+                    manifest_artifact: declaration.manifest_artifact.clone(),
+                    signature_bundle_artifact: "linux.bundle".into(),
+                    revocation_document_artifact: "revocations.json".into(),
+                    revocation_signature_bundle_artifact: "revocations.bundle".into(),
+                }));
+            let mut payload: Vec<_> = verified.artifacts.clone().into_iter().collect();
+            for name in ["linux.bundle", "revocations.json", "revocations.bundle"] {
+                let bytes = b"not canonical proof".to_vec();
+                let path = format!("artifacts/{name}");
+                canonical.artifacts.push(BundleArtifact {
+                    name: name.into(),
+                    role: ArtifactRole::Other,
+                    path: path.clone(),
+                    sha256: sha256_hex(&bytes),
+                    size_bytes: bytes.len() as u64,
+                });
+                payload.push((path, bytes));
+            }
+            let archive = write_bundle(&canonical, &publisher.key, payload).unwrap();
+            let path = dir.path().join("canonical.mvmpkg");
+            std::fs::write(&path, &archive).unwrap();
+            let structural = verify_bundle_file(&path, &publisher).unwrap();
+            assert_eq!(structural.manifest.schema_version, 7);
+            assert!(matches!(
+                verify_plan_bundle(
+                    &structural.plan_artifact(),
+                    &MemoryArchive(archive),
+                    &publisher
+                ),
+                Err(PlanBundleError::CanonicalKernelCustodyRequired)
+            ));
+        }
+        let calls = publisher.calls.get();
+        let mut missing = inputs.clone();
+        missing.cli_boot_assets.as_mut().unwrap().artifacts = &files[1..];
+        assert!(export_bundle_with_signer(&missing, &publisher).is_err());
+        let mut wrong_protocol = declaration.clone();
+        wrong_protocol.min_supported_protocol_version = 3;
+        let mut invalid = inputs.clone();
+        invalid.cli_boot_assets.as_mut().unwrap().runtime = &wrong_protocol;
+        assert!(export_bundle_with_signer(&invalid, &publisher).is_err());
+        let mut wrong_arch = declaration.clone();
+        wrong_arch.arch = "unknown".into();
+        invalid.cli_boot_assets.as_mut().unwrap().runtime = &wrong_arch;
+        assert!(export_bundle_with_signer(&invalid, &publisher).is_err());
+        for member in [
+            BundleMember::EmbeddedBootAssets {
+                manifest_artifact: declaration.manifest_artifact.clone(),
+            },
+            BundleMember::EmbeddedImageSet {
+                manifest_artifact: declaration.manifest_artifact.clone(),
+            },
+        ] {
+            let mut mixed = verified.manifest.clone();
+            mixed.members.push(member);
+            assert!(
+                mvm_core::plan::bundle::write_bundle(&mixed, &publisher.key, Vec::new()).is_err()
+            );
+        }
+        let mut downgraded = verified.manifest.clone();
+        downgraded.schema_version = 5;
+        assert!(
+            mvm_core::plan::bundle::write_bundle(&downgraded, &publisher.key, Vec::new()).is_err()
+        );
+        std::fs::write(&kernel, b"tampered").unwrap();
+        assert!(export_bundle_with_signer(&inputs, &publisher).is_err());
+        assert_eq!(publisher.calls.get(), calls);
+    }
+}
+
 struct Publisher {
     key: SigningKey,
     calls: Cell<usize>,
@@ -168,11 +363,9 @@ fn boot_export_binds_original_bytes_and_refuses_bad_inputs_before_signing() {
     let rootfs = dir.path().join("rootfs.ext4");
     let overlay = dir.path().join("overlay");
     let initramfs = dir.path().join("initramfs");
-    let boot_initrd = dir.path().join("initrd");
     let out = dir.path().join("bundle.mvmpkg");
     std::fs::write(&kernel, b"kernel").unwrap();
     std::fs::write(&rootfs, b"rootfs").unwrap();
-    std::fs::write(&boot_initrd, b"runtime initrd").unwrap();
     std::fs::write(dir.path().join("mvm-meta.json"), b"{}").unwrap();
     let original = manifest();
     let selected = select_boot_asset_members(&original, GuestArch::Aarch64).unwrap();
@@ -199,7 +392,6 @@ fn boot_export_binds_original_bytes_and_refuses_bad_inputs_before_signing() {
         "aarch64",
         &out,
     );
-    inputs.initrd = Some(boot_initrd.to_str().unwrap());
     inputs.boot_assets = Some(BootAssetsInputs {
         manifest_bytes: &bytes,
         manifest_sha256: &pin,
@@ -212,7 +404,6 @@ fn boot_export_binds_original_bytes_and_refuses_bad_inputs_before_signing() {
     let boot = verified.boot_assets.unwrap();
     assert_eq!(boot.image_set.manifest_sha256, pin);
     assert_eq!(verified.artifacts["artifacts/boot-image-set.json"], bytes);
-    assert_eq!(verified.artifacts["artifacts/initrd"], b"runtime initrd");
     assert!(verified.embedded_image_sets.is_empty());
     assert_eq!(boot.image_set.artifact_paths.len(), 2);
     let calls = publisher.calls.get();

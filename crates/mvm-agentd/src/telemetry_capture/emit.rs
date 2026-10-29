@@ -61,7 +61,7 @@ impl CaptureState {
             return self.shed(producer, ShedReason::Rejected, 0);
         };
         let bytes = prepared.len() as u64;
-        match self.outbox().offer(&prepared) {
+        match self.outbox_for(producer).offer(&prepared) {
             Offer::Queued => EmitOutcome::Queued,
             Offer::Full => self.shed(producer, ShedReason::Capacity, bytes),
             Offer::Contended => self.shed(producer, ShedReason::Contention, bytes),

@@ -16,7 +16,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use mvm_core::vm_backend::StandbyState;
+use mvm_core::vm_backend::{StandbyHandle, StandbyState};
 use mvm_runtime::standby_pool::SupervisorStandbyPool;
 
 /// How often the idle watcher looks at the pool.
@@ -136,7 +136,16 @@ fn watch_idle_in(pool: &SupervisorStandbyPool, idle_timeout: Duration, tick: Dur
                 return;
             }
             release_idle(pool, idle_timeout);
-            seen = live_standbys(pool);
+            let now = live_standbys(pool);
+            reap_exited_children(&seen, &now);
+            // The home can also vanish mid-sweep, after the check above; an
+            // empty listing then means the standbys seen last tick are
+            // orphaned, not released.
+            if now.is_empty() && !pool_root_exists(pool.root()) {
+                stop_orphaned(&seen);
+                return;
+            }
+            seen = now;
         }
         drop(guard);
         // A refill that recorded its standby while this watcher held the lock
@@ -148,8 +157,112 @@ fn watch_idle_in(pool: &SupervisorStandbyPool, idle_timeout: Duration, tick: Dur
     }
 }
 
+/// Collect the exit of every standby supervisor that stopped since the last
+/// sweep. A refill is the parent of the supervisors it spawned and never waits
+/// on them, so a stopped one would stay a zombie until the refill exits. A pid
+/// that is not this process's child, or was already collected, is a no-op.
+fn reap_exited_children(before: &BTreeMap<String, u32>, now: &BTreeMap<String, u32>) {
+    for (id, pid) in before {
+        if now.contains_key(id) {
+            continue;
+        }
+        mvm_runtime::standby_pool::reap_standby_child(*pid);
+    }
+}
+
 fn pool_root_exists(root: &Path) -> bool {
     root.is_dir()
+}
+
+/// The standby pool's occupancy, for `mvmctl pool status` and SDK callers.
+#[derive(Debug, serde::Serialize)]
+pub struct PoolStatus {
+    /// Standbys ready to be claimed.
+    pub idle: usize,
+    /// Standbys serving a launch.
+    pub claimed: usize,
+    /// Aged out of the warm set but kept as a claimable saved-state snapshot.
+    pub parked: usize,
+    /// Recorded standbys whose process is gone and that hold no saved state.
+    pub dead: usize,
+    /// Every recorded standby, live or not.
+    pub standbys: Vec<PoolStatusEntry>,
+}
+
+/// One recorded standby as the pool knows it.
+#[derive(Debug, serde::Serialize)]
+pub struct PoolStatusEntry {
+    /// The standby's id — the name a claiming VM runs under.
+    pub id: String,
+    /// `idle`, `claimed`, `parked`, or `dead`.
+    pub state: &'static str,
+    /// The supervisor process; 0 for a saved-state standby.
+    pub pid: u32,
+    /// The compat key's kernel half: sha256 of the kernel the parent booted.
+    pub kernel_sha256: String,
+    pub vcpus: u8,
+    /// Guest RAM the standby holds, in MiB.
+    pub mem_mib: u32,
+    /// The image half of the compat key: sha256 of the rootfs the parent
+    /// booted. Every standby carries one, since a parent is only ever spawned
+    /// for a resolved launch shape; absent marks a record predating that.
+    pub image_sha256: Option<String>,
+}
+
+/// Read the pool and build its status report.
+///
+/// # Errors
+///
+/// If the pool cannot be opened or listed.
+pub fn pool_status() -> Result<PoolStatus> {
+    let pool = SupervisorStandbyPool::open()?;
+    let standbys = pool.list()?;
+    Ok(build_pool_status(&standbys))
+}
+
+fn build_pool_status(standbys: &[StandbyHandle]) -> PoolStatus {
+    let idle = standbys
+        .iter()
+        .filter(|h| h.state == StandbyState::Idle && SupervisorStandbyPool::is_live_or_saved(h))
+        .count();
+    let parked = standbys
+        .iter()
+        .filter(|h| h.state == StandbyState::Parked && SupervisorStandbyPool::is_live_or_saved(h))
+        .count();
+    let claimed = standbys
+        .iter()
+        .filter(|h| h.state == StandbyState::Claimed && SupervisorStandbyPool::is_live_or_saved(h))
+        .count();
+    let dead = standbys
+        .iter()
+        .filter(|h| !SupervisorStandbyPool::is_live_or_saved(h))
+        .count();
+    PoolStatus {
+        idle,
+        claimed,
+        parked,
+        dead,
+        standbys: standbys
+            .iter()
+            .map(|h| PoolStatusEntry {
+                id: h.id.clone(),
+                state: if SupervisorStandbyPool::is_live_or_saved(h) {
+                    match h.state {
+                        StandbyState::Idle => "idle",
+                        StandbyState::Claimed => "claimed",
+                        StandbyState::Parked => "parked",
+                    }
+                } else {
+                    "dead"
+                },
+                pid: h.pid,
+                kernel_sha256: h.kernel_sha256.clone(),
+                vcpus: h.vcpus,
+                mem_mib: h.mem_mib,
+                image_sha256: h.image_sha256.clone(),
+            })
+            .collect(),
+    }
 }
 
 fn stop_orphaned(seen: &BTreeMap<String, u32>) {
@@ -162,6 +275,44 @@ fn stop_orphaned(seen: &BTreeMap<String, u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn idle_handle(id: &str, pid: u32) -> StandbyHandle {
+        StandbyHandle {
+            id: id.into(),
+            template_id: None,
+            control_socket: format!("/p/{id}.sock"),
+            pid,
+            kernel_sha256: "aa".into(),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "ab".repeat(32),
+            spawned_unix_secs: 1,
+            state: StandbyState::Idle,
+            image_sha256: None,
+            root_strategy: Default::default(),
+            parent_checkpoint: None,
+            preloaded_child_vm_name: None,
+            vsock_egress: false,
+        }
+    }
+
+    #[test]
+    fn pool_status_reports_dead_standbys_separately() {
+        let live = idle_handle("live", std::process::id());
+        let dead = idle_handle("dead", 999_999_999);
+        let mut saved = idle_handle("saved", 0);
+        saved.image_sha256 = Some("img".into());
+
+        let report = build_pool_status(&[live, dead, saved]);
+
+        assert_eq!(report.idle, 2, "live process + saved-state are idle");
+        assert_eq!(report.claimed, 0);
+        assert_eq!(report.parked, 0);
+        assert_eq!(report.dead, 1);
+        assert_eq!(report.standbys[0].state, "idle");
+        assert_eq!(report.standbys[1].state, "dead");
+        assert_eq!(report.standbys[2].state, "idle");
+    }
 
     #[test]
     fn a_standby_fits_the_standby_budget_after_what_is_already_held() {
@@ -244,16 +395,71 @@ mod tests {
             vsock_egress: false,
         };
         pool.record(&handle).unwrap();
-        let remover = {
-            let root = root.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
-                std::fs::remove_dir_all(&root).unwrap();
-            })
-        };
-        watch_idle_in(&pool, Duration::from_secs(3600), Duration::from_millis(200));
-        remover.join().unwrap();
+        let tick = Duration::from_millis(100);
+        let watcher =
+            std::thread::spawn(move || watch_idle_in(&pool, Duration::from_secs(3600), tick));
+        // Remove the home only once the watcher has seen the standby: it holds
+        // the watch lock from before its first sweep until it returns, so the
+        // lock still being taken after the file appeared means the first
+        // sweep listed s1 and the watcher is parked in its loop. Removing
+        // earlier would race that sweep, and the watcher stops only standbys
+        // it last saw. The extra half tick lands the removal inside the
+        // watcher's sleep rather than on its wake-up check. (An explicit
+        // "armed" signal from the watcher would replace probing its lock.)
+        let lock_path = root.join(WATCH_LOCK);
+        wait_until("the watcher to take the watch lock", || {
+            lock_path.with_extension("lock").exists()
+        });
+        std::thread::sleep(tick + tick / 2);
+        wait_until("the watcher to still hold the watch lock", || {
+            mvm_core::atomic_io::FileLock::try_acquire(&lock_path)
+                .unwrap()
+                .is_none()
+        });
+        std::fs::remove_dir_all(&root).unwrap();
+        watcher.join().unwrap();
         let status = child.wait().expect("waiting for the stand-in");
         assert!(!status.success(), "the orphaned standby was stopped");
+    }
+
+    /// Stopping a standby the refill spawned leaves its supervisor a zombie
+    /// until the refill collects it; the watcher collects it on its next sweep.
+    #[test]
+    fn the_watcher_collects_a_stopped_standby_it_spawned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawning a stand-in standby process");
+        let pid = child.id();
+        let mut handle = idle_handle("s1", pid);
+        handle.spawned_unix_secs = mvm_core::time::now_unix_secs();
+        pool.record(&handle).unwrap();
+        let tick = Duration::from_millis(50);
+        let watcher =
+            std::thread::spawn(move || watch_idle_in(&pool, Duration::from_secs(3600), tick));
+        let lock_path = tmp.path().join(WATCH_LOCK);
+        wait_until("the watcher to take the watch lock", || {
+            lock_path.with_extension("lock").exists()
+        });
+        child.kill().unwrap();
+        watcher.join().unwrap();
+        // ECHILD from the std handle means the watcher already collected it.
+        assert!(
+            child.try_wait().is_err(),
+            "the watcher collected the stopped standby"
+        );
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if done() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for {what}");
     }
 }

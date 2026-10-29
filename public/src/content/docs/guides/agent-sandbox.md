@@ -246,7 +246,7 @@ to produce one:
 
 - From an SDK function workload: declare the variable with
   `mvm.secret("anthropic", type="bearer", hosts=["api.anthropic.com"], var="ANTHROPIC_API_KEY")`
-  in the app's `env` and run `mvmctl build compile app.py --out ./out`. That
+  in the app's `env` and run `mvmctl dev compile app.py --out ./out`. That
   writes the flake and `./out/workload.json`, and strips the secret
   declaration out of the image.
 - For a hand-written flake: write `workload.json` yourself. The
@@ -309,8 +309,8 @@ Both forms reuse the placeholders minted at boot and admit nothing new.
 
 The entrypoint itself must be a per-call entrypoint: an image whose PID 1
 idles and whose `/etc/mvm/entrypoint` is a wrapper the guest agent runs on each
-call. Function workloads from `mvmctl build compile` have that shape. Command
-workloads from `mvmctl build compile`, and plain mkGuest `entrypoint.command`
+call. Function workloads from `mvmctl dev compile` have that shape. Command
+workloads from `mvmctl dev compile`, and plain mkGuest `entrypoint.command`
 images, do not: their program is PID 1, which never receives a placeholder.
 
 ## What the agent's HTTP client must do

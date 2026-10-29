@@ -25,9 +25,6 @@ mvm-contract = { workspace = true }
 # binary through `mvm_vmm::host::aux_bin::resolve_verified`, which asks for
 # `helper_contract::HOST_HELPER_CONTRACT_VERSION` before spawning.
 mvm-vmm = { workspace = true }
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
 libc.workspace = true
 
 [dev-dependencies]

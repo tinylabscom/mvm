@@ -161,6 +161,21 @@ where
         &GuestRequest::ActivateEnvironment(env.clone()),
     )
     .context("send ActivateEnvironment to guest")?;
+    require_activation_ack(response, env)
+}
+
+/// Use the same payload and ACK contract on an independently verified,
+/// retained native channel. The caller keeps custody on every error.
+pub(crate) fn activate_cold_hvf(
+    owner: &mut mvm_backends::driver::hvf::ColdHvfOwner,
+    config: &VmStartConfig,
+) -> Result<()> {
+    let env = build_activation_environment(config)?;
+    let response = owner.call_unary(&GuestRequest::ActivateEnvironment(env.clone()))?;
+    require_activation_ack(response, &env)
+}
+
+fn require_activation_ack(response: GuestResponse, env: &ActivateEnvironment) -> Result<()> {
     match response {
         GuestResponse::ActivateEnvironmentAck => Ok(()),
         GuestResponse::ActivateEnvironmentError { message } => {
@@ -386,7 +401,7 @@ fn probe_roothash_sidecar(rootfs_path: &str) -> Option<String> {
 }
 
 /// Translate configured volumes into the exact devices the runner attached.
-fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
+pub(crate) fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
     let block_devices = mvm_vmm::host::spec_map::workload_volume_devices(config);
     let extension_mountpoints = config
         .extensions

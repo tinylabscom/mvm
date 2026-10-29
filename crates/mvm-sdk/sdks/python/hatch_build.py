@@ -14,6 +14,8 @@ which reads the library's symbol versions and retags it ``manylinux_2_17`` or
 ``musllinux_1_2`` only if the library satisfies that policy.
 """
 
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +30,20 @@ class CustomBuildHook(BuildHookInterface):
             return
         if not any(_NATIVE_DIR.glob("libmvm_hostlib.*")):
             return
+        revision = os.environ.get("MVM_RELEASE_SOURCE_REV") or os.environ.get("GITHUB_SHA", "")
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+            raise RuntimeError("native wheels require the exact 40-hex build revision in MVM_RELEASE_SOURCE_REV or GITHUB_SHA")
+        # python/ -> sdks/ -> mvm-sdk/ -> crates/ -> repository root.
+        source = Path(__file__).resolve().parents[4] / "crates/deps/mvm-macho-sign"
+        (_NATIVE_DIR / "LICENSE-MPL-2.0.txt").write_bytes((source / "LICENSE").read_bytes())
+        (_NATIVE_DIR / "THIRD_PARTY_NOTICES.txt").write_text(
+            "This native library contains mvm-macho-sign, modified MPL-2.0 Covered Software "
+            "adapted from apple-codesign 0.29.0, Copyright Gregory Szorc.\n"
+            "The included LICENSE-MPL-2.0.txt governs those files, not Apache-2.0 alone.\n"
+            "Corresponding source, including modifications, is available under MPL-2.0 at:\n"
+            f"https://github.com/tinylabscom/mvm/tree/{revision}/crates/deps/mvm-macho-sign\n",
+            encoding="utf-8",
+        )
         from packaging.tags import sys_tags
 
         # Same selection hatchling uses for its own infer-tag: the first

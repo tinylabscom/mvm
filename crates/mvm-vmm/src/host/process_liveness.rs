@@ -19,24 +19,69 @@ pub const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "hvf.pid", "fc.pid", "qemu.
 /// Whether a process ID currently identifies a live or permission-protected
 /// process.
 pub fn pid_is_alive(pid: i32) -> bool {
+    pid_is_alive_with_probes(
+        pid,
+        |pid| {
+            #[cfg(target_os = "macos")]
+            {
+                macos_process_is_zombie(pid)
+            }
+            #[cfg(target_os = "linux")]
+            {
+                linux_process_is_zombie(pid)
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                let _ = pid;
+                false
+            }
+        },
+        |pid| {
+            // SAFETY: kill with signal 0 performs only a permission/existence
+            // check and never delivers a signal.
+            let result = unsafe { libc::kill(pid, 0) };
+            let error = (result != 0)
+                .then(|| std::io::Error::last_os_error().raw_os_error())
+                .flatten();
+            (result, error)
+        },
+    )
+}
+
+fn pid_is_alive_with_probes(
+    pid: i32,
+    is_zombie: impl FnOnce(i32) -> bool,
+    signal_zero: impl FnOnce(i32) -> (i32, Option<i32>),
+) -> bool {
     if pid <= 1 {
         return false;
     }
-    #[cfg(target_os = "macos")]
-    if macos_process_is_zombie(pid) {
+    if is_zombie(pid) {
         return false;
     }
-    // SAFETY: kill with signal 0 performs only a permission/existence
-    // check and never delivers a signal.
-    let result = unsafe { libc::kill(pid, 0) };
-    let error = (result != 0)
-        .then(|| std::io::Error::last_os_error().raw_os_error())
-        .flatten();
+    let (result, error) = signal_zero(pid);
     kill_zero_reports_alive(result, error)
 }
 
 fn kill_zero_reports_alive(result: i32, error: Option<i32>) -> bool {
     result == 0 || error == Some(libc::EPERM)
+}
+
+/// `kill(pid, 0)` also succeeds for an exited, unreaped child, so Linux reads
+/// the state field of `/proc/<pid>/stat` instead.
+#[cfg(target_os = "linux")]
+fn linux_process_is_zombie(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .is_ok_and(|stat| stat_state_is_zombie(&stat))
+}
+
+/// The state is the first field after the parenthesised command name, which
+/// may itself contain spaces and parentheses, so split at the last `)`.
+#[cfg(any(target_os = "linux", test))]
+fn stat_state_is_zombie(stat: &str) -> bool {
+    stat.rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .is_some_and(|state| state == "Z")
 }
 
 #[cfg(target_os = "macos")]
@@ -53,8 +98,19 @@ fn macos_process_is_zombie(pid: i32) -> bool {
             std::mem::size_of::<libc::proc_bsdinfo>() as i32,
         )
     };
+    // The kernel still answers `kill(pid, 0)` for a zombie but refuses its
+    // process info with ESRCH, so an empty answer with that error is how an
+    // exited, unreaped child shows up here. A pid that is gone entirely gives
+    // the same answer and is just as dead; any other failure (EPERM for
+    // another user's process) proves nothing.
+    if bytes == 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
     if bytes != std::mem::size_of::<libc::proc_bsdinfo>() as i32 {
-        return false;
+        // The kernel reports a zombie as `ESRCH` here, with no info, while
+        // `kill(pid, 0)` still succeeds. A process that is gone also answers
+        // `ESRCH`; both are "not a live process", which is all the caller asks.
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
     }
     // SAFETY: The size check above proves that the kernel populated `info`.
     unsafe { info.assume_init().pbi_status == libc::SZOMB }
@@ -333,7 +389,7 @@ fn open_identity_pidfd(pid: i32) -> std::io::Result<std::os::fd::OwnedFd> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn parse_proc_starttime(stat: &str) -> std::io::Result<u64> {
+pub(super) fn parse_proc_starttime(stat: &str) -> std::io::Result<u64> {
     // comm can contain spaces and ')' characters. Fields after its final ')'
     // begin at field 3; field 22 is therefore index 19.
     stat.rsplit_once(')')
@@ -488,6 +544,36 @@ fn inspect_then_kill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stopped supervisor whose parent has not reaped it still answers
+    /// `kill(pid, 0)`. It is not a live process, and a pool or a state-dir
+    /// sweep that believes otherwise keeps a dead VM's records forever.
+    #[test]
+    fn an_exited_but_unreaped_child_is_not_alive() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        // `true` has exited once it is a zombie; poll for that without
+        // waiting on it, which would reap it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pid_is_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // SAFETY: signal 0 only probes existence.
+        let still_there = unsafe { libc::kill(pid, 0) } == 0;
+        let alive = pid_is_alive(pid);
+        child.wait().unwrap();
+        assert!(still_there, "the unreaped child must still be a zombie");
+        assert!(!alive, "a zombie must not count as alive");
+    }
+
+    #[test]
+    fn stat_state_z_is_a_zombie_even_with_a_tricky_command_name() {
+        assert!(stat_state_is_zombie("42 (true) Z 1 2 3"));
+        assert!(stat_state_is_zombie("42 (a) Z (b) Z 1"));
+        assert!(!stat_state_is_zombie("42 (a) Z) S 1 2"));
+        assert!(!stat_state_is_zombie("42 (sleep) S 1 2 3"));
+        assert!(!stat_state_is_zombie("garbage"));
+    }
 
     #[test]
     fn identity_starttime_is_raw_field_22_even_with_complex_comm() {
@@ -814,5 +900,89 @@ mod tests {
         assert!(kill_zero_reports_alive(-1, Some(libc::EPERM)));
         assert!(!kill_zero_reports_alive(-1, Some(libc::ESRCH)));
         assert!(!kill_zero_reports_alive(-1, Some(libc::EINVAL)));
+    }
+
+    #[test]
+    fn pid_liveness_reserved_pids_never_reach_probes() {
+        for pid in [-1, 0, 1] {
+            assert!(!pid_is_alive_with_probes(
+                pid,
+                |_| panic!("reserved PID reached zombie probe"),
+                |_| panic!("reserved PID reached signal probe"),
+            ));
+        }
+    }
+
+    #[test]
+    fn pid_liveness_known_zombie_never_reaches_signal_probe() {
+        assert!(!pid_is_alive_with_probes(
+            42,
+            |pid| {
+                assert_eq!(pid, 42);
+                true
+            },
+            |_| panic!("known zombie reached signal probe"),
+        ));
+    }
+
+    #[test]
+    fn pid_liveness_successful_probe_reports_alive() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        assert!(pid_is_alive_with_probes(
+            42,
+            |_| {
+                calls.borrow_mut().push("zombie");
+                false
+            },
+            |_| {
+                calls.borrow_mut().push("signal");
+                (0, None)
+            },
+        ));
+        assert_eq!(calls.into_inner(), vec!["zombie", "signal"]);
+    }
+
+    #[test]
+    fn pid_liveness_permission_protected_process_is_alive_with_ordered_probes() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        assert!(pid_is_alive_with_probes(
+            42,
+            |pid| {
+                assert_eq!(pid, 42);
+                calls.borrow_mut().push("zombie");
+                false
+            },
+            |pid| {
+                assert_eq!(pid, 42);
+                calls.borrow_mut().push("signal");
+                (-1, Some(libc::EPERM))
+            },
+        ));
+        assert_eq!(calls.into_inner(), vec!["zombie", "signal"]);
+    }
+
+    #[test]
+    fn pid_liveness_missing_and_other_errors_preserve_policy() {
+        for error in [
+            Some(libc::ESRCH),
+            Some(libc::EINVAL),
+            Some(libc::EACCES),
+            Some(libc::EIO),
+            None,
+        ] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            assert!(!pid_is_alive_with_probes(
+                42,
+                |_| {
+                    calls.borrow_mut().push("zombie");
+                    false
+                },
+                |_| {
+                    calls.borrow_mut().push("signal");
+                    (-1, error)
+                },
+            ));
+            assert_eq!(calls.into_inner(), vec!["zombie", "signal"]);
+        }
     }
 }

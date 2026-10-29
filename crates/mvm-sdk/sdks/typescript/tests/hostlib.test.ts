@@ -25,9 +25,174 @@ import {
   resolveLibraryPath,
   setApprovalCallback,
   setInvokeForTesting,
+  NativeContext,
   type InvokeFn,
 } from "../src/_hostlib.js";
 import { MVM_HOSTLIB_PATH_ENV } from "../src/_env/vars.js";
+import { CODE_ERRORS, MachineRecoveryRequiredError } from "../src/_errors/types.js";
+import type { HostLibraryFailure } from "../src/_hostlib.js";
+
+describe("caller-owned context transport boundary", () => {
+  afterEach(() => setInvokeForTesting(null));
+  it("only clears unknown start after same-slot C close, retaining errors on failure", () => {
+    setInvokeForTesting(() => [6, Buffer.from(JSON.stringify({
+      code: "REJECTED", message: "preparation fixture", retryable: false,
+    }))]);
+    const context = new NativeContext();
+    const slot: unknown[] = [{}];
+    const cleanup = new Error("private cleanup fixture");
+    let release = false;
+    let closes = 0;
+    let frees = 0;
+    // In-process C transport fixture only; real provenance is tested in Rust.
+    const shared = { free: () => {}, koffi: { decode: () => [] } };
+    Object.assign(context, {
+      slot, shared,
+      functions: {
+        close: () => { closes++; if (!release) throw cleanup; return 0; },
+        free: () => { frees++; slot[0] = null; return 0; },
+      },
+    });
+    let original: unknown;
+    try { context.call("session.start", {}); } catch (error) { original = error; }
+    const state = context as unknown as { sessionPhase: string; sessionError: unknown };
+    expect(state.sessionPhase).toBe("unknown");
+    expect(() => context.close()).toThrow(cleanup);
+    expect(state.sessionPhase).toBe("unknown");
+    expect(state.sessionError).toBe(original);
+    expect(() => context.free()).toThrow();
+    expect(frees).toBe(0);
+    release = true;
+    context.close();
+    context.free();
+    expect(state.sessionPhase).toBe("finished");
+    expect(state.sessionError).toBe(original);
+    expect(slot[0]).toBeNull();
+    expect(closes).toBe(2);
+    expect(frees).toBe(1);
+  });
+
+  it("retains the actual context on a transport failure and cannot serialize it", () => {
+    setInvokeForTesting(() => [5, Buffer.from(JSON.stringify({
+      code: "CONFLICT", message: "local fixture", retryable: false,
+    }))]);
+    const context = new NativeContext();
+    let caught: unknown;
+    try { context.call("transport.fixture", {}); } catch (error) { caught = error; }
+    expect((caught as HostLibraryFailure).recovery).toBe(context);
+    expect(() => JSON.stringify(context)).toThrow(TypeError);
+    expect(() => context.inspect(5)).toThrow(RangeError);
+    // No C allocation or native owner exists under this transport seam.
+    context.close();
+    context.free();
+    expect(() => context.call("transport.fixture")).toThrow("closed");
+  });
+
+  it("refuses a second session start and foreign stop before transport", () => {
+    const sid = "abcdefghijklmnopqrstuvwx";
+    const methods: string[] = [];
+    setInvokeForTesting((method) => {
+      methods.push(method);
+      return [0, Buffer.from(JSON.stringify(method === "session.start" ? { session_id: sid } : {}))];
+    });
+    const context = new NativeContext();
+    context.call("session.start", { workload: "fixture" });
+    expect(() => context.call("session.start", { workload: "second" })).toThrow();
+    expect(() => context.call("session.stop", { session_id: "zyxwvutsrqponmlkjihgfedc" })).toThrow();
+    for (const cleanup of [
+      () => context.retry_stop(), () => context.close(), () => context.free(),
+    ]) expect(cleanup).toThrow();
+    expect(methods).toEqual(["session.start"]);
+    context.call("session.stop", { session_id: sid });
+    expect(() => context.call("session.start", { workload: "second" })).toThrow();
+    expect(methods).toEqual(["session.start", "session.stop"]);
+    context.close();
+    context.free();
+  });
+
+  it.each([
+    "{}", '{"session_id":7}', '{"session_id":null}', '{"session_id":"NOT-BASE32"}',
+    '{"session_id":"abcdefghijklmnopqrstuvwx\\n"}',
+    '{"session_id":"abcdefghijklmnopqrstuvwx","session_id":"abcdefghijklmnopqrstuvwx"}',
+    '{"session_id":"abcdefghijklmnopqrstuvwx","session_\\u0069d":"abcdefghijklmnopqrstuvwx"}',
+    '{"private_marker":"must-not-render"}', "not-json",
+  ])("retains malformed original start and refuses false cleanup: %s", (raw) => {
+    const methods: string[] = [];
+    setInvokeForTesting((method) => { methods.push(method); return [0, Buffer.from(raw)]; });
+    const context = new NativeContext();
+    let original: unknown;
+    try { context.call("session.start", { workload: "fixture" }); } catch (error) { original = error; }
+    expect(original).toBeInstanceOf(Error);
+    expect((original as HostLibraryFailure).recovery).toBe(context);
+    const retained = context as unknown as { sessionError: unknown; sessionReplyBytes: Buffer };
+    expect(retained.sessionError).toBe(original);
+    expect(retained.sessionReplyBytes.toString("utf8")).toBe(raw);
+    for (const cleanup of [
+      () => context.retry_stop(), () => context.close(), () => context.free(), () => context.inspect(),
+    ]) {
+      expect(cleanup).toThrow();
+      try { cleanup(); } catch (error) { expect(String(error)).not.toContain("must-not-render"); }
+    }
+    expect(() => context.call("session.start", { workload: "second" })).toThrow();
+    expect(retained.sessionError).toBe(original);
+    expect(retained.sessionReplyBytes.toString("utf8")).toBe(raw);
+    expect(methods).toEqual(["session.start"]);
+    // Actual SDK consumer state under a no-C-allocation recorder, not a VM.
+  });
+});
+
+describe("typed recovery error decoding", () => {
+  const details = { machine_id: "machine", plan_id: "plan", reason: "recover" };
+  function failure(status: number, value: unknown): HostLibraryFailure {
+    try {
+      call("machine.inspect", {}, { invoke: () => [status, Buffer.from(JSON.stringify(value))] });
+    } catch (error) {
+      return error as HostLibraryFailure;
+    }
+    throw new Error("nonzero status was not refused");
+  }
+  it("uses the normal generated constructor and a frozen typed details value", () => {
+    const error = failure(12, { code: "RECOVERY_REQUIRED", message: "context", retryable: false, details });
+    expect(error).toBeInstanceOf(MachineRecoveryRequiredError);
+    expect(error.message).toBe("context");
+    expect(error.retryable).toBe(false);
+    expect(error.details).toEqual(details);
+    expect(Object.isFrozen(error.details)).toBe(true);
+    expect(Reflect.set(error.details!, "machine_id", "replacement")).toBe(false);
+    expect(Reflect.set(error, "details", {})).toBe(false);
+  });
+  it.each([null, [], "private-marker", {}, { machine_id: "m" },
+    { ...details, reason: 7 }, { ...details, extra: "private-marker" }].map(value => ({ value })))(
+    "refuses malformed details without retaining payloads: $value", ({ value }) => {
+      const error = failure(12, { code: "RECOVERY_REQUIRED", message: "private-marker", retryable: false, details: value });
+      expect(error).toBeInstanceOf(HostLibraryError);
+      expect(error).not.toBeInstanceOf(MachineRecoveryRequiredError);
+      expect(error.retryable).toBe(false);
+      expect(error.details).toBeUndefined();
+      expect(String(error)).not.toContain("private-marker");
+      expect(JSON.stringify(error)).not.toContain("private-marker");
+    },
+  );
+  it.each([
+    [12, "UNAVAILABLE", true], [7, "RECOVERY_REQUIRED", false],
+    [12, "RECOVERY_REQUIRED", true], [12, "RECOVERY_REQUIRED", "false"],
+  ])("rejects status/code/retryability contradictions", (status, code, retryable) => {
+    const error = failure(status as number, { code, message: "private-marker", retryable, details });
+    expect(error.retryable).toBe(false);
+    expect(error.details).toBeUndefined();
+    expect(String(error)).not.toContain("private-marker");
+  });
+  it("the older generic fallback does not invent details or retry", () => {
+    const oldCodes: Record<string, new (message: string) => Error> = { ...CODE_ERRORS };
+    delete oldCodes.RECOVERY_REQUIRED;
+    const Ctor = oldCodes.RECOVERY_REQUIRED ?? HostLibraryError;
+    const error = new Ctor("recover") as HostLibraryFailure;
+    error.retryable = false;
+    expect(error.constructor).toBe(HostLibraryError);
+    expect(error.retryable).toBe(false);
+    expect(error.details).toBeUndefined();
+  });
+});
 import {
   MachineNotFoundError,
   MachineSpecError,

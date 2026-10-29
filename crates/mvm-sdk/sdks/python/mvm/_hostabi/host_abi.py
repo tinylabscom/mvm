@@ -7,6 +7,77 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
+AgentSessionId = str
+
+
+@dataclass
+class ApplicationTerminalGrant:
+    argv: List[str]
+
+
+ApprovalHead = str
+
+
+@dataclass
+class AttestationExportReply:
+    payload: List[int]
+    signature: List[int]
+    signer_id: str
+
+
+@dataclass
+class AttestationExportRequest:
+    pass
+
+
+@dataclass
+class AttestationProviderData:
+    compiled: bool
+    feature: str
+    name: str
+
+
+class AttestationPublicKeyFileKind(Enum):
+    public_key_file = 'public_key_file'
+
+
+class AttestationSelfIdentityKind(Enum):
+    self_identity = 'self_identity'
+
+
+@dataclass
+class AttestationStatusReply:
+    providers: List[AttestationProviderData]
+    pubkey_hex: str
+    public_path: str
+    secret_path: str
+    signer_id: str
+
+
+@dataclass
+class AttestationStatusRequest:
+    pass
+
+
+@dataclass
+class AttestationTrust1:
+    kind: AttestationSelfIdentityKind
+
+
+@dataclass
+class AttestationTrust2:
+    kind: AttestationPublicKeyFileKind
+    path: str
+
+
+AttestationTrust = Union[AttestationTrust1, AttestationTrust2]
+
+
+@dataclass
+class AttestationVerifyRequest:
+    report_path: str
+    trust: AttestationTrust
+
 
 @dataclass
 class BackendCapabilitiesReply:
@@ -58,6 +129,48 @@ BackpressureReason = Union[
 ]
 
 
+class CheckpointClass1(Enum):
+    fs_quick = 'fs_quick'
+
+
+class CheckpointClass2(Enum):
+    vm_full = 'vm_full'
+
+
+CheckpointClass = Union[CheckpointClass1, CheckpointClass2]
+
+
+CheckpointDigest = str
+
+
+CheckpointId = str
+
+
+CheckpointKeyDomain = str
+
+
+@dataclass
+class CheckpointListRequest:
+    pass
+
+
+class CheckpointProtection1(Enum):
+    unprotected = 'unprotected'
+
+
+class CheckpointProtection2(Enum):
+    sealed_v1 = 'sealed_v1'
+
+
+CheckpointProtection = Union[CheckpointProtection1, CheckpointProtection2]
+
+
+@dataclass
+class ContentBlob:
+    name: str
+    sha256: str
+
+
 class CopyDirection1(Enum):
     host_to_guest = 'host_to_guest'
 
@@ -67,6 +180,43 @@ class CopyDirection2(Enum):
 
 
 CopyDirection = Union[CopyDirection1, CopyDirection2]
+
+
+class Unit(Enum):
+    share = 'share'
+
+
+@dataclass
+class CpuGrant1:
+    millicores: int
+    unit: Unit
+
+
+class Unit1(Enum):
+    fuel = 'fuel'
+
+
+@dataclass
+class CpuGrant2:
+    instructions: int
+    unit: Unit1
+
+
+CpuGrant = Union[CpuGrant1, CpuGrant2]
+
+
+@dataclass
+class DisplayClipboardGrant:
+    max_paste_bytes: int
+
+
+@dataclass
+class DriveGrant:
+    max_bytes_in: int
+    max_bytes_out: int
+    program_id: str
+    ttl: int
+    workspace_roots: List[str]
 
 
 @dataclass
@@ -90,6 +240,11 @@ class FsEntryKind(Enum):
     dir = 'dir'
     symlink = 'symlink'
     other = 'other'
+
+
+class GuestArch(Enum):
+    x86_64 = 'x86_64'
+    aarch64 = 'aarch64'
 
 
 @dataclass
@@ -279,6 +434,51 @@ class GuestProcWaitRequest:
     id: str
     token: str
     timeout_secs: Optional[int] = None
+
+
+@dataclass
+class HardwareMeasurementData:
+    measurement_hex: str
+    provider: str
+
+
+@dataclass
+class HostPort:
+    host: str
+    port: int
+
+
+@dataclass
+class HumanCredentialGrant:
+    destinations: List[HostPort]
+
+
+@dataclass
+class ImageRevocationsStatusReply:
+    entries: int
+    issued_at: str
+    not_after: str
+    publication: int
+    sha256: str
+    signer_identity: str
+
+
+@dataclass
+class ImageRevocationsStatusRequest:
+    pass
+
+
+@dataclass
+class ImageRevocationsUpdateReply:
+    issued_at: str
+    publication: int
+    sha256: str
+
+
+@dataclass
+class ImageRevocationsUpdateRequest:
+    bundle_path: str
+    document_path: str
 
 
 class InstanceReadiness1(Enum):
@@ -561,6 +761,13 @@ class ManifestVerifyRequest:
 
 
 @dataclass
+class PlanArtifact:
+    bundle_sha256: str
+    key_id: str
+    manifest_sig_base64: str
+
+
+@dataclass
 class PortMapping:
     guest: int
     host: int
@@ -652,6 +859,53 @@ class RunMode2(Enum):
 
 
 RunMode = Union[RunMode1, RunMode2]
+
+
+class Kind(Enum):
+    release = 'release'
+
+
+class Kind2(Enum):
+    source = 'source'
+
+
+@dataclass
+class RuntimeBindingProvenance2:
+    arch: GuestArch
+    archive_sha256: str
+    kind: Kind2
+    version: str
+
+
+class Runtime(Enum):
+    cli_assembly = 'cli_assembly'
+
+
+class Runtime1(Enum):
+    legacy_bundle = 'legacy_bundle'
+
+
+class Runtime2(Enum):
+    legacy_portable = 'legacy_portable'
+
+
+@dataclass
+class RuntimeReleaseProof:
+    arch: GuestArch
+    archive: str
+    archive_sha256: str
+    checksum: str
+    signature_bundle: str
+    version: str
+
+
+@dataclass
+class SessionBinding:
+    approval_head: ApprovalHead
+    generation: int
+    journal_cursor: int
+    session_id: AgentSessionId
+    replay_input_digest: Optional[str] = None
 
 
 @dataclass
@@ -748,36 +1002,70 @@ class TelemetryStatusRequest:
     id: str
 
 
-class Kind(Enum):
+class Kind3(Enum):
     exited = 'exited'
 
 
 @dataclass
 class WaitOutcome1:
     code: int
-    kind: Kind
+    kind: Kind3
 
 
-class Kind2(Enum):
+class Kind4(Enum):
     killed = 'killed'
 
 
 @dataclass
 class WaitOutcome2:
-    kind: Kind2
+    kind: Kind4
     signal: int
 
 
-class Kind3(Enum):
+class Kind5(Enum):
     timed_out = 'timed_out'
 
 
 @dataclass
 class WaitOutcome3:
-    kind: Kind3
+    kind: Kind5
 
 
 WaitOutcome = Union[WaitOutcome1, WaitOutcome2, WaitOutcome3]
+
+
+class Kind6(Enum):
+    unbounded = 'unbounded'
+
+
+@dataclass
+class WallClockGrant1:
+    kind: Kind6
+
+
+class Kind7(Enum):
+    secs = 'secs'
+
+
+@dataclass
+class WallClockGrant2:
+    kind: Kind7
+    secs: int
+
+
+WallClockGrant = Union[WallClockGrant1, WallClockGrant2]
+
+
+@dataclass
+class AttestationExport:
+    reply: AttestationExportReply
+    request: AttestationExportRequest
+
+
+@dataclass
+class AttestationStatus:
+    reply: AttestationStatusReply
+    request: AttestationStatusRequest
 
 
 @dataclass
@@ -862,6 +1150,18 @@ class GuestProcStreamClose:
 class GuestProcStreamOpen:
     reply: GuestProcStreamOpenReply
     request: GuestProcStreamOpenRequest
+
+
+@dataclass
+class ImageRevocationsStatus:
+    reply: ImageRevocationsStatusReply
+    request: ImageRevocationsStatusRequest
+
+
+@dataclass
+class ImageRevocationsUpdate:
+    reply: ImageRevocationsUpdateReply
+    request: ImageRevocationsUpdateRequest
 
 
 @dataclass
@@ -973,6 +1273,34 @@ class AgentErrorReply:
 
 
 @dataclass
+class AttestationBodyData:
+    boot_measurement: str
+    identity_pubkey_hex: str
+    nonce_hex: str
+    schema_version: int
+    hw_measurement: Optional[HardwareMeasurementData] = None
+
+
+@dataclass
+class AttestationVerifyReply:
+    body: AttestationBodyData
+    signer_id: str
+    trust: AttestationTrust
+
+
+@dataclass
+class DisplayInputGrant:
+    attended: Optional[bool] = None
+    clipboard: Optional[DisplayClipboardGrant] = None
+    human_credential: Optional[HumanCredentialGrant] = None
+
+
+@dataclass
+class EgressGrant:
+    allow: List[HostPort]
+
+
+@dataclass
 class EntrypointCallReply:
     exit_code: int
     output_truncated: bool
@@ -987,6 +1315,16 @@ class FsEntry:
     kind: FsEntryKind
     name: str
     size: int
+
+
+@dataclass
+class Grants:
+    application_terminal: Optional[ApplicationTerminalGrant] = None
+    cpu: Optional[CpuGrant] = None
+    display_input: Optional[DisplayInputGrant] = None
+    drive: Optional[DriveGrant] = None
+    egress: Optional[EgressGrant] = None
+    wall_clock: Optional[WallClockGrant] = None
 
 
 @dataclass
@@ -1012,6 +1350,20 @@ class GuestProcWaitReply:
     stderr_b64: str
     stdout_b64: str
     truncated: bool
+
+
+@dataclass
+class LegacyBundleRuntimeProof:
+    archive: str
+    pin: PlanArtifact
+
+
+@dataclass
+class LegacyPortableRuntimeProof:
+    arch: GuestArch
+    archive: str
+    manifest_sha256: str
+    pin: PlanArtifact
 
 
 @dataclass
@@ -1190,6 +1542,51 @@ class MachineState:
 
 
 @dataclass
+class RuntimeBindingProvenance1:
+    kind: Kind
+    proof: RuntimeReleaseProof
+
+
+RuntimeBindingProvenance = Union[RuntimeBindingProvenance1, RuntimeBindingProvenance2]
+
+
+@dataclass
+class RuntimeLaunchBinding1:
+    initramfs_path: str
+    overlay_path: str
+    overlay_roothash: str
+    overlay_verity_path: str
+    provenance: RuntimeBindingProvenance
+    runtime: Runtime
+
+
+@dataclass
+class RuntimeLaunchBinding2:
+    proof: LegacyBundleRuntimeProof
+    rootfs_path: str
+    runtime: Runtime1
+    initramfs_path: Optional[str] = None
+
+
+@dataclass
+class RuntimeLaunchBinding3:
+    initramfs_path: str
+    kernel_path: str
+    overlay_path: str
+    overlay_roothash: str
+    overlay_verity_path: str
+    proof: LegacyPortableRuntimeProof
+    rootfs_path: str
+    runtime: Runtime2
+    version: str
+
+
+RuntimeLaunchBinding = Union[
+    RuntimeLaunchBinding1, RuntimeLaunchBinding2, RuntimeLaunchBinding3
+]
+
+
+@dataclass
 class SessionCallReply:
     exit_code: int
     output_truncated: bool
@@ -1203,6 +1600,12 @@ class SessionCallReply:
 class StreamEvent:
     data_b64: str
     stream: StreamName
+
+
+@dataclass
+class AttestationVerify:
+    reply: AttestationVerifyReply
+    request: AttestationVerifyRequest
 
 
 @dataclass
@@ -1278,6 +1681,31 @@ class SessionCall:
 
 
 @dataclass
+class CheckpointListReplyItem:
+    class_: CheckpointClass
+    content: List[ContentBlob]
+    created_unix: int
+    id: CheckpointId
+    meta_digest: CheckpointDigest
+    supervisor_config_digest: str
+    vm_name: str
+    audit_ref: Optional[str] = None
+    grants: Optional[Grants] = None
+    key_domain: Optional[CheckpointKeyDomain] = None
+    machine_input_cursor: Optional[int] = None
+    parent: Optional[CheckpointDigest] = None
+    protection: Optional[CheckpointProtection] = None
+    runtime_launch_binding: Optional[RuntimeLaunchBinding] = None
+    runtime_overlay_version: Optional[str] = None
+    session: Optional[SessionBinding] = None
+    snapshot_id: Optional[str] = None
+    tag: Optional[str] = None
+
+
+CheckpointListReply = List[CheckpointListReplyItem]
+
+
+@dataclass
 class GuestProcStreamNextReply:
     done: bool
     events: List[StreamEvent]
@@ -1300,6 +1728,12 @@ class MachineRunReply:
 
 
 @dataclass
+class CheckpointList:
+    reply: CheckpointListReply
+    request: CheckpointListRequest
+
+
+@dataclass
 class GuestProcStreamNext:
     reply: GuestProcStreamNextReply
     request: GuestProcStreamNextRequest
@@ -1319,7 +1753,11 @@ class MachineRun:
 
 @dataclass
 class HostAbi:
+    attestation_export: AttestationExport
+    attestation_status: AttestationStatus
+    attestation_verify: AttestationVerify
     backend_capabilities: BackendCapabilities
+    checkpoint_list: CheckpointList
     entrypoint_call: EntrypointCall
     guest_cp: GuestCp
     guest_fs_list: GuestFsList
@@ -1338,6 +1776,8 @@ class HostAbi:
     guest_proc_stream_next: GuestProcStreamNext
     guest_proc_stream_open: GuestProcStreamOpen
     guest_proc_wait: GuestProcWait
+    image_revocations_status: ImageRevocationsStatus
+    image_revocations_update: ImageRevocationsUpdate
     machine_create: MachineCreate
     machine_exec: MachineExec
     machine_inspect: MachineInspect

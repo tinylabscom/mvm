@@ -212,6 +212,7 @@ fn mvm_crate_path_resolves(root: &Path, segments: &[&str]) -> bool {
         return false;
     };
     rust_tree_contains(&module_root, leaf)
+        || (module_root.is_dir() && rust_tree_contains(&module_root.with_extension("rs"), leaf))
 }
 
 fn module_path_exists(src: &Path, modules: &[&str]) -> bool {
@@ -369,6 +370,32 @@ mod tests {
         );
 
         run(tmp.path()).expect("live accepted-ADR citations resolve");
+    }
+
+    #[test]
+    fn a_module_file_and_its_child_directory_both_resolve_without_comment_witnesses() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("crates/mvm-core/src");
+        std::fs::create_dir_all(src.join("real")).unwrap();
+        std::fs::write(
+            src.join("real.rs"),
+            "pub mod child;\npub fn parent_witness() {}\n// fn fabricated_witness() {}\n",
+        )
+        .unwrap();
+        std::fs::write(src.join("real/child.rs"), "pub fn child_witness() {}\n").unwrap();
+        std::fs::write(src.join("other.rs"), "pub fn unrelated_witness() {}\n").unwrap();
+        for name in ["parent_witness", "child_witness"] {
+            assert!(mvm_crate_path_resolves(
+                tmp.path(),
+                &["mvm_core", "real", name]
+            ));
+        }
+        for name in ["fabricated_witness", "unrelated_witness", "missing_witness"] {
+            assert!(!mvm_crate_path_resolves(
+                tmp.path(),
+                &["mvm_core", "real", name]
+            ));
+        }
     }
 
     #[test]

@@ -4,17 +4,45 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full lowercase main-ancestor commit to backfill (empty uses this workflow commit)
+        required: false
+        type: string
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
-  group: source-host-helpers-${{ github.sha }}
+  group: source-host-helpers-${{ inputs.source_sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
+  source:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate exact source commit
+        id: source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(python3 scripts/resolve-source-helper-commit.py \
+            --source "${SOURCE_SHA}" --workflow "${WORKFLOW_SHA}")
+          printf 'sha=%s\n' "${sha}" >> "${GITHUB_OUTPUT}"
+
   build:
+    needs: source
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +60,21 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          path: helper-source
+          persist-credentials: false
+      - name: Verify checked-out source
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C helper-source rev-parse HEAD)" = "${SOURCE_SHA}"
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.build_target }}
@@ -42,6 +85,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd helper-source
           if [[ "${BUILD_TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-network-endpoint \
@@ -54,15 +98,16 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           BUILD_TARGET: ${{ matrix.build_target }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          name="mvm-host-helpers-${GITHUB_SHA}-${TARGET}"
+          name="mvm-host-helpers-${SOURCE_SHA}-${TARGET}"
           mkdir -p "dist/${name}"
-          printf '%s\n' "${GITHUB_SHA}" > "dist/${name}/SOURCE_COMMIT"
-          cp "target/${BUILD_TARGET}/release/mvm-network-endpoint" "dist/${name}/"
+          printf '%s\n' "${SOURCE_SHA}" > "dist/${name}/SOURCE_COMMIT"
+          cp "helper-source/target/${BUILD_TARGET}/release/mvm-network-endpoint" "dist/${name}/"
           if [[ "${BUILD_TARGET}" == *apple-darwin ]]; then
-            cp "target/${BUILD_TARGET}/release/mvm-hvf-supervisor" "dist/${name}/"
+            cp "helper-source/target/${BUILD_TARGET}/release/mvm-hvf-supervisor" "dist/${name}/"
           fi
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
       - uses: actions/upload-artifact@v7
@@ -72,11 +117,17 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [source, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           pattern: source-host-helpers-*
@@ -98,14 +149,13 @@ jobs:
               --bundle "${archive}.bundle" \
               "${archive}"
           done
-      - name: Publish rolling source-build assets
+      - name: Publish immutable per-commit source helpers
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release view source-builds >/dev/null 2>&1 ||
-            gh release create source-builds --prerelease \
-              --title "Commit-addressed source helpers" \
-              --notes "Signed host helper bundles keyed by the exact mvm source commit."
-          gh release upload source-builds dist/*.tar.gz dist/*.tar.gz.bundle --clobber
+          python3 scripts/publish-source-host-helpers.py \
+            --repo "${GH_REPO}" --commit "${SOURCE_SHA}" --directory dist

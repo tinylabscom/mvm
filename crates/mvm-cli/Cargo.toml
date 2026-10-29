@@ -11,7 +11,7 @@ authors.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-mvm-core = { workspace = true, features = ["client-remote", "provenance"] }
+mvm-core = { workspace = true, features = ["client-remote", "host-state", "provenance"] }
 mvm-agentd.workspace = true
 mvm-runtime = { workspace = true, default-features = false }
 mvm-vmm = { workspace = true }
@@ -20,7 +20,6 @@ mvm-build = { workspace = true, default-features = false, features = ["builder-l
 libkrun-sys.workspace = true
 mvm-fs.workspace = true
 mvm-http.workspace = true
-mvm-observability.workspace = true
 mvm-hostd.workspace = true
 # The networking-mode compatibility gate: a plan that needs host-side
 # substitution must not be able to select the L3 tunnel, where the host
@@ -62,6 +61,9 @@ sha2.workspace = true
 tar.workspace = true
 flate2.workspace = true
 hex.workspace = true
+# Decodes OTLP exporter header values, which the OpenTelemetry environment
+# convention percent-encodes (the observability module's exporter config).
+percent-encoding.workspace = true
 # Wipes a `trust instructions sign --key` secret-key file's bytes from memory
 # once the signing key is built. Already in the closure through mvm-core.
 zeroize.workspace = true
@@ -72,6 +74,10 @@ notify = { workspace = true, optional = true }
 notify-debouncer-mini = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
 tracing.workspace = true
+# The observability module assembles the process-global subscriber (fmt,
+# span-timing and OTLP layers) with this. Host-only: guest binaries emit
+# through the `tracing` facade and never install a subscriber.
+tracing-subscriber.workspace = true
 which.workspace = true
 
 [[example]]
@@ -90,6 +96,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+mvm-runtime = { workspace = true, features = ["test-support"] }
 # Secret-command tests read back a stored value through SecretStore::get.
 secrecy.workspace = true
 # The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a
@@ -110,6 +117,10 @@ name = "wasm_run"
 required-features = ["wasm-backend"]
 
 [features]
+native-caller-identity = [
+    "mvm-hostd/native-caller-identity",
+    "mvm-client/native-caller-identity",
+]
 # Cross-compile the Linux host binaries (`mvm-host-vm-init`, `stage0-init`, …)
 # and `include_bytes!` them into `mvmctl` in every profile, failing the build if
 # the pinned zig + cargo-zigbuild toolchain is missing. Without it a release

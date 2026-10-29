@@ -409,6 +409,7 @@ fn parse_macos_diskutil_encryption_status(path: &Path, diskutil_output: &str) ->
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     const EXT4_MOUNT: &str =
         r#"{"filesystems":[{"source":"/dev/mapper/synthetic","fstype":"ext4"}]}"#;
     const INTERNAL_JOURNAL: &str = "Filesystem features: has_journal extents\nJournal inode: 8\n";

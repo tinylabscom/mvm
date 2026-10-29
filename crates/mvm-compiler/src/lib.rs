@@ -8,8 +8,9 @@
 
 pub mod archive;
 mod data;
+pub mod decorator;
 pub mod deps;
-pub mod deps_audit;
+pub mod environment;
 pub mod explain;
 pub mod flake;
 pub mod func_describe;
@@ -41,3 +42,7 @@ pub use reachability::{
 };
 pub use source::{SourceError, SourcePlan, copy_source, rehash};
 pub use strip_framework::{strip_python, strip_typescript};
+
+pub use decorator::{
+    DecoratorManifest, HELPER_ALLOWLIST, ParseError, parse_python, parse_typescript,
+};

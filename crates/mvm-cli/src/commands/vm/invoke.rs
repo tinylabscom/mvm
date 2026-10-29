@@ -16,6 +16,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use mvm_client::entrypoint::call::OwnedTransientResult;
 use mvm_client::entrypoint::dispatch::{
     CallObserver, CallOutcome, CallStdin, CallTerminal, RecordedDivergence, error_label,
     one_shot_payload,
@@ -104,6 +105,9 @@ pub(in crate::commands) struct EntrypointCall {
     /// Explicit hypervisor/backend selector passed through from `--hypervisor`.
     /// When `None` the platform-default auto-selection is used.
     pub hypervisor: Option<String>,
+    /// Same producer-owned release closure used for health and export.
+    pub portable_boot_assets:
+        Option<std::sync::Arc<mvm_client::portable_boot_assets::PreparedPortableBootAssets>>,
 }
 
 /// How a call's stdin is supplied.
@@ -163,7 +167,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     if call.attach {
         let exit_code = dispatch_attached(call)?;
         if exit_code != 0 {
-            mvm_observability::exit(exit_code);
+            crate::observability::exit(exit_code);
         }
         return Ok(());
     }
@@ -209,11 +213,83 @@ pub(in crate::commands) fn dispatch_attached(call: EntrypointCall) -> Result<i32
 }
 
 fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
+    let exit_code = boot_entrypoint(call)?;
+    if exit_code != 0 {
+        crate::observability::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// Boot the slot an entrypoint call names under the admitted path, dispatch
+/// its baked entrypoint, and return the workload's exit status rather than
+/// exiting with it.
+pub(in crate::commands) fn boot_entrypoint(call: EntrypointCall) -> Result<i32> {
+    boot_entrypoint_with_application(call, None)
+}
+
+pub(in crate::commands) fn run_application_entrypoint(
+    call: EntrypointCall,
+    application: mvm_core::registry_pack::application_bundle::ResolvedApplication,
+) -> Result<()> {
+    anyhow::ensure!(
+        !call.keep_alive && !call.attach,
+        "applications require a fresh foreground entrypoint"
+    );
+    let code = boot_entrypoint_with_application(call, Some(application))?;
+    if code != 0 {
+        crate::observability::exit(code);
+    }
+    Ok(())
+}
+
+fn boot_entrypoint_with_application(
+    call: EntrypointCall,
+    application: Option<mvm_core::registry_pack::application_bundle::ResolvedApplication>,
+) -> Result<i32> {
+    let selected_backend = mvm_client::entrypoint::backend_name_for(call.hypervisor.as_deref())?;
+    let native =
+        mvm_client::backend_kind_for(&selected_backend) == mvm_core::vm_backend::BackendKind::Hvf;
+    anyhow::ensure!(
+        !native
+            || (application.is_some()
+                && !call.keep_alive
+                && !call.attach
+                && !call.stdin.is_streaming()
+                && call.session.is_none()
+                && !call.reset
+                && call.r#fn.is_none()
+                && call.portable_boot_assets.is_none()),
+        "native entrypoint requires a fresh installed application with original signed boot inputs and one-shot stdin"
+    );
+    if let Some(application) = &application {
+        anyhow::ensure!(
+            call.source == application.bundle_sha256,
+            "application entrypoint differs from its authenticated bundle"
+        );
+    }
     warn_accepted_but_inert(&call);
 
     // The entrypoint action targets a manifest slot, resolved through the same
     // helper as `machine exec --manifest`.
     let slot = mvm_client::entrypoint::resolve_slot(WorkloadSource::Manifest(&call.source))?;
+    let producer_identity = native
+        .then(crate::commands::load_enrolled_identity)
+        .transpose()?;
+    let assets = application
+        .as_ref()
+        .map(|application| -> Result<_> {
+            Ok(mvm_client::admission::AssetSpec::RegistryPack(
+                mvm_core::registry_pack::PackPin::new(
+                    application.reference.clone(),
+                    mvm_core::packs::Sha256Hex::new(&application.descriptor_sha256)?,
+                )?,
+            ))
+        })
+        .transpose()?
+        .into_iter()
+        .collect();
+    let bundle_posture =
+        mvm_runtime::vm::template::lifecycle::installed_bundle_posture(&call.source)?;
     let lifecycle_label = if call.keep_alive {
         "warm session"
     } else {
@@ -237,7 +313,14 @@ fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
         .caller_commitment(call.caller_commitment)
         .dev(call.keep_alive_dev)
         .network_policy(call.network_policy)
-        .build()?;
+        .assets(assets)
+        .bundle_posture(bundle_posture);
+    let admission = if let Some(identity) = producer_identity {
+        admission.producer_identity(identity)
+    } else {
+        admission
+    }
+    .build()?;
     let lifecycle = if call.keep_alive {
         CallLifecycle::KeepAlive {
             mode: if call.keep_alive_dev {
@@ -256,32 +339,96 @@ fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
 
     let mut out = CallOutput::inherited();
     out.denials = CallDenials::new(call.show_denials, call.json_denials, call.review_source);
+    let request = mvm_client::entrypoint::EntrypointCall {
+        vm: EntrypointVm {
+            slot: &slot,
+            vm_name,
+            cpus: call.cpus,
+            memory_mib: call.memory_mib,
+            admission,
+            portable_boot_assets: call.portable_boot_assets.as_deref(),
+        },
+        stdin: call.stdin.into_call_stdin(),
+        timeout_secs: call.timeout,
+        lifecycle,
+    };
+    if native {
+        return crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+            run_native_entrypoint(request, pair, out)
+        });
+    }
     let outcome = crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
-        mvm_client::entrypoint::run_entrypoint_call(
-            mvm_client::entrypoint::EntrypointCall {
-                vm: EntrypointVm {
-                    slot: &slot,
-                    vm_name,
-                    cpus: call.cpus,
-                    memory_mib: call.memory_mib,
-                    admission,
-                },
-                stdin: call.stdin.into_call_stdin(),
-                timeout_secs: call.timeout,
-                lifecycle,
-            },
-            pair,
-            &mut out,
-        )
+        mvm_client::entrypoint::run_entrypoint_call(request, pair, &mut out)
     });
     out.finish_denials();
     let outcome = outcome?;
     flush_inherited();
-    let exit_code = outcome.exit_code();
-    if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+    Ok(outcome.exit_code())
+}
+
+struct RetainedNativeCall {
+    invocation: std::sync::Mutex<OwnedTransientResult<CallOutput<'static>>>,
+}
+
+impl std::fmt::Debug for RetainedNativeCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetainedNativeCall").finish_non_exhaustive()
     }
-    Ok(())
+}
+
+impl std::fmt::Display for RetainedNativeCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let invocation = self
+            .invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        write!(f, "native entrypoint failed; original invocation retained")?;
+        if let Some((vm, plan)) = invocation.recovery_details() {
+            write!(f, " (vm={vm}, plan={plan}; cleanup unconfirmed)")?;
+        }
+        for (stage, error) in [
+            ("call", invocation.call_error()),
+            ("flush", invocation.flush_error()),
+            ("stop", invocation.stop_error()),
+            ("cleanup", invocation.cleanup_error()),
+        ] {
+            if let Some(error) = error {
+                write!(f, "\n{stage}: {error:#}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RetainedNativeCall {}
+
+fn run_native_entrypoint(
+    request: mvm_client::entrypoint::EntrypointCall<'_>,
+    pair: Option<&mut mvm_client::launch::runtime_source::PairArtifactSource<'_>>,
+    observer: CallOutput<'static>,
+) -> Result<i32> {
+    let mut invocation = OwnedTransientResult::prepare(observer);
+    let _ = invocation.run(request, pair);
+    if let Ok((outcome, _)) = invocation.projection() {
+        let code = outcome.exit_code();
+        invocation.observer_mut()?.finish_denials();
+        flush_inherited();
+        return Ok(code);
+    }
+    // Recovery stays on the original owner; stopping alone is not completion.
+    let _ = invocation.retry_stop();
+    if let Ok((outcome, _)) = invocation.projection() {
+        let code = outcome.exit_code();
+        invocation.observer_mut()?.finish_denials();
+        flush_inherited();
+        return Ok(code);
+    }
+    if invocation.close().is_ok() {
+        invocation.observer_mut()?.finish_denials();
+    }
+    Err(anyhow::Error::new(RetainedNativeCall {
+        invocation: std::sync::Mutex::new(invocation),
+    }))
 }
 
 /// Say which accepted flags this build does not act on, rather than ignoring
@@ -529,8 +676,8 @@ fn flush_inherited() {
 /// asserts on what the handler wrote and when, rather than on the process's
 /// real fds.
 struct EventSinks<'a> {
-    out: Box<dyn Write + 'a>,
-    err: Box<dyn Write + 'a>,
+    out: Box<dyn Write + Send + 'a>,
+    err: Box<dyn Write + Send + 'a>,
 }
 
 impl EventSinks<'static> {
@@ -1706,6 +1853,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_call_error_retains_original_invocation() {
+        let mut invocation = OwnedTransientResult::prepare(CallOutput::inherited());
+        invocation.fail_preparation(anyhow::anyhow!("preparation refused"));
+        let error = anyhow::Error::new(RetainedNativeCall {
+            invocation: std::sync::Mutex::new(invocation),
+        });
+        let retained = error.downcast_ref::<RetainedNativeCall>().unwrap();
+        let invocation = retained.invocation.lock().unwrap();
+        assert!(invocation.projection().is_err());
+        assert!(
+            invocation
+                .call_error()
+                .unwrap()
+                .to_string()
+                .contains("preparation refused")
+        );
+        drop(invocation);
+        assert!(error.to_string().contains("original invocation retained"));
+    }
+
+    #[test]
     fn kept_alive_notice_identifies_both_machine_and_session() {
         let notice = kept_alive_notice("named-agent", Some("session-123"));
 
@@ -1967,6 +2135,7 @@ mod streamed_stdin_tests {
             review_source: ReviewSource::admitted_elsewhere(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             hypervisor: None,
+            portable_boot_assets: None,
         }
     }
 

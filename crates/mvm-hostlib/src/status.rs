@@ -1,9 +1,9 @@
 //! The status codes `mvm_hostlib_call` returns, and the error body written
 //! beside a non-zero one.
 //!
-//! Codes 1 to 7 mirror [`MvmError`] one to one, so a binding branches on the
-//! same failures a Rust caller of the client does. The rest are failures of
-//! the call itself rather than of the operation it asked for.
+//! Codes 1 to 7 and 12 mirror [`MvmError`] one to one, so a binding branches on
+//! the same failures a Rust caller of the client does. The other codes describe
+//! failures of the call itself rather than of the operation it asked for.
 
 use mvm_core::client::MvmError;
 
@@ -34,6 +34,8 @@ pub const MVM_HOSTLIB_EMBEDDER: i32 = 10;
 /// A fault in the library itself: a panic, a runtime that would not start, or
 /// a reply that would not encode.
 pub const MVM_HOSTLIB_INTERNAL: i32 = 11;
+/// The machine requires explicit recovery. Retrying the request is not recovery.
+pub const MVM_HOSTLIB_RECOVERY_REQUIRED: i32 = 12;
 
 /// A status and the bytes written to the caller's buffer with it.
 #[derive(Debug)]
@@ -80,9 +82,21 @@ impl Outcome {
 
 impl From<MvmError> for Outcome {
     fn from(error: MvmError) -> Self {
+        let details = match &error {
+            MvmError::RecoveryRequired {
+                machine_id,
+                plan_id,
+                reason,
+            } => Some(RecoveryRequiredDetails {
+                machine_id,
+                plan_id,
+                reason,
+            }),
+            _ => None,
+        };
         Self {
             status: status_of(&error),
-            body: error_body(error.code(), &error.to_string(), error.retryable()),
+            body: encode_error(error.code(), &error.to_string(), error.retryable(), details),
         }
     }
 }
@@ -97,17 +111,44 @@ pub(crate) fn status_of(error: &MvmError) -> i32 {
         MvmError::Conflict { .. } => MVM_HOSTLIB_CONFLICT,
         MvmError::Rejected { .. } => MVM_HOSTLIB_REJECTED,
         MvmError::Unavailable { .. } => MVM_HOSTLIB_UNAVAILABLE,
+        MvmError::RecoveryRequired { .. } => MVM_HOSTLIB_RECOVERY_REQUIRED,
     }
 }
 
 /// `{"code": ..., "message": ..., "retryable": ...}`. `code` is the same
 /// symbol [`MvmError::code`] gives every other programmatic surface.
 fn error_body(code: &str, message: &str, retryable: bool) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "code": code,
-        "message": message,
-        "retryable": retryable,
-    }))
+    encode_error(code, message, retryable, None)
+}
+
+#[derive(serde::Serialize)]
+struct RecoveryRequiredDetails<'a> {
+    machine_id: &'a str,
+    plan_id: &'a str,
+    reason: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct ErrorBody<'a> {
+    code: &'a str,
+    message: &'a str,
+    retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<RecoveryRequiredDetails<'a>>,
+}
+
+fn encode_error(
+    code: &str,
+    message: &str,
+    retryable: bool,
+    details: Option<RecoveryRequiredDetails<'_>>,
+) -> Vec<u8> {
+    serde_json::to_vec(&ErrorBody {
+        code,
+        message,
+        retryable,
+        details,
+    })
     .unwrap_or_else(|_| {
         br#"{"code":"INTERNAL","message":"error did not encode","retryable":false}"#.to_vec()
     })
@@ -117,7 +158,7 @@ fn error_body(code: &str, message: &str, retryable: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    fn every_error() -> [MvmError; 7] {
+    fn every_error() -> [MvmError; 8] {
         [
             MvmError::NotFound { id: "m".into() },
             MvmError::InvalidSpec { reason: "r".into() },
@@ -126,6 +167,11 @@ mod tests {
             MvmError::Conflict { reason: "r".into() },
             MvmError::Rejected { reason: "r".into() },
             MvmError::Unavailable { reason: "r".into() },
+            MvmError::RecoveryRequired {
+                machine_id: "m".into(),
+                plan_id: "p".into(),
+                reason: "r".into(),
+            },
         ]
     }
 
@@ -135,7 +181,7 @@ mod tests {
     fn every_client_error_has_its_own_status() {
         let statuses: std::collections::BTreeSet<i32> =
             every_error().iter().map(status_of).collect();
-        assert_eq!(statuses.len(), 7);
+        assert_eq!(statuses.len(), 8);
         for status in [
             MVM_HOSTLIB_OK,
             MVM_HOSTLIB_INVALID_INPUT,
@@ -157,6 +203,21 @@ mod tests {
             assert_eq!(body["code"], error.code());
             assert_eq!(body["message"], error.to_string());
             assert_eq!(body["retryable"], error.retryable());
+            if let MvmError::RecoveryRequired {
+                machine_id,
+                plan_id,
+                reason,
+            } = error
+            {
+                assert_eq!(
+                    body["details"],
+                    serde_json::json!({
+                        "machine_id": machine_id, "plan_id": plan_id, "reason": reason
+                    })
+                );
+            } else {
+                assert!(body.get("details").is_none());
+            }
         }
     }
 }

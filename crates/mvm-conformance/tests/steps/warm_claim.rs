@@ -21,10 +21,10 @@ use mvm_core::vm_backend::{
 };
 use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
 use mvm_runtime::checkpoint::{
-    CaptureFsQuickParams, CheckpointChainAnchor, CheckpointStore, capture_fs_quick,
+    CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, capture_vm_full,
     materialized_blob_sha256,
 };
-use mvm_runtime::driver::MockDriver;
+use mvm_runtime::driver::{MockDriver, VmmDriver};
 use mvm_runtime::standby_pool::SupervisorStandbyPool;
 use mvm_runtime::workload_runner::{
     ChildGrantIssuer, ClaimContext, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
@@ -39,6 +39,20 @@ use crate::world::{CliWorld, WarmClaimOutcome, WarmClaimWitness};
 /// parent as audited — the fail-closed lineage gate the claim runs before any
 /// clone.
 fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
+    // The claim path resolves VM state, the runtime namespace and the source
+    // cache under `MVM_HOME`, and a parent with no authenticated runtime
+    // binding is refused before any fork: the whole scenario therefore runs
+    // against one isolated home, held open across its steps. An earlier
+    // half-scenario's guard must go first so the new one snapshots the
+    // ambient home, not the outgoing override.
+    let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    drop(world.mvm_home_guard.take());
+    let home = tempfile::tempdir().expect("create a private MVM_HOME for this scenario");
+    world.mvm_home_guard = Some(crate::world::MvmHomeGuard::new(home.path()));
+    world.warm_claim_home = Some(home);
+
     let store_root = tempfile::tempdir().expect("create warm-claim store tempdir");
     let src = tempfile::tempdir().expect("create warm-claim parent source tempdir");
 
@@ -54,21 +68,47 @@ fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
         .write_to_dir(src.path())
         .expect("write the overlay sidecar");
 
+    // A warm claim restores a parent's saved memory, so the fixture parent is
+    // captured vm_full — anything else the claim refuses before forking — and
+    // carries the checked-source runtime binding the claim re-verifies against
+    // its own admitted launch.
+    let (parent_config, runtime_binding) =
+        mvm_runtime::runtime_evidence::checked_source_runtime_fixture("warm-parent", &rootfs)
+            .expect("build the checked-source runtime fixture");
+    let capture_driver = MockDriver::default().with_vm_full_rootfs(&rootfs);
+    let parent_state_dir = mvm_core::config::vm_state_dir("warm-parent");
+    std::fs::create_dir_all(&parent_state_dir).expect("create the parent state dir");
+    let parent_boot = mvm_vmm::host::spec_map::workload_device_spec(
+        &parent_config,
+        &capture_driver.workload_base_bootargs(true),
+        &parent_state_dir.join("console.log"),
+    );
+    capture_driver
+        .boot(&parent_boot)
+        .expect("boot the mock parent so its capture records real boot inputs");
+    let control = capture_driver
+        .vm_full_control("warm-parent")
+        .expect("the mock driver offers vm_full control");
     let parent_id = CheckpointId::new("warm-parent-cp");
-    let parent_meta = capture_fs_quick(
+    let parent_meta = capture_vm_full(
         &checkpoints,
-        CaptureFsQuickParams {
+        CaptureVmFullParams {
             id: parent_id.clone(),
             vm_name: "warm-parent".into(),
-            rootfs,
             supervisor_config_digest: "d".into(),
-            runtime_overlay_version: None,
+            runtime_overlay_version: parent_config.runtime_overlay_version.clone(),
+            runtime_launch_binding: Some(runtime_binding),
+            supervisor_config_src: None,
             tag: None,
             created_unix: 1,
-            quiesced: true,
+            retain_paused: false,
             grants: None,
+            parent: None,
+            session: None,
+            workspace_volumes: Vec::new(),
             key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         },
+        control.as_ref(),
     )
     .expect("capture the clean parent checkpoint");
     let snapshot_id = format!(
@@ -217,17 +257,17 @@ impl ChildGrantIssuer for WarmClaimGrantIssuer {
 
 #[when(expr = "the parent is claimed with an admitted child plan")]
 fn when_claim_parent(world: &mut CliWorld) {
-    // `vm_state_dir` / `vm_network_endpoint_socket` are `MVM_HOME`-rooted.
-    // Serialize against any other test in this process that mutates it, and
-    // restore the previous value when this step (the only place in the
-    // conformance suite driving the runner's guarded claim path in-process)
-    // returns.
+    // The Given step installed one isolated `MVM_HOME` for the whole scenario
+    // (`world.mvm_home_guard`); the claim's runtime verification resolves the
+    // source cache and retained generation under it. Serialize against any
+    // other test in this process that reads VM state rooted there.
     let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut env = mvm_core::util::test_env::TestEnv::new();
-    let mvm_home = tempfile::tempdir().expect("create a private MVM_HOME for this claim");
-    env.set("MVM_HOME", mvm_home.path());
+    assert!(
+        world.mvm_home_guard.is_some(),
+        "a Given step must seed a warm parent first"
+    );
 
     let checkpoints = world
         .warm_claim_checkpoints
@@ -283,13 +323,20 @@ fn when_claim_parent(world: &mut CliWorld) {
         .expect("serialize the signed child plan");
 
     let rootfs_path = src.path().join("rootfs.ext4");
+    // The claim's start config carries the launch's resolved runtime, exactly
+    // as the CLI populates it; the claim gate compares it against the parent's
+    // authenticated binding and refuses a child that asks for a different one.
+    let mut start_config = VmStartConfig {
+        name: "unused-cold".into(),
+        rootfs_path: rootfs_path.display().to_string(),
+        tenant_id: Some("tenant-x".into()),
+        ..Default::default()
+    };
+    if let Some(binding) = &parent_meta.runtime_launch_binding {
+        binding.apply_to_config(&mut start_config);
+    }
     let claim = StandbyClaim {
-        start_config: Some(VmStartConfig {
-            name: "unused-cold".into(),
-            rootfs_path: rootfs_path.display().to_string(),
-            tenant_id: Some("tenant-x".into()),
-            ..Default::default()
-        }),
+        start_config: Some(start_config),
         rootfs_path: rootfs_path.display().to_string(),
         tenant_id: "tenant-x".into(),
         audit_dir: rootfs_path.with_file_name("audit"),

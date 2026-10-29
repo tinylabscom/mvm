@@ -92,7 +92,7 @@ needs to support a heterogeneous fleet of hostd versions at once.
 
 This constant versions the hostd Unix-socket IPC protocol only. The
 guest-agent vsock protocol (`mvm_agentd::vsock::PROTOCOL_VERSION`) and the
-builder daemon's protocol (`mvm_build::builderd_protocol::PROTOCOL_VERSION`)
+builder daemon's protocol (`mvm_builder_guest::builderd_protocol::PROTOCOL_VERSION`)
 are separate wire protocols with their own version constants and their
 own compatibility rules — each is versioned independently because each
 connects a different pair of processes with a different compatibility

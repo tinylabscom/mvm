@@ -30,8 +30,8 @@ command = "mvmctl image pull python:3.12"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
 
 [[example]]
-command = 'mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -a"'
-witness = "suites/s31_launch_e2e/cli_launch_modes.feature::a transient run boots an OCI image and runs one command"
+command = "mvmctl machine run --name local-demo --profile dev --image \"${MVM_DEMO_IMAGE:?Run preparation in this terminal first}\" --cpus 1 --memory 256M --timeout 30 -- /bin/sh -c 'printf \"hello from a microVM\\n\"; /bin/uname -s'"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented local demo run boots a cached image and leaves no record"
 
 [[example]]
 command = 'mvmctl machine run --image python:3.12 --mount "$PWD/examples/python/hello-app:/work:ro" -- python /work/app.py'
@@ -98,9 +98,8 @@ command = "mvmctl bootstrap"
 witness = "suites/s31_launch_e2e/documented_setup.feature::bootstrap succeeds and reports a ready host"
 
 [[example]]
-command = "mvmctl doctor"
-hermetic_witness = "suites/s2_egress_vsock/default_deny_egress.feature::Host mediates egress over vsock, not a NIC"
-reason = "doctor reports host posture and boots nothing, so a live lane has no guest to add. The scenario runs the real binary and asserts the lines it prints."
+command = "mvmctl doctor --workflow cli-run"
+witness = "suites/s31_launch_e2e/documented_setup.feature::doctor --workflow cli-run reports the host ready for the documented demo"
 
 [[example]]
 command = "mvmctl machine build --flake ."
@@ -111,7 +110,7 @@ command = "mvmctl machine build --flake ./out"
 witness = "suites/s29_doc_examples/documented_build_live.feature::the documented flake build produces an image"
 
 [[example]]
-command = "mvmctl build compile app.py --out ./out"
+command = "mvmctl dev compile app.py --out ./out"
 witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a decorator workload compiles from its source file"
 
 [[example]]
@@ -121,4 +120,3 @@ witness = "suites/s29_doc_examples/documented_build_live.feature::the documented
 [[example]]
 command = "mvmctl run --mode plan ./script.py"
 witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a runtime-SDK script admits as a signed plan without booting"
-

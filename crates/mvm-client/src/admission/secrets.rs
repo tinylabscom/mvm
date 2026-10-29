@@ -56,10 +56,12 @@ impl ResolvedPlanSecrets {
 
     /// Capture the current secret-use approval requirement before plan signing.
     /// A missing secret or binding cannot be represented as an admitted plan.
+    /// A requested approval is never weakened by the stored requirement.
     pub fn bind_approval(mut self, service: &SecretService, tenant: &str) -> Result<Self> {
+        validate_secret_sources(&self.secrets)?;
         for binding in &mut self.secrets {
             let SecretSource::Keystore { address } = &binding.source else {
-                continue;
+                unreachable!("secret sources validated before binding approval");
             };
             let metadata = service
                 .metadata(tenant, address)
@@ -68,10 +70,26 @@ impl ResolvedPlanSecrets {
             let stored = metadata
                 .binding
                 .with_context(|| format!("binding for secret {address:?} is missing"))?;
-            binding.approval_required = stored.approve == SecretApproval::Ask;
+            binding.approval_required |= stored.approve == SecretApproval::Ask;
         }
         Ok(self)
     }
+}
+
+/// Validate supported references without reading secret metadata or values.
+///
+/// This is intent validation, not approval or secret-use authorization.
+/// Unsupported sources refuse before any metadata lookup or host-side effect.
+pub fn validate_secret_sources(bindings: &[SecretBinding]) -> Result<()> {
+    for binding in bindings {
+        if !matches!(binding.source, SecretSource::Keystore { .. }) {
+            anyhow::bail!(
+                "unsupported secret source for binding {:?}: only keystore references are supported",
+                binding.name
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn load_workload_ir(workload_ir_path: Option<&Path>) -> Result<Option<Workload>> {
@@ -228,7 +246,232 @@ fn append_env_bindings(
 mod tests {
     use super::*;
     use mvm_contract::ir::{AuthType, Image, Resources, SecretRef, Source};
+    use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
+    use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    struct ApprovalFixture {
+        root: tempfile::TempDir,
+        values: Arc<FileSecretStore>,
+        bindings: Arc<FileBindingStore>,
+        service: SecretService,
+    }
+
+    fn approval_fixture() -> ApprovalFixture {
+        let root = tempfile::tempdir().unwrap();
+        let values = Arc::new(FileSecretStore::with_dir(root.path().join("values")));
+        let bindings = Arc::new(FileBindingStore::with_dir(root.path().join("bindings")));
+        let service = SecretService::builder()
+            .store(values.clone())
+            .bindings(bindings.clone())
+            .machines_root(root.path().join("machines"))
+            .audit(crate::secret::audit::SecretAudit::with_path(
+                root.path().join("audit.jsonl"),
+            ))
+            .build()
+            .unwrap();
+        ApprovalFixture {
+            root,
+            values,
+            bindings,
+            service,
+        }
+    }
+
+    fn approval_binding(source: SecretSource, requested: bool) -> SecretBinding {
+        SecretBinding {
+            name: "API_KEY".into(),
+            source,
+            destinations: vec!["api.example.com".into()],
+            approval_required: requested,
+        }
+    }
+
+    fn stored_approval(fixture: &ApprovalFixture, ask: bool) {
+        fixture
+            .values
+            .put(
+                "local",
+                "key",
+                &secrecy::SecretBox::new(Box::new("fixture".into())),
+            )
+            .unwrap();
+        fixture
+            .bindings
+            .put(
+                "local",
+                "key",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.example.com".into()],
+                    sigv4: None,
+                    inject: Default::default(),
+                    provider: None,
+                    approve: if ask {
+                        SecretApproval::Ask
+                    } else {
+                        SecretApproval::Never
+                    },
+                    oauth: None,
+                },
+            )
+            .unwrap();
+    }
+
+    fn policy_files(root: &Path) -> Vec<(std::path::PathBuf, String)> {
+        fn walk(root: &Path, path: &Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+            if path == root.join("audit.jsonl") {
+                return;
+            }
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            let digest = if metadata.is_file() {
+                mvm_core::plan::bundle::sha256_hex(&std::fs::read(path).unwrap())
+            } else {
+                String::new()
+            };
+            out.push((path.strip_prefix(root).unwrap().into(), digest));
+            if metadata.is_dir() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    walk(root, &entry.unwrap().path(), out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn approval_policy_empty_bindings_do_not_lookup_or_initialize_storage() {
+        let fixture = approval_fixture();
+        let resolved = ResolvedPlanSecrets::default()
+            .bind_approval(&fixture.service, "local")
+            .unwrap();
+        assert!(resolved.secrets.is_empty());
+        assert_eq!(resolved.secret_release, SecretReleasePolicy::None);
+        assert_eq!(std::fs::read_dir(fixture.root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn approval_policy_preserves_the_strongest_requirement_for_all_four_pairs() {
+        for requested in [false, true] {
+            for stored_ask in [false, true] {
+                let fixture = approval_fixture();
+                stored_approval(&fixture, stored_ask);
+                let before = policy_files(fixture.root.path());
+                let binding = approval_binding(
+                    SecretSource::Keystore {
+                        address: "key".into(),
+                    },
+                    requested,
+                );
+                let resolved = ResolvedPlanSecrets::from_bindings(vec![binding])
+                    .bind_approval(&fixture.service, "local")
+                    .unwrap();
+                assert_eq!(
+                    resolved.secrets[0].approval_required,
+                    requested || stored_ask,
+                    "requested={requested},stored_ask={stored_ask}"
+                );
+                assert_eq!(policy_files(fixture.root.path()), before);
+            }
+        }
+    }
+
+    #[test]
+    fn approval_policy_external_refuses_for_every_requested_and_stored_approval_pair() {
+        for requested in [false, true] {
+            for stored_ask in [false, true] {
+                let fixture = approval_fixture();
+                stored_approval(&fixture, stored_ask);
+                let before = policy_files(fixture.root.path());
+                let binding = approval_binding(
+                    SecretSource::External {
+                        provider: "unsupported".into(),
+                        path: "key".into(),
+                    },
+                    requested,
+                );
+                let error = ResolvedPlanSecrets::from_bindings(vec![binding])
+                    .bind_approval(&fixture.service, "local")
+                    .unwrap_err();
+                assert!(format!("{error:#}").contains("only keystore"), "{error:#}");
+                assert_eq!(policy_files(fixture.root.path()), before);
+                assert!(!fixture.root.path().join("audit.jsonl").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn approval_policy_validates_the_entire_list_before_even_missing_metadata() {
+        for reverse in [false, true] {
+            let fixture = approval_fixture();
+            let mut bindings = vec![
+                approval_binding(
+                    SecretSource::Keystore {
+                        address: "missing".into(),
+                    },
+                    true,
+                ),
+                approval_binding(
+                    SecretSource::External {
+                        provider: "unsupported".into(),
+                        path: "path".into(),
+                    },
+                    false,
+                ),
+            ];
+            if reverse {
+                bindings.reverse();
+            }
+            let before = policy_files(fixture.root.path());
+            let error = ResolvedPlanSecrets::from_bindings(bindings)
+                .bind_approval(&fixture.service, "local")
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("only keystore"), "{error:#}");
+            assert_eq!(policy_files(fixture.root.path()), before);
+            assert_eq!(std::fs::read_dir(fixture.root.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn approval_policy_missing_value_and_binding_keep_the_existing_audited_refusal() {
+        for present in [false, true] {
+            let fixture = approval_fixture();
+            if present {
+                fixture
+                    .values
+                    .put(
+                        "local",
+                        "key",
+                        &secrecy::SecretBox::new(Box::new("fixture".into())),
+                    )
+                    .unwrap();
+            }
+            let before = policy_files(fixture.root.path());
+            let binding = approval_binding(
+                SecretSource::Keystore {
+                    address: "key".into(),
+                },
+                true,
+            );
+            let error = ResolvedPlanSecrets::from_bindings(vec![binding])
+                .bind_approval(&fixture.service, "local")
+                .unwrap_err();
+            assert!(format!("{error:#}").contains(if present {
+                "binding for secret"
+            } else {
+                "secret \"key\" is missing"
+            }));
+            assert_eq!(policy_files(fixture.root.path()), before);
+            let audit = std::fs::read_to_string(fixture.root.path().join("audit.jsonl")).unwrap();
+            assert!(audit.contains("\"action\":\"get\""));
+            assert!(!audit.contains("fixture"));
+            assert!(!fixture.root.path().join("machines").exists());
+        }
+    }
 
     fn workload_with_secret(mount: SecretMount) -> Workload {
         let mut env = BTreeMap::new();

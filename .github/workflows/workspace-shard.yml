@@ -17,12 +17,6 @@ on:
         required: false
         type: string
         default: ''
-      # The hosted runner architecture. `aarch64` runs the shard on the arm64
-      # pool against the aarch64 archive; the self-hosted pool is x86_64 only.
-      arch:
-        required: false
-        type: string
-        default: x86_64
       # How many hash partitions the caller fans the suite out over. The
       # caller's matrix and this number must agree, or tests go unrun.
       shard_count:
@@ -53,22 +47,84 @@ on:
         description: Parent run containing a shared workspace test archive
         required: false
         type: string
+      inventory_only:
+        description: Read-only Hetzner host inventory instead of running tests (runner_kind must be hetzner)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   actions: read
 
 jobs:
+  inventory:
+    name: Read-only runner inventory
+    if: github.event_name == 'workflow_dispatch' && inputs.inventory_only
+    permissions: {}
+    # Invalid selectors fail on a hosted runner, never silently skip.
+    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    steps:
+      - name: Inventory provisioned host
+        shell: bash
+        env:
+          RUNNER_KIND: ${{ inputs.runner_kind }}
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_KIND" != hetzner ]]; then
+            echo "inventory_only requires runner_kind=hetzner" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # No checkout, compiler shims, installs, or persistent test state.
+          # Only the Actions-owned summary is written; no cleanup is needed.
+          {
+            printf '## Read-only runner inventory\n\n```text\n'
+            printf '\nArchitecture\n'
+            uname -m
+            printf '\nCPU model and count\n'
+            LC_ALL=C lscpu | awk -F: '/^(Architecture|CPU\(s\)|Model name|Socket\(s\)|Core\(s\) per socket|Thread\(s\) per core):/ { print }'
+            printf 'Available CPUs: '
+            nproc
+            printf '\nRAM\n'
+            free -h
+            printf '\nDisk capacity (root and runner workspace)\n'
+            df -h / "$GITHUB_WORKSPACE"
+            printf '\nBlock device capacity\n'
+            lsblk -o NAME,TYPE,SIZE
+            printf '\nInstalled Rust toolchains (no compiler shims invoked)\n'
+            if command -v rustup >/dev/null 2>&1; then
+              rustup toolchain list
+            else
+              printf 'rustup not installed\n'
+            fi
+            printf '\nProvisioned tool paths (presence only; no executables invoked)\n'
+            for tool in rustc cargo gcc clang cc zig cargo-zigbuild cargo-nextest ld.lld nix go python3 node; do
+              command -v "$tool" || printf '%s: not on PATH\n' "$tool"
+            done
+            printf '\nKVM device (metadata only; not opened)\n'
+            if [[ -e /dev/kvm ]]; then
+              ls -l /dev/kvm
+              if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+                printf 'Runner has read/write access to /dev/kvm\n'
+              else
+                printf 'Runner lacks read/write access to /dev/kvm\n'
+              fi
+            else
+              printf '/dev/kvm is absent\n'
+            fi
+            printf '```\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
   test:
-    name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }}${{ inputs.arch == 'aarch64' && ', aarch64' || '' }})
-    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || inputs.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }})
+    if: github.event_name != 'workflow_dispatch' || !inputs.inventory_only
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
     # Archive workers on one persistent host share the build-time source path.
     # Serialize that pool; GitHub-hosted workers have separate filesystems.
-    # The architecture is part of the hosted key: x86_64 and aarch64 shards
-    # with the same number run in the same workflow run, and sharing a group
-    # would queue one behind the other (or cancel a pending one).
     concurrency:
-      group: ${{ inputs.runner_kind == 'hetzner' && inputs.archive_run_id != '' && format('workspace-archive-{0}', inputs.archive_run_id) || format('workspace-shard-{0}-{1}-{2}', github.run_id, inputs.arch || 'x86_64', inputs.shard) }}
+      group: ${{ inputs.runner_kind == 'hetzner' && inputs.archive_run_id != '' && format('workspace-archive-{0}', inputs.archive_run_id) || format('workspace-shard-{0}-{1}', github.run_id, inputs.shard) }}
       cancel-in-progress: false
     timeout-minutes: 55
     steps:
@@ -100,7 +156,7 @@ jobs:
       - uses: ./.github/actions/apt-deps
         if: inputs.runner_kind == 'github'
         with:
-          packages: ${{ inputs.arch == 'aarch64' && 'attr cryptsetup-bin libcap-ng-dev lld' || 'attr cryptsetup-bin lld' }}
+          packages: attr cryptsetup-bin lld
 
       - name: Verify provisioned self-hosted dependencies
         if: inputs.runner_kind == 'hetzner'
@@ -134,24 +190,23 @@ jobs:
           base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
           mkdir -m 700 -- "$base"
           mkdir -m 700 -- "$base/home" "$base/mvm" "$base/tmp"
+          runner_home="${HOME:-}"
+          if [[ -z "$runner_home" ]]; then
+            runner_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+          fi
+          [[ -n "$runner_home" && -d "$runner_home" ]] || {
+            echo "cannot determine the runner home directory" >&2
+            exit 1
+          }
+          rustup_home="${RUSTUP_HOME:-$(rustup show home)}"
           {
-            printf 'RUNNER_ORIGINAL_HOME=%s\n' "$HOME"
-            printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$HOME/.cargo}" "${RUSTUP_HOME:-$HOME/.rustup}"
+            printf 'RUNNER_ORIGINAL_HOME=%s\n' "$runner_home"
+            printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$runner_home/.cargo}" "$rustup_home"
             printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
           } >> "$GITHUB_ENV"
 
-      - name: Build
-        if: inputs.archive_run_id == ''
-        run: cargo build --all-targets
-
-      - name: Validate nextest override filters
-        if: inputs.archive_run_id == ''
-        run: cargo run -p xtask -- check-nextest-groups
-
-      - name: xtask man-page tests
-        if: inputs.archive_run_id == ''
-        run: cargo nextest run -p xtask --features man
-
+      # Nextest builds the exact workspace selection itself. Queue-owned
+      # doctests, feature suites and filter validation live in the extras job.
       - name: Run tests
         if: inputs.archive_run_id == ''
         env:
@@ -165,19 +220,14 @@ jobs:
           }
           cargo nextest run --workspace --all-targets --partition "hash:${SHARD}/${SHARD_COUNT}"
 
-      - name: Run addon/egress helper tests
-        if: inputs.archive_run_id == '' && inputs.shard == '1'
-        run: cargo nextest run -p mvm-agentd --features addons
-
-      - name: Run doctests
-        if: inputs.archive_run_id == '' && inputs.shard == '1'
-        run: cargo test --workspace --doc
-
       - name: Download shared workspace test archive
         if: inputs.archive_run_id != ''
+        # Bound the action's retries so a stalled blob download cannot hold a
+        # runner for the whole job; slow runners moved the 3.6 GB archive in over 5 min.
+        timeout-minutes: 10
         uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.arch == 'aarch64' && 'workspace-tests-aarch64' || 'workspace-tests' }}
+          name: workspace-tests
           run-id: ${{ inputs.archive_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ${{ runner.temp }}

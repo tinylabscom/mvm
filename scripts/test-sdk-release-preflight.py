@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class PreflightTests(unittest.TestCase):
     def test_workspace_compatibility_and_independent_sdk_version(self):
         release = preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)
+        self.assertEqual(release["version"], "0.15.2")
+        self.assertEqual(release["runtime_version"], "0.26.0")
         self.assertNotEqual(release["version"], release["runtime_version"])
         preflight.validate_metadata(ROOT, "release", "sdk-v" + release["version"], False)
         with self.assertRaises(ValueError):
@@ -33,12 +35,14 @@ class PreflightTests(unittest.TestCase):
         def loads(text):
             data = original(text)
             if "runtime_version" in data:
-                data["runtime_version"] = "0.0.1"
+                data["runtime_version"] = runtime_version
             return data
 
-        with patch.object(preflight.tomllib, "loads", side_effect=loads):
-            with self.assertRaisesRegex(ValueError, "compiled hostlib"):
-                preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)
+        for runtime_version in ("0.23.1", "0.0.1"):
+            with self.subTest(runtime_version=runtime_version):
+                with patch.object(preflight.tomllib, "loads", side_effect=loads):
+                    with self.assertRaisesRegex(ValueError, "compiled hostlib"):
+                        preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)
 
     def test_partial_publication_is_resumable(self):
         release = preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)

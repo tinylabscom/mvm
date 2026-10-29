@@ -21,8 +21,7 @@ use mvm_core::vm_backend::SnapshotCapability;
 use mvm_hostd::audit::bind::class_str;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::checkpoint::{
-    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, ForkParentLiveness,
-    capture_fs_quick, capture_vm_full, fork_checkpoint,
+    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, capture_fs_quick, capture_vm_full,
 };
 
 use super::Cli;
@@ -135,6 +134,15 @@ pub(in crate::commands) enum CheckpointCmd {
     /// Pass `--boot` to admit and launch the child immediately.
     /// vm_full forks always auto-boot as part of the fork; `--boot` is
     /// accepted there but has no extra effect.
+    ///
+    /// FsQuick copies require complete, unpruned signed original
+    /// lineage and a matching content-addressed parent plan (at most 4 MiB).
+    /// Unknown parent secret policy refuses even with --allow-secret-drop.
+    /// With --boot, every declared credential must resolve to a nonempty
+    /// effective destination set; empty is not encoded as pinned deny-all.
+    /// Metadata classification requires private 0600 records and refuses
+    /// oversized historical records, including with --boot. Valid vm_full
+    /// records still use the existing arm. No permissions are repaired.
     Fork {
         /// Parent checkpoint id.
         id: String,
@@ -386,6 +394,8 @@ fn capture_vm_full_for_running_vm(
         vm_name: args.name.to_string(),
         supervisor_config_digest: supervisor_config_digest(args.state_dir),
         runtime_overlay_version,
+        runtime_launch_binding: mvm_runtime::base::runtime_meta::read(args.name)?
+            .and_then(|meta| meta.runtime_launch_binding),
         // Backends that drive their VMM through a supervisor config (HVF) carry
         // it into the checkpoint: a restore has to rebuild the launch shape the
         // capture froze, and every stop reaps the live copy. Firecracker returns
@@ -527,7 +537,7 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
 }
 
 fn ls(json: bool) -> Result<()> {
-    let metas = CheckpointStore::open().list()?;
+    let metas = mvm_client::checkpoint::Checkpoints::open().list()?;
     if json {
         crate::json_out::emit_json(&metas)?;
         return Ok(());
@@ -846,26 +856,29 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
         json,
         intent,
     } = p;
+    // Whole-list intent validation precedes even ID/store/classification reads
+    // and service construction. Unsupported declarations intentionally win
+    // error precedence; this does not authenticate parent policy or approve use.
+    mvm_client::admission::secrets::validate_secret_sources(declared_secrets)?;
     let checkpoint = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
     // Pick the fork arm by the parent's class: vm_full carries memory and must
     // restore through the vm_full fork arm (which auto-boots the child); fs_quick
     // is a rootfs-only clone that the operator can optionally boot with `--boot`.
-    let parent = store.read_meta(&checkpoint)?;
+    let parent = mvm_client::checkpoint::fs_quick::FsQuickForks::open().classify(&checkpoint)?;
     if intent == ForkIntent::Replay && parent.class != CheckpointClass::VmFull {
         bail!("machine replay requires a vm_full checkpoint");
     }
-    let bound_secrets =
-        if declared_secrets.is_empty() || (parent.class == CheckpointClass::FsQuick && !boot) {
-            declared_secrets.to_vec()
-        } else {
-            let tenant = super::tenant_resolution::resolve_tenant(None);
-            mvm_client::admission::secrets::ResolvedPlanSecrets::from_bindings(
-                declared_secrets.to_vec(),
-            )
-            .bind_approval(&mvm_client::secret::SecretService::local()?, &tenant)?
-            .secrets
-        };
+    let bound_secrets = if declared_secrets.is_empty() || parent.class == CheckpointClass::FsQuick {
+        declared_secrets.to_vec()
+    } else {
+        let tenant = super::tenant_resolution::resolve_tenant(None);
+        mvm_client::admission::secrets::ResolvedPlanSecrets::from_bindings(
+            declared_secrets.to_vec(),
+        )
+        .bind_approval(&mvm_client::secret::SecretService::local()?, &tenant)?
+        .secrets
+    };
     match parent.class {
         CheckpointClass::VmFull => fork_vm_full_arm(fork_vm_full::ForkVmFullArmParams {
             store: &store,
@@ -880,7 +893,6 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
         })
         .map(|_| ()),
         CheckpointClass::FsQuick => fork_fs_quick_arm(ForkFsQuickArmParams {
-            store: &store,
             checkpoint: &checkpoint,
             new_id,
             boot,
@@ -897,7 +909,6 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
 /// Inputs for [`fork_fs_quick_arm`]. Grouped to stay under the
 /// `clippy::too_many_arguments` workspace ceiling.
 struct ForkFsQuickArmParams<'a> {
-    store: &'a CheckpointStore,
     checkpoint: &'a CheckpointId,
     new_id: Option<String>,
     boot: bool,
@@ -916,98 +927,61 @@ struct ForkFsQuickArmParams<'a> {
 /// materialized rootfs without clobbering it (the no-clobber seam in
 /// `prepare_instance_rootfs` returns early when source == instance path).
 fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
-    if !p.boot && !p.declared_secrets.is_empty() {
-        bail!(
-            "--secret requires --boot for an fs_quick fork because an unbooted clone has no child plan"
-        );
-    }
-    let child_tenant = super::tenant_resolution::resolve_tenant(None);
+    use mvm_client::checkpoint::fs_quick::{ForkRequest, FsQuickForks};
+
+    let service = FsQuickForks::open();
+    let request = ForkRequest {
+        checkpoint: p.checkpoint,
+        child_name: p.new_id,
+        declared_secrets: p.declared_secrets,
+        allow_secret_drop: p.allow_secret_drop,
+    };
+    let prepared = if p.boot {
+        let stage = service.prepare_boot(request)?;
+        let tenant = super::tenant_resolution::resolve_tenant(None);
+        stage.for_tenant(tenant)?
+    } else {
+        service.prepare_unbooted(request)?
+    };
+    let artifact = prepared.materialize_and_publish()?;
     if p.boot {
-        validate_fork_secret_policy(
-            p.checkpoint,
-            p.store,
-            &child_tenant,
-            p.declared_secrets,
-            p.allow_secret_drop,
-        )?;
+        #[cfg(unix)]
+        {
+            let instance_rootfs = artifact.destination().join("rootfs.ext4");
+            boot_forked_child(BootForkedChildParams {
+                prepared: &artifact,
+                instance_rootfs: &instance_rootfs,
+                hypervisor: p.hypervisor,
+                cpus_override: p.cpus_override,
+                memory_override: p.memory_override,
+                emit_text: !p.json,
+            })
+            .map_err(|error| artifact.retained_error(error))?;
+        }
+        #[cfg(not(unix))]
+        bail!("authenticated fs_quick boots are unavailable on this platform");
     }
-    let now = now_unix();
-    let child_vm_name = p
-        .new_id
-        .unwrap_or_else(|| format!("{}-fork-{now}", p.checkpoint.as_str()));
-    let dest_dir = vm_state_dir(&child_vm_name);
-    let child_id = CheckpointId::new(format!("fork-{child_vm_name}-{now}"));
-
-    // Verify the parent against the signed audit chain before any bytes are
-    // cloned — a fork must never build on a checkpoint edited after it was
-    // audited.
-    let anchor = SignedChainAnchor::load()
-        .context("loading the signed audit chain to verify the fork parent")?;
-    let meta = fork_checkpoint(
-        p.store,
-        ForkParams {
-            checkpoint: p.checkpoint.clone(),
-            child_id,
-            child_vm_name: child_vm_name.clone(),
-            dest_dir: dest_dir.clone(),
-            created_unix: now,
-            parent_liveness: ForkParentLiveness::MustBeStopped,
-            child_plan_json: None,
-            child_tenant_id: None,
-        },
-        &anchor,
-    )
-    .with_context(|| format!("forking checkpoint {:?}", p.checkpoint.as_str()))?;
-
-    // A fork that we can't audit (signer present but emit fails) is refused —
-    // an unaudited lineage record would break the chain. A missing plan/signer
-    // is best-effort, matching capture.
-    bind_checkpoint_forked(
-        p.checkpoint,
-        &meta,
-        &child_vm_name,
-        p.store,
-        p.declared_secrets,
-        &child_tenant,
-    )?;
-
-    if p.boot {
-        let instance_rootfs = dest_dir.join("rootfs.ext4");
-        boot_forked_child(BootForkedChildParams {
-            child_vm_name: &child_vm_name,
-            instance_rootfs: &instance_rootfs,
-            parent_checkpoint: p.checkpoint,
-            store: p.store,
-            hypervisor: p.hypervisor,
-            cpus_override: p.cpus_override,
-            memory_override: p.memory_override,
-            declared_secrets: p.declared_secrets,
-            emit_text: !p.json,
-        })?;
-    }
-
     if p.json {
         crate::json_out::emit_json(&CheckpointForkJson {
             schema_version: 1,
             action: "fork",
             parent_id: p.checkpoint,
-            child_vm_name: &child_vm_name,
+            child_vm_name: artifact.child_name(),
             booted: p.boot,
-            checkpoint: &meta,
+            checkpoint: artifact.checkpoint(),
         })?;
     } else {
         ui::success(&format!(
             "forked {} -> checkpoint {} (vm '{}')",
             p.checkpoint.as_str(),
-            meta.id.as_str(),
-            child_vm_name
+            artifact.checkpoint().id.as_str(),
+            artifact.child_name()
         ));
         if !p.boot {
             ui::info(&format!(
-                "child '{child_vm_name}' materialized at {}; re-run the fork with \
-                 --boot to admit and launch a child, or delete the directory to \
-                 discard this one",
-                dest_dir.display()
+                "child '{}' materialized at {}; re-run the fork with --boot to admit and launch a child, or delete the directory to discard this one",
+                artifact.child_name(),
+                artifact.destination().display()
             ));
         }
     }
@@ -1016,52 +990,55 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
 
 /// Inputs for [`boot_forked_child`]. Grouped to stay under the
 /// `clippy::too_many_arguments` workspace ceiling.
+#[cfg(unix)]
 struct BootForkedChildParams<'a> {
-    child_vm_name: &'a str,
+    prepared: &'a mvm_client::checkpoint::fs_quick::MaterializedFsQuickFork,
     /// Absolute path to the materialized child rootfs (the fork output).
     /// Passed as-is to admission so `prepare_instance_rootfs`'s
     /// source-equals-instance arm returns without clobbering it.
     instance_rootfs: &'a std::path::Path,
-    /// The parent fs_quick checkpoint id — used to look up the parent VM's
-    /// plan when the child has none yet.
-    parent_checkpoint: &'a CheckpointId,
-    store: &'a CheckpointStore,
     hypervisor: &'a str,
     cpus_override: Option<u32>,
     memory_override: Option<&'a str>,
-    /// Declared for this child's plan. A fs_quick fork admits a plan only under
-    /// `--boot`, which is this function, so this is where they land.
-    declared_secrets: &'a [mvm_core::plan::SecretBinding],
     emit_text: bool,
 }
 
 /// Admit and boot a forked child VM after its rootfs has been materialized.
 ///
-/// Resource resolution: flags win > parent's persisted plan > global defaults.
+/// Resource resolution: flags win over the captured authenticated original plan.
 /// The rootfs is the already-materialized instance file (`prepare_instance_rootfs`
 /// returns early when source == instance, so nothing gets clobbered).
+#[cfg(unix)]
 fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     use mvm_core::util::parse_human_size;
     use mvm_runtime::backend::AnyBackend;
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
     AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
-    let parent_agent_verbs = parent_agent_verb_override(p.parent_checkpoint, p.store);
-    let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
-    let parent_bundle = InheritedBundle::of_parent_vm(&parent_meta.vm_name)?;
-    // Resource shape: flag > parent plan > global defaults.
-    let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);
-    let user_cfg = mvm_core::user_config::load(None);
-    let cpus = p
-        .cpus_override
-        .or(parent_cpus)
-        .unwrap_or(user_cfg.default_cpus);
+    let parent_plan = p.prepared.parent_plan();
+    let parent_agent_verbs = parent_plan
+        .agent_verbs
+        .as_ref()
+        .map(|verbs| {
+            verbs
+                .iter()
+                .map(|verb| verb.as_str().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let parent_meta = p.prepared.parent_meta();
+    let parent_bundle = InheritedBundle::from_parent_plan(parent_plan)?;
+    let child_vm_name = p.prepared.child_name();
+    let cpus = p.cpus_override.unwrap_or(parent_plan.resources.cpus);
     let mem_mib = match p.memory_override {
         Some(s) => parse_human_size(s).context("parsing --memory for --boot")?,
-        None => parent_mem.unwrap_or(user_cfg.default_memory_mib),
+        None => parent_plan.resources.mem_mib as u32,
     } as u64;
 
-    let tenant = super::tenant_resolution::resolve_tenant(None);
+    let tenant = p
+        .prepared
+        .child_tenant()
+        .context("prepared boot tenant is missing")?;
 
     // The booted child needs a real kernel path; work-image boots ship none.
     // Fall back to the cached builder-VM kernel when the placeholder is absent.
@@ -1079,7 +1056,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     // validity window, which admission starts (see
     // `mvm_client::launch::boot_order`).
     let mut start_config = mvm_core::vm_backend::VmStartConfig {
-        name: p.child_vm_name.to_string(),
+        name: child_vm_name.to_string(),
         // Passing the instance path as rootfs_path so `prepare_instance_rootfs`
         // hits the source-equals-instance no-op arm and leaves the fork intact.
         rootfs_path: p.instance_rootfs.to_string_lossy().into_owned(),
@@ -1103,22 +1080,23 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         gpu: false,
         instructions: Default::default(),
         outputs: Vec::new(),
-        network_mode: parent_network_mode(p.parent_checkpoint, p.store),
-        tenant: &tenant,
-        vm_name: p.child_vm_name,
+        network_mode: parent_plan.network_mode,
+        tenant,
+        vm_name: child_vm_name,
         backend_name: &effective_hypervisor,
         configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
         rootfs_path: p.instance_rootfs,
         kernel_path: Some(std::path::Path::new(&vmlinux_path)),
         precomputed_image_sha256: None,
         boot_artifact_identity: None,
+        runtime_config: Some(&start_config),
         cpus,
         mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         secret_release: crate::commands::vm::managed_secrets::secret_release_for_bindings(
-            p.declared_secrets,
+            p.prepared.bindings(),
         ),
-        secrets: p.declared_secrets.to_vec(),
+        secrets: p.prepared.bindings().to_vec(),
         caller_commitment: None,
         ledger: &ledger,
         keys_dir: None,
@@ -1160,6 +1138,11 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)?;
     }
 
+    if let Err(error) = p.prepared.validate_admitted_plan(&admission.admitted) {
+        let error = anyhow::Error::new(error);
+        super::up::emit_failed(&admission, "fork-secret-policy", &error);
+        return Err(error);
+    }
     let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
     if let Err(e) = backend.start(&start_config) {
         super::up::emit_failed(&admission, "backend-start", &e);
@@ -1170,7 +1153,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     if p.emit_text {
         ui::success(&format!(
             "child VM '{}' booted (hypervisor: {})",
-            p.child_vm_name, effective_hypervisor
+            child_vm_name, effective_hypervisor
         ));
     }
     Ok(())
@@ -1387,6 +1370,7 @@ fn resolve_fork_secret_audit(
         .collect()
 }
 
+#[cfg(test)]
 fn parent_plan_resources(
     parent_checkpoint: &CheckpointId,
     store: &CheckpointStore,
@@ -1465,6 +1449,185 @@ mod tests {
     use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
     use mvm_runtime::checkpoint::{CheckpointChainAnchor, verify_lineage};
 
+    #[cfg(unix)]
+    mod fs_quick_client_delegation {
+        use super::*;
+        use crate::commands::dispatch::TopLevelCommand;
+        use clap::Parser;
+        use mvm_client::checkpoint::fs_quick::{ForkError, ForkPhase};
+        use mvm_core::util::test_env::TestEnv;
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Fixture {
+            _env: TestEnv,
+            home: tempfile::TempDir,
+        }
+
+        impl Fixture {
+            fn new() -> Self {
+                let mut env = TestEnv::new();
+                let home = tempfile::tempdir().unwrap();
+                env.isolate_mvm_home(home.path());
+                env.set(
+                    mvm_runtime::vm::snapshot_key::SNAPSHOT_TENANT_KEY_ENV,
+                    "19".repeat(32),
+                );
+                let rootfs = home.path().join("rootfs.ext4");
+                std::fs::write(&rootfs, b"fake-ext4-bytes").unwrap();
+                let store = CheckpointStore::open();
+                let parent = mvm_runtime::checkpoint::capture_fs_quick(
+                    &store,
+                    mvm_runtime::checkpoint::CaptureFsQuickParams {
+                        id: CheckpointId::new("parent"),
+                        vm_name: "parentvm".into(),
+                        rootfs,
+                        supervisor_config_digest: "config".into(),
+                        runtime_overlay_version: None,
+                        tag: None,
+                        created_unix: 1,
+                        quiesced: true,
+                        grants: None,
+                        key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
+                    },
+                )
+                .unwrap();
+                let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+                    .tenant("local")
+                    .workload("parentvm")
+                    .build();
+                plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+                let path = home.path().join("vms/parentvm/plan.json");
+                mvm_core::config::create_private_dir(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+                let key = mvm_hostd::audit::host_keypair::load_or_init().unwrap();
+                let emitter = mvm_hostd::audit::emitter::AuditEmitter::new(key.signing).unwrap();
+                mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, &plan, &parent).unwrap();
+                Self { _env: env, home }
+            }
+
+            fn invoke(&self, boot: bool) -> Result<()> {
+                let mut args = vec![
+                    "mvmctl",
+                    "machine",
+                    "checkpoint",
+                    "fork",
+                    "parent",
+                    "--new-id",
+                    "childvm",
+                    "--json",
+                ];
+                if boot {
+                    // Canonical unconditional refusal BEFORE kernel/backend
+                    // work. This fixture never instantiates Docker or any VM.
+                    args.extend(["--boot", "--hypervisor", "docker"]);
+                }
+                let cli = crate::commands::Cli::try_parse_from(args)?;
+                cli.command
+                    .clone()
+                    .run(&cli, &mvm_core::user_config::MvmConfig::default())
+            }
+
+            fn snapshot(&self) -> std::collections::BTreeMap<std::path::PathBuf, (u32, Vec<u8>)> {
+                fn walk(
+                    root: &std::path::Path,
+                    path: &std::path::Path,
+                    result: &mut std::collections::BTreeMap<std::path::PathBuf, (u32, Vec<u8>)>,
+                ) {
+                    let metadata = std::fs::symlink_metadata(path).unwrap();
+                    let bytes = if metadata.is_file() {
+                        std::fs::read(path).unwrap()
+                    } else {
+                        Vec::new()
+                    };
+                    result.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        (metadata.permissions().mode(), bytes),
+                    );
+                    if metadata.is_dir() {
+                        for entry in std::fs::read_dir(path).unwrap() {
+                            walk(root, &entry.unwrap().path(), result);
+                        }
+                    }
+                }
+                let mut result = std::collections::BTreeMap::new();
+                walk(self.home.path(), self.home.path(), &mut result);
+                result
+            }
+        }
+
+        #[test]
+        fn parsed_unbooted_adapter_returns_only_after_client_copy_and_publication() {
+            let fixture = Fixture::new();
+            fixture.invoke(false).unwrap();
+            assert_eq!(
+                std::fs::read(fixture.home.path().join("vms/childvm/rootfs.ext4")).unwrap(),
+                b"fake-ext4-bytes"
+            );
+            assert!(!fixture.home.path().join("vms/childvm/plan.json").exists());
+            let chain =
+                std::fs::read_to_string(fixture.home.path().join("audit/local.jsonl")).unwrap();
+            assert_eq!(chain.matches("\"checkpoint.forked\"").count(), 1);
+        }
+
+        #[test]
+        fn both_parsed_adapters_preserve_client_preparation_refusal_and_no_effects() {
+            for boot in [false, true] {
+                for missing in [false, true] {
+                    let fixture = Fixture::new();
+                    let path = fixture.home.path().join("vms/parentvm/plan.json");
+                    if missing {
+                        std::fs::remove_file(&path).unwrap();
+                    } else {
+                        let mut plan: mvm_core::plan::ExecutionPlan =
+                            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                        plan.resources.cpus += 1;
+                        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+                        std::fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+                    }
+                    assert!(!fixture.home.path().join("config/config.toml").exists());
+                    let before = fixture.snapshot();
+                    let error = fixture.invoke(boot).unwrap_err();
+                    let client = error
+                        .downcast_ref::<ForkError>()
+                        .expect("typed client delegation");
+                    assert_eq!(client.phase(), ForkPhase::Preparation);
+                    assert!(client.artifact().is_none());
+                    assert!(format!("{error:#}").contains(if missing {
+                        "required existing fork authority file"
+                    } else {
+                        "does not match authenticated original"
+                    }));
+                    assert_eq!(before, fixture.snapshot());
+                    assert!(!fixture.home.path().join("config/config.toml").exists());
+                    assert!(!fixture.home.path().join("vms/childvm").exists());
+                }
+            }
+        }
+
+        #[test]
+        fn parsed_boot_adapter_publishes_before_unconditional_non_native_selector_refusal() {
+            let fixture = Fixture::new();
+            let error = fixture.invoke(true).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("Docker backend has been removed"),
+                "{error:#}"
+            );
+            assert_eq!(
+                error.downcast_ref::<ForkError>().unwrap().phase(),
+                ForkPhase::ChildLaunch
+            );
+            assert_eq!(
+                std::fs::read(fixture.home.path().join("vms/childvm/rootfs.ext4")).unwrap(),
+                b"fake-ext4-bytes"
+            );
+            let chain =
+                std::fs::read_to_string(fixture.home.path().join("audit/local.jsonl")).unwrap();
+            assert_eq!(chain.matches("\"checkpoint.forked\"").count(), 1);
+            assert!(!fixture.home.path().join("vms/childvm/plan.json").exists());
+        }
+    }
+
     #[test]
     fn checkpoint_cursor_reads_the_machine_exec_journal() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
@@ -1505,6 +1668,236 @@ mod tests {
             },
             destinations: Vec::new(),
             approval_required: false,
+        }
+    }
+
+    mod declared_source_preflight {
+        use super::*;
+        use std::collections::BTreeMap;
+        use std::path::{Path, PathBuf};
+
+        fn external() -> SecretBinding {
+            SecretBinding {
+                name: "EXTERNAL".into(),
+                source: SecretSource::External {
+                    provider: "unsupported".into(),
+                    path: "reference".into(),
+                },
+                destinations: Vec::new(),
+                approval_required: true,
+            }
+        }
+
+        fn declarations() -> [Vec<SecretBinding>; 3] {
+            [
+                vec![external()],
+                vec![secret_binding("MISSING", "missing"), external()],
+                vec![external(), secret_binding("MISSING", "missing")],
+            ]
+        }
+
+        fn invoke(id: &str, boot: bool, replay: bool, declared: &[SecretBinding]) -> Result<()> {
+            fork(ForkCmdParams {
+                id,
+                new_id: Some("never-created".into()),
+                boot,
+                hypervisor: "firecracker",
+                cpus: None,
+                memory: None,
+                declared_secrets: declared,
+                allow_secret_drop: true,
+                json: true,
+                intent: if replay {
+                    ForkIntent::Replay
+                } else {
+                    ForkIntent::Ordinary
+                },
+            })
+        }
+
+        fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+            fn visit(root: &Path, path: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+                let meta = std::fs::symlink_metadata(path).unwrap();
+                let mut value = Vec::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+                    value.extend_from_slice(&meta.mode().to_le_bytes());
+                }
+                if meta.is_file() {
+                    value.extend(std::fs::read(path).unwrap());
+                } else if meta.file_type().is_symlink() {
+                    value.extend(
+                        std::fs::read_link(path)
+                            .unwrap()
+                            .as_os_str()
+                            .as_encoded_bytes(),
+                    );
+                }
+                files.insert(path.strip_prefix(root).unwrap().to_owned(), value);
+                if meta.is_dir() {
+                    for entry in std::fs::read_dir(path).unwrap() {
+                        visit(root, &entry.unwrap().path(), files);
+                    }
+                }
+            }
+            let mut files = BTreeMap::new();
+            visit(root, root, &mut files);
+            files
+        }
+
+        #[test]
+        fn unsupported_sources_precede_id_and_missing_or_unusable_root_errors() {
+            for blocked in [false, true] {
+                let mut env = mvm_core::util::test_env::TestEnv::new();
+                let root = tempfile::tempdir().unwrap();
+                let home = root.path().join("home");
+                if blocked {
+                    std::fs::write(&home, b"unusable authority root").unwrap();
+                }
+                env.isolate_mvm_home(&home);
+                for id in ["missing", "../invalid"] {
+                    for boot in [false, true] {
+                        for replay in [false, true] {
+                            for declared in declarations() {
+                                let before = snapshot(root.path());
+                                let error = invoke(id, boot, replay, &declared).unwrap_err();
+                                assert!(
+                                    error.to_string().contains("unsupported secret source"),
+                                    "{error:#}"
+                                );
+                                assert_eq!(before, snapshot(root.path()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn unsupported_class_matrix_never_constructs_secret_service_or_reaches_vm_arms() {
+            for class in [CheckpointClass::FsQuick, CheckpointClass::VmFull] {
+                for boot in [false, true] {
+                    for replay in [false, true] {
+                        for declared in declarations() {
+                            let mut env = mvm_core::util::test_env::TestEnv::new();
+                            let root = tempfile::tempdir().unwrap();
+                            env.isolate_mvm_home(root.path());
+                            let store = CheckpointStore::open();
+                            let id = CheckpointId::new("parent");
+                            mvm_core::config::create_private_dir(store.dir_for(&id)).unwrap();
+                            // Classification data only, not signed authority.
+                            // Every call must refuse before any VM arm is reached.
+                            let meta = CheckpointMeta::builder(id, class, "parentvm").build();
+                            store.write_meta(&meta).unwrap();
+                            let before = snapshot(root.path());
+                            let error = invoke("parent", boot, replay, &declared).unwrap_err();
+                            assert!(
+                                error.to_string().contains("unsupported secret source"),
+                                "{error:#}"
+                            );
+                            assert_eq!(
+                                before,
+                                snapshot(root.path()),
+                                "unsupported declarations must not initialize service state"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn empty_and_keystore_controls_reach_id_validation_without_approval_or_effects() {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let root = tempfile::tempdir().unwrap();
+            env.isolate_mvm_home(root.path().join("missing"));
+            for declared in [Vec::new(), vec![secret_binding("TOKEN", "address")]] {
+                for boot in [false, true] {
+                    for replay in [false, true] {
+                        let before = snapshot(root.path());
+                        let error = invoke("../invalid", boot, replay, &declared).unwrap_err();
+                        assert!(
+                            error.to_string().contains("invalid checkpoint id"),
+                            "{error:#}"
+                        );
+                        assert_eq!(before, snapshot(root.path()));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn unsupported_booted_sources_refuse_without_service_initialization() {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let root = tempfile::tempdir().unwrap();
+            env.isolate_mvm_home(root.path());
+            let store = CheckpointStore::open();
+            let id = CheckpointId::new("parent");
+            mvm_core::config::create_private_dir(store.dir_for(&id)).unwrap();
+            // This record only permits classification. No signature, content,
+            // key custody or fake authority is supplied to permit a VM start.
+            let meta = CheckpointMeta::builder(id, CheckpointClass::FsQuick, "parentvm").build();
+            store.write_meta(&meta).unwrap();
+            let before = snapshot(root.path());
+            let error = invoke("parent", true, false, &[external()]).unwrap_err();
+            let after = snapshot(root.path());
+            let created = after
+                .keys()
+                .filter(|path| !before.contains_key(*path))
+                .collect::<Vec<_>>();
+            assert!(
+                error.to_string().contains("unsupported secret source") && before == after,
+                "error: {error:#}; created service paths: {created:?}"
+            );
+        }
+
+        #[test]
+        fn empty_and_keystore_controls_reach_missing_metadata_without_starting() {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let root = tempfile::tempdir().unwrap();
+            env.isolate_mvm_home(root.path().join("missing"));
+            for declared in [Vec::new(), vec![secret_binding("TOKEN", "address")]] {
+                for boot in [false, true] {
+                    let before = snapshot(root.path());
+                    let error = invoke("missing", boot, false, &declared).unwrap_err();
+                    assert!(!error.to_string().contains("unsupported secret source"));
+                    assert_eq!(before, snapshot(root.path()));
+                }
+            }
+        }
+
+        #[test]
+        fn parsed_keystore_declaration_reaches_missing_checkpoint_not_approval() {
+            use crate::commands::dispatch::TopLevelCommand as _;
+            use clap::Parser as _;
+
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let root = tempfile::tempdir().unwrap();
+            env.isolate_mvm_home(root.path().join("missing"));
+            for boot in [false, true] {
+                let mut args = vec![
+                    "mvmctl",
+                    "machine",
+                    "checkpoint",
+                    "fork",
+                    "missing",
+                    "--secret",
+                    "TOKEN=address",
+                ];
+                if boot {
+                    args.push("--boot");
+                }
+                let before = snapshot(root.path());
+                let cli = crate::commands::Cli::try_parse_from(args).unwrap();
+                let error = cli
+                    .command
+                    .clone()
+                    .run(&cli, &mvm_core::user_config::MvmConfig::default())
+                    .unwrap_err();
+                assert!(!error.to_string().contains("unsupported secret source"));
+                assert_eq!(before, snapshot(root.path()));
+            }
         }
     }
 
@@ -1561,6 +1954,28 @@ mod tests {
     fn validated_checkpoint_id_accepts_normal() {
         assert!(validated_checkpoint_id("ckpt-myvm-1700000000").is_ok());
         assert!(validated_checkpoint_id("fork-child-42").is_ok());
+    }
+
+    #[test]
+    fn checkpoint_list_cli_json_preserves_full_metadata_and_legacy_omissions() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/checkpoint/catalog.json"
+        ))
+        .unwrap();
+        for record in fixture.as_array().unwrap() {
+            let dir = mvm_core::config::checkpoints_dir().join(record["id"].as_str().unwrap());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("meta.json"), serde_json::to_vec(record).unwrap()).unwrap();
+        }
+        let records = mvm_client::checkpoint::Checkpoints::open().list().unwrap();
+        let rendered = crate::json_out::to_json_string(&records).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&rendered).unwrap(),
+            fixture
+        );
     }
 
     #[test]
@@ -2083,6 +2498,7 @@ mod tests {
             accessible: false,
             rootfs_path: Some(rootfs_file.to_string_lossy().into_owned()),
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
             restored_device_anchors: None,
         };
@@ -2114,6 +2530,7 @@ mod tests {
             accessible: false,
             rootfs_path: Some(gone_path.to_string_lossy().into_owned()),
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
             restored_device_anchors: None,
         };
@@ -2188,7 +2605,7 @@ mod tests {
         let plan_cpus: Option<u32> = Some(2);
         let plan_mem: Option<u32> = Some(512);
 
-        let user_cfg = mvm_core::user_config::load(None);
+        let user_cfg = mvm_core::user_config::MvmConfig::default();
         let final_cpus = flag_cpus.or(plan_cpus).unwrap_or(user_cfg.default_cpus);
         let final_mem_mib = flag_mem
             .map(|s| mvm_core::util::parse_human_size(s).unwrap())
@@ -2196,6 +2613,19 @@ mod tests {
             .unwrap_or(user_cfg.default_memory_mib);
         assert_eq!(final_cpus, 8);
         assert_eq!(final_mem_mib, 1024);
+    }
+
+    #[test]
+    fn resource_shape_flags_override_plan_without_initializing_config() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("missing");
+        env.isolate_mvm_home(&home);
+        assert!(!home.exists());
+
+        resource_shape_flags_override_plan();
+
+        assert!(!home.exists());
     }
 
     // ── boot path: no-clobber property ───────────────────────────────────

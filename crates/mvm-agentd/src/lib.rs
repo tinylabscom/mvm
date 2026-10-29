@@ -104,6 +104,7 @@ pub mod host_time;
 pub mod icmp_client;
 pub mod icmp_mediator;
 pub mod integrations;
+pub mod late_volumes;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`
 /// binary calls into this module at boot to install kernel blackhole
@@ -123,6 +124,8 @@ pub mod restore_clock;
 /// these testable units. Folded in from the former `mvm-runner` crate.
 pub mod runner;
 pub mod runtime_config;
+#[cfg(target_os = "linux")]
+mod safe_mount_target;
 /// Shared SOCKS5 UDP datagram wire codec for the guest proxy and relay.
 pub mod socks5_udp;
 /// Shared bounded pipe-reader and consumer handoff.
@@ -161,6 +164,7 @@ pub mod tool_decision_socket;
 pub mod tool_helper;
 pub mod tool_install;
 pub mod tool_map;
+pub mod trusted_env;
 pub mod volume;
 pub mod vsock;
 pub mod worker_pool;
@@ -181,6 +185,7 @@ pub mod workload_identity;
 /// Process control RPC handler. Requests are admitted only after the guest
 /// agent's runtime profile and signed verb grant checks succeed.
 pub mod process_rpc;
+pub mod profile;
 
 /// Streaming exec core — runs `sh -c <cmd>` and emits `ExecEvent` chunks
 /// via a closure. The guest agent admits calls at runtime.

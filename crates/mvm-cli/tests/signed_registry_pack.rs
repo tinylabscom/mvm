@@ -185,7 +185,11 @@ fn the_builtin_default_bounds_trust_in_the_historical_fixture_identity() {
     let result = mvm_cli::pack_registry::pull("runtime/go");
     let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lockfile");
     if chrono::Utc::now() < cutoff {
-        let summary = result.expect("former publisher is trusted before the cutoff");
+        let mvm_cli::pack_registry::PullOutcome::Installed(summary) =
+            result.expect("former publisher is trusted before the cutoff")
+        else {
+            panic!("legacy fixture must install")
+        };
         assert_eq!(summary.manifest_sha256, MANIFEST_SHA256);
         assert_eq!(lock.pins().len(), 1);
     } else {
@@ -199,7 +203,11 @@ fn the_builtin_default_bounds_trust_in_the_historical_fixture_identity() {
 fn published_signed_pack_pulls_pins_and_loads_without_network() {
     let temp = TempDir::new().expect("tempdir");
     let _env = isolated_registry(&temp, MANIFEST, GROUP);
-    let summary = mvm_cli::pack_registry::pull("runtime/go").expect("signed pull");
+    let mvm_cli::pack_registry::PullOutcome::Installed(summary) =
+        mvm_cli::pack_registry::pull("runtime/go").expect("signed pull")
+    else {
+        panic!("legacy policy must install")
+    };
     assert_eq!(summary.reference.to_string(), "runtime/go@1.0.0");
     assert_eq!(summary.manifest_sha256, MANIFEST_SHA256);
     assert_eq!(summary.files, 1);
@@ -224,11 +232,52 @@ fn published_signed_pack_pulls_pins_and_loads_without_network() {
 }
 
 #[test]
+fn application_bytes_cannot_reuse_a_legacy_publishers_signed_bundle() {
+    let temp = TempDir::new().expect("tempdir");
+    let bytes = std::str::from_utf8(include_bytes!(
+        "../../mvm-core/src/registry_pack/application_manifest_v2.json"
+    ))
+    .expect("fixture UTF-8")
+    .replace("test/hello@1.0.0", "runtime/go@1.0.0");
+    let _env = isolated_registry(&temp, bytes.as_bytes(), GROUP);
+    let error =
+        mvm_cli::pack_registry::pull("runtime/go").expect_err("signature must bind original bytes");
+    assert!(format!("{error:#}").contains("signature"), "{error:#}");
+    let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lock");
+    assert!(lock.pins().is_empty());
+    assert!(!mvm_core::config::registry_pack_cache_dir().exists());
+}
+
+#[test]
+fn application_catalog_mismatch_refuses_before_signature_or_acquisition() {
+    let temp = TempDir::new().expect("tempdir");
+    let _env = isolated_registry(&temp, MANIFEST, GROUP);
+    std::fs::write(
+        temp.path()
+            .join("registry/packs/runtime/go/1.0.0/manifest.json"),
+        include_bytes!("../../mvm-core/src/registry_pack/application_manifest_v2.json"),
+    )
+    .expect("changed fetched descriptor");
+    let error = mvm_cli::pack_registry::pull("runtime/go").expect_err("catalog drift");
+    assert!(
+        format!("{error:#}").contains("catalog manifest digest mismatch"),
+        "{error:#}"
+    );
+    let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lock");
+    assert!(lock.pins().is_empty());
+    assert!(!mvm_core::config::registry_pack_cache_dir().exists());
+}
+
+#[test]
 fn a_signed_profile_include_fetches_verifies_and_pins_its_dependency() {
     let temp = TempDir::new().expect("tempdir");
     let (_env, policy) = isolated_signed_dependency_registry(&temp, PYTHON_FILES[0].1);
 
-    let parent = mvm_cli::pack_registry::pull("agent/claude").expect("signed dependency pull");
+    let mvm_cli::pack_registry::PullOutcome::Installed(parent) =
+        mvm_cli::pack_registry::pull("agent/claude").expect("signed dependency pull")
+    else {
+        panic!("legacy dependency root must install")
+    };
     assert_eq!(parent.reference.to_string(), "agent/claude@1.0.1");
     assert_eq!(parent.files, 1);
 
@@ -426,8 +475,12 @@ fn a_real_signed_image_pack_pulls_with_its_image_and_reopens_under_the_pin() {
     )
     .expect("save publisher trust");
 
-    let summary = mvm_cli::pack_registry::pull("runtime/python@1.1.0")
-        .expect("pull a real signed image pack");
+    let mvm_cli::pack_registry::PullOutcome::Installed(summary) =
+        mvm_cli::pack_registry::pull("runtime/python@1.1.0")
+            .expect("pull a real signed image pack")
+    else {
+        panic!("legacy image must install")
+    };
     assert_eq!(summary.files, 4);
     let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lockfile");
     let (_, verified) = open_installed_registry_pack(

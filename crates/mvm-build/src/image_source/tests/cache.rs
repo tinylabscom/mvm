@@ -50,9 +50,7 @@ impl Fixture {
             &mvm.join("rust-toolchain.toml"),
             "[toolchain]\nchannel = \"nightly-2026-08-25\"\n",
         );
-        git(&mvm, &["init", "-q"]);
-        git(&mvm, &["add", "-A"]);
-        git(&mvm, &["commit", "-q", "-m", "mvm"]);
+        repository::commit_all(&mvm, "mvm");
         let images = open(&images_dir).unwrap();
         let cache = LocalImageCache::at(tmp.path().join("cache"));
         Self {
@@ -248,6 +246,7 @@ fn staged_refusal(err: LocalImageCacheError) -> String {
 
 #[test]
 fn an_unchanged_pair_misses_once_then_hits() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     assert!(matches!(fx.lookup(&key), CacheLookup::Miss));
@@ -269,6 +268,7 @@ fn an_unchanged_pair_misses_once_then_hits() {
 
 #[test]
 fn the_key_names_every_input_it_was_derived_from() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
 
@@ -300,6 +300,7 @@ fn the_key_names_every_input_it_was_derived_from() {
 
 #[test]
 fn every_input_changes_the_key() {
+    let _env = TestEnv::new();
     let mut fx = Fixture::new();
     let base = fx.key();
     let mut digests = vec![base.digest()];
@@ -357,6 +358,7 @@ fn every_input_changes_the_key() {
 
 #[test]
 fn an_edit_misses_without_destroying_the_entry_for_the_old_state() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let before = fx.key();
     fx.publish(&before);
@@ -376,6 +378,7 @@ fn an_edit_misses_without_destroying_the_entry_for_the_old_state() {
 
 #[test]
 fn an_entry_for_one_target_survives_a_build_of_another() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let kernel = fx.key();
     fx.publish(&kernel);
@@ -388,6 +391,7 @@ fn an_entry_for_one_target_survives_a_build_of_another() {
 
 #[test]
 fn a_key_from_checkouts_that_have_since_changed_is_an_error_not_a_lookup() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);
@@ -407,6 +411,7 @@ fn a_key_from_checkouts_that_have_since_changed_is_an_error_not_a_lookup() {
 
 #[test]
 fn an_image_edit_after_selection_is_refused_before_the_cache_is_read() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);
@@ -419,6 +424,7 @@ fn an_image_edit_after_selection_is_refused_before_the_cache_is_read() {
 
 #[test]
 fn a_stale_set_cannot_be_published_under_a_fresh_key() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let old = fx.key();
     write(&fx.mvm().join("src.rs"), "fn main() {}\n");
@@ -434,6 +440,7 @@ fn a_stale_set_cannot_be_published_under_a_fresh_key() {
 
 #[test]
 fn a_crash_mid_publish_leaves_no_visible_entry() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.cache.stage(&key).unwrap();
@@ -457,6 +464,7 @@ fn a_crash_mid_publish_leaves_no_visible_entry() {
 /// under the same key as though the refusal never happened.
 #[test]
 fn a_publish_refused_at_the_parse_stage_leaves_nothing_and_a_retry_publishes() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.cache.stage(&key).unwrap();
@@ -494,6 +502,7 @@ fn a_publish_refused_at_the_parse_stage_leaves_nothing_and_a_retry_publishes() {
 
 #[test]
 fn an_abandoned_staging_directory_is_reaped() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.cache.stage(&key).unwrap();
@@ -513,6 +522,7 @@ fn an_abandoned_staging_directory_is_reaped() {
 
 #[test]
 fn an_unpublished_staging_directory_is_removed_when_dropped() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let staged = fx.stage_set(&fx.key());
     let dir = staged.dir().to_path_buf();
@@ -524,6 +534,7 @@ fn an_unpublished_staging_directory_is_removed_when_dropped() {
 
 #[test]
 fn concurrent_publishers_of_one_key_agree_on_one_entry() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged: Vec<StagedEntry> = (0..4).map(|_| fx.stage_set(&key)).collect();
@@ -557,6 +568,7 @@ fn concurrent_publishers_of_one_key_agree_on_one_entry() {
 #[cfg(unix)]
 #[test]
 fn a_symlink_in_a_staged_entry_is_refused() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.stage_set(&key);
@@ -574,6 +586,7 @@ fn a_symlink_in_a_staged_entry_is_refused() {
 
 #[test]
 fn a_subdirectory_in_a_staged_entry_is_refused() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.stage_set(&key);
@@ -586,6 +599,7 @@ fn a_subdirectory_in_a_staged_entry_is_refused() {
 
 #[test]
 fn a_file_the_manifest_does_not_name_is_refused() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.stage_set(&key);
@@ -598,6 +612,7 @@ fn a_file_the_manifest_does_not_name_is_refused() {
 
 #[test]
 fn an_artifact_name_that_leaves_the_entry_is_refused() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.cache.stage(&key).unwrap();
@@ -619,6 +634,7 @@ fn an_artifact_name_that_leaves_the_entry_is_refused() {
 
 #[test]
 fn a_staged_set_claiming_a_release_is_refused() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.stage_set(&key);
@@ -644,6 +660,7 @@ fn a_staged_set_claiming_a_release_is_refused() {
 
 #[test]
 fn a_set_for_another_architecture_is_refused() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.cache.stage(&key).unwrap();
@@ -659,6 +676,7 @@ fn a_set_for_another_architecture_is_refused() {
 
 #[test]
 fn a_build_cannot_write_the_entry_record() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.stage_set(&key);
@@ -672,6 +690,7 @@ fn a_build_cannot_write_the_entry_record() {
 #[cfg(unix)]
 #[test]
 fn an_entry_recording_the_release_tier_is_evicted_not_served() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);
@@ -695,6 +714,7 @@ fn an_entry_recording_the_release_tier_is_evicted_not_served() {
 #[cfg(unix)]
 #[test]
 fn a_tampered_artifact_is_evicted_not_served() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);
@@ -714,6 +734,7 @@ fn a_tampered_artifact_is_evicted_not_served() {
 
 #[test]
 fn an_entry_moved_under_another_key_is_evicted() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let kernel = fx.key();
     fx.publish(&kernel);
@@ -727,6 +748,7 @@ fn an_entry_moved_under_another_key_is_evicted() {
 
 #[test]
 fn a_publish_over_a_corrupt_entry_replaces_it() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     std::fs::create_dir_all(fx.cache.entry_dir(&key)).unwrap();
@@ -753,6 +775,7 @@ fn the_default_cache_lives_in_its_own_directory_of_the_mvm_cache() {
 
 #[test]
 fn a_key_digest_is_domain_separated() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let plain = Sha256Hex::from_bytes(&serde_json::to_vec(&key).unwrap());
@@ -766,6 +789,7 @@ fn a_key_digest_is_domain_separated() {
 
 #[test]
 fn a_linked_flake_lock_cannot_key_an_entry() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let lock = fx.images_dir().join("kernel/flake.lock");
     std::fs::remove_file(&lock).unwrap();
@@ -786,6 +810,7 @@ fn a_linked_flake_lock_cannot_key_an_entry() {
 
 #[test]
 fn an_mvm_checkout_without_a_toolchain_pin_cannot_key_an_entry() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     std::fs::remove_file(fx.mvm().join("rust-toolchain.toml")).unwrap();
 
@@ -842,6 +867,7 @@ fn a_flake_attribute_is_one_plain_segment() {
 /// verifies on lookup there — same key, same manifest digest, same bytes.
 #[test]
 fn a_seeded_cache_answers_the_lookup_the_donor_satisfied() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);
@@ -866,6 +892,7 @@ fn a_seeded_cache_answers_the_lookup_the_donor_satisfied() {
 
 #[test]
 fn a_donor_with_no_entries_seeds_nothing() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let absent = LocalImageCache::at(fx.tmp.path().join("absent-donor"));
 
@@ -875,6 +902,7 @@ fn a_donor_with_no_entries_seeds_nothing() {
 
 #[test]
 fn a_cache_that_already_has_entries_keeps_them_and_ignores_the_donor() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let mine = fx.key();
     fx.publish(&mine);
@@ -907,11 +935,15 @@ fn kernel_in(dir: &Path) -> PathBuf {
 /// it. The next run's lookup has to answer from that entry, not rebuild it.
 #[test]
 fn an_entry_whose_kernel_a_launch_hashed_still_hits() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);
     let kernel = kernel_in(&fx.cache.entry_dir(&key));
 
+    std::thread::sleep(
+        mvm_core::crypto::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(60),
+    );
     let digest = mvm_core::crypto::image_verify::sha256_file_cached(&kernel).unwrap();
 
     assert_eq!(digest, Sha256Hex::from_bytes(KERNEL).as_str());
@@ -929,6 +961,7 @@ fn an_entry_whose_kernel_a_launch_hashed_still_hits() {
 
 /// An x86_64 bzImage wrapped around an ELF kernel: what a launch has to
 /// extract before its VMM can load it.
+#[cfg(unix)]
 fn fake_bzimage() -> Vec<u8> {
     use std::io::Write;
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -941,7 +974,9 @@ fn fake_bzimage() -> Vec<u8> {
 /// The same, for a kernel a launch has to extract in place: the extracted ELF
 /// and its stamp land beside it in the entry.
 #[test]
+#[cfg(unix)]
 fn an_entry_whose_kernel_a_launch_extracted_still_hits() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.cache.stage(&key).unwrap();
@@ -959,6 +994,7 @@ fn an_entry_whose_kernel_a_launch_extracted_still_hits() {
 
 #[test]
 fn a_digest_sidecar_beside_any_file_of_the_set_is_tolerated() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);
@@ -980,6 +1016,7 @@ fn a_digest_sidecar_beside_any_file_of_the_set_is_tolerated() {
 
 #[test]
 fn a_digest_sidecar_for_a_file_outside_the_set_is_evicted() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);
@@ -998,6 +1035,7 @@ fn a_digest_sidecar_for_a_file_outside_the_set_is_evicted() {
 
 #[test]
 fn any_other_file_added_to_a_published_entry_is_evicted() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);
@@ -1027,6 +1065,7 @@ fn any_other_file_added_to_a_published_entry_is_evicted() {
 #[cfg(unix)]
 #[test]
 fn a_tampered_member_with_a_forged_sidecar_is_evicted_sidecars_and_all() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);
@@ -1050,10 +1089,13 @@ fn a_tampered_member_with_a_forged_sidecar_is_evicted_sidecars_and_all() {
         format!("{} {} {mtime}\n", vouched.as_str(), meta.len()),
     )
     .unwrap();
+    // The digest cache does not serve this forgery: an unsealed sidecar vouches
+    // for nothing, so it hashes the bytes it is asked about. Eviction below does
+    // not depend on that; it re-hashes on its own.
     assert_eq!(
         mvm_core::crypto::image_verify::sha256_file_cached(&kernel).unwrap(),
-        vouched.as_str(),
-        "the forgery is one the digest cache itself would serve"
+        Sha256Hex::from_bytes(tampered).as_str(),
+        "an unsealed sidecar must not vouch for different bytes"
     );
 
     let reason = expect_evicted(fx.lookup(&key));
@@ -1072,6 +1114,7 @@ fn a_tampered_member_with_a_forged_sidecar_is_evicted_sidecars_and_all() {
 
 #[test]
 fn a_seeded_entry_carrying_a_digest_sidecar_still_hits() {
+    let _env = TestEnv::new();
     let fx = Fixture::new();
     let key = fx.key();
     fx.publish(&key);

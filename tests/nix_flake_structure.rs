@@ -1365,7 +1365,8 @@ fn mk_guest_can_omit_setpriv_for_a_builder_boot_payload() {
 
 #[test]
 fn builder_hook_uses_util_linux_losetup_before_the_mount_syscall() {
-    let hook_path = repo_dir().join("crates/mvm-build/src/bin/mvm-host-vm-init/builder_hooks.rs");
+    let hook_path =
+        repo_dir().join("crates/mvm-builder-guest/src/bin/mvm-host-vm-init/builder_hooks.rs");
     let hook = fs::read_to_string(&hook_path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", hook_path.display()));
     assert!(
@@ -1490,7 +1491,7 @@ fn nix_flake_uses_the_builder_workspace_override_for_build_backed_checks() {
 
 #[test]
 fn ci_builds_the_guest_rootfs_package_budget() {
-    let path = repo_dir().join(".github/workflows/ci.yml");
+    let path = repo_dir().join(".github/workflows/ci-main.yml");
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
 

@@ -15,6 +15,9 @@
 //!   used by the runtime to materialize per-instance rootfs copies.
 //! - [`hash`]: content-addressing helpers (file/directory SHA-256) backing
 //!   [`snapshot_store`]'s content-addressed create.
+//! - [`manifest`]: the chunked, chain-aware v2 content manifest — a snapshot
+//!   child reuses its parent's digests for content the kernel proves
+//!   unchanged instead of rehashing the whole tree.
 //! - [`snapshot_store`]: content-addressed snapshot persistence used by the
 //!   warm-parent pool.
 //! - [`output`]: bounded, link-refusing collection of the files a transient
@@ -22,21 +25,28 @@
 //!
 //! The crate-level lint is `deny(unsafe_code)` rather than `forbid` so that
 //! the [`clone`] module can use the small, platform-specific unsafe blocks
-//! required to invoke `clonefile(2)` and `FICLONE`. Everywhere else in this
-//! crate remains unsafe-free.
+//! required to invoke `clonefile(2)` and `FICLONE`, and so the crate-private
+//! `extent` module can issue the Linux `FIEMAP` ioctl. Everywhere else in
+//! this crate remains unsafe-free.
 
+#[cfg(unix)]
 pub mod clone;
 pub mod elf;
 pub mod ext4;
+#[cfg(unix)]
 pub mod extension_image;
+mod extent;
 pub mod hash;
 pub mod initramfs;
+pub mod manifest;
+#[cfg(unix)]
 pub mod oci;
 /// OCI layer unpack to a staging rootfs directory. Handles whiteouts,
 /// symlinks, hardlinks, ownership, permissions, path traversal, the
 /// `/mvm` reserved-path collision check, and per-entry + per-layer
 /// size caps (decompression-bomb mitigation). ext4 generation
 /// (`mke2fs -d` against the staging dir) runs inside the builder VM.
+#[cfg(unix)]
 pub mod oci_to_rootfs;
 /// OS package inventory of an unpacked rootfs tree: dpkg/apk package
 /// databases, os-release distribution identity, and the version of a
@@ -45,11 +55,17 @@ pub mod oci_to_rootfs;
 pub mod os_inventory;
 pub mod output;
 pub mod overlay;
+#[cfg(unix)]
 pub mod ownership;
 pub mod parallel;
+mod path_guard;
+#[cfg(unix)]
 pub mod rootfs;
 pub mod sdk_sidecar;
+#[cfg(unix)]
 pub mod snapshot_store;
 pub mod tree_diff;
+#[cfg(unix)]
 pub mod trusted_snapshot;
+#[cfg(unix)]
 pub mod workspace_apply;

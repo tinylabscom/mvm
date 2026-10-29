@@ -30,6 +30,21 @@ pub(super) fn open_endpoint_stderr_log(state_dir: &Path) -> Result<std::fs::File
     Ok(file)
 }
 
+/// Open (truncating) the collector-only process's stderr log, owner-only,
+/// beside the VM.
+pub(super) fn open_collector_stderr_log(state_dir: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = state_dir.join("telemetry-collector.stderr.log");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .with_context(|| format!("open telemetry collector stderr log {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

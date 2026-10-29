@@ -28,9 +28,11 @@ impl TopLevelCommand for Commands {
             Commands::Completions(a) => completions::run(a),
             Commands::SdkNoVm(a) => vm::sdk_no_vm::run(&a),
             Commands::Doctor(a) => env::doctor::run(cli, a, cfg),
+            Commands::Backend(a) => backend::run(cli, a, cfg),
             Commands::Dashboard(a) => dashboard::run(a),
             Commands::Prepare(a) => vm::prepare::run(a),
-            Commands::Build(a) => build::group::run(cli, a, cfg),
+            Commands::Build(a) => build::front_door::run(cli, a, cfg),
+            Commands::Dev(a) => build::group::run(cli, a, cfg),
             Commands::Deploy(a) => deploy::run(cli, a, cfg),
             Commands::Deployments(a) => deployments::run(cli, a, cfg),
             Commands::Kernel(a) => build::kernel::run(cli, a, cfg),
@@ -72,11 +74,31 @@ impl TopLevelCommand for Commands {
         // Uninstall runs before startup creates config, host signing keys and
         // the command audit envelope: it must not create the state directory
         // it is deciding whether to remove.
+        // The archive-only reader likewise must not create keys or lifecycle
+        // state while checking untrusted bytes.
+        // Caller identity reads must stay side-effect free, and enrollment
+        // creates only its explicit reservation and native credential.
+        // `backend detect` is install.sh's probe of a just-extracted mvmctl:
+        // it must answer without creating any state.
         matches!(
             self,
             Commands::QemuVsockBridge(_)
+                | Commands::Backend(backend::Args {
+                    action: backend::BackendCmd::Detect(_),
+                    ..
+                })
+                | Commands::Dev(build::group::Args {
+                    action: build::group::BuildCmd::GuestBins(build::guest_bins::Args {
+                        check_release_archive: Some(_),
+                        ..
+                    }),
+                    ..
+                })
                 | Commands::Env(env::group::Args {
                     action: env::group::EnvCmd::Uninstall(_),
+                })
+                | Commands::Env(env::group::Args {
+                    action: env::group::EnvCmd::CallerIdentity(_),
                 })
         )
     }
@@ -87,9 +109,24 @@ impl TopLevelCommand for Commands {
         }
         match self {
             Commands::QemuVsockBridge(a) => Some(qemu_bridge::run(a)),
+            Commands::Backend(backend::Args {
+                action: backend::BackendCmd::Detect(args),
+                ..
+            }) => Some(backend::run_detect_early(args)),
+            Commands::Dev(build::group::Args {
+                action:
+                    build::group::BuildCmd::GuestBins(build::guest_bins::Args {
+                        check_release_archive: Some(archive),
+                        ..
+                    }),
+                ..
+            }) => Some(build::guest_bins::check_archive_to_stdout(archive)),
             Commands::Env(env::group::Args {
                 action: env::group::EnvCmd::Uninstall(a),
             }) => Some(env::uninstall::run(a)),
+            Commands::Env(env::group::Args {
+                action: env::group::EnvCmd::CallerIdentity(a),
+            }) => Some(env::caller_identity::run(a.clone())),
             _ => None,
         }
     }

@@ -87,7 +87,31 @@ const BUDGETS: &[ClosureBudget] = &[
 ///
 /// 307 (was 306): the first-party `mvm-compiler` extraction, with no new
 /// third-party dependencies; same reason as the Linux budget below.
-const MACOS_CLOSURE_BUDGET: usize = 307;
+///
+/// 374 (was 307): in-process checkout identity adds the same 64 crates as
+/// Linux, plus the byte-only Mach-O signer, plist and XML parser. Native
+/// verification uses the existing public Security/CoreFoundation dependencies.
+///
+/// 375 (was 374): the first-party `mvm-builder-guest` crate, same reason as
+/// the Linux budget below.
+///
+/// 374 (was 375): removing the unused direct `etherparse` dependency from
+/// `mvm-hostd` removes its final edge from the shipped graph.
+///
+/// 373 (was 374): `mvm-observability` folds back into `mvm-cli`, its only
+/// consumer, as the `observability` module. Every dependency it carried was
+/// already in this closure, so the folded crate itself is the only removed
+/// node. Keeping the assembly in the host-only CLI preserves the split's
+/// reason: `tracing-subscriber` stays out of `mvm-core`, the sealed agent
+/// and the musl binaries.
+///
+/// 351 (was 373): the Rekor and timestamp-authority HTTP clients are
+/// optional in the workspace's patched sigstore crates
+/// (`third_party/sigstore-patches.md`), and `mvm-core` no longer enables the
+/// `sigstore-verify` TLS feature that pulled `sigstore-tuf`. The `reqwest`,
+/// `hyper`, `tower` and TUF-fetch crates leave the closure; offline
+/// verification is unchanged. `sigstore-network` is the way back in.
+const MACOS_CLOSURE_BUDGET: usize = 351;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -252,7 +276,36 @@ const MACOS_CLOSURE_BUDGET: usize = 307;
 /// 313 (was 312): `mvm-compiler` extracts the workload compiler from `mvm-sdk`
 /// for direct host-tool reuse. All its dependencies were already in the
 /// closure; the sole additional node is this first-party workspace crate.
-pub(crate) const CLOSURE_BUDGET: usize = 313;
+///
+/// 377 (was 313): in-process checkout identity requires Git index, attributes
+/// and ignore handling through gix with only attributes/excludes/sha1 requested.
+/// The measured +64 is 57 new Git support crates and seven previously
+/// all-feature-only crates now reachable by default. No gix default, basic,
+/// extras or network-client feature is enabled; the identity path does not
+/// execute commands, filters, hooks, credential helpers or network clients.
+///
+/// 378 (was 377): `mvm-builder-guest`, the builder-VM guest binaries and the
+/// contract they share with the host, becomes its own first-party crate so the
+/// musl build that embeds them stops compiling `mvm-build`'s closure. Every
+/// dependency it has was already present, so the one new node is the crate itself.
+///
+/// 377 (was 378): removing the unused direct `etherparse` dependency from
+/// `mvm-hostd` removes its final edge from the shipped graph.
+///
+/// 376 (was 377): `mvm-observability` folds back into `mvm-cli`, its only
+/// consumer, as the `observability` module. Every dependency it carried was
+/// already in this closure, so the folded crate itself is the only removed
+/// node. Keeping the assembly in the host-only CLI preserves the split's
+/// reason: `tracing-subscriber` stays out of `mvm-core`, the sealed agent
+/// and the musl binaries.
+///
+/// 354 (was 376): the Rekor and timestamp-authority HTTP clients are
+/// optional in the workspace's patched sigstore crates
+/// (`third_party/sigstore-patches.md`), and `mvm-core` no longer enables the
+/// `sigstore-verify` TLS feature that pulled `sigstore-tuf`. The `reqwest`,
+/// `hyper`, `tower` and TUF-fetch crates leave the closure; offline
+/// verification is unchanged. `sigstore-network` is the way back in.
+pub(crate) const CLOSURE_BUDGET: usize = 354;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

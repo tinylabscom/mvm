@@ -7,6 +7,11 @@
 //! [`run_entrypoint_call`] adds the rest of a transient call: a session record
 //! so the call is visible while it runs, the agent wait, the dispatch, and the
 //! teardown or the keep-alive.
+//!
+//! Native foreground calls retain [`OwnedTransientResult`] from preparation
+//! through dispatch, original-owner quiescence, and audit closure. Only
+//! [`OwnedTransientResult::projection`] exposes completed output. Keep the
+//! entire result on failure; observer housekeeping is not a completion proof.
 
 use std::cell::RefCell;
 
@@ -43,6 +48,9 @@ pub struct EntrypointVm<'a> {
     pub memory_mib: u32,
     /// The admission policy; its backend is the one booted on.
     pub admission: EntrypointAdmission,
+    /// Producer-owned release inputs for health. Ordinary consumers leave this
+    /// unset and may not use it to repair an incomplete installed archive.
+    pub portable_boot_assets: Option<&'a crate::portable_boot_assets::PreparedPortableBootAssets>,
 }
 
 /// A booted entrypoint VM and the admission it booted under.
@@ -51,6 +59,579 @@ pub struct BootedEntrypoint {
     pub vm: SessionVm,
     /// The admitted plan and its audit emitter.
     pub admission: AdmissionContext,
+}
+
+/// Caller-owned host result, retained before any ABI/JSON mapping. A failed
+/// stop never replaces the original outcome or drops its original owner.
+/// This is resource custody, not a dispatch certificate or helper permit.
+pub struct OwnedTransientResult<O = ()> {
+    custody: Option<Box<TransientCustody<O>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeAuditClosure {
+    Unattempted,
+    Attempted,
+    Complete,
+}
+
+struct TransientCustody<O> {
+    observer: O,
+    outcome: Option<CallOutcome>,
+    call_error: Option<anyhow::Error>,
+    flush_error: Option<anyhow::Error>,
+    stop_error: Option<anyhow::Error>,
+    cleanup_error: Option<anyhow::Error>,
+    owner: Option<super::boot::OwnedClientBoot>,
+    completion: Option<mvm_runtime::workload_runner::runner::NativeCompletion>,
+    native_audit: NativeAuditClosure,
+    legacy_terminal: bool,
+    stopped: bool,
+    started: bool,
+}
+
+impl<O> OwnedTransientResult<O> {
+    pub fn prepare(observer: O) -> Self {
+        Self {
+            custody: Some(Box::new(TransientCustody {
+                observer,
+                outcome: None,
+                call_error: None,
+                flush_error: None,
+                stop_error: None,
+                cleanup_error: None,
+                owner: None,
+                completion: None,
+                native_audit: NativeAuditClosure::Unattempted,
+                legacy_terminal: false,
+                stopped: true,
+                started: false,
+            })),
+        }
+    }
+
+    pub fn outcome(&self) -> Option<&CallOutcome> {
+        self.custody.as_ref()?.outcome.as_ref()
+    }
+    pub fn call_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.call_error.as_ref()
+    }
+    pub fn flush_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.flush_error.as_ref()
+    }
+    pub fn stop_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.stop_error.as_ref()
+    }
+    pub fn cleanup_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.cleanup_error.as_ref()
+    }
+
+    /// Retain the typed failed boot and its original uncertain owner.
+    pub fn boot_failure(&self) -> Option<&super::boot::OwnedBootFailure> {
+        self.call_error()?.downcast_ref()
+    }
+
+    /// Housekeeping access only; this cannot supply a completion witness.
+    pub fn observer_mut(&mut self) -> Result<&mut O> {
+        Ok(&mut self
+            .custody
+            .as_mut()
+            .context("invocation already consumed")?
+            .observer)
+    }
+
+    pub fn fail_preparation(&mut self, error: anyhow::Error) {
+        if let Some(group) = self.custody.as_mut()
+            && !group.started
+        {
+            group.started = true;
+            group.call_error = Some(error);
+        }
+    }
+
+    /// Observation only: these labels never identify or reconstruct an owner.
+    pub fn recovery_details(&self) -> Option<(String, String)> {
+        let group = self.custody.as_ref()?;
+        if group.stopped {
+            return None;
+        }
+        let resources = group.owner.as_ref()?.resources();
+        Some((
+            resources.config.name.clone(),
+            resources.admission.admitted.plan_id().0.clone(),
+        ))
+    }
+
+    /// Copies may be rendered only after the native owner's completion
+    /// witness, never from a successful transport Result or caller status.
+    pub fn projection(&self) -> Result<(&CallOutcome, &O)> {
+        let group = self
+            .custody
+            .as_ref()
+            .context("invocation already consumed")?;
+        anyhow::ensure!(
+            (group.completion.is_some() && group.native_audit == NativeAuditClosure::Complete)
+                || group.legacy_terminal,
+            "output is retained: original completion remains unconfirmed"
+        );
+        anyhow::ensure!(
+            group.call_error.is_none()
+                && group.flush_error.is_none()
+                && group.stop_error.is_none()
+                && group.cleanup_error.is_none(),
+            "invocation failed; original errors remain retained"
+        );
+        Ok((
+            group.outcome.as_ref().context("no completed call result")?,
+            &group.observer,
+        ))
+    }
+
+    pub fn succeeded(&self) -> bool {
+        self.projection()
+            .is_ok_and(|(outcome, _)| matches!(outcome.terminal, CallTerminal::Exited { code: 0 }))
+    }
+
+    pub fn close(&mut self) -> Result<()> {
+        let group = self
+            .custody
+            .as_mut()
+            .context("invocation already consumed")?;
+        if let Some(failure) = group
+            .call_error
+            .as_mut()
+            .and_then(|error| error.downcast_mut::<super::boot::OwnedBootFailure>())
+        {
+            failure.retry_stop()?;
+        }
+        if !group.stopped {
+            if let Some(owner) = group.owner.as_mut()
+                && let Err(error) = owner.quiesce()
+            {
+                retain_cleanup_error(group, error);
+                anyhow::bail!("original owner cleanup remains unconfirmed");
+            }
+            group.stopped = true;
+        }
+        close_native_audit(group);
+        Ok(())
+    }
+
+    pub fn retry_stop(&mut self) -> Result<()> {
+        let group = self
+            .custody
+            .as_mut()
+            .context("transient custody already consumed")?;
+        if group.stopped {
+            return self.close();
+        }
+        if let Some(owner) = group.owner.as_mut()
+            && group.flush_error.is_none()
+            && group.outcome.is_some()
+        {
+            match owner.complete() {
+                Ok(completion) => {
+                    let matches = group.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.terminal == CallTerminal::from_event(completion.terminal())
+                    });
+                    group.completion = Some(completion);
+                    group.stopped = true;
+                    if !matches {
+                        if group.call_error.is_none() {
+                            group.call_error = Some(anyhow::anyhow!(
+                                "call result differs from original native terminal"
+                            ));
+                        }
+                        close_native_audit(group);
+                        anyhow::bail!("call result differs from original native terminal");
+                    }
+                    close_native_audit(group);
+                    return Ok(());
+                }
+                Err(error) => {
+                    retain_cleanup_error(group, error);
+                    anyhow::bail!("original completion remains unconfirmed");
+                }
+            }
+        }
+        self.close()
+    }
+
+    /// No data-only conversion while native custody or an unresolved error
+    /// would be lost. The host caller receives the whole object back.
+    pub fn into_terminal_outcome(mut self) -> std::result::Result<CallOutcome, Self> {
+        let Some(group) = self.custody.as_mut() else {
+            return Err(self);
+        };
+        if group.completion.is_none()
+            || group.native_audit != NativeAuditClosure::Complete
+            || group.call_error.is_some()
+            || group.flush_error.is_some()
+            || group.stop_error.is_some()
+            || group.cleanup_error.is_some()
+        {
+            return Err(self);
+        }
+        match group.outcome.take() {
+            Some(outcome) => Ok(outcome),
+            None => Err(self),
+        }
+    }
+}
+
+impl<O> Drop for OwnedTransientResult<O> {
+    fn drop(&mut self) {
+        if let Some(mut group) = self.custody.take()
+            && let Some(owner) = group.owner.take()
+            && let Err(owner) = owner.release_if_child_free()
+        {
+            group.owner = Some(owner);
+            // Abandonment is not recovery. Keep the actual output, every
+            // original error and the entire native/client group together.
+            std::mem::forget(group);
+        }
+    }
+}
+
+fn retain_cleanup_error<O>(group: &mut TransientCustody<O>, error: anyhow::Error) {
+    group.cleanup_error = Some(if let Some(prior) = group.cleanup_error.take() {
+        error.context(prior)
+    } else {
+        error
+    });
+}
+
+fn close_native_audit<O>(group: &mut TransientCustody<O>) {
+    if !group.stopped || group.native_audit != NativeAuditClosure::Unattempted {
+        return;
+    }
+    let Some(owner) = group.owner.as_ref() else {
+        // Boot failures retain their own deferred failure audit.
+        return;
+    };
+    let resources = owner.resources();
+    let ctx = &resources.admission;
+    let matching_completion = group.completion.as_ref().is_some_and(|proof| {
+        group
+            .outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.terminal == CallTerminal::from_event(proof.terminal()))
+    });
+    if !matching_completion
+        && group.call_error.is_none()
+        && group.flush_error.is_none()
+        && group.stop_error.is_none()
+        && group.cleanup_error.is_none()
+    {
+        group.call_error = Some(anyhow::anyhow!(
+            "native audit closure has no matching original completion"
+        ));
+    }
+    // An append/seal error can be ambiguous. Never retry it blindly.
+    group.native_audit = NativeAuditClosure::Attempted;
+    let failure = group
+        .call_error
+        .as_ref()
+        .or(group.flush_error.as_ref())
+        .or(group.stop_error.as_ref())
+        .or(group.cleanup_error.as_ref());
+    let closure = if let Some(error) = failure {
+        ctx.emitter.batched(|| {
+            ctx.emitter.emit_failed(
+                ctx.admitted.plan(),
+                "native-entrypoint",
+                &format!("{error:#}"),
+            )?;
+            ctx.emitter.seal_session(
+                ctx.admitted.plan(),
+                mvm_hostd::audit::session::SealReason::Failed,
+            )?;
+            ctx.emitter.publish_root(&ctx.admitted.plan().tenant.0)?;
+            Ok(())
+        })
+    } else {
+        // Session closure owns its batch; record the completion before it.
+        (|| {
+            ctx.emitter.emit_native_completed(
+                ctx.admitted.plan(),
+                group
+                    .completion
+                    .as_ref()
+                    .context("original native completion missing")?,
+            )?;
+            close_call_session_checked(
+                ctx,
+                &resources.config.name,
+                resources.backend.name(),
+                CallEnd::of(
+                    &group
+                        .outcome
+                        .clone()
+                        .context("native call returned no outcome"),
+                ),
+            )
+        })()
+    };
+    match closure {
+        Ok(()) => group.native_audit = NativeAuditClosure::Complete,
+        Err(error) => {
+            retain_cleanup_error(group, error);
+        }
+    }
+}
+
+trait FinalizeOperations {
+    fn sync(&mut self) -> Result<()>;
+    fn complete_original(
+        &mut self,
+    ) -> Result<Option<mvm_runtime::workload_runner::runner::NativeCompletion>>;
+    fn quiesce_original(&mut self) -> Result<()>;
+}
+
+impl FinalizeOperations for super::boot::OwnedClientBoot {
+    fn sync(&mut self) -> Result<()> {
+        self.finalize_readonly_entrypoint()
+    }
+    fn complete_original(
+        &mut self,
+    ) -> Result<Option<mvm_runtime::workload_runner::runner::NativeCompletion>> {
+        self.complete().map(Some)
+    }
+    fn quiesce_original(&mut self) -> Result<()> {
+        self.quiesce()
+    }
+}
+
+struct FinalizeState<'a> {
+    outcome: &'a Option<CallOutcome>,
+    call_error: &'a mut Option<anyhow::Error>,
+    flush_error: &'a mut Option<anyhow::Error>,
+    stop_error: &'a mut Option<anyhow::Error>,
+    completion: &'a mut Option<mvm_runtime::workload_runner::runner::NativeCompletion>,
+    stopped: &'a mut bool,
+}
+
+fn drive_finalization(state: FinalizeState<'_>, operations: &mut impl FinalizeOperations) {
+    *state.flush_error = operations.sync().err();
+    if state.flush_error.is_none() {
+        match operations.complete_original() {
+            Ok(completion) => {
+                if let Some(proof) = &completion
+                    && state.outcome.as_ref().is_none_or(|outcome| {
+                        outcome.terminal != CallTerminal::from_event(proof.terminal())
+                    })
+                    && state.call_error.is_none()
+                {
+                    *state.call_error = Some(anyhow::anyhow!(
+                        "call result differs from original native terminal"
+                    ));
+                }
+                *state.completion = completion;
+                *state.stopped = true;
+            }
+            Err(error) => *state.stop_error = Some(error),
+        }
+    } else {
+        match operations.quiesce_original() {
+            Ok(()) => *state.stopped = true,
+            Err(error) => *state.stop_error = Some(error),
+        }
+    }
+}
+
+/// Retain the actual call value and the caller's actual owning context. This
+/// does not authorize a request or change RunEntrypoint into Exec. Storage
+/// finalization requires the original readonly preparation and terminal.
+pub fn finish_owned_transient(
+    owner: super::boot::OwnedClientBoot,
+    call: Result<CallOutcome>,
+) -> OwnedTransientResult {
+    let (outcome, call_error) = match call {
+        Ok(outcome) => (Some(outcome), None),
+        Err(error) => (None, Some(error)),
+    };
+    // Install the entire group BEFORE either operation can fail or panic.
+    let mut result = OwnedTransientResult {
+        custody: Some(Box::new(TransientCustody {
+            observer: (),
+            outcome,
+            call_error,
+            flush_error: None,
+            stop_error: None,
+            cleanup_error: None,
+            owner: Some(owner),
+            completion: None,
+            native_audit: NativeAuditClosure::Unattempted,
+            legacy_terminal: false,
+            stopped: false,
+            started: true,
+        })),
+    };
+    let group = result.custody.as_mut().expect("new transient custody");
+    let owner = group.owner.as_mut().expect("original client owner");
+    drive_finalization(
+        FinalizeState {
+            outcome: &group.outcome,
+            call_error: &mut group.call_error,
+            flush_error: &mut group.flush_error,
+            stop_error: &mut group.stop_error,
+            completion: &mut group.completion,
+            stopped: &mut group.stopped,
+        },
+        owner,
+    );
+    close_native_audit(group);
+    result
+}
+
+/// Compatibility refusal type for callers of the former unsupported seam.
+/// Owner-preserving transient calls no longer return this refusal.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "native owned invocation is unsupported until immutable verified rootfs/verity custody is available"
+)]
+pub struct NativeOwnedInvocationUnavailable;
+
+/// The observer is moved BEFORE resolution, boot, callbacks and conversions.
+/// Native transient calls retain their original owner through dispatch and
+/// finalization. Kept-alive native calls remain unsupported.
+pub fn run_owned_entrypoint_call<O: CallObserver>(
+    call: EntrypointCall<'_>,
+    pair: Option<&mut PairArtifactSource<'_>>,
+    observer: O,
+) -> OwnedTransientResult<O> {
+    let mut result = OwnedTransientResult::prepare(observer);
+    let _ = result.run(call, pair);
+    result
+}
+
+impl<O: CallObserver> OwnedTransientResult<O> {
+    pub fn run(
+        &mut self,
+        call: EntrypointCall<'_>,
+        pair: Option<&mut PairArtifactSource<'_>>,
+    ) -> Result<()> {
+        let group = self
+            .custody
+            .as_mut()
+            .expect("invocation custody remains present");
+        if group.started {
+            anyhow::bail!("owned invocation has already been used");
+        }
+        group.started = true;
+        let operation = (|| {
+            let backend = super::boot::resolve_backend(Some(call.vm.admission.backend_name()))?;
+            anyhow::ensure!(
+                matches!(call.lifecycle, CallLifecycle::Transient),
+                "owned invocation requires one transient turn"
+            );
+            if backend.kind() == mvm_core::vm_backend::BackendKind::Hvf {
+                let EntrypointCall {
+                    mut vm,
+                    stdin,
+                    timeout_secs,
+                    ..
+                } = call;
+                anyhow::ensure!(
+                    matches!(&stdin, CallStdin::OneShot(_)),
+                    "owned native entrypoint requires one-shot stdin before boot preparation"
+                );
+                vm.admission = vm.admission.with_stream_stdin(false);
+                let named = vm.vm_name.resolve();
+                group.owner = Some(boot_entrypoint_vm_owned(
+                    EntrypointVm {
+                        slot: vm.slot,
+                        vm_name: SessionVmName::Exact(&named),
+                        cpus: vm.cpus,
+                        memory_mib: vm.memory_mib,
+                        admission: vm.admission,
+                        portable_boot_assets: vm.portable_boot_assets,
+                    },
+                    pair,
+                )?);
+                group.stopped = false;
+                group.observer.vm_named(&named);
+                let owner = group.owner.as_mut().expect("original client owner");
+                group
+                    .observer
+                    .admitted(&named, &owner.resources().admission.admitted);
+                match owner.entrypoint(stdin, timeout_secs, &mut group.observer) {
+                    Ok(outcome) => group.outcome = Some(outcome),
+                    Err(error) => group.call_error = Some(error),
+                }
+                drive_finalization(
+                    FinalizeState {
+                        outcome: &group.outcome,
+                        call_error: &mut group.call_error,
+                        flush_error: &mut group.flush_error,
+                        stop_error: &mut group.stop_error,
+                        completion: &mut group.completion,
+                        stopped: &mut group.stopped,
+                    },
+                    owner,
+                );
+                let stopped = if group.stopped {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("original native stop remains unconfirmed"))
+                };
+                group.observer.vm_stop_finished(
+                    &named,
+                    &owner.resources().admission.admitted,
+                    &stopped,
+                );
+                close_native_audit(group);
+                anyhow::ensure!(
+                    group.call_error.is_none()
+                        && group.flush_error.is_none()
+                        && group.stop_error.is_none()
+                        && group.cleanup_error.is_none(),
+                    "native invocation failed; original custody remains retained"
+                );
+                return group
+                    .outcome
+                    .clone()
+                    .context("native call returned no outcome");
+            }
+            run_entrypoint_call_recording(call, pair, &mut group.observer, &mut group.outcome)
+        })();
+        match operation {
+            Ok(outcome) => {
+                group.outcome = Some(outcome);
+                group.legacy_terminal = group.owner.is_none();
+                Ok(())
+            }
+            Err(error) => {
+                if group.call_error.is_none()
+                    && group.flush_error.is_none()
+                    && group.stop_error.is_none()
+                    && group.cleanup_error.is_none()
+                {
+                    group.call_error = Some(error);
+                }
+                anyhow::bail!("owned invocation failed; original error remains retained")
+            }
+        }
+    }
+}
+
+/// Native boot-only resource handoff. The host caller keeps original
+/// admission and runtime custody; no SessionVm/name downgrade is made.
+pub fn boot_entrypoint_vm_owned(
+    vm: EntrypointVm<'_>,
+    pair: Option<&mut PairArtifactSource<'_>>,
+) -> Result<super::boot::OwnedClientBoot> {
+    let backend_name = vm.admission.backend_name().to_string();
+    let boot = SessionBoot::builder(vm.slot, vm.vm_name)
+        .cpus(vm.cpus)
+        .memory_mib(vm.memory_mib)
+        .network_policy(vm.admission.network_policy().clone())
+        .backend_name(&backend_name)
+        .portable_boot_assets(vm.portable_boot_assets)
+        .build();
+    let owner = super::boot::boot_session_vm_owned(boot, &vm.admission, pair)?;
+    emit_launched(&owner.resources().admission, &backend_name, true);
+    Ok(owner)
 }
 
 impl BootedEntrypoint {
@@ -89,6 +670,7 @@ pub fn boot_entrypoint_vm(
         cpus,
         memory_mib,
         admission,
+        portable_boot_assets,
     } = vm;
     let backend_name = admission.backend_name().to_string();
     let admitted: RefCell<Option<AdmissionContext>> = RefCell::new(None);
@@ -102,6 +684,7 @@ pub fn boot_entrypoint_vm(
         .memory_mib(memory_mib)
         .network_policy(admission.network_policy().clone())
         .backend_name(&backend_name)
+        .portable_boot_assets(portable_boot_assets)
         .build();
     match boot_session_vm(boot, &admit, pair) {
         Ok(vm) => {
@@ -165,11 +748,21 @@ pub struct EntrypointCall<'a> {
 ///
 /// # Errors
 /// A refused admission or boot, an agent that never answered, or a failed
-/// dispatch — the last only after the VM has been torn down or kept alive.
+/// dispatch or backend stop. A failed or unconfirmed stop leaves the session
+/// record visible; a workload exit of zero does not override a stop failure.
 pub fn run_entrypoint_call(
     call: EntrypointCall<'_>,
     pair: Option<&mut PairArtifactSource<'_>>,
     observer: &mut dyn CallObserver,
+) -> Result<CallOutcome> {
+    run_entrypoint_call_recording(call, pair, observer, &mut None)
+}
+
+fn run_entrypoint_call_recording(
+    call: EntrypointCall<'_>,
+    pair: Option<&mut PairArtifactSource<'_>>,
+    observer: &mut dyn CallObserver,
+    terminal: &mut Option<CallOutcome>,
 ) -> Result<CallOutcome> {
     let EntrypointCall {
         mut vm,
@@ -190,20 +783,22 @@ pub fn run_entrypoint_call(
             cpus: vm.cpus,
             memory_mib: vm.memory_mib,
             admission: vm.admission,
+            portable_boot_assets: vm.portable_boot_assets,
         },
         pair,
     )?;
     let vm_name = booted.vm.vm_name.clone();
+    observer.admitted(&booted.vm.vm_name, &booted.admission.admitted);
 
     let mode = match lifecycle {
         CallLifecycle::Transient => SessionMode::Prod,
         CallLifecycle::KeepAlive { mode } => mode,
     };
     let session_id = register_call_session(&vm_name, slot, mode);
-    if let Err(e) = booted.await_agent(AGENT_WAIT_SECS) {
-        deregister_call_session(session_id.as_ref());
-        return Err(e);
-    }
+    // Agent-wait teardown is best-effort and does not return its stop result.
+    // On failure retain the session record: removing it would hide a VM whose
+    // stop is unconfirmed. This path emits no stop-acknowledgement observation.
+    booted.await_agent(AGENT_WAIT_SECS)?;
 
     // The admitted plan is borrowed across the dispatch because a streamed
     // stdin is opened under it: the gate takes the proof-carrying type, so the
@@ -212,9 +807,8 @@ pub fn run_entrypoint_call(
     let dispatch_stdin = match authorize_stdin(stdin, Some(&booted.admission.admitted)) {
         Ok(stdin) => stdin,
         Err(refusal) => {
-            end_transient_call(&booted, &backend_name, CallEnd::NOT_RUN);
-            deregister_call_session(session_id.as_ref());
-            return Err(refusal);
+            let stopped = end_transient_call(&booted, &backend_name, CallEnd::NOT_RUN, observer);
+            return finish_transient_result(Err(refusal), stopped, session_id.as_ref());
         }
     };
     observer.dispatching(&vm_name, streams_stdin);
@@ -228,6 +822,9 @@ pub fn run_entrypoint_call(
         observer,
     );
     observer.dispatched();
+    if let Ok(outcome) = &result {
+        *terminal = Some(outcome.clone());
+    }
 
     match lifecycle {
         CallLifecycle::KeepAlive { mode } => {
@@ -242,8 +839,9 @@ pub fn run_entrypoint_call(
             observer.kept_alive(&vm_name, session_id.as_ref());
         }
         CallLifecycle::Transient => {
-            end_transient_call(&booted, &backend_name, CallEnd::of(&result));
-            deregister_call_session(session_id.as_ref());
+            let stopped =
+                end_transient_call(&booted, &backend_name, CallEnd::of(&result), observer);
+            return finish_transient_result(result, stopped, session_id.as_ref());
         }
     }
     result
@@ -282,16 +880,72 @@ impl CallEnd {
 /// Stop a transient call's VM, then close its audit session. A VM whose stop
 /// failed may still be running, so its session is left open rather than
 /// sealed over a guest that can still act.
-fn end_transient_call(booted: &BootedEntrypoint, backend: &str, end: CallEnd) {
-    if let Err(e) = stop_session_vm(&booted.vm) {
+fn end_transient_call(
+    booted: &BootedEntrypoint,
+    backend: &str,
+    end: CallEnd,
+    observer: &mut dyn CallObserver,
+) -> Result<()> {
+    end_transient_call_with(booted, backend, end, observer, stop_session_vm)
+}
+
+fn end_transient_call_with(
+    booted: &BootedEntrypoint,
+    backend: &str,
+    end: CallEnd,
+    observer: &mut dyn CallObserver,
+    stop: impl FnOnce(&SessionVm) -> Result<()>,
+) -> Result<()> {
+    let stopped = stop(&booted.vm);
+    observer.vm_stop_finished(&booted.vm.vm_name, &booted.admission.admitted, &stopped);
+    if let Err(e) = stopped {
         record_unsealed_end(
             Some((&booted.admission.emitter, booted.admission.admitted.plan())),
             UnsealedEnd::new(&booted.vm.vm_name, UnsealedReason::StopFailed)
                 .error(format!("{e:#}")),
         );
-        return;
+        return Err(e);
     }
     close_call_session(&booted.admission, &booted.vm.vm_name, backend, end);
+    Ok(())
+}
+
+/// A workload's exit is not a clean lifecycle when its VM may still be alive.
+/// Preserve the call error as well when transport/dispatch and stop both failed.
+/// Remove the session record only after the backend acknowledged the stop.
+fn finish_transient_result(
+    result: Result<CallOutcome>,
+    stopped: Result<()>,
+    session_id: Option<&SessionId>,
+) -> Result<CallOutcome> {
+    if stopped.is_ok() {
+        deregister_call_session(session_id);
+    }
+    match (result, stopped) {
+        (result, Ok(())) => result,
+        (Ok(outcome), Err(stop)) => Err(TransientStopFailure::AfterTerminal {
+            _outcome: outcome,
+            stop,
+        }
+        .into()),
+        (Err(call), Err(stop)) => Err(TransientStopFailure::AfterError { call, stop }.into()),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum TransientStopFailure {
+    #[error("entrypoint call ended but VM stop was not acknowledged: {stop:#}")]
+    AfterTerminal {
+        _outcome: CallOutcome,
+        #[source]
+        stop: anyhow::Error,
+    },
+    #[error("{call:#}; VM stop was also not acknowledged: {stop:#}")]
+    AfterError {
+        #[source]
+        call: anyhow::Error,
+        stop: anyhow::Error,
+    },
 }
 
 /// Write `plan.exited` and the seal for a stopped transient call, under the
@@ -300,7 +954,16 @@ fn end_transient_call(booted: &BootedEntrypoint, backend: &str, end: CallEnd) {
 /// `trust audit verify` rather than failing the call. `seal_transient_end`
 /// records why it could not seal, so the error is not reported again here.
 fn close_call_session(ctx: &AdmissionContext, vm_name: &str, backend: &str, end: CallEnd) {
-    let _ = seal_transient_end(
+    let _ = close_call_session_checked(ctx, vm_name, backend, end);
+}
+
+fn close_call_session_checked(
+    ctx: &AdmissionContext,
+    vm_name: &str,
+    backend: &str,
+    end: CallEnd,
+) -> Result<()> {
+    seal_transient_end(
         &ctx.emitter,
         ctx.admitted.plan(),
         TransientEnd {
@@ -309,7 +972,8 @@ fn close_call_session(ctx: &AdmissionContext, vm_name: &str, backend: &str, end:
             exit_code: end.exit_code,
             completed: end.completed,
         },
-    );
+    )?;
+    Ok(())
 }
 
 /// Register a session record for a call. `None` when the record could not be
@@ -377,14 +1041,274 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
     use mvm_hostd::stream::ShownChunk;
 
+    #[test]
+    fn successive_cleanup_failures_preserve_completion_and_quiescence_errors() {
+        let mut result = OwnedTransientResult::prepare(());
+        let group = result.custody.as_mut().unwrap();
+        retain_cleanup_error(group, anyhow::anyhow!("completion recovery failed"));
+        retain_cleanup_error(group, anyhow::anyhow!("quiescence recovery failed"));
+        let error = group.cleanup_error.as_ref().unwrap();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("completion recovery failed"));
+        assert!(rendered.contains("quiescence recovery failed"));
+        assert!(result.projection().is_err());
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn native_streamed_stdin_refuses_before_boot_preparation() {
+        let home = tempfile::tempdir().unwrap();
+        let mut environment = TestEnv::new();
+        environment.isolate_mvm_home(home.path());
+        let mut result =
+            OwnedTransientResult::prepare(crate::entrypoint::CapturedOutput::default());
+        let call = EntrypointCall {
+            vm: EntrypointVm {
+                slot: "must-not-build",
+                vm_name: SessionVmName::Exact("must-not-start"),
+                cpus: 1,
+                memory_mib: 512,
+                admission: EntrypointAdmission::builder("hvf").build().unwrap(),
+                portable_boot_assets: None,
+            },
+            stdin: CallStdin::Streaming(Box::new(std::io::Cursor::new(b"must-not-read"))),
+            timeout_secs: 1,
+            lifecycle: CallLifecycle::Transient,
+        };
+        assert!(result.run(call, None).is_err());
+        assert!(
+            result
+                .call_error()
+                .unwrap()
+                .to_string()
+                .contains("one-shot stdin")
+        );
+        assert!(result.recovery_details().is_none());
+        assert!(result.projection().is_err());
+        assert!(std::fs::read_dir(home.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn native_audit_state_never_substitutes_for_original_completion() {
+        for audit in [
+            NativeAuditClosure::Unattempted,
+            NativeAuditClosure::Attempted,
+            NativeAuditClosure::Complete,
+        ] {
+            let mut result = OwnedTransientResult::prepare(());
+            let group = result.custody.as_mut().unwrap();
+            group.outcome = Some(CallOutcome {
+                terminal: CallTerminal::Exited { code: 0 },
+                capture: None,
+            });
+            group.native_audit = audit;
+            assert!(result.projection().is_err());
+            assert!(result.into_terminal_outcome().is_err());
+        }
+    }
+
+    #[test]
+    fn native_audit_without_original_owner_never_duplicates_boot_failure_audit() {
+        let mut result = OwnedTransientResult::prepare(());
+        let group = result.custody.as_mut().unwrap();
+        group.call_error = Some(anyhow::anyhow!("original boot failure"));
+        for stopped in [false, true] {
+            group.stopped = stopped;
+            close_native_audit(group);
+            assert_eq!(group.native_audit, NativeAuditClosure::Unattempted);
+            assert_eq!(
+                group.call_error.as_ref().unwrap().to_string(),
+                "original boot failure"
+            );
+            assert!(group.cleanup_error.is_none());
+        }
+    }
+
+    #[test]
+    fn uncertain_finalization_retains_every_terminal_without_minting_completion() {
+        struct Uncertain;
+        impl FinalizeOperations for Uncertain {
+            fn sync(&mut self) -> Result<()> {
+                anyhow::bail!("original flush failure")
+            }
+            fn complete_original(
+                &mut self,
+            ) -> Result<Option<mvm_runtime::workload_runner::runner::NativeCompletion>>
+            {
+                panic!("failed flush cannot supply completion")
+            }
+            fn quiesce_original(&mut self) -> Result<()> {
+                anyhow::bail!("original stop uncertainty")
+            }
+        }
+        let terminals = [
+            CallTerminal::Exited { code: 0 },
+            CallTerminal::Exited { code: 9 },
+            CallTerminal::Failed {
+                kind: mvm_agentd::vsock::RunEntrypointError::Timeout,
+                message: "deadline".into(),
+            },
+            CallTerminal::Failed {
+                kind: mvm_agentd::vsock::RunEntrypointError::Canceled,
+                message: "cancelled".into(),
+            },
+        ];
+        for terminal in terminals {
+            let mut result = OwnedTransientResult::prepare(());
+            let group = result.custody.as_mut().unwrap();
+            group.stopped = false;
+            group.outcome = Some(CallOutcome {
+                terminal: terminal.clone(),
+                capture: None,
+            });
+            drive_finalization(
+                FinalizeState {
+                    outcome: &group.outcome,
+                    call_error: &mut group.call_error,
+                    flush_error: &mut group.flush_error,
+                    stop_error: &mut group.stop_error,
+                    completion: &mut group.completion,
+                    stopped: &mut group.stopped,
+                },
+                &mut Uncertain,
+            );
+            assert!(!group.stopped);
+            assert_eq!(result.outcome().unwrap().terminal, terminal);
+            assert_eq!(
+                result.flush_error().unwrap().to_string(),
+                "original flush failure"
+            );
+            assert_eq!(
+                result.stop_error().unwrap().to_string(),
+                "original stop uncertainty"
+            );
+            assert!(result.projection().is_err());
+            assert!(result.into_terminal_outcome().is_err());
+        }
+    }
+
+    #[test]
+    fn consumer_keeps_typed_terminal_error_through_sync_cleanup_and_final_failure() {
+        struct NoChildOperations(Vec<&'static str>);
+        impl FinalizeOperations for NoChildOperations {
+            fn sync(&mut self) -> Result<()> {
+                self.0.push("sync");
+                Ok(())
+            }
+            fn complete_original(
+                &mut self,
+            ) -> Result<Option<mvm_runtime::workload_runner::runner::NativeCompletion>>
+            {
+                self.0.extend(["stop", "cleanup"]);
+                Ok(None) // no Child existed, so no opaque native witness exists
+            }
+            fn quiesce_original(&mut self) -> Result<()> {
+                panic!("sync succeeded; completion branch must be used")
+            }
+        }
+        let terminal = mvm_agentd::vsock::EntrypointEvent::Error {
+            kind: mvm_agentd::vsock::RunEntrypointError::Timeout,
+            message: "local terminal fixture".into(),
+        };
+        let mut result =
+            OwnedTransientResult::prepare(super::super::dispatch::CapturedOutput::default());
+        let group = result.custody.as_mut().unwrap();
+        group.outcome = Some(CallOutcome {
+            terminal: CallTerminal::from_event(&terminal),
+            capture: None,
+        });
+        let mut operations = NoChildOperations(Vec::new());
+        drive_finalization(
+            FinalizeState {
+                outcome: &group.outcome,
+                call_error: &mut group.call_error,
+                flush_error: &mut group.flush_error,
+                stop_error: &mut group.stop_error,
+                completion: &mut group.completion,
+                stopped: &mut group.stopped,
+            },
+            &mut operations,
+        );
+        assert_eq!(operations.0, ["sync", "stop", "cleanup"]);
+        assert_eq!(result.outcome().unwrap().exit_code(), 124);
+        assert!(!result.succeeded());
+        assert!(result.projection().is_err());
+        // Exercise the existing nonnative result projection separately. This
+        // does not construct NativeCompletion or authorize native output.
+        result.custody.as_mut().unwrap().legacy_terminal = true;
+        assert!(result.projection().is_ok());
+        assert!(
+            !result.succeeded(),
+            "a delivered typed error is never success"
+        );
+        // Actual consumer control flow, adapted only at its side effects.
+        // None never mints a native exit/output witness or success receipt.
+    }
+
+    #[test]
+    fn child_free_transient_retry_preserves_actual_outcome_and_all_error_values() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        #[derive(Debug)]
+        struct OriginalError(Arc<AtomicUsize>);
+        impl std::fmt::Display for OriginalError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("original local error")
+            }
+        }
+        impl std::error::Error for OriginalError {}
+        impl Drop for OriginalError {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut result = OwnedTransientResult {
+            custody: Some(Box::new(TransientCustody {
+                observer: (),
+                outcome: Some(CallOutcome {
+                    terminal: CallTerminal::Exited { code: 7 },
+                    capture: None,
+                }),
+                call_error: Some(anyhow::Error::new(OriginalError(Arc::clone(&drops)))),
+                flush_error: Some(anyhow::Error::new(OriginalError(Arc::clone(&drops)))),
+                stop_error: Some(anyhow::Error::new(OriginalError(Arc::clone(&drops)))),
+                owner: None,
+                cleanup_error: None,
+                completion: None,
+                native_audit: NativeAuditClosure::Unattempted,
+                legacy_terminal: false,
+                stopped: true,
+                started: true,
+            })),
+        };
+        result.retry_stop().unwrap();
+        assert_eq!(result.outcome().unwrap().exit_code(), 7);
+        assert!(result.call_error().unwrap().is::<OriginalError>());
+        assert!(result.flush_error().unwrap().is::<OriginalError>());
+        assert!(result.stop_error().unwrap().is::<OriginalError>());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(result);
+        assert_eq!(drops.load(Ordering::SeqCst), 3);
+        // This is a genuinely child-free aggregate, not native stop or a
+        // manufactured uncertain/ConfirmedExit fixture.
+    }
+
     #[derive(Default)]
     struct NamingObserver {
         named: Vec<String>,
+        admitted: Vec<String>,
     }
 
     impl CallObserver for NamingObserver {
         fn vm_named(&mut self, vm_name: &str) {
             self.named.push(vm_name.to_string());
+        }
+
+        fn admitted(&mut self, _vm_name: &str, admitted: &mvm_hostd::plan_admission::AdmittedPlan) {
+            self.admitted.push(admitted.plan().plan_id.0.clone());
         }
 
         fn output(&mut self, _chunk: &ShownChunk) {}
@@ -461,6 +1385,7 @@ mod tests {
                     cpus: 1,
                     memory_mib: 256,
                     admission,
+                    portable_boot_assets: None,
                 },
                 stdin: CallStdin::OneShot(b"[[], {}]".to_vec()),
                 timeout_secs: 5,
@@ -478,6 +1403,10 @@ mod tests {
         assert!(
             observer.named[0].starts_with("invoke-"),
             "the final generated name must be known before boot fails"
+        );
+        assert!(
+            observer.admitted.is_empty(),
+            "a failed boot must not emit a successful-boot admission observation"
         );
         assert!(
             mvm_core::session::list_sessions().expect("list").is_empty(),
@@ -521,6 +1450,164 @@ mod tests {
             terminal: CallTerminal::Exited { code },
             capture: None,
         })
+    }
+
+    struct StopObserver<'a> {
+        expected: &'a mvm_hostd::plan_admission::AdmittedPlan,
+        stop_completed: &'a std::cell::Cell<bool>,
+        stops: Vec<(String, bool)>,
+    }
+
+    impl CallObserver for StopObserver<'_> {
+        fn output(&mut self, _chunk: &ShownChunk) {}
+
+        fn control(&mut self, _header: &str, _payload_len: usize) {}
+
+        fn vm_stop_finished(
+            &mut self,
+            vm_name: &str,
+            admitted: &mvm_hostd::plan_admission::AdmittedPlan,
+            result: &Result<()>,
+        ) {
+            assert!(
+                self.stop_completed.get(),
+                "observation must follow the stop"
+            );
+            assert!(self.stops.is_empty(), "one observation per stop attempt");
+            assert!(
+                std::ptr::eq(admitted, self.expected),
+                "stop observation must borrow this boot's actual admission"
+            );
+            self.stops.push((vm_name.to_string(), result.is_ok()));
+        }
+    }
+
+    #[test]
+    fn stop_observation_uses_the_boot_admission_and_actual_backend_result() {
+        let _home = isolated();
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let booted = BootedEntrypoint {
+            vm: SessionVm {
+                vm_name: "observed-stop".into(),
+            },
+            admission: crate::admission::admit_plan_tests::admitted_into(
+                keys_dir.path(),
+                audit_dir.path(),
+                "observed-stop",
+            ),
+        };
+        emit_launched(&booted.admission, "mock", true);
+        let session_id = register_call_session("observed-stop", "slot", SessionMode::Prod).unwrap();
+        let stop_completed = std::cell::Cell::new(false);
+        let mut observer = StopObserver {
+            expected: &booted.admission.admitted,
+            stop_completed: &stop_completed,
+            stops: Vec::new(),
+        };
+
+        let stopped = end_transient_call_with(
+            &booted,
+            "mock",
+            CallEnd::of(&exited(0)),
+            &mut observer,
+            |vm| {
+                assert!(std::ptr::eq(vm, &booted.vm));
+                stop_completed.set(true);
+                Ok(())
+            },
+        );
+
+        finish_transient_result(exited(0), stopped, Some(&session_id))
+            .expect("call exited and backend acknowledged stop");
+        assert_eq!(observer.stops, vec![("observed-stop".into(), true)]);
+        assert!(
+            mvm_core::session::read_session(&session_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            only_seal(&booted.admission, audit_dir.path())
+                .exit_code
+                .as_deref(),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn exit_zero_with_failed_stop_is_observed_as_failed_and_left_unsealed() {
+        let _home = isolated();
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let booted = BootedEntrypoint {
+            vm: SessionVm {
+                vm_name: "unconfirmed-stop".into(),
+            },
+            admission: crate::admission::admit_plan_tests::admitted_into(
+                keys_dir.path(),
+                audit_dir.path(),
+                "unconfirmed-stop",
+            ),
+        };
+        emit_launched(&booted.admission, "mock", true);
+        let session_id =
+            register_call_session("unconfirmed-stop", "slot", SessionMode::Prod).unwrap();
+        let stop_completed = std::cell::Cell::new(false);
+        let mut observer = StopObserver {
+            expected: &booted.admission.admitted,
+            stop_completed: &stop_completed,
+            stops: Vec::new(),
+        };
+
+        let stopped = end_transient_call_with(
+            &booted,
+            "mock",
+            CallEnd::of(&exited(0)),
+            &mut observer,
+            |_| {
+                stop_completed.set(true);
+                Err(anyhow::anyhow!("backend stop was not acknowledged"))
+            },
+        );
+
+        assert!(stopped.is_err());
+        assert!(finish_transient_result(exited(0), stopped, Some(&session_id)).is_err());
+        assert_eq!(observer.stops, vec![("unconfirmed-stop".into(), false)]);
+        assert_eq!(
+            mvm_core::session::read_session(&session_id)
+                .unwrap()
+                .expect("unconfirmed VM must remain visible")
+                .state,
+            SessionState::Running
+        );
+        assert_eq!(
+            session_report(&booted.admission, audit_dir.path()).verdict,
+            mvm_hostd::audit::session::Verdict::Unsealed
+        );
+        let audit = std::fs::read_to_string(audit_dir.path().join("local.jsonl")).unwrap();
+        assert!(!audit.contains("session.sealed"));
+        assert!(!audit.contains("plan.exited"));
+    }
+
+    #[test]
+    fn a_transport_failure_and_stop_failure_are_both_retained() {
+        let result = finish_transient_result(
+            Err(anyhow::anyhow!("transport disconnected")),
+            Err(anyhow::anyhow!("backend stop failed")),
+            None,
+        )
+        .expect_err("neither a failed call nor a failed stop is success");
+        let detail = format!("{result:#}");
+        assert!(detail.contains("transport disconnected"), "{detail}");
+        assert!(detail.contains("backend stop failed"), "{detail}");
+    }
+
+    #[test]
+    fn acknowledged_stop_does_not_turn_a_failed_call_into_success() {
+        let result =
+            finish_transient_result(Err(anyhow::anyhow!("dispatch was refused")), Ok(()), None)
+                .expect_err("a successful stop is not a successful command");
+        assert!(result.to_string().contains("dispatch was refused"));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::packs::{KeylessTrust, Sha256Hex};
+#[cfg(test)]
 use crate::registry_pack::VerifiedRegistryPack;
 
 /// Supported signed registry-pack revocation document schema.
@@ -87,7 +88,7 @@ impl VerifiedRegistryPackRevocations {
     /// may not use this result after `not_after`.
     pub fn check_verified_pack_at(
         &self,
-        verified_pack: &VerifiedRegistryPack,
+        verified_pack: &impl crate::registry_pack::AuthenticatedRegistryManifest,
         now: DateTime<Utc>,
     ) -> Result<(), RegistryPackRevocationError> {
         self.check_pack_at(

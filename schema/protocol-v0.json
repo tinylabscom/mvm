@@ -2516,6 +2516,13 @@
                   },
                   "maxItems": 16,
                   "minItems": 16
+                },
+                "volumes": {
+                  "description": "Read-only volumes the claim attached to the late-volume slots this child's parent booted, for the guest to mount before it acknowledges. Omitted when empty, so a claim naming none reaches an agent built before the field; an agent that predates it refuses a request carrying volumes, which fails the claim.",
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/VolumeConfig"
+                  }
                 }
               },
               "additionalProperties": false
@@ -3978,6 +3985,15 @@
                 },
                 "success": {
                   "type": "boolean"
+                },
+                "volumes_mounted": {
+                  "description": "How many late volumes the guest mounted after this restore. Reported only when the request named volumes; `None` when it named none or the mount failed.",
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint32",
+                  "minimum": 0.0
                 }
               },
               "additionalProperties": false

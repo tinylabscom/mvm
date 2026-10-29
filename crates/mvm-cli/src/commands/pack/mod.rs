@@ -10,10 +10,10 @@ use mvm_core::user_config::MvmConfig;
 use super::{Cli, pull, search};
 
 mod author;
+pub(in crate::commands) mod build;
 mod download;
 mod inspect;
 mod list;
-mod native;
 mod prune;
 mod registry;
 mod rollback;
@@ -98,12 +98,8 @@ pub(in crate::commands) enum PackAction {
     },
     /// Resolve an authored pack spec against its source into a frozen lock
     Lock(author::LockArgs),
-    /// Freeze a pinned native input through the existing locked compiler
-    Prepare(native::Args),
     /// Compile a pack spec into a flake artifact, refusing a missing or stale lock
     Compile(author::CompileArgs),
-    /// Compile a frozen pack and materialize it into an exportable image slot
-    Build(author::BuildArgs),
     /// Search available workload packs
     Search(search::Args),
     /// Fetch, verify, install, and pin a workload pack
@@ -270,9 +266,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         PackAction::Info { reference, json } => inspect::run(&reference, json, false),
         PackAction::Verify { reference, json } => inspect::run(&reference, json, true),
         PackAction::Lock(args) => author::run_lock(args),
-        PackAction::Prepare(args) => native::run(args),
         PackAction::Compile(args) => author::run_compile(args),
-        PackAction::Build(args) => author::run_build(args),
         PackAction::Search(args) => search::run(cli, args, cfg),
         PackAction::Pull(args) => pull::run(cli, args, cfg),
         PackAction::Registry(action) => registry::run(cli, action, cfg),

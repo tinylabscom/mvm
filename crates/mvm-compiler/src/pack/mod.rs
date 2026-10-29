@@ -7,18 +7,24 @@
 //! recorded [`PackLock`](mvm_contract::pack_lock::PackLock) still matches.
 //!
 //! Copy operations are materialized into an application tree assembled from
-//! the verified source snapshot, and an npm lockfile lowers to the IR's Node
-//! dependency declaration, installed by the Nix factory at build time.
+//! the verified source snapshot. An npm lockfile lowers to the IR's Node
+//! dependency declaration, installed by the Nix factory at build time. A uv
+//! lockfile lowers to the IR's Python declaration and is resolved here, from
+//! the snapshot, to one wheel per package for the pack's target; the resolved
+//! set is recorded in the workload, so the lock binds every wheel's URL and
+//! hash, and the generated flake installs exactly that set at build time.
 //!
-//! Lowering refuses what the IR and Nix factories cannot honor yet: build-scoped
-//! packages, exact package versions, Python dependency files, non-npm Node
-//! lockfiles and copies outside the application tree. Builder execution
-//! happens elsewhere and is not implied by a successful compile.
+//! Lowering refuses what the IR and Nix factories cannot honor yet: exact
+//! package versions, Python dependency files other than a uv
+//! lockfile, non-npm Node lockfiles and copies outside the application tree.
+//! Builder execution happens elsewhere and is not implied by a successful
+//! compile.
 
 mod app_tree;
 mod frozen;
 mod lock;
 mod lower;
+pub mod python;
 
 pub use frozen::{compile_frozen, lock_pack};
 pub use lock::{LockField, spec_sha256, stale_fields};
@@ -40,6 +46,11 @@ use std::path::{Path, PathBuf};
 /// the lock beside a spec whose source is `.` must not stale it.
 pub const LOCK_FILE: &str = "pack.lock.json";
 
+/// Build inputs only a pack has, written beside `flake.nix` as canonical JSON
+/// when there are any: today the resolved Python environment under `python`,
+/// whose wheels the flake installs. Absent means the pack has none.
+pub const PACK_BUILD_FILE: &str = "pack-build.json";
+
 /// A spec, the directory its relative source path resolves against, and the
 /// mvm revision its flake will pin.
 #[derive(Debug, Clone, Copy)]
@@ -56,15 +67,17 @@ pub enum PackError {
     #[error("invalid pack lock: {0}")]
     Lock(#[from] PackLockError),
     #[error(
-        "package {package:?} is build-scoped; the workload compiler has no build-only package set yet"
-    )]
-    UnsupportedBuildScope { package: String },
-    #[error(
         "package {package:?} requests version {version:?}; exact package versions cannot be resolved yet"
     )]
     UnsupportedPackageVersion { package: String, version: String },
-    #[error("Python dependency files cannot be installed into a pack yet")]
-    UnsupportedDependencies,
+    #[error("{0}")]
+    Python(#[from] python::PythonError),
+    #[error("could not read {}: {source}", path.display())]
+    ReadLockfile {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error(
         "Node dependencies must be an npm `package.json` and `package-lock.json` at the source root"
     )]
@@ -101,8 +114,6 @@ pub enum PackError {
     Source(SourceError),
     #[error("could not create snapshot staging: {0}")]
     Staging(#[source] io::Error),
-    #[error("could not write the frozen artifact lock: {0}")]
-    ArtifactLock(#[source] io::Error),
     #[error("could not digest the lowered workload: {0}")]
     Digest(#[source] serde_json::Error),
     #[error("pack lock is stale: {} no longer match", join(.fields))]

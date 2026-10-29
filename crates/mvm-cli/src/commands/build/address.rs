@@ -1,4 +1,4 @@
-//! `mvmctl build address` — print a Workload IR's content identities.
+//! `mvmctl dev address` — print a Workload IR's content identities.
 //!
 //! Reads a Workload IR JSON (the cross-language interop shape the SDKs emit)
 //! and prints its two content identities: the UOR-ADDR-compatible

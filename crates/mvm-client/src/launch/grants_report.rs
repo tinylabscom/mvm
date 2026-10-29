@@ -69,6 +69,36 @@ pub fn report_enforced_grants(
     Ok(enforced)
 }
 
+pub(crate) fn report_owned_grants(
+    owner: &mut crate::entrypoint::boot::OwnedClientBoot,
+) -> anyhow::Result<EnforcedGrants> {
+    owner.with_original(|resources, runtime| {
+        let vm_id = runtime.vm_id()?.clone();
+        let ctx = &resources.admission;
+        let enforced = mvm_hostd::plan_admission::apply_admitted_grants_with_owned_rollback(
+            &resources.backend,
+            &vm_id,
+            &ctx.admitted,
+            // The retained client failure emits/seals once after proof.
+            None,
+            || runtime.stop(),
+        )?;
+        crate::record_enforced_grants(&vm_id.0, &enforced);
+        if let Err(error) = ctx
+            .emitter
+            .emit_grants_enforced(ctx.admitted.plan(), &enforced)
+        {
+            tracing::warn!(%error, "audit emit_grants_enforced failed (non-fatal)");
+        }
+        let undeclared = Grants::default();
+        let requested = ctx.admitted.plan().grants.as_ref().unwrap_or(&undeclared);
+        if let Some(reason) = degradation_warning(requested, &enforced) {
+            mvm_runtime::ui::warn(&reason);
+        }
+        Ok(enforced)
+    })
+}
+
 /// The operator-visible sentence for a boot that asked for a bound and did not
 /// get one, or `None` when there is nothing to report.
 ///
@@ -120,6 +150,7 @@ mod tests {
             kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config: None,
             cpus: 2,
             mem_mib: 512,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

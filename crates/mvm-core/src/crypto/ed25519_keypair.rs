@@ -140,6 +140,7 @@ fn read_exact_key(path: &Path) -> Result<Zeroizing<[u8; KEY_BYTES]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::{Arc, Barrier};
 
@@ -147,6 +148,7 @@ mod tests {
         (dir.join("k.ed25519"), dir.join("k.pub"))
     }
 
+    #[cfg(unix)]
     fn mode_of(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
@@ -156,8 +158,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (secret, public) = paths(dir.path());
         let (_, verifying) = load_or_init(&secret, &public).unwrap();
-        assert_eq!(mode_of(&secret), SECRET_MODE);
-        assert_eq!(mode_of(&public), PUBLIC_MODE);
+        #[cfg(unix)]
+        {
+            assert_eq!(mode_of(&secret), SECRET_MODE);
+            assert_eq!(mode_of(&public), PUBLIC_MODE);
+        }
         assert_eq!(std::fs::read(&public).unwrap(), verifying.to_bytes());
     }
 
@@ -218,6 +223,7 @@ mod tests {
         let (_, reloaded) = load_or_init(&secret, &public).unwrap();
         assert_eq!(reloaded, verifying);
         assert_eq!(std::fs::read(&public).unwrap(), verifying.to_bytes());
+        #[cfg(unix)]
         assert_eq!(mode_of(&public), PUBLIC_MODE);
     }
 }

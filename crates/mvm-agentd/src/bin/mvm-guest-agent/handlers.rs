@@ -607,14 +607,29 @@ pub(crate) fn handle_primed_status() -> GuestResponse {
     }
 }
 
+/// Everything a `PostRestore` request carries.
+pub(crate) struct PostRestoreInputs {
+    pub(crate) token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    pub(crate) hostname: Option<String>,
+    pub(crate) host_epoch_secs: Option<u64>,
+    pub(crate) grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+    pub(crate) seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    pub(crate) volumes: Vec<mvm_agentd::vsock::VolumeConfig>,
+}
+
 pub(crate) fn handle_post_restore(
     ctx: &mut HandlerCtx,
-    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
-    hostname: Option<&str>,
-    host_epoch_secs: Option<u64>,
-    grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
-    seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    inputs: PostRestoreInputs,
 ) -> GuestResponse {
+    let PostRestoreInputs {
+        token,
+        hostname,
+        host_epoch_secs,
+        grant_envelope,
+        seccomp_tier,
+        volumes,
+    } = inputs;
+    let hostname = hostname.as_deref();
     // Admit the claiming plan's seccomp tier before anything else here can
     // start a process: the init signal below restarts services, and the claim
     // commits on this answer, after which the host may start the workload.
@@ -628,6 +643,10 @@ pub(crate) fn handle_post_restore(
     // value when the host delivers each a distinct fresh token. A
     // zero token (no-rotation restore) is a no-op.
     let reseed = reseed_on_post_restore(token);
+    // Mount the claim's read-only volumes, or close the helper when it named
+    // none, before the claim commits on this answer and any workload starts.
+    let volumes_requested = !volumes.is_empty();
+    let late_volumes = mvm_agentd::late_volumes::attach_after_restore(&volumes);
     let (clock_resynced, clock_error) = match host_epoch_secs {
         None => (false, None),
         Some(epoch_secs) => match mvm_agentd::restore_clock::resync(epoch_secs) {
@@ -670,7 +689,7 @@ pub(crate) fn handle_post_restore(
     // `kill` executable, and restore must not depend on shell utilities.
     // A child whose tier was refused is about to be torn down by the host;
     // restarting its services first would only start them unfiltered.
-    let signal_detail = if matches!(seccomp, Some(Err(_))) {
+    let signal_detail = if matches!(seccomp, Some(Err(_))) || late_volumes.is_err() {
         None
     } else {
         send_init_signal_with(send_sigusr1_to_init)
@@ -684,6 +703,8 @@ pub(crate) fn handle_post_restore(
         clock_resynced,
         clock_error,
         signal_error: signal_detail,
+        volumes_requested,
+        late_volumes,
     })
 }
 
@@ -725,6 +746,10 @@ struct PostRestoreSteps {
     clock_resynced: bool,
     clock_error: Option<String>,
     signal_error: Option<String>,
+    /// Whether the request named late volumes.
+    volumes_requested: bool,
+    /// What handing the request to the late-volume helper produced.
+    late_volumes: Result<Option<u32>, String>,
 }
 
 /// Build the `PostRestoreAck`.
@@ -755,8 +780,14 @@ fn post_restore_ack(steps: PostRestoreSteps) -> GuestResponse {
         Some(Ok(tier)) => (Some(tier), None),
         Some(Err(error)) => (None, Some(format!("seccomp tier refused: {error}"))),
     };
+    let (volumes_mounted, volumes_error) = match steps.late_volumes {
+        Ok(mounted) if steps.volumes_requested => (mounted, None),
+        Ok(_) => (None, None),
+        Err(error) => (None, Some(format!("late volumes refused: {error}"))),
+    };
     let errors = [
         seccomp_error,
+        volumes_error,
         steps.hostname_error,
         steps.clock_error,
         steps.signal_error,
@@ -787,6 +818,7 @@ fn post_restore_ack(steps: PostRestoreSteps) -> GuestResponse {
         clock_resynced: steps.clock_resynced,
         reseed_shortfall,
         seccomp_tier,
+        volumes_mounted,
     }
 }
 
@@ -1219,6 +1251,8 @@ mod post_restore_ack_tests {
             clock_resynced: true,
             clock_error: None,
             signal_error: None,
+            volumes_requested: false,
+            late_volumes: Ok(None),
         }
     }
 

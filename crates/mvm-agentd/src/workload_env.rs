@@ -578,6 +578,7 @@ mod tests {
     fn the_shim_variant_tracks_the_guest_libc() {
         assert_eq!(shim_variant(false), "glibc");
         assert_eq!(shim_variant(true), "musl");
+        #[cfg(not(target_os = "linux"))]
         assert!(!guest_is_musl(), "host builds answer glibc");
     }
 
@@ -771,6 +772,31 @@ mod tests {
             )
             .as_deref(),
             Some(INTERACTIVE_TERM)
+        );
+    }
+
+    #[test]
+    fn workload_path_and_loader_overrides_remain_user_intent() {
+        let env = WorkloadEnvironment::builder()
+            .overrides([
+                ("PATH", "/work/bin:/data/bin::./tools"),
+                ("LD_PRELOAD", "/work/plugin.so"),
+                ("LD_LIBRARY_PATH", "/data/lib"),
+            ])
+            .build();
+        assert_eq!(
+            value(&env, "PATH").as_deref(),
+            Some("/work/bin:/data/bin::./tools")
+        );
+        assert_eq!(
+            value(&env, "LD_PRELOAD").as_deref(),
+            Some("/work/plugin.so")
+        );
+        // GPU boots may prepend the runtime shim, but must preserve user intent.
+        assert!(
+            value(&env, "LD_LIBRARY_PATH")
+                .unwrap()
+                .ends_with("/data/lib")
         );
     }
 

@@ -63,10 +63,9 @@ impl Drop for PendingChild {
     }
 }
 
-pub(crate) const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
-pub(crate) const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
-pub(crate) const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
-pub(crate) const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
+pub(crate) use mvm_builder_guest::builder_boot::cmdline::{
+    BUILDER_INPUT_DEVICE, BUILDER_OUTPUT_DEVICE, BUILDER_RUNTIME_DEVICE, BUILDER_VSOCK_EGRESS_TOKEN,
+};
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
 pub(crate) const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
 /// Resolve (or locally build) the runtime overlay ext4 the builder VM sources
@@ -382,6 +381,12 @@ impl BuilderVsockEgressEndpoint {
 
 pub fn builder_vsock_socket_dir(state_dir: &Path) -> Result<PathBuf, BuilderVmError> {
     let socket_dir = mvm_core::config::vm_socket_dir_at(state_dir);
+    mvm_core::config::secure_fallback_socket_dir_at(state_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "securing builder vsock socket dir {}: {e}",
+            socket_dir.display()
+        ))
+    })?;
     std::fs::create_dir_all(&socket_dir).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "creating builder vsock socket dir {}: {e}",

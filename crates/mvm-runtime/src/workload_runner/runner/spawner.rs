@@ -60,18 +60,121 @@ pub trait NetworkEndpointSpawner: Send + Sync {
     fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint>;
     /// Provision authentication without starting an endpoint or granting egress.
     fn prepare_identity(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<Option<PathBuf>>;
+    /// For a boot with no endpoint, start its VM-lifetime telemetry collector
+    /// on its own and record whether the boot is provisioned for it. Never
+    /// fails a launch: a collector that cannot start costs telemetry only.
+    fn start_telemetry_without_endpoint(
+        &self,
+        _req: &NetworkEndpointSpawnRequest<'_>,
+    ) -> TelemetryStart {
+        TelemetryStart::default()
+    }
+}
+
+/// What [`NetworkEndpointSpawner::start_telemetry_without_endpoint`] did:
+/// whether the boot asserts telemetry, and the collector start it owes.
+///
+/// A cold boot's start runs beside the boot, so it costs the launch nothing.
+/// A warm claim's is held until the claim has succeeded: the claim is the
+/// launch's critical path, and a collector starting during it competes with
+/// it for the host and the guest.
+#[derive(Default)]
+pub struct TelemetryStart {
+    /// The boot is provisioned: its guest serves the telemetry listener.
+    pub provisioned: bool,
+    pending: Option<std::thread::JoinHandle<()>>,
+    deferred: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl TelemetryStart {
+    /// A provisioned boot with no collector start owed (a test double's).
+    pub fn provisioned(provisioned: bool) -> Self {
+        Self {
+            provisioned,
+            ..Self::default()
+        }
+    }
+
+    fn running(pending: std::thread::JoinHandle<()>) -> Self {
+        Self {
+            provisioned: true,
+            pending: Some(pending),
+            deferred: None,
+        }
+    }
+
+    fn deferred(start: Box<dyn FnOnce() + Send>) -> Self {
+        Self {
+            provisioned: true,
+            pending: None,
+            deferred: Some(start),
+        }
+    }
+
+    /// The launch succeeded: start a held collector now, beside the
+    /// workload, without waiting for it.
+    pub fn release(&mut self) {
+        if let Some(start) = self.deferred.take() {
+            let _ = std::thread::Builder::new()
+                .name("mvm-telemetry-start".into())
+                .spawn(start);
+        }
+    }
+
+    /// The launch failed: a held start is dropped, never begun; one already
+    /// running is waited for, so whoever reaps finds what it started.
+    pub fn abandon(&mut self) {
+        self.deferred = None;
+        if let Some(pending) = self.pending.take() {
+            let _ = pending.join();
+        }
+    }
 }
 
 /// The production `NetworkEndpointSpawner`: spawns the real `mvm-network-endpoint`
 /// over the in-process-VMM UDS transport.
 pub struct RealNetworkEndpointSpawner;
 
-fn telemetry_for_boot(collection_enabled: bool, identity: FlowMuxIdentitySource<'_>) -> bool {
-    // A restored guest keeps the standby parent's kernel command line. That
-    // parent deliberately booted without an endpoint or telemetry assertion,
-    // so adding a collector only on claim would create another listener/dialer
-    // mismatch. Fresh boots can assert telemetry after their endpoint spawns.
-    collection_enabled && matches!(identity, FlowMuxIdentitySource::Mint)
+pub(super) fn telemetry_for_boot(
+    collection_enabled: bool,
+    identity: FlowMuxIdentitySource<'_>,
+) -> bool {
+    // A fresh boot asserts telemetry on its own command line. A restored guest
+    // keeps its standby parent's, so it serves the listener exactly when the
+    // parent asserted it; a collector for a child whose parent did not would
+    // dial a guest that never listens.
+    collection_enabled
+        && match identity {
+            FlowMuxIdentitySource::Mint => true,
+            FlowMuxIdentitySource::InheritFrom(parent) => {
+                mvm_vmm::host::telemetry_provisioning::boot_is_provisioned(parent)
+            }
+        }
+}
+
+/// Assert telemetry on a standby parent's command line when collection is on,
+/// and record it, so every child claimed from it serves the listener its own
+/// collector dials. The parent itself gets no collector: nothing it records
+/// before it is snapshotted belongs to a workload. A parent whose provisioning
+/// cannot be recorded asserts nothing, and its children are simply not
+/// collected; the pool is not refused over telemetry.
+pub(super) fn assert_standby_telemetry(state_dir: &Path, cmdline: &mut String) {
+    let enabled = mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled();
+    let recorded =
+        mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(state_dir, enabled);
+    if let Err(error) = &recorded {
+        tracing::warn!(
+            state_dir = %state_dir.display(),
+            error = %error,
+            "standby parent telemetry provisioning not recorded; its children are not collected"
+        );
+    }
+    if enabled && recorded.is_ok() {
+        if !cmdline.is_empty() {
+            cmdline.push(' ');
+        }
+        cmdline.push_str("mvm.telemetry=1");
+    }
 }
 
 /// Provision a parent's guest key without tenant workload authority or egress.
@@ -104,6 +207,72 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
         mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(req.state_dir, false)
             .context("clearing telemetry provisioning for a boot without an endpoint")?;
         prepare_observation_identity(req, &anchor_path)
+    }
+
+    fn start_telemetry_without_endpoint(
+        &self,
+        req: &NetworkEndpointSpawnRequest<'_>,
+    ) -> TelemetryStart {
+        if !telemetry_for_boot(
+            mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled(),
+            req.identity,
+        ) {
+            return TelemetryStart::default();
+        }
+        // The provisioning decision is made now, because the guest's command
+        // line is built from it; the collector itself starts beside the boot.
+        // If it cannot start, its absent status says so and the guest's
+        // listener simply waits to be dialed.
+        if let Err(error) =
+            mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(req.state_dir, true)
+        {
+            tracing::warn!(
+                vm = req.vm_name,
+                error = %error,
+                "recording telemetry provisioning failed; booting without it"
+            );
+            return TelemetryStart::default();
+        }
+        let vm_name = req.vm_name.to_string();
+        let tenant = req.tenant.to_string();
+        let state_dir = req.state_dir.to_path_buf();
+        let redaction = req.redaction.clone();
+        let start = move || {
+            let started = std::time::Instant::now();
+            let outcome = mvm_vmm::host::network_endpoint_spawn::spawn_telemetry_collector(
+                &vm_name, &tenant, &state_dir, &redaction,
+            );
+            tracing::debug!(
+                vm = vm_name,
+                started = outcome.is_ok(),
+                elapsed_us = started.elapsed().as_micros() as u64,
+                "telemetry collector start"
+            );
+            if let Err(error) = outcome {
+                tracing::warn!(
+                    vm = vm_name,
+                    error = format!("{error:#}"),
+                    "telemetry collector did not start; the VM runs without it"
+                );
+            }
+        };
+        if matches!(req.identity, FlowMuxIdentitySource::InheritFrom(_)) {
+            return TelemetryStart::deferred(Box::new(start));
+        }
+        match std::thread::Builder::new()
+            .name("mvm-telemetry-start".into())
+            .spawn(start)
+        {
+            Ok(pending) => TelemetryStart::running(pending),
+            Err(error) => {
+                tracing::warn!(vm = req.vm_name, error = %error, "telemetry start thread failed");
+                let _ = mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(
+                    req.state_dir,
+                    false,
+                );
+                TelemetryStart::default()
+            }
+        }
     }
 
     fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
@@ -178,7 +347,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             redaction: req.redaction,
             tools: Some(req.tools),
             transport: EndpointTransport::Uds { path: uds.clone() },
-            // None ⇒ inherit the host's proxy environment, resolved once inside
+            // None ⇒ resolve host config, then ambient proxy variables inside
             // `spawn_network_endpoint` for every backend.
             egress_proxy: None,
             session_marker: None,
@@ -380,14 +549,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn telemetry_is_provisioned_only_for_fresh_boots_that_can_assert_it() {
-        let parent = Path::new("/parent");
+    fn telemetry_follows_the_boot_that_asserted_it() {
+        let quiet = tempfile::tempdir().unwrap();
+        let asserted = tempfile::tempdir().unwrap();
+        mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(asserted.path(), true)
+            .unwrap();
         assert!(telemetry_for_boot(true, FlowMuxIdentitySource::Mint));
+        assert!(!telemetry_for_boot(false, FlowMuxIdentitySource::Mint));
+        // A child serves the listener only when its parent asserted it.
         assert!(!telemetry_for_boot(
             true,
-            FlowMuxIdentitySource::InheritFrom(parent)
+            FlowMuxIdentitySource::InheritFrom(quiet.path())
         ));
-        assert!(!telemetry_for_boot(false, FlowMuxIdentitySource::Mint));
+        assert!(telemetry_for_boot(
+            true,
+            FlowMuxIdentitySource::InheritFrom(asserted.path())
+        ));
+        assert!(!telemetry_for_boot(
+            false,
+            FlowMuxIdentitySource::InheritFrom(asserted.path())
+        ));
     }
     use base64::Engine as _;
     use mvm_vmm::host::flowmux_identity::{

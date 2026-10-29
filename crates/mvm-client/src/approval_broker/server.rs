@@ -150,9 +150,16 @@ mod tests {
         }
     }
 
+    fn socket_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("mvm-approval-")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
     #[test]
     fn a_prompt_is_answered_by_the_backend_and_the_socket_is_private() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = socket_tempdir();
         let path = dir.path().join("approval.sock");
         let server = ApprovalServer::bind(
             &path,
@@ -172,7 +179,7 @@ mod tests {
 
     #[test]
     fn a_malformed_prompt_gets_no_answer() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = socket_tempdir();
         let path = dir.path().join("approval.sock");
         let _server = ApprovalServer::bind(&path, Arc::new(DenyBackend)).unwrap();
         let mut stream = UnixStream::connect(&path).unwrap();
@@ -184,7 +191,7 @@ mod tests {
 
     #[test]
     fn a_stale_socket_is_replaced_and_a_regular_file_is_not() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = socket_tempdir();
         let path = dir.path().join("approval.sock");
         drop(UnixListener::bind(&path).unwrap());
         assert!(path.exists());

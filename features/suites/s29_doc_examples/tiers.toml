@@ -17,30 +17,34 @@ path = "agent-session ls"
 tier = "exec"
 
 [[command]]
+path = "backend list"
+tier = "exec"
+
+[[command]]
 path = "bootstrap"
 tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
-path = "build compile"
+path = "build"
+tier = "live"
+reason = "compiles every supported source through the builder or OCI materializer and signs a local archive; source detection, ambiguity refusal, export controls, and origin stamping have focused tests, while live pack and OCI scenarios exercise the expensive paths"
+
+[[command]]
+path = "dev compile"
 tier = "exec"
 fixture = "decorator-script"
 env = { PYTHONPATH = "crates/mvm-sdk/sdks/python" }
 
 [[command]]
-path = "build guest-bins"
+path = "dev guest-bins"
 tier = "parse"
 reason = "cross-compiles every guest artifact for both guest architectures with the pinned zig toolchain, which takes minutes and needs that toolchain installed; its packaging and verification have focused unit tests"
 
 [[command]]
-path = "build kernel build"
+path = "dev kernel build"
 tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
-
-[[command]]
-path = "bundle build"
-tier = "live"
-reason = "acquires OCI and authenticated runtime assets, materializes a real rootfs, and signs the archive; the live bundle scenario verifies outputs and publisher trust"
 
 [[command]]
 path = "bundle fetch"
@@ -124,9 +128,24 @@ path = "env cleanup"
 tier = "exec"
 
 [[command]]
+path = "env caller-identity enroll"
+tier = "parse"
+reason = "creates a native credential and requires explicit operator enrollment; hermetic documentation checks must not mutate the host credential store"
+
+[[command]]
+path = "env caller-identity show"
+tier = "exec"
+fixture = "caller-public-pin-only"
+
+[[command]]
 path = "env verify-release"
 tier = "exec"
 fixture = "release-signature"
+
+[[command]]
+path = "env verify-runtime"
+tier = "parse"
+reason = "authenticates a Sigstore-signed guest-runtime release archive and the selected overlay, verity and initramfs bytes against its declaration; the tree carries a signed fixture for a checksum manifest (`env verify-release`) but none for a runtime release archive, so there is nothing an isolated home could execute this against"
 
 [[command]]
 path = "explain"
@@ -330,6 +349,11 @@ tier = "live"
 [[command]]
 path = "machine stop"
 tier = "live"
+
+[[command]]
+path = "machine telemetry"
+tier = "parse"
+reason = "reads the records a booted machine's collector kept, so the documented form needs a VM that ran; the hermetic s34_telemetry_capture scenarios execute it in an isolated home against records their fixtures collected, and a live witness is follow-on work"
 
 [[command]]
 path = "machine undo"
@@ -568,22 +592,22 @@ tier = "parse"
 reason = "boots VMs in a measurement loop; the runtime is a benchmark budget, not a test budget"
 
 [[command]]
-path = "build address"
+path = "dev address"
 tier = "parse"
 reason = "needs a compiled workload fixture to address"
 
 [[command]]
-path = "build runtime-overlay build"
+path = "dev runtime-overlay build"
 tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
-path = "build sdk-sidecar build"
+path = "dev sdk-sidecar build"
 tier = "parse"
 reason = "boots the Stage 0 builder and builds a multi-megabyte guest artifact; the documented-surface runner performs it as shared setup"
 
 [[command]]
-path = "build validate"
+path = "dev validate"
 tier = "parse"
 reason = "needs a generated launch plan to validate"
 
@@ -744,11 +768,7 @@ reason = "folded into `doctor`; the CLI reference documents the fold in the past
 
 [[absent]]
 path = "flake"
-reason = "renamed to `build validate`; the reference records the rename"
-
-[[absent]]
-path = "dev"
-reason = "removed with `dev import-image`; the airgap and release guides describe its removal"
+reason = "renamed to `dev validate`; the reference records the rename"
 
 [[absent]]
 path = "addon"
@@ -775,14 +795,6 @@ reason = "\"...asks mvmctl for the kernel\" — a preposition"
 [[prose]]
 text = "mvmctl with it"
 reason = "\"...rebuild mvmctl with it enabled\" — a preposition"
-
-[[prose]]
-text = "mvmctl build will"
-reason = "\"a `mvmctl build` will...\" — the verb is real; `will` is the sentence"
-
-[[prose]]
-text = "mvmctl build to"
-reason = "\"...asks mvmctl build to emit\" — the verb is real; `to` is the sentence"
 
 [[prose]]
 text = "mvmctl build with"

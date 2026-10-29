@@ -143,11 +143,44 @@ pub(crate) enum PromptAnswer {
 pub(crate) struct LocalEntrypoint;
 
 impl LocalEntrypoint {
-    fn admission(cpus: u32, memory_mib: u32) -> Result<EntrypointAdmission> {
-        EntrypointAdmission::builder(mvm_client::entrypoint::backend_name_for(None)?)
+    fn refuse_unowned_native(kind: mvm_core::vm_backend::BackendKind) -> Result<()> {
+        if kind == mvm_core::vm_backend::BackendKind::Hvf {
+            return Err(mvm_client::entrypoint::call::NativeOwnedInvocationUnavailable.into());
+        }
+        Ok(())
+    }
+
+    fn admission(
+        select: impl FnOnce() -> Result<String>,
+        cpus: u32,
+        memory_mib: u32,
+    ) -> Result<EntrypointAdmission> {
+        let backend = select()?;
+        Self::refuse_unowned_native(mvm_client::backend_kind_for(&backend))?;
+        EntrypointAdmission::builder(backend)
             .cpus(cpus)
             .mem_mib(u64::from(memory_mib))
             .build()
+    }
+
+    fn with_existing_vm<T>(vm_name: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        Self::refuse_unowned_native(mvm_client::entrypoint::session::existing_vm_backend_kind(
+            vm_name,
+        )?)?;
+        operation()
+    }
+
+    fn in_session<T>(
+        id: &SessionId,
+        operation: impl FnOnce(&SessionRecord) -> Result<T>,
+    ) -> Result<T> {
+        let (_, record) = mvm_client::entrypoint::require_running_session(id.as_str())?;
+        Self::with_existing_vm(&record.vm_name, || operation(&record))
+    }
+
+    fn stopping_session<T>(id: &SessionId, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let record = mvm_client::entrypoint::session::session_for_stop(id.as_str())?;
+        Self::with_existing_vm(&record.vm_name, operation)
     }
 }
 
@@ -157,6 +190,11 @@ impl EntrypointOps for LocalEntrypoint {
     }
 
     fn call(&self, spec: CallSpec) -> Result<CallResult> {
+        let admission = Self::admission(
+            || mvm_client::entrypoint::backend_name_for(None),
+            spec.cpus,
+            spec.memory_mib,
+        )?;
         let mut output = CapturedOutput::default();
         let outcome = mvm_client::entrypoint::run_entrypoint_call(
             EntrypointCall {
@@ -165,7 +203,8 @@ impl EntrypointOps for LocalEntrypoint {
                     vm_name: SessionVmName::Prefixed("invoke"),
                     cpus: spec.cpus,
                     memory_mib: spec.memory_mib,
-                    admission: Self::admission(spec.cpus, spec.memory_mib)?,
+                    admission,
+                    portable_boot_assets: None,
                 },
                 stdin: CallStdin::for_payload(spec.payload),
                 timeout_secs: spec.timeout_secs,
@@ -178,21 +217,12 @@ impl EntrypointOps for LocalEntrypoint {
     }
 
     fn start(&self, spec: StartSpec) -> Result<SessionRecord> {
-        mvm_client::entrypoint::start_session(
-            SessionStart {
-                vm: EntrypointVm {
-                    slot: &spec.slot,
-                    vm_name: SessionVmName::Prefixed("session"),
-                    cpus: spec.cpus,
-                    memory_mib: spec.memory_mib,
-                    admission: Self::admission(spec.cpus, spec.memory_mib)?,
-                },
-                mode: SessionMode::Prod,
-                idle_timeout_secs: spec.idle_timeout_secs,
-                ephemeral: false,
-            },
-            None,
-        )
+        let admission = Self::admission(
+            || mvm_client::entrypoint::backend_name_for(None),
+            spec.cpus,
+            spec.memory_mib,
+        )?;
+        start_admitted(spec, admission)
     }
 
     fn session_call(
@@ -201,15 +231,23 @@ impl EntrypointOps for LocalEntrypoint {
         payload: Vec<u8>,
         timeout_secs: u64,
     ) -> Result<CallResult> {
-        let (id, record) = mvm_client::entrypoint::require_running_session(id.as_str())?;
-        let mut output = CapturedOutput::default();
-        let outcome =
-            mvm_client::entrypoint::call_session(&id, &record, payload, timeout_secs, &mut output)?;
-        Ok(CallResult::new(outcome, output))
+        Self::in_session(id, |record| {
+            let mut output = CapturedOutput::default();
+            let outcome = mvm_client::entrypoint::call_session(
+                &record.id,
+                record,
+                payload,
+                timeout_secs,
+                &mut output,
+            )?;
+            Ok(CallResult::new(outcome, output))
+        })
     }
 
     fn stop(&self, id: &SessionId) -> Result<()> {
-        mvm_client::entrypoint::kill_session(id.as_str()).map(|_| ())
+        Self::stopping_session(id, || {
+            mvm_client::entrypoint::kill_session(id.as_str()).map(|_| ())
+        })
     }
 
     fn info(&self, id: &SessionId) -> Result<SessionRecord> {
@@ -220,22 +258,24 @@ impl EntrypointOps for LocalEntrypoint {
     /// command line's checkpoint machinery, so a prompt sent from here is
     /// recorded and audited but is not a replayable step.
     fn prompt(&self, prompt: AgentPrompt) -> Result<PromptAnswer> {
-        let mut output = CapturedOutput::default();
-        Ok(
-            match mvm_client::agent_prompt::send_prompt(&prompt, &mut output, None)? {
-                PromptOutcome::Delivered {
-                    journal_cursor,
-                    call,
-                    ..
-                } => PromptAnswer::Delivered {
-                    journal_cursor,
-                    result: CallResult::new(call, output),
+        Self::with_existing_vm(prompt.vm_name(), || {
+            let mut output = CapturedOutput::default();
+            Ok(
+                match mvm_client::agent_prompt::send_prompt(&prompt, &mut output, None)? {
+                    PromptOutcome::Delivered {
+                        journal_cursor,
+                        call,
+                        ..
+                    } => PromptAnswer::Delivered {
+                        journal_cursor,
+                        result: CallResult::new(call, output),
+                    },
+                    PromptOutcome::Duplicate { journal_cursor } => {
+                        PromptAnswer::Duplicate { journal_cursor }
+                    }
                 },
-                PromptOutcome::Duplicate { journal_cursor } => {
-                    PromptAnswer::Duplicate { journal_cursor }
-                }
-            },
-        )
+            )
+        })
     }
 }
 
@@ -499,21 +539,8 @@ fn answer(ops: &dyn EntrypointOps, method: &str, request: &[u8]) -> Result<Outco
             Outcome::ok(&EntrypointCallReply::from(result))
         }
         SESSION_START => {
-            let r: SessionStartRequest = parse(request)?;
-            let source = source_of(r.workload.as_deref(), r.manifest.as_deref())?;
-            let idle_timeout_secs = r
-                .idle_timeout_secs
-                .unwrap_or(mvm_core::session::DEFAULT_IDLE_TIMEOUT_SECS);
-            mvm_client::entrypoint::session::validate_idle_timeout(idle_timeout_secs)
-                .map_err(spec_error)?;
-            let slot = ops.resolve(source).map_err(spec_error)?;
             let record = ops
-                .start(StartSpec {
-                    slot,
-                    cpus: r.cpus.unwrap_or_else(mvm_client::default_vcpus),
-                    memory_mib: r.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
-                    idle_timeout_secs,
-                })
+                .start(session_start_spec(ops, request).map_err(|failure| failure.outcome)?)
                 .map_err(backend_error)?;
             Outcome::ok(&SessionStartReply {
                 session_id: record.id.into_string(),
@@ -632,9 +659,262 @@ fn spec_error(error: anyhow::Error) -> Outcome {
 /// The backend's answer to a well-formed request: an admission refusal, a
 /// boot that failed, an agent that never answered, or a broken stream.
 fn backend_error(error: anyhow::Error) -> Outcome {
+    render_backend_error(&error)
+}
+
+fn render_backend_error(error: &anyhow::Error) -> Outcome {
+    if error.is::<mvm_client::entrypoint::call::NativeOwnedInvocationUnavailable>() {
+        return Outcome::from(MvmError::Rejected {
+            reason: "native operation is unsupported before verified inputs and an owning lifetime are available".into(),
+        });
+    }
     Outcome::from(MvmError::Backend {
         reason: format!("{error:#}"),
     })
+}
+
+#[derive(Debug)]
+struct OwnedPreparationResponse {
+    _status: i32,
+    _body: Vec<u8>,
+}
+
+impl std::fmt::Display for OwnedPreparationResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("owned entrypoint preparation was refused")
+    }
+}
+impl std::error::Error for OwnedPreparationResponse {}
+
+/// Local control flow, never reconstructed from a wire status or request.
+pub(crate) enum OwnedStartAttempt {
+    KnownNotDispatched {
+        outcome: Outcome,
+        error: anyhow::Error,
+    },
+    MayHaveDispatched(Outcome),
+}
+
+struct StartPreparationFailure {
+    outcome: Outcome,
+    error: anyhow::Error,
+}
+
+impl From<Outcome> for StartPreparationFailure {
+    fn from(outcome: Outcome) -> Self {
+        let error = OwnedPreparationResponse {
+            _status: outcome.status,
+            _body: outcome.body.clone(),
+        };
+        Self {
+            outcome,
+            error: error.into(),
+        }
+    }
+}
+
+fn session_start_spec(
+    ops: &dyn EntrypointOps,
+    request: &[u8],
+) -> Result<StartSpec, StartPreparationFailure> {
+    let r: SessionStartRequest =
+        serde_json::from_slice(request).map_err(|error| StartPreparationFailure {
+            outcome: Outcome::invalid_input(&format!("request did not parse: {error}")),
+            error: anyhow::Error::from(error),
+        })?;
+    let source = source_of(r.workload.as_deref(), r.manifest.as_deref())
+        .map_err(StartPreparationFailure::from)?;
+    let idle_timeout_secs = r
+        .idle_timeout_secs
+        .unwrap_or(mvm_core::session::DEFAULT_IDLE_TIMEOUT_SECS);
+    mvm_client::entrypoint::session::validate_idle_timeout(idle_timeout_secs).map_err(|error| {
+        StartPreparationFailure {
+            outcome: Outcome::from(MvmError::InvalidSpec {
+                reason: format!("{error:#}"),
+            }),
+            error,
+        }
+    })?;
+    let slot = ops
+        .resolve(source)
+        .map_err(|error| StartPreparationFailure {
+            outcome: Outcome::from(MvmError::InvalidSpec {
+                reason: format!("{error:#}"),
+            }),
+            error,
+        })?;
+    Ok(StartSpec {
+        slot,
+        cpus: r.cpus.unwrap_or_else(mvm_client::default_vcpus),
+        memory_mib: r.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
+        idle_timeout_secs,
+    })
+}
+
+fn start_admitted(spec: StartSpec, admission: EntrypointAdmission) -> Result<SessionRecord> {
+    mvm_client::entrypoint::start_session(
+        SessionStart {
+            vm: EntrypointVm {
+                slot: &spec.slot,
+                vm_name: SessionVmName::Prefixed("session"),
+                cpus: spec.cpus,
+                memory_mib: spec.memory_mib,
+                admission,
+                portable_boot_assets: None,
+            },
+            mode: SessionMode::Prod,
+            idle_timeout_secs: spec.idle_timeout_secs,
+            ephemeral: false,
+        },
+        None,
+    )
+}
+
+pub(crate) fn start_owned(request: &[u8]) -> OwnedStartAttempt {
+    let prepared = crate::declared()
+        .map_err(StartPreparationFailure::from)
+        .and_then(|()| session_start_spec(&LocalEntrypoint, request));
+    let spec = match prepared {
+        Ok(spec) => spec,
+        Err(StartPreparationFailure { outcome, error }) => {
+            return OwnedStartAttempt::KnownNotDispatched { outcome, error };
+        }
+    };
+    start_owned_prepared(spec, || mvm_client::entrypoint::backend_name_for(None))
+}
+
+fn start_owned_prepared(
+    spec: StartSpec,
+    select: impl FnOnce() -> Result<String>,
+) -> OwnedStartAttempt {
+    let admission = match LocalEntrypoint::admission(select, spec.cpus, spec.memory_mib) {
+        Ok(admission) => admission,
+        Err(error) => {
+            return OwnedStartAttempt::KnownNotDispatched {
+                outcome: render_backend_error(&error),
+                error,
+            };
+        }
+    };
+    // From here even a failed return may own a launched VM. The context was
+    // armed before entering this function, including every unwind boundary.
+    let outcome = match start_admitted(spec, admission) {
+        Ok(record) => Outcome::ok(&SessionStartReply {
+            session_id: record.id.into_string(),
+            vm_name: record.vm_name,
+        }),
+        Err(error) => backend_error(error),
+    };
+    OwnedStartAttempt::MayHaveDispatched(outcome)
+}
+
+/// The caller's context has already stored the observer and error aggregate.
+pub(crate) fn run_owned(
+    request: &[u8],
+    operation: &mut mvm_client::entrypoint::call::OwnedTransientResult<CapturedOutput>,
+) -> Outcome {
+    prepare_owned_call(request, operation, || {
+        mvm_client::entrypoint::backend_name_for(None)
+    })
+}
+
+fn prepare_owned_call(
+    request: &[u8],
+    operation: &mut mvm_client::entrypoint::call::OwnedTransientResult<CapturedOutput>,
+    select: impl FnOnce() -> Result<String>,
+) -> Outcome {
+    let parsed: EntrypointCallRequest = match serde_json::from_slice(request) {
+        Ok(value) => value,
+        Err(error) => {
+            operation.fail_preparation(error.into());
+            return Outcome::invalid_input("invalid owned entrypoint request");
+        }
+    };
+    let cpus = parsed.cpus.unwrap_or_else(mvm_client::default_vcpus);
+    let memory_mib = parsed.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB);
+    let admission = match LocalEntrypoint::admission(select, cpus, memory_mib) {
+        Ok(admission) => admission,
+        Err(error) => {
+            operation.fail_preparation(error);
+            return owned_projection(operation);
+        }
+    };
+    let source = match source_of(parsed.workload.as_deref(), parsed.manifest.as_deref()) {
+        Ok(source) => source,
+        Err(outcome) => {
+            operation.fail_preparation(
+                OwnedPreparationResponse {
+                    _status: outcome.status,
+                    _body: outcome.body.clone(),
+                }
+                .into(),
+            );
+            return outcome;
+        }
+    };
+    let payload = match B64.decode(&parsed.payload_b64) {
+        Ok(payload) => payload,
+        Err(error) => {
+            operation.fail_preparation(error.into());
+            return Outcome::invalid_input("invalid owned entrypoint payload encoding");
+        }
+    };
+    let slot = match LocalEntrypoint.resolve(source) {
+        Ok(slot) => slot,
+        Err(error) => {
+            operation.fail_preparation(error);
+            return owned_projection(operation);
+        }
+    };
+    let _ = operation.run(
+        EntrypointCall {
+            vm: EntrypointVm {
+                slot: &slot,
+                vm_name: SessionVmName::Prefixed("invoke"),
+                cpus,
+                memory_mib,
+                admission,
+                portable_boot_assets: None,
+            },
+            stdin: CallStdin::for_payload(payload),
+            timeout_secs: parsed.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
+            lifecycle: CallLifecycle::Transient,
+        },
+        None,
+    );
+    owned_projection(operation)
+}
+
+pub(crate) fn owned_projection(
+    operation: &mvm_client::entrypoint::call::OwnedTransientResult<CapturedOutput>,
+) -> Outcome {
+    match operation.projection() {
+        Ok((outcome, output)) => Outcome::ok(&EntrypointCallReply::from(CallResult {
+            terminal: outcome.terminal.clone(),
+            output: output.clone(),
+        })),
+        Err(_) => {
+            if let Some(error) = operation.call_error()
+                && error.is::<mvm_client::entrypoint::call::NativeOwnedInvocationUnavailable>()
+            {
+                return Outcome::from(MvmError::Rejected {
+                    reason: "native invocation is unsupported before verified rootfs custody"
+                        .into(),
+                });
+            }
+            if let Some((machine_id, plan_id)) = operation.recovery_details() {
+                return Outcome::from(MvmError::RecoveryRequired {
+                    machine_id,
+                    plan_id,
+                    reason: "original owned cleanup is unresolved".into(),
+                });
+            }
+            Outcome::from(MvmError::Backend {
+                reason: "owned invocation failed; original result and errors remain in its context"
+                    .into(),
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1108,6 +1388,29 @@ mod tests {
     }
 
     #[test]
+    fn owned_start_native_refusal_retains_original_error_without_dispatch() {
+        let attempts = std::cell::Cell::new(0);
+        let attempt = start_owned_prepared(
+            StartSpec {
+                slot: "not-opened".into(),
+                cpus: 2,
+                memory_mib: 256,
+                idle_timeout_secs: 60,
+            },
+            || {
+                attempts.set(attempts.get() + 1);
+                Ok("hvf".into())
+            },
+        );
+        let OwnedStartAttempt::KnownNotDispatched { outcome, error } = attempt else {
+            panic!("the native refusal must precede any session boot");
+        };
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(outcome.status, MVM_HOSTLIB_REJECTED);
+        assert!(error.is::<mvm_client::entrypoint::call::NativeOwnedInvocationUnavailable>());
+    }
+
+    #[test]
     fn a_session_stops_and_reports_nothing() {
         let ops = Recording::default();
         let request = serde_json::json!({"session_id": SESSION});
@@ -1157,6 +1460,197 @@ mod tests {
         for method in METHODS {
             assert!(is_known(method));
         }
+    }
+
+    fn target_record(vm: &str, marker: Option<&str>) -> SessionRecord {
+        let record = SessionRecord::new_running(vm, "target-fixture", SessionMode::Prod);
+        mvm_core::session::write_session(&record).unwrap();
+        if let Some(marker) = marker {
+            let dir = mvm_core::config::vm_state_dir(vm);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(marker), b"metadata, not a child or owner").unwrap();
+        }
+        record
+    }
+
+    #[test]
+    fn launch_admission_selects_once_and_preserves_that_backend() {
+        for backend in ["firecracker", "hvf"] {
+            let lookups = std::cell::Cell::new(0);
+            let result = LocalEntrypoint::admission(
+                || {
+                    lookups.set(lookups.get() + 1);
+                    Ok(backend.to_owned())
+                },
+                2,
+                256,
+            );
+            assert_eq!(lookups.get(), 1);
+            match result {
+                Ok(admission) => assert_eq!(admission.backend_name(), backend),
+                Err(error) => {
+                    assert_eq!(backend, "hvf");
+                    assert!(
+                        error
+                            .is::<mvm_client::entrypoint::call::NativeOwnedInvocationUnavailable>()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn owned_preparation_selects_once_and_retains_prelaunch_refusal() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        for backend in ["hvf", "firecracker"] {
+            let mut operation = mvm_client::entrypoint::call::OwnedTransientResult::prepare(
+                CapturedOutput::default(),
+            );
+            let lookups = std::cell::Cell::new(0);
+            let response = prepare_owned_call(
+                br#"{"workload":"not-built","payload_b64":""}"#,
+                &mut operation,
+                || {
+                    lookups.set(lookups.get() + 1);
+                    Ok(backend.to_owned())
+                },
+            );
+            assert_eq!(lookups.get(), 1);
+            let error = operation.call_error().expect("original failure retained");
+            if backend == "hvf" {
+                assert_eq!(response.status, MVM_HOSTLIB_REJECTED);
+                assert!(
+                    error.is::<mvm_client::entrypoint::call::NativeOwnedInvocationUnavailable>()
+                );
+            } else {
+                assert!(error.to_string().contains("no built image"));
+            }
+            assert!(!operation.succeeded());
+            // Both branches are before boot: native refusal or absent workload.
+            operation.close().unwrap();
+        }
+    }
+
+    #[test]
+    fn existing_session_and_prompt_use_target_not_opposite_launch_selection() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        for (launch, vm, marker, allowed) in [
+            ("hvf", "ordinary-target", "fc.pid", true),
+            ("firecracker", "native-target", "hvf.pid", false),
+        ] {
+            // Exercise the actual launch selector adapter too. Its decision is
+            // deliberately opposite, and is not reused for the existing target.
+            let lookups = std::cell::Cell::new(0);
+            let admission = LocalEntrypoint::admission(
+                || {
+                    lookups.set(lookups.get() + 1);
+                    Ok(launch.to_owned())
+                },
+                2,
+                256,
+            );
+            assert_eq!(admission.is_ok(), launch != "hvf");
+            let record = target_record(vm, Some(marker));
+            let prompt = AgentPrompt::builder(vm, b"classification-only".to_vec())
+                .build()
+                .unwrap();
+            let effects = std::cell::Cell::new(0);
+            let effect = || {
+                effects.set(effects.get() + 1);
+                Ok(())
+            };
+            for result in [
+                LocalEntrypoint::in_session(&record.id, |_| effect()),
+                LocalEntrypoint::stopping_session(&record.id, effect),
+                LocalEntrypoint::with_existing_vm(prompt.vm_name(), effect),
+            ] {
+                assert_eq!(result.is_ok(), allowed);
+                if let Err(error) = result {
+                    let refusal = backend_error(error);
+                    assert_eq!(refusal.status, MVM_HOSTLIB_REJECTED);
+                    let body: serde_json::Value = serde_json::from_slice(&refusal.body).unwrap();
+                    assert_eq!(body["retryable"], false);
+                }
+            }
+            assert_eq!(effects.get(), if allowed { 3 } else { 0 });
+            assert_eq!(lookups.get(), 1);
+            assert_eq!(
+                mvm_client::entrypoint::session_info(record.id.as_str())
+                    .unwrap()
+                    .state,
+                mvm_core::session::SessionState::Running
+            );
+        }
+        // The only operations above are metadata lookups and counters. Neither
+        // the fake markers nor an allowed callback construct a native owner.
+    }
+
+    #[test]
+    fn target_lookup_errors_precede_effects_and_stop_keeps_its_original_policy() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let missing = SessionId::new();
+        assert!(
+            LocalEntrypoint
+                .stop(&missing)
+                .unwrap_err()
+                .to_string()
+                .contains("no session with id")
+        );
+        assert!(
+            LocalEntrypoint
+                .session_call(&missing, Vec::new(), 1)
+                .unwrap_err()
+                .to_string()
+                .contains("no session with id")
+        );
+        let mut record = target_record("unknown-target", None);
+        let error = LocalEntrypoint::stopping_session(&record.id, || -> Result<()> {
+            panic!("unclassified target reached stop")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("no recorded backend"));
+        env.set(mvm_core::session::STRICT_CREATOR_PID_ENV, "1");
+        record.creator_pid = std::process::id().checked_add(1).unwrap();
+        mvm_core::session::write_session(&record).unwrap();
+        assert!(
+            LocalEntrypoint::in_session(&record.id, |_| -> Result<()> {
+                panic!("creator refusal reached dispatch")
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("created by pid")
+        );
+        let dir = mvm_core::config::vm_state_dir(&record.vm_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fc.pid"), b"metadata only").unwrap();
+        LocalEntrypoint::stopping_session(&record.id, || Ok(())).unwrap();
+        record.state = mvm_core::session::SessionState::Killed;
+        mvm_core::session::write_session(&record).unwrap();
+        assert!(
+            LocalEntrypoint
+                .stop(&record.id)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot kill")
+        );
+        std::fs::write(
+            mvm_core::session::sessions_dir().join(format!("{}.json", record.id)),
+            b"{",
+        )
+        .unwrap();
+        assert!(
+            LocalEntrypoint
+                .stop(&record.id)
+                .unwrap_err()
+                .to_string()
+                .contains("reading session")
+        );
     }
 
     #[test]

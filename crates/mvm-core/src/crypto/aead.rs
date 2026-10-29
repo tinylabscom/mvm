@@ -86,6 +86,14 @@ impl Key {
         Key::from_slice(&bytes)
     }
 
+    /// The raw key bytes, for handing a data key to a confined helper
+    /// process over a private pipe — the one case where the helper cannot
+    /// reach the key-encryption key to unwrap it itself. Never log or
+    /// persist the result; persist [`Key::wrap_under`] instead.
+    pub fn expose_bytes(&self) -> &[u8; KEY_SIZE] {
+        &self.0
+    }
+
     /// Whether this key's bytes equal `other`, compared in constant time.
     /// Lets a caller refuse to use one secret for two primitives without the
     /// raw bytes leaving this type.
@@ -261,12 +269,15 @@ mod tests {
 
     #[test]
     fn load_or_create_mints_an_owner_only_key_once() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("kek.bin");
         let first = Key::load_or_create(&path).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
         assert_eq!(std::fs::read(&path).unwrap(), first.0);
         let again = Key::load_or_create(&path).unwrap();
         assert_eq!(again.0, first.0, "an existing key is loaded, not replaced");

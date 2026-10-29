@@ -91,7 +91,7 @@ impl ResolvedSource {
 ///    `a_misplaced_image_reference_is_refused_even_inside_a_detected_project`).
 /// 4. `--no-detect`, or a verb that only takes explicit sources, stops here.
 /// 5. An `mvm.toml` in or above the working directory, found by the same
-///    walk-up `mvmctl build` already uses.
+///    walk-up `mvmctl machine build` already uses.
 /// 6. The command being run, then a project file in the working directory.
 /// 7. The bundled default image.
 ///
@@ -109,6 +109,7 @@ pub(in crate::commands) fn resolve_run_source(
         || args.flake.is_some()
         || args.deployment.is_some()
         || args.runtime_pack
+        || args.registry_pack_image.is_some()
     {
         return Ok(ResolvedSource::Explicit);
     }
@@ -538,7 +539,7 @@ mod source_resolution {
     /// carries the same profile and the same deny-all egress as one that
     /// named its image, or "convenience" would be a policy bypass.
     #[test]
-    fn a_detected_run_is_still_deny_all_and_keeps_the_default_profile() {
+    fn a_detected_run_is_still_deny_all_and_development_profile() {
         let dir = sealed_dir();
         touch(dir.path(), "package.json");
         let mut args = RunArgs::default();

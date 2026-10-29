@@ -311,25 +311,16 @@ pub fn seal_declared_rootfs(dir: &Path) -> Result<Option<String>, BuilderVmError
     if !sidecar_declares_sealed(dir)? {
         return Ok(None);
     }
-    seal_rootfs_for_export(dir).map(Some)
-}
-
-/// Bind an authored package's bytes with verity, including development images.
-///
-/// This does not change the guest sidecar or grant production access. Call only
-/// on an author-controlled build output, never on an installed signed bundle.
-pub fn seal_rootfs_for_export(dir: &Path) -> Result<String, BuilderVmError> {
-    for name in [VERITY_TREE_FILENAME, VERITY_ROOTHASH_FILENAME] {
-        discard_guest_member(&dir.join(name))?;
-    }
     let rootfs = dir.join("rootfs.ext4");
     require_regular_member(&rootfs)?;
-    crate::rootfs::emit_verity_sidecars(&rootfs).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "computing the dm-verity pair for {}: {e}",
-            rootfs.display()
-        ))
-    })
+    crate::rootfs::emit_verity_sidecars(&rootfs)
+        .map(Some)
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "computing the dm-verity pair for {}: {e}",
+                rootfs.display()
+            ))
+        })
 }
 
 /// Remove `path` without following it. A directory there is refused: nothing
@@ -559,8 +550,13 @@ mod tests {
     const SEALED_SIDECAR: &[u8] = br#"{"overlayAware":true,"runtimeLean":true,"sealed":true}"#;
 
     /// Sixteen 4 KiB blocks of distinct bytes: enough for a two-block tree.
+    /// Patterned bytes under an ext4 superblock declaring 4 KiB blocks, the
+    /// geometry the seal reads from the image.
     fn image_bytes() -> Vec<u8> {
-        (0..16 * 4096).map(|i| (i % 251) as u8).collect()
+        let mut image: Vec<u8> = (0..16 * 4096).map(|i| (i % 251) as u8).collect();
+        image[1024 + 24..1024 + 28].copy_from_slice(&2u32.to_le_bytes());
+        image[1024 + 56..1024 + 58].copy_from_slice(&0xEF53u16.to_le_bytes());
+        image
     }
 
     /// The root hash dm-verity would compute over `image` at boot.
@@ -633,19 +629,6 @@ mod tests {
 
         assert_eq!(seal_declared_rootfs(dir.path()).unwrap(), None);
         assert_eq!(verify_builder_output(&build).unwrap().verity(), None);
-    }
-
-    #[test]
-    fn an_authored_development_package_can_have_integrity_without_changing_access() {
-        let dir = tempfile::tempdir().unwrap();
-        let build = build_in(dir.path(), false);
-        std::fs::write(&build.rootfs_path, image_bytes()).unwrap();
-        let sidecar = std::fs::read(&build.sidecar_path).unwrap();
-        let written = seal_rootfs_for_export(dir.path()).unwrap();
-        let verified = verify_builder_output(&build).unwrap();
-        assert_eq!(verified.verity().unwrap().roothash(), written);
-        assert_eq!(std::fs::read(&build.sidecar_path).unwrap(), sidecar);
-        assert!(!sidecar_declares_sealed(dir.path()).unwrap());
     }
 
     #[test]

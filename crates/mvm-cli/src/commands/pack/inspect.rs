@@ -5,9 +5,12 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
 use mvm_core::packs::Sha256Hex;
-use mvm_core::registry_pack::PackReference;
+use mvm_core::registry_pack::{
+    AuthenticatedRegistryManifest, PackReference, VerifiedRegistryApplication,
+    VerifiedRegistryManifest,
+};
 use mvm_core::registry_pack_store::{
-    load_pack_lockfile, load_publisher_policy_or_official_default, open_installed_registry_pack,
+    load_pack_lockfile, load_publisher_policy_or_official_default, open_installed_registry_manifest,
 };
 
 #[derive(Serialize)]
@@ -49,12 +52,18 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
     let publisher = load_publisher_policy_or_official_default(
         &mvm_core::config::registry_pack_publisher_policy_path(),
     )?;
-    let (installed, verified) = open_installed_registry_pack(
+    let (installed, verified) = open_installed_registry_manifest(
         &mvm_core::config::registry_pack_cache_dir(),
         &lock,
         &publisher.policy,
         &reference,
     )?;
+    let verified = match verified {
+        VerifiedRegistryManifest::Legacy(pack) => pack,
+        VerifiedRegistryManifest::Application(application) => {
+            return inspect_application(&application, json, verify_only);
+        }
+    };
     let manifest = verified.manifest();
     let revocation_required = manifest.reference.namespace() == "mvm"
         || matches!(
@@ -178,6 +187,106 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
     Ok(())
 }
 
+#[derive(Serialize)]
+struct ApplicationInfo {
+    kind: &'static str,
+    reference: String,
+    description: String,
+    manifest_sha256: String,
+    signer_identity: String,
+    signer_issuer: String,
+    guest_arch: String,
+    bundle: mvm_core::registry_pack::application::RegistryApplicationBundle,
+    verification_scope: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle_manifest: Option<mvm_core::plan::bundle::BundleManifest>,
+}
+
+fn application_info(
+    manifest: &mvm_core::registry_pack::application::RegistryApplicationManifest,
+    manifest_sha256: &Sha256Hex,
+    signer: &mvm_core::crypto::image_verify::VerifiedSigner,
+) -> ApplicationInfo {
+    ApplicationInfo {
+        kind: "application",
+        reference: manifest.reference.to_string(),
+        description: manifest.description.clone(),
+        manifest_sha256: manifest_sha256.as_str().to_owned(),
+        signer_identity: signer.identity.clone(),
+        signer_issuer: signer.issuer.clone(),
+        guest_arch: manifest.application.guest_arch.clone(),
+        bundle: manifest.application.bundle.clone(),
+        verification_scope: "descriptor_and_bundle_archive",
+        bundle_manifest: None,
+    }
+}
+
+fn inspect_application(
+    application: &VerifiedRegistryApplication,
+    json: bool,
+    verify_only: bool,
+) -> Result<()> {
+    use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore};
+    use mvm_core::registry_pack::application_bundle::verify_application_bundle;
+
+    let registry = BundleRegistry::default_path()?;
+    let trust = FsTrustStore::default_path()?;
+    let archive = registry.archive_path(
+        application
+            .manifest()
+            .application
+            .bundle
+            .archive_sha256
+            .as_str(),
+    );
+    // A descriptor is not proof that the archive exists or its independent
+    // author is trusted. Keep the existing archive verifier as that boundary.
+    let verified_archive =
+        verify_application_bundle(application, &archive, &trust).with_context(|| {
+            format!(
+                "reverifying local application bundle for {}; \
+                 use `mvmctl pull {}` to acquire a missing archive",
+                application.reference(),
+                application.reference(),
+            )
+        })?;
+    let mut info = application_info(
+        application.manifest(),
+        application.manifest_sha256(),
+        application.signer(),
+    );
+    info.bundle_manifest = Some(verified_archive.bundle().manifest.clone());
+    if json {
+        return crate::json_out::emit_json(&info);
+    }
+    if verify_only {
+        println!(
+            "Verified application descriptor and bundle archive: {} ({})",
+            info.reference, info.manifest_sha256
+        );
+    } else {
+        println!("Application: {}", info.reference);
+        println!("Description: {}", info.description);
+        println!("Manifest SHA-256: {}", info.manifest_sha256);
+    }
+    println!("Signer identity: {}", info.signer_identity);
+    println!("Signer issuer: {}", info.signer_issuer);
+    for line in trust_status_lines(application.reference().namespace() == "mvm", false) {
+        println!("{line}");
+    }
+    println!("Guest architecture: {}", info.guest_arch);
+    println!(
+        "Bundle archive SHA-256: {}",
+        info.bundle.archive_sha256.as_str()
+    );
+    println!("Bundle archive size: {}", info.bundle.archive_size);
+    println!("Bundle author key: {}", info.bundle.key_id.0);
+    println!(
+        "Verification covers the descriptor and archive, not extracted-file custody or launch admission."
+    );
+    Ok(())
+}
+
 /// Human-readable trust status. `official` is only passed after the pack and
 /// the official revocation feed have both verified.
 fn trust_status_lines(official: bool, revocation_required: bool) -> [&'static str; 2] {
@@ -199,7 +308,48 @@ fn trust_status_lines(official: bool, revocation_required: bool) -> [&'static st
 
 #[cfg(test)]
 mod tests {
-    use super::trust_status_lines;
+    use super::{application_info, trust_status_lines};
+
+    #[test]
+    fn application_info_keeps_descriptor_and_bundle_identities_distinct() {
+        // Formatting data only: no synthetic publisher or bundle authority.
+        let manifest = mvm_core::registry_pack::application::parse_application_manifest(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "kind": "application",
+                "reference": "runtime/python@1.2.3",
+                "description": "Application info unit fixture",
+                "application": {
+                    "schema_version": 1,
+                    "guest_arch": "x86_64",
+                    "bundle": {
+                        "source": "https://example.test/python.mvmpkg",
+                        "archive_sha256": "a".repeat(64),
+                        "archive_size": 42,
+                        "key_id": "b".repeat(32)
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let digest = mvm_core::packs::Sha256Hex::new("c".repeat(64)).unwrap();
+        let signer = mvm_core::crypto::image_verify::VerifiedSigner {
+            identity: "unit-formatting-identity".to_owned(),
+            issuer: "unit-formatting-issuer".to_owned(),
+        };
+        let info = serde_json::to_value(application_info(&manifest, &digest, &signer)).unwrap();
+        assert_eq!(info["kind"], "application");
+        assert_eq!(info["reference"], "runtime/python@1.2.3");
+        assert_eq!(info["manifest_sha256"], "c".repeat(64));
+        assert_eq!(info["bundle"]["archive_sha256"], "a".repeat(64));
+        assert_eq!(info["bundle"]["key_id"], "b".repeat(32));
+        assert_eq!(info["guest_arch"], "x86_64");
+        assert_eq!(info["verification_scope"], "descriptor_and_bundle_archive");
+        assert!(info.get("files").is_none());
+        assert!(info.get("policy_documents").is_none());
+        assert!(info.get("launch_authorized").is_none());
+    }
 
     #[test]
     fn only_an_official_pack_reports_the_mvm_release_feed() {

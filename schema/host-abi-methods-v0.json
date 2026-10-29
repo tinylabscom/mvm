@@ -1,7 +1,43 @@
 {
   "abi_major": 1,
-  "abi_minor": 7,
+  "abi_minor": 10,
   "methods": [
+    {
+      "classification": "prod_safe",
+      "key": "checkpoint_list",
+      "name": "checkpoint.list",
+      "summary": "Lists complete local checkpoint metadata in deterministic ID order."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "attestation_export",
+      "name": "attestation.export",
+      "summary": "Export a host-signed v0 identity report, not measured-boot evidence."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "attestation_verify",
+      "name": "attestation.verify",
+      "summary": "Verify a bounded report file under explicitly selected trust."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "attestation_status",
+      "name": "attestation.status",
+      "summary": "Inspect public identity metadata, initializing identity if needed."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "image_revocations_update",
+      "name": "image_revocations.update",
+      "summary": "Apply bounded signed revocation files through the canonical store."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "image_revocations_status",
+      "name": "image_revocations.status",
+      "summary": "Reauthenticate the applied image-set revocation list."
+    },
     {
       "classification": "prod_safe",
       "key": "manifest_info",

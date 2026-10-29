@@ -136,7 +136,7 @@ nightly, the lanes divide sharply:
 |---|---|---|
 | trivial | `no-ssh-forwarding`, `flake-locks-clean`, `seccomp-functional`, `guest-agent-runtime-boundary`, `cargo-deny`, `cargo-audit`, `prod-agent-no-authority`, `builderd-no-authority` | 0–3 min each |
 | moderate | `hash-verify-tests`, `verified-boot-artifacts`, `sealed-prod-no-ssh`, `builder-vm-image-reproducibility`, `reproducibility` | 10–29 min |
-| expensive | `fuzz`, `mutation-witnesses` | 235 min and up to 330 min per shard |
+| expensive | `fuzz` (and the since-removed `mutation-witnesses`) | 235 min and up to 330 min per shard |
 
 Six of ADR-001's ten `ci:` witnesses sit in the first two bands, and
 `ci.yml`'s own critical path is ~30 minutes — so promoting them to

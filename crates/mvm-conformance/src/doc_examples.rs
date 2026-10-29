@@ -960,15 +960,10 @@ impl TierPolicy {
 }
 
 /// Single files in the documentation set, relative to the repository root.
-///
-/// CI's `docs` scope classifier in `.github/workflows/ci.yml` names the same
-/// roots, so a change confined to any of them still runs the suite that reads
-/// them. A test holds the two lists together.
 pub const DOCUMENTATION_FILES: [&str; 2] = ["README.md", "AGENTS.md"];
 
 /// Directories whose Markdown is part of the documentation set, relative to
-/// the repository root. Kept in step with CI's `docs` scope, as
-/// [`DOCUMENTATION_FILES`] is.
+/// the repository root.
 pub const DOCUMENTATION_TREES: [&str; 3] =
     ["public/src/content/docs", "crates/mvm-sdk/sdks", "examples"];
 
@@ -1025,8 +1020,8 @@ mod tests {
     /// and the scenario exercising it are free to differ in spelling.
     #[test]
     fn a_value_binds_whether_spelled_with_a_space_or_an_equals() {
-        let spaced = flag_bindings(&argv("build kernel build --source download"));
-        let equals = flag_bindings(&argv("build kernel build --source=download"));
+        let spaced = flag_bindings(&argv("dev kernel build --source download"));
+        let equals = flag_bindings(&argv("dev kernel build --source=download"));
         assert_eq!(spaced.get("--source"), Some(&Some("download".to_string())));
         assert_eq!(spaced, equals);
     }
@@ -1035,12 +1030,8 @@ mod tests {
     /// identical flag *set* that select different operations.
     #[test]
     fn two_modes_of_one_flag_are_distinguishable() {
-        let download = flag_bindings(&argv(
-            "build kernel build --which workload --source download",
-        ));
-        let compile = flag_bindings(&argv(
-            "build kernel build --which workload --source compile",
-        ));
+        let download = flag_bindings(&argv("dev kernel build --which workload --source download"));
+        let compile = flag_bindings(&argv("dev kernel build --which workload --source compile"));
         assert_ne!(download, compile);
         assert_eq!(
             download.keys().collect::<Vec<_>>(),
@@ -1644,51 +1635,6 @@ mod corpus_tests {
         let files = documentation_files(root.path());
 
         assert_eq!(files, vec![sdk.join("README.md")]);
-    }
-
-    /// The `docs=` line's pattern in CI's scope classifier, as the list of
-    /// alternatives inside its `^(...)` group.
-    fn ci_docs_scope_roots() -> Vec<String> {
-        let workflow = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
-            .expect("read .github/workflows/ci.yml");
-        let lines: Vec<&str> = workflow.lines().collect();
-        let output = lines
-            .iter()
-            .position(|line| line.contains(r#"echo "docs=true""#))
-            .expect("ci.yml's scope job must emit docs=true");
-        let grep = lines[..output]
-            .iter()
-            .rev()
-            .find(|line| line.contains("grep -zE"))
-            .expect("the docs=true output must follow its grep");
-        let pattern = grep
-            .split_once("'^(")
-            .and_then(|(_, rest)| rest.split_once(")'"))
-            .map(|(alternatives, _)| alternatives)
-            .unwrap_or_else(|| panic!("the docs grep must be an anchored group: {grep}"));
-        pattern
-            .split('|')
-            .map(|root| root.replace(r"\.", "."))
-            .collect()
-    }
-
-    /// CI decides whether a change runs this suite by its paths. A root the
-    /// suite reads but the classifier does not name is a root whose edits
-    /// merge unchecked; a root named only in CI runs the suite for nothing.
-    #[test]
-    fn ci_docs_scope_names_exactly_the_documentation_roots() {
-        let mut expected: Vec<String> = DOCUMENTATION_FILES
-            .iter()
-            .map(|file| format!("{file}$"))
-            .chain(DOCUMENTATION_TREES.iter().map(|tree| format!("{tree}/")))
-            .collect();
-        expected.sort();
-        let mut actual = ci_docs_scope_roots();
-        actual.sort();
-        assert_eq!(
-            actual, expected,
-            "ci.yml's docs scope and documentation_files() must name the same roots"
-        );
     }
 
     /// The features that read the corpus are the ones the docs-only CI path

@@ -68,6 +68,7 @@ pub mod gateway_audit;
 pub mod egress_rate;
 #[cfg(feature = "custom-dns")]
 pub mod hickory_dns;
+pub mod hvf_stop;
 pub mod icmp_audit;
 pub mod icmp_echo;
 pub mod icmp_handler;
@@ -122,9 +123,12 @@ pub mod transcript_sink;
 // (mvm-broker, mvm-host-signer, mvm-audit-signer). Stateless client
 // libraries that open a fresh UDS connection per call.
 pub mod aggregate;
+pub mod caller_registration;
 /// Arming a warm-claimed child's bounds in the standby supervisor it inherits.
 pub mod claimed_child;
 pub mod protected_handoff;
+/// Verification of the plan a restored child's supervisor takes as authority.
+pub mod restored_plan;
 pub mod services;
 /// Session idle-timeout enforcement: the shared reap decision and the
 /// supervisor-side watcher.

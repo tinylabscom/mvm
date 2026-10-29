@@ -1,0 +1,27 @@
+[package]
+name = "runmvm-client"
+version.workspace = true
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/tinylabscom/mvm"
+description = "Public JSON-over-libmvm_hostlib client"
+readme = "README.md"
+autotests = false
+include = ["Cargo.toml", "README.md", "src/**", "tests/**"]
+
+[[test]]
+name = "native"
+path = "tests/native.rs"
+
+[dependencies]
+libloading = "0.8"
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+wait-timeout = "0.2.1"
+
+[lints.clippy]
+too_many_arguments = "deny"

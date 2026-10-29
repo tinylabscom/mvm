@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-REPOSITORY = "tinylabscom/mvm"
+from runtime_release_proof import REPOSITORY, checksum_record, verify_blob
 
 
 def fetch_json(url):
@@ -33,8 +33,9 @@ def validate_metadata(root, event, tag, dry_run):
     hostlib = tomllib.loads((root / "crates/mvm-hostlib/Cargo.toml").read_text())
     python = tomllib.loads((sdk / "python/pyproject.toml").read_text())["project"]
     npm = json.loads((sdk / "typescript/package.json").read_text())
-    for key in ("version", "runtime_version"):
-        if not re.fullmatch(r"\d+\.\d+\.\d+", release[key]):
+    # The runtime mirror may be a release candidate; the SDK's own version may not.
+    for key, pattern in (("version", r"\d+\.\d+\.\d+"), ("runtime_version", r"\d+\.\d+\.\d+(-rc\.\d+)?")):
+        if not re.fullmatch(pattern, release[key]):
             raise ValueError(f"invalid {key}")
     if hostlib["package"]["version"] != {"workspace": True}:
         raise ValueError("hostlib must inherit workspace version")
@@ -53,17 +54,6 @@ def validate_metadata(root, event, tag, dry_run):
     return release
 
 
-def checksum_record(text, filename):
-    matches = []
-    for line in text.splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64}) [ *](.+)", line)
-        if match and match[2] == filename:
-            matches.append(match[1])
-    if len(matches) != 1:
-        raise ValueError(f"expected exactly one checksum record for {filename}")
-    return matches[0]
-
-
 def verify_runtime(version, directory):
     tag = f"v{version}"
     archive = f"mvm-guest-bins-{tag}.tar.gz"
@@ -75,13 +65,7 @@ def verify_runtime(version, directory):
             with urllib.request.urlopen(url, timeout=120) as response:
                 with (directory / filename).open("wb") as output:
                     shutil.copyfileobj(response, output)
-        subprocess.run([
-            "cosign", "verify-blob", "--bundle", str(directory / (asset + ".bundle")),
-            "--certificate-identity",
-            f"https://github.com/{REPOSITORY}/.github/workflows/release.yml@refs/tags/{tag}",
-            "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
-            str(directory / asset),
-        ], check=True)
+        verify_blob(version, directory, asset)
     with (directory / archive).open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     for record in (archive + ".sha256", manifest):

@@ -105,63 +105,6 @@ pub(in crate::commands) fn apply_installed_bundle_defaults(
     Ok(())
 }
 
-/// Check required capabilities against the effective launch, not just the
-/// publisher's posture. A declaration is a requirement, never a grant.
-pub(in crate::commands) fn check_application_requirements(args: &RunArgs) -> anyhow::Result<()> {
-    if args.application_policy.is_none() {
-        return Ok(());
-    }
-    let environment = args
-        .manifest
-        .as_deref()
-        .map(mvm_client::admission::bundle_environment::installed_bundle_environment)
-        .transpose()?
-        .flatten()
-        .ok_or_else(|| anyhow::anyhow!("installed application has no signed environment"))?;
-    check_capabilities(args, &environment)
-}
-
-fn check_capabilities(args: &RunArgs, environment: &EnvironmentDescriptor) -> anyhow::Result<()> {
-    use mvm_core::plan::EnvironmentCapability;
-    for capability in &environment.capabilities {
-        let granted = match capability {
-            EnvironmentCapability::Egress => {
-                !args.allow_host.is_empty() || !args.policy_routes.is_empty()
-            }
-            EnvironmentCapability::HostVolumes => !args.mounts.is_empty(),
-            EnvironmentCapability::InteractiveTerminal => {
-                args.pty && args.profile == mvm_client::profile::RunProfile::Dev
-            }
-        };
-        anyhow::ensure!(
-            granted,
-            "local policy or launch settings prevent required application capability {}; \
-             select a compatible local --policy and explicit supported bindings; \
-             application terminals require an explicit development package and --profile dev -it",
-            capability.as_str()
-        );
-    }
-    for required in &environment.volumes {
-        let mut present = false;
-        for raw in &args.mounts {
-            use crate::commands::vm::shared::VolumeSpec;
-            let guest = match crate::commands::vm::shared::parse_volume_spec(raw)? {
-                VolumeSpec::DirShare { guest_mount, .. } => guest_mount,
-                VolumeSpec::Disk { guest, .. } => guest,
-            };
-            present |= guest == required.guest_path;
-        }
-        anyhow::ensure!(
-            present,
-            "required application volume {} at {} has no binding; supply an explicitly \
-             authorized --mount for that guest path",
-            required.name,
-            required.guest_path
-        );
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,42 +163,6 @@ mod tests {
         let before = (args.cpus, args.memory.clone());
         assert_eq!(apply(&mut args, &environment(None)), None);
         assert_eq!((args.cpus, args.memory), before);
-    }
-
-    #[test]
-    fn a_required_capability_is_not_an_automatic_grant() {
-        let mut environment = environment(None);
-        environment.capabilities = vec![mvm_core::plan::EnvironmentCapability::Egress];
-        let mut args = RunArgs::default();
-        assert!(
-            check_capabilities(&args, &environment)
-                .unwrap_err()
-                .to_string()
-                .contains("required application capability egress")
-        );
-        args.allow_host.push("api.example.test:443".into());
-        check_capabilities(&args, &environment).unwrap();
-        environment.capabilities = vec![mvm_core::plan::EnvironmentCapability::InteractiveTerminal];
-        assert!(check_capabilities(&args, &environment).is_err());
-    }
-
-    #[test]
-    fn a_volume_requirement_needs_the_declared_guest_path() {
-        let mut environment = environment(None);
-        environment.volumes = vec![mvm_contract::plan::environment::EnvironmentVolume {
-            name: "workspace".into(),
-            guest_path: "/work".into(),
-        }];
-        let mut args = RunArgs::default();
-        args.mounts.push("/tmp/input:/other:ro".into());
-        assert!(
-            check_capabilities(&args, &environment)
-                .unwrap_err()
-                .to_string()
-                .contains("workspace at /work has no binding")
-        );
-        args.mounts = vec!["/tmp/input:/work:ro".into()];
-        check_capabilities(&args, &environment).unwrap();
     }
 
     #[test]

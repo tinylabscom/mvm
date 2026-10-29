@@ -93,8 +93,8 @@ with the id of an earlier release run to smoke the archive that run built:
 | `brew install tinylabscom/mvm/mvmctl` | the same tarball, via the tap formula |
 | `cargo install --git https://github.com/tinylabscom/mvm mvmctl` | source from the repository (CLI binary only; no adjacent helper bundle). `mvmctl` is not on crates.io; only `mvm-contract` is published there |
 | `mvmctl env update` | the tarball for the latest release and that release's guest runtime, which it fetches and verifies before the in-place swap |
-| `mvmctl build kernel build --source download` | the kernel member of the pinned image set, verified against its signed root |
-| `mvmctl build runtime-overlay build --source download` (releases that predate the guest-runtime asset only) | `runtime-overlay-<arch>.tar.gz` from the pinned image set, verified against its signed root; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`. Current releases have no `--source download`: they assemble the overlay from their guest runtime |
+| `mvmctl dev kernel build --source download` | the kernel member of the pinned image set, verified against its signed root |
+| `mvmctl dev runtime-overlay build --source download` (releases that predate the guest-runtime asset only) | `runtime-overlay-<arch>.tar.gz` from the pinned image set, verified against its signed root; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`. Current releases have no `--source download`: they assemble the overlay from their guest runtime |
 
 ## Image releases and the support window
 
@@ -280,10 +280,26 @@ merges, `just release::tag 0.18.4` tags `origin/main` and pushes the tag, which
 starts `release.yml` (see
 [Promotion](#promotion-a-release-reaches-users-only-after-a-fresh-install-boots)).
 
-Source builds also use a separate, unversioned channel:
+Source builds also use a separate, commit-addressed channel:
 `source-host-helpers.yml` publishes Sigstore-signed helper bundles for each
-`main` commit. It replaces neither release train and has nothing for a dirty or
-unpublished revision.
+`main` commit under `source-builds-` plus the full 40-character commit SHA.
+Each prerelease tag targets that exact commit and is never promoted to Latest.
+Each contains three platform archives and their three `.bundle` signatures.
+It replaces neither release train and has nothing for a dirty or unpublished
+revision. Existing assets in the legacy `source-builds` release are preserved;
+new clients consult it only when the per-commit archive returns HTTP 404.
+
+Publication retries preserve complete archive/signature pairs and can resume
+whole missing platform pairs. An archive-only or signature-only partial pair
+fails closed: an operator must decide how to finish it using the original
+matching bytes. Never blindly regenerate, clobber or delete signed assets.
+Concurrent uploads cannot overwrite an existing asset; a losing upload may
+fail and require a retry. Existing tags are resolved to their actual commit
+(including annotated tags), not trusted through a symbolic `target_commitish`.
+Historical backfill and partial-pair repair require separate authorization;
+this workflow does not provide a backfill dispatch feature. See
+[source-build recovery](/contributing/development/) for the exact-base override
+and explicit local-build path available to already-built fixed-URL clients.
 
 ### Image set (`image-set/v*`, mvm-images)
 

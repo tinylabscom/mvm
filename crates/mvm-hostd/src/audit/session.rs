@@ -1150,19 +1150,59 @@ impl crate::audit::emitter::AuditEmitter {
         Ok(seal)
     }
 
-    /// The seal over the whole verified chain. Always available; reads every
-    /// segment.
+    /// The seal over the verified chain. When a cached prefix covers the
+    /// sealed segments, only the active segment is read from disk; otherwise
+    /// every segment is walked from genesis.
     fn decide_seal_from_genesis(
         &self,
         tenant: &str,
         request: &SealRequest<'_>,
     ) -> Result<SealDecision> {
+        if let Some(decision) = self.decide_seal_over_cached_prefix(tenant, request)? {
+            return Ok(decision);
+        }
         let lines =
             crate::audit::merkle::read_leaves(self.audit_dir(), tenant, &self.verifying_key())
                 .context("reading the verified chain to seal the session")?;
         let tail = ChainTail::whole(&lines);
         let prev_seal = last_seal_hash(&tail)?.unwrap_or_else(|| GENESIS_SEAL.to_string());
         decide_seal(&tail, prev_seal, request)
+    }
+
+    /// Try to compute the seal using the cached prefix — the published root
+    /// stands in for the sealed segments, and only the active segment is read.
+    ///
+    /// This is the middle path between `decide_seal_in_live_segment` (which
+    /// also requires a floor marker) and the full genesis walk (which reads
+    /// every segment). It succeeds whenever the session's entries and the
+    /// previous seal are both in the active segment, regardless of whether a
+    /// floor marker was set.
+    fn decide_seal_over_cached_prefix(
+        &self,
+        tenant: &str,
+        request: &SealRequest<'_>,
+    ) -> Result<Option<SealDecision>> {
+        let audit_dir = self.audit_dir();
+        let Some(chain) =
+            crate::audit::merkle::CachedChain::load(audit_dir, tenant, &self.verifying_key())
+        else {
+            return Ok(None);
+        };
+        let lines = chain.active_lines();
+        let Some(first_seq) = chain.tree_size().checked_sub(lines.len() as u64) else {
+            return Ok(None);
+        };
+        let tail = ChainTail { lines, first_seq };
+        let prev_seal = match last_seal_hash(&tail)? {
+            Some(hash) => hash,
+            // An un-rotated chain whose previous seal is not in the active
+            // segment has no previous seal at all: genesis.
+            None if !chain.has_sealed_segments() => GENESIS_SEAL.to_string(),
+            // The previous seal is in a sealed segment: the active segment
+            // alone is not enough.
+            None => return Ok(None),
+        };
+        decide_seal(&tail, prev_seal, request).map(Some)
     }
 
     /// The seal computed from the live segment alone, or `None` when the live

@@ -5,9 +5,114 @@
 * and run json-schema-to-typescript to regenerate this file.
 */
 
+export type AttestationTrust = ({
+kind: AttestationSelfIdentityKind
+} | {
+kind: AttestationPublicKeyFileKind
+path: string
+})
+export type AttestationSelfIdentityKind = "self_identity"
+export type AttestationPublicKeyFileKind = "public_key_file"
+/**
+ * The capture mechanism behind a checkpoint. Only `FsQuick` is currently implemented; `VmFull` is reserved so the memory-state path can slot into the same model without a new surface.
+ */
+export type CheckpointClass = ("fs_quick" | "vm_full")
+/**
+ * CPU bound. The two variants are different units, not different precisions, and no conversion between them is offered: a share is a fraction of host wall-clock CPU, fuel is a count of executed instructions.
+ */
+export type CpuGrant = ({
+millicores: number
+unit: "share"
+} | {
+instructions: number
+unit: "fuel"
+})
+/**
+ * Wall-clock bound.
+ *
+ * `Unbounded` is a named variant rather than a sentinel value. The legacy `TimeoutSpec::exec_secs` encodes unbounded as `0`, so a user writing `0` to mean "no time allowed" would get "no limit" — the exact inversion of their intent. `NonZeroU32` makes that unrepresentable here.
+ */
+export type WallClockGrant = ({
+kind: "unbounded"
+} | {
+kind: "secs"
+secs: number
+})
+/**
+ * Stable identifier for a checkpoint (also its on-disk directory name under `config::checkpoints_dir()`).
+ */
+export type CheckpointId = string
+/**
+ * Isolation boundary for checkpoint chunk deduplication.
+ *
+ * The wire form is either `host` or `tenant:<name>`. The field is sealed into [`CheckpointMeta::meta_digest`], so changing the domain after capture makes lineage verification fail. Storage code hashes this value before using it as a directory name; tenant-controlled text never becomes a path component.
+ */
+export type CheckpointKeyDomain = string
+/**
+ * Content-address of a [`CheckpointMeta`]: `sha256(serde_json(load-bearing fields))` rendered `sha256:<64 lowercase hex>`. A child hash-links to its parent by this digest, so editing an ancestor's sealed record is detectable from any descendant — the recomputed ancestor digest no longer matches the child's link.
+ *
+ * This is a content-address, not a signature and not an exact-byte blob digest. It shares the `sha256:<64-hex>` wire shape with several unrelated ids (OCI manifest/layer digests, blob shas, workload addresses) precisely so the boundary between them is a type-system property, not a string check: there is no `From`/`Into`/`Deref` to or from any of them (nor to [`CheckpointId`]), so handing one where another is expected does not compile.
+ */
+export type CheckpointDigest = string
+/**
+ * How a checkpoint's content is stored at rest.
+ *
+ * Part of the load-bearing digest, so a sealed record cannot be relabelled unprotected (or the reverse) without failing lineage verification. A record that predates the field carries none on the wire and reads back as [`CheckpointProtection::Unprotected`]: legacy content is never reclassified as protected, and is never opened through the sealed path.
+ */
+export type CheckpointProtection = ("unprotected" | "sealed_v1")
+/**
+ * Untrusted record of the artifacts selected for a launch. A checkpoint must authenticate this record and reverify its release and artifact bytes before using it; reading a metadata file does not create runtime authority.
+ */
+export type RuntimeLaunchBinding = ({
+initramfs_path: string
+overlay_path: string
+overlay_roothash: string
+overlay_verity_path: string
+provenance: RuntimeBindingProvenance
+runtime: "cli_assembly"
+} | {
+initramfs_path?: (string | null)
+proof: LegacyBundleRuntimeProof
+rootfs_path: string
+runtime: "legacy_bundle"
+} | {
+initramfs_path: string
+kernel_path: string
+overlay_path: string
+overlay_roothash: string
+overlay_verity_path: string
+proof: LegacyPortableRuntimeProof
+rootfs_path: string
+runtime: "legacy_portable"
+version: string
+})
+/**
+ * Deserialized provenance remains a request for the corresponding verifier, never a verification result.
+ */
+export type RuntimeBindingProvenance = ({
+kind: "release"
+proof: RuntimeReleaseProof
+} | {
+arch: GuestArch
+archive_sha256: string
+kind: "source"
+version: string
+})
+export type GuestArch = ("x86_64" | "aarch64")
+/**
+ * The approval-ledger head a [`SessionBinding`] was admitted under.
+ *
+ * Shares the `sha256:<64-hex>` wire shape with [`CheckpointDigest`] — both are heads of a hash chain — but an approval-ledger head is deliberately not a `CheckpointDigest`. `CheckpointDigest`'s own doc explains why the shape is shared with no conversion: so the boundary between unrelated hash-chain heads is a type-system property, not a string check. Without this newtype, `approval_head: CheckpointDigest` would let an approval head be assigned wherever a checkpoint content-address is expected (or the reverse) with the compiler saying nothing — and because `SessionBinding` sits inside `CheckpointMeta`'s digest input, whichever encoding shipped first would freeze into every sealed record's `meta_digest`.
+ */
+export type ApprovalHead = string
+/**
+ * Stable public agent-session identifier.
+ */
+export type AgentSessionId = string
+export type CheckpointListReply = CheckpointMeta[]
 /**
  * Kind of agent-side error reported via `EntrypointEvent::Error`.
- * 
+ *
  * The variants are deliberately coarse — the host correlates by `kind` and surfaces the human-readable `message` to the operator. Adding a variant is a wire change; renaming or removing is a breaking change.
  */
 export type RunEntrypointError = ("PayloadCap" | "Timeout" | "Canceled" | "Busy" | "WrapperCrashed" | "NotReady" | "EntrypointInvalid" | "SessionKilled" | "InternalError")
@@ -47,9 +152,9 @@ kind: "timed_out"
 export type MachineId = string
 /**
  * Finer-grained "is this VM usable?" state, composed alongside the coarse [`InstanceStatus`] lifecycle.
- * 
+ *
  * `InstanceStatus::Running` means the backend accepted the VM and it has not stopped. `InstanceReadiness` explains *whether* it is actually usable: did the agent answer? Are integration probes green? Is a streaming operation currently throttled?
- * 
+ *
  * Readiness transitions are independent of lifecycle transitions — they do not gate or require `InstanceStatus` to move.
  */
 export type InstanceReadiness = ("launch_accepted" | "agent_connecting" | "agent_ready" | {
@@ -76,7 +181,7 @@ reason: BackpressureReason
 } | "stopping")
 /**
  * Why a streaming or queued operation is currently throttled.
- * 
+ *
  * Closed enum: every reason is named, and drift between host and guest fails the serde `deny_unknown_fields`-equivalent path (variants must match). Detail strings carried alongside this enum are bounded and redacted — never argv / env / stdin / stdout / stderr / filesystem paths.
  */
 export type BackpressureReason = ("guest_agent_unavailable" | {
@@ -99,7 +204,11 @@ export type RunMode = ("transient" | "persistent")
 export type ManifestListReply = SlotRow[]
 
 export interface HostAbi {
+attestation_export: AttestationExport
+attestation_status: AttestationStatus
+attestation_verify: AttestationVerify
 backend_capabilities: BackendCapabilities
+checkpoint_list: CheckpointList
 entrypoint_call: EntrypointCall
 guest_cp: GuestCp
 guest_fs_list: GuestFsList
@@ -118,6 +227,8 @@ guest_proc_stream_close: GuestProcStreamClose
 guest_proc_stream_next: GuestProcStreamNext
 guest_proc_stream_open: GuestProcStreamOpen
 guest_proc_wait: GuestProcWait
+image_revocations_status: ImageRevocationsStatus
+image_revocations_update: ImageRevocationsUpdate
 machine_create: MachineCreate
 machine_exec: MachineExec
 machine_inspect: MachineInspect
@@ -146,6 +257,61 @@ session_stop: SessionStop
 telemetry_records: TelemetryRecords
 telemetry_status: TelemetryStatus
 }
+export interface AttestationExport {
+reply: AttestationReportData
+request: AttestationEmpty
+}
+export interface AttestationReportData {
+payload: number[]
+signature: number[]
+signer_id: string
+}
+export interface AttestationEmpty {
+
+}
+export interface AttestationStatus {
+reply: AttestationStatusData
+request: AttestationEmpty1
+}
+export interface AttestationStatusData {
+providers: AttestationProviderData[]
+pubkey_hex: string
+public_path: string
+secret_path: string
+signer_id: string
+}
+export interface AttestationProviderData {
+compiled: boolean
+feature: string
+name: string
+}
+export interface AttestationEmpty1 {
+
+}
+export interface AttestationVerify {
+reply: AttestationVerificationData
+request: AttestationVerifyRequest
+}
+export interface AttestationVerificationData {
+body: AttestationBodyData
+signer_id: string
+trust: AttestationTrust
+}
+export interface AttestationBodyData {
+boot_measurement: string
+hw_measurement?: (HardwareMeasurementData | null)
+identity_pubkey_hex: string
+nonce_hex: string
+schema_version: number
+}
+export interface HardwareMeasurementData {
+measurement_hex: string
+provider: string
+}
+export interface AttestationVerifyRequest {
+report_path: string
+trust: AttestationTrust
+}
 export interface BackendCapabilities {
 reply: BackendCapabilitiesReply
 request: Empty
@@ -160,6 +326,223 @@ export interface BackendCapabilitiesReply {
  * A request that carries nothing.
  */
 export interface Empty {
+
+}
+export interface CheckpointList {
+reply: CheckpointListReply
+request: ListRequest
+}
+/**
+ * On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).
+ *
+ * `parent` hash-links to the parent checkpoint's `meta_digest` (its content-address), not to a mutable name — so a descendant can detect any post-seal edit of an ancestor. `meta_digest` is the content-address of this record's load-bearing fields, derived in [`CheckpointMetaBuilder::build`] and never set by callers.
+ *
+ * `audit_ref` is a non-load-bearing back-pointer backfilled after the chain-signed entry is emitted; it and `meta_digest` are excluded from the digest so the backfill does not perturb the content-address.
+ */
+export interface CheckpointMeta {
+audit_ref?: (string | null)
+class: CheckpointClass
+content: ContentBlob[]
+created_unix: number
+/**
+ * The permission set the captured VM was admitted under. Load-bearing so a restore can bound a child against it: the digest covers this field, the signed chain covers the digest, and a record edited to widen what the parent held stops verifying before it can justify a wider child.
+ */
+grants?: (Grants | null)
+id: CheckpointId
+/**
+ * Deduplication boundary for chunk objects. Host is omitted on the wire so pre-chunk whole-file records retain their original digest shape.
+ */
+key_domain?: CheckpointKeyDomain
+/**
+ * Last fully committed machine-exec input at the instant this checkpoint was captured. Replay uses this exact cursor instead of a wall clock, so two operations in one second cannot be reordered or executed twice.
+ */
+machine_input_cursor?: (number | null)
+/**
+ * Content-address of the load-bearing fields above. Required with no serde default: a record that carries no content-address cannot be lineage-verified, so a pre-lineage meta.json must fail closed rather than load as an unverifiable record.
+ */
+meta_digest: CheckpointDigest
+parent?: (CheckpointDigest | null)
+/**
+ * How the content is stored at rest. Omitted on the wire when unprotected, so a record sealed before the field existed keeps its digest and still reads as unprotected.
+ */
+protection?: CheckpointProtection
+/**
+ * Exact runtime generation captured with the machine. This untrusted DTO is authenticated by the audit-chain binding of `meta_digest`, not by the content-address alone; restore also re-verifies its release.
+ */
+runtime_launch_binding?: (RuntimeLaunchBinding | null)
+runtime_overlay_version?: (string | null)
+/**
+ * The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest.
+ */
+session?: (SessionBinding | null)
+/**
+ * Content-addressed snapshot-store entry containing this checkpoint's immutable bytes. It is part of the load-bearing digest so a claim cannot redirect materialization to an unrelated staged snapshot.
+ */
+snapshot_id?: (string | null)
+supervisor_config_digest: string
+tag?: (string | null)
+vm_name: string
+}
+/**
+ * One named artifact inside a checkpoint's `content/` dir, with its hash.
+ */
+export interface ContentBlob {
+name: string
+sha256: string
+}
+/**
+ * A workload's permission set. Every field is optional: absent means "unspecified", which each dimension resolves differently — an absent `egress` is deny-all, an absent `cpu` is uncapped.
+ */
+export interface Grants {
+/**
+ * The one application a development terminal may attach to. Absent means the console keeps its ordinary development behaviour. Present, every terminal must run exactly this argv as the workload user; it never opens the console on a sealed image.
+ */
+application_terminal?: (ApplicationTerminalGrant | null)
+cpu?: (CpuGrant | null)
+/**
+ * Host-to-guest display input. Viewing is the separate `host.display.view.v1` service token; this grants the input direction only. Absent means no input path exists.
+ */
+display_input?: (DisplayInputGrant | null)
+drive?: (DriveGrant | null)
+egress?: (EgressGrant | null)
+wall_clock?: (WallClockGrant | null)
+}
+/**
+ * The one program a terminal may run, admitted by the signed plan.
+ */
+export interface ApplicationTerminalGrant {
+/**
+ * The exact argv. `argv[0]` is an absolute path, so the guest resolves nothing on the caller's behalf.
+ */
+argv: string[]
+}
+/**
+ * Authority to send display input events to a workload.
+ */
+export interface DisplayInputGrant {
+/**
+ * A human attends this run. Required before a sealed workload accepts display input, and reported by `doctor` and `machine ls`.
+ */
+attended?: boolean
+/**
+ * Host-to-guest paste. Absent means no paste event is accepted.
+ */
+clipboard?: (DisplayClipboardGrant | null)
+/**
+ * A human will enter a credential through the display during this run.
+ */
+human_credential?: (HumanCredentialGrant | null)
+}
+/**
+ * Host-to-guest paste authority.
+ */
+export interface DisplayClipboardGrant {
+/**
+ * Largest paste, in UTF-8 bytes. Admission refuses a value above [`MAX_CLIPBOARD_PASTE_BYTES`].
+ */
+max_paste_bytes: number
+}
+/**
+ * The signed statement that a human credential will be typed into the guest.
+ *
+ * The credential itself never appears anywhere in the plan or the audit chain. What the plan records is where the resulting session may be used.
+ */
+export interface HumanCredentialGrant {
+/**
+ * The only destinations this run may reach. Never empty: a credential with nowhere to be used needs no display input.
+ */
+destinations: HostPort[]
+}
+/**
+ * A host:port pair for network allowlist rules.
+ */
+export interface HostPort {
+host: string
+port: number
+}
+/**
+ * The bounded authority to drive one plan-selected program and its workspace.
+ */
+export interface DriveGrant {
+max_bytes_in: number
+max_bytes_out: number
+program_id: string
+/**
+ * Lifetime of one opened drive session, in seconds.
+ */
+ttl: number
+workspace_roots: string[]
+}
+/**
+ * Outbound destinations. An empty `allow` is "no egress" and is distinct from an absent `EgressGrant`, which is also deny-all — both are closed, so the distinction never opens anything.
+ */
+export interface EgressGrant {
+allow: HostPort[]
+}
+export interface RuntimeReleaseProof {
+arch: GuestArch
+archive: string
+archive_sha256: string
+checksum: string
+signature_bundle: string
+version: string
+}
+/**
+ * Untrusted inputs for a legacy image's baked runtime. The runtime boundary re-verifies the pin against the host's enrolled publishers and binds the selected rootfs and initrd to signed artifact roles. This is not authority to bypass verification, and the archive cannot supply its own trust store.
+ */
+export interface LegacyBundleRuntimeProof {
+archive: string
+pin: PlanArtifact
+}
+/**
+ * Pin from an `ExecutionPlan` to a specific signed bundle. Captures the three quantities the supervisor needs to re-verify on admit:
+ *
+ * 1. **`bundle_sha256`** — SHA-256 of the entire archive bytes. The plan's pin is "I authorise launching this exact byte string." 2. **`manifest_sig_base64`** — the publisher's signature over the bundle's manifest. Held in the plan so the verifier can refuse the launch without trusting whatever copy of the manifest the archive on disk contains. 3. **`key_id`** — the publisher's key_id. Lets admission reject plans whose pinning publisher isn't in the local trust store *before* opening the archive.
+ *
+ * `serde(deny_unknown_fields)` keeps the wire format strict — a future field added in v2 fails closed in older builds.
+ */
+export interface PlanArtifact {
+/**
+ * Lowercase-hex SHA-256 of the entire `.mvmpkg` archive.
+ */
+bundle_sha256: string
+/**
+ * Publisher key_id the bundle was signed under.
+ */
+key_id: string
+/**
+ * Base64-encoded 64-byte Ed25519 signature over the bundle's `manifest.json` bytes. Use [`signature_from_base64`] to decode.
+ */
+manifest_sig_base64: string
+}
+/**
+ * Untrusted original schema-4 archive and schema-2 runtime selection.
+ */
+export interface LegacyPortableRuntimeProof {
+arch: GuestArch
+archive: string
+manifest_sha256: string
+pin: PlanArtifact
+}
+/**
+ * The durable agent session a checkpoint is a resume point for.
+ *
+ * `generation` fences a resume: reopening a parked session increments it, so a frame addressed to an earlier generation is refused rather than delivered into a successor. `journal_cursor` is the session-journal position the capture is consistent with, and `approval_head` names the approval-ledger state the capture was admitted under — a resume bounds its fresh grants against that head rather than against whatever the ledger holds later. `replay_input_digest`, when present, commits the encrypted input artifact executed immediately before this step was captured.
+ */
+export interface SessionBinding {
+approval_head: ApprovalHead
+generation: number
+journal_cursor: number
+/**
+ * Content-address of the encrypted input committed at this step. Optional for older and non-step session checkpoints; replay accepts only a step carrying this binding.
+ */
+replay_input_digest?: (string | null)
+session_id: AgentSessionId
+}
+/**
+ * Listing has no filters; reject unknown fields rather than silently ignoring them.
+ */
+export interface ListRequest {
 
 }
 export interface EntrypointCall {
@@ -506,6 +889,34 @@ export interface WaitRequest {
 id: string
 timeout_secs?: (number | null)
 token: string
+}
+export interface ImageRevocationsStatus {
+reply: StatusReport
+request: ImageRevocationsEmpty
+}
+export interface StatusReport {
+entries: number
+issued_at: string
+not_after: string
+publication: number
+sha256: string
+signer_identity: string
+}
+export interface ImageRevocationsEmpty {
+
+}
+export interface ImageRevocationsUpdate {
+reply: CheckpointReport
+request: UpdateRequest
+}
+export interface CheckpointReport {
+issued_at: string
+publication: number
+sha256: string
+}
+export interface UpdateRequest {
+bundle_path: string
+document_path: string
 }
 export interface MachineCreate {
 reply: MachineState
@@ -1367,7 +1778,7 @@ path?: (string | null)
 }
 export interface ManifestList {
 reply: ManifestListReply
-request: ListRequest
+request: ListRequest1
 }
 /**
  * One built slot, preserving the manifest-list JSON representation.
@@ -1383,7 +1794,7 @@ updated_at: string
 /**
  * Filters for built slots. Tags have intersection semantics.
  */
-export interface ListRequest {
+export interface ListRequest1 {
 orphans?: boolean
 tags?: string[]
 }

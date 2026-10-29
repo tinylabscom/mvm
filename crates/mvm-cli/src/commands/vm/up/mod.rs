@@ -8,8 +8,8 @@ mod kernel;
 
 pub(super) use mvm_client::admission::{
     AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot,
-    attach_guest_boot_config_for_plan, emit_failed, emit_launched, guest_profile_for_boot,
-    record_transient_outcome,
+    admit_plan_for_boot_syncing_beside_boot, attach_guest_boot_config_for_plan, emit_failed,
+    emit_launched, guest_profile_for_boot, record_transient_outcome,
 };
 
 pub(in crate::commands) use kernel::resolve_kernel_pin_path;

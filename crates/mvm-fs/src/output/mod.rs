@@ -14,12 +14,14 @@
 //! - [`collect`]: the two-pass walk — validate the whole tree against the
 //!   bounds, then extract through directory handles that never follow a link.
 
+#[cfg(unix)]
 pub mod collect;
 pub mod manifest;
 pub mod rules;
 
 use std::path::PathBuf;
 
+#[cfg(unix)]
 pub use collect::{
     CollectedOutputs, OutputCollection, check_destination_available, collect_from_ext4,
     manifest_path_for,
@@ -110,6 +112,7 @@ impl OutputRefusal {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn io(context: impl Into<String>, source: std::io::Error) -> Self {
         Self::Io {
             context: context.into(),

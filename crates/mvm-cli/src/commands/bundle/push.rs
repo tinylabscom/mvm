@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
+use mvm_client::bundle::BundleSigner;
 use mvm_core::plan::bundle::{FsTrustStore, bundle_sha256};
 use mvm_core::user_config::MvmConfig;
 
@@ -50,8 +51,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?,
     };
     let transport = RegistryTransport::for_reference(&reference, args.allow_http)?;
+    let host_key_id = mvm_client::bundle::HostBundleSigner::load()?.key_id();
 
-    let (verified, pushed) = publish_bundle(&archive, &reference, &transport, &trust)?;
+    let (verified, pushed) =
+        publish_bundle(&archive, &reference, &transport, &trust, &host_key_id)?;
     let pinned = display_reference(&pushed.reference);
 
     mvm_core::audit_emit!(

@@ -15,10 +15,11 @@ pub(super) fn resolve_persistent_spec(
         || args.run.manifest.is_some()
         || args.run.deployment.is_some()
         || resolved_manifest_slot.is_some()
+        || args.run.registry_pack_image.is_some()
         || direct_boot;
     if !has_source && existing.is_none() {
         anyhow::bail!(
-            "machine {name:?} does not exist; pass --image, --manifest, --deployment, or --flake to create it"
+            "machine {name:?} does not exist; pass --image, --manifest, --deployment, --flake, or a signed image-bearing --policy pack to create it"
         );
     }
     let desired = if has_source {
@@ -31,6 +32,35 @@ pub(super) fn resolve_persistent_spec(
         None
     };
     mvm_client::launch::detached::resolve_spec(name, desired, existing, args.force)
+}
+
+pub(super) fn effective_hypervisor(explicit: Option<&str>) -> String {
+    explicit
+        .map(String::from)
+        .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"))
+}
+
+pub(super) fn preflight_registry_pack_image(
+    spec: &MachineSpec,
+    hypervisor: Option<&str>,
+) -> Result<()> {
+    // Match start_machine_spec's distinction: a pin plus Source manifest slot
+    // is Source; a pin without a slot is the Built source marker.
+    let Some(pin) = spec
+        .registry_pack_image
+        .as_ref()
+        .filter(|_| spec.manifest.is_none())
+    else {
+        return Ok(());
+    };
+    let backend_name = effective_hypervisor(hypervisor);
+    mvm_client::launch::built_pack::resolve_built_pack_image(pin, &backend_name, &spec.profile)
+        .context("preflighting the signed Built pack before persistent reconciliation")?;
+    Ok(())
+}
+
+pub(super) fn needs_built_pack_preflight(action: &SpecReconcile, machine_running: bool) -> bool {
+    !(matches!(action, SpecReconcile::Reuse) && machine_running)
 }
 
 fn run_persistent(
@@ -64,6 +94,12 @@ fn run_persistent(
             print_machine_start_preflight_human(&summary);
         }
         return Ok(());
+    }
+
+    // Validate the selected immutable pack before a forced reconciliation can
+    // stop an existing machine or persist a replacement definition.
+    if needs_built_pack_preflight(&action, lifecycle::machine_is_running(&name)) {
+        preflight_registry_pack_image(&spec, args.run.hypervisor.as_deref())?;
     }
 
     // Watch for egress refusals from before the boot, so one the workload
@@ -142,7 +178,9 @@ fn persistent_review_source(launch: ReviewSource, booted: bool) -> ReviewSource 
 
 fn check_pack_entrypoint(args: &MachineRunArgs) -> Result<()> {
     anyhow::ensure!(
-        !args.entrypoint || args.run.registry_pack_image.is_none(),
+        !args.entrypoint
+            || args.run.registry_pack_image.is_none()
+            || args.run.resolved_application.is_some(),
         "machine run --entrypoint cannot carry a signed pack identity through its \
          separate boot path; run the pack without --entrypoint"
     );
@@ -221,7 +259,7 @@ fn run_persistent_post_start(
         denials.finish()?;
         let code = outcome?;
         if code != 0 {
-            mvm_observability::exit(code);
+            crate::observability::exit(code);
         }
         return Ok(());
     }
@@ -442,6 +480,7 @@ fn run_entrypoint_action(
     resolved_flake_slot: Option<String>,
     review_source: ReviewSource,
 ) -> Result<()> {
+    crate::commands::vm::exec::application_source::require_entrypoint_request(&args.run)?;
     if !args.run.outputs.is_empty() {
         anyhow::bail!(
             "machine run --entrypoint does not accept --output; collect outputs from a \
@@ -484,7 +523,9 @@ fn run_entrypoint_action(
         &routes.with_allow_host(&args.run.allow_host),
         &[],
     )?
-    .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget))
+    .with_ai(crate::commands::vm::exec::application_source::ai_policy(
+        &args.run,
+    )?)
     .with_routes(routes.routes);
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
     let exit_apply = exit_apply_request(&args);
@@ -511,7 +552,11 @@ fn run_entrypoint_action(
         review_source,
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
+        portable_boot_assets: None,
     };
+    if let Some(application) = args.run.resolved_application {
+        return invoke::run_application_entrypoint(call, application);
+    }
     if !call.attach {
         return invoke::run_entrypoint(call);
     }
@@ -522,7 +567,7 @@ fn run_entrypoint_action(
     let exit_code = invoke::dispatch_attached(call)?;
     workspace_apply::offer_at_exit(&machine, exit_apply)?;
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }
@@ -584,34 +629,22 @@ fn resolve_entrypoint_stdin_with(
     }
 }
 
-pub(super) fn prepare_application_run(
-    args: &mut MachineRunArgs,
-    posture: &mvm_core::plan::BundleSecurityPosture,
-    environment: &mvm_core::plan::EnvironmentDescriptor,
-) -> Result<()> {
-    let development = posture.profile == mvm_core::security::AgentProfile::Dev;
-    anyhow::ensure!(
-        !development || args.run.profile == RunProfile::Dev,
-        "this application is signed for development access; explicitly select --profile dev"
-    );
-    if args.interactive() {
-        anyhow::ensure!(
-            development && args.run.profile == RunProfile::Dev,
-            "application terminal access requires both a development package and --profile dev; \
-             sealed application console access remains refused"
-        );
-        anyhow::ensure!(
-            args.run.argv.is_empty() && args.run.launch_plan.is_none(),
-            "application terminal access runs only the signed declared entrypoint"
-        );
-        anyhow::ensure!(
-            environment.entrypoint.working_dir.is_none(),
-            "the development terminal path cannot yet preserve a declared working directory; \
-             use the non-terminal entrypoint path"
-        );
-        args.run.argv = environment.entrypoint.argv.clone();
-        args.run.pty = true;
+fn select_application_action(args: &mut MachineRunArgs) -> Result<()> {
+    if args.run.resolved_application.is_none() {
+        return Ok(());
     }
+    if args.run.argv.is_empty() {
+        anyhow::ensure!(
+            !args.interactive(),
+            "an application entrypoint cannot be combined with --tty or --interactive; \
+             provide an explicit command after -- instead"
+        );
+        args.entrypoint = true;
+    }
+    anyhow::ensure!(
+        !args.entrypoint || args.run.argv.is_empty(),
+        "an application entrypoint cannot be combined with a command after --"
+    );
     Ok(())
 }
 
@@ -633,28 +666,19 @@ pub(in crate::commands) fn run_dispatch(
     // Before the `--prod` check below, which asks whether an image was named:
     // a positional image reference is one. An artifact is verified and
     // installed here, and refused under `--prod` before it is.
-    crate::commands::vm::exec::positional_source::apply_positional_source(&mut args.run)?;
-    if args.run.application_policy.is_some() {
-        let bundle = args
-            .run
-            .manifest
-            .as_deref()
-            .context("application bundle is missing")?;
-        let posture = mvm_runtime::vm::template::lifecycle::installed_bundle_posture(bundle)?
-            .context("application bundle has no signed security posture")?;
-        let environment =
-            mvm_client::admission::bundle_environment::installed_bundle_environment(bundle)?
-                .context("application bundle has no signed environment")?;
-        prepare_application_run(&mut args, &posture, &environment)?;
-        anyhow::ensure!(
-            !args.persistent() && !args.entrypoint,
-            "installed application names support only the foreground declared-entrypoint path; \
-             persistent machines and explicit --entrypoint are not supported"
-        );
-        mvm_core::cold_build::set_policy(mvm_core::cold_build::launch_policy(
-            mvm_core::cold_build::BuildFlag::NoBuild,
-        ));
+    crate::commands::vm::exec::application_source::apply_application_source(&mut args.run)?;
+    crate::commands::vm::exec::application_source::require_bound_route(
+        args.run.resolved_application.as_ref(),
+        args.persistent(),
+        args.attach,
+    )?;
+    select_application_action(&mut args)?;
+    if args.entrypoint {
+        crate::commands::vm::exec::application_source::apply_entrypoint_resource_defaults(
+            &mut args.run,
+        )?;
     }
+    crate::commands::vm::exec::positional_source::apply_positional_source(&mut args.run)?;
     args.refuse_unsupported_prod()?;
     args.refuse_unsupported_persistent_env()?;
     // Syntax, policy, terminal, dry-run, and host-capability refusals must be
@@ -675,16 +699,19 @@ pub(in crate::commands) fn run_dispatch(
     // flag or as the positional source) becomes the installed bundle's sha256
     // here, so nothing downstream parses the archive as an `mvm.toml` and the
     // boot is a plain `--manifest <bundle-sha256>`.
-    crate::commands::bundle::settle_manifest_archive(&mut args.run.manifest, args.run.dry_run)?;
-    if args.run.application_policy.is_some() {
-        crate::commands::vm::exec::environment_defaults::apply_installed_bundle_defaults(
-            &mut args.run,
-        )?;
-    }
+    crate::commands::bundle::settle_manifest_archive(
+        &mut args.run.manifest,
+        args.run.dry_run,
+        args.run.prod,
+    )?;
     // Before the flake is built into a slot below: the project's `[policy]`
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
-    crate::commands::vm::exec::environment_defaults::check_application_requirements(&args.run)?;
+    if args.entrypoint {
+        crate::commands::vm::exec::application_source::apply_entrypoint_secret_defaults(
+            &mut args.run,
+        )?;
+    }
     // The manifest that policy came from, for reviewing the run's refusals.
     // Read now, while the arguments still name the flake directory; the
     // transient lanes carry it on the run arguments.
@@ -833,6 +860,61 @@ pub(in crate::commands) fn boot_persistent_by_name(
 #[cfg(test)]
 mod entrypoint_stdin_tests {
     use super::*;
+
+    fn application_args() -> MachineRunArgs {
+        MachineRunArgs {
+            run: RunArgs {
+                resolved_application: Some(
+                    mvm_core::registry_pack::application_bundle::ResolvedApplication {
+                        reference: "agent/claude@2.0.0".parse().unwrap(),
+                        descriptor_sha256: "a".repeat(64),
+                        bundle_sha256: "b".repeat(64),
+                    },
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn installed_application_defaults_to_entrypoint_with_one_shot_joke_stdin() {
+        let mut args = application_args();
+        select_application_action(&mut args).unwrap();
+        assert!(args.entrypoint);
+        assert!(args.run.argv.is_empty());
+        let stdin = resolve_entrypoint_stdin_with(args.stdin.as_deref(), || {
+            Ok(b"tell me a joke\n".to_vec())
+        })
+        .unwrap();
+        assert!(
+            matches!(stdin, invoke::EntrypointStdin::OneShot(bytes) if bytes == b"tell me a joke\n")
+        );
+    }
+
+    #[test]
+    fn explicit_commands_and_ordinary_sources_keep_their_route() {
+        let mut args = application_args();
+        args.run.argv = vec!["echo".into(), "hello".into()];
+        select_application_action(&mut args).unwrap();
+        assert!(!args.entrypoint);
+        assert_eq!(args.run.argv, ["echo", "hello"]);
+        let mut ordinary = MachineRunArgs::default();
+        select_application_action(&mut ordinary).unwrap();
+        assert!(!ordinary.entrypoint);
+    }
+
+    #[test]
+    fn application_action_refuses_conflicts_without_dropping_commands() {
+        let mut args = application_args();
+        args.tty = true;
+        assert!(select_application_action(&mut args).is_err());
+        args.tty = false;
+        args.entrypoint = true;
+        args.run.argv = vec!["echo".into()];
+        assert!(select_application_action(&mut args).is_err());
+        assert_eq!(args.run.argv, ["echo"]);
+    }
 
     #[test]
     fn a_pack_image_refuses_the_separate_entrypoint_boot_path() {

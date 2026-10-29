@@ -15,6 +15,9 @@ pub const DEFAULT_STANDBY_MEMORY_MIB: u64 = 2048;
 pub struct MvmConfig {
     /// Default tenant label used when neither the CLI nor `MVM_TENANT` names one.
     pub tenant: UserTenantConfig,
+    /// Host forward-leg transport override. A present table replaces ambient
+    /// proxy variables completely; an empty table explicitly selects direct.
+    pub egress_proxy: Option<HostEgressProxyConfig>,
     /// vCPUs allocated to the dev VM (default: 8). macOS uses Apple
     /// Container; Linux uses native KVM.
     pub dev_vm_cpus: u32,
@@ -103,6 +106,21 @@ pub struct MvmConfig {
 pub struct UserTenantConfig {
     /// Default tenant label. An empty value falls back to `local`.
     pub name: String,
+}
+
+/// Operator-only upstream transport settings, never guest egress grants.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HostEgressProxyConfig {
+    pub https: Option<String>,
+    pub http: Option<String>,
+    pub no_proxy: Option<String>,
+}
+
+impl std::fmt::Debug for HostEgressProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostEgressProxyConfig { <redacted> }")
+    }
 }
 
 /// One external plan signer the operator has chosen to trust: the
@@ -232,6 +250,7 @@ impl Default for MvmConfig {
     fn default() -> Self {
         Self {
             tenant: UserTenantConfig::default(),
+            egress_proxy: None,
             dev_vm_cpus: 8,
             dev_vm_mem_gib: 16,
             default_cpus: 2,
@@ -301,10 +320,10 @@ pub fn load(override_dir: Option<&Path>) -> MvmConfig {
     }
 
     match std::fs::read_to_string(&path) {
-        Ok(text) => match toml::from_str::<MvmConfig>(&text) {
+        Ok(text) => match parse(&text) {
             Ok(cfg) => cfg,
-            Err(e) => {
-                tracing::warn!("Failed to parse {}: {e}. Using defaults.", path.display());
+            Err(_) => {
+                tracing::warn!("Failed to parse {}. Using defaults.", path.display());
                 MvmConfig::default()
             }
         },
@@ -315,21 +334,22 @@ pub fn load(override_dir: Option<&Path>) -> MvmConfig {
     }
 }
 
-/// Read configuration without creating it or falling back on malformed contents.
-///
-/// A missing file uses defaults; other read errors and parse errors are returned.
+/// Parse operator settings without retaining TOML source in errors. Config
+/// diagnostics may be logged, and the source can contain proxy credentials.
+pub fn parse(text: &str) -> Result<MvmConfig> {
+    toml::from_str(text)
+        .map_err(|_| anyhow::anyhow!("host config is invalid; check config/config.toml"))
+}
+
+/// Read operator settings without creating files or falling back on malformed
+/// input. Parse errors deliberately omit TOML source, which can hold secrets.
 pub fn load_strict(override_dir: Option<&Path>) -> Result<MvmConfig> {
     let path = config_path_at(&config_dir(override_dir));
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(MvmConfig::default());
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("Failed to read {}", path.display()));
-        }
-    };
-    toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MvmConfig::default()),
+        Err(_) => anyhow::bail!("host config could not be read; check config/config.toml"),
+    }
 }
 
 /// Save `MvmConfig` to `<mvm_config_dir>/config.toml` (or `override_dir/config.toml` in tests).
@@ -450,6 +470,74 @@ mod tests {
     use super::*;
     use crate::util::test_env::TestEnv;
 
+    #[test]
+    fn config_parse_errors_do_not_retain_sensitive_source() {
+        let sensitive = format!("private-{}", std::process::id());
+        let text = format!("[egress_proxy]\nhttps = 'http://{sensitive}@proxy.corp\n");
+        let err = parse(&text).unwrap_err();
+        assert!(!format!("{err:?}").contains(&sensitive));
+        assert!(parse("").unwrap().egress_proxy.is_none());
+    }
+
+    #[test]
+    fn egress_proxy_defaults_and_roundtrip() {
+        assert!(MvmConfig::default().egress_proxy.is_none());
+        let cfg: MvmConfig = toml::from_str(
+            "[egress_proxy]\nhttps = 'http://proxy.corp:3128'\nhttp = ''\nno_proxy = 'internal.example'",
+        )
+        .unwrap();
+        let proxy = cfg.egress_proxy.as_ref().unwrap();
+        assert_eq!(proxy.http.as_deref(), Some(""));
+        assert_eq!(proxy.no_proxy.as_deref(), Some("internal.example"));
+        let roundtrip: MvmConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(roundtrip.egress_proxy, cfg.egress_proxy);
+        let empty: MvmConfig = toml::from_str("[egress_proxy]").unwrap();
+        assert_eq!(empty.egress_proxy, Some(HostEgressProxyConfig::default()));
+    }
+
+    #[test]
+    fn strict_config_load_refuses_malformed_proxy_without_echoing_input() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            load_strict(Some(dir.path()))
+                .unwrap()
+                .egress_proxy
+                .is_none()
+        );
+        assert!(!dir.path().join("config.toml").exists());
+        for text in [
+            "[egress_proxy]\nhttps = 42",
+            "[egress_proxy]\nhtps = 'http://proxy.corp'",
+            "[egress_proxy",
+        ] {
+            std::fs::write(dir.path().join("config.toml"), text).unwrap();
+            let err = load_strict(Some(dir.path())).unwrap_err();
+            assert!(!format!("{err:?}").contains(text));
+        }
+        std::fs::write(dir.path().join("config.toml"), "[egress_proxy]").unwrap();
+        assert_eq!(
+            load_strict(Some(dir.path())).unwrap().egress_proxy,
+            Some(HostEgressProxyConfig::default())
+        );
+    }
+
+    #[test]
+    fn host_proxy_debug_redacts_every_field() {
+        let sensitive = "http://username-token:password-token@proxy.corp".to_string();
+        let cfg = HostEgressProxyConfig {
+            https: Some(sensitive.clone()),
+            http: Some(sensitive.clone()),
+            no_proxy: Some(sensitive.clone()),
+        };
+        let wrapper = MvmConfig {
+            egress_proxy: Some(cfg.clone()),
+            ..MvmConfig::default()
+        };
+        for debug in [format!("{cfg:?}"), format!("{wrapper:?}")] {
+            assert!(!debug.contains("username-token"));
+            assert!(!debug.contains("password-token"));
+        }
+    }
     #[test]
     fn test_default_values() {
         let cfg = MvmConfig::default();

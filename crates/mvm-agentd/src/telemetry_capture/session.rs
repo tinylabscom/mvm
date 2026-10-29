@@ -283,7 +283,7 @@ pub fn serve_capture_session<S: TimedStream>(
         return SessionEnd::Failed;
     }
 
-    let mut summarized = SourceLosses::default();
+    let mut summarized = [SourceLosses::default(); ProducerId::ALL.len()];
     let mut last_summary = Instant::now();
     loop {
         if stop.load(Ordering::Acquire) {
@@ -328,14 +328,24 @@ fn drain_turn<S: TimedStream>(
     capture: &CaptureState,
     write: Duration,
 ) -> Result<usize, ()> {
-    for sent in 0..RECORDS_PER_TURN {
-        match sender.send_next(&mut Deadline::new(stream, write), capture.outbox()) {
-            Ok(true) => {}
-            Ok(false) => return Ok(sent),
-            Err(_) => return Err(()),
+    // One record from each queue in turn, so a producer flooding its own
+    // queue cannot keep another's records waiting for a later turn.
+    let queues = capture.queues();
+    let mut drained = vec![false; queues.len()];
+    let mut sent = 0;
+    while sent < RECORDS_PER_TURN && drained.iter().any(|done| !done) {
+        for (queue, done) in queues.iter().zip(drained.iter_mut()) {
+            if *done || sent == RECORDS_PER_TURN {
+                continue;
+            }
+            match sender.send_next(&mut Deadline::new(stream, write), queue) {
+                Ok(true) => sent += 1,
+                Ok(false) => *done = true,
+                Err(_) => return Err(()),
+            }
         }
     }
-    Ok(RECORDS_PER_TURN)
+    Ok(sent)
 }
 
 enum PeerProbe {
@@ -371,10 +381,28 @@ fn summarize_losses<S: TimedStream>(
     stream: &mut S,
     sender: &mut TelemetrySender,
     capture: &CaptureState,
+    summarized: &mut [SourceLosses; ProducerId::ALL.len()],
+    write: Duration,
+) -> Result<(), ()> {
+    // Every producer's losses, each under its own producer, so a source that
+    // sheds — a workload flooding stdout, say — is reported, never silent.
+    for (producer, summarized) in ProducerId::ALL.into_iter().zip(summarized.iter_mut()) {
+        summarize_producer(stream, sender, capture, producer, summarized, write)?;
+    }
+    Ok(())
+}
+
+/// Send one Loss record per loss family that grew since `producer`'s last
+/// summary.
+fn summarize_producer<S: TimedStream>(
+    stream: &mut S,
+    sender: &mut TelemetrySender,
+    capture: &CaptureState,
+    producer: ProducerId,
     summarized: &mut SourceLosses,
     write: Duration,
 ) -> Result<(), ()> {
-    let current = capture.losses(ProducerId::AgentDiagnostics);
+    let current = capture.losses(producer);
     // Contention is admission pressure like capacity — the wire reason
     // merges them, and the per-producer counters keep the finer split.
     let capacity_records = current.capacity.records + current.contention.records;
@@ -426,8 +454,8 @@ fn summarize_losses<S: TimedStream>(
             continue;
         }
         let Some(prepared) = capture.prepare_direct(
-            SourceKind::GuestAgent,
-            ProducerId::AgentDiagnostics,
+            producer.default_source(),
+            producer,
             RecordBody::Loss {
                 stage: GuestLossStage::Capture,
                 reason,
@@ -894,10 +922,123 @@ mod tests {
         let shed_reported = collector.join().unwrap();
         assert_eq!(end, SessionEnd::PeerClosed);
         assert!(shed_reported > 0, "a summary reported the flood's losses");
+        // The flood never ends on its own: it stops only because a summary
+        // crossed. The bound is generous because a loaded CI runner stretches
+        // the handshake and the first turns; the property is that a summary
+        // arrives while the flood is still running, not its exact cadence.
         assert!(
-            started.elapsed() < SUMMARY_INTERVAL * 4,
+            started.elapsed() < SUMMARY_INTERVAL * 15,
             "the summary came on its cadence, not after the flood"
         );
+    }
+
+    /// Collect what a host receives from a session over `capture` until the
+    /// guest ends it, stopping the session once `until` has seen enough.
+    fn receive_until(
+        capture: &CaptureState,
+        until: impl Fn(&[TelemetryRecord]) -> bool + Send + 'static,
+    ) -> Vec<TelemetryRecord> {
+        let (guest_key, anchor_key) = keys();
+        let (mut guest, mut host) = UnixStream::pair().unwrap();
+        let expected = guest_key.verifying_key();
+        let anchor = anchor_key.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let collector = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut receiver = authenticate(&mut host, &anchor, &expected);
+                // A bound on the wait, so a witness whose condition never
+                // holds fails instead of hanging; well past the summary clock.
+                let give_up = std::time::Instant::now() + SUMMARY_INTERVAL * 5;
+                host.set_read_timeout(Some(SUMMARY_INTERVAL * 5)).unwrap();
+                let mut seen = Vec::new();
+                while let Ok(record) = receiver.receive(&mut host) {
+                    seen.push(record);
+                    if until(&seen) || std::time::Instant::now() >= give_up {
+                        stop.store(true, Ordering::Release);
+                    }
+                }
+                seen
+            })
+        };
+        let _ = serve_capture_session(
+            &mut guest,
+            guest_key,
+            &anchor_key.verifying_key(),
+            capture,
+            &stop,
+            BOUNDS,
+        );
+        drop(guest);
+        collector.join().unwrap()
+    }
+
+    fn stdout_chunk(capture: &CaptureState) {
+        crate::telemetry_capture::offer_stdio_to(
+            capture,
+            mvm_core::protocol::telemetry::StdioStream::Stdout,
+            &[b'o'; 4096],
+        );
+    }
+
+    fn stdout_losses(seen: &[TelemetryRecord]) -> u64 {
+        seen.iter()
+            .filter(|record| record.producer() == ProducerId::Stdout.number())
+            .map(|record| match record.body() {
+                RecordBody::Loss { records, .. } => *records,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn a_workload_flooding_stdout_has_its_losses_summarized_not_dropped_silently() {
+        let capture = capture_over(4);
+        for _ in 0..40 {
+            stdout_chunk(&capture);
+        }
+        let shed = capture.losses(ProducerId::Stdout).capacity.records;
+        assert!(shed > 0, "the flood overflowed the queue");
+        let seen = receive_until(&capture, move |seen| stdout_losses(seen) >= shed);
+        assert_eq!(
+            stdout_losses(&seen),
+            shed,
+            "every stdout record shed is reported under the stdout producer"
+        );
+    }
+
+    #[test]
+    fn a_stdout_flood_in_its_own_queue_cannot_crowd_out_diagnostics() {
+        let capture = capture_over(8).with_queue_for(
+            ProducerId::Stdout,
+            Arc::new(Outbox::new(4, 4 * MAX_RECORD_BYTES).unwrap()),
+        );
+        for _ in 0..40 {
+            stdout_chunk(&capture);
+        }
+        diagnostic(&capture, "after-the-flood");
+        assert_eq!(
+            capture
+                .losses(ProducerId::AgentDiagnostics)
+                .capacity
+                .records,
+            0,
+            "the diagnostic was admitted beside a full stdout queue"
+        );
+        let seen = receive_until(&capture, |seen| {
+            seen.iter().any(|record| {
+                matches!(record.body(), RecordBody::Event { name, .. } if name.as_str() == "after-the-flood")
+            })
+        });
+        let position = seen
+            .iter()
+            .position(|record| {
+                matches!(record.body(), RecordBody::Event { name, .. } if name.as_str() == "after-the-flood")
+            })
+            .expect("the diagnostic arrived");
+        // Announcement, then queues drained in turn: the diagnostic is not
+        // held behind the four queued stdout records.
+        assert!(position <= 2, "diagnostic arrived at {position}");
     }
 
     #[test]

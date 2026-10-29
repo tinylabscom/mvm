@@ -1,4 +1,4 @@
-//! `mvmctl build guest-bins` — assemble the publishable `mvm-guest-bins`
+//! `mvmctl dev guest-bins` — assemble the publishable `mvm-guest-bins`
 //! artifact from this source checkout.
 //!
 //! The archive carries every guest artifact mvm owns: the static guest
@@ -13,12 +13,14 @@
 //! command. A downloaded `mvmctl` acquires its own version's copy;
 //! `mvm-images` does not consume it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm_build::guest_bins::{GuestBinsBuild, WrittenGuestBins, build_guest_bins};
+use mvm_build::guest_bins::{
+    GuestBinsBuild, GuestBinsManifest, WrittenGuestBins, build_guest_bins,
+};
 use mvm_core::arch::GuestArch;
 use mvm_core::user_config::MvmConfig;
 
@@ -34,12 +36,19 @@ pub(in crate::commands) struct Args {
     /// to both
     #[arg(long = "arch", value_name = "ARCH")]
     pub arches: Vec<GuestArch>,
+
+    /// Check an existing complete release archive without building or acquiring artifacts
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["out", "arches"])]
+    pub check_release_archive: Option<PathBuf>,
 }
 
 /// Both guest architectures, which is what a published artifact carries.
 const ALL_ARCHES: [GuestArch; 2] = [GuestArch::Aarch64, GuestArch::X86_64];
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+    if let Some(archive) = &args.check_release_archive {
+        return check_archive_to_stdout(archive);
+    }
     let workspace =
         mvm_build::guest_agent_build::detect_source_workspace().ok_or_else(no_source_checkout)?;
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
@@ -52,14 +61,45 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         request.workspace_root.display()
     ));
     let written = build_guest_bins(&request).context("assemble the guest-bins artifact")?;
+    validate_complete_runtime(&written.manifest, &request.arches, &request.version)?;
     phase.finish();
     println!("{}", render_summary(&written));
     Ok(())
 }
 
+pub(in crate::commands) fn check_archive_to_stdout(archive: &Path) -> Result<()> {
+    let manifest = check_existing_release(archive)?;
+    println!("{}", serde_json::to_string(&manifest)?);
+    Ok(())
+}
+
+fn check_existing_release(archive: &Path) -> Result<GuestBinsManifest> {
+    let version = env!("CARGO_PKG_VERSION");
+    let manifest = mvm_build::guest_bins::release::check_release_archive(archive, version)
+        .context("checking the original release runtime archive")?;
+    mvm_build::guest_runtime::validate_release_guest_runtime_manifest(&manifest, version)
+        .context("checking complete release runtime boot assemblies")?;
+    Ok(manifest)
+}
+
+fn validate_complete_runtime(
+    manifest: &GuestBinsManifest,
+    arches: &[GuestArch],
+    version: &str,
+) -> Result<()> {
+    if ALL_ARCHES.iter().all(|arch| arches.contains(arch)) {
+        // The archive writer already verified the original payload's hashes.
+        // A complete publishing inventory also needs the canonical runtime
+        // version, required members and both deterministic boot assemblies.
+        mvm_build::guest_runtime::validate_release_guest_runtime_manifest(manifest, version)
+            .context("validating the complete release runtime before upload")?;
+    }
+    Ok(())
+}
+
 fn no_source_checkout() -> anyhow::Error {
     anyhow::anyhow!(
-        "`mvmctl build guest-bins` builds from an mvm source checkout, and none was found; \
+        "`mvmctl dev guest-bins` builds from an mvm source checkout, and none was found; \
          run it from a clone of the mvm repository"
     )
 }
@@ -121,6 +161,7 @@ mod tests {
         Args {
             out: PathBuf::from("/tmp/out"),
             arches,
+            check_release_archive: None,
         }
     }
 
@@ -144,8 +185,19 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_names_the_pin_the_source_and_both_fingerprints() {
-        let written = WrittenGuestBins {
+    fn existing_archive_check_refuses_missing_or_malformed_inputs_without_building() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.tar.gz");
+        assert!(check_existing_release(&missing).is_err());
+        let malformed = directory.path().join("malformed.tar.gz");
+        std::fs::write(&malformed, b"not an archive").unwrap();
+        assert!(check_existing_release(&malformed).is_err());
+        assert!(!directory.path().join("cache").exists());
+        assert!(!directory.path().join("vms").exists());
+    }
+
+    fn written_fixture() -> WrittenGuestBins {
+        WrittenGuestBins {
             archive: PathBuf::from("/out/mvm-guest-bins-v1.2.3.tar.gz"),
             checksum: PathBuf::from("/out/mvm-guest-bins-v1.2.3.tar.gz.sha256"),
             sha256: "ab".repeat(32),
@@ -159,8 +211,32 @@ mod tests {
                     worktree: WorktreeState::Clean,
                 },
                 files: BTreeMap::from([("x86_64/bin/mvm-guest-agent".into(), "d".repeat(64))]),
+                assemblies: Default::default(),
             },
-        };
+        }
+    }
+
+    #[test]
+    fn complete_publishing_inventory_uses_the_canonical_runtime_validator() {
+        let mut written = written_fixture();
+        written.manifest.schema_version = mvm_build::guest_bins::GUEST_BINS_MANIFEST_SCHEMA;
+        let error = validate_complete_runtime(&written.manifest, &ALL_ARCHES, "1.2.3")
+            .expect_err("a partial legacy manifest must not become a release runtime");
+        assert!(format!("{error:#}").contains("complete release runtime"));
+        let wrong_version = validate_complete_runtime(&written.manifest, &ALL_ARCHES, "9.9.9")
+            .expect_err("the canonical validator must refuse the wrong runtime version");
+        assert!(format!("{wrong_version:#}").contains("9.9.9"));
+    }
+
+    #[test]
+    fn explicit_single_arch_development_build_remains_partial() {
+        let written = written_fixture();
+        validate_complete_runtime(&written.manifest, &[GuestArch::X86_64], "1.2.3").unwrap();
+    }
+
+    #[test]
+    fn the_summary_names_the_pin_the_source_and_both_fingerprints() {
+        let written = written_fixture();
         let summary = render_summary(&written);
         for expected in [
             "mvm-guest-bins-v1.2.3.tar.gz".to_string(),

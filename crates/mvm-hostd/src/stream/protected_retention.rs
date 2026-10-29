@@ -188,3 +188,179 @@ impl ManagedRetention {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::transcript_retirement::authenticated_retirement;
+    use crate::stream::{StreamBroker, StreamRedaction};
+    use mvm_core::plan::test_support::PlanFixture;
+    use mvm_core::stream_client::protected::GENERATIONS_DIRECTORY;
+    use mvm_core::transcript::{
+        AtRestRetention, CaptureBinding, CaptureBounds, Direction, MANIFEST_FILENAME,
+        RetentionPolicy, TranscriptWriter, TranscriptWriterConfig, verify_sealed_root,
+    };
+
+    struct SealedGeneration {
+        dir: PathBuf,
+        manifest: TranscriptManifest,
+        segment: PathBuf,
+        segment_bytes: Vec<u8>,
+    }
+
+    fn seal_generation(
+        root: &Path,
+        run: &str,
+        vm: &str,
+        tenant: &str,
+        created: u64,
+        sealed: u64,
+        marker: &[u8],
+    ) -> SealedGeneration {
+        let relative = Path::new(GENERATIONS_DIRECTORY)
+            .join(run)
+            .join("00000000000000000000");
+        let dir = root.join(&relative);
+        mvm_core::private_fs::ensure_private_dir(&dir).unwrap();
+        let mut writer = TranscriptWriter::new(
+            &dir,
+            mvm_core::crypto::aead::Key::random(),
+            TranscriptWriterConfig {
+                capture_id: format!("synthetic-{run}"),
+                binding: CaptureBinding {
+                    tenant_id: tenant.into(),
+                    vm_name: vm.into(),
+                    session_id: None,
+                },
+                bounds: CaptureBounds {
+                    max_duration_secs: 3_600,
+                    max_bytes: 1 << 20,
+                    max_chunks: 100,
+                },
+                retention: RetentionPolicy::FailClosed,
+                at_rest: Some(AtRestRetention::default()),
+                generation_budget: Some(GenerationBudget::default()),
+                payload_encoding: Default::default(),
+                created_unix_secs: created,
+                recipient: "transcript-kek".into(),
+                wrapped_data_key_b64: "synthetic-envelope".into(),
+            },
+        )
+        .unwrap();
+        writer.push(Direction::Stdout, marker).unwrap();
+        let manifest = writer.finalize_at(sealed).unwrap();
+        drop(writer);
+        std::fs::write(
+            dir.join(MANIFEST_FILENAME),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let segment = dir.join(&manifest.chunks[0].file);
+        let segment_bytes = std::fs::read(&segment).unwrap();
+        SealedGeneration {
+            dir,
+            manifest,
+            segment,
+            segment_bytes,
+        }
+    }
+
+    /// One maintenance pass retires only the generation whose deadline has
+    /// passed: its ciphertext is unlinked while its manifest and audit
+    /// evidence keep verifying, and the unexpired generation in the same
+    /// family keeps its payload, its manifest, and its read window.
+    #[test]
+    fn maintenance_removes_only_due_payload_and_keeps_unexpired_generation_readable() {
+        let root = tempfile::tempdir().unwrap();
+        mvm_core::private_fs::ensure_private_dir(root.path()).unwrap();
+        let vm = "maintained-instance";
+        let tenant = "maintained-tenant";
+        let plan = PlanFixture::new().tenant(tenant).build();
+        let emitter = AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[41; 32]),
+            &root.path().join("audit"),
+        )
+        .unwrap();
+        let now = retention_now().unwrap();
+        let due = seal_generation(
+            root.path(),
+            "run-due",
+            vm,
+            tenant,
+            now - 700_000,
+            now - 699_000,
+            b"synthetic-due",
+        );
+        let fresh = seal_generation(
+            root.path(),
+            "run-fresh",
+            vm,
+            tenant,
+            now - 100,
+            now - 50,
+            b"synthetic-fresh",
+        );
+        for generation in [&due, &fresh] {
+            emitter
+                .emit_transcript_sealed(
+                    &plan,
+                    &generation.manifest.capture_id,
+                    &generation.manifest.binding.vm_name,
+                    &generation.manifest.sealed_root_hex,
+                    generation.manifest.chunks.len(),
+                    false,
+                )
+                .unwrap();
+        }
+        let chain = emitter.audit_dir().join(format!("{tenant}.jsonl"));
+        let mut managed = ManagedRetention::new(root.path(), vm, tenant, &emitter).unwrap();
+        assert_eq!(managed.inventory.generations.len(), 2);
+        let broker: SharedBroker = Arc::new(Mutex::new(StreamBroker::live_only(
+            vm,
+            StreamRedaction::curated(&plan.redaction),
+        )));
+        managed.maintain(&emitter, &broker).unwrap();
+        // Due: payload unlinked, verification metadata preserved.
+        assert!(!due.segment.exists());
+        let retired_manifest: TranscriptManifest =
+            serde_json::from_slice(&std::fs::read(due.dir.join(MANIFEST_FILENAME)).unwrap())
+                .unwrap();
+        assert_eq!(retired_manifest, due.manifest);
+        verify_sealed_root(&retired_manifest).unwrap();
+        assert!(
+            authenticated_retirement(emitter.audit_dir(), &emitter.verifying_key(), &due.manifest)
+                .unwrap()
+        );
+        // Not due: payload, manifest and read window untouched; no evidence.
+        assert_eq!(std::fs::read(&fresh.segment).unwrap(), fresh.segment_bytes);
+        let kept_manifest: TranscriptManifest =
+            serde_json::from_slice(&std::fs::read(fresh.dir.join(MANIFEST_FILENAME)).unwrap())
+                .unwrap();
+        assert_eq!(kept_manifest, fresh.manifest);
+        assert!(
+            !authenticated_retirement(
+                emitter.audit_dir(),
+                &emitter.verifying_key(),
+                &fresh.manifest
+            )
+            .unwrap()
+        );
+        assert!(
+            fresh
+                .manifest
+                .check_readable_at(retention_now().unwrap())
+                .is_ok()
+        );
+        assert_eq!(managed.inventory.generations.len(), 1);
+        assert_eq!(
+            managed.inventory.generations[0].manifest.capture_id,
+            fresh.manifest.capture_id
+        );
+        // A second pass is a no-op: nothing new is signed or removed.
+        let evidence = std::fs::read(&chain).unwrap();
+        managed.maintain(&emitter, &broker).unwrap();
+        assert_eq!(std::fs::read(&chain).unwrap(), evidence);
+        assert!(fresh.segment.exists());
+        assert!(!due.segment.exists());
+    }
+}

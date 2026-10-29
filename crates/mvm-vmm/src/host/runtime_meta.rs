@@ -80,6 +80,11 @@ pub struct VmRuntimeMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_overlay_version: Option<String>,
 
+    /// Observed bound paths and untrusted release inputs for checkpoint capture.
+    /// This record grants no authority without independent verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_launch_binding: Option<mvm_core::protocol::runtime_release::RuntimeLaunchBinding>,
+
     /// Host-side observability target for eBPF/procfs telemetry collectors.
     ///
     /// Best-effort: if the file cannot be written the VM still starts.
@@ -230,6 +235,7 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
         accessible: true,
         rootfs_path: None,
         runtime_overlay_version: None,
+        runtime_launch_binding: None,
         observability_target: None,
         restored_device_anchors: None,
     }
@@ -330,6 +336,7 @@ pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmR
         accessible,
         rootfs_path: None,
         runtime_overlay_version: None,
+        runtime_launch_binding: None,
         observability_target: None,
         restored_device_anchors: None,
     })
@@ -383,6 +390,109 @@ fn from_start_config(mode: StartMode, start_config: &VmStartConfig) -> Result<Vm
     let mut meta = from_sidecar(mode, dir)?;
     meta.rootfs_path = Some(start_config.rootfs_path.clone());
     meta.runtime_overlay_version = start_config.runtime_overlay_version.clone();
+    use mvm_core::protocol::runtime_release::RuntimeBindingProvenance;
+    let provenance = match &start_config.runtime_release_proof {
+        Some(proof) => Some(RuntimeBindingProvenance::Release {
+            proof: proof.clone(),
+        }),
+        None if start_config.unsigned_runtime_development => {
+            Some(RuntimeBindingProvenance::Source {
+                version: start_config
+                    .runtime_overlay_version
+                    .clone()
+                    .context("source runtime binding has no version")?,
+                arch: mvm_core::arch::GuestArch::host(),
+                archive_sha256: start_config
+                    .source_runtime_archive_sha256
+                    .clone()
+                    .context("source runtime binding has no archive digest")?,
+            })
+        }
+        None => None,
+    };
+    meta.runtime_launch_binding = provenance
+        .map(|provenance| {
+            Ok::<_, anyhow::Error>(
+                mvm_core::protocol::runtime_release::RuntimeLaunchBinding::CliAssembly(
+                    mvm_core::protocol::runtime_release::CliRuntimeLaunchBinding {
+                        provenance,
+                        overlay_path: start_config
+                            .runtime_overlay_path
+                            .as_ref()
+                            .context("runtime binding has no overlay")?
+                            .into(),
+                        overlay_verity_path: start_config
+                            .runtime_overlay_verity_path
+                            .as_ref()
+                            .context("runtime binding has no verity tree")?
+                            .into(),
+                        initramfs_path: start_config
+                            .initrd_path
+                            .as_ref()
+                            .context("runtime binding has no initramfs")?
+                            .into(),
+                        overlay_roothash: start_config
+                            .runtime_overlay_roothash
+                            .clone()
+                            .context("runtime binding has no verity root")?,
+                    },
+                ),
+            )
+        })
+        .transpose()?;
+    if let Some(proof) = &start_config.legacy_bundle_runtime {
+        anyhow::ensure!(
+            meta.runtime_launch_binding.is_none(),
+            "mixed runtime provenance"
+        );
+        meta.runtime_launch_binding = Some(
+            mvm_core::protocol::runtime_release::RuntimeLaunchBinding::LegacyBundle {
+                proof: proof.clone(),
+                rootfs_path: start_config.rootfs_path.clone().into(),
+                initramfs_path: start_config.initrd_path.as_ref().map(PathBuf::from),
+            },
+        );
+    }
+    if let Some(proof) = &start_config.legacy_portable_runtime {
+        anyhow::ensure!(
+            meta.runtime_launch_binding.is_none(),
+            "mixed runtime provenance"
+        );
+        meta.runtime_launch_binding = Some(
+            mvm_core::protocol::runtime_release::RuntimeLaunchBinding::LegacyPortable {
+                proof: proof.clone(),
+                rootfs_path: start_config.rootfs_path.clone().into(),
+                kernel_path: start_config
+                    .kernel_path
+                    .as_ref()
+                    .context("portable kernel missing")?
+                    .into(),
+                overlay_path: start_config
+                    .runtime_overlay_path
+                    .as_ref()
+                    .context("portable overlay missing")?
+                    .into(),
+                overlay_verity_path: start_config
+                    .runtime_overlay_verity_path
+                    .as_ref()
+                    .context("portable verity missing")?
+                    .into(),
+                initramfs_path: start_config
+                    .initrd_path
+                    .as_ref()
+                    .context("portable initramfs missing")?
+                    .into(),
+                overlay_roothash: start_config
+                    .runtime_overlay_roothash
+                    .clone()
+                    .context("portable verity root missing")?,
+                version: start_config
+                    .runtime_overlay_version
+                    .clone()
+                    .context("portable version missing")?,
+            },
+        );
+    }
     Ok(meta)
 }
 
@@ -430,6 +540,7 @@ mod tests {
                 accessible: true,
                 rootfs_path: None,
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 observability_target: None,
                 restored_device_anchors: None,
             };
@@ -447,6 +558,7 @@ mod tests {
                 accessible: false,
                 rootfs_path: None,
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 observability_target: None,
                 restored_device_anchors: None,
             };
@@ -659,6 +771,7 @@ mod tests {
                 accessible: false,
                 rootfs_path: Some("/abs/path/rootfs.ext4".to_string()),
                 runtime_overlay_version: Some("0.17.0".to_string()),
+                runtime_launch_binding: None,
                 observability_target: None,
                 restored_device_anchors: None,
             };
@@ -672,6 +785,7 @@ mod tests {
                 accessible: true,
                 rootfs_path: None,
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 observability_target: None,
                 restored_device_anchors: None,
             };
@@ -694,6 +808,63 @@ mod tests {
             .unwrap();
             let meta = read("oldvm-runtime").expect("read").expect("present");
             assert!(meta.runtime_overlay_version.is_none());
+            assert!(meta.runtime_launch_binding.is_none());
+        });
+    }
+
+    #[test]
+    fn records_bound_runtime_paths_without_claiming_the_record_is_verified() {
+        with_home_temp(|home| {
+            let generation = home.join("runtime-evidence/bound/runtime-one");
+            let config = VmStartConfig {
+                name: "bound".into(),
+                runtime_overlay_version: Some("1.2.3".into()),
+                runtime_overlay_path: Some(generation.join("overlay.ext4").display().to_string()),
+                runtime_overlay_verity_path: Some(
+                    generation.join("overlay.verity").display().to_string(),
+                ),
+                runtime_overlay_roothash: Some("a".repeat(64)),
+                initrd_path: Some(generation.join("initramfs.cpio.gz").display().to_string()),
+                runtime_release_proof: Some(
+                    mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                        archive: "/release/archive".into(),
+                        checksum: "/release/checksum".into(),
+                        signature_bundle: "/release/signature".into(),
+                        archive_sha256: "b".repeat(64),
+                        version: "1.2.3".into(),
+                        arch: mvm_core::arch::GuestArch::host(),
+                    },
+                ),
+                ..Default::default()
+            };
+            record_from_start_config("bound", StartMode::Detached, &config).unwrap();
+            let binding = read("bound")
+                .unwrap()
+                .unwrap()
+                .runtime_launch_binding
+                .unwrap();
+            let mvm_core::protocol::runtime_release::RuntimeLaunchBinding::CliAssembly(binding) =
+                binding
+            else {
+                panic!("CLI assembly fixture");
+            };
+            assert_eq!(binding.overlay_path, generation.join("overlay.ext4"));
+            assert_eq!(
+                binding.overlay_verity_path,
+                generation.join("overlay.verity")
+            );
+            assert_eq!(binding.initramfs_path, generation.join("initramfs.cpio.gz"));
+            assert_eq!(
+                binding.release_proof(),
+                config.runtime_release_proof.as_ref()
+            );
+            let incomplete = VmStartConfig {
+                initrd_path: None,
+                ..config
+            };
+            assert!(
+                record_from_start_config("bad-binding", StartMode::Detached, &incomplete).is_err()
+            );
         });
     }
 

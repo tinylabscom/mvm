@@ -586,8 +586,182 @@ mod tests {
         workflow("ci.yml")
     }
 
-    fn ci_full_workflow() -> String {
-        workflow("ci-full.yml")
+    /// The slow lanes that run after the merge.
+    fn main_workflow() -> String {
+        workflow("ci-main.yml")
+    }
+
+    #[test]
+    fn linux_evidence_dispatch_is_read_only_main_and_keeps_full_coverage() {
+        let dispatch = workflow("e2e-docs-linux-evidence.yml");
+        let macos = workflow("e2e-docs-macos-evidence.yml");
+        let expected = macos
+            .replace("macOS", "Linux")
+            .replace("the self-hosted lane", "the live lane")
+            .replace("run_linux: false", "run_linux: true")
+            .replace("run_macos: true", "run_macos: false")
+            .replace("      macos_blocks_on_unusable_host: true\n", "");
+        assert_eq!(dispatch, expected);
+        let reusable = workflow("e2e-docs.yml");
+        let linux = job_block(&reusable, "e2e-docs-linux");
+        assert_eq!(job_if(linux), "inputs.run_linux");
+        for required in [
+            "shard: [\"0/2\", \"1/2\"]",
+            "run: just e2e::docs",
+            "uses: actions/checkout@v6\n",
+            "MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: ${{ inputs.allow_runtime_candidate_skip }}",
+        ] {
+            assert!(linux.contains(required), "missing {required}");
+        }
+        assert!(!linux.contains("ref:"));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let script =
+            std::fs::read_to_string(root.join("scripts/e2e-documented-surface.sh")).unwrap();
+        for required in [
+            "MVM_BDD_LIVE=1",
+            "MVM_BDD_DIR_SHARE=1",
+            "MVM_BDD_STRICT_SKIPS=1",
+            "--test conformance --features bdd",
+        ] {
+            assert!(script.contains(required), "missing {required}");
+        }
+        let volume = std::fs::read_to_string(
+            root.join("features/suites/s26_volumes/volume_lifecycle.feature"),
+        )
+        .unwrap();
+        assert!(volume.contains(
+            "@live @firecracker @workload_kernel\n  Scenario: restarting refreshes a registered host directory snapshot"
+        ));
+        assert!(!volume.contains("@runtime_candidate"));
+        for required in ["dir-volume-visible", "dir-volume-refreshed"] {
+            assert!(volume.contains(required), "missing {required}");
+        }
+    }
+
+    #[test]
+    fn macos_evidence_dispatch_is_read_only_main_and_keeps_full_coverage() {
+        let dispatch = workflow("e2e-docs-macos-evidence.yml");
+        assert!(dispatch.contains("on:\n  workflow_dispatch:\n"));
+        assert!(dispatch.contains("permissions:\n  contents: read\n"));
+        let lane = job_block(&dispatch, "evidence");
+        assert_eq!(
+            job_if(lane),
+            "github.repository == 'tinylabscom/mvm' && github.ref == 'refs/heads/main'"
+        );
+        for required in [
+            "uses: ./.github/workflows/e2e-docs.yml",
+            "run_linux: false",
+            "run_macos: true",
+            "allow_runtime_candidate_skip: true",
+            "macos_blocks_on_unusable_host: true",
+        ] {
+            assert!(lane.contains(required), "missing {required}");
+        }
+        for forbidden in [
+            "secrets:",
+            "write",
+            "release.yml",
+            "steps:",
+            "inputs:",
+            "publish",
+            "deploy",
+        ] {
+            assert!(!dispatch.contains(forbidden), "unexpected {forbidden}");
+        }
+
+        let reusable = workflow("e2e-docs.yml");
+        for os in ["linux", "macos"] {
+            assert!(reusable.contains(&format!(
+                "      run_{os}:\n        description: Run the full {} documented surface\n        type: boolean\n        default: true",
+                if os == "linux" { "Linux" } else { "macOS" }
+            )));
+        }
+        assert_eq!(
+            job_if(job_block(&reusable, "e2e-docs-linux")),
+            "inputs.run_linux"
+        );
+        assert_eq!(
+            job_if(job_block(&reusable, "e2e-docs-macos-host-check")),
+            "inputs.run_macos"
+        );
+        let mac = job_block(&reusable, "e2e-docs-macos");
+        assert_eq!(
+            job_if(mac),
+            "inputs.run_macos && needs.e2e-docs-macos-host-check.outputs.supported == 'true'"
+        );
+        for required in [
+            "runs-on: [self-hosted, macOS, ARM64, m1]",
+            "shard: [\"0/2\", \"1/2\"]",
+            "MVM_BDD_SNAPSHOT: \"1\"",
+            "just e2e::docs",
+            "uses: actions/checkout@v6\n",
+        ] {
+            assert!(mac.contains(required), "missing {required}");
+        }
+        assert!(
+            !mac.contains("ref:"),
+            "checkout must retain event SHA semantics"
+        );
+        assert!(
+            job_if(job_block(&reusable, "e2e-docs-macos-evidence"))
+                .contains("inputs.run_macos && inputs.macos_blocks_on_unusable_host")
+        );
+        let release = workflow("release.yml");
+        assert!(!release.contains("run_linux: false") && !release.contains("run_macos: false"));
+        assert!(!release.contains("allow_runtime_candidate_skip: true"));
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let prompt = std::fs::read_to_string(
+            root.join("features/suites/s32_documented_surface/agent_prompt.feature"),
+        )
+        .unwrap();
+        assert!(prompt.contains(
+            "@live @snapshot\n  Scenario: recorded prompts replay onto a fork of the session's base"
+        ));
+        assert!(!prompt.contains("@runtime_candidate"));
+        for required in ["turn 3: third", "turn 4: fourth", "step checkpoint failed"] {
+            assert!(prompt.contains(required), "missing {required}");
+        }
+        let script =
+            std::fs::read_to_string(root.join("scripts/e2e-documented-surface.sh")).unwrap();
+        assert!(script.contains("MVM_BDD_LIVE=1"));
+        assert!(script.contains("MVM_BDD_STRICT_SKIPS=1"));
+        assert!(script.contains("--test conformance --features bdd"));
+    }
+
+    #[test]
+    fn sdk_distribution_evidence_survives_the_release_review_window() {
+        for (file, job, step, artifact) in [
+            (
+                "publish-npm.yml",
+                "build",
+                "Upload packed artifacts",
+                "npm-dist",
+            ),
+            (
+                "publish-pypi.yml",
+                "build",
+                "Upload built artifacts",
+                "pypi-dist-${{ matrix.platform }}",
+            ),
+        ] {
+            let source = workflow(file);
+            let upload = job_block(&source, job)
+                .split(&format!("      - name: {step}\n"))
+                .nth(1)
+                .expect("distribution upload step must exist")
+                .split("\n      - ")
+                .next()
+                .unwrap();
+            for required in [
+                "uses: actions/upload-artifact@",
+                &format!("name: {artifact}"),
+                "retention-days: 30",
+                "if-no-files-found: error",
+            ] {
+                assert!(upload.contains(required), "{file}: missing {required}");
+            }
+        }
     }
 
     fn workflow(name: &str) -> String {
@@ -622,45 +796,284 @@ mod tests {
         condition
     }
 
-    /// Lanes that run on a pull request and again in the merge queue.
-    const FAST_GATE_LANES: [&str; 5] = [
-        "lint-core",
+    /// Lanes that run on a pull request, in the merge queue and on a push to main.
+    const FAST_GATE_LANES: [&str; 2] = ["lint-core", "test-workspace-build"];
+
+    /// Lanes that run on a pull request and a push to main, never in the queue.
+    const PR_GATE_LANES: [&str; 4] = [
         "lint-feature-clippy",
         "lint-windows",
-        "test-workspace-build",
+        "test-windows-identity",
         "test-workspace",
     ];
 
-    /// Lanes that run in the merge queue (and on a manual dispatch) only.
-    const FULL_MATRIX_LANES: [&str; 11] = [
-        "lint-features",
-        "lint-features-test-support",
-        "lint-features-embed",
-        "test-workspace-extras",
-        "test-workspace-aarch64-build",
-        "test-workspace-aarch64",
-        "test-release-witness",
-        "test-musl-confinement",
-        "test-linux",
-        "test-ebpf-telemetry",
-        "boot-latency",
-    ];
+    fn step_run(job: &str, name: &str) -> String {
+        job.split(&format!("      - name: {name}\n"))
+            .nth(1)
+            .expect("named step must exist")
+            .split("        run: |\n")
+            .nth(1)
+            .expect("step must have a literal run block")
+            .lines()
+            .take_while(|line| line.is_empty() || line.starts_with("          "))
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_string()
+    }
 
     #[test]
-    fn elevated_warm_claim_does_not_inherit_another_users_session_bus() {
-        let workflow = ci_full_workflow();
-        let warm_claim = job_block(&workflow, "bdd-live-warm-claim");
-        let sudo = warm_claim
-            .find("sudo --preserve-env=")
-            .expect("warm claim must cross the privilege boundary");
-        let recipe = warm_claim
-            .find("bdd::live-warm-claim")
-            .expect("warm claim recipe must run");
-        let invocation = &warm_claim[sudo..recipe];
+    fn docs_scope_matches_the_documented_example_corpus_roots() {
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../crates/mvm-conformance/src/doc_examples.rs"),
+        )
+        .unwrap();
+        let parsed = syn::parse_file(&source).unwrap();
+        let roots = |name: &str| {
+            let item = parsed
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Const(item) if item.ident == name => Some(item),
+                    _ => None,
+                })
+                .expect("documentation corpus constant must exist");
+            let syn::Expr::Array(array) = item.expr.as_ref() else {
+                panic!("documentation corpus must be an explicit array");
+            };
+            array
+                .elems
+                .iter()
+                .map(|element| {
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(value),
+                        ..
+                    }) = element
+                    else {
+                        panic!("documentation root must be a string");
+                    };
+                    value.value()
+                })
+                .collect::<Vec<_>>()
+        };
+        let patterns = roots("DOCUMENTATION_FILES")
+            .iter()
+            .map(|root| format!("{}$", regex::escape(root)))
+            .chain(
+                roots("DOCUMENTATION_TREES")
+                    .iter()
+                    .map(|root| format!("{root}/")),
+            )
+            .collect::<Vec<_>>()
+            .join("|");
+        let ci = ci_workflow();
         assert!(
-            invocation.contains("env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS"),
-            "root must not inherit the runner user's systemd/DBus session"
+            job_block(&ci, "scope").contains(&format!("grep -zE '^({patterns})'")),
+            "the docs classifier must match documentation_files() roots"
         );
+    }
+
+    #[test]
+    fn docs_static_is_required_without_reintroducing_queue_bdd() {
+        let ci = ci_workflow();
+        let lane = job_block(&ci, "docs-static");
+        assert!(lane.contains("needs: [scope]"));
+        assert_eq!(job_if(lane), "needs.scope.outputs.docs == 'true'");
+        for setup in [
+            "actions/checkout@v6",
+            "dtolnay/rust-toolchain@1.97.1",
+            "uses: ./.github/actions/rust-cache",
+        ] {
+            assert!(lane.contains(setup));
+        }
+        assert_eq!(
+            step_run(lane, "Check static documentation surfaces"),
+            "cargo run -p xtask -- check-cli-help-matches-docs\n\
+             cargo run -p xtask -- check-doc-links\n\
+             cargo run -p xtask -- check-doc-claims"
+        );
+        for heavy in ["--features", "bdd", "artifact", "cargo build", "sdk build"] {
+            assert!(!lane.contains(heavy), "docs static must not add {heavy}");
+        }
+        let scope = job_block(&ci, "scope");
+        for wiring in [
+            "docs: ${{ steps.validate.outputs.docs }}",
+            "DOCS: ${{ steps.decide.outputs.docs }}",
+            "validate docs \"$DOCS\"",
+            "for output in code architecture docs; do",
+        ] {
+            assert!(scope.contains(wiring));
+        }
+        let aggregate = job_block(&ci, "test");
+        assert!(aggregate.contains("needs: [scope, runners, docs-static,"));
+        assert!(aggregate.contains("if: ${{ always() }}"));
+        assert!(aggregate.contains(
+            "BAD: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}"
+        ));
+        assert!(aggregate.contains("DOCS: ${{ needs.scope.outputs.docs }}"));
+        assert!(aggregate.contains("DOCS_RESULT: ${{ needs.docs-static.result }}"));
+        assert!(job_body(&ci, "bdd-conformance").is_none());
+        assert!(!ci.contains("uses: ./.github/workflows/bdd.yml"));
+        let main = main_workflow();
+        assert_eq!(job_if(job_block(&main, "bdd-conformance")), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docs_scope_validation_rejects_missing_and_invalid_outputs() {
+        use std::process::Command;
+        let ci = ci_workflow();
+        let script = step_run(job_block(&ci, "scope"), "Validate classification");
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        for docs in ["true", "false", "", "invalid"] {
+            let result = Command::new("bash")
+                .args(["-c", &script])
+                .env("CODE", "false")
+                .env("ARCHITECTURE", "false")
+                .env("DOCS", docs)
+                .env("GITHUB_OUTPUT", temp.path())
+                .output()
+                .unwrap();
+            assert_eq!(result.status.success(), matches!(docs, "true" | "false"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aggregate_requires_valid_docs_scope_and_required_lane_success() {
+        use std::process::Command;
+        let ci = ci_workflow();
+        let script = step_run(
+            job_block(&ci, "test"),
+            "Require every validation lane to pass",
+        );
+        for docs in ["true", "false", "", "invalid"] {
+            for scope in ["success", "skipped", "failure", "cancelled"] {
+                for lane in ["success", "skipped", "failure", "cancelled", "", "invalid"] {
+                    for other in ["success", "skipped", "failure", "cancelled"] {
+                        let bad = [scope, lane, other]
+                            .iter()
+                            .any(|result| matches!(*result, "failure" | "cancelled"));
+                        let verdict = Command::new("bash")
+                            .args([
+                                "--noprofile",
+                                "--norc",
+                                "-e",
+                                "-o",
+                                "pipefail",
+                                "-c",
+                                &script,
+                            ])
+                            .env("BAD", bad.to_string())
+                            .env("DOCS", docs)
+                            .env("DOCS_RESULT", lane)
+                            .output()
+                            .unwrap();
+                        let expected = !bad
+                            && match docs {
+                                "true" => lane == "success",
+                                "false" => matches!(lane, "success" | "skipped"),
+                                _ => false,
+                            };
+                        assert_eq!(
+                            verdict.status.success(),
+                            expected,
+                            "docs={docs:?}, scope={scope}, lane={lane}, other={other}: {verdict:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Execute the workflow's shell, stubbing only git's external inputs. This
+    // covers NUL-delimited paths and failure fallbacks without a real checkout.
+    #[cfg(unix)]
+    #[test]
+    fn docs_classifier_executes_paths_and_fail_closed_events() {
+        use std::process::Command;
+        let ci = ci_workflow();
+        let script = step_run(job_block(&ci, "scope"), "Classify changed paths");
+        let temp = tempfile::tempdir().unwrap();
+        let changed = temp.path().join("changed");
+        let output = temp.path().join("output");
+        let cases = [
+            ("README.md", true, true),
+            ("AGENTS.md", true, true),
+            ("public/src/content/docs/guides/new.mdx", true, false),
+            (
+                "public/src/content/docs/new file\nwith newline.md",
+                true,
+                false,
+            ),
+            ("crates/mvm-sdk/sdks/python/README.md", true, true),
+            ("examples/new/config.toml", true, true),
+            ("public/src/content/docs-extra/page.md", false, false),
+            ("README.md.bak", false, false),
+            ("docs/README.md", false, false),
+            ("public/src/pages/index.astro", false, false),
+            ("crates/mvm-core/src/lib.rs", false, true),
+        ];
+        for event in ["pull_request", "merge_group", "push", "workflow_dispatch"] {
+            for failure in ["", "fetch", "merge-base", "diff", "base-ref"] {
+                for (path, docs, code) in cases {
+                    std::fs::write(&changed, format!("{path}\0")).unwrap();
+                    std::fs::write(&output, "").unwrap();
+                    let result = Command::new("bash")
+                        .arg("-c")
+                        .arg(format!(
+                            r#"git() {{
+  if [ "$1" = "$FAILURE" ]; then return 1; fi
+  case "$1" in
+    fetch) ;;
+    merge-base) printf 'base\n' ;;
+    diff) cat "$CHANGED" ;;
+    *) return 2 ;;
+  esac
+}}
+{script}"#
+                        ))
+                        .env("EVENT", event)
+                        .env("FAILURE", failure)
+                        .env(
+                            "MG_BASE_REF",
+                            if failure == "base-ref" {
+                                "invalid"
+                            } else {
+                                "refs/heads/main"
+                            },
+                        )
+                        .env("MG_HEAD", "head")
+                        .env("PR_BASE", "base")
+                        .env("PR_HEAD", "head")
+                        .env("CHANGED", &changed)
+                        .env("GITHUB_OUTPUT", &output)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        result.status.success(),
+                        "{event}/{failure}/{path}: {result:?}"
+                    );
+                    let outputs = std::fs::read_to_string(&output).unwrap();
+                    let all = matches!(event, "push" | "workflow_dispatch")
+                        || matches!(failure, "merge-base" | "diff")
+                        || (event == "merge_group" && matches!(failure, "fetch" | "base-ref"));
+                    assert!(
+                        outputs.contains(&format!("docs={}", all || docs)),
+                        "{event}/{failure}/{path}: {outputs}"
+                    );
+                    assert!(
+                        outputs.contains(&format!("code={}", all || code)),
+                        "{event}/{failure}/{path}: {outputs}"
+                    );
+                    if all {
+                        assert!(outputs.contains("architecture=true"));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -722,6 +1135,7 @@ mod tests {
     #[test]
     fn pull_request_ci_runs_the_required_matrix_without_redundant_caches() {
         let workflow = ci_workflow();
+        let main = main_workflow();
         assert!(
             job_body(&workflow, "lint").is_none(),
             "the redundant Lint aggregate must not allocate a second control runner"
@@ -754,7 +1168,7 @@ mod tests {
         // 35-minute `lint-features` it was the critical path for every
         // code-touching pull request, and nothing beside it shared a cargo
         // fingerprint to lose by moving it out.
-        let lint_features = job_block(&workflow, "lint-features-test-support");
+        let lint_features = job_block(&main, "lint-features-test-support");
         // One invocation covering the whole test-support subtree. Selecting a
         // package at a time made cargo resolve features once per package and
         // rebuild most of the same graph each time; the packages are listed
@@ -794,24 +1208,24 @@ mod tests {
         assert!(test.contains("if: ${{ always() }}"));
         assert!(test.contains("runs-on: ubuntu-slim"));
         assert!(
-            test.contains("name: Require CI scope to pass")
-                && test.contains("CI scope did not pass: $SCOPE_RESULT"),
-            "the required test context must fail closed when classification fails"
-        );
-        assert!(
-            !test.contains("actions/checkout")
-                && !test.contains("cargo ")
-                && test.contains("name: Require every validation lane to pass"),
+            !test.contains("actions/checkout") && !test.contains("cargo "),
             "the aggregate must publish the required context without another full runner"
         );
         assert!(test.contains(
-            "needs: [scope, runners, lint-core, lint-policy, lint-feature-clippy, \
-             lint-features, lint-features-test-support, lint-features-embed, lint-windows, \
-             test-workspace-build, test-workspace, test-workspace-extras, \
-             test-workspace-aarch64-build, test-workspace-aarch64, test-linux, \
-             test-release-witness, test-musl-confinement, test-ebpf-telemetry, \
-             bdd-conformance, boot-latency, nix-flake-check]"
+            "needs: [scope, runners, docs-static, lint-core, lint-policy, lint-feature-clippy, \
+             lint-windows, test-windows-identity, test-workspace-build, test-workspace]"
         ));
+        let test_main = job_block(&main, "test-main");
+        assert!(test_main.contains("name: Test (main)"));
+        assert!(
+            test_main.contains(
+                "needs: [lint-features, lint-features-test-support, lint-features-embed, \
+                 bdd-conformance, test-workspace-extras, test-workspace-aarch64, \
+                 test-release-witness, test-musl-confinement, test-linux, \
+                 test-ebpf-telemetry, boot-latency, nix-flake-check]"
+            ),
+            "every post-merge lane must feed the Test (main) aggregate"
+        );
         assert!(
             job_body(&workflow, "pr-regressions").is_none(),
             "focused regressions must not allocate a separate PR runner"
@@ -831,9 +1245,8 @@ mod tests {
         }
 
         // The tier split. Fast-gate lanes run on a pull request and again in
-        // the queue; full-matrix lanes run in the queue (and on a manual
-        // dispatch) only. `ci_scope_aggregate` pins the aggregate's half of the
-        // same split by executing it.
+        // the queue; PR-gate lanes run on a pull request and a push but not in
+        // the queue. The slow lanes live in ci-main.yml and never see either.
         for lane in FAST_GATE_LANES {
             let job_if = job_if(job_block(&workflow, lane));
             assert!(
@@ -842,55 +1255,25 @@ mod tests {
                 "{lane} is fast-gate: it must run for code on every event, got {job_if:?}"
             );
         }
-        for lane in FULL_MATRIX_LANES {
+        for lane in PR_GATE_LANES {
             let job_if = job_if(job_block(&workflow, lane));
             assert!(
-                job_if.contains("github.event_name != 'pull_request'"),
-                "{lane} is full-matrix: it must not run on a pull request, got {job_if:?}"
-            );
-            assert!(
-                !job_if.contains("merge_group"),
-                "{lane} is full-matrix: it must run in the merge queue, got {job_if:?}"
+                job_if.contains("needs.scope.outputs.code == 'true'")
+                    && job_if.contains("github.event_name != 'merge_group'")
+                    && !job_if.contains("'pull_request'"),
+                "{lane} runs on a pull request and a push but not in the queue, got {job_if:?}"
             );
         }
-
-        // Every lane the aggregate names must also be read back in the loop that
-        // compares results against the scope decision. A lane in `needs` but not
-        // in the loop is gated on nothing but its own scheduling.
-        // `bdd-conformance` joined the loop when it took the Gherkin suite, and
-        // the `code` scope, off the Linux lane.
-        for expected in [
-            "\"$WORKSPACE_BUILD_RESULT\"",
-            "\"$WORKSPACE_RESULT\"",
-            "\"$WORKSPACE_EXTRAS_RESULT\"",
-            "\"$WORKSPACE_AARCH64_BUILD_RESULT\"",
-            "\"$WORKSPACE_AARCH64_RESULT\"",
-            "\"$FEATURE_CLIPPY_RESULT\"",
-            "\"$CORE_RESULT\"",
-            "\"$POLICY_RESULT\"",
-            "\"$FEATURES_RESULT\"",
-            "\"$FEATURES_SUPPORT_RESULT\"",
-            "\"$FEATURES_EMBED_RESULT\"",
-            "\"$WINDOWS_RESULT\"",
-            "\"$LINUX_RESULT\"",
-            "\"$RELEASE_WITNESS_RESULT\"",
-            "\"$MUSL_CONFINEMENT_RESULT\"",
-            "\"$EBPF_RESULT\"",
-            "\"$BDD_RESULT\"",
-            "\"$BOOT_RESULT\"",
-            "\"$NIX_RESULT\"",
-        ] {
-            assert!(
-                test.contains(expected),
-                "Test aggregate must compare {expected} against the scope decision"
-            );
-        }
+        assert!(
+            !main.contains("pull_request") && !main.contains("merge_group"),
+            "ci-main.yml is push and dispatch only"
+        );
 
         // The release-profile lane is the only one that runs with trapping
         // overflow and debug assertions off, i.e. the only one that witnesses
         // what actually ships. A lane that runs but is not in the aggregate's
         // `needs` is a lane that cannot fail the merge, so pin both halves.
-        let release_witness = job_block(&workflow, "test-release-witness");
+        let release_witness = job_block(&main, "test-release-witness");
         assert!(release_witness.contains("--cargo-profile release-witness"));
         for expected in [
             "-p mvm-fs",
@@ -908,7 +1291,7 @@ mod tests {
         // which syscalls reach a confined role's seccomp filter. Only this
         // lane builds the endpoint the way the release does, so it must cover
         // both shipped musl targets and stay in the aggregate.
-        let musl = job_block(&workflow, "test-musl-confinement");
+        let musl = job_block(&main, "test-musl-confinement");
         for expected in [
             "target: x86_64-unknown-linux-musl",
             "target: aarch64-unknown-linux-musl",
@@ -926,8 +1309,8 @@ mod tests {
 
         let test_workspace = job_block(&workflow, "test-workspace");
         assert!(!test_workspace.contains("uses: actions/cache@v5"));
-        assert_workspace_suite_compiles_once_and_runs_everything(&workflow);
-        assert_aarch64_suite_compiles_once_and_runs_everything(&workflow);
+        assert_workspace_suite_compiles_once_and_runs_everything(&workflow, &main);
+        assert_aarch64_suite_compiles_once_and_runs_everything(&main);
         for expected in [
             "permissions:",
             "actions: read",
@@ -962,14 +1345,12 @@ mod tests {
             "--partition \"hash:${SHARD}/${SHARD_COUNT}\"",
             "SHARD_COUNT: ${{ inputs.shard_count || '2' }}",
             "\"$SHARD\" -le \"$SHARD_COUNT\"",
-            "inputs.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest'",
-            "inputs.arch == 'aarch64' && 'workspace-tests-aarch64' || 'workspace-tests'",
-            "cargo nextest run -p xtask --features man",
+            "|| 'ubuntu-24.04' }}",
+            "name: workspace-tests\n",
             "cargo nextest run --workspace --all-targets --partition \"hash:${SHARD}/${SHARD_COUNT}\"",
             "actions: read",
             "workspace-archive-{0}",
-            "workspace-shard-{0}-{1}-{2}",
-            "inputs.arch || 'x86_64'",
+            "workspace-shard-{0}-{1}",
             "if: inputs.archive_run_id == ''",
             "if: inputs.archive_run_id != ''",
             "cp -a \"$GITHUB_WORKSPACE/.\" \"$archive_root/\"",
@@ -984,7 +1365,7 @@ mod tests {
             );
         }
         assert!(!workspace_worker.contains("actions: write"));
-        let test_linux = job_block(&workflow, "test-linux");
+        let test_linux = job_block(&main, "test-linux");
         assert!(test_linux.contains("bash scripts/ci-linux-coverage.sh"));
         assert!(!workspace_worker.contains("ci-linux-coverage.sh"));
 
@@ -1031,33 +1412,34 @@ mod tests {
             bdd_workflow.contains("just bdd"),
             "bdd-conformance must still run the Gherkin suite"
         );
-        // ...and it has to be reachable on every code run the Linux lane
-        // covers, and on every change to the documentation its README and
-        // example features read. It is full-matrix: the queue runs it.
-        let bdd = job_block(&workflow, "bdd-conformance");
+        // ...and it has to run on every push to main, the Linux lane's tier.
+        let bdd = job_block(&main, "bdd-conformance");
         assert!(
-            bdd.contains(
-                "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request'"
-            ),
-            "bdd-conformance must run for the code scope and the docs scope, in the merge queue"
+            bdd.contains("uses: ./.github/workflows/bdd.yml"),
+            "bdd-conformance must call the Gherkin workflow"
         );
-        // A docs-only change gets the documentation scenarios; anything that
-        // compiles still gets the whole suite.
+    }
+
+    #[test]
+    fn workspace_archive_download_is_bounded_and_fails_closed() {
+        let worker = workflow("workspace-shard.yml");
+        let download = worker
+            .split_once("      - name: Download shared workspace test archive\n")
+            .expect("workspace shards must download their shared test archive")
+            .1
+            .split("\n      - ")
+            .next()
+            .expect("download step body");
         assert!(
-            bdd.contains("docs_only: ${{ needs.scope.outputs.code != 'true' }}"),
-            "bdd-conformance must narrow to the documentation scenarios only when code is out of scope"
+            download.contains("\n        timeout-minutes: 10\n"),
+            "a stalled artifact transfer must not occupy a runner for the whole job"
         );
-        for expected in [
-            "docs_only:",
-            "default: false",
-            "if: ${{ !inputs.docs_only }}\n        run: just bdd::run",
-            "if: ${{ inputs.docs_only }}\n        run: just bdd::docs",
-        ] {
-            assert!(
-                bdd_workflow.contains(expected),
-                "bdd.yml must keep the full suite as its default and gate the docs path: {expected:?}"
-            );
-        }
+        assert!(download.contains("uses: actions/download-artifact@"));
+        assert!(download.contains("run-id: ${{ inputs.archive_run_id }}"));
+        assert!(
+            !download.contains("continue-on-error:"),
+            "a failed archive transfer must fail the shard, never skip its tests"
+        );
     }
 
     /// The workspace suite is compiled by one job and run by the shards out of
@@ -1065,7 +1447,7 @@ mod tests {
     /// turning anything red: the archive's target selection, the shards'
     /// dependency on it and their partition of all of it, and the suites that
     /// run exactly once.
-    fn assert_workspace_suite_compiles_once_and_runs_everything(workflow: &str) {
+    fn assert_workspace_suite_compiles_once_and_runs_everything(workflow: &str, main: &str) {
         let build = job_block(workflow, "test-workspace-build");
         assert!(
             build.contains("cargo nextest archive --workspace --all-targets"),
@@ -1076,9 +1458,9 @@ mod tests {
             "listing the suite once per filter cost eight minutes on the fast gate's critical path"
         );
         assert!(
-            job_block(workflow, "test-workspace-extras")
+            job_block(main, "test-workspace-extras")
                 .contains("cargo run -p xtask -- check-nextest-groups"),
-            "the nextest override filters must still be validated in the merge queue"
+            "the nextest override filters must still be validated on a push to main"
         );
         let upload = build
             .find("uses: actions/upload-artifact@")
@@ -1115,7 +1497,7 @@ mod tests {
             );
         }
 
-        let extras = job_block(workflow, "test-workspace-extras");
+        let extras = job_block(main, "test-workspace-extras");
         for expected in [
             "cargo nextest run -p xtask --features man",
             "cargo nextest run -p mvm-agentd --features addons",
@@ -1133,61 +1515,78 @@ mod tests {
             "cargo test --workspace --doc",
         ] {
             assert_eq!(
-                workflow.matches(once).count(),
+                workflow.matches(once).count() + main.matches(once).count(),
                 1,
-                "{once:?} must run exactly once in ci.yml"
+                "{once:?} must run exactly once in CI"
             );
         }
     }
 
-    /// The aarch64 suite has the same shape as the x86_64 one: one job
-    /// compiles an archive on the arm64 pool and three shards run all of it.
-    /// Pin the parts whose loss would shrink aarch64 coverage while every
-    /// lane stays green: the archive's target selection (everything but the
+    /// The aarch64 suite builds and runs in one job on one arm64 runner: in
+    /// the merge queue a hosted arm64 runner costs far more waiting than the
+    /// suite costs running, so it is never split into shards or a separate
+    /// build. Pin the parts whose loss would shrink aarch64 coverage while
+    /// every lane stays green: the target selection (everything but the
     /// `mvm-fs` oracle that cannot build there), the privileged witnesses,
-    /// and a matrix whose size matches the partition count it declares.
+    /// and a run that is the whole suite rather than a partition of it.
     fn assert_aarch64_suite_compiles_once_and_runs_everything(workflow: &str) {
-        let build = job_block(workflow, "test-workspace-aarch64-build");
-        for expected in [
-            "needs: [scope]",
-            "runs-on: ubuntu-24.04-arm",
-            "cargo nextest archive --workspace --exclude mvm-fs --all-targets",
-            "name: workspace-tests-aarch64",
-            "MVM_GUEST_PRIVILEGED_TESTS=1",
-            "grep -q \"test result: ok. 4 passed\" helper.log",
-            "tool_attribution::tests::egress_identity_alone_receives_live_attribution_over_unix_credentials",
-        ] {
-            assert!(
-                build.contains(expected),
-                "the aarch64 archive build must contain {expected:?}"
-            );
-        }
-
-        let shards = job_block(workflow, "test-workspace-aarch64");
+        assert!(
+            job_body(workflow, "test-workspace-aarch64-build").is_none(),
+            "the aarch64 suite must build where it runs, not hand an archive to another runner"
+        );
+        let job = job_block(workflow, "test-workspace-aarch64");
         for expected in [
             "name: Test workspace (aarch64)",
-            "needs: [scope, test-workspace-aarch64-build]",
-            "uses: ./.github/workflows/workspace-shard.yml",
-            "archive_run_id: ${{ github.run_id }}",
-            "arch: aarch64",
-            "runner_kind: github",
-            "shard: ['1', '2', '3']",
-            "shard_count: '3'",
+            "runs-on: ubuntu-24.04-arm",
+            "run: cargo nextest run --workspace --exclude mvm-fs --all-targets\n",
+            "MVM_GUEST_PRIVILEGED_TESTS=1",
+            "grep -q \"test result: ok. 4 passed\" \"$RUNNER_TEMP/helper.log\"",
+            "tool_attribution::tests::egress_identity_alone_receives_live_attribution_over_unix_credentials",
+            "printf 'HOME=%s\\nMVM_HOME=%s\\nTMPDIR=%s\\n'",
         ] {
             assert!(
-                shards.contains(expected),
-                "the aarch64 shards must run the archive: missing {expected:?}"
+                job.contains(expected),
+                "the aarch64 suite job must contain {expected:?}"
             );
         }
-        assert!(
-            !shards.contains("cargo build") && !shards.contains("cargo nextest archive"),
-            "an aarch64 shard must run the archive it was handed, not compile its own"
-        );
+        for absent in [
+            "--all-targets --no-run",
+            "--partition",
+            "strategy:",
+            "workspace-shard.yml",
+            "upload-artifact",
+        ] {
+            assert!(
+                !job.contains(absent),
+                "the aarch64 suite must run whole on one runner: found {absent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_output_stress_runs_on_native_aarch64_with_prepared_workspace() {
+        let workflow = main_workflow();
+        let job = job_block(&workflow, "test-workspace-aarch64");
+        assert!(job.contains("runs-on: ubuntu-24.04-arm\n"));
+        let preparation = job
+            .find("run: cargo nextest run --workspace --exclude mvm-fs --all-targets\n")
+            .expect("the workspace suite prepares the native test artifacts");
+        let stress = job
+            .find("run: cargo nextest run --stress-count 200 -E 'test(run_job_matches_streaming_for_short_output)'\n")
+            .expect("the exact short-output stress witness must run");
+        let restore = job
+            .find("- name: Restore HOME")
+            .expect("restore runner HOME");
+        assert!(preparation < stress && stress < restore);
+        let step = &job[job[..stress].rfind("- name:").expect("stress step")..restore];
+        assert!(step.contains("working-directory: crates/mvm-builder-guest\n"));
+        assert!(!step.contains("if:"));
+        assert!(!step.contains("continue-on-error:"));
     }
 
     #[test]
     fn feature_coverage_tail_uses_existing_test_support_runner() {
-        let workflow = ci_workflow();
+        let workflow = main_workflow();
         let core = job_block(&workflow, "lint-features");
         let support = job_block(&workflow, "lint-features-test-support");
 
@@ -1221,8 +1620,9 @@ mod tests {
     }
 
     #[test]
-    fn merge_group_ci_runs_the_full_matrix_and_pull_requests_run_the_fast_gate() {
+    fn merge_group_and_pull_requests_run_the_fast_gate_and_main_runs_the_full_matrix() {
         let ci = ci_workflow();
+        let main = main_workflow();
         let scope = job_block(&ci, "scope");
         for expected in [
             "name: Enforce merge queue policy",
@@ -1238,8 +1638,6 @@ mod tests {
             "could not diff $BASE..$HEAD — running every lane to stay safe",
             "invalid or missing ${name} scope",
             "code=true",
-            "docs=true",
-            "nix=true",
             "architecture=true",
             "just/",
             "third_party/",
@@ -1288,34 +1686,11 @@ mod tests {
             "the fast gate must compile every workspace test target"
         );
 
-        // The full matrix on the integrated commit. Every lane runs there;
-        // none of the expensive ones runs on a pull request.
-        for job in FAST_GATE_LANES.iter().chain(FULL_MATRIX_LANES.iter()) {
-            let block = job_block(&ci, job);
-            assert!(
-                block.contains("needs.scope.outputs.code == 'true'"),
-                "{job} must keep the code scope"
-            );
-            assert!(
-                !block.contains("github.event_name != 'merge_group'")
-                    && !block.contains("github.event_name == 'pull_request'"),
-                "{job} must run in the merge queue"
-            );
-        }
-        for job in FULL_MATRIX_LANES
-            .iter()
-            .chain(["bdd-conformance", "nix-flake-check"].iter())
-        {
-            assert!(
-                job_if(job_block(&ci, job)).contains("github.event_name != 'pull_request'"),
-                "{job} is an expensive lane and must not run on a pull request"
-            );
-        }
         // `cargo install --locked` pins the installed crate's own dependencies
         // but not which version of that crate is installed, so an upstream
         // release retroactively changes this lane. Now that the lane gates the
         // merge, an unpinned install lets a publish elsewhere block the queue.
-        let ebpf = job_block(&ci, "test-ebpf-telemetry");
+        let ebpf = job_block(&main, "test-ebpf-telemetry");
         assert!(
             !ebpf.contains("uses: ./.github/actions/free-disk"),
             "the focused eBPF lane must not spend minutes deleting unrelated runner tools"
@@ -1325,35 +1700,45 @@ mod tests {
                 && ebpf.contains("bpf-linker"),
             "eBPF lane must install a pinned bpf-linker version"
         );
+        // bpf-linker 0.11.0 dropped the rustc-LLVM proxy, so from 0.11.0 on
+        // the linker is built against a named LLVM and links that LLVM's
+        // shared library. The `--features` flag and the apt suite that
+        // provides it have to name the same LLVM: a linker built against
+        // 22.x cannot link a 23.x library, and the failure is a link error
+        // far from the cause. Asserting the pairing here makes a deliberate
+        // LLVM bump a one-line change instead of a broken lane.
+        assert!(
+            ebpf.contains("--no-default-features --features llvm-23")
+                && ebpf.contains("llvm-toolchain-noble-23"),
+            "eBPF lane must pin one LLVM version for both the bpf-linker feature and the apt suite"
+        );
+        // The nightly is floating on purpose, so the LLVM it bundles moves on
+        // rustc's schedule. The lane checks the two against each other; that
+        // check is what keeps a floating nightly safe to combine with a
+        // pinned LLVM, so it must not be dropped.
+        assert!(
+            ebpf.contains("rustc +nightly --version --verbose") && ebpf.contains("23.1.*"),
+            "eBPF lane must check the nightly's LLVM against the pinned one"
+        );
 
         let policy = job_block(&ci, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
-        assert!(
-            job_if(policy).is_empty(),
-            "policy invariants run on every event, the queue included"
+        assert_eq!(
+            job_if(policy),
+            "github.event_name != 'merge_group'",
+            "policy invariants run on a pull request and a push, not in the queue"
         );
         assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
 
-        let nix = job_block(&ci, "nix-flake-check");
-        assert!(nix.contains("needs: [scope]"));
-        assert!(nix.contains(
-            "if: needs.scope.outputs.nix == 'true' && github.event_name != 'pull_request'"
-        ));
-        let aggregate = job_block(&ci, "test");
-        assert!(aggregate.contains("SCOPE_NIX: ${{ needs.scope.outputs.nix }}"));
-        assert!(aggregate.contains(r#"nix_required=$(required "$full_matrix" "$SCOPE_NIX")"#));
-        assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
+        let nix = job_block(&main, "nix-flake-check");
         assert!(
             nix.contains("run: sh scripts/check-devshell-tiers.sh"),
             "the dev shell tier check must run in the Nix lane"
         );
         assert!(!nix.contains("Boot the mvm-images-built image"));
 
-        let guest = job_block(&ci, "guest-image-boot");
-        assert!(guest.contains("needs: [scope]"));
-        assert!(guest.contains(
-            "if: github.event_name == 'workflow_dispatch' && needs.scope.outputs.guest_image == 'true'"
-        ));
+        let guest = job_block(&main, "guest-image-boot");
+        assert!(guest.contains("if: github.event_name == 'workflow_dispatch'"));
         assert!(
             guest.contains("Boot the pinned base image with the tree's guest runtime"),
             "the guest-image witness must boot the pinned base set"
@@ -1376,7 +1761,7 @@ mod tests {
         );
         assert!(
             guest.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build")
-                && guest.contains("build runtime-overlay build --source build"),
+                && guest.contains("dev runtime-overlay build --source build"),
             "the guest runtime under test must be assembled from this tree"
         );
         assert!(
@@ -1385,7 +1770,7 @@ mod tests {
         );
         assert!(guest.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
         assert!(
-            guest.contains("build runtime-overlay build --source build --arch x86_64 --force")
+            guest.contains("dev runtime-overlay build --source build --arch x86_64 --force")
                 && guest.contains("cmp \"overlay-staging/$f\" \"$dir/$f\""),
             "the overlay must be reassembled and its bytes compared"
         );
@@ -1394,22 +1779,6 @@ mod tests {
         assert!(
             !website.contains("merge_group:"),
             "the non-required Website workflow must not consume every merge-group runner slot"
-        );
-
-        assert!(aggregate.contains("needs.scope.result"));
-        assert!(aggregate.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
-        assert!(aggregate.contains("SCOPE_DOCS: ${{ needs.scope.outputs.docs }}"));
-        assert!(
-            aggregate.contains(r#"bdd_required=$(required "$full_matrix" "$code_or_docs")"#)
-                && aggregate.contains(r#"check "BDD conformance" "$BDD_RESULT" "$bdd_required""#),
-            "Test must require the BDD lane in the queue whenever code or docs is in scope"
-        );
-        assert!(
-            aggregate.contains("pull_request) full_matrix=false ;;")
-                && aggregate.contains("merge_group|workflow_dispatch) full_matrix=true ;;")
-                && aggregate.contains(r#"gate_required=$(required true "$SCOPE_CODE")"#)
-                && aggregate.contains(r#"full_required=$(required "$full_matrix" "$SCOPE_CODE")"#),
-            "Test must enforce the fast gate on every event and the full matrix in the queue"
         );
     }
 
@@ -1442,222 +1811,7 @@ mod tests {
         assert!(lane.contains("--features provenance,client,hostd-transport"));
 
         // A lane outside the aggregate cannot fail the merge.
-        let aggregate = job_block(&ci, "test");
-        assert!(aggregate.contains("WINDOWS_RESULT: ${{ needs.lint-windows.result }}"));
-    }
-
-    #[test]
-    fn mutation_cli_shard_installs_its_embedded_host_toolchain() {
-        let workflow = workflow("security.yml");
-        let mutation = job_block(&workflow, "mutation-witnesses");
-        let install = concat!(
-            "      - name: Install mvm-cli embedded-host toolchain\n",
-            "        if: matrix.package == 'mvm-cli'\n",
-            "        uses: ./.github/actions/install-zigbuild",
-        );
-        assert!(
-            mutation.contains(install),
-            "the mvm-cli mutation shard must install the pinned Zig toolchain"
-        );
-        assert!(
-            mutation.find(install) < mutation.find("Mutate this package's claim surface"),
-            "the embedded-host toolchain must be installed before cargo-mutants builds mvm-cli"
-        );
-    }
-
-    #[test]
-    fn no_kvm_pipeline_prepares_a_bounded_bundle_then_boots_with_tcg() {
-        let workflow = ci_full_workflow();
-        let prepare = job_block(&workflow, "no-kvm-prepare");
-        let bootstrap = job_block(&workflow, "no-kvm-bootstrap");
-        let build = job_block(&workflow, "no-kvm-build");
-        let smoke = job_block(&workflow, "no-kvm-smoke");
-        let grant = concat!(
-            "      - name: Grant QEMU access to vhost-vsock\n",
-            "        run: |\n",
-            "          test -c /dev/vhost-vsock\n",
-            "          sudo chown \"$USER\" /dev/vhost-vsock\n",
-            "          sudo chmod 0600 /dev/vhost-vsock",
-        );
-        for (job, action) in [
-            (bootstrap, "Bootstrap source-matched launch artifacts"),
-            (smoke, "Install and boot the sealed bundle under QEMU TCG"),
-        ] {
-            assert!(
-                job.contains(grant),
-                "each hosted QEMU runner must grant its current user access to vhost-vsock"
-            );
-            assert!(
-                job.find(grant) < job.find(action),
-                "vhost-vsock access must be granted before QEMU starts"
-            );
-        }
-        let deny_kvm = "Deny KVM to force QEMU TCG";
-        assert!(
-            !build.contains("/dev/vhost-vsock")
-                && !build.contains("/dev/kvm")
-                && !build.contains("machine build --flake examples/exit_code"),
-            "bounded bundle preparation must not boot a builder VM"
-        );
-        assert!(
-            build.contains(r#"image_tag="$(./scripts/locked-image-tag.sh)""#)
-                && build.contains(r#"image boot update --tag "$image_tag" --force"#)
-                && bootstrap.contains("Download published builder VM")
-                && bootstrap.contains("--builder qemu __builder-vm-bootstrap -v")
-                && bootstrap.contains("MVM_KERNEL_SOURCE: auto")
-                && bootstrap.contains("--builder qemu bootstrap --production -v")
-                && bootstrap.contains("sudo chmod 0666 /dev/kvm")
-                && bootstrap.contains("sudo chmod a+r")
-                && bootstrap.contains("/boot/vmlinuz-$(uname -r)")
-                && bootstrap.contains("/boot/initrd.img-$(uname -r)")
-                && bootstrap.contains("kernel build --which workload --source compile -v")
-                && build.contains(".mvm-ci/cache/kernels/x86_64/workload/bzImage")
-                && build.contains("bzImage.sha256")
-                && build.contains("write /tmp/exit-code-entrypoint /etc/mvm/entrypoint")
-                && build.contains("veritysetup format")
-                && build.contains("bundle export \"$slot_hash\""),
-            "bundle preparation must combine verified release rootfs bytes with source-matched launch artifacts and exporter"
-        );
-        // `/etc/mvm/entrypoint` is a marker, not a command line. The agent
-        // takes the marker file itself as the program only when it starts
-        // with `#!` and is mode 0555 root:root, and `debugfs write` creates
-        // 0644. The fixture originally wrote a command line at 0644, which
-        // satisfies neither, so the guest refused the entrypoint at boot and
-        // the lane exited 1 where it asserts 7 — every night, undetected,
-        // because the only thing checking was a guest three jobs downstream.
-        // This lane runs nightly; this assertion runs on every pull request.
-        // The mode itself is held to the agent's policy by
-        // `no_kvm_fixture_stamps_the_entrypoint_mode_the_guest_agent_requires`,
-        // which reads it from `EntrypointPolicy` rather than restating it: this
-        // assertion once pinned 0755 after the agent moved to 0555.
-        assert!(
-            build.contains("'#!/bin/sh'") && build.contains("sif /etc/mvm/entrypoint mode 0100555"),
-            "the exit-code fixture must bake a shebang marker at mode 0555 — \
-             the only shape the guest agent's sealed-marker policy accepts"
-        );
-        // The guest agent builds the dm-verity table at the data device's ext4
-        // block size, read from its superblock; it has no other source for it.
-        // The published default rootfs is a 1 KiB-block filesystem, so a hash
-        // tree formatted at a literal 4096 covers a quarter of the blocks the
-        // guest hashes, and activation refuses it as "hash device too small".
-        // The fixture has to format at the block size of the rootfs it edits.
-        assert!(
-            build.contains(r#"dumpe2fs -h "$revision_dir/rootfs.ext4""#)
-                && build.contains(r#"--data-block-size="$data_block_size""#)
-                && !build.contains("--data-block-size=4096"),
-            "the exit-code fixture must format verity at the rootfs's own ext4 \
-             block size, the size the guest agent pairs the hash device with"
-        );
-        // The published builder boots first; source compilation only starts
-        // after the mvm-images checkout and host boot inputs are in place.
-        let published_builder = bootstrap
-            .find("Download published builder VM")
-            .expect("the published builder must bootstrap first");
-        let source_bootstrap = bootstrap
-            .find("Bootstrap source-matched launch artifacts")
-            .expect("the source-matched bootstrap must run");
-        let images_checkout = bootstrap
-            .find("Check out mvm-images for the source workload kernel")
-            .expect("source compilation needs the mvm-images kernel recipe");
-        let source_kernel_build = bootstrap
-            .find("kernel build --which workload --source compile -v")
-            .expect("the source QEMU kernel must be built");
-        let restore_kvm = bootstrap
-            .find("sudo chmod 0666 /dev/kvm")
-            .expect("source artifact compilation must restore KVM acceleration");
-        let grant_boot_read = bootstrap
-            .find("sudo chmod a+r")
-            .expect("source artifact compilation must make the host boot inputs readable");
-        assert!(
-            published_builder < source_bootstrap
-                && source_bootstrap < images_checkout
-                && images_checkout < restore_kvm
-                && restore_kvm < grant_boot_read
-                && grant_boot_read < source_kernel_build,
-            "published bootstrap, the mvm-images checkout, KVM acceleration, and readable boot inputs must precede source kernel compilation"
-        );
-        let deny_kvm_position = smoke
-            .find(deny_kvm)
-            .expect("the hosted boot witness must deny KVM");
-        let bundle_boot_position = smoke
-            .find("Install and boot the sealed bundle under QEMU TCG")
-            .expect("the no-KVM job must install and boot the sealed bundle");
-        assert!(
-            deny_kvm_position < bundle_boot_position,
-            "KVM must be denied before the installed bundle boots"
-        );
-        let source_build = prepare
-            .find("Build source mvmctl and published-builder bootstrap helper")
-            .expect("the hosted no-KVM gate must build source-matched mvmctl");
-        let source_copy = prepare
-            .find("cp target/release/mvmctl /tmp/mvmctl-source-under-test")
-            .expect("the source-matched mvmctl must be preserved before helper compilation");
-        let workload = smoke
-            .find("/tmp/mvmctl-source-under-test machine run")
-            .expect("the live workload must run through the source-matched mvmctl");
-        assert!(prepare.contains("MVM_EMBED_NO_CACHE: 1"));
-        assert!(prepare.contains("timeout-minutes: 45"));
-        assert!(
-            prepare.contains("cargo build --release -p mvmctl --features user,embed-host-bins")
-        );
-        assert!(prepare.contains("cargo build --release -p mvm-hostd --bin mvm-network-endpoint"));
-        assert!(
-            prepare
-                .contains("cp target/release/mvm-network-endpoint ci-artifacts/no-kvm-binaries/")
-        );
-        assert!(prepare.contains(
-            "cargo build --release -p mvmctl --features \
-             user,release-artifact-bootstrap,release-channel"
-        ));
-        for live_job in [bootstrap, smoke] {
-            assert!(live_job.contains(
-                "install -m 0755 /tmp/no-kvm-binaries/mvm-network-endpoint \
-                 /tmp/mvm-network-endpoint"
-            ));
-        }
-        assert!(source_build < source_copy);
-        assert!(bootstrap.contains("needs: no-kvm-prepare"));
-        assert!(bootstrap.contains("timeout-minutes: 180"));
-        assert!(bootstrap.contains("MVM_BUILDER_VM_TIMEOUT_SECS: 7200"));
-        assert!(build.contains("needs: no-kvm-bootstrap"));
-        assert!(smoke.contains("needs: no-kvm-build"));
-        assert!(workload > smoke.find(grant).expect("smoke must grant vhost-vsock"));
-    }
-
-    #[test]
-    fn no_kvm_smoke_restores_the_source_guest_runtime_before_booting() {
-        let workflow = ci_full_workflow();
-        let bootstrap = job_block(&workflow, "no-kvm-bootstrap");
-        let smoke = job_block(&workflow, "no-kvm-smoke");
-        let pack = "tar -C \"$MVM_HOME/cache\" -cf /tmp/no-kvm-guest-runtime.tar guest-runtime";
-        let unpack = "tar -C \"$MVM_HOME/cache\" -xf /tmp/no-kvm-guest-runtime.tar";
-        assert!(
-            bootstrap.contains(pack)
-                && bootstrap.contains("name: no-kvm-guest-runtime")
-                && bootstrap.contains("path: /tmp/no-kvm-guest-runtime.tar"),
-            "transfer the fingerprint-indexed runtime cache with its executable modes intact"
-        );
-        assert!(
-            bootstrap.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build"),
-            "artifact acquisition defaults to published downloads even from a source checkout; \
-             without the explicit build arm the bootstrap packs no guest-runtime cache"
-        );
-        assert!(
-            smoke.contains("name: no-kvm-guest-runtime") && smoke.contains("path: /tmp"),
-            "download the runtime cache produced by this run, not a different source generation"
-        );
-        let restore = smoke.find(unpack).expect("restore the runtime cache");
-        let boot = smoke
-            .find("/tmp/mvmctl-source-under-test machine run")
-            .expect("boot the installed bundle");
-        assert!(
-            restore < boot,
-            "restore the runtime before source resolution"
-        );
-        assert!(
-            !smoke.contains("install-zigbuild"),
-            "the boot-only witness must reuse prepared artifacts, not cross-compile them"
-        );
+        assert!(job_block(&ci, "test").contains("lint-windows"));
     }
 
     #[test]
@@ -1681,16 +1835,18 @@ mod tests {
         // Each merge group has its own ref and the queue builds several at
         // once, so a shared queue key would make one group cancel another.
         let expected_group = "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}";
-        let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' }}";
+        let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}";
 
         let ci = ci_workflow();
-        assert!(ci.contains("merge_group:\n    types: [checks_requested]"));
+        assert!(ci.contains(
+            "merge_group:\n    types: [checks_requested]\n  push:\n    branches: [main]"
+        ));
         assert!(ci.contains(expected_group));
         assert!(ci.contains(expected_cancel));
         assert!(ci.contains("permissions:\n  contents: read"));
         assert!(ci.contains("name: Test"), "required check name drifted");
         assert!(ci.contains("name: Invariant"));
-        assert!(ci.contains("name: Nix flake check (Linux eval)"));
+        assert!(main_workflow().contains("name: Nix flake check (Linux eval)"));
 
         assert!(
             !Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1863,7 +2019,6 @@ mod tests {
         for (name, wf) in [
             ("Security", "security.yml"),
             ("Pack signing smoke", "pack-signing-smoke.yml"),
-            ("Extended CI", "ci-full.yml"),
         ] {
             assert!(
                 watcher.contains(name),
@@ -1929,7 +2084,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{lane} must stay in security.yml under its name"));
             for assembled in [
                 "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build",
-                "build runtime-overlay build --source build --arch x86_64",
+                "dev runtime-overlay build --source build --arch x86_64",
                 "sha256sum -c checksums-sha256.txt",
             ] {
                 assert!(
@@ -1954,10 +2109,10 @@ mod tests {
         let no_ssh = job_body(&security, "sealed-prod-no-ssh").expect("checked above");
         assert!(no_ssh.contains("mount -o ro,loop"));
 
-        let ci = workflow("ci.yml");
-        let latency = job_body(&ci, "boot-latency").expect("boot-latency must stay in ci.yml");
+        let ci = main_workflow();
+        let latency = job_body(&ci, "boot-latency").expect("boot-latency must stay in ci-main.yml");
         assert!(
-            latency.contains("build runtime-overlay build --source build --arch x86_64")
+            latency.contains("dev runtime-overlay build --source build --arch x86_64")
                 && !latency.contains("runtime-overlay-x86_64.tar.gz"),
             "boot-latency must boot the overlay mvmctl assembles, not the set's member"
         );
@@ -1969,45 +2124,29 @@ mod tests {
     }
 
     #[test]
-    fn extended_ci_macos_builds_install_libkrun_from_a_trusted_tap() {
-        let extended = workflow("ci-full.yml");
-        for job in ["apple", "libkrun-macos"] {
-            let body = job_body(&extended, job).expect("extended CI job must exist");
-            assert!(
-                body.contains("uses: ./.github/actions/install-libkrun"),
-                "{job} must use the shared resilient libkrun installer"
-            );
-        }
-
-        let action = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join(".github/actions/install-libkrun/action.yml"),
-        )
-        .expect("shared libkrun installer must be readable");
-        for command in [
-            "brew tap slp/krun",
-            "brew trust slp/krun",
-            "brew install --build-from-source slp/krun/libkrunfw",
-            "brew install slp/krun/libkrun",
-            "for attempt in 1 2 3",
-        ] {
-            assert!(
-                action.contains(command),
-                "shared libkrun installer must contain `{command}`"
-            );
-        }
-
-        let apple = job_body(&extended, "apple").expect("Apple job must exist");
-        let embedded_toolchain = apple
-            .find("uses: ./.github/actions/install-zigbuild")
-            .expect("Apple workspace build must install the embedded-host toolchain");
-        let build = apple
-            .find("      - name: Build")
-            .expect("Apple workspace build step must exist");
-        assert!(
-            embedded_toolchain < build,
-            "Apple must install the embedded-host toolchain before building mvm-cli"
+    fn test_support_cache_warms_the_exact_primary_consumer_selection() {
+        let selection = |job: &str, command: &str| {
+            let joined = job.replace("\\\n", " ");
+            joined
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(command))
+                .expect("test-support primary command must exist")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let warm = workflow("cache-warm.yml");
+        let ci = main_workflow();
+        assert_eq!(
+            selection(
+                job_block(&warm, "warm-test-support"),
+                "cargo test --no-run ",
+            ),
+            selection(
+                job_block(&ci, "lint-features-test-support"),
+                "cargo nextest run ",
+            ),
+            "the trusted cache must compile the same packages, features and targets as its consumer"
         );
     }
 
@@ -2036,7 +2175,7 @@ mod tests {
         assert!(warm.contains("key: test-support"));
         assert!(warm.contains("Warm test-support feature tests"));
 
-        let ci = ci_workflow();
+        let ci = main_workflow();
         let support = job_block(&ci, "lint-features-test-support");
         assert!(support.contains("key: test-support"));
         let support_cache = support

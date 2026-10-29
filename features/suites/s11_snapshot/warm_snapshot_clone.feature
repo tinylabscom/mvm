@@ -11,3 +11,10 @@ Feature: Warm-snapshot clone
     Then the instance byte-equals the warm snapshot
     And mutating the instance does not change the stored warm snapshot
     And re-storing the identical artifact reuses the existing snapshot rather than rebuilding it
+
+  @snapshot_chain_v2
+  Scenario: a CoW child's content id derives from its parent's chunk manifest plus its delta
+    Given a v2 content-addressed warm snapshot built from a template tree
+    When a child cloned from the snapshot is mutated by a few blocks and stored from the parent's manifest
+    Then the child's content id equals a from-scratch manifest hash of its bytes
+    And the parent snapshot still verifies against its stored bytes

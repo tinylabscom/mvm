@@ -131,7 +131,7 @@ impl LaunchRecord {
 
 /// Constructed fresh for every scenario. Holds the result of the most
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
-/// workload identities parsed from successful `build address` runs, keyed by
+/// workload identities parsed from successful `dev address` runs, keyed by
 /// fixture name.
 #[derive(cucumber::World, Default)]
 pub struct CliWorld {
@@ -195,7 +195,7 @@ pub struct CliWorld {
     /// plan did not authorize.
     pub volume_admission_result: Option<Result<(), String>>,
     /// `workload_address` per fixture name, populated on a zero-exit
-    /// `build address` run.
+    /// `dev address` run.
     pub addresses: HashMap<String, String>,
     /// `ir_hash` per fixture name, from the same run as `addresses`.
     pub ir_hashes: HashMap<String, String>,
@@ -375,6 +375,12 @@ pub struct CliWorld {
     pub snapshot_source_bytes: Option<Vec<u8>>,
     /// Path of the most recently materialized instance.
     pub snapshot_instance_path: Option<PathBuf>,
+    /// Source directory tree for the chained-manifest (v2) scenario.
+    pub snapshot_tree_path: Option<PathBuf>,
+    /// The chain-stored child snapshot's id and the path it was cloned into.
+    pub snapshot_child_id: Option<SnapshotId>,
+    /// Where the chain scenario's mutated child tree lives.
+    pub snapshot_child_path: Option<PathBuf>,
     /// Root tempdir backing the warm-claim scenario's checkpoint + snapshot
     /// stores and standby pool. Kept alive for the scenario's duration.
     pub warm_claim_store_root: Option<tempfile::TempDir>,
@@ -398,6 +404,10 @@ pub struct CliWorld {
     pub warm_claim_registry_path: Option<PathBuf>,
     /// The outcome of the most recent `claim_standby` call.
     pub warm_claim_outcome: Option<WarmClaimOutcome>,
+    /// Per-scenario isolated `MVM_HOME` backing the warm-claim fixture. Kept
+    /// alive for the scenario's duration; `world.mvm_home_guard` holds the
+    /// process override pointing at it.
+    pub warm_claim_home: Option<tempfile::TempDir>,
 
     /// RAII guard that keeps a scenario-local `MVM_HOME` and snapshot key
     /// active across the warm-restore steps. Dropping it restores the

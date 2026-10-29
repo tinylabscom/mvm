@@ -90,12 +90,12 @@ fn main() -> ExitCode {
     // First statement in the process: a panic before this line would
     // print its payload unredacted.
     mvm_hostd::panic_hook::install("libkrun-supervisor");
-    // macOS Hypervisor.framework rejects any process without
-    // `com.apple.security.hypervisor`. The ad-hoc signer
-    // self-signs + re-spawns the binary on first run; subsequent
-    // invocations are silent (`MVM_SIGNED=1`). Without this,
-    // `krun_start_enter` fails at VM creation with rc -22.
-    mvm_runtime::codesign::ensure_signed();
+    // Refuse before VM creation unless this loaded process has its entitlement.
+    // Executable preparation must happen before launch, not by self-signing.
+    if let Err(error) = mvm_runtime::codesign::ensure_signed() {
+        tracing::error!("{error}");
+        return ExitCode::FAILURE;
+    }
 
     // Diagnostic: opt-in libkrun internal logger. Set
     // `MVM_KRUN_LOG={off,error,warn,info,debug,trace}` to surface
@@ -174,7 +174,9 @@ fn apply_egress_relay_override(cfg: &mut SupervisorConfig) {
 /// Failure is fatal. The guest is about to attach that image read-write, and
 /// booting it while another VM holds the lock is the filesystem corruption the
 /// lock exists to prevent.
-fn hold_exclusive_image_lock(cfg: &SupervisorConfig) -> Result<Option<std::fs::File>, ExitCode> {
+fn hold_exclusive_image_lock(
+    cfg: &SupervisorConfig,
+) -> Result<Option<mvm_build::builder_vm_runtime::HeldImageLock>, ExitCode> {
     hold_exclusive_image_lock_with(cfg, mvm_build::builder_vm_runtime::LockWait::from_env())
 }
 
@@ -190,18 +192,18 @@ fn hold_exclusive_image_lock(cfg: &SupervisorConfig) -> Result<Option<std::fs::F
 fn hold_exclusive_image_lock_with(
     cfg: &SupervisorConfig,
     wait: mvm_build::builder_vm_runtime::LockWait,
-) -> Result<Option<std::fs::File>, ExitCode> {
+) -> Result<Option<mvm_build::builder_vm_runtime::HeldImageLock>, ExitCode> {
     let Some(lock_path) = cfg.exclusive_image_lock.as_ref() else {
         return Ok(None);
     };
     match mvm_build::builder_vm_runtime::hold_image_lock(lock_path, wait) {
-        Ok(file) => {
+        Ok(guard) => {
             append_supervisor_breadcrumb(
                 std::path::Path::new(&cfg.vm_state_dir),
                 "image_lock",
                 format!("held {}", lock_path.display()),
             );
-            Ok(Some(file))
+            Ok(Some(guard))
         }
         Err(e) => {
             eprintln!(
@@ -294,7 +296,10 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
         vm_state_dir: std::path::Path::new(&cfg.vm_state_dir),
         pid_file: &pid_file,
     };
-    let _wall_clock = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(timer_inputs) {
+    let _wall_clock = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
+        timer_inputs,
+        Box::new(timer_inputs.exit_killer()),
+    ) {
         Ok(guard) => guard,
         Err(e) => {
             eprintln!("supervisor: refusing to boot a bounded workload it cannot audit: {e}");
@@ -303,7 +308,10 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
     };
     // A session's idle timeout, for the same reason: no client is left to
     // enforce it once the one that started the session has exited.
-    mvm_hostd::supervisor::session_expiry::arm_for_supervisor(&timer_inputs);
+    mvm_hostd::supervisor::session_expiry::arm_for_supervisor(
+        &timer_inputs,
+        Box::new(timer_inputs.exit_killer()),
+    );
 
     // Registered here rather than at the top of `main`: everything above this
     // line refuses to boot, and a refusal has no consumption worth recording.

@@ -1,7 +1,7 @@
 # The sibling checkout is the contributor default; CI consumes mvm-images
 
 Backing: shipped-source
-Validation: cargo nextest run -p mvm-build -p mvm-cli -E 'test(sibling) | test(discovered) | test(outranks) | test(no_sibling) | test(image_source)' && cargo nextest run -p mvmctl --test ci_scope_aggregate
+Validation: cargo nextest run -p mvm-build -p mvm-cli -E 'test(sibling) | test(discovered) | test(outranks) | test(no_sibling) | test(image_source)' && cargo nextest run -p mvmctl --test ci_scope_classifier
 
 The wiring the project's other working sessions flagged as missing: with
 `MVM_IMAGES_DIR` unset, nothing consumed `mvm-images` — normal image-backed

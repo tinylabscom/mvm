@@ -15,7 +15,7 @@ use mvm_core::user_config::MvmConfig;
 use super::Cli;
 use super::{
     checkpoint, cp, diff, display, forward, fs, pause, proc, prompt, rekernel, replay, sandbox,
-    session, set_ttl, snapshot, volume, wait, workspace_apply,
+    session, set_ttl, snapshot, telemetry, volume, wait, workspace_apply,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -81,6 +81,9 @@ pub(in crate::commands) enum VmCmd {
     /// Explain how to migrate dynamic forwarding to declared ingress
     #[command(hide = true)]
     Forward(forward::Args),
+    /// Show what the host collected from a machine's guest: status, losses,
+    /// spans, events, logs and stdio
+    Telemetry(telemetry::Args),
     /// Inspect and clean sandbox lifecycle state
     #[command(hide = true)]
     Sandbox(sandbox::Args),
@@ -104,6 +107,7 @@ impl VmCmd {
                 }
             },
             VmCmd::Save(a) => a.json,
+            VmCmd::Telemetry(a) => a.json,
             _ => false,
         }
     }
@@ -142,6 +146,7 @@ impl VmCmd {
             VmCmd::BootReport(_) => "boot-report",
             VmCmd::SetTtl(_) => "set-ttl",
             VmCmd::Forward(_) => "forward",
+            VmCmd::Telemetry(_) => "telemetry",
             VmCmd::Sandbox(_) => "sandbox",
             VmCmd::Session(_) => "session",
             VmCmd::Volume(_) => "volume",
@@ -171,6 +176,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::BootReport(a) => wait::run_boot_report(cli, a, cfg),
         VmCmd::SetTtl(a) => set_ttl::run(cli, a, cfg),
         VmCmd::Forward(a) => forward::run(cli, a, cfg),
+        VmCmd::Telemetry(a) => telemetry::run(cli, a, cfg),
         VmCmd::Sandbox(a) => sandbox::run(cli, a, cfg),
         VmCmd::Session(a) => session::run(cli, a, cfg),
         VmCmd::Volume(a) => volume::run(cli, a, cfg),

@@ -40,6 +40,7 @@ Feature: The --peer flag authors a route the runtime honours
   @live
   Scenario: the documented peer route carries a guest dial to the host service
     Given an artifact-warm mvm home
+    And the documented launch images are prepared
     And a host TCP service on port 34567 that greets its caller
     When I launch "run --name e2e-peer-dial --peer db.mvm.peer:5432=127.0.0.1:34567" with a guest that dials the peer
     Then the launch succeeds

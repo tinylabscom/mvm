@@ -67,6 +67,8 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         vm_name: "parent".into(),
         builder_egress_endpoint: None,
         kernel: state_dir.join("Image"),
+        kernel_fd: None,
+        boot_image_fds: None,
         cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
         memory_mib: 512,
         vcpus: 1,
@@ -90,6 +92,7 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         restore_fds: None,
         timeout_secs: 0,
         plan: None,
+        caller_registration: None,
         audit_dir: None,
         signing_key_path: None,
         agent_socket: Some(PathBuf::from("/parent/state/hvf-agent.sock")),
@@ -166,6 +169,7 @@ fn rewrite_for_child(world: &mut CliWorld) {
             state_dir: &dir,
             cpu_grant: None,
             content: &[],
+            plan_json: None,
         },
     )
     .expect("rewrite the captured config for a restored child");

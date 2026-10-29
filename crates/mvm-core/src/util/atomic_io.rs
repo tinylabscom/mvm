@@ -181,10 +181,240 @@ fn persist_noclobber(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Resu
         // `err.file` is the same temp file, handed back unpersisted. Unlike a
         // rename, a successful `hard_link` never consumes the source name, so
         // it is removed when `err.file` drops at the end of this arm.
-        Err(err) if is_rename_flag_unsupported(&err.error) => {
-            std::fs::hard_link(err.file.path(), path)
-        }
+        Err(err) if is_rename_flag_unsupported(&err.error) => link_noclobber(err.file.path(), path),
         Err(err) => Err(err.error),
+    }
+}
+
+fn link_noclobber(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        link_noclobber_at(rustix::fs::CWD, source, rustix::fs::CWD, destination)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::hard_link(source, destination)
+    }
+}
+
+#[cfg(unix)]
+fn link_noclobber_at(
+    source_dir: impl std::os::fd::AsFd,
+    source: &Path,
+    destination_dir: impl std::os::fd::AsFd,
+    destination: &Path,
+) -> std::io::Result<()> {
+    rustix::fs::linkat(
+        source_dir,
+        source,
+        destination_dir,
+        destination,
+        rustix::fs::AtFlags::empty(),
+    )
+    .map_err(Into::into)
+}
+
+/// An invocation-private file awaiting exclusive publication.
+///
+/// The random, owner-only directory separates concurrent writers. Directory
+/// descriptors anchor linking and cleanup, so replacing the namespace's outer
+/// pathname cannot redirect either operation. Identity checks refuse observed
+/// substitutions inside that namespace. They are not a security boundary
+/// against a hostile process with the same UID: such a process can mutate even
+/// private directories between a check and an operation.
+///
+/// Explicitly call [`Self::cleanup`] on failure to observe cleanup errors.
+/// Drop is only a best-effort backstop and never touches the final pathname.
+#[derive(Debug)]
+pub struct StagedFile {
+    file: fs::File,
+    #[cfg(unix)]
+    directory: fs::File,
+    #[cfg(unix)]
+    parent: fs::File,
+    #[cfg(unix)]
+    parent_path: std::path::PathBuf,
+    #[cfg(unix)]
+    directory_name: std::ffi::OsString,
+    #[cfg(unix)]
+    destination_name: std::ffi::OsString,
+    #[cfg(unix)]
+    file_present: bool,
+    #[cfg(unix)]
+    directory_present: bool,
+}
+
+impl StagedFile {
+    /// Create private staging beside `destination`, without creating the final
+    /// name. Missing parent directories are created. Publication is Unix-only.
+    pub fn new(destination: &Path) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use rustix::fs::{Mode, OFlags, openat};
+            use std::os::unix::fs::PermissionsExt;
+
+            let parent_path = destination
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            fs::create_dir_all(parent_path)?;
+            let parent_path = std::env::current_dir()?.join(parent_path);
+            let destination_name = destination
+                .file_name()
+                .context("staged destination has no file name")?
+                .to_owned();
+            let parent = fs::File::open(&parent_path)?;
+            let temporary = tempfile::Builder::new()
+                .prefix(".mvm-stage-")
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir_in(&parent_path)?
+                .keep();
+            let directory_name = temporary
+                .file_name()
+                .context("staging directory has no name")?
+                .to_owned();
+            let directory = fs::File::from(
+                openat(
+                    &parent,
+                    &directory_name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+                    Mode::empty(),
+                )
+                .with_context(|| {
+                    format!(
+                        "opening staging directory; retained {} for inspection",
+                        temporary.display()
+                    )
+                })?,
+            );
+            let file = match openat(
+                &directory,
+                "archive",
+                OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW,
+                Mode::RUSR | Mode::WUSR,
+            ) {
+                Ok(file) => fs::File::from(file),
+                Err(error) => {
+                    let error = anyhow::Error::from(error).context("creating private staged file");
+                    return Err(
+                        match Self::remove_directory(&parent, &directory_name, &directory) {
+                            Ok(()) => error,
+                            Err(cleanup) => error.context(format!(
+                                "cleaning staging initialization failed: {cleanup:#}"
+                            )),
+                        },
+                    );
+                }
+            };
+            Ok(Self {
+                file,
+                directory,
+                parent,
+                parent_path,
+                directory_name,
+                destination_name,
+                file_present: true,
+                directory_present: true,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = destination;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "private staged publication requires Unix directory descriptors",
+            )
+            .into())
+        }
+    }
+
+    /// The owned file, independent of any mutable archive pathname.
+    pub fn file_mut(&mut self) -> &mut fs::File {
+        &mut self.file
+    }
+
+    #[cfg(unix)]
+    fn check_entry(directory: &fs::File, name: &std::ffi::OsStr, owned: &fs::File) -> Result<()> {
+        let actual = rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+        let expected = rustix::fs::fstat(owned)?;
+        anyhow::ensure!(
+            actual.st_dev == expected.st_dev && actual.st_ino == expected.st_ino,
+            "staging ownership changed for {:?}",
+            name
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn remove_directory(parent: &fs::File, name: &std::ffi::OsStr, owned: &fs::File) -> Result<()> {
+        Self::check_entry(parent, name, owned)?;
+        rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::REMOVEDIR)?;
+        Ok(())
+    }
+
+    /// Publish the finished file using the same exclusive hard-link primitive
+    /// as the no-clobber writer's fallback. No final name is ever removed.
+    /// An error after linking explicitly reports that publication succeeded.
+    pub fn publish(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            self.file.sync_all().context("syncing staged file")?;
+            let current_parent = fs::metadata(&self.parent_path)?;
+            let owned_parent = self.parent.metadata()?;
+            anyhow::ensure!(
+                current_parent.dev() == owned_parent.dev()
+                    && current_parent.ino() == owned_parent.ino(),
+                "destination directory was substituted"
+            );
+            Self::check_entry(&self.parent, &self.directory_name, &self.directory)?;
+            Self::check_entry(&self.directory, std::ffi::OsStr::new("archive"), &self.file)?;
+            link_noclobber_at(
+                &self.directory,
+                Path::new("archive"),
+                &self.parent,
+                Path::new(&self.destination_name),
+            )
+            .context("publishing staged file without replacing an existing destination")?;
+            self.cleanup()
+                .context("file was published, but staging cleanup failed")?;
+            self.parent
+                .sync_all()
+                .context("file was published, but syncing its directory failed")
+        }
+        #[cfg(not(unix))]
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "private staged publication requires Unix directory descriptors",
+        )
+        .into())
+    }
+
+    /// Remove only this invocation's staging entries, never recursively and
+    /// never by following the staging directory's mutable outer pathname.
+    pub fn cleanup(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use rustix::fs::{AtFlags, unlinkat};
+
+            if self.file_present {
+                Self::check_entry(&self.directory, std::ffi::OsStr::new("archive"), &self.file)?;
+                unlinkat(&self.directory, "archive", AtFlags::empty())?;
+                self.file_present = false;
+            }
+            if self.directory_present {
+                Self::remove_directory(&self.parent, &self.directory_name, &self.directory)?;
+                self.directory_present = false;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
     }
 }
 
@@ -552,7 +782,12 @@ impl FileLock {
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        // flock is released when the file descriptor is closed (automatic)
+        // An unrelated child can inherit this open file description between
+        // fork and exec despite CLOEXEC. Closing only our descriptor would
+        // extend this lexical guard's lock until that child reaches exec.
+        if let Err(error) = fs::File::unlock(&self._file) {
+            tracing::warn!(%error, "failed to release file lock");
+        }
     }
 }
 
@@ -1167,5 +1402,193 @@ mod tests {
         }
         done.store(true, Ordering::Release);
         reader.join().expect("reader");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod staged_file_tests {
+    use super::*;
+
+    fn staging_path(staged: &StagedFile) -> std::path::PathBuf {
+        staged.parent_path.join(&staged.directory_name)
+    }
+
+    #[test]
+    fn staged_files_are_private_isolated_and_publish_one_winner() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("bundle");
+        let mut first = StagedFile::new(&destination).unwrap();
+        let mut second = StagedFile::new(&destination).unwrap();
+        first.file_mut().write_all(b"first").unwrap();
+        second.file_mut().write_all(b"second").unwrap();
+        assert_ne!(staging_path(&first), staging_path(&second));
+        assert_eq!(
+            fs::metadata(staging_path(&first))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let threads = [first, second]
+            .into_iter()
+            .map(|mut staged| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let result = staged.publish();
+                    staged.cleanup().unwrap();
+                    result
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(
+            [b"first".as_slice(), b"second".as_slice()]
+                .contains(&fs::read(&destination).unwrap().as_slice())
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn existing_file_directory_and_dangling_symlink_are_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["file", "directory", "symlink"] {
+            let destination = dir.path().join(name);
+            match name {
+                "file" => fs::write(&destination, b"winner").unwrap(),
+                "directory" => fs::create_dir(&destination).unwrap(),
+                "symlink" => std::os::unix::fs::symlink("missing", &destination).unwrap(),
+                _ => unreachable!(),
+            }
+            let mut staged = StagedFile::new(&destination).unwrap();
+            staged.file_mut().write_all(b"loser").unwrap();
+            assert!(staged.publish().is_err());
+            staged.cleanup().unwrap();
+            assert!(fs::symlink_metadata(&destination).is_ok());
+        }
+        assert_eq!(fs::read(dir.path().join("file")).unwrap(), b"winner");
+        assert_eq!(
+            fs::read_link(dir.path().join("symlink")).unwrap(),
+            Path::new("missing")
+        );
+    }
+
+    #[test]
+    fn substituted_source_is_neither_published_nor_cleaned() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("bundle");
+        let mut staged = StagedFile::new(&destination).unwrap();
+        let source = staging_path(&staged).join("archive");
+        fs::rename(&source, source.with_extension("owned")).unwrap();
+        fs::write(&source, b"foreign").unwrap();
+        assert!(staged.publish().is_err());
+        assert!(staged.cleanup().is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"foreign");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn substituted_namespace_does_not_redirect_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut staged = StagedFile::new(&dir.path().join("bundle")).unwrap();
+        let original = staging_path(&staged);
+        let moved = dir.path().join("moved");
+        fs::rename(&original, &moved).unwrap();
+        fs::create_dir(&original).unwrap();
+        fs::write(original.join("archive"), b"foreign").unwrap();
+        assert!(staged.publish().is_err());
+        assert!(staged.cleanup().is_err());
+        assert_eq!(fs::read(original.join("archive")).unwrap(), b"foreign");
+        assert!(
+            !moved.join("archive").exists(),
+            "cleanup uses the owned directory descriptor"
+        );
+    }
+
+    #[test]
+    fn substituted_destination_parent_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("output");
+        let destination = parent.join("bundle");
+        let mut staged = StagedFile::new(&destination).unwrap();
+        fs::rename(&parent, dir.path().join("moved")).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(&destination, b"foreign").unwrap();
+        assert!(staged.publish().is_err());
+        staged.cleanup().unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"foreign");
+        assert!(!dir.path().join("moved/bundle").exists());
+    }
+
+    #[test]
+    fn substituted_destination_parent_symlink_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let foreign = dir.path().join("foreign");
+        fs::create_dir(&original).unwrap();
+        fs::create_dir(&foreign).unwrap();
+        let parent = dir.path().join("alias");
+        std::os::unix::fs::symlink(&original, &parent).unwrap();
+        let mut staged = StagedFile::new(&parent.join("bundle")).unwrap();
+        fs::remove_file(&parent).unwrap();
+        std::os::unix::fs::symlink(&foreign, &parent).unwrap();
+        assert!(staged.publish().is_err());
+        staged.cleanup().unwrap();
+        assert!(!foreign.join("bundle").exists());
+        assert_eq!(fs::read_dir(&original).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn interrupted_file_cleanup_and_nonrecursive_cleanup_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("bundle");
+        let mut staged = StagedFile::new(&destination).unwrap();
+        staged.file_mut().write_all(b"interrupted").unwrap();
+        let private = staging_path(&staged);
+        fs::write(private.join("unexpected"), b"foreign").unwrap();
+        let error = staged.cleanup().unwrap_err();
+        assert!(!error.to_string().is_empty());
+        assert_eq!(fs::read(private.join("unexpected")).unwrap(), b"foreign");
+        assert!(!private.join("archive").exists());
+        assert!(!destination.exists());
+        fs::remove_file(private.join("unexpected")).unwrap();
+        staged.cleanup().unwrap();
+        assert!(!private.exists());
+    }
+
+    #[test]
+    fn publication_cleanup_failure_never_rolls_back_the_final_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("bundle");
+        let mut staged = StagedFile::new(&destination).unwrap();
+        staged.file_mut().write_all(b"sealed").unwrap();
+        fs::write(staging_path(&staged).join("unexpected"), b"foreign").unwrap();
+        let error = staged.publish().unwrap_err();
+        assert!(error.to_string().contains("file was published"));
+        drop(staged);
+        assert_eq!(fs::read(&destination).unwrap(), b"sealed");
+    }
+
+    #[test]
+    fn missing_parent_file_and_missing_staging_source_fail_without_a_final_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("not-a-directory");
+        fs::write(&parent, b"foreign").unwrap();
+        assert!(StagedFile::new(&parent.join("bundle")).is_err());
+        let destination = dir.path().join("bundle");
+        let mut staged = StagedFile::new(&destination).unwrap();
+        fs::remove_file(staging_path(&staged).join("archive")).unwrap();
+        assert!(staged.publish().is_err());
+        assert!(staged.cleanup().is_err());
+        assert!(!destination.exists());
     }
 }

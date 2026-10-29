@@ -40,6 +40,7 @@ fn fixture() -> (tempfile::TempDir, GuestRuntime) {
     let runtime = GuestRuntime {
         root: root.path().to_path_buf(),
         digest: "d".repeat(64),
+        release_proof: None,
         manifest: GuestBinsManifest {
             schema_version: mvm_build::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
             version: env!("CARGO_PKG_VERSION").into(),
@@ -50,6 +51,7 @@ fn fixture() -> (tempfile::TempDir, GuestRuntime) {
                 worktree: mvm_core::image_set::WorktreeState::Clean,
             },
             files,
+            assemblies: Default::default(),
         },
     };
     (root, runtime)

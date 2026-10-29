@@ -239,6 +239,52 @@ pub struct AiPolicy {
     /// Optional token budget. `None` means no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<AiBudget>,
+    /// Strict pre-forward request and USD reservation ceiling, independent of metering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_budget: Option<AiRequestBudget>,
+}
+
+/// Pre-forward limits for one endpoint lifetime. Reservations are never refunded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AiRequestBudget {
+    /// Maximum upstream attempts, including failed and cancelled attempts.
+    pub max_requests: u64,
+    /// USD ceiling in millionths of a dollar, excluding taxes and account charges.
+    pub max_spend_microusd: u64,
+    /// Exact model and conservative tariff revision; aliases are not accepted.
+    pub model: AiBudgetModel,
+}
+
+impl AiRequestBudget {
+    /// Whether a child retains this exact model and narrows both ceilings.
+    pub fn permits(&self, child: &Self) -> bool {
+        self.model == child.model
+            && child.max_requests <= self.max_requests
+            && child.max_spend_microusd <= self.max_spend_microusd
+    }
+
+    /// Narrow both ceilings; selecting different exact models is not an intersection.
+    pub fn intersect(self, other: Self) -> Result<Self, &'static str> {
+        if self.model != other.model {
+            return Err("AI request ceilings select different exact models");
+        }
+        Ok(Self {
+            model: self.model,
+            max_requests: self.max_requests.min(other.max_requests),
+            max_spend_microusd: self.max_spend_microusd.min(other.max_spend_microusd),
+        })
+    }
+}
+
+/// Reviewed model/tariff combinations supported by pre-forward reservations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum AiBudgetModel {
+    /// 200K context, $2/MTok worst-case cached input and $5/MTok output.
+    #[serde(rename = "claude-haiku-4-5-20251001")]
+    ClaudeHaiku45,
 }
 
 impl AiPolicy {
@@ -252,6 +298,7 @@ impl AiPolicy {
         Self {
             metering: true,
             budget: None,
+            request_budget: None,
         }
     }
 
@@ -1482,6 +1529,7 @@ mod tests {
     fn ai_policy_roundtrips_through_json() {
         let policy = AiPolicy {
             metering: true,
+            request_budget: None,
             budget: Some(AiBudget {
                 max_input_tokens: Some(100),
                 max_output_tokens: Some(200),
@@ -1501,6 +1549,29 @@ mod tests {
         assert!(policy.metering);
         assert_eq!(policy.budget, None);
         assert_ne!(policy, AiPolicy::default());
+    }
+
+    #[test]
+    fn pre_forward_budget_roundtrips_and_unknown_models_fail_closed() {
+        let json = r#"{"metering":false,"request_budget":{"max_requests":1,
+            "max_spend_microusd":500000,"model":"claude-haiku-4-5-20251001"}}"#;
+        let policy: AiPolicy = serde_json::from_str(json).unwrap();
+        assert!(!policy.metering);
+        assert_eq!(policy.request_budget.unwrap().max_spend_microusd, 500_000);
+        let back: AiPolicy =
+            serde_json::from_str(&serde_json::to_string(&policy).unwrap()).unwrap();
+        assert_eq!(policy, back);
+        assert!(
+            serde_json::from_str::<AiPolicy>(
+                &json.replace("claude-haiku-4-5-20251001", "claude-haiku-4-5")
+            )
+            .is_err()
+        );
+        assert!(
+            !serde_json::to_string(&AiPolicy::metered())
+                .unwrap()
+                .contains("request_budget")
+        );
     }
 
     #[test]
@@ -1553,6 +1624,45 @@ mod tests {
         assert!(policy.ai().is_none());
     }
     #[test]
+    fn certificate_hosts_require_both_interception_and_inspection() {
+        use crate::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+
+        let mut routes = Vec::new();
+        for intercept in [false, true] {
+            for inspect in [false, true] {
+                routes.push(EgressRoute {
+                    id: format!("route-{}-{}", u8::from(intercept), u8::from(inspect)),
+                    host: format!(
+                        "host-{}-{}.example.test",
+                        u8::from(intercept),
+                        u8::from(inspect)
+                    ),
+                    port: 443,
+                    intercept,
+                    rules: if inspect {
+                        vec![EndpointRule {
+                            id: None,
+                            method: Some("GET".into()),
+                            path: "/**".into(),
+                            outcome: RouteOutcome::Allow,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    otherwise: RouteOutcome::Allow,
+                });
+            }
+        }
+        for policy in [NetworkPolicy::unrestricted(), NetworkPolicy::deny_all()] {
+            assert!(policy.intercepted_route_hosts().is_empty());
+            assert_eq!(
+                policy.with_routes(routes.clone()).intercepted_route_hosts(),
+                ["host-1-1.example.test"]
+            );
+        }
+    }
+
+    #[test]
     fn endpoint_routes_are_returned_for_both_policy_forms() {
         let route: crate::policy::routes::EgressRoute =
             serde_json::from_str(r#"{"id":"api","host":"api.example.test"}"#).unwrap();
@@ -1566,5 +1676,51 @@ mod tests {
         }
         assert!(is_mandatory_deny("0.1.2.3".parse().unwrap()));
         assert!(is_mandatory_deny("64:ff9b::a9fe:a9fe".parse().unwrap()));
+    }
+
+    /// `intercepted_route_hosts` names the destinations the host endpoint
+    /// terminates TLS for, and only those: a route must both grant
+    /// interception and carry something to enforce. A route that inspects but
+    /// was not granted interception is not terminated, since nothing is
+    /// intercepted silently, and a granted route with nothing to decide gives
+    /// the endpoint no reason to open the connection.
+    ///
+    /// The `&&` swapped for `||` survived here: the one test of this function
+    /// lived in the runtime crate, outside the package this file is mutated
+    /// under. Under that mutant every route with either property is
+    /// terminated, which is the silent interception the grant exists to rule
+    /// out.
+    #[test]
+    fn intercepted_route_hosts_need_both_the_grant_and_a_rule_to_enforce() {
+        use crate::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+        let route = |id: &str, host: &str, intercept: bool, inspects: bool| EgressRoute {
+            id: id.into(),
+            host: host.into(),
+            port: 443,
+            rules: if inspects {
+                vec![EndpointRule {
+                    id: None,
+                    method: None,
+                    path: "/**".into(),
+                    outcome: RouteOutcome::Deny,
+                }]
+            } else {
+                Vec::new()
+            },
+            otherwise: RouteOutcome::Allow,
+            intercept,
+        };
+        let policy = NetworkPolicy::deny_all().with_routes(vec![
+            route("granted-and-ruled", "a.example.test", true, true),
+            route("ruled-only", "b.example.test", false, true),
+            route("granted-only", "c.example.test", true, false),
+            route("neither", "d.example.test", false, false),
+        ]);
+        assert_eq!(policy.intercepted_route_hosts(), ["a.example.test"]);
+        assert!(
+            NetworkPolicy::deny_all()
+                .intercepted_route_hosts()
+                .is_empty()
+        );
     }
 }

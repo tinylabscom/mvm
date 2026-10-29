@@ -1,0 +1,61 @@
+name: Rust registry and released hostlib evidence
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  installed:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: sigstore/cosign-installer@v3
+      - name: Download actual published release and exercise external registry consumer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || exit 1
+          assets="${RUNNER_TEMP}/rust-release-assets"
+          evidence="${RUNNER_TEMP}/rust-registry-evidence"
+          mkdir -p "$assets" "$evidence"
+          gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName \
+            > "$evidence/release.json"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["isDraft"] is False and r["tagName"] == sys.argv[2]' \
+            "$evidence/release.json" "$TAG_NAME"
+          gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --dir "$assets"
+          python3 scripts/rust-registry-smoke.py \
+            --tag "$TAG_NAME" --target "$TARGET" --repository "$GITHUB_REPOSITORY" \
+            --assets-dir "$assets" --evidence "$evidence" | tee "$evidence/stdout.log"
+          echo "Exact crates.io Rust consumer and authenticated released hostlib passed for $TARGET. No VM or guest boot witnessed." \
+            >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: rust-registry-${{ matrix.target }}
+          path: ${{ runner.temp }}/rust-registry-evidence
+          if-no-files-found: error
+          retention-days: 30

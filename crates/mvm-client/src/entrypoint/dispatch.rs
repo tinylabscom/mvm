@@ -311,6 +311,13 @@ pub trait CallObserver {
     /// The call's VM has its final name, before admission or backend startup.
     /// Observers can arm host-side evidence collection without racing boot.
     fn vm_named(&mut self, _vm_name: &str) {}
+    /// A boot succeeded under this exact admitted plan, before agent wait or
+    /// command dispatch. This is not an authenticated guest-readiness event,
+    /// a final-runtime measurement, or a new admission capability.
+    ///
+    /// The plan is borrowed from the boot's admission, not reconstructed from
+    /// a cached plan or supplied by the observer. Do not log its secret bindings.
+    fn admitted(&mut self, _vm_name: &str, _admitted: &AdmittedPlan) {}
     /// One chunk of the workload's own bytes, on the channel the guest sent it
     /// on, with how its recorded copy differed.
     fn output(&mut self, chunk: &ShownChunk);
@@ -326,10 +333,20 @@ pub trait CallObserver {
     fn dispatching(&mut self, _vm_name: &str, _streams_stdin: bool) {}
     /// The dispatch returned, before the machine is torn down or kept alive.
     fn dispatched(&mut self) {}
-    /// The call has a terminal.
+    /// The dispatch has a terminal. This precedes lifecycle teardown and does
+    /// not establish that its VM stopped or its resources were reclaimed.
     fn call_finished(&mut self, _vm_name: &str, _outcome: &CallOutcome) {}
     /// A kept-alive call left its VM running under this session.
     fn kept_alive(&mut self, _vm_name: &str, _session_id: Option<&SessionId>) {}
+    /// The transient-call lifecycle attempted to stop its VM, under the same
+    /// admission that booted it. `Ok(())` means only that the selected backend
+    /// acknowledged its stop request; it does not prove resource reclamation,
+    /// authenticated peer identity, audit sealing, or physical cleanup.
+    ///
+    /// Absence of this callback is not success: an earlier boot/agent-wait
+    /// failure or a kept-alive session may take another teardown path.
+    fn vm_stop_finished(&mut self, _vm_name: &str, _admitted: &AdmittedPlan, _result: &Result<()>) {
+    }
 }
 
 /// Hand one streamed event to the capture and the observer.

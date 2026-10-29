@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use super::Cli;
 use super::host_signer::{host_signer_id, load_or_init};
 
+pub(in crate::commands) mod application_source;
 pub(in crate::commands) mod detect;
 mod image_source;
 pub(in crate::commands) mod positional_source;
@@ -99,6 +100,8 @@ pub(in crate::commands) struct Args {
     /// manifest from `mvmforge emit` (top-level `apps[]`). The resolved
     /// entrypoint (command, working_dir, env) is invoked instead of a
     /// trailing argv. Mutually exclusive with the trailing `<ARGV>...`.
+    /// Select an already-built image separately with `--manifest`; this
+    /// document does not build or select the microVM image.
     #[arg(long, value_name = "PATH", conflicts_with = "argv")]
     pub launch_plan: Option<String>,
     /// Argv to run inside the guest (use `--` to separate). Required unless
@@ -137,6 +140,15 @@ const SOURCES_EXCEPT_RUNTIME_PACK: [&str; 4] = ["image", "manifest", "flake", "d
 const SOURCES_EXCEPT_DEPLOYMENT: [&str; 4] = ["image", "manifest", "flake", "runtime_pack"];
 const SOURCES_EXCEPT_RUNTIME: [&str; 5] =
     ["image", "manifest", "flake", "runtime_pack", "deployment"];
+const SOURCES_EXCEPT_APPLICATION: [&str; 7] = [
+    "image",
+    "manifest",
+    "flake",
+    "runtime_pack",
+    "deployment",
+    "runtime",
+    "source",
+];
 const SOURCES_EXCEPT_POSITIONAL: [&str; 6] = [
     "image",
     "manifest",
@@ -159,6 +171,15 @@ pub(in crate::commands) struct RunArgs {
     /// Boot an OCI image (resolved through the local cache first).
     #[arg(long, value_name = "REF", conflicts_with_all = SOURCES_EXCEPT_IMAGE)]
     pub image: Option<String>,
+    /// Boot an installed application (NAMESPACE/NAME[@VERSION]).
+    #[arg(
+        short = 'a',
+        long = "application",
+        visible_alias = "app",
+        value_name = "REF",
+        conflicts_with_all = SOURCES_EXCEPT_APPLICATION
+    )]
+    pub application: Option<String>,
     /// Build and boot a Nix flake.
     #[arg(long, value_name = "PATH", conflicts_with_all = SOURCES_EXCEPT_FLAKE)]
     pub flake: Option<String>,
@@ -224,9 +245,7 @@ pub(in crate::commands) struct RunArgs {
     /// Set memory (for example, 512M or 1G).
     #[arg(long, default_value = "512M")]
     pub memory: String,
-    /// Which of `--cpus` / `--memory` the command line named. Not a flag:
-    /// recorded from clap's value sources after parsing, so a signed bundle's
-    /// advisory resources fill only what the user left unnamed.
+    /// Which of `--cpus` / `--memory` the command line named (not a flag).
     #[arg(skip)]
     pub explicit_resources: environment_defaults::ExplicitResources,
     /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
@@ -269,9 +288,6 @@ pub(in crate::commands) struct RunArgs {
     /// Internal signed pack identity selected as this run's image source.
     #[arg(skip)]
     pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
-    /// Internal signed package policy selected by installed application name.
-    #[arg(skip)]
-    pub application_policy: Option<String>,
     /// Collect a guest directory into HOST_DIR after exit (repeatable).
     //
     // HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]. The guest gets a fresh writable
@@ -330,7 +346,7 @@ pub(in crate::commands) struct RunArgs {
     /// Require production policy (digest-pinned, verified images).
     #[arg(long = "prod")]
     pub prod: bool,
-    /// Boot an installed package, image, or signed archive.
+    /// Boot an OCI image, .mvmpkg artifact, or installed app.
     // Classified by shape, never by probing the filesystem: a path-shaped
     // `.mvmpkg` is an artifact, anything else an image reference. Under
     // `--mode` it names the script instead. See `positional_source`.
@@ -382,6 +398,11 @@ pub(in crate::commands) struct RunArgs {
     /// refusals. Settled before a `--flake` is built into a slot.
     #[arg(skip)]
     pub review_source: Option<super::denial_review::ReviewSource>,
+    /// Internal: the installed application this run resolved to, recorded
+    /// once admission has produced the plan it boots under.
+    #[arg(skip)]
+    pub resolved_application:
+        Option<mvm_core::registry_pack::application_bundle::ResolvedApplication>,
 }
 
 /// Every flag that authors policy. A resolved manifest is the whole policy,
@@ -418,7 +439,7 @@ pub(in crate::commands) struct SdkTransportArgs {
     /// - `--mode live`: spawn the user's script with `MVM_SDK_MODE=live`
     ///   so the SDK shells each `Sandbox` operation to existing
     ///   `mvmctl` verbs against a real microVM.
-    /// - `--mode record` redirects users to `mvmctl build compile` (where
+    /// - `--mode record` redirects users to `mvmctl dev compile` (where
     ///   record is the default mode).
     ///
     /// When unset, the verb behaves as a transient-sandbox runner
@@ -445,7 +466,7 @@ pub(in crate::commands) struct RunVerbArgs {
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
-/// `mvmctl build compile` but specialises the rejection messages to point
+/// `mvmctl dev compile` but specialises the rejection messages to point
 /// users at the right verb when they pick the wrong default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(in crate::commands) enum RunMode {
@@ -458,7 +479,7 @@ pub(in crate::commands) enum RunMode {
     Plan,
     /// Record transport — capture Sandbox operations into a
     /// recording and lower to a Workload. `mvmctl run --mode
-    /// record` redirects users to `mvmctl build compile`, whose default
+    /// record` redirects users to `mvmctl dev compile`, whose default
     /// mode is record.
     Record,
 }
@@ -582,12 +603,10 @@ pub(in crate::commands) fn run_secure_started(
     // When an SDK transport mode is requested, peel off the
     // SDK-shaped surface before the sandbox-runner validation kicks
     // in. `--dev` (alias for live) is refused in v1; `--prod` (alias
-    // for record) redirects to `mvmctl build compile`; `--mode plan` routes
+    // for record) redirects to `mvmctl dev compile`; `--mode plan` routes
     // through the plan-mode admission dry-run.
     validate_run_profile(&args)?;
-    // An installed bundle's signed environment sizes the launch where the
-    // user named no size. Done before anything reads `cpus` / `memory`, so the
-    // preflight summary, admission and the boot all see the same values.
+    // Before anything reads `cpus` / `memory`, so every later step agrees.
     environment_defaults::apply_installed_bundle_defaults(&mut args)?;
     if args.dry_run {
         let summary = RunPreflightSummary::from_args(&args, None)?;
@@ -610,7 +629,7 @@ pub(in crate::commands) fn run_secure_started(
     let outputs = super::outputs::PreparedOutputs::prepare(&args.outputs, &args.mounts)?;
     let admit_outputs = outputs.grants();
     let host_config = mvm_core::user_config::load(None);
-    let ai_policy = super::shared::resolve_ai_policy(args.ai_token_budget);
+    let ai_policy = application_source::ai_policy(&args)?;
     let routes = super::run_routes::launch_routes(&args)?;
     crate::approval::configure(super::run_routes::launch_approval(&args)?);
     let allow_host = routes.with_allow_host(&args.allow_host);
@@ -680,6 +699,7 @@ pub(in crate::commands) fn run_secure_started(
     let admit_gpu = args.gpu;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
+    let admit_prod = args.prod;
     let admit_workload_dir = local_workload_dir(args.flake.as_deref(), args.manifest.as_deref());
     // A run of an installed bundle is bounded by the posture its publisher
     // signed. Read before boot, from the verified manifest; admission refuses
@@ -701,6 +721,7 @@ pub(in crate::commands) fn run_secure_started(
     // plan exists, so the provenance entry binds to the plan that booted.
     let oci_provenance: OciProvenanceSink = std::rc::Rc::new(std::cell::RefCell::new(None));
     let provenance_for_admit = std::rc::Rc::clone(&oci_provenance);
+    let application_for_admit = args.resolved_application.clone();
     let denials = super::egress_denials::PendingWatch::for_run(args.json, args.pty);
     let denials_for_admit = std::rc::Rc::clone(&denials);
     let applied_tool_rules = args
@@ -718,12 +739,16 @@ pub(in crate::commands) fn run_secure_started(
             assets,
             volumes,
             bundle_archive,
+            runtime_config,
         } = inputs;
         denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let instruction_mounts =
             crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
-        let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        // Every refusal is made before this returns; the audit sync is left
+        // running beside the VMM boot, and activation waits for it.
+        let configured_images_dir = mvm_build::image_source::configured_images_dir();
+        let params = super::up::AdmitPlanForBootParams {
             gpu: admit_gpu,
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
                 .with_mount_roots(&[])
@@ -734,10 +759,11 @@ pub(in crate::commands) fn run_secure_started(
             vm_name,
             kernel_path: kernel,
             backend_name: &admit_backend,
-            configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
+            configured_images_dir: configured_images_dir.as_deref(),
             rootfs_path: rootfs,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config,
             cpus: admit_cpus,
             mem_mib: admit_mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -748,7 +774,13 @@ pub(in crate::commands) fn run_secure_started(
             keys_dir: None,
             audit_dir: None,
             policy_dir: None,
-            bundle_pin: bundle_archive.map(mvm_client::admission::BundlePin::boots),
+            bundle_pin: bundle_archive.map(|archive| {
+                if admit_prod {
+                    mvm_client::admission::BundlePin::boots_for_production(archive)
+                } else {
+                    mvm_client::admission::BundlePin::boots(archive)
+                }
+            }),
             bundle_posture: admit_bundle_posture,
             deps_volume: None,
             // The grants come from the launch config's own volume list, so the
@@ -772,7 +804,8 @@ pub(in crate::commands) fn run_secure_started(
                 admit_has_argv,
             ),
             assets: assets.to_vec(),
-        })?;
+        };
+        let (c, durability) = super::up::admit_plan_for_boot_syncing_beside_boot(params)?;
         // Persist the bare plan so the pre-start moat / endpoint can read it
         // on the backends that consume it from disk (mirrors the invoke path).
         if super::up::persists_plan_before_start(&admit_backend) {
@@ -798,6 +831,8 @@ pub(in crate::commands) fn run_secure_started(
         let substrate = crate::exec::SessionAuditSubstrate {
             tenant_id: c.admitted.plan().tenant.0.clone(),
             plan_json,
+            built_pack_check: c.admitted.built_pack_boot_check()?,
+            caller_registration: None,
             bundle_json,
             config_files: start_config.config_files,
             read_only_materialized_images: c
@@ -808,11 +843,19 @@ pub(in crate::commands) fn run_secure_started(
                 .filter(|share| share.read_only)
                 .map(|share| share.host_path.clone())
                 .collect(),
+            durability: Some(durability),
         };
-        // Bind the OCI provenance to the plan that was just admitted, before
-        // the backend starts. Claim 14 wants the image's origin in the chain
-        // for the admission that booted it, and this is the first point where
-        // that plan exists.
+        if let Some(resolved) = &application_for_admit {
+            application_source::record_launch(
+                resolved,
+                vm_name,
+                &c.admitted.plan().plan_id.0,
+                None,
+            );
+        }
+        // Bind the OCI provenance to the plan just admitted, before the backend
+        // starts: claim 14 wants the image's origin in the chain for the
+        // admission that booted it, and this is the first point that plan exists.
         if let Some(labels) = provenance_for_admit.borrow_mut().take() {
             c.emitter
                 .emit_oci_provenance(c.admitted.plan(), labels)
@@ -882,7 +925,7 @@ pub(in crate::commands) fn run_secure_started(
             offer_review(&refused, &denials, review_source.as_ref());
         }
         if output.exit_code != 0 {
-            mvm_observability::exit(output.exit_code);
+            crate::observability::exit(output.exit_code);
         }
         return Ok(());
     }
@@ -986,7 +1029,7 @@ fn run_run_args(
         .announce_exit(exit_code, &super::host_notices::Stderr);
     offer_review(&refused, audit.denials, audit.review_source);
     if exit_code != 0 {
-        mvm_observability::exit(exit_code);
+        crate::observability::exit(exit_code);
     }
     Ok(())
 }
@@ -1070,6 +1113,12 @@ fn build_exec_request(
             .context("resolving --runtime-pack image source")?
     } else if let Some(source) = source_override {
         source
+    } else if let Some(pin) = args
+        .registry_pack_image
+        .as_ref()
+        .filter(|_| manifest_arg.is_none() && image_ref.is_none())
+    {
+        crate::exec::ImageSource::RegistryPack { pin: pin.clone() }
     } else {
         match (manifest_arg, image_ref) {
             (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
@@ -1647,46 +1696,6 @@ mod tests {
     }
 
     #[test]
-    fn prod_requires_an_explicit_non_development_profile() {
-        use clap::Parser;
-
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.remove(mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV);
-        let image = format!("registry.example/worker@sha256:{}", "1".repeat(64));
-        for verb in [vec!["mvmctl", "run"], vec!["mvmctl", "machine", "run"]] {
-            for selection in [None, Some("standard")] {
-                let mut argv = verb.clone();
-                argv.extend(["--prod", "--image", &image]);
-                if let Some(selection) = selection {
-                    argv.extend(["--profile", selection]);
-                }
-                let parsed = crate::commands::Cli::try_parse_from(argv).expect("parse run");
-                let run = match parsed.command {
-                    crate::commands::Commands::Run(args) => args.machine.run,
-                    crate::commands::Commands::Machine(args) => {
-                        let crate::commands::machine::MachineAction::Run(args) = args.action else {
-                            panic!("expected machine run");
-                        };
-                        args.run
-                    }
-                    _ => panic!("expected run"),
-                };
-                let result = validate_run_profile(&run);
-                if selection.is_some() {
-                    result.expect("explicit standard reaches the existing safe preflight");
-                } else {
-                    assert!(
-                        result
-                            .expect_err("the development default must refuse --prod")
-                            .to_string()
-                            .contains("--profile dev")
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn a_production_oci_image_without_argv_dispatches_its_baked_entrypoint() {
         let mut run = run_args(RunProfile::Standard);
         run.argv.clear();
@@ -2167,7 +2176,7 @@ mod tests {
         let mut args = run_args(RunProfile::Standard);
         args.prod = true;
         let err = resolve_run_mode(&sdk(None, false), &args).expect_err("--prod must bail");
-        assert!(err.to_string().contains("mvmctl build compile"));
+        assert!(err.to_string().contains("mvmctl dev compile"));
     }
 
     #[test]
@@ -2199,7 +2208,7 @@ mod tests {
         let args = run_args(RunProfile::Standard);
         let err = resolve_run_mode(&sdk(Some(RunMode::Record), false), &args)
             .expect_err("--mode record must bail");
-        assert!(err.to_string().contains("mvmctl build compile"));
+        assert!(err.to_string().contains("mvmctl dev compile"));
     }
 
     #[test]

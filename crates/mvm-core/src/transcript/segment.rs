@@ -314,6 +314,13 @@ impl SegmentStore {
     ) -> Result<(), TranscriptError> {
         let mut options = OpenOptions::new();
         options.create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+        }
         if placement.offset == 0 {
             options.write(true).truncate(true);
         } else {
@@ -511,6 +518,7 @@ pub(super) fn hash_range(
 }
 
 /// Slice one chunk's ciphertext out of its already-read segment.
+#[cfg(any(test, not(unix)))]
 pub(crate) fn slice_chunk<'a>(
     segment: &'a [u8],
     chunk: &ChunkRecord,
@@ -533,7 +541,13 @@ pub(crate) fn slice_chunk<'a>(
 /// names onto a directory and opens them well before anything verifies, so the
 /// guard has to be available at that first touch rather than only at the last.
 pub fn check_safe_name(file: &str) -> Result<(), TranscriptError> {
-    if file.is_empty() || file.contains('/') || file.contains('\\') || file == "." || file == ".." {
+    if file.is_empty()
+        || file.contains('/')
+        || file.contains('\\')
+        || file == "."
+        || file == ".."
+        || file == super::WRITER_LOCK_FILENAME
+    {
         return Err(TranscriptError::UnsafeChunkName(file.to_string()));
     }
     Ok(())

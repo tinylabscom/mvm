@@ -20,6 +20,8 @@ use crate::crypto::aead;
 
 pub mod evidence;
 pub mod evidence_pressure;
+#[cfg(unix)]
+pub mod local_store;
 mod retention;
 mod ring;
 #[cfg(unix)]
@@ -44,6 +46,8 @@ pub const TRANSCRIPT_KEK_RECIPIENT: &str = "transcript-kek";
 /// side that names it — the operator CLI, the supervisor's capture sink, and
 /// the stream reader — so a capture written by one is found by the others.
 pub const MANIFEST_FILENAME: &str = "manifest.json";
+const WRITER_LOCK_FILENAME: &str = ".capture-writer.lock";
+const MAX_EXPORT_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Current sealed-transcript manifest format. Unknown versions fail closed.
 ///
@@ -506,7 +510,7 @@ pub fn verify_chunks(manifest: &TranscriptManifest, dir: &Path) -> Result<(), Tr
 pub struct TranscriptWriter {
     key: aead::Key,
     #[cfg(unix)]
-    _capture_lease: Option<secure_cleanup::CaptureDirectory>,
+    _capture_lease: Option<secure_cleanup::CaptureProducerDirectory>,
     store: segment::SegmentStore,
     budget: CaptureBudget,
     retention: RetentionPolicy,
@@ -557,9 +561,48 @@ pub struct TranscriptWriterConfig {
     pub wrapped_data_key_b64: String,
 }
 
+/// An integrity snapshot of unsigned, empty configuration, not a producer or
+/// terminal lifecycle assertion. Kept private to the fixed-layout local store.
+#[cfg(unix)]
+fn initial_manifest(config: TranscriptWriterConfig) -> Result<TranscriptManifest, TranscriptError> {
+    validate_protection(
+        config.at_rest,
+        config.generation_budget,
+        config.payload_encoding,
+        config.created_unix_secs,
+    )?;
+    let mut manifest = TranscriptManifest {
+        format_version: if config.at_rest.is_some() {
+            TRANSCRIPT_MANIFEST_FORMAT_VERSION
+        } else {
+            LEGACY_TRANSCRIPT_MANIFEST_FORMAT_VERSION
+        },
+        capture_id: config.capture_id,
+        binding: config.binding,
+        bounds: config.bounds,
+        created_unix_secs: config.created_unix_secs,
+        at_rest: config.at_rest,
+        generation_budget: config.generation_budget,
+        payload_encoding: config.payload_encoding,
+        sealed_unix_secs: None,
+        wrapped_data_key_b64: config.wrapped_data_key_b64,
+        recipient: config.recipient,
+        retention: config.retention,
+        chunks: Vec::new(),
+        refused_chunks: 0,
+        refused_bytes: 0,
+        evicted_chunks: 0,
+        evicted_bytes: 0,
+        adopted: false,
+        sealed_root_hex: String::new(),
+    };
+    manifest.sealed_root_hex = sealed_root_hex(&manifest)?;
+    Ok(manifest)
+}
+
 impl TranscriptWriter {
     /// Construct a writer and fail before producer startup if protection or its
-    /// exclusive directory lease cannot be established.
+    /// producer reservation cannot be established.
     pub fn new(
         dir: impl Into<PathBuf>,
         key: aead::Key,
@@ -583,7 +626,7 @@ impl TranscriptWriter {
         let capture_lease = config
             .at_rest
             .map(|_| {
-                secure_cleanup::CaptureDirectory::for_writer(&dir).map_err(|error| {
+                secure_cleanup::CaptureProducerDirectory::existing(&dir).map_err(|error| {
                     TranscriptError::Io {
                         file: MANIFEST_FILENAME.to_string(),
                         msg: error.to_string(),
@@ -877,10 +920,210 @@ pub struct ExportedChunk {
     pub plaintext: Vec<u8>,
 }
 
+#[cfg(unix)]
+fn export_reader(
+    manifest: &TranscriptManifest,
+    dir: &Path,
+) -> Result<secure_cleanup::CaptureReadDirectory, TranscriptError> {
+    let capture = if manifest.at_rest.is_none() {
+        secure_cleanup::CaptureReadDirectory::legacy_existing(dir)
+    } else {
+        secure_cleanup::CaptureReadDirectory::existing(dir)
+    };
+    capture.map_err(|error| export_io(error, "capture"))
+}
+
+#[cfg(unix)]
+fn export_io(error: std::io::Error, file: &str) -> TranscriptError {
+    TranscriptError::Io {
+        file: file.into(),
+        msg: error.to_string(),
+    }
+}
+
+#[cfg(unix)]
+fn check_export_readable(manifest: &TranscriptManifest) -> Result<(), TranscriptError> {
+    if manifest.at_rest.is_some() {
+        let now = retention_now()?;
+        #[cfg(test)]
+        let now = export_test_clock::now().unwrap_or(now);
+        manifest.check_readable_at(now)?;
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod export_test_clock {
+    use std::cell::Cell;
+    thread_local! { static NOW: Cell<Option<u64>> = const { Cell::new(None) }; }
+    pub(super) struct Guard(Option<u64>);
+    pub(super) fn at(now: u64) -> Guard {
+        Guard(NOW.replace(Some(now)))
+    }
+    pub(super) fn now() -> Option<u64> {
+        NOW.get()
+    }
+    pub(super) fn set(now: u64) {
+        NOW.set(Some(now));
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            NOW.set(self.0);
+        }
+    }
+
+    #[test]
+    fn override_restores_prior_thread_local_clock_on_unwind() {
+        let before = now();
+        let guard = at(10);
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _nested = at(20);
+                panic!("test scoped clock cleanup");
+            })
+            .is_err()
+        );
+        assert_eq!(now(), Some(10));
+        drop(guard);
+        assert_eq!(now(), before);
+    }
+}
+
+fn export_record_size(chunk: &ChunkRecord) -> Result<usize, TranscriptError> {
+    let overhead = (aead::NONCE_SIZE + aead::TAG_SIZE) as u64;
+    if chunk.size_bytes < overhead || chunk.size_bytes > MAX_EXPORT_SEGMENT_BYTES {
+        return Err(TranscriptError::BoundExceeded(
+            "ciphertext record size".into(),
+        ));
+    }
+    usize::try_from(chunk.size_bytes)
+        .map_err(|_| TranscriptError::BoundExceeded("ciphertext record size".into()))
+}
+
+/// Check an in-memory response ceiling before ciphertext reads or decryption.
+/// This is an allocation bound, not a replacement retention policy.
+pub fn bounded_export_size(
+    manifest: &TranscriptManifest,
+    maximum: usize,
+) -> Result<usize, TranscriptError> {
+    let mut total = 0usize;
+    for chunk in &manifest.chunks {
+        let ciphertext = export_record_size(chunk)?;
+        let plaintext = ciphertext - aead::NONCE_SIZE - aead::TAG_SIZE;
+        total = total
+            .checked_add(plaintext)
+            .filter(|size| *size <= maximum)
+            .ok_or_else(|| TranscriptError::BoundExceeded("in-memory export size".into()))?;
+    }
+    Ok(total)
+}
+
+#[cfg(unix)]
+fn visit_export(
+    manifest: &TranscriptManifest,
+    capture: &secure_cleanup::CaptureReadDirectory,
+    key: &aead::Key,
+    mut expose: impl FnMut(&ChunkRecord, &[u8]) -> Result<(), TranscriptError>,
+) -> Result<(), TranscriptError> {
+    capture
+        .validate_manifest(manifest)
+        .map_err(|error| export_io(error, "capture"))?;
+    check_export_readable(manifest)?;
+    verify_sealed_root(manifest)?;
+    for chunk in &manifest.chunks {
+        export_record_size(chunk)?;
+    }
+    let spans = segment::segment_spans(&manifest.chunks)?;
+    for span in &spans {
+        check_export_readable(manifest)?;
+        capture
+            .open_segment(span.file, span.bytes)
+            .map_err(|error| export_io(error, span.file))?;
+        check_export_readable(manifest)?;
+    }
+    for span in spans {
+        for chunk in span.chunks {
+            let ciphertext = capture.read_record(manifest, chunk, span.bytes)?;
+            check_export_readable(manifest)?;
+            let plaintext =
+                zeroize::Zeroizing::new(aead::open(key, &ciphertext, &[]).map_err(|_| {
+                    TranscriptError::Decrypt {
+                        seq: chunk.seq,
+                        file: chunk.file.clone(),
+                    }
+                })?);
+            check_export_readable(manifest)?;
+            expose(chunk, &plaintext)?;
+        }
+    }
+    check_export_readable(manifest)
+}
+
+/// Export under the caller's read lease. Writer/flush failures and observed
+/// expiry fail closed, even if the sink received a prefix. Checks cannot
+/// interrupt a callback while it retains control.
+#[cfg(unix)]
+pub fn export_to_writer(
+    manifest: &TranscriptManifest,
+    capture: &secure_cleanup::CaptureReadDirectory,
+    key: &aead::Key,
+    writer: &mut impl std::io::Write,
+) -> Result<u64, TranscriptError> {
+    let mut written = 0u64;
+    visit_export(manifest, capture, key, |_, mut plaintext| {
+        while !plaintext.is_empty() {
+            check_export_readable(manifest)?;
+            let count = match writer.write(plaintext) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result.map_err(|error| export_io(error, "export sink"))?,
+            };
+            if count == 0 {
+                return Err(export_io(
+                    std::io::ErrorKind::WriteZero.into(),
+                    "export sink",
+                ));
+            }
+            plaintext = &plaintext[count..];
+            written += count as u64;
+            check_export_readable(manifest)?;
+        }
+        Ok(())
+    })?;
+    check_export_readable(manifest)?;
+    writer
+        .flush()
+        .map_err(|error| export_io(error, "export sink"))?;
+    check_export_readable(manifest)?;
+    Ok(written)
+}
+
+/// Keep the directory leased throughout bounded verification and decryption.
+/// Sequence/direction and the existing history-facing signature are unchanged.
+#[cfg(unix)]
+pub fn export_chunks(
+    manifest: &TranscriptManifest,
+    dir: &Path,
+    key: &aead::Key,
+) -> Result<Vec<ExportedChunk>, TranscriptError> {
+    let capture = export_reader(manifest, dir)?;
+    let mut out = Vec::new();
+    visit_export(manifest, &capture, key, |chunk, plaintext| {
+        out.push(ExportedChunk {
+            seq: chunk.seq,
+            direction: chunk.direction,
+            dropped: chunk.dropped,
+            plaintext: plaintext.to_vec(),
+        });
+        Ok(())
+    })?;
+    Ok(out)
+}
+
 /// Verify a sealed transcript and decrypt it chunk by chunk, preserving each
 /// chunk's sequence number and direction. Integrity is checked first
 /// ([`verify_sealed_root`] then [`verify_chunks`]); a wrong key or tampered
 /// ciphertext fails closed on decrypt.
+#[cfg(not(unix))]
 pub fn export_chunks(
     manifest: &TranscriptManifest,
     dir: &Path,
@@ -922,9 +1165,23 @@ pub fn export_chunks(
     Ok(out)
 }
 
+/// Hold one read lease through the final deadline check and buffer delivery.
+#[cfg(unix)]
+pub fn export(
+    manifest: &TranscriptManifest,
+    dir: &Path,
+    key: &aead::Key,
+) -> Result<Vec<u8>, TranscriptError> {
+    let capture = export_reader(manifest, dir)?;
+    let mut out = Vec::new();
+    export_to_writer(manifest, &capture, key, &mut out)?;
+    Ok(out)
+}
+
 /// Verify a sealed transcript and decrypt its chunks back to the original
 /// plaintext stream. Integrity is checked first ([`verify_chunks`]); a wrong
 /// key or tampered ciphertext fails closed on decrypt.
+#[cfg(not(unix))]
 pub fn export(
     manifest: &TranscriptManifest,
     dir: &Path,
@@ -1458,6 +1715,122 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn guarded_export_failure_after_writes_or_flush_never_reports_success() {
+        struct Sink {
+            mode: u8,
+            bytes: Vec<u8>,
+            called: bool,
+            flushed: bool,
+            expiry: u64,
+        }
+        impl std::io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.called = true;
+                match self.mode {
+                    0 => Err(std::io::Error::other("write refused")),
+                    1 => Ok(0),
+                    _ => {
+                        self.bytes.extend_from_slice(bytes);
+                        Ok(bytes.len())
+                    }
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushed = true;
+                if self.mode == 2 {
+                    return Err(std::io::Error::other("flush refused"));
+                }
+                export_test_clock::set(self.expiry);
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(root.path()).unwrap();
+        let now = retention_now().unwrap();
+        let mut config = writer_config();
+        config.at_rest = Some(AtRestRetention::default());
+        config.created_unix_secs = now;
+        let mut writer = TranscriptWriter::new(root.path(), fixed_key(1), config).unwrap();
+        writer.push(Direction::Stdout, b"payload").unwrap();
+        let manifest = writer.seal();
+        assert!(bounded_export_size(&manifest, 6).is_err());
+        assert_eq!(bounded_export_size(&manifest, 7).unwrap(), 7);
+        let reader = secure_cleanup::CaptureReadDirectory::existing(root.path()).unwrap();
+        // An integrity snapshot is not a terminal lifecycle seal.
+        assert!(manifest.retention_deadline().unwrap().is_none());
+        let policy = manifest.at_rest.unwrap();
+        let horizon = policy
+            .generation_deadline(manifest.created_unix_secs)
+            .unwrap()
+            .checked_add(policy.payload_after_seal_secs)
+            .unwrap();
+        for mode in 0..4 {
+            let _clock = export_test_clock::at(now);
+            let mut sink = Sink {
+                mode,
+                bytes: Vec::new(),
+                called: false,
+                flushed: false,
+                expiry: horizon + 1,
+            };
+            let error = export_to_writer(&manifest, &reader, &fixed_key(1), &mut sink).unwrap_err();
+            assert!(sink.called);
+            if mode >= 2 {
+                assert!(sink.flushed);
+                assert_eq!(sink.bytes, b"payload");
+            }
+            if mode == 3 {
+                assert!(matches!(error, TranscriptError::PayloadExpired));
+            } else if let TranscriptError::Io { msg, .. } = error {
+                if mode == 0 {
+                    assert_eq!(msg, "write refused");
+                }
+                if mode == 1 {
+                    assert_eq!(
+                        msg,
+                        std::io::Error::from(std::io::ErrorKind::WriteZero).to_string()
+                    );
+                }
+                if mode == 2 {
+                    assert_eq!(msg, "flush refused");
+                }
+            } else {
+                panic!("expected writer I/O refusal");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_live_producer_supports_guarded_history_without_exclusive_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(root.path()).unwrap();
+        let mut config = writer_config();
+        config.at_rest = Some(AtRestRetention::default());
+        config.created_unix_secs = retention_now().unwrap();
+        let mut writer = TranscriptWriter::new(root.path(), fixed_key(1), config.clone()).unwrap();
+        writer.push(Direction::Stdout, b"history").unwrap();
+        let snapshot = writer.sealed_manifest();
+        assert_eq!(
+            export_chunks(&snapshot, root.path(), &fixed_key(1)).unwrap()[0].plaintext,
+            b"history"
+        );
+        assert!(TranscriptWriter::new(root.path(), fixed_key(2), config).is_err());
+        assert!(secure_cleanup::CaptureDirectory::for_writer(root.path()).is_err());
+        let reader = secure_cleanup::CaptureReadDirectory::existing(root.path()).unwrap();
+        drop(writer);
+        assert!(secure_cleanup::CaptureDirectory::for_writer(root.path()).is_err());
+        let mut bytes = Vec::new();
+        export_to_writer(&snapshot, &reader, &fixed_key(1), &mut bytes).unwrap();
+        assert_eq!(bytes, b"history");
+        drop(reader);
+        let exclusive = secure_cleanup::CaptureDirectory::for_writer(root.path()).unwrap();
+        assert!(export_chunks(&snapshot, root.path(), &fixed_key(1)).is_err());
+        drop(exclusive);
+    }
+
     /// A writer with room for a real stream capture — wider bounds than
     /// [`bounds`], which is deliberately tight for budget-exhaustion tests.
     fn writer_at(dir: &Path) -> TranscriptWriter {
@@ -1509,15 +1882,70 @@ mod tests {
                 Err(TranscriptError::SealedRootMismatch)
             );
         }
+        let payload_path = dir.path().join(&terminal.chunks[0].file);
+        let ciphertext = std::fs::read(&payload_path).unwrap();
+        let manifest_bytes = serde_json::to_vec(&terminal).unwrap();
+        let manifest_path = dir.path().join(MANIFEST_FILENAME);
+        std::fs::write(&manifest_path, &manifest_bytes).unwrap();
         assert_eq!(
             export(&terminal, dir.path(), &fixed_key(1)),
             Err(TranscriptError::PayloadExpired)
         );
+        assert_eq!(std::fs::read(&payload_path).unwrap(), ciphertext);
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_bytes);
+        assert_eq!(
+            export_chunks(&terminal, dir.path(), &fixed_key(1)),
+            Err(TranscriptError::PayloadExpired)
+        );
+        assert_eq!(std::fs::read(&payload_path).unwrap(), ciphertext);
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_bytes);
+        verify_sealed_root(&terminal).unwrap();
+        verify_chunks(&terminal, dir.path()).unwrap();
         assert_eq!(
             terminal.retained_plaintext_bytes().unwrap(),
             b"synthetic".len() as u64
         );
         assert!(serde_json::from_str::<PayloadEncoding>("\"unknown\"").is_err());
+    }
+
+    /// The read window closes at the exact deadline on both export paths: one
+    /// second earlier the payload is delivered, at the deadline the refusal is
+    /// clean and leaves ciphertext and manifest untouched.
+    #[cfg(unix)]
+    #[test]
+    fn protected_export_is_readable_until_the_exact_deadline_then_refuses_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(dir.path()).unwrap();
+        let mut cfg = writer_config();
+        cfg.created_unix_secs = 100;
+        cfg.at_rest = Some(AtRestRetention::default());
+        let mut writer = TranscriptWriter::new(dir.path(), fixed_key(1), cfg).unwrap();
+        writer.push(Direction::Stdout, b"synthetic").unwrap();
+        let terminal = writer.finalize_at(200).unwrap();
+        let deadline = terminal.retention_deadline().unwrap().unwrap();
+        let payload_path = dir.path().join(&terminal.chunks[0].file);
+        let ciphertext = std::fs::read(&payload_path).unwrap();
+        let clock = export_test_clock::at(deadline - 1);
+        assert_eq!(
+            export(&terminal, dir.path(), &fixed_key(1)).unwrap(),
+            b"synthetic"
+        );
+        assert_eq!(
+            export_chunks(&terminal, dir.path(), &fixed_key(1)).unwrap()[0].plaintext,
+            b"synthetic"
+        );
+        export_test_clock::set(deadline);
+        assert_eq!(
+            export(&terminal, dir.path(), &fixed_key(1)),
+            Err(TranscriptError::PayloadExpired)
+        );
+        assert_eq!(
+            export_chunks(&terminal, dir.path(), &fixed_key(1)),
+            Err(TranscriptError::PayloadExpired)
+        );
+        drop(clock);
+        assert_eq!(std::fs::read(&payload_path).unwrap(), ciphertext);
+        verify_sealed_root(&terminal).unwrap();
     }
 
     #[test]

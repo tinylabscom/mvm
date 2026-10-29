@@ -24,6 +24,7 @@ impl CaptureRoute {
         owner: CaptureOwner,
         pid_file: PathBuf,
         stop: &'static AtomicBool,
+        stop_authority: super::hvf_stop::StopAuthority,
     ) -> Result<Self> {
         let (control, requests) = mpsc::sync_channel(1);
         std::thread::Builder::new()
@@ -39,7 +40,9 @@ impl CaptureRoute {
                                 Err(anyhow::anyhow!("capture owner already transferred"))
                             } else {
                                 claimed = true;
-                                transfer(&mut owner, &request, &pid_file)
+                                stop_authority.transfer(&request.child.child_vm_name, || {
+                                    transfer(&mut owner, &request, &pid_file)
+                                })
                             };
                             match result {
                                 Ok(bounds) => {
@@ -49,7 +52,11 @@ impl CaptureRoute {
                                         break;
                                     }
                                 }
-                                Err(_) => {
+                                Err(error) => {
+                                    mvm_vmm::agent_debug::line(
+                                        "handoff",
+                                        format_args!("capture transfer failed: {error:#}"),
+                                    );
                                     stop.store(true, Ordering::Release);
                                     let _ = request.sealed.try_send(false);
                                     break;
@@ -123,7 +130,7 @@ fn transfer(
     if !parent.finish() {
         anyhow::bail!("parent capture finalization incomplete");
     }
-    super::claimed_child::arm_for_claimed_child(&request.child, pid_file)
+    super::claimed_child::arm_for_claimed_child_preserving_evidence(&request.child, pid_file)
 }
 
 #[cfg(test)]
@@ -164,6 +171,11 @@ mod tests {
         crate::audit::host_keypair::load_or_init_at(&config::mvm_keys_dir()).unwrap();
         let parent_plan = PlanFixture::new().tenant("parent-tenant").build();
         let child_plan = PlanFixture::new().tenant("child-tenant").build();
+        // The supervisor binds its stop endpoint before it starts capture, so
+        // the socket namespace is still the private one it creates.
+        let stop = Box::leak(Box::new(AtomicBool::new(false)));
+        let stop_control =
+            super::super::hvf_stop::StopControl::start("route-parent", stop).unwrap();
         let (owner, producer) = CaptureOwner::start(CaptureParams {
             vm: "route-parent",
             authority: if operational {
@@ -174,11 +186,11 @@ mod tests {
             redaction: &parent_plan.redaction,
         })
         .unwrap();
-        let stop = Box::leak(Box::new(AtomicBool::new(false)));
         let route = CaptureRoute::start(
             owner,
             config::vm_state_dir("route-parent").join("supervisor.pid"),
             stop,
+            stop_control.authority(),
         )
         .unwrap();
         let mut uart = Pl011::new(0);

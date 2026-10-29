@@ -11,7 +11,8 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use super::{bootstrap, cleanup, sign, uninstall, update, verify_release};
+use super::verify_runtime;
+use super::{bootstrap, caller_identity, cleanup, sign, uninstall, update, verify_release};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -21,6 +22,8 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum EnvCmd {
+    /// Explicitly enroll or inspect the native caller identity
+    CallerIdentity(caller_identity::Args),
     /// Full environment setup from scratch
     Bootstrap(bootstrap::Args),
     /// Remove old dev-build artifacts and run Nix garbage collection
@@ -31,6 +34,8 @@ pub(in crate::commands) enum EnvCmd {
     Update(update::Args),
     /// Verify a downloaded release archive against its signature bundle, offline
     VerifyRelease(verify_release::Args),
+    /// Verify selected CLI release runtime bytes offline; diagnostic only
+    VerifyRuntime(verify_runtime::Args),
     /// Re-sign mvmctl + supervisors with the VMM entitlements (macOS)
     Sign(sign::Args),
 }
@@ -39,11 +44,13 @@ impl EnvCmd {
     /// Audit verb name (matches the clap subcommand name).
     pub(in crate::commands) fn verb_name(&self) -> &'static str {
         match self {
+            EnvCmd::CallerIdentity(_) => "caller-identity",
             EnvCmd::Bootstrap(_) => "bootstrap",
             EnvCmd::Cleanup(_) => "cleanup",
             EnvCmd::Uninstall(_) => "uninstall",
             EnvCmd::Update(_) => "update",
             EnvCmd::VerifyRelease(_) => "verify-release",
+            EnvCmd::VerifyRuntime(_) => "verify-runtime",
             EnvCmd::Sign(_) => "sign",
         }
     }
@@ -51,11 +58,13 @@ impl EnvCmd {
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
+        EnvCmd::CallerIdentity(a) => caller_identity::run(a),
         EnvCmd::Bootstrap(a) => bootstrap::run(cli, a, cfg),
         EnvCmd::Cleanup(a) => cleanup::run(cli, a, cfg),
         EnvCmd::Uninstall(a) => uninstall::run(&a),
         EnvCmd::Update(a) => update::run(cli, a, cfg),
         EnvCmd::VerifyRelease(a) => verify_release::run(cli, a, cfg),
+        EnvCmd::VerifyRuntime(a) => verify_runtime::run(a),
         EnvCmd::Sign(a) => sign::run(cli, a, cfg),
     }
 }

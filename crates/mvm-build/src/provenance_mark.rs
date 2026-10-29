@@ -54,7 +54,7 @@ pub struct SealEvidence<'a> {
 
 impl<'a> SealEvidence<'a> {
     /// Builder entry point. `signer` is the builder identity key — the
-    /// host signer conventionally (`mvmctl artifact pack` signs with the
+    /// host signer conventionally (`mvmctl build` signs with the
     /// same key, so one trust anchor covers both artifact forms).
     pub fn builder(signer: &'a SigningKey) -> SealEvidenceBuilder<'a> {
         SealEvidenceBuilder {

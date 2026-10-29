@@ -20,6 +20,7 @@ impl Default for RunArgs {
             detected_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             manifest: None,
             image: None,
+            application: None,
             flake: None,
             flake_profile: None,
             deployment: None,
@@ -58,7 +59,6 @@ impl Default for RunArgs {
             caller_commitment: None,
             assets: Vec::new(),
             registry_pack_image: None,
-            application_policy: None,
             outputs: Vec::new(),
             json: false,
             dry_run: false,
@@ -78,6 +78,7 @@ impl Default for RunArgs {
             applied_policy: None,
             policy_backend: None,
             review_source: None,
+            resolved_application: None,
         }
     }
 }

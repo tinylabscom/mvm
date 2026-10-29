@@ -192,9 +192,11 @@ per-worktree VM** (boot cost, duplicated tens-of-GB store, warm-cache loss).
 
 One-time per clone: `just maint::hooks` points `core.hooksPath` at
 `.githooks/`. The pre-commit hook runs `cargo fmt --all` (auto-restaging),
-scoped stable clippy `-D warnings`, `nix fmt` for staged `.nix` files, and
-`actionlint` for workflow changes — never the full test suite; heavy gates run
-in CI (`MVM_SKIP_CLIPPY=1` bypasses the clippy pass).
+scoped stable clippy `-D warnings`, and `actionlint` for workflow changes —
+never Nix on the host or the full test suite. Nix flake checks run in CI;
+local Nix evaluation and builds run only in the builder VM. CI does not
+currently enforce Nix formatting because the flake declares no formatter.
+`MVM_SKIP_CLIPPY=1` bypasses the clippy pass.
 
 ## The DX rule: binary development is single-repo
 
@@ -233,6 +235,10 @@ No task is complete without all of:
    scope, dependencies, and acceptance criteria. Link the PR to its issue and
    leave verification results in the PR. Do not create or update a shared
    sprint, refactor, delivery, or progress dashboard in `specs/`.
+   **Issues may ONLY be considered closed when no unchecked checkboxes remain.**
+   Verify completion before checking each item; never check or delete unfinished
+   items merely to permit closure. This applies to manual closure and PR
+   auto-closing keywords such as `Fixes` or `Closes`.
 6. **Update active technical documents only when their substance changes**:
    ADRs own durable decisions and contracts own stable interfaces. An
    exceptional new plan is an immutable design attachment linked to one issue,
@@ -295,7 +301,10 @@ do not extend a foreground timeout and rerun the same command.
 ## Scoped feedback and worktree shell
 
 Debug with `just tests::scoped <crate> <filter>`: read the failure, make one
-change, and rerun that scoped test. Run the full workspace suite once before
+change, and rerun that scoped test. Append `--lib` for a library unit test or
+`--test <name>` for one integration target, avoiding compilation of unrelated
+test binaries. Use an empty filter (`""`) to run every test in that target.
+Run the full workspace suite once before
 declaring the task done, not after each edit. Source `scripts/dev-env.sh` once
 per worktree shell and then use plain commands; do not repeat inline
 `MVM_HOME`/`CARGO_TARGET_DIR`/`CARGO_HOME` or `cd` prefixes. Use
@@ -367,6 +376,15 @@ commit message or the owning spec, and link the code from there.
 
 ## Reuse first; compose small, testable units
 
+**Write as little code as possible.** Prefer the fewest lines that correctly
+solve the task: reuse existing code, delete unnecessary code, and avoid
+speculative abstractions. Do not trade readability, safety, or required tests
+for a lower line count.
+
+**Use the `ponytail` skill and, for Rust work, `rust-skills`.** Load and follow
+them before implementing; if either required skill is unavailable, report that
+explicitly rather than silently skipping it.
+
 Never reimplement existing functionality. Before writing anything, search for
 an existing helper, type, trait impl, or crate that does the job — grep the
 workspace, check facade re-exports, read the module the work belongs in. If a
@@ -394,6 +412,23 @@ drifts, doubles the test surface, and is the most common source of bugs here.
   no `_ =>` catch-alls, so new variants break the build where they must be
   handled.
 - Follow the existing pattern — match surrounding naming, idiom, and layout.
+
+## Dependencies: fewer is the default
+
+Lean on fewer dependencies, always. A new crate needs a reason in the PR.
+
+- **Prefer, in order:** `std`, then a crate already in the closure, then a small
+  tested helper, then a new crate. Never add a crate for a few lines.
+- **Measure.** State what the crate replaces and the closure before and after:
+  `cargo tree -p mvmctl -e normal,build --prefix none | sort -u | wc -l`, and
+  `-p mvm-builder-guest` for the guest binaries. Check what a feature pulls in
+  with `cargo tree -e features -i <crate>`.
+- **Default features off**, enabling only what is used.
+- **Removing is measured too.** Record accepted and declined reductions in
+  `specs/contracts/build-dependency-decisions.md` with the numbers.
+- **Trust boundaries:** replacing a parser, signature or cryptography crate
+  with hand-written code to save dependencies needs a fuzz target and an owner
+  decision first.
 
 ## Rust best practices
 

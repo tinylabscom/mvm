@@ -107,6 +107,28 @@ impl ForkDevices {
             .map(|relative| self.child_state_dir.join(relative))
     }
 
+    /// A capture of the parent's runtime, with every drive path the child
+    /// repoints to its own file rewritten to that file. What the restored VMM
+    /// reports after the retarget is compared against this, not against the
+    /// parent's recorded paths.
+    pub fn as_child_capture(
+        &self,
+        mut capture: mvm_vmm::runtime_artifacts::RuntimeArtifacts,
+    ) -> mvm_vmm::runtime_artifacts::RuntimeArtifacts {
+        let remap = |path: &mut PathBuf| {
+            if let Some(child) = self.child_path_for(path) {
+                *path = child;
+            }
+        };
+        for drive in capture.firecracker_drives.iter_mut().flatten() {
+            remap(&mut drive.path);
+        }
+        for disk in &mut capture.disks {
+            remap(&mut disk.path);
+        }
+        capture
+    }
+
     /// Make sure every drive path the snapshot recorded exists, so the load
     /// can open it before the drive is pointed at the child's copy.
     ///
@@ -189,7 +211,12 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
-        let root = tempfile::tempdir().unwrap();
+        // The default temp dir can be deep enough that the VM's sockets fall
+        // back to the short namespace; from_anchors then derives the parent's
+        // state dir from the relocated socket path and drive remapping breaks.
+        // Production refuses that layout, so the fixture keeps sockets inside
+        // the state dir by rooting at a short path.
+        let root = crate::driver::socket_tempdir();
         let image_dir = root.path().join("cache/image");
         let parent_dir = root.path().join("vms/parent");
         let child_dir = root.path().join("vms/child");
@@ -264,6 +291,52 @@ mod tests {
             ],
             "a shared artifact outside the parent's state keeps its path"
         );
+    }
+
+    #[test]
+    fn a_parent_capture_is_read_at_the_childs_drive_paths() {
+        use mvm_vmm::runtime_artifacts::{FirecrackerDrive, RuntimeArtifact, RuntimeArtifacts};
+        let f = fixture();
+        let overlay = f.image.with_file_name("runtime-overlay.ext4");
+        let config = f.parent_dir.join("config.ext4");
+        let drive = |id: &str, path: &Path, read_only| FirecrackerDrive {
+            drive_id: id.into(),
+            path: path.to_path_buf(),
+            is_root_device: false,
+            is_read_only: read_only,
+        };
+        let disk = |path: &Path| RuntimeArtifact {
+            path: path.to_path_buf(),
+            sha256: "ab".repeat(32),
+        };
+        let capture = RuntimeArtifacts {
+            kernel: None,
+            initramfs: None,
+            disks: vec![disk(&overlay), disk(&config)],
+            kernel_cmdline: String::new(),
+            firecracker_drives: Some(vec![
+                drive("blk0", &f.image, false),
+                drive("blk1", &overlay, true),
+                drive("blk2", &config, true),
+            ]),
+        };
+        let child = f.devices.as_child_capture(capture);
+        let paths: Vec<_> = child
+            .firecracker_drives
+            .unwrap()
+            .into_iter()
+            .map(|d| d.path)
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                f.child_dir.join("rootfs.ext4"),
+                overlay.clone(),
+                f.child_dir.join("config.ext4")
+            ]
+        );
+        let disks: Vec<_> = child.disks.into_iter().map(|d| d.path).collect();
+        assert_eq!(disks, vec![overlay, f.child_dir.join("config.ext4")]);
     }
 
     #[test]

@@ -13,10 +13,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use build_embed_cache::{
-    DEFAULT_MAX_BYTES, KeyInputs, Stored, StoredKey, WorkspaceGraph, artifact_key, artifact_path,
-    cache_root_from, digest_path, hash_file, hash_member, hash_tree, inspect, install, lookup,
-    max_bytes_from, parse_manifest_deps, parse_package_name, prune, select_victims, stored_keys,
-    workspace_closure,
+    DEFAULT_MAX_BYTES, KeyInputs, Stored, StoredKey, WorkspaceGraph, WorkspaceManifestDigest,
+    artifact_key, artifact_path, cache_root_from, digest_path, hash_file, hash_member, hash_tree,
+    inspect, install, lookup, max_bytes_from, parse_manifest_deps, parse_package_name, prune,
+    select_victims, stored_keys, workspace_closure,
 };
 
 fn graph(edges: &[(&str, &[&str])]) -> WorkspaceGraph {
@@ -184,6 +184,8 @@ fn graph_resolves_direct_and_inherited_dependency_aliases() {
 type Mutation = (&'static str, Box<dyn Fn(&mut KeyInputs)>);
 
 fn inputs() -> KeyInputs {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
     KeyInputs {
         package: "mvm-build".into(),
         binary: "mvm-host-vm-init".into(),
@@ -192,6 +194,7 @@ fn inputs() -> KeyInputs {
         toolchain: "zig=0.13.0".into(),
         flavor: "musl-static".into(),
         lockfile: "abc".into(),
+        workspace_manifest: WorkspaceManifestDigest::read(root.path()).unwrap(),
         sources: vec![("crates/mvm-core/src/lib.rs".into(), "deadbeef".into())],
     }
 }
@@ -216,6 +219,18 @@ fn the_key_changes_when_any_input_changes() {
         (
             "lockfile",
             Box::new(|i: &mut KeyInputs| i.lockfile.push('x')),
+        ),
+        (
+            "workspace profile",
+            Box::new(|i: &mut KeyInputs| {
+                let root = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    root.path().join("Cargo.toml"),
+                    "[workspace]\n[profile.release.build-override]\nstrip = false\n",
+                )
+                .unwrap();
+                i.workspace_manifest = WorkspaceManifestDigest::read(root.path()).unwrap();
+            }),
         ),
         (
             "source content",
@@ -245,6 +260,112 @@ fn the_key_changes_when_any_input_changes() {
 #[test]
 fn the_key_is_stable_for_identical_inputs() {
     assert_eq!(artifact_key(&inputs()), artifact_key(&inputs()));
+}
+
+#[test]
+fn invalid_workspace_manifests_cannot_supply_a_digest() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(WorkspaceManifestDigest::read(root.path()).is_err());
+    std::fs::create_dir(root.path().join("Cargo.toml")).unwrap();
+    assert!(WorkspaceManifestDigest::read(root.path()).is_err());
+    std::fs::remove_dir(root.path().join("Cargo.toml")).unwrap();
+    for bytes in [b"".as_slice(), b"[broken", b"\xff", b"[package]\nname='x'"] {
+        std::fs::write(root.path().join("Cargo.toml"), bytes).unwrap();
+        assert!(WorkspaceManifestDigest::read(root.path()).is_err());
+    }
+}
+
+#[test]
+fn v2_lookup_never_adopts_an_existing_v1_entry() {
+    use sha2::{Digest, Sha256};
+    let input = inputs();
+    // Independent serialization of the old schema, not a production fallback.
+    let mut old = Sha256::new();
+    let mut field = |value: &str| {
+        old.update(value.len().to_le_bytes());
+        old.update(value.as_bytes());
+    };
+    for value in [
+        "mvm-embed-cache-v1",
+        &input.package,
+        &input.binary,
+        &input.features,
+        &input.target,
+        &input.toolchain,
+        &input.flavor,
+        &input.lockfile,
+    ] {
+        field(value);
+    }
+    for (path, digest) in &input.sources {
+        field(path);
+        field(digest);
+    }
+    let legacy = workspace_graph::hex(old.finalize().as_slice());
+    let current = artifact_key(&input);
+    assert_ne!(legacy, current);
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    std::fs::write(&source, b"old payload").unwrap();
+    let store = directory.path().join("store");
+    install(&store, &legacy, &input.binary, &source);
+    let destination = directory.path().join("destination");
+    assert!(!lookup(&store, &current, &input.binary, &destination));
+    assert!(!destination.exists());
+    assert!(artifact_path(&store, &legacy, &input.binary).is_file());
+    assert!(lookup(&store, &legacy, &input.binary, &destination));
+}
+
+#[test]
+fn release_host_override_leaves_target_settings_and_profile_inheritance_intact() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let manifest: toml::Value = std::fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let profiles = &manifest["profile"];
+    let release = &profiles["release"];
+    assert_eq!(release["strip"].as_bool(), Some(true));
+    assert_eq!(release["build-override"]["strip"].as_bool(), Some(false));
+    assert_eq!(release["overflow-checks"].as_bool(), Some(true));
+    assert_eq!(release["lto"].as_str(), Some("thin"));
+    assert_eq!(release["codegen-units"].as_integer(), Some(16));
+    assert_eq!(
+        profiles["release-min"]["inherits"].as_str(),
+        Some("release")
+    );
+    assert_eq!(
+        profiles["release-witness"]["inherits"].as_str(),
+        Some("release")
+    );
+    assert_eq!(profiles["release-witness"]["strip"].as_bool(), Some(false));
+    let pins = &manifest["workspace"]["metadata"]["mvm"]["toolchain"];
+    assert_eq!(pins["rust"].as_str(), Some("1.91.1"));
+    assert_eq!(pins["zig"].as_str(), Some("0.13.0"));
+    assert_eq!(pins["cargo-zigbuild"].as_str(), Some("0.23.0"));
+    assert_eq!(
+        pins["targets"]["x86_64"].as_str(),
+        Some("x86_64-unknown-linux-musl")
+    );
+    assert_eq!(
+        pins["targets"]["aarch64"].as_str(),
+        Some("aarch64-unknown-linux-musl")
+    );
+    assert!(
+        release.get("package").is_none(),
+        "package overrides outrank build-override"
+    );
+    assert!(
+        release["build-override"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .all(|key| key == "strip")
+    );
 }
 
 #[test]

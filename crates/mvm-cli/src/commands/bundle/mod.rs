@@ -29,9 +29,8 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 
-mod build;
 pub(super) mod export;
-pub(super) mod fetch;
+pub(crate) mod fetch;
 mod gc;
 mod install;
 mod push;
@@ -47,12 +46,6 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum BundleAction {
-    /// Materialize an OCI image and package its boot assets into one signed archive.
-    Build(build::Args),
-    /// Seal a built template into a signed `.mvmpkg` archive.
-    /// Signs with the host signer at `~/.mvm/keys/host-signer.ed25519`
-    /// (the same key that signs `ExecutionPlan` envelopes).
-    Export(export::Args),
     /// Verify a `.mvmpkg` archive against the local trust store.
     /// Reports the parsed manifest on success; rejects on any of
     /// the failure modes in `BundleVerifyError`.
@@ -73,8 +66,6 @@ pub(in crate::commands) enum BundleAction {
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
-        BundleAction::Build(a) => build::run(a),
-        BundleAction::Export(a) => export::run(cli, a, cfg),
         BundleAction::Fetch(a) => fetch::run(cli, a, cfg),
         BundleAction::Install(a) => install::run(cli, a, cfg),
         BundleAction::Push(a) => push::run(cli, a, cfg),

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-use super::{ImageSetVerification, VerifiedImageSetRoot, verify_image_set_root};
+use super::{ConsumerProtocols, ImageSetVerification, VerifiedImageSetRoot, verify_image_set_root};
 use crate::image_set::{HostProtocolSupport, ImageLock, ImageSetRequirement};
 use crate::packs::PackRevocationChecker;
 use crate::util::atomic_io::{FileLock, atomic_write_durable, atomic_write_new, is_already_exists};
@@ -21,6 +21,39 @@ const MAX_PROOF_BYTES: usize = 6 * (MAX_MANIFEST_BYTES + MAX_BUNDLE_BYTES) + 128
 struct RootProof {
     manifest: String,
     signature_bundle: String,
+}
+
+/// Owns the original bytes authenticated by one root-cache read.
+///
+/// This is root evidence, not selected-kernel custody or launch permission.
+/// Exporters can retain these exact bytes instead of re-reading a mutable
+/// cache path or reserializing the parsed manifest. Consumers must reverify
+/// them against their own compiled lock and current revocation policy.
+/// Construction and deserialization are deliberately not public.
+///
+/// ```compile_fail
+/// let _: mvm_core::image_set::RetainedImageSetRootProof =
+///     serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Debug)]
+pub struct RetainedImageSetRootProof {
+    root: VerifiedImageSetRoot,
+    manifest: Vec<u8>,
+    signature_bundle: Vec<u8>,
+}
+
+impl RetainedImageSetRootProof {
+    pub fn root(&self) -> &VerifiedImageSetRoot {
+        &self.root
+    }
+
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest
+    }
+
+    pub fn signature_bundle(&self) -> &[u8] {
+        &self.signature_bundle
+    }
 }
 
 impl RootProof {
@@ -133,6 +166,57 @@ pub fn read_cached_image_set_root(
     host: &HostProtocolSupport,
     revocations: Option<&dyn PackRevocationChecker>,
 ) -> Result<VerifiedImageSetRoot> {
+    Ok(read_cached_image_set_root_proof(cache, lock, host, revocations)?.root)
+}
+
+/// Reverify a bounded, no-follow cache read and retain its original proof.
+///
+/// Applies the same root, completeness, protocol and supplied revocation
+/// checks as [`read_cached_image_set_root`]. `None` does not establish current
+/// revocation evidence; a workflow requiring it must supply its actual
+/// admission policy. Neither entry point authenticates kernel member bytes.
+pub fn read_cached_image_set_root_proof(
+    cache: &Path,
+    lock: &ImageLock,
+    host: &HostProtocolSupport,
+    revocations: Option<&dyn PackRevocationChecker>,
+) -> Result<RetainedImageSetRootProof> {
+    read_cached_root_proof(cache, lock, ConsumerProtocols::AllImages(host), revocations)
+}
+
+/// Read a workload-only root with the same checks as
+/// [`read_cached_workload_image_set_root_proof`]. Member selection and byte
+/// verification remain the caller's obligation.
+pub fn read_cached_workload_image_set_root(
+    cache: &Path,
+    lock: &ImageLock,
+    host: &HostProtocolSupport,
+    revocations: Option<&dyn PackRevocationChecker>,
+) -> Result<VerifiedImageSetRoot> {
+    Ok(read_cached_workload_image_set_root_proof(cache, lock, host, revocations)?.root)
+}
+
+/// Reverify the complete signed root for a workload-only consumer.
+///
+/// Preserves all trust, lock, completeness and supplied revocation checks, but
+/// does not require builder cache or payload support. Callers must select and
+/// verify consumed members for their backend and architecture; this proof does
+/// not authorize builder execution.
+pub fn read_cached_workload_image_set_root_proof(
+    cache: &Path,
+    lock: &ImageLock,
+    host: &HostProtocolSupport,
+    revocations: Option<&dyn PackRevocationChecker>,
+) -> Result<RetainedImageSetRootProof> {
+    read_cached_root_proof(cache, lock, ConsumerProtocols::Workload(host), revocations)
+}
+
+fn read_cached_root_proof(
+    cache: &Path,
+    lock: &ImageLock,
+    protocols: ConsumerProtocols<'_>,
+    revocations: Option<&dyn PackRevocationChecker>,
+) -> Result<RetainedImageSetRootProof> {
     let path = proof_path(cache, lock);
     let proof = read_proof(&path).with_context(|| {
         format!(
@@ -147,12 +231,21 @@ pub fn read_cached_image_set_root(
         lock,
         cache,
     )
-    .require(&requirement)
-    .with_host_protocols(host);
+    .require(&requirement);
+    request = match protocols {
+        ConsumerProtocols::AllImages(host) => request.with_host_protocols(host),
+        ConsumerProtocols::Workload(host) => request.with_workload_protocols(host),
+    };
     if let Some(revocations) = revocations {
         request = request.with_revocations(revocations);
     }
-    verify_image_set_root(&request).context("reverify cached image-set publisher proof")
+    let root =
+        verify_image_set_root(&request).context("reverify cached image-set publisher proof")?;
+    Ok(RetainedImageSetRootProof {
+        root,
+        manifest: proof.manifest.into_bytes(),
+        signature_bundle: proof.signature_bundle.into_bytes(),
+    })
 }
 
 fn read_proof(path: &Path) -> Result<RootProof> {
@@ -191,7 +284,7 @@ fn read_proof(path: &Path) -> Result<RootProof> {
 
 #[cfg(all(test, feature = "manifest-verify"))]
 #[path = "fixtures/published_root.rs"]
-mod published_root;
+pub(crate) mod published_root;
 
 #[cfg(test)]
 mod tests {
@@ -298,6 +391,101 @@ mod tests {
         cache_image_set_root(cache.path(), &request).unwrap();
         let root = read_cached_image_set_root(cache.path(), &lock, &host, None).unwrap();
         assert_eq!(root.manifest_sha256(), &lock.manifest_sha256);
+        let retained = read_cached_image_set_root_proof(cache.path(), &lock, &host, None).unwrap();
+        assert_eq!(retained.root(), &root);
+        assert_eq!(retained.manifest_bytes(), manifest);
+        assert_eq!(retained.signature_bundle(), bundle);
+        let workload_host = HostProtocolSupport {
+            builder_boot_abi: BuilderBootAbiRange::LEGACY_ONLY,
+            ..host
+        };
+        assert!(matches!(
+            verify_image_set_root(&request.with_host_protocols(&workload_host)),
+            Err(crate::image_set::ImageSetError::BuilderBootAbiUnsupported { .. })
+        ));
+        let workload_request = request.with_workload_protocols(&workload_host);
+        let workload_root = verify_image_set_root(&workload_request).unwrap();
+        let support =
+            crate::image_set::BackendImageSupport::for_backend(crate::vm_backend::BackendKind::Hvf)
+                .unwrap();
+        crate::image_set::select_workload_image(
+            workload_root.manifest(),
+            crate::image_set::WorkloadImageProfile::DefaultTenant,
+            crate::arch::GuestArch::Aarch64,
+            &support,
+        )
+        .unwrap();
+        assert!(
+            crate::image_set::select_workload_image(
+                workload_root.manifest(),
+                crate::image_set::WorkloadImageProfile::DefaultTenant,
+                crate::arch::GuestArch::X86_64,
+                &support,
+            )
+            .is_err()
+        );
+        let wrong_base_host = HostProtocolSupport {
+            base_image_contract: crate::image_set::BaseImageContractRange::new(
+                crate::image_set::BaseImageContract::new(99),
+                crate::image_set::BaseImageContract::new(99),
+            )
+            .unwrap(),
+            ..workload_host
+        };
+        assert!(verify_image_set_root(&request.with_workload_protocols(&wrong_base_host)).is_err());
+        let workload_cached =
+            read_cached_workload_image_set_root_proof(cache.path(), &lock, &workload_host, None)
+                .unwrap();
+        assert_eq!(workload_cached.root(), &root);
+        assert_eq!(
+            read_cached_workload_image_set_root(cache.path(), &lock, &workload_host, None).unwrap(),
+            root
+        );
+        assert!(
+            read_cached_workload_image_set_root_proof(cache.path(), &lock, &wrong_base_host, None)
+                .is_err()
+        );
+        assert!(
+            read_cached_image_set_root_proof(cache.path(), &lock, &workload_host, None,).is_err()
+        );
+        let unrelated_cache_host = HostProtocolSupport {
+            builder_cache_contract: 999,
+            ..workload_host
+        };
+        assert!(
+            read_cached_workload_image_set_root_proof(
+                cache.path(),
+                &lock,
+                &unrelated_cache_host,
+                None,
+            )
+            .is_ok()
+        );
+        struct Revoked;
+        impl PackRevocationChecker for Revoked {
+            fn status(
+                &self,
+                _: &crate::plan::KeyId,
+                _: &crate::packs::Sha256Hex,
+            ) -> crate::packs::RevocationStatus {
+                crate::packs::RevocationStatus::Revoked {
+                    reason: "test withdrawal".into(),
+                }
+            }
+        }
+        assert!(
+            read_cached_image_set_root_proof(cache.path(), &lock, &host, Some(&Revoked)).is_err()
+        );
+        assert!(
+            read_cached_workload_image_set_root_proof(
+                cache.path(),
+                &lock,
+                &workload_host,
+                Some(&Revoked),
+            )
+            .is_err()
+        );
+        assert!(verify_image_set_root(&workload_request.with_revocations(&Revoked)).is_err());
         cache_image_set_root(cache.path(), &request).expect("an authentic collision re-verifies");
 
         let path = proof_path(cache.path(), &lock);
@@ -307,6 +495,15 @@ mod tests {
         let poison = serde_json::to_vec(&poisoned).unwrap();
         std::fs::write(&path, &poison).unwrap();
         assert!(read_cached_image_set_root(cache.path(), &lock, &host, None).is_err());
+        assert!(read_cached_image_set_root_proof(cache.path(), &lock, &host, None).is_err());
+        assert!(
+            read_cached_workload_image_set_root_proof(cache.path(), &lock, &workload_host, None,)
+                .is_err()
+        );
+        // An already captured proof owns the exact authenticated originals,
+        // not a path to the subsequently poisoned cache entry.
+        assert_eq!(retained.manifest_bytes(), manifest);
+        assert_eq!(retained.signature_bundle(), bundle);
         let bad = ImageSetVerification::new(b"{}", b"{}", &lock, cache.path());
         assert!(cache_image_set_root(cache.path(), &bad).is_err());
         assert_eq!(
@@ -331,11 +528,30 @@ mod tests {
         wrong_signer.signing_identity.workflow =
             WorkflowPath::new(".github/workflows/wrong.yml").unwrap();
         assert!(read_cached_image_set_root(cache.path(), &wrong_signer, &host, None).is_err());
+        assert!(
+            read_cached_workload_image_set_root_proof(
+                cache.path(),
+                &wrong_signer,
+                &workload_host,
+                None,
+            )
+            .is_err()
+        );
         let mut moved_lock = lock.clone();
         moved_lock.manifest_sha256 = Sha256Hex::from_bytes(b"another accepted root");
         assert!(read_cached_image_set_root(cache.path(), &moved_lock, &host, None).is_err());
+        assert!(
+            read_cached_workload_image_set_root_proof(
+                cache.path(),
+                &moved_lock,
+                &workload_host,
+                None,
+            )
+            .is_err()
+        );
     }
 
+    #[cfg(feature = "host-state")]
     #[test]
     fn public_cache_boundaries_refuse_unsigned_or_wrong_root_proofs() {
         let dir = tempfile::tempdir().unwrap();
@@ -363,6 +579,104 @@ mod tests {
         let error = read_cached_image_set_root(dir.path(), &train.image_set, &host, None)
             .expect_err("the path's digest does not establish authenticity");
         assert!(error.chain().any(|e| e.to_string().contains("digest")));
+    }
+
+    #[cfg(all(feature = "manifest-verify", feature = "host-state"))]
+    #[test]
+    fn application_resigning_cannot_authorize_replaced_kernel_and_linux_json() {
+        use crate::image_set::{ImageSetManifest, ImageSetRole, WorkloadImageProfile};
+        use crate::plan::bundle::{
+            ArtifactRole, BundleArtifact, BundleManifest, KeyId, TrustStore, key_id_from_pubkey,
+            read_and_verify_bundle, sha256_hex, write_bundle,
+        };
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+
+        let kernel = b"replacement kernel controlled by an application publisher".to_vec();
+        let mut linux: ImageSetManifest = serde_json::from_slice(published_root::MANIFEST).unwrap();
+        let member = linux
+            .members
+            .iter_mut()
+            .find(|member| {
+                member.role == ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant)
+                    && member.target.admits(crate::arch::GuestArch::host())
+            })
+            .unwrap();
+        member.artifacts[0].sha256 = crate::packs::Sha256Hex::from_bytes(&kernel);
+        member.artifacts[0].size = kernel.len() as u64;
+        crate::image_set::validate_structure(&linux).unwrap();
+        let changed_json = serde_json::to_vec(&linux).unwrap();
+        let app_key = SigningKey::from_bytes(&[53; 32]);
+        struct AppTrust(VerifyingKey);
+        impl TrustStore for AppTrust {
+            fn lookup(&self, id: &KeyId) -> Option<VerifyingKey> {
+                (id == &key_id_from_pubkey(&self.0)).then_some(self.0)
+            }
+        }
+        let payload = vec![
+            ("artifacts/vmlinux".to_owned(), kernel),
+            ("artifacts/linux.json".to_owned(), changed_json.clone()),
+            (
+                "artifacts/linux.bundle".to_owned(),
+                published_root::BUNDLE.to_vec(),
+            ),
+        ];
+        let manifest = BundleManifest {
+            schema_version: 3,
+            publisher: "application-only".into(),
+            key_id: key_id_from_pubkey(&app_key.verifying_key()),
+            arch: crate::arch::GuestArch::host().to_string(),
+            kernel_version: None,
+            profile: None,
+            workload_label: None,
+            created_at: "2026-10-16T00:00:00Z".into(),
+            labels: Default::default(),
+            members: Vec::new(),
+            verity: None,
+            resources: None,
+            artifacts: payload
+                .iter()
+                .map(|(path, bytes)| BundleArtifact {
+                    name: path.strip_prefix("artifacts/").unwrap().to_owned(),
+                    role: if path.ends_with("/vmlinux") {
+                        ArtifactRole::Kernel
+                    } else {
+                        ArtifactRole::Other
+                    },
+                    path: path.clone(),
+                    sha256: sha256_hex(bytes),
+                    size_bytes: bytes.len() as u64,
+                })
+                .collect(),
+        };
+        let archive = write_bundle(&manifest, &app_key, payload).unwrap();
+        let app = read_and_verify_bundle(&archive, &AppTrust(app_key.verifying_key())).unwrap();
+        // Outer signature and all replaced artifact digests really verify.
+        // They do not replace the independent, compiled Linux publisher pin.
+        assert_eq!(app.artifacts["artifacts/linux.json"], changed_json);
+        let cache = tempfile::tempdir().unwrap();
+        let train = crate::image_set::image_train_lock();
+        let forged = RootProof {
+            manifest: String::from_utf8(app.artifacts["artifacts/linux.json"].clone()).unwrap(),
+            signature_bundle: String::from_utf8(app.artifacts["artifacts/linux.bundle"].clone())
+                .unwrap(),
+        };
+        std::fs::write(
+            proof_path(cache.path(), &train.image_set),
+            serde_json::to_vec(&forged).unwrap(),
+        )
+        .unwrap();
+        let host = HostProtocolSupport {
+            base_image_contract: crate::image_set::BaseImageContractRange::SUPPORTED,
+            builder_cache_contract: train.compatibility.builder_cache_contract,
+            builder_boot_abi: crate::image_set::BuilderBootAbiRange::WITH_PAYLOAD,
+        };
+        let error = read_cached_image_set_root_proof(cache.path(), &train.image_set, &host, None)
+            .expect_err("application signing must not replace canonical Linux authority");
+        assert!(
+            error
+                .chain()
+                .any(|error| error.to_string().contains("digest"))
+        );
     }
 
     #[test]

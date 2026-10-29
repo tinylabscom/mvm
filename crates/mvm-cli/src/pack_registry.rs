@@ -11,208 +11,36 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 use tempfile::TempDir;
 
-use mvm_client::policy_profiles::{PolicyRef, ProfileFile, builtin};
+use mvm_client::registry_pack_local::profile_pack_dependencies;
 use mvm_core::packs::Sha256Hex;
+use mvm_core::registry_pack::application_bundle::{
+    ApplicationInstallStore, InstalledRegistryApplication, install_application_bundle,
+    verify_application_bundle,
+};
 use mvm_core::registry_pack::{
-    InstalledRegistryPack, PackAdoption, PackReference, RegistryPackImage,
-    RegistryPackVerification, VerifiedRegistryPack, adopt_registry_pack, verify_registry_pack,
+    AuthenticatedRegistryManifest, InstalledRegistryPack, PackAdoption, PackReference,
+    RegistryPackImage, RegistryPackVerification, VerifiedRegistryApplication,
+    VerifiedRegistryManifest, VerifiedRegistryPack, adopt_registry_manifest,
+    verify_registry_manifest,
 };
 use mvm_core::registry_pack_store::{
     PackPolicyDocument, adopt_install_and_pin, check_registry_pack_revocations_if_configured,
     load_pack_lockfile, load_publisher_policy_or_official_default, read_pack_policy_document,
 };
 
-/// Environment override for the pack registry base URL.
-pub const PACK_REGISTRY_ENV: &str = "MVM_PACK_REGISTRY";
-/// Default registry: the mvm-packs repository.
-pub const DEFAULT_PACK_REGISTRY: &str =
-    "https://raw.githubusercontent.com/tinylabscom/mvm-packs/main";
+pub use mvm_client::registry_application::discovery::{
+    DEFAULT_PACK_REGISTRY, PACK_REGISTRY_ENV, PackIndexEntry, PackIndexVersion, PackRegistryConfig,
+    fetch_index, resolve_version, search_index,
+};
+use mvm_client::registry_application::discovery::{block_on, fetch_bytes};
 
-const PACK_INDEX_SCHEMA_VERSION: u32 = 2;
 const PACKS_DIR: &str = "packs";
 const MANIFEST_FILE: &str = "manifest.json";
 const SIGNATURE_FILE: &str = "manifest.sigstore.json";
 const FILES_DIR: &str = "files";
 const MAX_PACKS_PER_PULL: usize = 128;
-
-#[derive(Debug, Clone, Copy)]
-enum PolicyDependencyKind {
-    Profile,
-    Group,
-}
-
-impl PolicyDependencyKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Profile => "profile",
-            Self::Group => "group",
-        }
-    }
-}
-
-/// Registry configuration: one base URL, overridable for tests and mirrors.
-#[derive(Debug, Clone)]
-pub struct PackRegistryConfig {
-    pub registry_url: String,
-}
-
-impl PackRegistryConfig {
-    pub fn load() -> Self {
-        let registry_url = std::env::var(PACK_REGISTRY_ENV)
-            .ok()
-            .unwrap_or_else(|| DEFAULT_PACK_REGISTRY.to_string());
-        Self { registry_url }
-    }
-
-    fn base(&self) -> String {
-        self.registry_url.trim_end_matches('/').to_string()
-    }
-}
-
-/// One pack in the registry index.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PackIndexEntry {
-    pub namespace: String,
-    pub name: String,
-    pub description: String,
-    pub versions: Vec<PackIndexVersion>,
-}
-
-/// Untrusted discovery metadata; the digest does not authorize a publisher.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PackIndexVersion {
-    pub version: String,
-    pub manifest_sha256: Sha256Hex,
-}
-
-impl PackIndexEntry {
-    pub fn coordinate(&self) -> String {
-        format!("{}/{}", self.namespace, self.name)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PackIndexWire {
-    schema_version: u32,
-    packs: Vec<PackIndexEntry>,
-}
-
-/// Fetch and parse the pack index.
-pub fn fetch_index(config: &PackRegistryConfig) -> Result<Vec<PackIndexEntry>> {
-    let url = format!("{}/index.json", config.base());
-    let text = block_on(fetch_text(&url))?;
-    let wire: PackIndexWire =
-        serde_json::from_str(&text).with_context(|| format!("parsing pack index from {url}"))?;
-    if wire.schema_version != PACK_INDEX_SCHEMA_VERSION {
-        bail!(
-            "pack index at {url} has schema version {}, expected {PACK_INDEX_SCHEMA_VERSION}",
-            wire.schema_version
-        );
-    }
-    let mut coordinates = std::collections::BTreeSet::new();
-    for entry in &wire.packs {
-        let coordinate = entry.coordinate();
-        let reference: PackReference = coordinate.parse().context("invalid catalog coordinate")?;
-        if reference.version().is_some()
-            || reference.namespace() != entry.namespace
-            || reference.name() != entry.name
-            || !coordinates.insert(coordinate.clone())
-        {
-            bail!("duplicate or invalid catalog coordinate {coordinate}");
-        }
-        if entry.versions.is_empty() {
-            bail!("pack {coordinate} publishes no versions");
-        }
-        let mut versions = std::collections::BTreeSet::new();
-        for version in &entry.versions {
-            let _: PackReference = format!("{coordinate}@{}", version.version)
-                .parse()
-                .context("invalid catalog version")?;
-            if !versions.insert(&version.version) {
-                bail!("duplicate catalog version {coordinate}@{}", version.version);
-            }
-        }
-    }
-    Ok(wire.packs)
-}
-
-/// Filter index entries by an optional case-insensitive substring over
-/// coordinate and description. No query lists everything.
-pub fn search_index<'a>(
-    index: &'a [PackIndexEntry],
-    query: Option<&str>,
-) -> Vec<&'a PackIndexEntry> {
-    let Some(query) = query.map(str::to_lowercase) else {
-        return index.iter().collect();
-    };
-    index
-        .iter()
-        .filter(|entry| {
-            entry.coordinate().to_lowercase().contains(&query)
-                || entry.description.to_lowercase().contains(&query)
-        })
-        .collect()
-}
-
-/// Pick the exact versioned reference to pull: the requested version must be
-/// published, and an unversioned request takes the highest version.
-pub fn resolve_version(entry: &PackIndexEntry, requested: &PackReference) -> Result<PackReference> {
-    if entry.namespace != requested.namespace() || entry.name != requested.name() {
-        bail!("catalog coordinate does not match requested pack {requested}");
-    }
-    let versions = &entry.versions;
-    if versions.is_empty() {
-        bail!("pack {} publishes no versions", entry.coordinate());
-    }
-    let released = |spelling: &str| {
-        mvm_core::release_version::ReleaseVersion::parse(
-            spelling,
-            mvm_core::release_version::VersionSyntax::Strict,
-        )
-    };
-    let spelling = match requested.version() {
-        Some(version) => {
-            let spelling = version.to_string();
-            if !versions
-                .iter()
-                .any(|published| published.version == spelling)
-            {
-                bail!(
-                    "pack {} is not published at version {spelling} (published: {})",
-                    entry.coordinate(),
-                    versions
-                        .iter()
-                        .map(|v| v.version.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-            spelling
-        }
-        None => versions
-            .iter()
-            .filter_map(|published| {
-                released(&published.version).map(|version| (version, &published.version))
-            })
-            .max_by(|(a, _), (b, _)| a.cmp(b))
-            .map(|(_, spelling)| spelling.clone())
-            .context("catalog contains no valid published versions")?,
-    };
-    format!("{}@{spelling}", entry.coordinate())
-        .parse()
-        .with_context(|| {
-            format!(
-                "registry listed an invalid version for {}",
-                entry.coordinate()
-            )
-        })
-}
 
 fn pack_url(config: &PackRegistryConfig, reference: &PackReference, leaf: &str) -> String {
     let version = reference
@@ -311,12 +139,7 @@ fn allowed_release_url(url: &str) -> bool {
     })
 }
 
-pub(crate) fn download_payload_file(
-    url: &str,
-    target: &Path,
-    size: u64,
-    release: bool,
-) -> Result<()> {
+fn download_payload_file(url: &str, target: &Path, size: u64, release: bool) -> Result<()> {
     use std::io::Read;
     let mut output = std::fs::OpenOptions::new()
         .write(true)
@@ -381,12 +204,35 @@ pub struct PullSummary {
     pub refreshed: bool,
 }
 
-/// Fetch, verify, install, and pin a pack and its signed profile dependencies.
+/// Only completed installation and pin commits are reported as installed.
+#[derive(Debug)]
+pub enum PullOutcome {
+    Installed(PullSummary),
+    InstalledApplication(Box<InstalledRegistryApplication>),
+}
+
+#[derive(Debug)]
+enum VerifiedPull {
+    Installed(PullSummary),
+    Application(Box<VerifiedRegistryApplication>),
+}
+
+impl VerifiedPull {
+    fn reference(&self) -> &PackReference {
+        match self {
+            Self::Installed(summary) => &summary.reference,
+            Self::Application(application) => application.reference(),
+        }
+    }
+}
+
+/// Authenticate a manifest; install legacy packs and their signed dependencies.
 ///
 /// A pack whose coordinate is already pinned is re-verified lock-first
 /// (digest drift refuses); a new pack is adopted signature-first. The pin is
-/// written only after installation succeeds.
-pub fn pull(reference_arg: &str) -> Result<PullSummary> {
+/// written only after installation succeeds. Applications independently verify
+/// their bundle under local consumer trust before installation and pin commit.
+pub fn pull(reference_arg: &str) -> Result<PullOutcome> {
     let requested: PackReference = reference_arg
         .parse()
         .with_context(|| format!("invalid pack reference {reference_arg:?}"))?;
@@ -394,7 +240,7 @@ pub fn pull(reference_arg: &str) -> Result<PullSummary> {
     let index = fetch_index(&config)?;
     let mut seen = BTreeMap::new();
     let mut active = Vec::new();
-    pull_with_dependencies(
+    let verified = pull_with_dependencies(
         &config,
         &index,
         &requested,
@@ -415,7 +261,65 @@ pub fn pull(reference_arg: &str) -> Result<PullSummary> {
             pull_one(config, reference, &advertised.manifest_sha256)
         },
     )?
-    .context("the requested pack was already visited before its pull")
+    .context("the requested pack was already visited before its pull")?;
+    match verified {
+        VerifiedPull::Installed(summary) => Ok(PullOutcome::Installed(summary)),
+        VerifiedPull::Application(application) => acquire_application(&application)
+            .map(Box::new)
+            .map(PullOutcome::InstalledApplication),
+    }
+}
+
+fn acquire_application(
+    application: &VerifiedRegistryApplication,
+) -> Result<InstalledRegistryApplication> {
+    use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, TrustStore};
+    application.check_current_revocations()?;
+    crate::commands::bundle::fetch::admit_application_source(application)?;
+    let trust = FsTrustStore::default_path()?;
+    anyhow::ensure!(
+        trust
+            .lookup(&application.manifest().application.bundle.key_id)
+            .is_some(),
+        "application bundle key is not independently enrolled in the consumer trust store"
+    );
+    let registry = BundleRegistry::default_path()?;
+    if let Ok(metadata) = std::fs::symlink_metadata(registry.root()) {
+        anyhow::ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "bundle registry root must be a real directory"
+        );
+    }
+    let cached = registry.archive_path(
+        application
+            .manifest()
+            .application
+            .bundle
+            .archive_sha256
+            .as_str(),
+    );
+    if cached.is_file() {
+        crate::commands::bundle::fetch::refuse_application_local_build(&cached)?;
+    }
+    let candidate = match verify_application_bundle(application, &cached, &trust) {
+        Ok(candidate) => candidate,
+        Err(_) => {
+            let loaded = crate::commands::bundle::fetch::load_application_bundle(application)?;
+            verify_application_bundle(application, loaded.path(), &trust)?
+        }
+    };
+    let store = ApplicationInstallStore::new(
+        mvm_core::config::registry_pack_cache_dir(),
+        mvm_core::config::pack_lockfile_path(),
+        registry.root(),
+    );
+    install_application_bundle(
+        &candidate,
+        &store,
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+        &trust,
+    )
+    .map_err(Into::into)
 }
 
 fn register_dependency(
@@ -434,59 +338,6 @@ fn register_dependency(
     }
     seen.insert(coordinate, reference.clone());
     Ok(true)
-}
-
-fn profile_pack_dependencies(text: &str) -> Result<Vec<PackReference>> {
-    let profile: ProfileFile = toml::from_str(text).context("parsing signed pack profile")?;
-    let mut dependencies = Vec::new();
-    for name in profile.extends.to_vec() {
-        add_policy_dependency(&name, PolicyDependencyKind::Profile, &mut dependencies)?;
-    }
-    for name in profile.groups.include {
-        add_policy_dependency(&name, PolicyDependencyKind::Group, &mut dependencies)?;
-    }
-    for block in profile.when {
-        for name in block.include {
-            add_policy_dependency(&name, PolicyDependencyKind::Group, &mut dependencies)?;
-        }
-    }
-    Ok(dependencies)
-}
-
-fn add_policy_dependency(
-    name: &str,
-    kind: PolicyDependencyKind,
-    dependencies: &mut Vec<PackReference>,
-) -> Result<()> {
-    let reference = PolicyRef::parse(name).map_err(|reason| {
-        anyhow::anyhow!("invalid signed pack policy reference {name:?}: {reason}")
-    })?;
-    match reference {
-        PolicyRef::Pack { .. } => {
-            let pack: PackReference = name
-                .parse()
-                .with_context(|| format!("invalid pack reference {name:?}"))?;
-            if !dependencies.contains(&pack) {
-                dependencies.push(pack);
-            }
-        }
-        PolicyRef::Name(local) => {
-            let exists = match kind {
-                PolicyDependencyKind::Profile => builtin::profile(&local).is_some(),
-                PolicyDependencyKind::Group => builtin::group(&local).is_some(),
-            };
-            if !exists {
-                bail!(
-                    "{local:?} is not a built-in {}; signed packs cannot import local policy",
-                    kind.label()
-                );
-            }
-        }
-        PolicyRef::Path(_) => {
-            bail!("signed pack profile cannot follow a filesystem policy path: {name:?}")
-        }
-    }
-    Ok(())
 }
 
 fn declared_pack_dependencies(
@@ -512,9 +363,9 @@ fn pull_with_dependencies<F>(
     seen: &mut BTreeMap<String, PackReference>,
     active: &mut Vec<PackReference>,
     pull_pack: &mut F,
-) -> Result<Option<PullSummary>>
+) -> Result<Option<VerifiedPull>>
 where
-    F: FnMut(&PackRegistryConfig, &PackReference) -> Result<(PullSummary, Vec<PackReference>)>,
+    F: FnMut(&PackRegistryConfig, &PackReference) -> Result<(VerifiedPull, Vec<PackReference>)>,
 {
     let entry = index
         .iter()
@@ -535,9 +386,13 @@ where
     }
     active.push(reference.clone());
     let (summary, dependencies) = pull_pack(config, &reference)?;
+    if active.len() > 1 && matches!(summary, VerifiedPull::Application(_)) {
+        bail!("application {reference} cannot satisfy a signed policy-pack dependency");
+    }
     for dependency in dependencies {
-        pull_with_dependencies(config, index, &dependency, seen, active, pull_pack)
-            .with_context(|| format!("pulling dependency {dependency} of {}", summary.reference))?;
+        pull_with_dependencies(config, index, &dependency, seen, active, pull_pack).with_context(
+            || format!("pulling dependency {dependency} of {}", summary.reference()),
+        )?;
     }
     active.pop();
     Ok(Some(summary))
@@ -547,7 +402,7 @@ fn pull_one(
     config: &PackRegistryConfig,
     reference: &PackReference,
     advertised_digest: &Sha256Hex,
-) -> Result<(PullSummary, Vec<PackReference>)> {
+) -> Result<(VerifiedPull, Vec<PackReference>)> {
     let fetched = download_pack(config, reference)?;
     let actual = Sha256Hex::from_bytes(&fetched.manifest_bytes);
     if &actual != advertised_digest {
@@ -577,7 +432,7 @@ fn pull_one(
     // (that is what `pack registry update` relies on).
     let pinned = lock.pins().iter().any(|pin| pin.reference() == reference);
 
-    let verified: VerifiedRegistryPack = if pinned {
+    let verified = if pinned {
         let request = RegistryPackVerification::new(
             reference,
             &fetched.manifest_bytes,
@@ -585,25 +440,37 @@ fn pull_one(
             &lock,
             &policy,
         );
-        verify_registry_pack(&request)?
+        verify_registry_manifest(&request)?
     } else {
-        adopt_registry_pack(&PackAdoption {
+        adopt_registry_manifest(&PackAdoption {
             requested: reference,
             manifest_bytes: &fetched.manifest_bytes,
             signature_bundle: &fetched.signature_bundle,
             publisher_policy: &policy,
         })?
     };
+    let verified = match verified {
+        VerifiedRegistryManifest::Application(application) => {
+            application.check_current_revocations()?;
+            // Persist a pin only after acquisition succeeds. The handoff retains
+            // authenticated bytes and digest for that later transaction.
+            return Ok((VerifiedPull::Application(Box::new(application)), Vec::new()));
+        }
+        VerifiedRegistryManifest::Legacy(legacy) => legacy,
+    };
     check_registry_pack_revocations_if_configured(&verified)?;
     with_built_image_verifier_preflight(verified.manifest().image.as_ref(), || {
         download_payload(config, &verified, fetched.staged_path())
     })?;
-    // A failed archive download or verification must not advance the name pin.
-    crate::application_package::install_declared(fetched.staged_path(), &verified)?;
 
     let installed = if pinned {
         // The pin already exists; install reuses or repairs the cache entry.
-        mvm_core::registry_pack::install_registry_pack(fetched.staged_path(), &verified)?
+        mvm_core::registry_pack_store::refresh_pinned_registry_pack(
+            &mvm_core::config::registry_pack_cache_dir(),
+            &lock_path,
+            fetched.staged_path(),
+            &verified,
+        )?
     } else {
         adopt_install_and_pin(
             &PackAdoption {
@@ -620,13 +487,13 @@ fn pull_one(
     let files = verified.payload_files().len();
     let dependencies = declared_pack_dependencies(&installed, &verified)?;
     Ok((
-        PullSummary {
+        VerifiedPull::Installed(PullSummary {
             reference: verified.manifest().reference.clone(),
             manifest_sha256: verified.manifest_sha256().as_str().to_string(),
             files,
             installed_root: installed.root().to_path_buf(),
             refreshed: pinned,
-        },
+        }),
         dependencies,
     ))
 }
@@ -639,57 +506,6 @@ fn with_built_image_verifier_preflight<T>(
         mvm_core::registry_pack::ensure_built_image_verifier_available()?;
     }
     download_payload()
-}
-
-fn runtime() -> Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("building a runtime for the pack registry fetch")
-}
-
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    runtime()
-        .expect("building a single-thread runtime for one registry fetch")
-        .block_on(future)
-}
-
-async fn fetch_text(url: &str) -> Result<String> {
-    let bytes = fetch_bytes(url).await?;
-    String::from_utf8(bytes).with_context(|| format!("{url} is not UTF-8 text"))
-}
-
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    const MAX_METADATA_BYTES: u64 = 1024 * 1024;
-    if let Some(path) = url.strip_prefix("file://") {
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(MAX_METADATA_BYTES + 1)
-            .read_to_end(&mut bytes)?;
-        if u64::try_from(bytes.len())? > MAX_METADATA_BYTES {
-            bail!("pack registry metadata exceeds 1 MiB");
-        }
-        return Ok(bytes);
-    }
-    let client = mvm_http::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .max_response_bytes(MAX_METADATA_BYTES)
-        .build()?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("fetching {url}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        bail!("pack registry returned {} for {url}", status.as_u16());
-    }
-    response
-        .bytes()
-        .await
-        .with_context(|| format!("reading body from {url}"))
-        .map(|b| b.to_vec())
 }
 
 #[cfg(test)]
@@ -1178,13 +994,13 @@ mod tests {
         assert_eq!(visited, ["agent/root@1.0.0", "runtime/node@1.0.0"]);
     }
 
-    fn summary(reference: &PackReference) -> PullSummary {
-        PullSummary {
+    fn summary(reference: &PackReference) -> VerifiedPull {
+        VerifiedPull::Installed(PullSummary {
             reference: reference.clone(),
             manifest_sha256: String::new(),
             files: 0,
             installed_root: PathBuf::new(),
             refreshed: false,
-        }
+        })
     }
 }

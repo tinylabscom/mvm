@@ -28,7 +28,7 @@ use super::chunks::{
     self, ChunkDigest, MATERIALIZATION_TEMP_PREFIX, MATERIALIZATIONS_DIR, OBJECT_TEMP_PREFIX,
     OBJECTS_DIR,
 };
-use super::staging::{self, STAGING_DIR};
+use super::staging;
 
 /// An object still being written is linked under its digest within one chunk
 /// write and sync. One older than this belongs to a capture that died.
@@ -37,7 +37,7 @@ const STALE_OBJECT_TEMP_AGE: Duration = Duration::from_secs(60 * 60);
 /// What [`prune_unreferenced_content`] removed, or would remove on a dry run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ContentPruneReport {
-    /// Staging left by captures and restores whose process is gone.
+    /// Positively reclaimable local staging and abandoned restore materializations.
     pub abandoned_staging: usize,
     /// Pool objects no checkpoint links, plus objects a dead capture never
     /// finished writing.
@@ -72,16 +72,28 @@ impl ContentPruneReport {
 ///
 /// Fails before removing anything when the store cannot be listed, because a
 /// materialization is judged unreferenced against that listing.
+///
+/// Unknown/legacy state, active leases and external-writer uncertainty retain
+/// staging and defer pool/cache collection. This deliberately favors retention
+/// over collection availability; it is not full legacy-GC compatibility.
 pub fn prune_unreferenced_content(
     store: &CheckpointStore,
     dry_run: bool,
 ) -> Result<ContentPruneReport> {
     let referenced = referenced_materializations(store)?;
-    let staging_root = store.root().join(STAGING_DIR);
+    let staged = staging::reclaim_abandoned(store, dry_run);
+    if staged.retained {
+        // A retained/unknown capture may root objects or derived inputs.
+        // Directory retention alone is insufficient: defer global sweeping.
+        return Ok(ContentPruneReport {
+            abandoned_staging: staged.removed,
+            ..Default::default()
+        });
+    }
     let abandoned_staging = if dry_run {
-        staging::abandoned_entries(&staging_root).len() + staging::abandoned_restores(store.root())
+        staged.removed + staging::abandoned_restores(store.root())
     } else {
-        staging::sweep_abandoned(&staging_root) + staging::reclaim_abandoned_restores(store.root())
+        staged.removed + staging::reclaim_abandoned_restores(store.root())
     };
     let objects = sweep_pool(store.root(), dry_run, SystemTime::now())?;
     let materializations = sweep_materializations(store.root(), &referenced, dry_run)?;
@@ -422,22 +434,170 @@ mod tests {
         let kept = capture(&store, tmp.path(), "kept", &[chunk(1)]);
         // A capture that died after linking its chunks: its staging holds the
         // only link besides the pool's.
-        let staged_content = store
-            .root()
-            .join(STAGING_DIR)
-            .join(format!("{DEAD_PID}-1-0-crashed"))
-            .join("content");
-        std::fs::create_dir_all(&staged_content).unwrap();
+        let staged = staging::StagedCapture::begin(&store, &CheckpointId::new("crashed")).unwrap();
+        let staged_content = staged.content_dir();
         let pool = chunks::ObjectPool::new(store.root(), &Default::default()).unwrap();
         pool.store_and_link(&staged_content, &chunk(9)).unwrap();
         pool.store_and_link(&staged_content, &chunk(1)).unwrap();
+        // Release the actual local creator lease, not a simulated PID or a
+        // forgotten live lock. No external writer was ever invoked.
+        let abandoned = staged.release_lease_for_gc_fixture();
 
         let report = prune_unreferenced_content(&store, false).unwrap();
 
         assert_eq!(report.abandoned_staging, 1);
         assert_eq!(report.objects, 1, "chunk 1 is still kept's");
         assert!(!staged_content.exists());
+        assert!(!abandoned.exists());
         verify_content(&store, &kept).unwrap();
+    }
+
+    #[test]
+    fn active_or_uncertain_staging_defers_global_objects_even_after_real_lease_loss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let kept = capture(&store, tmp.path(), "kept", &[chunk(1)]);
+        let orphan = capture(&store, tmp.path(), "orphan", &[chunk(7)]);
+        let scratch = tempfile::tempdir().unwrap();
+        crate::checkpoint::materialized_source(&store, &orphan, "rootfs.ext4", scratch.path())
+            .unwrap();
+        let cached = chunks::materialization_blob_cache_root(
+            store.root(),
+            &orphan.key_domain,
+            &orphan.content[0].name,
+        )
+        .join(&orphan.content[0].sha256);
+        assert!(cached.is_dir());
+        store.remove(&orphan.id).unwrap();
+        let staged = staging::StagedCapture::begin(&store, &CheckpointId::new("held")).unwrap();
+        let content = staged.content_dir();
+        chunks::ObjectPool::new(store.root(), &Default::default())
+            .unwrap()
+            .store_and_link(&content, &chunk(9))
+            .unwrap();
+        let before = object_names(&pool_objects(&store));
+        assert_eq!(before.len(), 3);
+        let members = regular_files_recursive(&content).unwrap();
+        assert_eq!(members.len(), 1);
+        assert!(
+            prune_unreferenced_content(&store, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(object_names(&pool_objects(&store)), before);
+        staged.arm_writer().unwrap();
+        let retained = staged.release_lease_for_gc_fixture();
+        for dry_run in [true, false] {
+            assert!(
+                prune_unreferenced_content(&store, dry_run)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(retained.exists() && content.exists());
+            assert!(
+                cached.is_dir(),
+                "uncertain roots also defer derived-cache deletion"
+            );
+            assert_eq!(object_names(&pool_objects(&store)), before);
+            assert_eq!(std::fs::read(&members[0]).unwrap(), chunk(9));
+            verify_content(&store, &kept).unwrap();
+        }
+        // Only local file/lease mechanics: no process death, external writer,
+        // native quiescence, or synthetic native ownership is asserted.
+    }
+
+    #[test]
+    fn post_inspection_lease_or_store_substitution_retains_claim_and_global_roots() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for fault in [
+            "lease",
+            "store",
+            "missing-disposition",
+            "corrupt-disposition",
+            "replaced-disposition",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = CheckpointStore::at(tmp.path().join("store"));
+            let orphan = capture(&store, tmp.path(), "orphan", &[chunk(7)]);
+            let scratch = tempfile::tempdir().unwrap();
+            crate::checkpoint::materialized_source(&store, &orphan, "rootfs.ext4", scratch.path())
+                .unwrap();
+            let cached = chunks::materialization_blob_cache_root(
+                store.root(),
+                &orphan.key_domain,
+                &orphan.content[0].name,
+            )
+            .join(&orphan.content[0].sha256);
+            store.remove(&orphan.id).unwrap();
+            let staged =
+                staging::StagedCapture::begin(&store, &CheckpointId::new("claim")).unwrap();
+            chunks::ObjectPool::new(store.root(), &Default::default())
+                .unwrap()
+                .store_and_link(&staged.content_dir(), &chunk(9))
+                .unwrap();
+            let path = staged.release_lease_for_gc_fixture();
+            let before = object_names(&pool_objects(&store));
+            assert!(
+                staging::reclaim_after_inspection(&store, &path, || {
+                    if fault == "lease" {
+                        std::fs::rename(path.join(".capture-lease"), tmp.path().join("old-lease"))
+                            .unwrap();
+                        std::fs::write(path.join(".capture-lease"), b"replacement").unwrap();
+                        std::fs::set_permissions(
+                            path.join(".capture-lease"),
+                            std::fs::Permissions::from_mode(0o600),
+                        )
+                        .unwrap();
+                    } else if fault.ends_with("disposition") {
+                        let record = path.join(".capture-disposition.json");
+                        if fault == "missing-disposition" {
+                            std::fs::remove_file(record).unwrap();
+                        } else if fault == "corrupt-disposition" {
+                            std::fs::write(record, b"invalid").unwrap();
+                        } else {
+                            let bytes = std::fs::read(&record).unwrap();
+                            std::fs::rename(&record, tmp.path().join("old-disposition")).unwrap();
+                            std::fs::write(&record, bytes).unwrap();
+                            std::fs::set_permissions(
+                                record,
+                                std::fs::Permissions::from_mode(0o600),
+                            )
+                            .unwrap();
+                        }
+                    } else {
+                        let old = tmp.path().join("old-store");
+                        std::fs::rename(store.root(), &old).unwrap();
+                        std::fs::create_dir_all(store.root().join(staging::STAGING_DIR)).unwrap();
+                        std::fs::rename(
+                            old.join(staging::STAGING_DIR)
+                                .join(path.file_name().unwrap()),
+                            &path,
+                        )
+                        .unwrap();
+                        for name in [OBJECTS_DIR, MATERIALIZATIONS_DIR] {
+                            std::fs::rename(old.join(name), store.root().join(name)).unwrap();
+                        }
+                    }
+                })
+                .is_err()
+            );
+            let claims = std::fs::read_dir(store.root().join(staging::STAGING_DIR))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|entry| entry.join("entry/content").is_dir())
+                .collect::<Vec<_>>();
+            assert_eq!(claims.len(), 1, "mismatched private claim remains intact");
+            assert!(
+                !regular_files_recursive(&claims[0].join("entry/content"))
+                    .unwrap()
+                    .is_empty()
+            );
+            for dry in [true, false] {
+                assert!(prune_unreferenced_content(&store, dry).unwrap().is_empty());
+                assert_eq!(object_names(&pool_objects(&store)), before);
+                assert!(cached.is_dir());
+            }
+        }
     }
 
     #[test]

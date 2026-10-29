@@ -1,7 +1,7 @@
-//! `mvmctl build <sub>` — build-time commands.
+//! `mvmctl dev <sub>` — contributor build-time commands.
 //!
 //! `address`/`compile`/`validate`/`kernel`/`runtime-overlay`/`sdk-sidecar`/`image-set`/`guest-bins` are the
-//! build-time verbs. Image builds moved to `machine build`.
+//! contributor verbs. User-facing package builds belong to `mvmctl machine build`.
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
@@ -12,6 +12,7 @@ use super::Cli;
 use super::{
     address, compile, guest_bins, image_set, kernel, runtime_overlay, sdk_sidecar, validate,
 };
+use crate::commands::bundle::export;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -52,6 +53,9 @@ pub(in crate::commands) enum BuildCmd {
     /// Needs the pinned cross toolchain: `just payload::toolchain`.
     #[command(name = "guest-bins")]
     GuestBins(guest_bins::Args),
+    /// Seal an already-built template for internal fixtures and CI.
+    #[command(name = "export-template", hide = true)]
+    ExportTemplate(export::Args),
 }
 
 impl BuildCmd {
@@ -66,6 +70,7 @@ impl BuildCmd {
             BuildCmd::Address(_) => "address",
             BuildCmd::ImageSet(_) => "image-set",
             BuildCmd::GuestBins(_) => "guest-bins",
+            BuildCmd::ExportTemplate(_) => "export-template",
         }
     }
 }
@@ -80,5 +85,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         BuildCmd::Address(a) => address::run(cli, a, cfg),
         BuildCmd::ImageSet(a) => image_set::run(cli, a, cfg),
         BuildCmd::GuestBins(a) => guest_bins::run(cli, a, cfg),
+        BuildCmd::ExportTemplate(a) => export::run(cli, a, cfg),
     }
 }

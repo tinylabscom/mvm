@@ -449,9 +449,12 @@ impl MachineRunArgs {
                 "`machine run --prod` is supported only for transient runs; persistent machine state cannot preserve the production image policy"
             );
         }
-        if self.run.image.is_none() && self.run.runtime.is_none() {
+        let manifest_is_bundle = self.run.manifest.as_deref().is_some_and(|manifest| {
+            mvm_client::launch::manifest_ref::is_bundle_archive(std::path::Path::new(manifest))
+        });
+        if self.run.image.is_none() && self.run.runtime.is_none() && !manifest_is_bundle {
             bail!(
-                "`machine run --prod` is supported only with `--image` or `--runtime`; other sources cannot select or build a sealed image"
+                "`machine run --prod` is supported only with `--image`, `--runtime`, or a signed bundle artifact; other sources cannot select or build a sealed image"
             );
         }
         Ok(())
@@ -497,7 +500,6 @@ impl MachineRunArgs {
                 let carries_own_entrypoint = self.run.hypervisor.as_deref() == Some("wasm")
                     || self.run.launch_plan.is_some()
                     || self.run.flake.is_some()
-                    || self.run.application_policy.is_some()
                     || (self.run.prod && (self.run.image.is_some() || self.run.runtime.is_some()))
                     || image_supplies_entrypoint;
                 if self.run.argv.is_empty() && !carries_own_entrypoint {
@@ -523,10 +525,11 @@ impl MachineRunArgs {
             && self.run.flake.is_none()
             && self.run.deployment.is_none()
             && !self.run.runtime_pack
+            && self.run.registry_pack_image.is_none()
         {
             bail!(
-                "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, `--deployment <dir>`, or \
-                 `--runtime-pack` to boot a new machine"
+                "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, `--deployment <dir>`, \
+                 `--runtime-pack`, or an image-bearing `--policy` pack to boot a new machine"
             );
         }
         Ok(())
@@ -650,6 +653,9 @@ fn machine_run_spec(
     } else if args.run.runtime_pack {
         // The verified runtime pack is its own source; recorded via
         // `runtime_pack: true` below, not `image`/`manifest`.
+        (None, None, None)
+    } else if args.run.registry_pack_image.is_some() {
+        // Persist only the built image's exact pin, never a host payload path.
         (None, None, None)
     } else if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
         // Test escape: kernel + rootfs from env vars; no persistent source.

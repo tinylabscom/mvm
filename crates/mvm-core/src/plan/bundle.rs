@@ -64,33 +64,42 @@
 //! buy little and add a transitive dep. A future `.mvmpkg.gz`
 //! wrapper can layer on if size becomes a real concern.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(feature = "host-state")]
+use std::collections::BTreeSet;
+#[cfg(feature = "host-state")]
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
+#[cfg(feature = "host-state")]
+use ed25519_dalek::{Signature, Verifier};
+#[cfg(feature = "host-state")]
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub use mvm_contract::plan::bundle::{
-    ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
-    BundleMember, BundleResources, BundleSecurityPosture, ENVIRONMENT_MEMBER_MIN_SCHEMA, KeyId,
+    ARTIFACTS_DIR, ArtifactRole, BOOT_ASSETS_MEMBER_MIN_SCHEMA, BUNDLE_MEMBERS_MIN_SCHEMA,
+    BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, BundleMember, BundleResources,
+    BundleSecurityPosture, CANONICAL_LINUX_PROOF_MIN_SCHEMA, CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA,
+    CanonicalLinuxProof, ENVIRONMENT_MEMBER_MIN_SCHEMA, EmbeddedCliBootAssets, KeyId,
     MANIFEST_FILENAME, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES,
     PlanArtifact, SIGNATURE_FILENAME, VerityInfo, signature_from_base64, signature_to_base64,
 };
 pub use mvm_contract::plan::environment::{
     ApplicationService, ENVIRONMENT_DESCRIPTOR_VERSION, EnvironmentCapability,
-    EnvironmentDescriptor, EnvironmentDescriptorError, EnvironmentEntrypoint, EnvironmentVolume,
-    SecretSlot,
+    EnvironmentDescriptor, EnvironmentDescriptorError, EnvironmentEntrypoint, EnvironmentPolicy,
+    EnvironmentVolume, SecretSlot,
 };
 
 use crate::arch::GuestArch;
 use crate::image_set::{
     BackendImageSupport, HostProtocolSupport, ImageSetError, ImageSetManifest, ImageSetRequirement,
-    ImageSetRole, RetiredGuestRuntimeRole, WorkloadImageProfile, check_protocol_compatibility,
-    require_complete, select_member, select_workload_image, validate_structure,
+    ImageSetRole, RetiredGuestRuntimeRole, WorkloadImageProfile,
+    check_workload_protocol_compatibility, require_complete, select_member, select_workload_image,
+    validate_structure,
 };
 use crate::packs::Sha256Hex;
 
@@ -100,15 +109,93 @@ mod signer;
 mod stream;
 mod verify_error;
 pub use declarations::{
-    BundleSizeBudget, forbidden_capabilities, unbound_environment_secret_slots,
+    BundleSizeBudget, environment_network_permitted, forbidden_capabilities,
+    unbound_environment_secret_slots, unsupported_environment_requirements,
 };
-pub use lookup::{BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, TrustStore};
+pub use lookup::{
+    BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, LocalBundleTrustStore,
+    TrustStore,
+};
 pub use signer::ManifestSigner;
+// The streaming archive I/O half of the bundle surface (seal/verify/install)
+// is host-state; the captured-canonical-inputs type stays because
+// `canonical_linux::PreparedCanonicalLinux` holds one and is named by
+// `vm_backend::VmStartConfig` in every build.
+#[cfg(feature = "host-state")]
+pub(crate) use stream::HashingWriter;
+#[cfg(feature = "host-state")]
 pub use stream::{
-    BundlePayload, MAX_IMAGE_SET_MANIFEST_BYTES, VerifiedBundleFile, verify_bundle_file,
+    BundlePayload, VerifiedBundleFile, capture_canonical_linux_inputs, verify_bundle_file,
     write_bundle_to,
 };
+pub use stream::{CapturedCanonicalLinuxInputs, MAX_IMAGE_SET_MANIFEST_BYTES};
 pub use verify_error::{BundleVerifyError, ensure_safe_path};
+
+/// Signed manifest label written by the local build front door.
+pub const BUNDLE_ORIGIN_LABEL: &str = "mvm.origin";
+/// Value identifying a bundle as a host-local build.
+pub const LOCAL_BUILD_ORIGIN: &str = "local-build";
+/// User-facing description of local-build authority.
+pub const LOCAL_BUILD_NOTICE: &str = "local build, signed by this host's key; not release-verified";
+
+/// Trust class derived from both the signed manifest and consumer-owned keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleOrigin {
+    /// The signing key is enrolled in the consumer trust store.
+    ReleaseVerified,
+    /// The bundle carries the local-build label and this host signed it.
+    LocalBuild,
+    /// The bundle has no admissible release or host-local identity.
+    Untrusted,
+}
+
+/// Mark a manifest produced by the local build front door.
+pub fn mark_local_build(manifest: &mut BundleManifest) {
+    manifest.labels.insert(
+        BUNDLE_ORIGIN_LABEL.to_string(),
+        LOCAL_BUILD_ORIGIN.to_string(),
+    );
+}
+
+/// Classify a bundle without granting authority from a signer-controlled label.
+///
+/// Signature and artifact verification remain separate mandatory checks. This
+/// function only combines the signed manifest with consumer-owned key state.
+pub fn bundle_origin(
+    manifest: &BundleManifest,
+    host_key_id: &KeyId,
+    trust: &dyn TrustStore,
+) -> BundleOrigin {
+    let carries_local_label = manifest
+        .labels
+        .get(BUNDLE_ORIGIN_LABEL)
+        .is_some_and(|value| value == LOCAL_BUILD_ORIGIN);
+    let signed_by_this_host = &manifest.key_id == host_key_id;
+
+    if carries_local_label || signed_by_this_host {
+        return if carries_local_label && signed_by_this_host {
+            BundleOrigin::LocalBuild
+        } else {
+            BundleOrigin::Untrusted
+        };
+    }
+
+    match trust.lookup(&manifest.key_id) {
+        Some(key) if key_id_from_pubkey(&key) == manifest.key_id => BundleOrigin::ReleaseVerified,
+        _ => BundleOrigin::Untrusted,
+    }
+}
+
+/// Whether registry ingress or egress must reject this manifest before trust
+/// lookup. Either the host key or the reserved local-build label is sufficient
+/// for refusal; neither can be made publishable by enrolling the host key.
+pub fn is_registry_forbidden_local_build(manifest: &BundleManifest, host_key_id: &KeyId) -> bool {
+    &manifest.key_id == host_key_id
+        || manifest
+            .labels
+            .get(BUNDLE_ORIGIN_LABEL)
+            .is_some_and(|value| value == LOCAL_BUILD_ORIGIN)
+}
 
 /// Derive the key_id from a verifying-key's bytes.
 ///
@@ -197,6 +284,36 @@ impl InstalledBundle {
     }
 }
 
+/// Parse only the signed manifest entry for an early refusal decision.
+///
+/// The returned fields are not authenticated. Callers may use them only to
+/// reject an archive before network publication or registry installation;
+/// successful admission still requires the normal signature and artifact
+/// verification path.
+#[cfg(feature = "host-state")]
+pub fn inspect_bundle_manifest_for_refusal(
+    archive: impl Read,
+) -> Result<BundleManifest, BundleVerifyError> {
+    let manifest_bytes = stream::read_manifest_entry(archive)?;
+    check_schema_cap(&manifest_bytes, BUNDLE_SCHEMA_VERSION)?;
+    serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| BundleVerifyError::ManifestParse(error.to_string()))
+}
+
+/// File-backed form of [`inspect_bundle_manifest_for_refusal`].
+#[cfg(feature = "host-state")]
+pub fn inspect_bundle_manifest_file_for_refusal(
+    path: &Path,
+) -> Result<BundleManifest, BundleVerifyError> {
+    let file = std::fs::File::open(path).map_err(|error| {
+        BundleVerifyError::ManifestParse(format!(
+            "opening bundle archive {}: {error}",
+            path.display()
+        ))
+    })?;
+    inspect_bundle_manifest_for_refusal(file)
+}
+
 /// Errors specific to bundle install.
 #[derive(Debug, Error)]
 pub enum BundleInstallError {
@@ -278,6 +395,7 @@ impl BundleRegistry {
     /// The bytes are spooled to a temporary file and installed through
     /// [`install_file`](Self::install_file), so an archive in memory and one
     /// on disk go through the same streaming verification.
+    #[cfg(feature = "host-state")]
     pub fn install(
         &self,
         archive_bytes: &[u8],
@@ -309,7 +427,14 @@ impl BundleRegistry {
     /// the caller's audit log should reflect the *attempt*, not
     /// the success — the next install of the same sha will refuse
     /// (or overwrite with `force`) cleanly either way.
+    #[cfg(feature = "host-state")]
     pub fn remove(&self, bundle_sha256: &str) -> anyhow::Result<bool> {
+        match std::fs::symlink_metadata(&self.root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        let _lease = self.lock_entry(bundle_sha256).map_err(anyhow::Error::msg)?;
         let mut removed_any = false;
 
         let archive = self.archive_path(bundle_sha256);
@@ -389,6 +514,7 @@ impl BundleRegistry {
     /// hashed when the bundle was installed; this is the cheap read a launch
     /// makes to learn what the bundle declares, and it refuses a manifest
     /// whose posture was edited on disk after install.
+    #[cfg(feature = "host-state")]
     pub fn verified_manifest(
         &self,
         bundle_sha256: &str,
@@ -405,7 +531,7 @@ impl BundleRegistry {
                 )));
             }
         };
-        let (manifest_bytes, sig_bytes) = read_manifest_entries(file)?;
+        let (manifest_bytes, sig_bytes) = stream::read_manifest_entries(file)?;
         verify_signed_manifest(&manifest_bytes, &sig_bytes, trust)
             .map(|(manifest, _)| Some(manifest))
     }
@@ -436,49 +562,16 @@ impl BundleRegistry {
     }
 }
 
-/// Read `manifest.json` and `manifest.sig` out of an archive, stopping as soon
-/// as both are found. A bundle writes them first, so a multi-GiB archive is
-/// read only as far as its first two entries.
-fn read_manifest_entries(archive: impl Read) -> Result<(Vec<u8>, Vec<u8>), BundleVerifyError> {
-    let tar_error = |e: std::io::Error| BundleVerifyError::ManifestParse(format!("tar read: {e}"));
-    let mut manifest = None;
-    let mut signature = None;
-    let mut budget = declarations::BundleSizeBudget::default();
-    for entry in tar::Archive::new(archive).entries().map_err(tar_error)? {
-        let mut entry = entry.map_err(tar_error)?;
-        let path = entry
-            .path()
-            .map_err(tar_error)?
-            .to_string_lossy()
-            .into_owned();
-        let slot = match path.as_str() {
-            MANIFEST_FILENAME => &mut manifest,
-            SIGNATURE_FILENAME => &mut signature,
-            _ => continue,
-        };
-        budget.admit(&path, entry.size())?;
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).map_err(tar_error)?;
-        *slot = Some(bytes);
-        if manifest.is_some() && signature.is_some() {
-            break;
-        }
-    }
-    let missing = |name: &str| BundleVerifyError::ManifestParse(format!("{name} missing"));
-    Ok((
-        manifest.ok_or_else(|| missing(MANIFEST_FILENAME))?,
-        signature.ok_or_else(|| missing(SIGNATURE_FILENAME))?,
-    ))
-}
-
 /// The verified bundle an embedded image-set cache is filled from: its
 /// manifest, the image sets it embeds, and where their bytes can be read.
+#[cfg(feature = "host-state")]
 struct ImageSetSource<'a> {
     manifest: &'a BundleManifest,
     embedded: &'a [VerifiedEmbeddedImageSet],
     artifacts: &'a dyn stream::ArtifactSource,
 }
 
+#[cfg(feature = "host-state")]
 impl ImageSetSource<'_> {
     fn manifest_declaration(
         &self,
@@ -490,6 +583,7 @@ impl ImageSetSource<'_> {
     }
 }
 
+#[cfg(feature = "host-state")]
 fn install_embedded_image_set_cache(
     source: &ImageSetSource<'_>,
     cache_root: &Path,
@@ -542,6 +636,7 @@ fn install_embedded_image_set_cache(
     Ok(())
 }
 
+#[cfg(feature = "host-state")]
 fn write_embedded_image_set_cache(
     source: &ImageSetSource<'_>,
     embedded: &VerifiedEmbeddedImageSet,
@@ -569,6 +664,7 @@ fn write_embedded_image_set_cache(
 
 /// Re-hash an existing cache entry against the digests the verified bundle
 /// declares. Streams each file; nothing is held whole.
+#[cfg(feature = "host-state")]
 fn verify_cached_embedded_image_set(
     source: &ImageSetSource<'_>,
     embedded: &VerifiedEmbeddedImageSet,
@@ -629,10 +725,71 @@ fn verify_cached_embedded_image_set(
 ///   same bytes.
 /// - **Pin-key_id mismatch**: the archive declares a different
 ///   publisher than the plan pinned. Forged-publisher case.
+#[cfg(feature = "host-state")]
 pub fn verify_plan_bundle(
     pin: &PlanArtifact,
     resolver: &dyn BundleResolver,
     trust: &dyn TrustStore,
+) -> Result<VerifiedBundle, PlanBundleError> {
+    verify_plan_bundle_checked(pin, resolver, trust, |verified| {
+        if verified
+            .manifest
+            .members
+            .iter()
+            .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_)))
+        {
+            return Err(PlanBundleError::CanonicalKernelCustodyRequired);
+        }
+        Ok(())
+    })
+}
+
+/// The canonical lane additionally requires the SAME in-process owner and
+/// actual launch selection. There is no path/hash/JSON fallback.
+#[cfg(feature = "host-state")]
+pub fn verify_canonical_plan_bundle(
+    pin: &PlanArtifact,
+    resolver: &dyn BundleResolver,
+    trust: &dyn TrustStore,
+    owner: &std::sync::Arc<crate::canonical_linux::PreparedCanonicalLinux>,
+    config: &crate::vm_backend::VmStartConfig,
+    backend: crate::vm_backend::BackendKind,
+    host: &crate::image_set::HostProtocolSupport,
+) -> Result<VerifiedBundle, PlanBundleError> {
+    verify_plan_bundle_checked(pin, resolver, trust, |verified| {
+        owner_binds_canonical_bundle(&verified.manifest, owner.pin(), pin)?;
+        owner
+            .verify_config(config, backend, host)
+            .map_err(|error| PlanBundleError::CanonicalKernelBinding(error.to_string()))
+    })
+}
+
+/// The canonical owner must have been prepared from this very bundle, and the
+/// bundle must declare the canonical proof the owner was prepared from.
+#[cfg(feature = "host-state")]
+fn owner_binds_canonical_bundle(
+    manifest: &BundleManifest,
+    owner_pin: &PlanArtifact,
+    pin: &PlanArtifact,
+) -> Result<(), PlanBundleError> {
+    let declares_proof = manifest
+        .members
+        .iter()
+        .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_)));
+    if !declares_proof || owner_pin != pin {
+        return Err(PlanBundleError::CanonicalKernelBinding(
+            "owner does not bind this canonical bundle".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "host-state")]
+fn verify_plan_bundle_checked(
+    pin: &PlanArtifact,
+    resolver: &dyn BundleResolver,
+    trust: &dyn TrustStore,
+    admit_kernel: impl FnOnce(&VerifiedBundle) -> Result<(), PlanBundleError>,
 ) -> Result<VerifiedBundle, PlanBundleError> {
     let archive = resolver
         .resolve(&pin.bundle_sha256)
@@ -675,6 +832,8 @@ pub fn verify_plan_bundle(
         return Err(PlanBundleError::SignatureMismatch);
     }
 
+    admit_kernel(&verified)?;
+
     Ok(verified)
 }
 
@@ -684,6 +843,13 @@ pub fn verify_plan_bundle(
 /// found but the pin says they shouldn't be these."
 #[derive(Debug, Error)]
 pub enum PlanBundleError {
+    #[error("canonical kernel binding refused: {0}")]
+    CanonicalKernelBinding(String),
+    #[error(
+        "canonical Linux proof requires retained backend kernel custody; this admission path does not yet support it"
+    )]
+    CanonicalKernelCustodyRequired,
+
     #[error("could not resolve pinned bundle: {0}")]
     Resolve(#[source] BundleResolveError),
 
@@ -710,6 +876,7 @@ pub enum PlanBundleError {
 /// Used by [`verify_plan_bundle`] to compare against the plan's
 /// pin. Errors carry the reason as a string so the calling code
 /// can surface it without owning the underlying io::Error.
+#[cfg(feature = "host-state")]
 fn extract_manifest_signature(archive: &[u8]) -> Result<[u8; 64], String> {
     let mut tar = tar::Archive::new(std::io::Cursor::new(archive));
     for entry in tar.entries().map_err(|e| e.to_string())? {
@@ -747,6 +914,7 @@ fn extract_manifest_signature(archive: &[u8]) -> Result<[u8; 64], String> {
 /// responsible for writing them out. In-memory representation
 /// matches the on-disk archive byte-for-byte. [`write_bundle_to`] is the same
 /// writer streaming into any `Write`, from files as well as bytes.
+#[cfg(feature = "host-state")]
 pub fn write_bundle(
     manifest: &BundleManifest,
     signer: &dyn ManifestSigner,
@@ -779,12 +947,16 @@ pub struct VerifiedBundle {
     pub boot_assets: Option<VerifiedBootAssets>,
 }
 
-/// Architecture-bound runtime selection authenticated by the bundle publisher.
-/// This is not a complete image set and must never enter the full-set cache.
+/// Architecture-bound boot selection authenticated by the bundle publisher.
+/// The embedded Linux manifest's structure and selected artifact hashes are
+/// checked here; this is not independent Linux publisher or revocation proof.
+/// CLI-runtime release authentication happens again at launch. This is not a
+/// complete image set and must never enter the full-set cache.
 #[derive(Debug, Clone)]
 pub struct VerifiedBootAssets {
     pub arch: GuestArch,
     pub image_set: VerifiedEmbeddedImageSet,
+    pub cli_runtime: Option<EmbeddedCliBootAssets>,
 }
 
 /// The image-set role of the runtime overlay a bundle's boot assets carry.
@@ -833,13 +1005,41 @@ pub fn select_boot_asset_members(
     Ok(selected)
 }
 
-/// Check only the packaged runtime roles, not the unshipped workload image.
+/// Select the original production Linux kernel for a CLI-runtime bundle.
+/// Runtime archives are deliberately not part of this image-set selection.
+pub fn select_cli_boot_kernel(
+    manifest: &ImageSetManifest,
+    arch: GuestArch,
+) -> Result<&crate::image_set::ImageSetMember, ImageSetError> {
+    validate_structure(manifest)?;
+    require_complete(manifest, &ImageSetRequirement::current_train())?;
+    let support = BackendImageSupport::for_backend(crate::vm_backend::BackendKind::Qemu)
+        .expect("Qemu declares portable Linux image support");
+    select_member(
+        manifest,
+        ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+        arch,
+        &support,
+    )
+}
+
+/// Check the selected Linux kernel for schema 6, or the historical packaged
+/// runtime roles for schema 4, not an unshipped workload base image.
 pub fn check_boot_assets_for_backend(
     boot: &VerifiedBootAssets,
     backend: &BackendImageSupport,
     host_protocols: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
-    check_protocol_compatibility(&boot.image_set.manifest, host_protocols)?;
+    check_workload_protocol_compatibility(&boot.image_set.manifest.compatibility, host_protocols)?;
+    if boot.cli_runtime.is_some() {
+        select_member(
+            &boot.image_set.manifest,
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+            boot.arch,
+            backend,
+        )?;
+        return Ok(());
+    }
     for role in [BOOT_ASSET_OVERLAY_ROLE, BOOT_ASSET_INITRAMFS_ROLE] {
         select_member(&boot.image_set.manifest, role, boot.arch, backend)?;
     }
@@ -866,7 +1066,7 @@ pub fn check_embedded_image_set_for_backend(
     backend: &BackendImageSupport,
     host_protocols: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
-    check_protocol_compatibility(&embedded.manifest, host_protocols)?;
+    check_workload_protocol_compatibility(&embedded.manifest.compatibility, host_protocols)?;
     select_workload_image(
         &embedded.manifest,
         WorkloadImageProfile::DefaultTenant,
@@ -887,6 +1087,7 @@ pub fn check_embedded_image_set_for_backend(
 /// for the size and hash pass, which suits bytes that are already in
 /// memory. An archive on disk goes through [`verify_bundle_file`] or
 /// [`BundleRegistry::install_file`], which stream it instead.
+#[cfg(feature = "host-state")]
 pub fn read_and_verify_bundle(
     archive_bytes: &[u8],
     trust_store: &dyn TrustStore,
@@ -958,6 +1159,25 @@ pub fn read_and_verify_bundle(
 /// it: the schema sniff, the key lookup, the signature, the full parse, and
 /// the declaration checks. Everything [`read_and_verify_bundle`] establishes
 /// about the manifest, without looking at a single artifact byte.
+#[cfg(feature = "host-state")]
+fn check_schema_cap(manifest_bytes: &[u8], supported: u32) -> Result<(), BundleVerifyError> {
+    #[derive(Deserialize)]
+    struct SchemaProbe {
+        schema_version: u32,
+    }
+    let probe: SchemaProbe = serde_json::from_slice(manifest_bytes).map_err(|e| {
+        BundleVerifyError::ManifestParse(format!("schema_version probe failed: {e}"))
+    })?;
+    if probe.schema_version > supported {
+        return Err(BundleVerifyError::UnsupportedSchema {
+            found: probe.schema_version,
+            supported,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "host-state")]
 fn verify_signed_manifest(
     manifest_bytes: &[u8],
     sig_bytes: &[u8],
@@ -970,19 +1190,7 @@ fn verify_signed_manifest(
     // should refuse with UnsupportedSchema, not parse-fail with a
     // misleading deny_unknown_fields error. The signature check
     // still happens before we expose any parsed plan-level fields.
-    #[derive(Deserialize)]
-    struct SchemaProbe {
-        schema_version: u32,
-    }
-    let probe: SchemaProbe = serde_json::from_slice(manifest_bytes).map_err(|e| {
-        BundleVerifyError::ManifestParse(format!("schema_version probe failed: {e}"))
-    })?;
-    if probe.schema_version > BUNDLE_SCHEMA_VERSION {
-        return Err(BundleVerifyError::UnsupportedSchema {
-            found: probe.schema_version,
-            supported: BUNDLE_SCHEMA_VERSION,
-        });
-    }
+    check_schema_cap(manifest_bytes, BUNDLE_SCHEMA_VERSION)?;
 
     // ----- Step 2: pull key_id (still pre-signature) -----
     #[derive(Deserialize)]
@@ -1045,6 +1253,7 @@ fn verify_signed_manifest(
 /// Bind each embedded image-set declaration to the already verified bundle
 /// artifacts. The image-set module owns structure, completeness and backend
 /// compatibility; this adapter owns only the cross-manifest name/hash binding.
+#[cfg(feature = "host-state")]
 fn verify_embedded_image_sets(
     bundle: &BundleManifest,
     artifacts: &dyn stream::ArtifactSource,
@@ -1065,28 +1274,44 @@ fn verify_embedded_image_sets(
             BundleMember::EmbeddedImageSet { manifest_artifact } => Some(manifest_artifact),
             BundleMember::KernelCmdline { .. }
             | BundleMember::EmbeddedBootAssets { .. }
+            | BundleMember::EmbeddedCliBootAssets(_)
+            | BundleMember::CanonicalLinuxProof(_)
             | BundleMember::SecurityPosture(_)
             | BundleMember::BuildProvenance(_)
             | BundleMember::Environment(_) => None,
         })
         .map(|manifest_artifact| {
-            verify_embedded_image_set(bundle, artifacts, manifest_artifact, None)
+            verify_embedded_image_set(
+                bundle,
+                artifacts,
+                manifest_artifact,
+                ImageSetSelection::Full,
+            )
         })
         .collect()
 }
 
+#[cfg(feature = "host-state")]
 fn verify_boot_assets(
     bundle: &BundleManifest,
     artifacts: &dyn stream::ArtifactSource,
 ) -> Result<Option<VerifiedBootAssets>, BundleVerifyError> {
-    let Some(manifest_artifact) = bundle.members.iter().find_map(|member| match member {
-        BundleMember::EmbeddedBootAssets { manifest_artifact } => Some(manifest_artifact),
-        BundleMember::EmbeddedImageSet { .. }
-        | BundleMember::KernelCmdline { .. }
-        | BundleMember::SecurityPosture(_)
-        | BundleMember::BuildProvenance(_)
-        | BundleMember::Environment(_) => None,
-    }) else {
+    let Some((manifest_artifact, cli_runtime)) =
+        bundle.members.iter().find_map(|member| match member {
+            BundleMember::EmbeddedBootAssets { manifest_artifact } => {
+                Some((manifest_artifact, None))
+            }
+            BundleMember::EmbeddedCliBootAssets(runtime) => {
+                Some((&runtime.manifest_artifact, Some(runtime)))
+            }
+            BundleMember::EmbeddedImageSet { .. }
+            | BundleMember::CanonicalLinuxProof(_)
+            | BundleMember::KernelCmdline { .. }
+            | BundleMember::SecurityPosture(_)
+            | BundleMember::BuildProvenance(_)
+            | BundleMember::Environment(_) => None,
+        })
+    else {
         return Ok(None);
     };
     let arch = match bundle.arch.as_str() {
@@ -1098,15 +1323,33 @@ fn verify_boot_assets(
             )));
         }
     };
-    let image_set = verify_embedded_image_set(bundle, artifacts, manifest_artifact, Some(arch))?;
-    Ok(Some(VerifiedBootAssets { arch, image_set }))
+    let selection = if cli_runtime.is_some() {
+        ImageSetSelection::CliKernel(arch)
+    } else {
+        ImageSetSelection::LegacyRuntime(arch)
+    };
+    let image_set = verify_embedded_image_set(bundle, artifacts, manifest_artifact, selection)?;
+    Ok(Some(VerifiedBootAssets {
+        arch,
+        image_set,
+        cli_runtime: cli_runtime.cloned(),
+    }))
 }
 
+#[derive(Clone, Copy)]
+#[cfg(feature = "host-state")]
+enum ImageSetSelection {
+    Full,
+    LegacyRuntime(GuestArch),
+    CliKernel(GuestArch),
+}
+
+#[cfg(feature = "host-state")]
 fn verify_embedded_image_set(
     bundle: &BundleManifest,
     artifacts: &dyn stream::ArtifactSource,
     manifest_artifact: &str,
-    boot_arch: Option<GuestArch>,
+    selection: ImageSetSelection,
 ) -> Result<VerifiedEmbeddedImageSet, BundleVerifyError> {
     let declaration = bundle
         .artifacts
@@ -1138,16 +1381,19 @@ fn verify_embedded_image_set(
         }
     })?;
 
-    let members = if let Some(arch) = boot_arch {
-        select_boot_asset_members(&manifest, arch)
-            .map_err(|reason| BundleVerifyError::ImageSetRefused {
-                name: manifest_artifact.to_string(),
-                reason,
-            })?
-            .to_vec()
-    } else {
-        manifest.members.iter().collect()
+    let selected = match selection {
+        ImageSetSelection::Full => Ok(manifest.members.iter().collect()),
+        ImageSetSelection::LegacyRuntime(arch) => {
+            select_boot_asset_members(&manifest, arch).map(|members| members.to_vec())
+        }
+        ImageSetSelection::CliKernel(arch) => {
+            select_cli_boot_kernel(&manifest, arch).map(|member| vec![member])
+        }
     };
+    let members = selected.map_err(|reason| BundleVerifyError::ImageSetRefused {
+        name: manifest_artifact.to_string(),
+        reason,
+    })?;
     let mut artifact_paths = BTreeMap::new();
     for image_artifact in members
         .into_iter()
@@ -1157,7 +1403,12 @@ fn verify_embedded_image_set(
         let bundle_artifact = bundle
             .artifacts
             .iter()
-            .find(|artifact| artifact.name == name)
+            .find(|artifact| match selection {
+                ImageSetSelection::CliKernel(_) => artifact.role == ArtifactRole::Kernel,
+                ImageSetSelection::Full | ImageSetSelection::LegacyRuntime(_) => {
+                    artifact.name == name
+                }
+            })
             .ok_or_else(|| BundleVerifyError::ImageSetArtifactMissing {
                 name: name.to_string(),
             })?;
@@ -1195,7 +1446,7 @@ pub fn bundle_sha256(archive_bytes: &[u8]) -> String {
     sha256_hex(archive_bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-state"))]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
@@ -1255,6 +1506,91 @@ mod tests {
             verity: None,
             resources: None,
         }
+    }
+
+    #[test]
+    fn bundle_origin_is_release_verified_only_for_enrolled_keys() {
+        let release = fresh_key();
+        let host = fresh_key();
+        let manifest = make_manifest(key_id_from_pubkey(&release.verifying_key()), Vec::new());
+
+        assert_eq!(
+            bundle_origin(
+                &manifest,
+                &key_id_from_pubkey(&host.verifying_key()),
+                &trust(&release),
+            ),
+            BundleOrigin::ReleaseVerified
+        );
+        assert_eq!(
+            bundle_origin(
+                &manifest,
+                &key_id_from_pubkey(&host.verifying_key()),
+                &MapTrustStore(HashMap::new()),
+            ),
+            BundleOrigin::Untrusted
+        );
+    }
+
+    #[test]
+    fn the_local_label_without_the_host_key_grants_no_level() {
+        let foreign = fresh_key();
+        let host = fresh_key();
+        let mut manifest = make_manifest(key_id_from_pubkey(&foreign.verifying_key()), Vec::new());
+        mark_local_build(&mut manifest);
+
+        assert_eq!(
+            bundle_origin(
+                &manifest,
+                &key_id_from_pubkey(&host.verifying_key()),
+                &trust(&foreign),
+            ),
+            BundleOrigin::Untrusted
+        );
+        assert!(is_registry_forbidden_local_build(
+            &manifest,
+            &key_id_from_pubkey(&host.verifying_key())
+        ));
+    }
+
+    #[test]
+    fn a_host_key_archive_without_the_label_is_not_a_local_build() {
+        let host = fresh_key();
+        let manifest = make_manifest(key_id_from_pubkey(&host.verifying_key()), Vec::new());
+        let enrolled = trust(&host);
+
+        assert_eq!(
+            bundle_origin(
+                &manifest,
+                &key_id_from_pubkey(&host.verifying_key()),
+                &enrolled,
+            ),
+            BundleOrigin::Untrusted
+        );
+        assert!(is_registry_forbidden_local_build(
+            &manifest,
+            &key_id_from_pubkey(&host.verifying_key())
+        ));
+    }
+
+    #[test]
+    fn marked_host_bundle_is_local_and_never_registry_eligible() {
+        let host = fresh_key();
+        let mut manifest = make_manifest(key_id_from_pubkey(&host.verifying_key()), Vec::new());
+        mark_local_build(&mut manifest);
+
+        assert_eq!(
+            bundle_origin(
+                &manifest,
+                &key_id_from_pubkey(&host.verifying_key()),
+                &trust(&host),
+            ),
+            BundleOrigin::LocalBuild
+        );
+        assert!(is_registry_forbidden_local_build(
+            &manifest,
+            &key_id_from_pubkey(&host.verifying_key())
+        ));
     }
 
     fn art(name: &str, role: ArtifactRole, path: &str, bytes: &[u8]) -> BundleArtifact {
@@ -1513,12 +1849,35 @@ mod tests {
     #[test]
     fn typed_members_require_bundle_schema_v3() {
         let sk = fresh_key();
-        let (image_set, bytes) = complete_image_set();
-        let archive = embedded_bundle_with_schema(&sk, &image_set, &bytes, 2);
+        // The production writer now refuses this malformed member floor too;
+        // hand-seal it to exercise the reader's independent refusal.
+        let archive = hand_sealed_bundle_with(
+            &sk,
+            |manifest| {
+                manifest.schema_version = 2;
+                manifest.members = vec![BundleMember::EmbeddedImageSet {
+                    manifest_artifact: "image-set.json".into(),
+                }];
+            },
+            |_| {},
+        );
         assert!(matches!(
             read_and_verify_bundle(&archive, &trust(&sk)),
             Err(BundleVerifyError::MembersRequireSchemaV3 { found: 2 })
         ));
+    }
+
+    #[test]
+    fn schema_six_reader_refuses_canonical_seven_before_parsing_its_member() {
+        let bytes = br#"{"schema_version":7,"members":[{"class":"canonical_linux_proof"}]}"#;
+        assert!(matches!(
+            check_schema_cap(bytes, 6),
+            Err(BundleVerifyError::UnsupportedSchema {
+                found: 7,
+                supported: 6
+            })
+        ));
+        assert!(check_schema_cap(br#"{"schema_version":6}"#, 6).is_ok());
     }
 
     fn boot_bundle(
@@ -1541,6 +1900,7 @@ mod tests {
             payload.push((path, bytes.clone()));
         }
         let mut manifest = make_manifest(key_id_from_pubkey(&sk.verifying_key()), artifacts);
+        manifest.schema_version = 4;
         manifest.arch = arch.to_string();
         manifest.members.push(BundleMember::EmbeddedBootAssets {
             manifest_artifact: "image-set.json".into(),
@@ -1618,6 +1978,157 @@ mod tests {
                 .join(full.embedded_image_sets[0].manifest_sha256.as_str())
                 .exists()
         );
+    }
+
+    /// A CLI-assets bundle names its kernel by role: the verifier must pair the
+    /// image set's kernel member with the bundle's `Kernel`-role artifact, not
+    /// with whichever artifact happens to come first.
+    #[test]
+    fn cli_boot_assets_pair_the_image_set_kernel_with_the_kernel_role_artifact() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let arch = GuestArch::Aarch64;
+        let kernel_member = select_cli_boot_kernel(&image_set, arch).unwrap();
+        let kernel_name = kernel_member.artifacts[0].name.as_str().to_string();
+        let kernel_bytes = bytes
+            .iter()
+            .find(|(name, _)| *name == kernel_name)
+            .map(|(_, bytes)| bytes.clone())
+            .expect("the kernel artifact's bytes");
+        let image_manifest = serde_json::to_vec(&image_set).unwrap();
+
+        let runtime_names = [
+            "runtime.tar.gz",
+            "runtime.sha256",
+            "runtime.bundle",
+            "runtime.sha256.bundle",
+            "overlay",
+            "overlay.verity",
+        ];
+        let mut artifacts = vec![art(
+            "image-set.json",
+            ArtifactRole::Other,
+            "artifacts/image-set.json",
+            &image_manifest,
+        )];
+        let mut payload = vec![("artifacts/image-set.json".to_string(), image_manifest)];
+        for name in runtime_names {
+            let body = format!("runtime bytes {name}").into_bytes();
+            artifacts.push(art(
+                name,
+                ArtifactRole::Other,
+                &format!("artifacts/{name}"),
+                &body,
+            ));
+            payload.push((format!("artifacts/{name}"), body));
+        }
+        let initrd = b"initramfs bytes".to_vec();
+        artifacts.push(art(
+            "initrd",
+            ArtifactRole::Initrd,
+            "artifacts/initrd",
+            &initrd,
+        ));
+        payload.push(("artifacts/initrd".to_string(), initrd));
+        artifacts.push(art(
+            &kernel_name,
+            ArtifactRole::Kernel,
+            &format!("artifacts/{kernel_name}"),
+            &kernel_bytes,
+        ));
+        payload.push((format!("artifacts/{kernel_name}"), kernel_bytes));
+
+        let mut manifest = make_manifest(key_id_from_pubkey(&sk.verifying_key()), artifacts);
+        manifest.schema_version = 6;
+        manifest.arch = arch.to_string();
+        manifest.members = vec![BundleMember::EmbeddedCliBootAssets(EmbeddedCliBootAssets {
+            manifest_artifact: "image-set.json".into(),
+            version: "0.24.0".into(),
+            arch: arch.to_string(),
+            archive_artifact: "runtime.tar.gz".into(),
+            checksum_artifact: "runtime.sha256".into(),
+            signature_bundle_artifact: "runtime.bundle".into(),
+            checksum_signature_bundle_artifact: "runtime.sha256.bundle".into(),
+            overlay_artifact: "overlay".into(),
+            overlay_verity_artifact: "overlay.verity".into(),
+            initramfs_artifact: "initrd".into(),
+            overlay_roothash: "a".repeat(64),
+            protocol_version: 2,
+            min_supported_protocol_version: 2,
+        })];
+        let archive = write_bundle(&manifest, &sk, payload).unwrap();
+
+        let verified = read_and_verify_bundle(&archive, &trust(&sk)).unwrap();
+        let boot = verified.boot_assets.expect("CLI boot assets verified");
+        assert_eq!(boot.image_set.artifact_paths.len(), 1);
+        assert!(boot.image_set.artifact_paths.contains_key(&kernel_name));
+    }
+
+    #[test]
+    fn a_canonical_owner_binds_only_the_bundle_it_was_prepared_from() {
+        let sk = fresh_key();
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
+        let pin = |sha: &str| PlanArtifact::new(sha.repeat(64), &[7u8; 64], key_id.clone());
+        let mut with_proof = make_manifest(key_id.clone(), Vec::new());
+        with_proof.members = vec![BundleMember::CanonicalLinuxProof(CanonicalLinuxProof {
+            manifest_artifact: "linux.json".into(),
+            signature_bundle_artifact: "linux.bundle".into(),
+            revocation_document_artifact: "revocations.json".into(),
+            revocation_signature_bundle_artifact: "revocations.bundle".into(),
+        })];
+        let without_proof = make_manifest(key_id.clone(), Vec::new());
+
+        owner_binds_canonical_bundle(&with_proof, &pin("a"), &pin("a")).unwrap();
+        for (manifest, owner, bundle) in [
+            (&with_proof, "a", "b"),
+            (&without_proof, "a", "a"),
+            (&without_proof, "a", "b"),
+        ] {
+            assert!(matches!(
+                owner_binds_canonical_bundle(manifest, &pin(owner), &pin(bundle)),
+                Err(PlanBundleError::CanonicalKernelBinding(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn schema4_file_plan_artifact_pins_the_original_signed_archive() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let payload = boot_payload(&image_set, GuestArch::Aarch64, &bytes);
+        let archive = boot_bundle(&sk, &image_set, "aarch64", &payload);
+        let expected = PlanArtifact::new(
+            bundle_sha256(&archive),
+            &extract_manifest_signature(&archive).unwrap(),
+            key_id_from_pubkey(&sk.verifying_key()),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("original.mvmpkg");
+        std::fs::write(&path, &archive).unwrap();
+        let verified = verify_bundle_file(&path, &trust(&sk)).unwrap();
+        assert_eq!(verified.manifest.schema_version, 4);
+        assert!(verified.boot_assets.is_some());
+        assert_eq!(verified.plan_artifact(), expected);
+        let independently_verified = verify_plan_bundle(
+            &verified.plan_artifact(),
+            &FixedResolver(archive.clone()),
+            &trust(&sk),
+        )
+        .unwrap();
+        assert_eq!(independently_verified.manifest, verified.manifest);
+
+        let needle = b"\"schema_version\":4";
+        let position = archive
+            .windows(needle.len())
+            .position(|bytes| bytes == needle)
+            .unwrap();
+        let mut tampered = archive;
+        tampered[position + needle.len() - 1] = b'3';
+        std::fs::write(&path, tampered).unwrap();
+        assert!(matches!(
+            verify_bundle_file(&path, &trust(&sk)),
+            Err(BundleVerifyError::SignatureInvalid { .. })
+        ));
     }
 
     #[test]
@@ -2741,6 +3252,36 @@ mod tests {
         assert!(!touched, "no archive + no dir → returns false");
     }
 
+    /// An absent registry root is "nothing installed": `remove` answers
+    /// `false` without creating the root as a side effect of locking.
+    #[test]
+    fn bundle_registry_remove_on_an_absent_root_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("never-created");
+        let registry = BundleRegistry::new(&root);
+        assert!(!registry.remove(&"a".repeat(64)).expect("remove ok"));
+        assert!(!root.exists(), "removing from nothing must not create it");
+    }
+
+    #[test]
+    fn bundle_registry_remove_reports_root_lookup_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("not-a-directory");
+        std::fs::write(&parent, b"retain this file").unwrap();
+        let root = parent.join("bundles");
+        let lookup_error = std::fs::symlink_metadata(&root).unwrap_err();
+        assert_ne!(lookup_error.kind(), std::io::ErrorKind::NotFound);
+
+        let error = BundleRegistry::new(&root)
+            .remove(&"a".repeat(64))
+            .expect_err("an inaccessible registry is not an absent bundle");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            lookup_error.kind()
+        );
+        assert_eq!(std::fs::read(parent).unwrap(), b"retain this file");
+    }
+
     #[test]
     fn bundle_registry_list_returns_installed_shas_sorted() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3075,6 +3616,36 @@ mod tests {
             append_bytes(&mut tar, path, bytes).unwrap();
         }
         tar.into_inner().unwrap()
+    }
+
+    #[test]
+    fn manifest_scan_stops_at_the_first_complete_set_of_entries() {
+        // A later duplicate must never replace what the scan already settled on.
+        let archive = |entries: &[(&str, &[u8])]| {
+            let mut tar = tar::Builder::new(Vec::new());
+            for (path, bytes) in entries {
+                append_bytes(&mut tar, path, bytes).unwrap();
+            }
+            tar.into_inner().unwrap()
+        };
+
+        let signed = archive(&[
+            (MANIFEST_FILENAME, b"first"),
+            (SIGNATURE_FILENAME, b"sig"),
+            (MANIFEST_FILENAME, b"second"),
+        ]);
+        let (manifest, signature) = stream::read_manifest_entries(Cursor::new(&signed)).unwrap();
+        assert_eq!(manifest, b"first");
+        assert_eq!(signature, b"sig");
+
+        let unsigned = archive(&[
+            (MANIFEST_FILENAME, b"first"),
+            (MANIFEST_FILENAME, b"second"),
+        ]);
+        assert_eq!(
+            stream::read_manifest_entry(Cursor::new(&unsigned)).unwrap(),
+            b"first"
+        );
     }
 
     /// A sealed-prod posture that allows egress and volumes, verity-bound.

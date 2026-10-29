@@ -48,14 +48,61 @@ pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String
     (Some(verity.to_string_lossy().into_owned()), Some(hash))
 }
 
-/// Whether this boot attached the universal initramfs. Bundles carry an
-/// admitted boot-assets pin; other launches resolve the shared initramfs cache.
-/// This keeps the activation handshake tied to the artifact that implements it.
+/// Build the cmdline fragment consumed by `mvm-verity-init`
+/// (the PID 1 in the verity initramfs). Pure function for unit
+/// testing — `None` is returned when verity is disabled (no
+/// `roothash`). When the three runtime-overlay fields are also
+/// present, the fragment includes the `mvm.runtime_*` knobs the
+/// init binary reads to set up the second dm-verity target and
+/// bind-mount it at `/sysroot/mvm/runtime`.
+pub fn build_verity_cmdline_args(
+    roothash: Option<&str>,
+    overlay_roothash: Option<&str>,
+) -> Option<String> {
+    let h = roothash?;
+    let base = format!("mvm.roothash={h} mvm.data=/dev/vda mvm.hash=/dev/vdb");
+    match overlay_roothash {
+        Some(oh) => Some(format!(
+            "{base} mvm.runtime_roothash={oh} mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd"
+        )),
+        None => Some(base),
+    }
+}
+
+/// Build the runtime-overlay cmdline fragment for Firecracker workload boots.
+///
+/// Verity-root boots use the fixed `/dev/vdc` + `/dev/vdd` runtime pair that
+/// `mvm-verity-init` consumes. Injected OCI non-verity boots instead mount a
+/// plain read-only overlay ext4 from `/dev/vdb` in their `/init`, so they only
+/// need the data-device token.
+pub fn build_runtime_overlay_cmdline_args(
+    rootfs_roothash: Option<&str>,
+    overlay_present: bool,
+) -> Option<String> {
+    if !overlay_present {
+        return None;
+    }
+    match rootfs_roothash {
+        Some(_) => Some("mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd".to_string()),
+        None => Some("mvm.runtime_data=/dev/vdb".to_string()),
+    }
+}
+
+/// Whether this boot attached the universal initramfs (as opposed to a
+/// legacy per-rootfs verity initramfs or no initramfs at all). Release
+/// assemblies use the universal ABI even after their verified initramfs is
+/// moved to a private launch generation. Proof presence selects an ABI here,
+/// not authority: the launch boundary must authenticate it before spawning.
+/// Legacy cache resolution remains supported for contributor boots.
 pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
     let Some(initrd) = &config.initrd_path else {
         return false;
     };
-    if config.bundle_boot_assets.is_some() {
+    if config.bundle_boot_assets.is_some()
+        || config.legacy_portable_runtime.is_some()
+        || config.runtime_release_proof.is_some()
+        || config.unsigned_runtime_development
+    {
         return true;
     }
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
@@ -184,6 +231,28 @@ pub fn balloon_body(amount_mib: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_generation_uses_the_universal_abi_outside_the_cache() {
+        let config = mvm_core::vm_backend::VmStartConfig {
+            initrd_path: Some("/private/generation/initramfs.cpio.gz".into()),
+            runtime_release_proof: Some(mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                archive: "/release/archive".into(),
+                checksum: "/release/checksum".into(),
+                signature_bundle: "/release/signature".into(),
+                archive_sha256: "a".repeat(64),
+                version: "1.2.3".into(),
+                arch: mvm_core::arch::GuestArch::host(),
+            }),
+            ..Default::default()
+        };
+        assert!(booted_with_universal_initramfs(&config));
+        let without_initramfs = mvm_core::vm_backend::VmStartConfig {
+            initrd_path: None,
+            ..config
+        };
+        assert!(!booted_with_universal_initramfs(&without_initramfs));
+    }
 
     #[test]
     fn a_pinned_bundle_initrd_uses_universal_activation_outside_the_cli_cache() {

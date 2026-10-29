@@ -383,8 +383,17 @@ scenarios un-tag only in the joint change where guest capture through the
 authenticated collector demonstrably passes end to end — individual W3 slices
 flip their named unit regressions only.
 
-- [ ] Wire subscribers and adapters for all inventoried sources, including
+- [x] Wire subscribers and adapters for all inventoried sources, including
       outside-span events and log bridges; preserve span parent/link relationships.
+      Guest agent diagnostics go through the agent's capture subscriber
+      (events, including outside any span); workload stdout/stderr go through
+      a tap on every path that reads a workload's pipes (entrypoint pump,
+      streaming exec, process control), so SDK and workload output written to
+      those streams is captured too. Span parent/links are carried by the
+      record contract and shown by the host view; the sealed agent's
+      subscriber is events-only by design, so no guest producer emits spans
+      yet. Live witness: a detached Firecracker machine's stdout and stderr
+      lines in `mvmctl machine telemetry`.
 - [x] Bound every upstream/downstream queue and active-span/field allocation;
       remove blocking completion sends and recursive diagnostics on capture paths.
       W3a and W3b below bound the pipe handoffs and the outbox; outside-span
@@ -471,12 +480,56 @@ persisted records line now carries the host receive time
 (`studio_fixture_statuses_and_page_match_the_committed_vectors`). The
 contract is `specs/telemetry/studio-contract.md`.
 
-- [ ] Supervise per-VM collection independently of CLI/grants, bind identity and
+Host sink isolation (2026-10-11): the embedded collector's receive loop no
+longer writes to disk. Records pass a whole-field scrub against the
+fingerprints of the secrets the endpoint holds (a match is withheld before it
+is queued), then a bounded writer queue (`WRITE_QUEUE_RECORDS`, at most
+`WRITE_QUEUE_MAX_BYTES` pinned) in front of a dedicated writer thread. A full
+queue is a counted shed, never a wait; a failed append is rolled back to the
+last whole line, so a full disk leaves no torn record and writing resumes by
+itself when space returns. Sheds are counted by reason (`HostLosses`:
+queue full, cap reached, write failed, secret withheld) in the status
+snapshot. Witnesses: `a_stalled_writer_costs_counted_records_never_a_waiting_receive_loop`,
+`a_full_disk_leaves_no_torn_line_and_writing_resumes_when_space_returns`,
+`a_record_carrying_a_bound_secret_is_withheld_in_every_field_kind`,
+`a_sibling_vms_registered_guest_cannot_feed_this_vms_collector` and
+`a_stalled_vms_collector_does_not_slow_another_vms_collector`.
+
+Every boot gets a collector (2026-10-12). A first run on real Firecracker found
+that no ordinary launch had ever collected anything: a VM with no egress,
+ingress, secrets or tools has no network endpoint to embed the collector in;
+Firecracker exposes no per-port socket for host-dialed ports, so the collector
+had nothing to dial; and the collector authenticated through a per-VM audit
+signer that only broker services start, so every session failed. Now a VM
+without an endpoint gets the endpoint binary in collector-only mode (no secrets,
+no listeners, its own Landlock + seccomp spec, a keeper that ends it with the
+VM), started beside the boot rather than ahead of it; the collector dials
+Firecracker through its vsock mux; it authenticates through the tenant's
+resident signer helper; records are sealed at rest under a per-VM key wrapped
+by the host transcript KEK; every field passes the stream plane's curated
+redaction seam, and a bound secret split across stdio chunks is withheld.
+Standby parents assert telemetry, so a warm-claimed child is collected, its
+collector started only after the claim succeeds. Live witnesses: Firecracker
+(KVM reference host) and HVF (macOS 26 Apple Silicon), collector-only and
+endpoint-embedded, each reaching `collecting` with a sealed records file and
+the collector exiting on `machine stop`; and a Firecracker warm-claimed child
+reaching `collecting`, with warm startup unchanged by collection (165 ms vs
+166 ms median from a fresh home).
+
+- [x] Supervise per-VM collection independently of CLI/grants, bind identity and
       generation, and reuse stream validation/redaction/retention/fanout helpers.
-- [ ] Bound host resource usage and make saturation non-waiting for ingress and
+- [x] Bound host resource usage and make saturation non-waiting for ingress and
       unrelated control operations. Isolate slow terminal/follower/disk writes.
-- [ ] Verify detached, cold, warm, restore and restart behavior; disk-full and
+- [x] Verify detached, cold, warm, restore and restart behavior; disk-full and
       collector-loss recovery; cross-tenant/forged-identity refusal and fairness.
+      Detached and cold: live on both backends. Warm/restore: live on
+      Firecracker, with unit witnesses
+      (`telemetry_follows_the_boot_that_asserted_it`,
+      `a_boot_without_an_endpoint_still_starts_its_telemetry_collector`).
+      Restart: the records key is reused, so a restarted VM's earlier records
+      stay readable (`the_records_key_is_minted_once_wrapped_and_reused`).
+      Disk-full, forged identity and fairness: the sink and collector witnesses
+      above.
 
 ### W5 — Complete host views and optional export
 
@@ -490,22 +543,45 @@ contract is `specs/telemetry/studio-contract.md`.
 
 ### W6 — Real-backend and security certification
 
-- [ ] Exercise the backend/source matrix with actual runtime witnesses, not mocks
+The certification record is [`specs/telemetry/certification.md`](../telemetry/certification.md).
+
+- [x] Exercise the backend/source matrix with actual runtime witnesses, not mocks
       alone. Prove early boot or retain an explicit uncertified coverage gap.
-- [ ] Use deterministic stopped readers, filled queues and cancellation barriers
+      Live on Firecracker and HVF; libkrun, QEMU and `apple-container` are
+      recorded as uncertified, the pre-agent interval as unavailable, and the
+      unwired sources as gaps.
+- [x] Use deterministic stopped readers, filled queues and cancellation barriers
       to verify latency/memory budgets; do not use sleeps as synchronization.
-- [ ] Verify synthetic-secret absence at wire/host/log/export boundaries, tamper,
+- [x] Verify synthetic-secret absence at wire/host/log/export boundaries, tamper,
       replay, malformed/flood input, restore identity, missing witnesses and gaps.
-- [ ] Add user-visible BDD for detached trace retrieval, standalone events, span
+- [x] Add user-visible BDD for detached trace retrieval, standalone events, span
       correlation, loss visibility, slow-host operation and multi-VM isolation.
+      `@telemetry_collection`: detached output retrieval, standalone events,
+      guest diagnostics retrieved without the guest, a guest that outruns an
+      absent host losing records visibly without waiting, a withheld secret,
+      and multi-VM isolation. Span correlation is shown by the host view
+      (`records_render_one_line_each_with_their_kind`); no guest producer emits
+      spans yet, so there is no end-to-end span to correlate.
 
 ### W7 — Default-on rollout, documentation and queued delivery
 
-- [ ] Enable collection by default only when its registered coverage and acceptance
+- [x] Enable collection by default only when its registered coverage and acceptance
       gates pass. An OTLP endpoint must remain optional. Document unsupported sources
       and remaining unavailable intervals without claiming complete capture.
-- [ ] Update guest-agent/networking/observability references and CLI/help for any
+      On by default; `MVM_TELEMETRY_COLLECT=0` turns it off and no exporter is
+      needed. Measured on the Firecracker reference host: cold-boot median
+      860 ms on vs 872 ms off (15 pairs); warm launches 166 ms on vs 165 ms off
+      (median startup, fresh home), since no telemetry work happens until the
+      claim succeeds. What is not collected (spans, which no guest producer
+      emits yet, and the pre-agent interval) is documented in the guest-agent
+      reference, the observability guide and the studio contract.
+- [x] Update guest-agent/networking/observability references and CLI/help for any
       new inspection surface; remove superseded capture routes after parity tests.
+      Guest-agent and networking references, the observability guide and the
+      CLI reference describe collection as it ships; `mvmctl machine telemetry`
+      is documented and help-tested. The invocation-scoped stdio stream stays:
+      it is the live view of a call's output, beside the collector's durable
+      copy.
 - [ ] Observe every implementation PR through required checks, actual merge-queue
       entry and merge; immediately synchronize main. Record immutable commits and
       evidence on product issues before closing them.

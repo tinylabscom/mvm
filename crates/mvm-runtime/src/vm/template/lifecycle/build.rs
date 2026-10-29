@@ -38,6 +38,27 @@ pub fn template_build_from_manifest(
     update_hash: bool,
     mode: mvm_build::pipeline::BuildMode,
 ) -> Result<TemplateRevision> {
+    build_manifest_slot(persisted, force, update_hash, mode, None)
+}
+
+/// Build a private slot with owned frozen inputs, without contributor overrides.
+///
+/// Frozen inputs cannot request cache deletion or mutation of the pinned flake.
+pub fn build_frozen_manifest(
+    persisted: &PersistedManifest,
+    inputs: &mvm_build::pipeline::frozen::FrozenInputs,
+    mode: mvm_build::pipeline::BuildMode,
+) -> Result<TemplateRevision> {
+    build_manifest_slot(persisted, false, false, mode, Some(inputs))
+}
+
+fn build_manifest_slot(
+    persisted: &PersistedManifest,
+    force: bool,
+    update_hash: bool,
+    mode: mvm_build::pipeline::BuildMode,
+    frozen: Option<&mvm_build::pipeline::frozen::FrozenInputs>,
+) -> Result<TemplateRevision> {
     let build_env = crate::build_env::default_build_env();
     let env = build_env.as_ref();
 
@@ -58,8 +79,17 @@ pub fn template_build_from_manifest(
         }
     }
 
-    let result =
-        mvm_build::dev_build::dev_build(env, &persisted.flake_ref, Some(&persisted.profile), mode)?;
+    let result = match frozen {
+        Some(inputs) => {
+            mvm_build::dev_build::frozen_build(env, inputs, Some(&persisted.profile), mode)?
+        }
+        None => mvm_build::dev_build::dev_build(
+            env,
+            &persisted.flake_ref,
+            Some(&persisted.profile),
+            mode,
+        )?,
+    };
 
     // No post-build agent injection: every mkGuest image resolves its
     // agent from the runtime overlay (or mkGuest's own bake) at boot,

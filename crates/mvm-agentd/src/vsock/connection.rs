@@ -288,6 +288,7 @@ pub fn connect_to_port_once(uds_path: &str, port: u32, timeout_secs: u64) -> Res
 /// for definitive failures (connection refused, socket not found).
 pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let mut last_err = None;
+    let started = Instant::now();
 
     for attempt in 0..CONNECT_RETRIES {
         match connect_to_port_once(uds_path, port, timeout_secs) {
@@ -297,7 +298,11 @@ pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<U
                     return Err(e);
                 }
 
-                last_err = Some(e);
+                last_err = Some(e.context(format!(
+                    "vsock connect to port {port} failed on attempt {} of {CONNECT_RETRIES} after {:?}",
+                    attempt + 1,
+                    started.elapsed()
+                )));
 
                 if attempt + 1 < CONNECT_RETRIES {
                     std::thread::sleep(connect_retry_delay(attempt));
@@ -480,6 +485,17 @@ pub(crate) fn open_authenticated_session(
 pub(crate) fn open_authenticated_session_stream<S: std::io::Read + std::io::Write + Send>(
     stream: &mut S,
 ) -> Result<crate::vsock::AuthenticatedSession> {
+    open_peer_authenticated_session(stream).map(|(session, _)| session)
+}
+
+/// Establish a session and retain its authenticated peer key. Native transport
+/// ownership must be established independently on the very same stream.
+pub fn open_peer_authenticated_session<S: std::io::Read + std::io::Write + Send>(
+    stream: &mut S,
+) -> Result<(
+    crate::vsock::AuthenticatedSession,
+    ed25519_dalek::VerifyingKey,
+)> {
     let key_path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
     let key_bytes: [u8; 32] = std::fs::read(&key_path)
         .with_context(|| format!("read host signer key {}", key_path.display()))?
@@ -488,7 +504,7 @@ pub(crate) fn open_authenticated_session_stream<S: std::io::Read + std::io::Writ
         .map_err(|_| anyhow::anyhow!("host signer key must be exactly 32 bytes"))?;
     let signing_key = SigningKey::from_bytes(&key_bytes);
     let session_id = format!("vsock-{:032x}", rand::random::<u128>());
-    crate::vsock::AuthenticatedSession::host(stream, &session_id, signing_key)
+    crate::vsock::AuthenticatedSession::host_retaining_peer(stream, &session_id, signing_key)
 }
 
 #[cfg(test)]

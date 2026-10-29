@@ -144,6 +144,39 @@ unbounded line.
    unavailable` → show the code; `stopped` → clean end. Absence of records
    is not evidence of health — the status snapshot is.
 
+## What the host withholds and masks
+
+Before a record is queued for the records file, the host collector:
+
+- **withholds** any record carrying a secret bound to the VM (the
+  fingerprints the VM's substitution endpoint holds), counted as
+  `secret_withheld`. Stdio is scanned joined to each stream's last bytes, so
+  a secret split across chunks is caught too. Chunks are held back up to
+  500 ms so that, when the rest of a secret follows within that window, no
+  part of it is written. **Limit:** a guest that pauses longer than 500 ms
+  in the middle of printing a bound secret gets the part before the pause
+  written; the completing chunk is still withheld, so the secret is never
+  on disk whole. Holding longer would delay every quiet stream's last line
+  by as much, and the host cannot tell a secret's prefix from ordinary
+  output (it holds fingerprints, not values). Encoded or derived forms of a
+  secret are not recognised, as on the stream plane. Each stream is joined
+  across all of its chunks, whoever wrote them: two workload processes
+  writing the same stream at once interleave, and a secret one of them splits
+  across writes with enough of the other's output between the pieces is
+  joined to the other's bytes and missed.
+- **masks** every text and byte field through the stream plane's curated
+  redaction seam (`XXX` in place of a match), the same rules the transcript
+  uses. A field the seam cannot vouch for withholds the record.
+
+Records travel encrypted from guest to host, and stay encrypted at rest:
+every line of the records file is an AES-256-GCM frame (base64) under a
+per-VM data key, which is stored beside it only wrapped under the host's
+transcript key-encryption key — the same custody the stream transcript uses.
+The file is owner-only (`0600`) in the VM's owner-only state directory. The
+read seam opens lines with the host's keys; a host without them reads no
+records (`KeyUnavailable`), and a line that does not open is counted as
+undecodable rather than served.
+
 ## The status
 
 `TelemetryStatus` is a tagged object on `collection`:
@@ -174,15 +207,14 @@ starts over from offset 0.
 
 ## Scope of this phase, per the recorded decisions
 
-Collection is opt-in (`MVM_TELEMETRY_COLLECT=1`, or any configured OTLP
-exporter endpoint) until the enablement workstreams land their live
-baselines. The v1 data is: agent diagnostics events, coverage lifecycle and
-loss accounting. Workload stdio arrives with the invocation-scoped tee
-(detached stdio is a registered inventory gap until the collector machinery
-owns it); spans wait for a real span producer. A studio v1 built around a
-health badge, a diagnostics feed and loss counters matches what the
-pipeline emits; anything more renders fixtures that production will not
-send.
+Collection is on by default for every fresh workload boot, with or without
+egress (`MVM_TELEMETRY_COLLECT=0` turns it off); an OTLP exporter endpoint is
+optional; a VM claimed from a warm standby is collected once its claim has
+succeeded. The v1 data
+is: agent diagnostics events, coverage lifecycle, loss accounting and
+workload stdout/stderr; spans wait for a real span producer. A studio v1 built around a health badge, a diagnostics feed and
+loss counters matches what the pipeline emits; anything more renders
+fixtures that production will not send.
 
 ## Security note for the web mode
 

@@ -767,7 +767,9 @@ mod tests {
         seed_guest_artifacts(tmp.path(), b"v1");
         let before = oci_runtime_tag(tmp.path());
 
-        seed_guest_artifacts(tmp.path(), b"v2");
+        // Make the metadata stamp change even when both writes land within
+        // one filesystem timestamp tick.
+        seed_guest_artifacts(tmp.path(), b"v2-rebuilt");
         let after = oci_runtime_tag(tmp.path());
 
         assert_ne!(

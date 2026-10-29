@@ -221,9 +221,19 @@ impl AuthenticatedSession {
         session_id: &str,
         signing_key: SigningKey,
     ) -> Result<Self> {
-        let (inner, _peer_key) = Session::host(stream, session_id, signing_key)
+        Self::host_retaining_peer(stream, session_id, signing_key).map(|(session, _)| session)
+    }
+
+    /// Retain the actual handshake key. This is peer authentication, not a
+    /// claim that the transport belongs to a particular native generation.
+    pub fn host_retaining_peer<S: Read + Write>(
+        stream: &mut S,
+        session_id: &str,
+        signing_key: SigningKey,
+    ) -> Result<(Self, VerifyingKey)> {
+        let (inner, peer_key) = Session::host(stream, session_id, signing_key)
             .context("host session handshake failed")?;
-        Ok(Self { inner })
+        Ok((Self { inner }, peer_key))
     }
 
     /// Establish a guest session and require the host identity to match `anchor`.
@@ -316,6 +326,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn retaining_handshake_returns_the_real_guest_key_and_preserves_counters() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let host_key = test_keypair();
+        let guest_key = test_keypair();
+        let expected = guest_key.verifying_key();
+        let anchor = host_key.verifying_key();
+        let peer = std::thread::spawn(move || {
+            let mut session = AuthenticatedSession::guest(&mut guest, guest_key, &anchor).unwrap();
+            for value in [1_u32, 2, 3] {
+                assert_eq!(session.read::<u32>(&mut guest).unwrap(), value);
+                session.write(&mut guest, &value).unwrap();
+            }
+        });
+        let (mut session, key) =
+            AuthenticatedSession::host_retaining_peer(&mut host, "retained-key", host_key).unwrap();
+        assert_eq!(key, expected);
+        for value in [1_u32, 2, 3] {
+            session.write(&mut host, &value).unwrap();
+            assert_eq!(session.read::<u32>(&mut host).unwrap(), value);
+        }
+        peer.join().unwrap();
+    }
+
     struct WouldBlockReader;
 
     impl std::io::Read for WouldBlockReader {
@@ -336,6 +374,64 @@ mod tests {
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
         }));
+    }
+
+    #[test]
+    fn control_frame_timeout_after_partial_read_is_not_retryable() {
+        struct PartialTimeout {
+            bytes: std::io::Cursor<Vec<u8>>,
+            kind: std::io::ErrorKind,
+        }
+
+        impl Read for PartialTimeout {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.bytes.position() < u64::try_from(self.bytes.get_ref().len()).unwrap() {
+                    self.bytes.read(buf)
+                } else {
+                    Err(self.kind.into())
+                }
+            }
+        }
+
+        // Both an incomplete prefix and an incomplete body have consumed wire
+        // bytes that a fresh read cannot safely interpret as another prefix.
+        for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::TimedOut] {
+            for bytes in [
+                vec![0],
+                vec![0, 0],
+                vec![0, 0, 0, 4],
+                vec![0, 0, 0, 4, 1, 2],
+            ] {
+                let error = read_sealed_frame(
+                    &mut PartialTimeout {
+                        bytes: std::io::Cursor::new(bytes),
+                        kind,
+                    },
+                    MAX_SEALED_FRAME_SIZE,
+                )
+                .expect_err("partial frame must fail closed");
+                assert!(
+                    matches!(error, SessionError::InvalidHandshake(_)),
+                    "partial frame must not look like an idle-stream timeout: {error}"
+                );
+            }
+            let error = read_sealed_frame(
+                &mut PartialTimeout {
+                    bytes: std::io::Cursor::new(Vec::new()),
+                    kind,
+                },
+                MAX_SEALED_FRAME_SIZE,
+            )
+            .expect_err("idle stream times out");
+            assert!(matches!(error, SessionError::Io(ref io) if io.kind() == kind));
+        }
+        for bytes in [vec![], vec![0], vec![0, 0, 0, 4, 1, 2]] {
+            let error = read_sealed_frame(&mut bytes.as_slice(), MAX_SEALED_FRAME_SIZE)
+                .expect_err("EOF remains a transport hangup");
+            assert!(
+                matches!(error, SessionError::Io(ref io) if io.kind() == std::io::ErrorKind::UnexpectedEof)
+            );
+        }
     }
 
     // ========================================================================

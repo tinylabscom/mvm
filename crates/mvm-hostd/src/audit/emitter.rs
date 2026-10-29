@@ -61,15 +61,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod atomic_sync;
-use atomic_sync::AtomicSyncBatch;
 pub(crate) use atomic_sync::AtomicSyncState;
 #[cfg(test)]
 use atomic_sync::atomic_sync_is_batched;
 use atomic_sync::defer_atomic_sync;
+use atomic_sync::{AtomicSyncBatch, PendingSync};
 
 mod atomic_write;
 pub(crate) use atomic_write::{write_atomic, write_atomic_batched, write_atomic_unsynced};
 
+mod native_completion;
 mod session_events;
 mod stream_input_refusal;
 use stream_input_refusal::input_refused_labels;
@@ -1171,7 +1172,43 @@ impl AuditEmitter {
     /// result is discarded, so a caller that boots on `Ok` cannot boot on
     /// records that never reached the disk. The scope must therefore close
     /// before the action the entries authorize — not at process exit.
+    ///
+    /// Batches do not nest: `f` runs nothing that opens another batch on this
+    /// emitter, which refuses with an error before `f`'s records are written.
     pub fn batched<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let (value, pending) = self.batched_writes(f)?;
+        pending
+            .sync()
+            .context("syncing batched audit entries before the action they authorize")?;
+        Ok(value)
+    }
+
+    /// [`Self::batched`], with the single sync started on its own thread
+    /// instead of waited for.
+    ///
+    /// Every record is written, and every write error returned, before this
+    /// returns; only the `fdatasync` round is left outstanding. The returned
+    /// [`AdmissionDurability`] is that round, and the caller must wait for it
+    /// to succeed before the action the records authorize takes effect — the
+    /// rule the batch exists for is unchanged, only where the caller blocks on
+    /// it moves.
+    ///
+    /// If `f` fails, its writes are synced inline and its error returned, as
+    /// [`Self::batched`] does.
+    ///
+    /// [`AdmissionDurability`]: mvm_core::admission_durability::AdmissionDurability
+    pub fn batched_sync_detached<T>(
+        &self,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<(T, mvm_core::admission_durability::AdmissionDurability)> {
+        let (value, pending) = self.batched_writes(f)?;
+        Ok((value, pending.detach()))
+    }
+
+    /// Run `f` with barrier syncs held, close the batch, and return what it
+    /// still owes a sync. A failed `f` has its writes synced here and its
+    /// error returned.
+    fn batched_writes<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<(T, PendingSync)> {
         let atomic_batch = AtomicSyncBatch::begin(Arc::clone(&self.atomic_sync_state))?;
         for signer in &self.signers {
             signer.begin_batch();
@@ -1183,13 +1220,18 @@ impl AuditEmitter {
         for signer in &self.signers {
             paths.extend(signer.take_batched_paths());
         }
-        let flush = atomic_batch
-            .finish(paths)
-            .context("syncing batched audit entries before the action they authorize");
-        match (out, flush) {
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-            (Ok(value), Ok(())) => Ok(value),
+        let pending = atomic_batch.close(paths);
+        match out {
+            Ok(value) => Ok((value, pending)),
+            Err(error) => {
+                if let Err(sync_error) = pending.sync() {
+                    tracing::warn!(
+                        error = %format!("{sync_error:#}"),
+                        "syncing the writes of a failed audit batch also failed"
+                    );
+                }
+                Err(error)
+            }
         }
     }
 
@@ -1504,6 +1546,47 @@ mod tests {
         let after = dir.path().join("after.json");
         write_atomic(&after, b"after").unwrap();
         assert_eq!(std::fs::read(after).unwrap(), b"after");
+    }
+
+    /// The detached form writes every record before it returns and closes the
+    /// batch then, so an emit that follows it syncs on its own as usual; only
+    /// the batch's own sync is left to the handle.
+    #[test]
+    fn a_detached_batch_writes_now_and_leaves_only_its_sync_outstanding() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[33; 32]);
+        let verifying = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-detached-sync");
+
+        let ((), durability) = emitter
+            .batched_sync_detached(|| emitter.emit_admitted(&plan, "host:test"))
+            .expect("the batch writes");
+        assert!(
+            !atomic_sync_is_batched(&emitter.atomic_sync_state),
+            "the batch closes when its writes are done, not when its sync is"
+        );
+        emitter
+            .emit_failed(&plan, "test", "after the batch")
+            .expect("a later emit is not held by the detached sync");
+        durability.wait().expect("the detached sync completes");
+
+        let chain = dir.path().join("local.jsonl");
+        verify_audit_chain(&chain, &verifying).expect("the chain verifies");
+        let text = std::fs::read_to_string(&chain).unwrap();
+        assert!(text.contains("plan.admitted"));
+    }
+
+    #[test]
+    fn a_detached_batch_whose_body_fails_returns_no_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[35; 32]);
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let error = emitter
+            .batched_sync_detached::<()>(|| anyhow::bail!("refused inside the batch"))
+            .expect_err("a failed body is an error, not a pending sync");
+        assert!(error.to_string().contains("refused inside the batch"));
+        assert!(!atomic_sync_is_batched(&emitter.atomic_sync_state));
     }
 
     #[test]

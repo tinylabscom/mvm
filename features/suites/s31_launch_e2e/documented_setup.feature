@@ -1,7 +1,7 @@
 Feature: The documented setup commands run on a real host
 
   The README opens with three commands a new user types before anything else:
-  `bootstrap`, and the two arms of `build kernel build`. Every other live
+  `bootstrap`, and the two arms of `dev kernel build`. Every other live
   scenario depends on their output, which is exactly why they went untested —
   "the suite would not run at all if bootstrap were broken" is true, and it is
   also how a *partial* failure hides. A bootstrap that acquires the kernel but
@@ -20,7 +20,7 @@ Feature: The documented setup commands run on a real host
   @live
   Scenario: the documented workload kernel download resolves
     Given an artifact-warm mvm home
-    When I launch "build kernel build --which workload --source download"
+    When I launch "dev kernel build --which workload --source download"
     Then the launch succeeds
 
   # `doctor` is the command the README tells a reader to run when either of the
@@ -30,4 +30,13 @@ Feature: The documented setup commands run on a real host
   Scenario: doctor reports on the host the setup commands just prepared
     Given an artifact-warm mvm home
     When I launch "doctor"
+    Then the launch succeeds
+
+  # The quick start opens with the workflow-scoped form, not bare `doctor`: it
+  # is the readiness probe for the demo run that follows it, and filtering the
+  # blocking set to one workflow is its own code path.
+  @live
+  Scenario: doctor --workflow cli-run reports the host ready for the documented demo
+    Given an artifact-warm mvm home
+    When I launch "doctor --workflow cli-run"
     Then the launch succeeds

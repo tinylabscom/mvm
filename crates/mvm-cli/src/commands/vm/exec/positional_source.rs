@@ -33,31 +33,9 @@ enum PositionalSource {
 /// installs it on first use, and boots it by its bundle SHA-256, exactly as
 /// writing `--manifest ./app.mvmpkg` does.
 pub(in crate::commands) fn apply_positional_source(args: &mut RunArgs) -> Result<()> {
-    apply_with_package_lookup(args, |raw| {
-        crate::application_package::resolve_installed(raw).map(|resolved| {
-            resolved.map(|package| (package.bundle_sha256, package.reference.to_string()))
-        })
-    })
-}
-
-fn apply_with_package_lookup(
-    args: &mut RunArgs,
-    lookup: impl FnOnce(&str) -> Result<Option<(String, String)>>,
-) -> Result<()> {
     let Some(raw) = args.source.take() else {
         return Ok(());
     };
-    if let Some((bundle_sha256, reference)) = lookup(&raw)? {
-        if !args.argv.is_empty() || args.launch_plan.is_some() {
-            bail!(
-                "installed application {reference} runs only its signed declared entrypoint; \
-                 remove the trailing command or --launch-plan"
-            );
-        }
-        args.manifest = Some(bundle_sha256);
-        args.application_policy = Some(reference);
-        return Ok(());
-    }
     match classify(&raw)? {
         PositionalSource::Image(image) => args.image = Some(image),
         PositionalSource::Artifact(path) => args.manifest = Some(path.display().to_string()),
@@ -168,51 +146,5 @@ mod tests {
         let mut args = RunArgs::default();
         apply_positional_source(&mut args).expect("nothing to do");
         assert!(args.image.is_none() && args.manifest.is_none());
-    }
-
-    #[test]
-    fn an_installed_package_selects_its_bundle_and_automatic_policy() {
-        let mut args = args_with("agent/environment");
-        let sha = "a".repeat(64);
-        apply_with_package_lookup(&mut args, |name| {
-            assert_eq!(name, "agent/environment");
-            Ok(Some((sha.clone(), "agent/environment@1.0.0".into())))
-        })
-        .unwrap();
-        assert_eq!(args.manifest.as_deref(), Some(sha.as_str()));
-        assert_eq!(
-            args.application_policy.as_deref(),
-            Some("agent/environment@1.0.0")
-        );
-        assert!(args.image.is_none() && args.argv.is_empty());
-    }
-
-    #[test]
-    fn package_lookup_failure_never_falls_back_to_an_image() {
-        let mut args = args_with("agent/environment");
-        let error = apply_with_package_lookup(&mut args, |_| {
-            bail!("installed package archive failed verification")
-        })
-        .unwrap_err();
-        assert!(error.to_string().contains("failed verification"));
-        assert!(args.image.is_none() && args.manifest.is_none());
-    }
-
-    #[test]
-    fn a_package_cannot_be_used_to_run_an_unrelated_command() {
-        for launch_plan in [false, true] {
-            let mut args = args_with("agent/environment");
-            if launch_plan {
-                args.launch_plan = Some("/tmp/launch.json".into());
-            } else {
-                args.argv = vec!["/bin/other".into()];
-            }
-            let error = apply_with_package_lookup(&mut args, |_| {
-                Ok(Some(("a".repeat(64), "agent/environment@1.0.0".into())))
-            })
-            .unwrap_err();
-            assert!(error.to_string().contains("signed declared entrypoint"));
-            assert!(args.manifest.is_none());
-        }
     }
 }

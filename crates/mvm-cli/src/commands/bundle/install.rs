@@ -2,9 +2,11 @@
 //! and extract it into the local bundle registry so subsequent
 //! `mvmctl machine run --manifest <bundle-sha256>` calls can launch from it.
 //!
-//! The same install backs `--manifest <app.mvmpkg>` on `mvmctl run` and
-//! `mvmctl machine run` ([`settle_manifest_archive`]): the archive is verified
-//! and installed, and the run continues as a launch of its bundle sha256.
+//! The same registry writer backs `--manifest <app.mvmpkg>` on `mvmctl run`
+//! and `mvmctl machine run` ([`settle_manifest_archive`]), but that run path
+//! has one additional authority: a local path carrying both this host's
+//! signature and the signed local-build label. The public `bundle install`
+//! command refuses that origin and never turns it into publisher trust.
 //!
 //! Reuses the source-parsing + transport rules from
 //! [`super::fetch::BundleSource`] (local path, `https://` URL, or `oci://`
@@ -22,8 +24,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
+use mvm_client::bundle::{BundleSigner, HostBundleSigner};
 use mvm_core::plan::bundle::{
-    BundleInstallError, BundleRegistry, FsTrustStore, InstalledBundle, verify_bundle_file,
+    BundleInstallError, BundleOrigin, BundleRegistry, FsTrustStore, InstalledBundle,
+    LocalBundleTrustStore, TrustStore, bundle_origin, inspect_bundle_manifest_file_for_refusal,
+    is_registry_forbidden_local_build, verify_bundle_file,
 };
 use mvm_core::user_config::MvmConfig;
 use mvm_fs::oci::ImageReference;
@@ -55,8 +60,8 @@ pub(in crate::commands) struct Args {
     /// Production mode. Refuses `--allow-http` for every source. For an
     /// `oci://` source, also refuses a tag instead of a digest and a registry
     /// the OCI registry policy does not allow, before contacting it. Paths
-    /// and `https://` URLs are not restricted further; every source must
-    /// still pass the signature check.
+    /// and `https://` URLs are not restricted further by production transport
+    /// policy; every source must still pass signature and origin checks.
     #[arg(long)]
     pub prod: bool,
     /// Overwrite an existing install with the same bundle_sha256
@@ -77,6 +82,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     )
     .with_context(|| format!("loading bundle archive from {}", args.source))?;
     let trust = trust_store(args.trust_store)?;
+    refuse_local_build_install(loaded.path())?;
     let registry = bundle_registry(args.registry)?;
 
     let installed = install_archive(
@@ -163,7 +169,7 @@ struct Installed {
 /// install changes what the registry can boot.
 fn install_archive(
     request: ArchiveInstall<'_>,
-    trust: &FsTrustStore,
+    trust: &dyn TrustStore,
     registry: &BundleRegistry,
 ) -> Result<Installed> {
     let force = request.on_existing == OnExisting::Replace;
@@ -208,13 +214,15 @@ fn install_archive(
 /// plan synthesis, signing, and admit-time bundle re-verification. A manifest
 /// that is not an archive is left alone.
 ///
-/// The archive is verified against the default trust store before anything is
-/// written, and a refusal carries the verifier's own error, so an unsigned,
-/// tampered, or unknown-publisher archive never reaches a backend. A dry run
-/// verifies and stops there; it installs nothing.
+/// A release archive is verified against the default publisher trust store. A
+/// local-path archive may instead carry this host's signature together with
+/// the signed local-build label; production refuses that authority. Either
+/// path verifies before anything is written, and admission repeats the check.
+/// A dry run verifies and stops there; it installs nothing.
 pub(in crate::commands) fn settle_manifest_archive(
     manifest: &mut Option<String>,
     dry_run: bool,
+    prod: bool,
 ) -> Result<()> {
     let Some(arg) = manifest.as_deref() else {
         return Ok(());
@@ -223,15 +231,37 @@ pub(in crate::commands) fn settle_manifest_archive(
         return Ok(());
     }
     let loaded = load_bundle(arg, LoadOptions::default())?;
-    let trust = trust_store(None)?;
+    let release_trust = trust_store(None)?;
+    let signer = HostBundleSigner::load()?;
+    let host_key_id = signer.key_id();
+    let trust =
+        LocalBundleTrustStore::new(release_trust, host_key_id.clone(), signer.verifying_key());
     // Timed from here, after the archive is local: verification is the cost a
     // launch from a signed artifact pays on every run, and the launch sample
     // reports it beside the boot so the two are never folded together.
     let verify_started = std::time::Instant::now();
+    let verified = verify_bundle_file(loaded.path(), &trust)
+        .with_context(|| format!("verifying bundle archive {arg}"))?;
+    let origin = bundle_origin(&verified.manifest, &host_key_id, trust.release());
+    match origin {
+        BundleOrigin::LocalBuild => {
+            anyhow::ensure!(
+                loaded.is_local_path(),
+                "refusing a local build that did not come from a local path"
+            );
+            anyhow::ensure!(
+                !prod,
+                "refusing a local build under --prod: local builds are not release-verified"
+            );
+            eprintln!("{}", mvm_core::plan::bundle::LOCAL_BUILD_NOTICE);
+        }
+        BundleOrigin::ReleaseVerified => {}
+        BundleOrigin::Untrusted => anyhow::bail!(
+            "refusing bundle {arg}: its signed origin is neither release-verified nor a local build signed by this host"
+        ),
+    }
     let sha256 = if dry_run {
-        let sha256 = verify_bundle_file(loaded.path(), &trust)
-            .with_context(|| format!("verifying bundle archive {arg}"))?
-            .bundle_sha256;
+        let sha256 = verified.bundle_sha256;
         eprintln!("[mvm] verified {arg} as bundle {sha256} (dry run: not installed)");
         sha256
     } else {
@@ -261,6 +291,17 @@ pub(in crate::commands) fn settle_manifest_archive(
     };
     mvm_core::launch_trace::record_bundle_verify(verify_started.elapsed());
     *manifest = Some(sha256);
+    Ok(())
+}
+
+fn refuse_local_build_install(path: &Path) -> Result<()> {
+    let manifest = inspect_bundle_manifest_file_for_refusal(path)
+        .context("inspecting bundle origin before installation")?;
+    let host_key_id = HostBundleSigner::load()?.key_id();
+    anyhow::ensure!(
+        !is_registry_forbidden_local_build(&manifest, &host_key_id),
+        "refusing to install a local build: run its local `.mvmpkg` path directly instead"
+    );
     Ok(())
 }
 
@@ -404,6 +445,48 @@ mod tests {
             (dir, path, bytes)
         }
 
+        fn host_archive(
+            &self,
+            local_build: bool,
+        ) -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
+            let host = mvm_hostd::audit::host_keypair::load_or_init().expect("host signer");
+            let rootfs = ROOTFS.to_vec();
+            let mut manifest = BundleManifest {
+                schema_version: BUNDLE_SCHEMA_VERSION,
+                publisher: "host-build-test".to_string(),
+                key_id: key_id_from_pubkey(&host.verifying),
+                arch: GuestArch::host().to_string(),
+                kernel_version: None,
+                profile: None,
+                workload_label: Some("host-build".to_string()),
+                created_at: "2026-10-23T00:00:00Z".to_string(),
+                labels: Default::default(),
+                artifacts: vec![BundleArtifact {
+                    name: "rootfs.ext4".to_string(),
+                    role: ArtifactRole::Rootfs,
+                    path: "artifacts/rootfs.ext4".to_string(),
+                    sha256: sha256_hex(&rootfs),
+                    size_bytes: rootfs.len() as u64,
+                }],
+                members: Vec::new(),
+                verity: None,
+                resources: None,
+            };
+            if local_build {
+                mvm_core::plan::bundle::mark_local_build(&mut manifest);
+            }
+            let bytes = write_bundle(
+                &manifest,
+                &host.signing,
+                vec![("artifacts/rootfs.ext4".to_string(), rootfs)],
+            )
+            .expect("write host bundle");
+            let dir = tempfile::tempdir().expect("archive dir");
+            let path = dir.path().join("app.mvmpkg");
+            std::fs::write(&path, &bytes).expect("write archive");
+            (dir, path, bytes)
+        }
+
         fn registry(&self) -> BundleRegistry {
             BundleRegistry::new(self.home.path().join("bundles"))
         }
@@ -427,7 +510,7 @@ mod tests {
 
     fn settle(path: &std::path::Path, dry_run: bool) -> (Option<String>, Result<()>) {
         let mut manifest = Some(path.display().to_string());
-        let result = settle_manifest_archive(&mut manifest, dry_run);
+        let result = settle_manifest_archive(&mut manifest, dry_run, false);
         (manifest, result)
     }
 
@@ -512,6 +595,57 @@ mod tests {
         assert!(host.installed().is_empty());
     }
 
+    #[test]
+    fn a_local_build_signed_by_this_host_runs_without_publisher_enrollment() {
+        let host = Host::new(false);
+        let (_dir, path, bytes) = host.host_archive(true);
+
+        let (manifest, result) = settle(&path, false);
+
+        result.expect("this host's labeled local build is admissible for a development run");
+        assert_eq!(manifest, Some(bundle_sha256(&bytes)));
+        assert_eq!(host.installed().len(), 1);
+    }
+
+    #[test]
+    fn a_local_build_is_refused_under_prod_without_installing() {
+        let host = Host::new(false);
+        let (_dir, path, _) = host.host_archive(true);
+        let mut manifest = Some(path.display().to_string());
+
+        let error = settle_manifest_archive(&mut manifest, false, true)
+            .expect_err("production must reject a local build");
+
+        assert!(
+            error.to_string().contains("not release-verified"),
+            "{error:#}"
+        );
+        assert!(host.installed().is_empty());
+    }
+
+    #[test]
+    fn this_hosts_signature_without_the_local_build_label_is_refused() {
+        let host = Host::new(false);
+        let (_dir, path, _) = host.host_archive(false);
+
+        let (_, result) = settle(&path, false);
+
+        let error = result.expect_err("a host signature alone grants no authority");
+        assert!(error.to_string().contains("signed origin"), "{error:#}");
+        assert!(host.installed().is_empty());
+    }
+
+    #[test]
+    fn bundle_install_refuses_a_local_build_even_from_a_local_path() {
+        let host = Host::new(false);
+        let (_dir, path, _) = host.host_archive(true);
+
+        let error = refuse_local_build_install(&path)
+            .expect_err("the ordinary install path must not admit local builds");
+
+        assert!(error.to_string().contains("run its local"), "{error:#}");
+    }
+
     /// The trust store is keyed by `key_id`, so the file it hands back is the
     /// only link from the id an archive declares to the key that must have
     /// signed it. A store entry for the archive's id holding some other key is
@@ -576,11 +710,11 @@ mod tests {
             "./project".to_string(),
         ] {
             let mut manifest = Some(arg.clone());
-            settle_manifest_archive(&mut manifest, false).expect("nothing to settle");
+            settle_manifest_archive(&mut manifest, false, false).expect("nothing to settle");
             assert_eq!(manifest, Some(arg));
         }
         let mut none = None;
-        settle_manifest_archive(&mut none, false).expect("no manifest");
+        settle_manifest_archive(&mut none, false, false).expect("no manifest");
         assert_eq!(none, None);
     }
 

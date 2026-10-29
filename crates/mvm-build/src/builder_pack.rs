@@ -41,10 +41,10 @@ pub const ROOTHASH_FILE: &str = "rootfs.roothash";
 /// can be published as-is. Distinct from the cache's own `.pack-manifest.json`
 /// sidecar, and never a declared pack file.
 pub const MANIFEST_FILE: &str = "manifest.json";
-/// In-pack path of the optional seeded Nix store closure (a `nix-store
-/// --export` NAR of the dev-shell toolchain). Present only when the producer
-/// is given a closure to bundle; a pack without one stays valid.
-pub const CLOSURE_FILE: &str = "nix-closure.nar";
+// In-pack path of the optional seeded Nix store closure: a `nix-store
+// --export` NAR of the dev-shell toolchain. Present only when the producer
+// is given a closure to bundle; a pack without one stays valid.
+pub use crate::builder_disk_transport::CLOSURE_FILE;
 
 /// The `vsock` capability every mvm builder pack requires of its host — the
 /// single control-plane transport an hvf builder VM exposes.

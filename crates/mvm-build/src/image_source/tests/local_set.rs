@@ -28,9 +28,7 @@ impl Pair {
         images_checkout(&tmp.path().join("mvm-images"));
         let mvm = tmp.path().join("mvm");
         write(&mvm.join("Cargo.toml"), "[workspace]\n");
-        git(&mvm, &["init", "-q"]);
-        git(&mvm, &["add", "-A"]);
-        git(&mvm, &["commit", "-q", "-m", "mvm"]);
+        repository::commit_all(&mvm, "mvm");
         let images = open(&tmp.path().join("mvm-images")).unwrap();
         Self { tmp, images }
     }
@@ -124,6 +122,7 @@ fn refusal(err: &LocalSetError) -> &ImageSetError {
 
 #[test]
 fn a_set_built_from_the_pair_as_it_is_reads_at_the_local_dev_tier() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     pair.emit_current();
 
@@ -162,7 +161,7 @@ fn linux_only_set_does_not_depend_on_a_paired_mvm_checkout() {
     manifest["compatibility"]["builder_boot_abi"] =
         serde_json::json!(mvm_core::image_set::BuilderBootAbi::NO_MVM_BINARY.get());
     manifest["compatibility"]["builder_cache_contract"] =
-        serde_json::json!(crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION);
+        serde_json::json!(crate::builder_contract::BUILDER_VM_CACHE_CONTRACT_VERSION);
     std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     let set = pair
         .read_with(
@@ -179,6 +178,7 @@ fn linux_only_set_does_not_depend_on_a_paired_mvm_checkout() {
 
 #[test]
 fn an_mvm_edit_after_the_build_makes_the_set_stale() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     pair.emit_current();
     write(&pair.mvm().join("Cargo.toml"), "[workspace]\n# edited\n");
@@ -200,11 +200,11 @@ fn an_mvm_edit_after_the_build_makes_the_set_stale() {
 
 #[test]
 fn an_mvm_commit_after_the_build_makes_the_set_stale() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     pair.emit_current();
     write(&pair.mvm().join("new.rs"), "fn main() {}\n");
-    git(&pair.mvm(), &["add", "-A"]);
-    git(&pair.mvm(), &["commit", "-q", "-m", "more"]);
+    repository::commit_all(&pair.mvm(), "more");
 
     let err = pair.read().unwrap_err();
 
@@ -222,6 +222,7 @@ fn an_mvm_commit_after_the_build_makes_the_set_stale() {
 
 #[test]
 fn a_set_recording_another_image_state_is_stale() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     let mvm = probe_identity(&pair.mvm()).unwrap();
     let other = RepoIdentity {
@@ -248,6 +249,7 @@ fn a_set_recording_another_image_state_is_stale() {
 
 #[test]
 fn an_image_edit_after_selection_is_refused_before_the_set_is_read() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     pair.emit_current();
     write(&pair.tmp.path().join("mvm-images/flake.nix"), "# edited\n");
@@ -265,6 +267,7 @@ fn an_image_edit_after_selection_is_refused_before_the_set_is_read() {
 
 #[test]
 fn a_role_the_set_lacks_is_refused() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     pair.emit_current();
 
@@ -280,6 +283,7 @@ fn a_role_the_set_lacks_is_refused() {
 
 #[test]
 fn a_set_for_another_architecture_is_refused() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     pair.emit_current();
 
@@ -303,6 +307,7 @@ fn a_set_for_another_architecture_is_refused() {
 #[cfg(unix)]
 #[test]
 fn a_symlinked_manifest_is_refused() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     pair.emit_current();
     let manifest = pair.set_dir().join(LOCAL_SET_MANIFEST_NAME);
@@ -321,6 +326,7 @@ fn a_symlinked_manifest_is_refused() {
 #[cfg(unix)]
 #[test]
 fn a_symlinked_artifact_is_refused() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     pair.emit_current();
     let artifact = pair.set_dir().join(KERNEL_NAME);
@@ -338,6 +344,7 @@ fn a_symlinked_artifact_is_refused() {
 
 #[test]
 fn a_missing_manifest_is_refused() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
 
     let err = pair.read().unwrap_err();
@@ -350,6 +357,7 @@ fn a_missing_manifest_is_refused() {
 
 #[test]
 fn an_mvm_path_that_is_not_a_checkout_root_is_refused() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     pair.emit_current();
     std::fs::create_dir_all(pair.mvm().join("crates")).unwrap();

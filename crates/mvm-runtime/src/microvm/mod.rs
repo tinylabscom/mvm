@@ -4,7 +4,7 @@
 //! `crate::microvm::<name>` (and `mvm_runtime::microvm::<name>` for external
 //! crates) resolves identically to before the split.
 
-mod activation;
+pub(crate) mod activation;
 mod boot_config;
 mod flake_run;
 mod run_info;

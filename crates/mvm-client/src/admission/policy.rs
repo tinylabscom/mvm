@@ -292,6 +292,20 @@ pub(super) mod bundle_pin_tests {
         sk: &ed25519_dalek::SigningKey,
         members: Vec<mvm_core::plan::BundleMember>,
     ) -> (Vec<u8>, mvm_core::plan::KeyId) {
+        make_bundle_for_pin_with_origin(sk, members, false)
+    }
+
+    pub(in crate::admission) fn make_local_bundle_for_pin(
+        sk: &ed25519_dalek::SigningKey,
+    ) -> (Vec<u8>, mvm_core::plan::KeyId) {
+        make_bundle_for_pin_with_origin(sk, Vec::new(), true)
+    }
+
+    fn make_bundle_for_pin_with_origin(
+        sk: &ed25519_dalek::SigningKey,
+        members: Vec<mvm_core::plan::BundleMember>,
+        local_build: bool,
+    ) -> (Vec<u8>, mvm_core::plan::KeyId) {
         use mvm_core::plan::bundle::{
             ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
             key_id_from_pubkey, sha256_hex, write_bundle,
@@ -299,7 +313,7 @@ pub(super) mod bundle_pin_tests {
         let key_id = key_id_from_pubkey(&sk.verifying_key());
         let kernel = b"kernel-bytes".to_vec();
         let rootfs = b"rootfs-bytes".to_vec();
-        let manifest = BundleManifest {
+        let mut manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA_VERSION,
             publisher: "test".to_string(),
             key_id: key_id.clone(),
@@ -329,6 +343,9 @@ pub(super) mod bundle_pin_tests {
             verity: None,
             resources: None,
         };
+        if local_build {
+            mvm_core::plan::bundle::mark_local_build(&mut manifest);
+        }
         let archive = write_bundle(
             &manifest,
             sk,

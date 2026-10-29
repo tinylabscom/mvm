@@ -108,16 +108,21 @@ fn io_loop(
     let mut events = Events::with_capacity(16);
     let mut registered = HashSet::new();
     while !stop.load(Ordering::Relaxed) {
-        let (current, backlog) = {
+        let (current, backlog, readiness) = {
             let shared = shared.lock().unwrap_or_else(|e| e.into_inner());
             (
                 shared.poll_fds().into_iter().collect::<HashSet<_>>(),
                 shared.has_host_backlog(),
+                shared.readiness_timeout(),
             )
         };
         sync_ready_fds(&poll, &mut registered, &current);
         // `EINTR` surfaces as `Err` — just loop and re-check `stop`.
-        let _ = poll.poll(&mut events, poll_timeout(backlog));
+        let timeout = match (poll_timeout(backlog), readiness) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let _ = poll.poll(&mut events, timeout);
         if stop.load(Ordering::Relaxed) {
             break;
         }

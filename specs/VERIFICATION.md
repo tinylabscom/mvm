@@ -9,7 +9,7 @@ prove each gate can fail.
 
 | Rule | What it says | Enforced by |
 | --- | --- | --- |
-| R1 | The model is the single source. Every claim lives in `model/*.toml`, and `CONFORMANCE.md` is generated from it. | `cargo run -p xtask -- check-conformance` |
+| R1 | The model is the single source. Every claim lives in `model/*.toml`, and `docs/CONFORMANCE.md` is generated from it. | `cargo run -p xtask -- check-conformance` |
 | R2 | Levels are load-bearing. A claim is `some-true`, `build`, or `open`, and the two registers are never blurred. | `cargo run -p xtask -- check-honesty` |
 | R3 | A capability begins as a register row, then a scenario, then a witness. | `cargo test -p mvm-conformance --test meta` |
 | R4 | Nothing is deferred. No deferral marker, no stub, no capability behind a flag that turns it off. | `cargo run -p xtask -- check-deferrals` |
@@ -25,7 +25,7 @@ row below records a defect that was planted to prove the gate fires.
 | `check-build-egress-callers` (vacuity) | Point the gate at a tree with no allow-listed call site, i.e. the state it would reach if the constructor were renamed and the gate silently stopped checking anything | yes — refused rather than passing empty |
 | `check-verified-kernel-reads` | Add a boot path that takes `cached_kernel_path` and accepts it on `is_file()` — the shape of the Firecracker arm and the kernel-less-image fallback that both booted an unverified kernel | yes — named the file and line, refused |
 | `check-verified-kernel-reads` (vacuity) | Point the gate at a tree where no file pairs the location helper with `resolve_kernel`, i.e. the state it would reach if either were renamed | yes — refused rather than passing empty |
-| `check-conformance` (R1) | Edit `CONFORMANCE.md` so it disagrees with `model/claims.toml` | yes |
+| `check-conformance` (R1) | Edit `docs/CONFORMANCE.md` so it disagrees with `model/claims.toml` | yes |
 | `check-honesty` (R2) | Add "MVM-SEC-07 proves cargo deps are audited" to `README.md` | yes |
 | `meta` (R3) | Register `MVM-SEC-99` with no scenario, or remove a scenario's ID tag | yes |
 | `check-deferrals` (R4) | Add `// TODO example` to a production source file outside an exemption | yes |
@@ -34,7 +34,6 @@ row below records a defect that was planted to prove the gate fires.
 | `check-claim-catalog` | Name a witness in the ADR-001 ledger that `model/claims.toml` does not list | yes |
 | `check-workflow-paths` | Point a fuzz step's `working-directory` at `crates/mvm-oci` (the pre-consolidation path that made the fuzz lane dead for ten nightlies) | yes |
 | `check-mvm-host-binaries-sync` | Drop `--bin mvm-builderd` from the builder-VM cross-compile step, reproducing the "path does not exist" image-build failure | yes |
-| `check-mutation-witnesses` (shard matrix) | Remove the `mvm-cli` shard from `security.yml`'s mutation matrix, so that package would never be mutated while every shard stayed green | yes — `package mvm-cli is on the mutation surface but has no shard` |
 | `check-claim-witness-freshness` | Change `security.yml`'s cron to hourly so its real last scheduled run exceeds the allowance, or feed the classifier a completed `cancelled` run; reports the stale or unhealthy scheduled evidence and names every claim it backs | yes |
 | `a_modified_kernel_is_rejected_and_both_files_evicted` etc. | Make `verify_cached_kernel` return the path unchecked, i.e. restore the path-trust `resolve_kernel` shipped with — a cached kernel served because the file exists | yes — 3 of the read-path tests fired |
 | `resolve_cached_when_present_and_pinned` | The pre-existing version of this test staged a kernel with **no** pin and asserted a cache hit, encoding "existence is evidence". It had to be rewritten for the new contract, which is the clearest single sign of what changed | n/a — the old test was the defect |
@@ -101,217 +100,12 @@ launch-provisioned signed grant must all authorize the call. The unit suite
 enumerates the DevOnly request set, and the CI lane runs those tests against
 the same artifact shape used by both tiers.
 
-### Mutation-tested witnesses: what the first full run found
+### Mutation testing
 
-`check-mutation-witnesses --run` breaks each claim-surface file on purpose
-and asks whether any witness notices. Its nightly lane ran
-`continue-on-error` until a baseline covered the whole surface. Producing
-that baseline is recorded here, because most of what it found was not
-surviving mutants.
-
-The whole surface now measures — **1221 mutants** — which it had never
-done before, and **the lane is armed**: `continue-on-error` is gone, so a
-witness that stops detecting its own property fails the nightly.
-
-Every survivor is either closed by a test or carried in
-`xtask/mutation-witness-baseline.json` with the mechanism that makes it
-uncatchable here. Ninety-one entries, and none of them says "not yet
-triaged": the generator that wrote them leaves anything without a stated
-mechanism *out*, so an untriaged survivor fails the gate rather than being
-suppressed by omission. Each entry comes from the newest **completed** run
-of that file — completion checked on `end_time`, because cargo-mutants
-writes `outcomes.json` incrementally and a run 39 of 50 through reports
-`missed: 0` and looks clean.
-
-| Mechanism | Entries |
-| --- | --- |
-| libkrun VM lifecycle over a live supervisor process | 31 |
-| Firecracker snapshot driver I/O + vsock readiness probes | 17 |
-| witnessed only by a nix-gated integration test the lane does not run | 12 |
-| not compiled by the lane's feature set (`pure-mkfs`) | 11 |
-| OCI registry / blob-cache I/O | 6 |
-| equivalent: the field's value equals the derived `Default` | 5 |
-| needs a live VM state dir plus a controlled pid | 3 |
-| singletons (binary entrypoint, fail-closed constant, two provable equivalences, two untestable inputs) | 6 |
-
-The lane is **sharded per package**, because it has to be: the whole
-surface takes ~6.9 hours end to end and a GitHub-hosted job is killed at
-six. One job could not reliably finish, so it would go red nightly for a
-reason unrelated to any claim and be ignored — the same failure this lane
-exists to prevent, arrived at from the other side. That makes the matrix a
-second place the surface is written down, so `check-mutation-witnesses`
-pins it against the baseline on every PR; the row above records the
-planted defect.
-
-Per package was not enough for long. On 2026-08-15 the `mvm-hostd` shard
-died on the platform cap having reached six of its ten files in 3h17m, and
-because the cap kills the runner rather than the job, the only trace was
-`The runner has received a shutdown signal` — naming no package, no file
-and no claim. A package may therefore be split further, spelled
-`mvm-hostd/1of2` in the matrix and passed through the same `--package`
-flag. Files are ordered by path and then packed onto the emptiest shard
-heaviest-first, so membership is a property of the committed surface
-rather than of resolution order. The gate
-checks the split is total: a missing index, a repeated one, disagreeing
-totals, or a bare entry alongside sharded ones all fail, because each
-leaves files nothing mutates while every remaining shard stays green.
-
-The job also carries `timeout-minutes: 330`, under the cap, so a shard
-that outgrows its budget is stopped as this job rather than as the runner,
-and uploads its partial cargo-mutants output either way.
-
-**A shard stopped that way does not report as failed.** Actions gives a
-job killed by `timeout-minutes` the conclusion `cancelled`, not
-`timed_out`, so `security-lane-watch.yml` counts `cancelled` as failing and
-skips only when the run as a whole was cancelled. Before it did, a shard
-that never finished contributed no failing job — and on a night where it
-was the only casualty, the empty failing set read as green and closed the
-tracking issue.
-
-**File count is not cost, and adding shards did not make it one.** The
-two-shard split measured the gap on 2026-08-16: `1of2` finished five files
-in 100 minutes while `2of2` drew `plan_admission` (93 mutants),
-`supervisor/audit_file` (107) and `supervisor/network/stages` (108, a file
-since deleted with the packet-path scan layer it held), spent
-its full 330 and never reached its fifth file. The response was to cut
-`mvm-hostd` four ways, on the correct diagnosis but the wrong remedy: a
-cost-blind split of an unequal surface stays unequal at any width. It
-recurred on 2026-08-21, when `2of4` and `4of4` were both killed at 330
-minutes — round-robin had put the four most expensive files in the tree on
-those two shards — while `3of4` finished its three cheapest in 24.
-
-Assignment is therefore by cost, not by stride: shards are packed
-longest-first, heaviest file onto the lightest shard. Cost is the file's
-mutant count, read from `cargo mutants --list` under the same package,
-features and scope the run uses, so it needs nothing recorded beside the
-surface and cannot drift from what the shard executes. Every mutant in a
-package runs the same suite, which is what makes the count a cost.
-
-Source size stood in for it until 2026-10-12, and stopped tracking it:
-`audit/session.rs` (44 KB, 155 mutants, 234 minutes) is a third the size of
-`audit/emitter.rs` (137 KB, 81 mutants, 42 minutes), so size packing put
-`session.rs`, `broker/registry.rs` and `admission_budget.rs` on one shard,
-whose job had taken 307 of its 330 minutes the night before and whose
-mutation step was stopped inside `registry.rs` the next night. Replaying the
-2026-08-21 per-file measurements through it splits that same surface
-188/189/191/193 minutes where round-robin gave 90/323/24/324 — 1.01x the
-ideal even split against 1.70x. `xtask`'s
-`cost_packing_balances_a_surface_that_round_robin_left_lopsided` pins the
-ratio against those measurements, and fails on the old assignment.
-
-`mvm-hostd` is cut eight ways on top of that. Six cost-aware shards still
-put `audit_file.rs` after 183 minutes of earlier work; the 2026-10-07 lane
-reached only 101 of that file's mutants before its 315-minute deadline.
-Eight-way packing isolates that file, preserving time for outcome accounting
-inside the job budget.
-
-These are **accepted rather than scoped out** on purpose. Scoping would
-stop the lane measuring those files at all; accepting keeps the ratchet
-live, so a *new* hole in any of them still fails the nightly. Scoping is
-reserved for the case where the non-claim noise would drown the ledger —
-164 and 78 entries would, 40 and 14 do not. The residual coverage debt is
-tracked in #2033.
-
-**Four of eight packages could not be measured at all.** The lane runs
-`cargo mutants -p <package> --file <path>` in a fresh copy of the tree, so
-a package whose own suite does not pass *on its own* never reaches a
-mutant. Three packages were in that state, each green under `--workspace`
-and red alone:
-
-| Package | Why the package-scoped suite failed | Surface files |
-| --- | --- | --- |
-| `mvm-sdk` | uses `mvm-core`'s `TestEnv` without enabling `test-support`; the feature arrived only through workspace-wide feature unification, so the crate's tests did not compile | 1 |
-| `mvm-cli` | 42 tests drive the `mvmctl` binary, which belongs to the root package — `CARGO_BIN_EXE_mvmctl` is only set for tests in the package declaring the bin | 4 |
-| `mvm-runtime` | a test spawned the real `mvm-substitution-endpoint`, an `mvm-hostd` binary; it passed only when another package's build had populated the shared `target/` | 3 |
-
-Eight of the twenty-six surface files — claims 1, 3, 10, 11, 14 and 15 —
-were therefore unmeasured while the lane reported no new misses.
-
-**And two of them read as clean.** A file whose baseline never runs
-reports `total_mutants: 0, missed: 0, caught: 0`, which is what a
-fully-covered file reports. `ensure_mutants_actually_ran` was written for
-exactly this, but it enumerated the one baseline verdict it had seen —
-`Failure` — and `crates/mvm-build/src/app_deps_gate.rs` came back
-`Timeout`. cargo-mutants found 33 mutants there and tested none of them.
-
-The check now requires the baseline verdict to *be* `Success` rather than
-to not be one of a known list, and requires `total_mutants` to be nonzero.
-A verdict this code has never seen is not evidence that anything ran.
-
-| Guard | Planted defect | Reported |
-| --- | --- | --- |
-| `ensure_mutants_actually_ran` | `outcomes.json` with a `Baseline`/`Timeout` verdict and zero counts (verbatim from the observed run) | yes |
-| `ensure_mutants_actually_ran` | a baseline verdict string the code has never seen | yes |
-| `ensure_mutants_actually_ran` | a passing baseline with `total_mutants: 0` | yes |
-
-**A witness can also resolve to a file that is not its subject.** The
-surface maps each `fn:` witness to its declaring file, assuming the file
-is the enforcement code the witness guards. That holds for a cohesive
-module and fails for a large multi-purpose binary.
-`crates/mvm-build/src/bin/mvm-host-vm-init.rs` is 4476 lines and sits on
-claim 2's surface only because the witness test
-`virtiofs_mount_flags_keep_workspace_read_only` is declared in it. That
-witness guards one function, which is fully caught; the file's other 164
-surviving mutants are vsock framing, nix-store seeding and ext4 probing,
-none of which claim 2 asserts.
-
-Narrowing a claim's surface is a weakening move that reads as routine in
-a diff, so `SurfaceScope` makes it expensive rather than convenient: a
-scope cannot be produced by resolution, only added by hand to the
-committed baseline; `why` and `excluded_tracked_by` are both mandatory
-and enforced exactly as an accepted miss's reason is; and a re-pin carries
-scopes forward so maintenance cannot silently widen one back out. The 164
-excluded mutants are filed as #2006 with the measurement attached.
-
-**Most surviving mutants were real holes.** Each of the tests below was
-verified by planting its mutant by hand and confirming the new test fails,
-then reverting. Two categories of genuine non-hole turned up, both
-recorded as accepted misses naming their mechanism rather than asserted to
-be equivalent: a read-buffer size (`64 * 1024` versus `64 + 1024`, same
-digest either way) and the feature-gated mutants above.
-
-| Claim | File | Survivors | Sharpest one |
-| --- | --- | --- | --- |
-| 10 | `policy/network_policy.rs` | 4 | `is_banned_ssh_port` pinned to `false` — the crate asserted only the negative direction, so disarming the SSH ban failed nothing |
-| 12 | `protocol/broker.rs` | 4 | `Display` blanked and `as_str` pinned to a constant on identifiers that are rendered into audit entries |
-| 13 | `protocol/vm_backend.rs` | 6 | `LayerCoverage::is_microvm` with `&&` weakened to `||` — fail-open, since it gates the Tier 3 shared-kernel banner |
-| 9 | `plan/bundle.rs` | 5 | four `e.kind() == NotFound` guards pinned to `true`, merging "absent" with "unreadable" in resolve, remove and list |
-| 12 | `broker/registry.rs` | 1 | `Registry::is_empty` pinned to `true`, read by the broker's startup readiness gate |
-
-The four `network_policy` entries had been sitting in `accepted_misses`
-recorded as untriaged. They were holes, so they are closed rather than
-explained.
-
-**A mutant in code the run does not compile cannot be killed by
-anything.** cargo-mutants generates mutants by parsing source, and `syn`
-does not evaluate `cfg`. A function behind a feature the mutation build
-does not enable is therefore mutated, never compiled, and reported as a
-survivor — indistinguishable from a real hole, and unkillable by any test.
-
-Measured on `overlay_mode_of`, which copies a staged file's permission
-bits into the runtime overlay and lives behind the non-default
-`pure-mkfs`:
-
-| Build | `& 0o7777` → `| 0o7777` |
-| --- | --- |
-| default features — what the lane runs | survives, against 720 passing tests |
-| `--features pure-mkfs` | caught |
-
-The mutant is not cosmetic: it makes every file in the overlay
-world-writable and setuid. The test that catches it exists and passes;
-the lane simply does not build the code. Until the run compiles the
-features its surface needs, these are recorded as accepted misses naming
-that mechanism, which is falsifiable — enable the feature and they become
-catchable.
-
-**One measurement was of the wrong thing.** `mvm-build`'s baseline timed
-out because `runtime_overlay_build.rs` shells out to a real `nix build`.
-The lane does not install `nix`, so those tests skip there — the timeout
-was an artifact of the host used to produce the baseline. The baseline is
-therefore produced with `nix` off `PATH`, matching the lane. The
-consequence is recorded rather than hidden: on the lane, no nix-gated
-integration test participates, so a mutant only those tests would catch
-survives.
+Mutation testing of the claim witnesses was removed from CI: the nightly lane
+cost hours per shard and its `mvm-cli` and `mvm-hostd` shards timed out. A claim
+witness is therefore checked for existence (`check-claim-catalog`), not for
+whether it detects its property breaking.
 
 ### Does device-mapper layout drift fail open?
 

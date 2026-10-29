@@ -38,7 +38,7 @@ disagree. The rest of the Decision is kept as written.
   (`mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime`,
   `mvm_build::sdk_sidecar::build_sdk_sidecar_from_guest_runtime`), with or
   without a selected `mvm-images` checkout, and so do the explicit
-  `mvmctl build runtime-overlay build` and `mvmctl build sdk-sidecar build`.
+  `mvmctl dev runtime-overlay build` and `mvmctl dev sdk-sidecar build`.
 - **The two glibc CI gates do not exist.** No workflow in this repository
   defines either check named in the size paragraph. The only build-backed
   glibc check here is `guest-rootfs-no-glibc` in the `nix-flake-check` CI

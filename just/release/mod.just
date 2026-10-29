@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list release
+
 # ── Release ──────────────────────────────────────────────────────────────
 # `main` is protected (enforce_admins + merge queue), so the version bump lands
 # through a PR — a direct `git push` to main is rejected. After the PR merges,
@@ -102,7 +107,7 @@ tag VERSION:
 
 # Cross-compile release binary for a target
 build-target TARGET:
-    cargo build --release --target {{ TARGET }} --features host,user,template-registry-s3,release-artifact-bootstrap,embed-host-bins
+    cargo build --release --target {{ TARGET }} --features host,user,release-artifact-bootstrap,embed-host-bins
 
 # Dry-run crates.io publish (the public crates only)
 publish-dry-run:

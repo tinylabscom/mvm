@@ -8,27 +8,97 @@ Working with an AI coding agent on this repo? Read the
 it covers claiming issues, the mandatory worktree flow, the Graft/Serena tooling
 split, the fast feedback ladder, and what CI does and does not gate.
 
+## macOS documented-surface evidence
+
+After the change under test has landed on `main`, an authorized maintainer can
+collect evidence without running the Release workflow:
+
+```bash
+gh workflow run e2e-docs-macos-evidence.yml --repo tinylabscom/mvm --ref main
+gh run list --repo tinylabscom/mvm --workflow e2e-docs-macos-evidence.yml --limit 5
+```
+
+The dispatch admits only this repository's `main`, has `contents: read` only,
+inherits no secrets, and neither publishes nor deploys. The run's `headSha`
+(`gh run view --repo tinylabscom/mvm --json headSha,url`) identifies the tested
+commit: the local reusable workflow and default checkout both use that event
+SHA, not a later moving `main`. There is no arbitrary ref or command input.
+
+This runs the complete existing macOS HVF suite on the self-hosted Apple Silicon
+runner, including both `0/2` and `1/2` shards, live and snapshot coverage, and
+strict skip accounting. No runtime candidate is supplied; only scenarios tagged
+`@runtime_candidate` may additionally report `needs-runtime-candidate`.
+Release defaults still require both operating systems and a signed candidate.
+
+Download both `e2e-docs-macos-logs-RUN_ID-RUN_ATTEMPT-JOB_INDEX` artifacts from
+the run page within 14 days. Read each `e2e-docs.log` summary and its “did NOT
+run” tally, not just the job status. For issue #4096, the scenario
+`recorded prompts replay onto a fork of the session's base` in
+`features/suites/s32_documented_surface/agent_prompt.feature` must actually pass:
+turns one and two, replay onto a fork, turn three, replay the fork's session,
+and turn four, with no step-checkpoint failure. It is not runtime-candidate
+tagged and must not be accepted as skipped. Retain the run URL, tested SHA,
+both shard summaries and witness output with the issue evidence.
+
+A queued/offline runner, failed preflight, recorded-local-evidence fallback,
+missing summary, skipped prompt scenario or failed shard is not a new live HVF
+prompt/replay witness. This wiring alone does not complete #4096.
+
+## Linux documented-surface evidence
+
+After review and landing on `main`, an authorized maintainer can collect the
+Linux Firecracker evidence for #4764 without Release or draft assets:
+
+```bash
+gh workflow run e2e-docs-linux-evidence.yml --repo tinylabscom/mvm --ref main
+gh run list --repo tinylabscom/mvm --workflow e2e-docs-linux-evidence.yml --limit 5
+```
+
+Like the macOS entrypoint, this admits only this repository's `main`, has only
+`contents: read`, inherits no secrets, accepts no ref or command inputs, and
+does not publish or deploy. The local reusable workflow and checkout use the
+event SHA; record it with `gh run view RUN_ID --repo tinylabscom/mvm --json headSha,url`.
+It runs the full existing Linux suite, both `0/2` and `1/2` shards, with live,
+directory-share and strict-skip flags unchanged. Only `@runtime_candidate`
+scenarios may additionally report `needs-runtime-candidate`; Release defaults
+still require both operating systems and a signed candidate.
+
+Save both Linux shard job logs from the run page; this lane does not upload
+log artifacts. Retain the run URL, tested SHA, both scenario summaries and their
+“did NOT run” tallies, and the witness output. The scenario
+`restarting refreshes a registered host directory snapshot` in
+`features/suites/s26_volumes/volume_lifecycle.feature` must actually pass,
+including the initial marker and the refreshed marker after stop/start. It is
+not runtime-candidate tagged and must not be accepted as skipped. A failed
+shard, missing summary or skipped witness is not Linux live evidence for the
+socket-custody fix in #4808. This entrypoint alone does not complete #4764.
+
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
-- **macOS 26+ Apple Silicon or Linux** — macOS development uses native HVF; Linux uses native `/dev/kvm`. Intel Macs and older macOS releases are not supported local microVM hosts.
+- **macOS 26+ Apple Silicon or Linux** — standard source-checkout development
+  uses native HVF on macOS and native `/dev/kvm` on Linux. Downloaded releases
+  also carry an explicitly selected libkrun preview for macOS 13–25 Apple
+  Silicon; contributors rebuilding that tier need its integration toolchain.
 - **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just payload::toolchain` installs the pinned versions. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
 ### Do I need to install libkrun?
 
-No. Standard source builds, release artifacts, builder selection, and workload
-selection do not install, link, or auto-select libkrun:
+Downloaded releases need no separate libkrun installation. The Apple Silicon
+archive includes the signed compatibility tier for macOS 13–25, while standard
+source builds do not install, link, or auto-select it:
 
 | Host | libkrun (`slp/krun/*`) needed? |
 |---|---|
 | macOS 26+ Apple Silicon | **No** — auto-detect picks the native **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). |
-| macOS 13–25 Apple Silicon | Unsupported by the standard local runtime; update macOS or use a Linux KVM host. |
+| macOS 13–25 Apple Silicon | **No for a downloaded release** — its signed archive includes the preview tier; select it explicitly with `--hypervisor libkrun`. Source-checkout integration work still needs the development prerequisites below. |
 | Linux + `/dev/kvm` | **No** — auto-detect picks the **Firecracker** builder, so libkrun is not part of the default builder path on native Linux hosts. |
 
-The libkrun Cargo features remain only for explicit integration development and
-CI coverage. `mvmctl doctor` reports the resolved standard backend on the
-`builder backend` line (`<backend> — <source> — <availability>`).
+The libkrun Cargo features remain for explicit source-checkout integration
+development and CI coverage; end users do not compile them. `mvmctl doctor`
+reports the resolved standard backend on the `builder backend` line
+(`<backend> — <source> — <availability>`).
 
 The contributor-only `--source compile` kernel path still uses the explicit
 libkrun integration for its Stage 0 build. That path is not used by ordinary
@@ -57,7 +127,7 @@ image and payload preparation excluded:
 
 "Before" fetched Zig 0.13 and 0.15, cargo-zigbuild and libclang on entry.
 `scripts/check-devshell-tiers.sh` keeps them out of the default shell and in
-`.#full`; the merge queue runs it in the Nix flake check lane.
+`.#full`; it runs in the Nix flake check lane after the merge, on every push to main.
 
 A full clone downloads about 215 MiB, roughly 150 MiB of which is a build
 directory committed by mistake in August 2026 and deleted in September. History
@@ -145,11 +215,56 @@ just check::run -- machine run --image alpine -- uname -a
 just release-build
 ```
 
-CI publishes signed host-helper bundles for each `main` commit. A clean checkout
-of one of those commits downloads the exact bundle during bootstrap. Dirty
+CI publishes signed host-helper bundles for each `main` commit in the prerelease
+`source-builds-` followed by its full 40-character commit SHA. A clean checkout
+downloads that exact bundle during bootstrap. Only an archive HTTP 404 triggers
+a lookup in the preserved legacy `source-builds` release; signature, authorization
+and network failures never trigger fallback. Both locations require the same
+source-workflow signature and matching `SOURCE_COMMIT` before installation. Dirty
 checkouts and commits not yet published from `main` have no remote artifact by
 construction; explicitly opt into local compilation with
 `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`.
+
+Already-built binaries that still use the legacy URL do not discover the new
+tags automatically. If matching signed artifacts actually exist in a per-commit
+release, select that exact base explicitly:
+
+```bash
+commit=$(git rev-parse HEAD)
+MVM_SOURCE_HELPER_BASE_URL="https://github.com/tinylabscom/mvm/releases/download/source-builds-${commit}" mvmctl bootstrap
+```
+
+The binary must have been built cleanly from that same commit, and the base must
+contain both its platform archive and matching `.bundle`. This override does not
+bypass verification and makes no implicit probes of other locations. It cannot
+recover an unpublished commit: for example, commit
+`8be5cece93ccc01d0cfc4a8759d9dc2df146db91` had no published helpers when the
+legacy release filled. Use the explicit local build mode above, or request a
+separately authorized historical backfill. Rerunning that commit's frozen old
+workflow still targets the full legacy release and is not a migration.
+
+For an operator-approved backfill, dispatch **Source host helpers** on `main`
+with `source_sha` set to the full lowercase source commit. The workflow rejects
+non-`main` refs and sources that are not ancestors of its own immutable workflow
+commit. An empty input retains the normal current-commit build.
+
+Build tooling, signing and publication use the workflow revision, while a
+separate checkout supplies the exact historical helper source. Archive names,
+`SOURCE_COMMIT` and the destination `source-builds-<commit>` tag all use the
+validated source SHA. Build jobs have read-only repository permissions and no
+signing token. The publisher preserves existing complete archive/signature
+pairs and refuses partial pairs; never delete assets or rerun with clobbering
+to repair a partial release.
+
+Before dispatch, obtain approval for the source SHA, exact workflow revision,
+destination tag, three platform archives and their three `.bundle` signatures,
+and the verification procedure. Afterwards, check that the tag resolves to the
+source commit, the release is a non-latest prerelease, all six assets exist,
+and each archive verifies against the source-workflow identity on `main` with
+the matching `SOURCE_COMMIT`. Then test the explicit-base recovery command
+above with a clean binary built from that historical commit in isolated state.
+Neither a successful workflow run nor manual archive extraction proves that
+bootstrap installation and repeat bootstrap work.
 
 Source guest-runtime caches are keyed by the source fingerprint, version and
 guest architecture. On a miss in an isolated `MVM_HOME`, the resolver can copy
@@ -176,17 +291,17 @@ fresh machine compiles the kernel from source. It can take several minutes
 depending on the host and is memory-heavy; later builds reuse the persistent
 Nix store.
 
-`mvmctl build kernel build` makes that compile explicit and one-time. Image
+`mvmctl dev kernel build` makes that compile explicit and one-time. Image
 backed runs from a source checkout also bootstrap this kernel automatically;
 prebuilding it is useful when you want the first interactive run to be warm:
 
 ```bash
 # Compile the builder kernel once into the cache + persistent nix store.
 # The next build reuses it (substituted, not rebuilt).
-just check::run -- build kernel build --which builder
+just check::run -- dev kernel build --which builder
 
 # Or both kernels:
-just check::run -- build kernel build --all
+just check::run -- dev kernel build --all
 
 # The same policy applies to the direct kernel recipe:
 MVM_KERNEL_SOURCE=download just kernel::workload
@@ -219,7 +334,7 @@ effect? The loop is build → boot-smoke → measure:
 
 ```bash
 # 1. Build the variant you touched (compiles your edited config in Stage 0).
-just check::run -- build kernel build --which workload
+just check::run -- dev kernel build --which workload
 
 # 2. Boot-smoke it — a kernel that builds isn't proof it boots. Boot a
 #    throwaway VM and confirm the in-guest agent answers over vsock.
@@ -307,6 +422,23 @@ and removes its isolated home, state and temporary directories;
 `tests/github_actions_self_hosted_runner.rs` fails the build if a job lacks
 it. An hourly sweep on the box removes stale temporary directories that both
 miss. `nix/ops/hetzner/README.md` has the details and the install steps.
+
+## Targeted test feedback
+
+Source `scripts/dev-env.sh` once in each worktree shell, then select the target
+that owns the failure. Filtering test names alone still compiles the crate's
+other integration targets; `--lib` and `--test` avoid that work:
+
+```bash
+source scripts/dev-env.sh
+just tests::scoped mvm-cli roundtrip --lib
+just tests::scoped mvmctl "" --test workspace_shard_isolation
+```
+
+Omitting the target flags preserves the existing whole-crate selection. The
+command propagates nextest failures and keeps the pinned fast toolchain and
+worktree-isolated target directory. This is the edit/test loop, not a replacement
+for the final workspace tests, clippy and applicable Linux/BDD checks.
 
 ## Profiling
 
@@ -406,6 +538,16 @@ chain-signed audit log remains the record of what ran.
 Only the host-side `mvmctl` process exports. Nothing is exported from inside a
 microVM, and the per-VM supervisors and host daemons do not export yet. A trace
 is an analysis aid; the chain-signed audit log remains the record of what ran.
+
+## Discovering development commands
+
+Run `just` to list the top-level recipes and command modules. Invoking a
+module without a subcommand lists its available recipes and descriptions;
+it does not build, install, test, or publish anything.
+
+`just docs` lists the documentation site's subcommands. Choose
+`just site::dev` to start the preview server or `just site::build` to build
+the site. Use the same explicit `module::recipe` form for other modules.
 
 ## Linting and Formatting
 
@@ -515,10 +657,51 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| `ci.yml` | Push to main/feat/*, PRs | check, fmt, clippy, test (macOS + Linux), audit |
+| `ci.yml` | PRs, push to main, manual dispatch | Scoped fast gate: formatting, clippy, policy checks, workspace test compilation and sharded tests, Windows portability checks, and static documentation checks; required verdict is `Test` |
+| `ci.yml` (merge queue) | Merge group | `Lint core` and `Build workspace tests` for code changes (formatting, clippy and a compile of every test target against latest main), plus `Docs static` for documentation changes; other validation lanes passed on the PR head and run again on push to main |
+| `ci-main.yml` | Push to main, manual dispatch | The slow lanes (feature suites, BDD, aarch64, release-profile and musl witnesses, eBPF, Linux coverage, Nix evaluation, boot ceiling), gated by `Test (main)`; a pull request and the merge queue never list them |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
 | `publish-crates.yml` | Dispatched by `release.yml` on a tag | Publishes the public crates (`mvm-contract`) to crates.io; every other crate is `publish = false` |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
+
+The SDK publishing workflows retain the raw `npm-dist` tarballs and
+`pypi-dist-*` wheels for 30 days, including dry runs. Download them from the
+same workflow run when reviewing package contents, license notices, and native
+library provenance; smoke reports alone are not package-content evidence.
+Missing distribution files fail the artifact upload. This retention window
+does not replace published release assets or a permanent evidence archive.
+
+### Static documentation gate
+
+`Docs static` runs on pull requests and merge groups touching `README.md`,
+`AGENTS.md`, `public/src/content/docs/`, `crates/mvm-sdk/sdks/`, or `examples/`.
+It also runs on pushes to main and manual dispatches. A failed or cancelled
+lane fails the required `Test` aggregate. The docs scope does not enable the
+compiler/test matrix; the existing code scope applies independently, including
+to root README/instruction files, SDK sources, examples, and selected pages
+read by Rust tests.
+
+The lane runs three existing source-only checks:
+
+```bash
+cargo run -p xtask -- check-cli-help-matches-docs
+cargo run -p xtask -- check-doc-links
+cargo run -p xtask -- check-doc-claims
+```
+
+This is a static smoke gate, not execution of the documentation corpus.
+The CLI check compares top-level command declarations with the CLI reference,
+not every flag or example. The link check resolves repository and internal-site
+links in the published docs, not external URLs. The claims check scans the
+published docs and root README for its configured overclaim phrases. Selecting
+the full corpus as a trigger does not extend those checks to every file in it.
+The lane builds xtask, not the CLI or language SDKs, and does not parse or run
+every documented configuration or command.
+
+Authoritative executable documented-example coverage remains the
+`bdd-conformance` lane in `ci-main.yml`, unscoped on every push to main and
+manual dispatch. BDD stays postmerge: failures there require a fix-forward;
+passing `Docs static` does not prove the examples execute successfully.
 
 ### Website deployment
 

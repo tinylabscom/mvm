@@ -1,66 +1,34 @@
-//! macOS codesigning of mvm's VMM binaries with their required entitlements.
+//! In-process preparation and native validation of macOS VM executables.
 //!
-//! Apple requires the binary that launches a Virtualization.framework VM to
-//! carry `com.apple.security.virtualization` and the binary that enters
-//! Hypervisor.framework to carry `com.apple.security.hypervisor`. The CLI
-//! and per-VM supervisors are signed separately because they have different
-//! roles. Everything here is a no-op off macOS.
-//!
-//! It lives beside the helper resolver rather than in the runtime so that
-//! [`crate::host::aux_bin`] can sign a supervisor it has just built: a helper
-//! compiled on demand is ready to launch without a separate signing step.
+//! Prepare executables before launch with [`sign_targets`]. Signing an on-disk
+//! replacement cannot grant entitlements to an already running process.
 
 use std::path::{Path, PathBuf};
 
-/// The macOS entitlement required by a signed mvm executable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequiredEntitlement {
-    /// Required by the CLI's Virtualization.framework path.
-    Virtualization,
-    /// Required by the per-VM Hypervisor.framework supervisor.
-    Hypervisor,
-    /// The combined profile retained for callers of the legacy bulk API.
-    VirtualizationAndHypervisor,
-}
+pub use mvm_core::native_signature::RequiredEntitlement;
 
-#[cfg(target_os = "macos")]
-impl RequiredEntitlement {
-    fn keys(self) -> &'static [&'static str] {
-        match self {
-            Self::Virtualization => &["com.apple.security.virtualization"],
-            Self::Hypervisor => &["com.apple.security.hypervisor"],
-            Self::VirtualizationAndHypervisor => &[
-                "com.apple.security.virtualization",
-                "com.apple.security.hypervisor",
-            ],
-        }
-    }
-}
-
-/// An executable and the entitlement required by its runtime role.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignTarget {
-    /// Path to the executable to inspect or sign.
     pub path: PathBuf,
-    /// Entitlement the executable must carry.
     pub required: RequiredEntitlement,
 }
 
-/// Outcome of attempting to sign one binary.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SignReport {
     pub path: PathBuf,
-    /// Whether codesign was (re)applied during this call.
+    /// True only after a validated staged signature has been installed.
     pub applied: bool,
-    /// Whether the target's required entitlement is present after signing.
     pub entitlements_present: bool,
+    /// Preparation failures are never represented as successful application.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-/// Check whether an executable carries a specific required entitlement.
+/// Validate the native signature and typed entitlements in every Mach-O slice.
 pub fn entitlement_present(path: &Path, required: RequiredEntitlement) -> Option<bool> {
     #[cfg(target_os = "macos")]
     {
-        Some(macos::entitlement_present(path, required))
+        Some(macos::verify(path, required).is_ok())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -69,32 +37,24 @@ pub fn entitlement_present(path: &Path, required: RequiredEntitlement) -> Option
     }
 }
 
-/// Check whether an executable carries both historical VM entitlements.
-///
-/// New callers should use [`entitlement_present`] with the target's specific
-/// runtime role. This compatibility wrapper remains for existing consumers of
-/// the original bulk signing API.
 pub fn entitlements_present(path: &Path) -> Option<bool> {
     entitlement_present(path, RequiredEntitlement::VirtualizationAndHypervisor)
 }
 
-/// Ad-hoc re-sign a list of executables with the historical combined profile.
-///
-/// New callers should use [`sign_targets`] so each executable receives only
-/// the entitlement required by its runtime role.
 pub fn sign_binaries(targets: &[PathBuf]) -> Vec<SignReport> {
-    let targets: Vec<SignTarget> = targets
-        .iter()
-        .cloned()
-        .map(|path| SignTarget {
-            path,
-            required: RequiredEntitlement::VirtualizationAndHypervisor,
-        })
-        .collect();
-    sign_targets(&targets)
+    sign_targets(
+        &targets
+            .iter()
+            .cloned()
+            .map(|path| SignTarget {
+                path,
+                required: RequiredEntitlement::VirtualizationAndHypervisor,
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
-/// Ad-hoc re-sign each role-specific target and report the post-sign state.
+/// Prepare role-specific executables before launch, without subprocesses.
 /// No-op (empty) off macOS.
 pub fn sign_targets(targets: &[SignTarget]) -> Vec<SignReport> {
     #[cfg(target_os = "macos")]
@@ -108,150 +68,31 @@ pub fn sign_targets(targets: &[SignTarget]) -> Vec<SignReport> {
     }
 }
 
-/// Auto-sign the running supervisor on first launch if it lacks the
-/// Hypervisor.framework entitlement, then re-exec the signed binary
-/// (`MVM_SIGNED=1` guards against a recursion loop). No-op off macOS / when
-/// already signed.
-pub fn ensure_signed() {
+/// Fallibly check the loaded supervisor identity, not just its current on-disk path.
+///
+/// The installer/preparer must sign before launch; this never mutates or
+/// re-executes the running helper. No-op off macOS.
+pub fn try_ensure_signed() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        macos::ensure_signed();
+        macos::ensure_signed()
     }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
+/// Preserve the historical non-fallible entry point.
+///
+/// Startup paths that must reject an unready supervisor use
+/// [`try_ensure_signed`] and propagate its error.
+pub fn ensure_signed() {
+    let _ = try_ensure_signed();
 }
 
 #[cfg(target_os = "macos")]
-mod macos {
-    use super::{RequiredEntitlement, SignReport, SignTarget};
-    use std::path::Path;
-
-    const VIRTUALIZATION_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-        <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-        \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-        <plist version=\"1.0\"><dict>\n\
-        <key>com.apple.security.virtualization</key><true/>\n\
-        </dict></plist>";
-
-    const HYPERVISOR_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-        <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-        \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-        <plist version=\"1.0\"><dict>\n\
-        <key>com.apple.security.hypervisor</key><true/>\n\
-        </dict></plist>";
-
-    const COMBINED_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-        <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-        \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-        <plist version=\"1.0\"><dict>\n\
-        <key>com.apple.security.virtualization</key><true/>\n\
-        <key>com.apple.security.hypervisor</key><true/>\n\
-        </dict></plist>";
-
-    pub(super) fn sign_path(target: &SignTarget) -> SignReport {
-        let already = entitlement_present(&target.path, target.required);
-        let preserve = developer_id_signature(&target.path);
-        if !already && !preserve {
-            sign_binary(&target.path.to_string_lossy(), target.required);
-        }
-        SignReport {
-            path: target.path.clone(),
-            applied: !already && !preserve,
-            entitlements_present: entitlement_present(&target.path, target.required),
-        }
-    }
-
-    /// Never replace a valid distribution signature with an ad-hoc one, even
-    /// when a release is missing an entitlement. Report the missing entitlement
-    /// instead: repairing that release requires a newly notarized binary.
-    fn developer_id_signature(path: &Path) -> bool {
-        mvm_core::env_hygiene::helper_command("codesign")
-            .args([
-                "--verify",
-                "--strict",
-                "-R",
-                "=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists",
-            ])
-            .arg(path)
-            .output()
-            .is_ok_and(|output| output.status.success())
-    }
-
-    /// Sign the binary ad-hoc with the entitlement required by its role.
-    fn sign_binary(exe_str: &str, required: RequiredEntitlement) {
-        // Per-process: two processes signing at once with different roles
-        // must not read each other's entitlement file.
-        let ent_path =
-            std::env::temp_dir().join(format!("mvm-entitlements-{}.plist", std::process::id()));
-        let entitlements = match required {
-            RequiredEntitlement::Virtualization => VIRTUALIZATION_ENTITLEMENTS_PLIST,
-            RequiredEntitlement::Hypervisor => HYPERVISOR_ENTITLEMENTS_PLIST,
-            RequiredEntitlement::VirtualizationAndHypervisor => COMBINED_ENTITLEMENTS_PLIST,
-        };
-        if std::fs::write(&ent_path, entitlements).is_err() {
-            return;
-        }
-        let _ = mvm_core::env_hygiene::helper_command("codesign")
-            .args(["--sign", "-", "--force", "--entitlements"])
-            .arg(&ent_path)
-            .arg(exe_str)
-            .output();
-        let _ = std::fs::remove_file(&ent_path);
-    }
-
-    /// Read the binary's entitlements XML via codesign.
-    fn read_entitlements_xml(path: &Path) -> Option<String> {
-        let out = mvm_core::env_hygiene::helper_command("codesign")
-            .args(["-d", "--entitlements", "-", "--xml"])
-            .arg(path)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        Some(String::from_utf8_lossy(&out.stdout).into_owned())
-    }
-
-    /// True when the executable carries the entitlement required by its role.
-    pub(super) fn entitlement_present(path: &Path, required: RequiredEntitlement) -> bool {
-        match read_entitlements_xml(path) {
-            Some(xml) => required.keys().iter().all(|key| xml.contains(key)),
-            None => false,
-        }
-    }
-
-    pub(super) fn ensure_signed() {
-        // Already re-exec'd or launched by launchd with a signed binary.
-        if std::env::var("MVM_SIGNED").as_deref() == Ok("1") {
-            return;
-        }
-        let exe = match std::env::current_exe() {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-
-        // Binaries signed before the hypervisor entitlement was added have
-        // only `virtualization`; the missing `hypervisor` key forces a
-        // one-time re-sign on first run after upgrade.
-        if entitlement_present(&exe, RequiredEntitlement::Hypervisor) {
-            return;
-        }
-        if developer_id_signature(&exe) {
-            tracing::error!(
-                "Developer ID signed binary lacks the hypervisor entitlement; refusing ad-hoc repair"
-            );
-            std::process::exit(1);
-        }
-        tracing::info!("Signing binary with the Hypervisor.framework entitlement...");
-        sign_binary(&exe.to_string_lossy(), RequiredEntitlement::Hypervisor);
-
-        use std::os::unix::process::CommandExt;
-        let err = mvm_core::env_hygiene::helper_command(&exe)
-            .args(std::env::args_os().skip(1))
-            .env("MVM_SIGNED", "1")
-            .exec();
-        tracing::error!("Re-exec after signing failed: {err}");
-        std::process::exit(1);
-    }
-}
+mod macos;
 
 #[cfg(test)]
 mod tests {
@@ -260,80 +101,37 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_distribution_signature_is_never_replaced_to_repair_an_entitlement() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let directory = tempfile::tempdir().unwrap();
-        let codesign = directory.path().join("codesign");
-        env.set("PATH", directory.path());
-        for (verify_status, should_sign) in [(0, false), (1, true)] {
-            std::fs::write(
-                &codesign,
-                format!(
-                    "#!/bin/sh\n\
-                     case \"$1\" in\n\
-                     --verify)\n\
-                       case \"$4\" in '=anchor apple generic and '*) exit {verify_status} ;; *) exit 2 ;; esac ;;\n\
-                     --sign) printf 'signed' > \"$0.applied\" ;;\n\
-                     -d) printf '<plist><dict/></plist>' ;;\n\
-                     *) exit 2 ;;\n\
-                     esac\n"
-                ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&codesign, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let report = sign_targets(&[SignTarget {
-                path: directory.path().join("mvm-hvf-supervisor"),
-                required: RequiredEntitlement::Hypervisor,
-            }]);
-            assert_eq!(report.len(), 1);
-            assert_eq!(report[0].applied, should_sign);
-            assert!(!report[0].entitlements_present);
-            assert_eq!(
-                directory.path().join("codesign.applied").exists(),
-                should_sign,
-                "a valid Developer ID signature must survive a missing entitlement"
-            );
-        }
+        let error = macos::require_repair_allowed(true).unwrap_err();
+        assert!(error.contains("valid Developer ID signature"), "{error}");
+        assert!(error.contains("reinstall"), "{error}");
+        macos::require_repair_allowed(false).unwrap();
     }
 
     #[test]
     fn sign_report_is_serializable() {
-        let r = SignReport {
-            path: std::path::PathBuf::from("/tmp/mvmctl"),
-            applied: true,
-            entitlements_present: true,
+        let report = SignReport {
+            path: PathBuf::from("/tmp/mvmctl"),
+            applied: false,
+            entitlements_present: false,
+            error: Some("invalid Mach-O".into()),
         };
-        let json = serde_json::to_string(&r).unwrap();
-        assert!(json.contains("\"applied\":true"));
-        assert!(json.contains("\"entitlements_present\":true"));
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"applied\":false"));
+        assert!(json.contains("invalid Mach-O"));
+    }
+
+    #[test]
+    fn signer_entrypoints_keep_compatibility_and_fallibility_distinct() {
+        let _: fn() = ensure_signed;
+        let _: fn() -> std::result::Result<(), String> = try_ensure_signed;
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn entitlements_present_is_none_off_macos() {
-        assert!(
-            entitlement_present(
-                std::path::Path::new("/bin/sh"),
-                RequiredEntitlement::Virtualization
-            )
-            .is_none()
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn sign_targets_is_noop_off_macos() {
-        let target = SignTarget {
-            path: std::path::PathBuf::from("/bin/sh"),
-            required: RequiredEntitlement::Virtualization,
-        };
-        assert!(sign_targets(&[target]).is_empty());
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn legacy_sign_binaries_is_noop_off_macos() {
-        assert!(sign_binaries(&[std::path::PathBuf::from("/bin/sh")]).is_empty());
+    fn signing_is_noop_off_macos() {
+        let path = PathBuf::from("/not/an/executable");
+        assert_eq!(entitlements_present(&path), None);
+        assert!(sign_binaries(&[path]).is_empty());
+        assert!(try_ensure_signed().is_ok());
     }
 }

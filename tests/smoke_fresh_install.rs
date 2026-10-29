@@ -251,6 +251,16 @@ fn a_first_command_that_prints_the_token_passes() {
             && transcript.contains("a boot allowed example.com fetched it in"),
         "{transcript}"
     );
+    assert_eq!(
+        std::fs::read_to_string(smoke.out().join("boot-results.jsonl")).unwrap(),
+        concat!(
+            "{\"name\":\"cold\",\"result\":\"success\"}\n",
+            "{\"name\":\"cache-reuse\",\"result\":\"success\"}\n",
+            "{\"name\":\"sdk-sidecar\",\"result\":\"success\"}\n",
+            "{\"name\":\"egress\",\"result\":\"success\"}\n"
+        ),
+        "each completed boot must emit exactly one structured success record"
+    );
 }
 
 /// A release whose network endpoint dies after the guest authenticates boots
@@ -281,6 +291,15 @@ fn an_egress_boot_that_fails_fails_the_smoke() {
     assert!(
         transcript.contains("waiting for the network endpoint's authenticated session"),
         "the transcript must carry the egress boot's stderr: {transcript}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(smoke.out().join("boot-results.jsonl")).unwrap(),
+        concat!(
+            "{\"name\":\"cold\",\"result\":\"success\"}\n",
+            "{\"name\":\"cache-reuse\",\"result\":\"success\"}\n",
+            "{\"name\":\"sdk-sidecar\",\"result\":\"success\"}\n"
+        ),
+        "a failed egress boot must never acquire a success record"
     );
 }
 
@@ -400,6 +419,73 @@ fn an_unpublished_guest_runtime_is_adopted_from_beside_mvmctl() {
         "release archive mvm-guest-bins-v1.2.3.tar.gz 0123456789ab",
     ] {
         assert!(transcript.contains(expected), "{expected}\n{transcript}");
+    }
+}
+
+/// A launch refuses a runtime with no release signature, which is all a dry run
+/// can stage. The smoke must not report that refusal as a failure of the
+/// archive, and must not claim a boot it never made.
+#[test]
+fn an_unsigned_guest_runtime_is_checked_but_not_booted() {
+    let smoke = Smoke::new();
+    let output = run_with_guest_runtime(&smoke, &runtime_adopting_mvmctl());
+
+    assert!(output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    assert!(transcript.contains("PASS (boots skipped)"), "{transcript}");
+    assert!(!transcript.contains("its first microVM"), "{transcript}");
+}
+
+/// The signed candidate a tag run stages is booted as before.
+#[test]
+fn a_signed_guest_runtime_is_booted() {
+    let smoke = Smoke::new();
+    let archive = release_archive(smoke.dir.path(), &[("mvmctl", &runtime_adopting_mvmctl())]);
+    let runtime = smoke.dir.path().join("mvm-guest-bins-v1.2.3.tar.gz");
+    for suffix in ["", ".sha256", ".bundle", ".sha256.bundle"] {
+        std::fs::write(format!("{}{suffix}", runtime.display()), b"x").unwrap();
+    }
+
+    let output = smoke.run_archive_with(
+        &archive,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", runtime.to_str().unwrap())],
+    );
+
+    assert!(output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    assert!(!transcript.contains("boots skipped"), "{transcript}");
+    assert!(transcript.contains("PASS: mvmctl 1.2.3"), "{transcript}");
+}
+
+/// A launch authenticates the runtime its pieces came from, so the checksum and
+/// both signature bundles must be staged with the archive; the bare archive is
+/// refused at the first boot.
+#[test]
+fn a_signed_guest_runtime_is_staged_with_its_checksum_and_bundles() {
+    let smoke = Smoke::new();
+    let lister = "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'mvmctl 1.2.3' ;;\n  \
+                  bootstrap) ls \"$(dirname \"$(readlink -f \"$0\")\")/guest-runtime\" >&2 ;;\nesac";
+    let archive = release_archive(smoke.dir.path(), &[("mvmctl", lister)]);
+    let runtime = smoke.dir.path().join("mvm-guest-bins-v1.2.3.tar.gz");
+    for suffix in ["", ".sha256", ".bundle", ".sha256.bundle"] {
+        std::fs::write(format!("{}{suffix}", runtime.display()), b"x").unwrap();
+    }
+
+    smoke.run_archive_with(
+        &archive,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", runtime.to_str().unwrap())],
+    );
+
+    let transcript = smoke.transcript();
+    for staged in [
+        "mvm-guest-bins-v1.2.3.tar.gz\n",
+        "mvm-guest-bins-v1.2.3.tar.gz.sha256\n",
+        "mvm-guest-bins-v1.2.3.tar.gz.bundle\n",
+        "mvm-guest-bins-v1.2.3.tar.gz.sha256.bundle\n",
+    ] {
+        assert!(transcript.contains(staged), "{staged}\n{transcript}");
     }
 }
 

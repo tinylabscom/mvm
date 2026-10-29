@@ -4,23 +4,20 @@ on:
   push:
     tags:
       - "v*"
-  # Manual dry-run: validate the release build + packaging (binaries, host-bin
-  # bundling, Linux cross-build) on the real CI runners WITHOUT publishing.
-  # `dry_run=true` (the default) runs only the `build` job and skips the
-  # publishing `release` job and `verify-release`. A real
-  # release still happens via a `v*` tag push; an explicit `dry_run=false`
-  # dispatch publishes too (escape hatch).
+  # Manual validation runs ordinary build/packaging/native coverage, but cannot
+  # mint a tag-bound candidate or satisfy the release-only producer gate.
+  # Release creation and promotion require a real push of a version-matched tag.
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Build + package only; do NOT publish (no GitHub release, no crates.io)"
+        description: "Legacy validation input; manual runs cannot create or publish a tag-bound release"
         type: boolean
         default: true
 
 permissions:
   contents: write
   id-token: write        # Required for cosign keyless signing via OIDC
-  actions: write         # Required to dispatch publish-crates workflow
+  actions: write         # Required for post-promotion workflow dispatch
   attestations: write    # Required to record build provenance for the release binaries
 
 env:
@@ -31,27 +28,35 @@ env:
   # default (a dev build does not need the payload and should not pay the
   # cross-compile), which means the *only* place it gets turned on for a shipped
   # artifact is here.
-  MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap,release-channel,embed-host-bins
+  # The S3 template registry is fleet-only and is enabled by those builds;
+  # general release artifacts do not carry its object-store dependency graph.
+  MVMCTL_RELEASE_FEATURES: host,user,release-artifact-bootstrap,release-channel,embed-host-bins
 
 jobs:
   bdd:
     uses: ./.github/workflows/bdd.yml
 
-  # Every documented example, booted on both backends, before anything is
-  # published. The hermetic `bdd` lane above drives `--help` and refusal paths
-  # and boots no guest, so on its own it cannot see a documented command that
-  # parses and then fails at runtime — which is exactly what `machine run -it`
-  # did, on every OCI image, while the README told readers to run it.
-  #
-  # This is a release blocker on purpose. It is the slowest thing here; a tag
-  # that cannot wait for it is a tag published without evidence that its own
-  # README works.
+  # Every documented example, booted on both backends. It runs beside the
+  # build, and both this live witness and BDD must pass before any release
+  # assets are published. Promotion retains its additional installed checks.
   e2e-docs:
+    needs: runtime-proof-candidate
+    if: ${{ !cancelled() && (needs.runtime-proof-candidate.result == 'success' || github.event_name == 'workflow_dispatch') }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: none
     uses: ./.github/workflows/e2e-docs.yml
     with:
-      # Stated rather than inherited. A tag must not be cut without live macOS
-      # evidence, so a macOS host that cannot boot a guest fails this workflow
-      # here even though Extended CI tolerates it nightly.
+      runtime_candidate_artifact_id: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_id }}
+      runtime_candidate_artifact_digest: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_digest }}
+      runtime_archive_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_sha256 }}
+      runtime_checksum_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_sha256 }}
+      runtime_archive_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_bundle_sha256 }}
+      runtime_checksum_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_bundle_sha256 }}
+      # Stated rather than inherited: a macOS host that cannot boot a guest
+      # fails this workflow, so promotion never goes ahead without live macOS
+      # evidence.
       macos_blocks_on_unusable_host: true
       # A release tests what its users get, and nothing is pair-built through
       # mvm-images: the Linux layer (kernels, base and dev root filesystems,
@@ -66,6 +71,126 @@ jobs:
   # downloaded mvmctl fetches the runtime of its own version and nothing else.
   guest-runtime:
     uses: ./.github/workflows/guest-bins.yml
+
+  # Run the same-source canonical reader without any signing permission.
+  # Clearing its environment is not a sandbox; the job boundary withholds OIDC.
+  runtime-proof-input-check:
+    needs: guest-runtime
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.guest-runtime.result == 'success' }}
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: none
+    outputs:
+      checked_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      checked_artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Fetch the exact producer attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.guest-runtime.outputs.unsigned_artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.guest-runtime.outputs.unsigned_artifact_digest }}
+        run: |
+          python3 scripts/runtime-proof-candidate.py fetch --kind unsigned \
+            --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" \
+            --out-dir "$RUNNER_TEMP/runtime-original"
+      - name: Validate original archive bytes and retain only the checked inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/runtime-proof-candidate.py prepare-checked \
+            --directory "$RUNNER_TEMP/runtime-original" \
+            --out-dir "$RUNNER_TEMP/runtime-checked"
+      - name: Upload the unchanged checked inputs
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: mvm-runtime-proof-input-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-checked/
+          if-no-files-found: error
+
+  runtime-proof-candidate:
+    needs: [guest-runtime, runtime-proof-input-check]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.guest-runtime.result == 'success' && needs.runtime-proof-input-check.result == 'success' }}
+    environment: release-signing
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    outputs:
+      candidate_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      candidate_artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      archive_sha256: ${{ steps.seal.outputs.archive_sha256 }}
+      checksum_sha256: ${{ steps.seal.outputs.checksum_sha256 }}
+      archive_bundle_sha256: ${{ steps.seal.outputs.archive_bundle_sha256 }}
+      checksum_bundle_sha256: ${{ steps.seal.outputs.checksum_bundle_sha256 }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      # Fetch separately. Neither the checker artifact nor an earlier attempt
+      # can replace the original producer subjects.
+      - name: Fetch original and checked inputs into isolated directories
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_ID: ${{ needs.guest-runtime.outputs.unsigned_artifact_id }}
+          ORIGINAL_DIGEST: ${{ needs.guest-runtime.outputs.unsigned_artifact_digest }}
+          CHECKED_ID: ${{ needs.runtime-proof-input-check.outputs.checked_artifact_id }}
+          CHECKED_DIGEST: ${{ needs.runtime-proof-input-check.outputs.checked_artifact_digest }}
+        run: |
+          python3 scripts/runtime-proof-candidate.py fetch --kind unsigned \
+            --artifact-id "$ORIGINAL_ID" --artifact-digest "$ORIGINAL_DIGEST" \
+            --out-dir "$RUNNER_TEMP/runtime-original"
+          python3 scripts/runtime-proof-candidate.py fetch --kind checked \
+            --artifact-id "$CHECKED_ID" --artifact-digest "$CHECKED_DIGEST" \
+            --out-dir "$RUNNER_TEMP/runtime-checked"
+      - name: Independently compare subjects before OIDC signing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/runtime-proof-candidate.py stage-signing \
+            --original-dir "$RUNNER_TEMP/runtime-original" \
+            --checked-dir "$RUNNER_TEMP/runtime-checked" \
+            --directory "$RUNNER_TEMP/runtime-candidate"
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign only the original archive and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          archive="$RUNNER_TEMP/runtime-candidate/mvm-guest-bins-v${version}.tar.gz"
+          for blob in "$archive" "${archive}.sha256"; do
+            test -f "$blob" && test ! -L "$blob" && test ! -e "${blob}.bundle"
+            cosign sign-blob --yes --new-bundle-format --bundle "${blob}.bundle" "$blob"
+          done
+      - name: Verify emitted identity and unchanged subjects
+        id: seal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/runtime-proof-candidate.py seal-candidate \
+            --original-dir "$RUNNER_TEMP/runtime-original" \
+            --checked-dir "$RUNNER_TEMP/runtime-checked" \
+            --directory "$RUNNER_TEMP/runtime-candidate"
+      - name: Upload the exact candidate quartet and transport context
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: mvm-runtime-proof-candidate-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-candidate/
+          if-no-files-found: error
 
   build:
     strategy:
@@ -92,17 +217,20 @@ jobs:
           # distributions too.
           - target: x86_64-unknown-linux-gnu
             build_target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            os: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             build_target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            os: ubuntu-24.04
 
     runs-on: ${{ matrix.os }}
-    # Backstop: a cold macOS release plus host binaries took 43 min before the
-    # size check began on 2026-10-08. That check and man-page generation each
-    # compile xtask separately. Keep a bounded cap with room to package, so a
-    # healthy cold build is not canceled at the old 45-minute limit.
-    timeout-minutes: 75
+    # Backstop: the pre-libkrun cold macOS release plus host binaries took 43
+    # min before the size check began on 2026-10-08. The source-built libkrun
+    # tier adds a kernel, firmware and dylib build; the size check and man-page
+    # generation also compile xtask separately. Keep a bounded cap with enough
+    # room for a healthy cold build and packaging.
+    timeout-minutes: 135
 
     steps:
       - uses: actions/checkout@v6
@@ -156,8 +284,21 @@ jobs:
       # `xtask check-per-vm-host-binaries-sync` fails the build if the two
       # drift. Add a binary there, not here.
       #
+      # Profile: these stay on `--release` (panic=unwind), NOT `release-min`
+      # (panic=abort). mvm-hostd's observer pipeline, signer fan-out and
+      # audit mirror, the gpu shim core, and mvm-hostlib's C ABI all contain a
+      # fault with `catch_unwind`; under abort a panic inside the in-process
+      # SDK library would kill the Python/Node host that loaded it, and a
+      # daemon fault would take down the process instead of failing one call.
+      # Panic strategy is profile-wide, so these cannot share compiled deps
+      # with mvmctl; the daemons and gpu endpoint share one invocation (one
+      # feature set), and mvm-hostlib stays separate because
+      # `mvm-client/release-channel` would otherwise change mvm-hostd's
+      # mvm-build features.
+      #
       # Apple Silicon macOS additionally gets the native HVF supervisor. The
-      # optional libkrun integration is not part of standard release artifacts.
+      # libkrun supervisor and its dylibs are built from immutable upstream
+      # sources by the dedicated release-tier step below.
       - name: Build per-VM host binaries
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
@@ -169,15 +310,15 @@ jobs:
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-hvf-supervisor
           fi
+
           # Ships on every target — see the note above.
           if [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]]; then
-            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostd \
+            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostd -p mvm-gpu \
               --bin mvm-host-agent \
               --bin mvm-signer-helper \
               --bin mvm-network-endpoint \
               --bin mvm-broker \
-              --bin mvm-audit-signer
-            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-gpu \
+              --bin mvm-audit-signer \
               --bin mvm-gpu-endpoint
             # The in-process SDK host library: the language SDKs load it by
             # the platform file name, and the release ships it beside
@@ -193,17 +334,64 @@ jobs:
             cp "target/${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}/release/libmvm_hostlib.so" \
               "target/${BUILD_TARGET}/release/libmvm_hostlib.so"
           else
-            cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
+            cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd -p mvm-gpu \
               --bin mvm-host-agent \
               --bin mvm-signer-helper \
               --bin mvm-network-endpoint \
               --bin mvm-broker \
-              --bin mvm-audit-signer
-            cargo build --release --target "${BUILD_TARGET}" -p mvm-gpu \
+              --bin mvm-audit-signer \
               --bin mvm-gpu-endpoint
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib \
               --features mvm-client/release-channel
           fi
+
+      - name: Install libkrun build dependencies
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: brew install make llvm lld flex bison gnu-sed gnu-tar xz
+
+      - name: Build libkrun release tier
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+          MVM_GNU_MAKE: gmake
+        shell: bash
+        run: |
+          llvm_prefix="$(brew --prefix llvm)"
+          lld_prefix="$(brew --prefix lld)"
+          flex_prefix="$(brew --prefix flex)"
+          bison_prefix="$(brew --prefix bison)"
+          gnu_sed_prefix="$(brew --prefix gnu-sed)"
+          gnu_tar_prefix="$(brew --prefix gnu-tar)"
+          export PATH="${llvm_prefix}/bin:${lld_prefix}/bin:${flex_prefix}/bin:${bison_prefix}/bin:${gnu_sed_prefix}/libexec/gnubin:${gnu_tar_prefix}/libexec/gnubin:${PATH}"
+          scripts/release/build-libkrun-tier.sh \
+            "target/${BUILD_TARGET}/release/libkrun-tier" "${BUILD_TARGET}"
+
+      # Attribution only: which packages the builds above compile more than once
+      # and what differs (profile, features, target), so a long release is
+      # explainable. The cargo arguments mirror the two build steps above —
+      # `xtask check-compile-report-sync` fails CI when they drift — and the
+      # report adds the payload builds mvm-cli's build script runs (one nested
+      # cargo zigbuild per embedded binary) from the shared payload build plan.
+      # It asks Cargo for unit graphs and compiles nothing, and it never fails
+      # the release.
+      - name: Report compilation units
+        continue-on-error: true
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+        shell: bash
+        run: |
+          hostlib_target="${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}"
+          [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]] || hostlib_target="${BUILD_TARGET}"
+          size_args=()
+          for f in target/"${BUILD_TARGET}"/release-min/mvmctl; do
+            [[ -f "$f" ]] && size_args+=(--asset "$f")
+          done
+          cargo run --package xtask -- report-compile-units \
+            --build "mvmctl (release-min)=build --profile release-min --target ${BUILD_TARGET} --features ${MVMCTL_RELEASE_FEATURES}" \
+            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-gpu-endpoint" \
+            --build "mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel" \
+            "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Verify Linux release payloads are statically linked
         if: endsWith(matrix.build_target, '-unknown-linux-musl')
@@ -287,10 +475,13 @@ jobs:
           # surface much later as a spawn failure on a user's machine.
           REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-gpu-endpoint"
           if [[ "${TARGET}" == *apple-darwin ]]; then
-            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor"
+            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
           fi
           for hostbin in ${REQUIRED_HOSTBINS}; do
             src="target/${BUILD_TARGET}/release/${hostbin}"
+            if [[ "${hostbin}" == mvm-libkrun-supervisor ]]; then
+              src="target/${BUILD_TARGET}/release/libkrun-tier/${hostbin}"
+            fi
             if [ ! -f "$src" ]; then
               echo "::error::${hostbin} was not built for ${TARGET}; mvmctl spawns it at run time and the adjacent-to-exe resolver has no fallback on a downloaded install" >&2
               exit 1
@@ -298,6 +489,25 @@ jobs:
             cp "$src" "staging/${ARCHIVE_NAME}/"
             echo "bundled ${hostbin}"
           done
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            LIBKRUN_TIER="target/${BUILD_TARGET}/release/libkrun-tier"
+            for required in lib/libkrun.1.dylib lib/libkrunfw.5.dylib \
+              lib/libkrunfw.dylib \
+              licenses/libkrun-APACHE-2.0.txt \
+              licenses/libkrunfw-LGPL-2.1-only.txt \
+              licenses/linux-GPL-2.0-only.txt \
+              sources/libkrunfw-macos-host.patch SOURCE-OFFER.txt SOURCE-PINS; do
+              if [[ ! -e "${LIBKRUN_TIER}/${required}" ]]; then
+                echo "::error::libkrun release tier is missing ${required}" >&2
+                exit 1
+              fi
+            done
+            cp -R "${LIBKRUN_TIER}/lib" "staging/${ARCHIVE_NAME}/"
+            cp -R "${LIBKRUN_TIER}/licenses" "staging/${ARCHIVE_NAME}/"
+            cp -R "${LIBKRUN_TIER}/sources" "staging/${ARCHIVE_NAME}/"
+            cp "${LIBKRUN_TIER}/SOURCE-OFFER.txt" \
+              "${LIBKRUN_TIER}/SOURCE-PINS" "staging/${ARCHIVE_NAME}/"
+          fi
           # The SDK host library, beside mvmctl: the SDKs' third lookup is
           # the platform file name next to the resolved mvmctl, and a
           # downloaded install has no other source. Fail closed like the
@@ -316,10 +526,45 @@ jobs:
 
           cp -r assets "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
+          # The native signer is MPL-covered even though the larger work is not.
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
+          cp crates/deps/mvm-macho-sign/LICENSE "staging/${ARCHIVE_NAME}/LICENSE-MPL-2.0.txt"
+          printf '%s\n' \
+            'This release contains mvm-macho-sign, modified MPL-2.0 Covered Software adapted from apple-codesign 0.29.0, Copyright Gregory Szorc.' \
+            'LICENSE-MPL-2.0.txt governs those files, not Apache-2.0 alone.' \
+            'Corresponding source, including modifications, is available under MPL-2.0 at:' \
+            "https://github.com/tinylabscom/mvm/tree/${GITHUB_SHA}/crates/deps/mvm-macho-sign" \
+            > "staging/${ARCHIVE_NAME}/THIRD_PARTY_NOTICES.txt"
           # Include generated man pages
           if [ -d man ] && ls man/*.1 2>/dev/null; then
             cp -r man "staging/${ARCHIVE_NAME}/"
           fi
+          # The backend component table install.sh reads to decide what to
+          # stage, generated from BACKEND_COMPONENT_TABLE so the archive and
+          # the table cannot drift. Fail closed like the host binaries above.
+          cargo run --package xtask --features man -- emit-backend-components-tsv \
+            > "staging/${ARCHIVE_NAME}/components.tsv"
+          if [ ! -s "staging/${ARCHIVE_NAME}/components.tsv" ]; then
+            echo "::error::components.tsv was not generated for ${ARCHIVE_NAME}; install.sh reads it to select backend components" >&2
+            exit 1
+          fi
+          echo "bundled components.tsv"
+
+      - name: Mandatory ad-hoc producer signing
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        run: |
+          python3 scripts/release/sign_macos.py \
+            --producer-adhoc --require-cli-inventory \
+            --payload staging/mvmctl-aarch64-apple-darwin \
+            --report "${RUNNER_TEMP}/macos-producer-signing.json"
+
+      - name: Retain macOS producer signing evidence
+        if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-producer-signing
+          path: ${{ runner.temp }}/macos-producer-signing.json
+          if-no-files-found: warn
 
       - name: Sign and notarize the staged macOS release
         if: ${{ matrix.target == 'aarch64-apple-darwin' && github.ref_type == 'tag' }}
@@ -367,10 +612,33 @@ jobs:
           # Generate SHA256 checksum for the tarball
           shasum -a 256 "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
 
+      - name: Inspect final macOS package bytes
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmd=(python3 scripts/release/verify_macos_package.py
+            --archive staging/mvmctl-aarch64-apple-darwin.tar.gz
+            --envelope mvmctl-aarch64-apple-darwin --require-cli-inventory
+            --producer-report "${RUNNER_TEMP}/macos-producer-signing.json"
+            --report "${RUNNER_TEMP}/macos-final-package.json")
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            cmd+=(--notary-report "${RUNNER_TEMP}/macos-notarization.json")
+          fi
+          "${cmd[@]}"
+
+      - name: Retain final macOS package inspection
+        if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-final-package
+          path: ${{ runner.temp }}/macos-final-package.json
+          if-no-files-found: warn
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mvmctl-${{ matrix.target }}
+          name: mvmctl-${{ matrix.target }}-attempt-${{ github.run_attempt }}
           path: |
             staging/*.tar.gz
             staging/*.sha256
@@ -382,20 +650,23 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
             library: libmvm_hostlib.so
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             library: libmvm_hostlib.so
           - target: aarch64-apple-darwin
-            runner: macos-latest
+            # Exercise the packaged compatibility tier on a supported pre-HVF
+            # host instead of the moving latest image.
+            runner: macos-15
             library: libmvm_hostlib.dylib
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: mvmctl-${{ matrix.target }}
+          name: mvmctl-${{ matrix.target }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/archive
       - name: Install the archive and load its native library
         shell: bash
@@ -417,6 +688,14 @@ jobs:
             test "${installed}" = "mvmctl ${EXPECT_VERSION#v}"
           fi
           "${prefix}/bin/mvmctl" --help
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            payload="${prefix}/lib/mvmctl-${TARGET}"
+            answer="$("${payload}/mvm-libkrun-supervisor" --contract-version)"
+            [[ "${answer}" == "mvm-libkrun-supervisor contract-version="* ]] || {
+              echo "::error::packaged libkrun supervisor did not answer its contract probe" >&2
+              exit 1
+            }
+          fi
           python3 - "${prefix}/lib/mvmctl-${TARGET}/${LIBRARY}" <<'PY'
           import ctypes
           import json
@@ -439,9 +718,18 @@ jobs:
   # endpoint from them. v0.22.0 published an endpoint that could not survive a
   # guest's egress handshake for exactly that reason.
   release-archive-smoke:
-    needs: [build, guest-runtime]
+    needs: [build, guest-runtime, runtime-proof-candidate]
+    # A dry run signs no candidate, so its candidate job is skipped; the smoke
+    # still has to run there.
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.guest-runtime.result == 'success' && (needs.runtime-proof-candidate.result == 'success' || needs.runtime-proof-candidate.result == 'skipped') }}
     uses: ./.github/workflows/release-archive-smoke.yml
     with:
+      runtime_candidate_artifact_id: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_id }}
+      runtime_candidate_artifact_digest: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_digest }}
+      runtime_archive_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_sha256 }}
+      runtime_checksum_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_sha256 }}
+      runtime_archive_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_bundle_sha256 }}
+      runtime_checksum_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_bundle_sha256 }}
       # A tag must ship the version it names; a dry run builds from a branch,
       # whose name is not a version.
       tag: ${{ github.event_name == 'push' && github.ref_name || '' }}
@@ -456,20 +744,12 @@ jobs:
       tarballs: build
 
   release:
-    needs: [bdd, e2e-docs, build, archive-install-smoke, guest-runtime, release-archive-smoke, distro-packages]
-    # `e2e-docs` was added to `needs` above when the documented-surface gate
-    # landed, and its result was never added here. `!cancelled()` overrides the
-    # implicit all-needs-succeeded rule, so for as long as that was true the
-    # release published whether or not a single documented example booted —
-    # the gate existed, was listed, was asserted by a test that only read the
-    # `needs` list, and enforced nothing. Every entry in `needs` must appear in
-    # this condition; a job listed and not checked is worse than one that was
-    # never added, because it reads as covered.
+    needs: [bdd, e2e-docs, build, archive-install-smoke, guest-runtime, runtime-proof-candidate, release-archive-smoke, distro-packages]
+    # `!cancelled()` overrides the implicit all-needs-succeeded rule, so every
+    # entry in `needs` must appear in this condition.
     #
-    # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
-    # (the `build` job) but never reaches this publish job — only a tag push or
-    # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
+    # A manual tag ref is not a real tag push and cannot satisfy this gate.
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.runtime-proof-candidate.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -477,7 +757,13 @@ jobs:
     # ref cannot produce a signature the shipped verifier accepts. Revocations
     # are gated the same way against their own tag.
     environment: release-signing
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
+    env:
+      RUNTIME_ARCHIVE_SHA256: ${{ needs.runtime-proof-candidate.outputs.archive_sha256 }}
+      RUNTIME_CHECKSUM_SHA256: ${{ needs.runtime-proof-candidate.outputs.checksum_sha256 }}
+      RUNTIME_ARCHIVE_BUNDLE_SHA256: ${{ needs.runtime-proof-candidate.outputs.archive_bundle_sha256 }}
+      RUNTIME_CHECKSUM_BUNDLE_SHA256: ${{ needs.runtime-proof-candidate.outputs.checksum_bundle_sha256 }}
     steps:
       - uses: actions/checkout@v6
 
@@ -493,11 +779,15 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-          merge-multiple: true
+      - name: Collect exact current-attempt release inputs without overlays
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_ID: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_id }}
+          CANDIDATE_DIGEST: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_digest }}
+        run: |
+          python3 scripts/runtime-proof-candidate.py collect-release \
+            --candidate-id "$CANDIDATE_ID" --candidate-digest "$CANDIDATE_DIGEST" \
+            --out-dir artifacts
 
       # Exactly one guest runtime, and on a tag the one whose name carries the
       # tag's version: the archive's own manifest records the version it was
@@ -563,10 +853,8 @@ jobs:
           # The .deb and .rpm are signed directly like the tarballs, and are
           # in the manifest too, so either anchor authenticates them.
           #
-          # The guest runtime archive matches `*.tar.gz` and is signed with
-          # the tarballs. Its `.sha256` sidecar is published too, since
-          # mvmctl reads that digest before it fetches the archive, and is
-          # signed so that no unsigned file ships in the release.
+          # The guest runtime already has its retained candidate envelopes.
+          # Neither its archive nor its checksum may be signed again here.
           #
           # Boot images are not in this release: they are members of the
           # signed image set `images.lock` pins, verified against that root's
@@ -575,9 +863,11 @@ jobs:
             artifacts/*.tar.gz \
             artifacts/*.deb \
             artifacts/*.rpm \
-            artifacts/mvm-guest-bins-v*.tar.gz.sha256 \
             artifacts/checksums-sha256.txt \
             sbom.cdx.json; do
+            if [[ "$blob" == "artifacts/mvm-guest-bins-${GITHUB_REF_NAME}.tar.gz" ]]; then
+              continue
+            fi
             cosign sign-blob \
               --yes \
               --new-bundle-format \
@@ -620,6 +910,11 @@ jobs:
       #
       # Subjects are the tarballs (the guest runtime archive among them) and
       # the distro packages, matching the direct-signature set.
+      - name: Confirm retained runtime envelopes before any release API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/runtime-proof-candidate.py verify-collected --directory artifacts
+
       - name: Attest build provenance for the release tarballs (release-provenance)
         if: ${{ github.event_name == 'push' }}
         uses: actions/attest-build-provenance@v4
@@ -729,21 +1024,6 @@ jobs:
             echo "no dry-run draft ${tag} to delete"
           fi
 
-      # The "release: published" event fired by `gh release create` runs under
-      # GITHUB_TOKEN, which by design does not trigger downstream workflows.
-      # workflow_dispatch is exempt from that rule, so chain publish-crates
-      # explicitly here. This keeps crates.io in sync with GitHub releases.
-      - name: Trigger crates.io publish workflow
-        if: ${{ github.event_name == 'push' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          gh workflow run publish-crates.yml \
-            --ref "${TAG_NAME}" \
-            -f tag="${TAG_NAME}" \
-            -f dry_run=false
-
   # Plan 199 B2: post-publish gate. Download the just-created release and assert
   # every binary target has a tarball + matching SHA256 + cosign signature bundle
   # + an entry in the combined checksums manifest, and that the SBOM is signed.
@@ -756,7 +1036,8 @@ jobs:
     # under a `refs/tags/*` identity a dispatch cannot produce. Running it there
     # would fail for reasons that say nothing about the release.
     if: ${{ github.event_name == 'push' && needs.release.result == 'success' }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -824,6 +1105,55 @@ jobs:
     with:
       tag: ${{ github.ref_name }}
 
+  # This report witnesses the current signed image pin with the released CLI.
+  # Staged schema-3 image candidates are validated separately with that same CLI;
+  # requiring one here would introduce a circular rollout dependency.
+  # ARM Linux boot remains unverified: there is no ARM Linux KVM runner.
+  published-installed-boot:
+    needs: [verify-release, first-run-smoke]
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: sigstore/cosign-installer@v3
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: installed-boot-lane-*-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/boot-lanes
+      - name: Reauthenticate and aggregate both installed boot lanes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          python3 scripts/published-installed-boot.py aggregate \
+            --tag "$TAG_NAME" --lanes "${RUNNER_TEMP}/boot-lanes" \
+            --assets "${RUNNER_TEMP}/boot-assets" \
+            --out "${RUNNER_TEMP}/published-installed-boot/installed-boot.json"
+      - name: Attest the installed boot report
+        id: boot-attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ runner.temp }}/published-installed-boot/installed-boot.json
+      - name: Keep the offline attestation bundle beside the report
+        env:
+          BUNDLE: ${{ steps.boot-attestation.outputs.bundle-path }}
+        run: |
+          test -s "$BUNDLE"
+          cp "$BUNDLE" "${RUNNER_TEMP}/published-installed-boot/installed-boot.json.bundle"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: published-installed-boot-v1
+          overwrite: true
+          path: ${{ runner.temp }}/published-installed-boot
+          if-no-files-found: error
+          retention-days: 90
+
   published-package-smoke:
     needs: [verify-release]
     if: ${{ github.event_name == 'push' }}
@@ -846,9 +1176,10 @@ jobs:
   # prerelease. A red smoke leaves the tag staged; fix forward with a new tag.
   promote-release:
     name: Promote the release once a fresh install boots
-    needs: [first-run-smoke, published-package-smoke, recipe-install-smoke]
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.first-run-smoke.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
-    runs-on: ubuntu-latest
+    needs: [e2e-docs, published-installed-boot, published-package-smoke, recipe-install-smoke]
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.e2e-docs.result == 'success' && needs.published-installed-boot.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       # The release event emitted by GITHUB_TOKEN does not start workers.yml,
@@ -883,7 +1214,8 @@ jobs:
     name: Propose verified Nix prebuilt pin
     needs: [promote-release]
     if: ${{ github.event_name == 'push' && needs.promote-release.result == 'success' && !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     permissions:
       actions: write
       contents: write

@@ -35,6 +35,30 @@ mvmctl run --policy ./org-base.toml --policy ./team.toml --policy ./mine.json --
 That is exactly equivalent to a profile whose `extends` lists the same
 references in the same order.
 
+### Configured local defaults
+
+Set ordered launch policies in `$MVM_HOME/config/config.toml`:
+
+```toml
+default_policy = ["agent-apis", "/etc/policy/team.toml"]
+```
+
+Selection is explicit `--plan`, otherwise repeated `--policy`, otherwise the
+project's `[policy]` profile/include, otherwise `default_policy`. Project
+`[network] allow_hosts` still contributes when selecting authored profiles.
+Configured defaults are fallback selections, not mandatory organization
+restrictions: explicit flags or a project policy replace them. Use the
+existing mandatory policy/admission controls for restrictions a caller must
+not replace. Malformed or unreadable configuration refuses launch rather than
+silently dropping configured restrictions.
+
+The same ordered composition applies to `run`, `machine run`, and policy
+selection during persistent machine creation. Explicit local network
+restrictions remain effective when an installed application's signed network
+defaults are folded. A signed application ceiling cannot be widened by local
+policy. This does not change the existing rule that signed network defaults
+apply when no local network selection exists.
+
 Ask one question of the resolved policy without booting anything:
 
 ```sh
@@ -349,7 +373,7 @@ pack allows, and that deny wins. A generated template can use the same
 `[policy]` table to expose its shipped policy to the application.
 
 `pull` follows pack references in the signed profile, verifying and pinning
-each dependency; `agent/claude` includes `runtime/python`.
+each dependency; the policy-only `agent/claude@1.0.1` includes `runtime/python`.
 If a root pack also declares a signed workload image, `run` and `machine run`
 select that image when no explicit boot source was supplied. The image's
 `mvm.toml`, `flake.nix`, and `flake.lock` are verified as signed payload; the
@@ -368,16 +392,21 @@ under the same rules as every non-user layer — denies stick, resource
 bounds are ceilings, and `env.readmit` and `shares.mount` entries the pack
 carries are stripped with notes, never honoured.
 
-Legacy pack trust is the default: with no publisher policy file, packs
-signed by the old `mvm-templates` or renamed `mvm-packs` publish workflow
-verify only in `agent/` and `runtime/`. The former identity expires from
-built-in trust at 2026-11-06 00:00 UTC; `mvm/` has no built-in trust until
-revocation enforcement exists. To make your own trust decision — pin other
+With no publisher policy file, the exact current `mvm-packs` publish workflow
+identity is trusted for `agent/` and `runtime/`. The former `mvm-templates`
+identity is accepted only for the nine exact historical versioned manifest
+reference/byte-digest pairs [listed in pack authoring](/guides/pack-authoring/#decide-who-may-publish),
+and only before 2026-11-06 00:00 UTC. Real Sigstore verification must identify
+the signer before that exception is checked. The reserved `mvm/` namespace
+trusts only the exact current workflow identity, never a wildcard; official
+packs also require the independently signed fresh MVM revocation feed.
+To make your own trust decision — pin other
 publishers, or refuse packs outright — write
 `$MVM_HOME/registry/publishers.toml`; it
 replaces the default wholesale, and a malformed file fails closed rather
-than silently widening trust. One publisher may use the `*` namespace to
-accept a signing identity for every namespace, and an exact
+than silently widening trust. The built-in historical digest exception and
+cutoff do not constrain explicit operator policy. One publisher may use the
+`*` namespace to accept a signing identity for non-reserved namespaces, and an exact
 `namespace = ...` entry always wins over the wildcard.
 
 The repository rename changed its workflow identity. Packs signed under the

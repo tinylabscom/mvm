@@ -17,15 +17,26 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
-use zeroize::Zeroizing;
 
 use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
-use mvm_core::atomic_io::write_private;
 
+mod egress_tls;
+pub use egress_tls::{
+    EGRESS_CA_STATE_FILE, EgressTlsDelivery, build_egress_tls_delivery, forget_egress_tls_delivery,
+    load_egress_tls_delivery, persist_egress_tls_delivery,
+};
+mod owned;
+use owned::endpoint_command;
+pub use owned::{OwnedEndpoint, OwnedEndpointSpawnError, spawn_network_endpoint_owned};
 mod endpoint_identity;
 mod stderr_log;
 pub use endpoint_identity::EndpointPid;
 use stderr_log::{endpoint_stderr_log_path, open_endpoint_stderr_log};
+mod collector;
+pub use collector::{
+    TELEMETRY_COLLECTOR_PID_FILE, reap_telemetry_collector, spawn_telemetry_collector,
+};
+use collector::{provision_collector, telemetry_section};
 
 /// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
 /// `vhost-vsock` gives a real guest→host AF_VSOCK path, so the host binds an
@@ -118,173 +129,6 @@ fn fingerprints() -> MutexGuard<'static, HashMap<String, Vec<SecretFingerprint>>
         .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-}
-
-/// The cert/key split the egress CA exists to enforce. The guest receives only
-/// the certificate, so it can trust host-terminated bound-host TLS; the
-/// terminator endpoint receives the certificate **and** the key to mint per-SNI
-/// leaves. The key never enters a guest — the same claim-13 "no key on the
-/// guest" invariant the substitution channel upholds.
-///
-/// Deliberately **not** `Serialize`. It holds a private key, and a derived
-/// `Serialize` would mean any future struct that embeds this one writes that key
-/// wherever it is written. The one durable sink is
-/// [`persist_egress_tls_delivery`], which converts to a private record of its
-/// own; a second sink has to be written on purpose.
-#[derive(Clone, PartialEq, Eq)]
-pub struct EgressTlsDelivery {
-    /// The binding patterns the certificate was minted from — the exact slice,
-    /// `*.` wildcards included, whose subtrees its `nameConstraints permitted`
-    /// carries. Recorded so a later boot can ask what this CA is allowed to
-    /// speak for without re-parsing X.509, using the same matching the binding
-    /// check uses.
-    bound_hosts: Vec<String>,
-    /// The CA cert PEM: delivered to the guest's trust bundle, and what the
-    /// endpoint's minted leaves chain to.
-    cert_pem: String,
-    /// The CA key PEM — terminator-side only, NEVER to a guest. Zeroized when
-    /// the last copy drops.
-    key_pem: Zeroizing<String>,
-}
-
-// Manual redacted Debug: this struct carries the CA private key, so its `Debug`
-// must never print key bytes (xtask check-no-display-on-secret-types parity
-// with `VmEgressCa`).
-// allow(secret-debug): hand-written and redacted below.
-impl std::fmt::Debug for EgressTlsDelivery {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EgressTlsDelivery")
-            .field("bound_hosts", &self.bound_hosts)
-            .field("cert_pem", &"<egress ca cert>")
-            .field("key_pem", &"<redacted>")
-            .finish()
-    }
-}
-
-impl EgressTlsDelivery {
-    /// The certificate — the only half a guest is ever handed.
-    #[must_use]
-    pub fn cert_pem(&self) -> &str {
-        &self.cert_pem
-    }
-
-    /// The key the terminator mints leaves under.
-    #[must_use]
-    pub fn key_pem(&self) -> &str {
-        &self.key_pem
-    }
-
-    /// The destinations this certificate permits.
-    #[must_use]
-    pub fn bound_hosts(&self) -> &[String] {
-        &self.bound_hosts
-    }
-
-    /// The first entry of `wanted` this certificate does not permit, if any.
-    ///
-    /// Decided by the binding allow-list's own matching over the patterns the
-    /// certificate was minted from, so `api.example.com` — or `*.api.example.com`
-    /// — is covered by a `*.example.com` mint. Every name that matching admits
-    /// lies inside the subtrees the mint wrote, which also hold each wildcard's
-    /// apex; the apex is still reported here, because the binding does not
-    /// admit it. A conservative answer costs a refusal; a generous one costs a
-    /// leaf the guest's own TLS stack rejects, after the flow was admitted.
-    #[must_use]
-    pub fn first_unpermitted<'a>(&self, wanted: &'a [String]) -> Option<&'a str> {
-        wanted
-            .iter()
-            .find(|host| !mvm_contract::ir::host_is_bound(&self.bound_hosts, host))
-            .map(String::as_str)
-    }
-}
-
-/// The on-disk shape of [`EgressTlsDelivery`].
-///
-/// Separate from the live value precisely so the key has exactly one
-/// serialization site. Private to this module: nothing outside it can name this
-/// type, so nothing outside it can grow a second place the key is written.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedEgressCa {
-    bound_hosts: Vec<String>,
-    cert_pem: String,
-    key_pem: String,
-}
-
-/// Filename the per-VM egress CA is persisted under, inside the VM's own state
-/// dir. Mode 0600: it carries the key.
-///
-/// A warm child restores its parent's `/run/mvm` out of the parent's memory
-/// image and therefore trusts the **parent's** certificate. Its endpoint has to
-/// terminate under that same identity, and there is no path back into a running
-/// guest's memory to replace the trust bundle — so the parent's CA is persisted
-/// here for the claim path to read, exactly as the FlowMux identity is.
-pub const EGRESS_CA_STATE_FILE: &str = "egress-ca.json";
-
-/// Mint a fresh per-VM egress CA, name-constrained to `bound_hosts`.
-///
-/// `bound_hosts` are the destinations the plan's secret bindings admit — the
-/// CA's `nameConstraints permitted` is exactly that set, so a leaked per-VM key
-/// cannot be used to impersonate any other name to its own guest.
-pub fn build_egress_tls_delivery(bound_hosts: &[&str]) -> Result<EgressTlsDelivery> {
-    let ca = mvm_core::crypto::egress_ca::VmEgressCa::mint(bound_hosts)
-        .map_err(|e| anyhow!("mint the per-VM egress CA: {e}"))?;
-    Ok(EgressTlsDelivery {
-        // The same slice the certificate's permitted subtrees were built from,
-        // so the record and the extension cannot describe different sets.
-        bound_hosts: bound_hosts.iter().map(|h| (*h).to_string()).collect(),
-        cert_pem: ca.cert_pem().to_string(),
-        key_pem: Zeroizing::new(ca.key_pem()),
-    })
-}
-
-/// Persist this boot's egress CA in the VM's state dir at mode 0600.
-///
-/// The serialized buffer holds the key, so it is zeroized when it drops, and it
-/// reaches disk through [`write_private`] — a mode set at creation on a fresh
-/// inode, then renamed into place.
-pub fn persist_egress_tls_delivery(state_dir: &Path, delivery: &EgressTlsDelivery) -> Result<()> {
-    std::fs::create_dir_all(state_dir)
-        .with_context(|| format!("creating {}", state_dir.display()))?;
-    let path = state_dir.join(EGRESS_CA_STATE_FILE);
-    let record = PersistedEgressCa {
-        bound_hosts: delivery.bound_hosts.clone(),
-        cert_pem: delivery.cert_pem.clone(),
-        key_pem: delivery.key_pem.to_string(),
-    };
-    let json = Zeroizing::new(
-        serde_json::to_vec_pretty(&record).context("serializing the per-VM egress CA")?,
-    );
-    drop(record);
-    write_private(&path, &json).with_context(|| format!("writing {}", path.display()))
-}
-
-/// Forget the persisted egress CA. Called when the VM stops, at which point
-/// nothing can claim it and the key has no further use.
-pub fn forget_egress_tls_delivery(state_dir: &Path) {
-    let _ = std::fs::remove_file(state_dir.join(EGRESS_CA_STATE_FILE));
-}
-
-/// Load the egress CA a previous boot persisted in `state_dir`.
-///
-/// `None` when that boot had no bound destination to terminate for; a claim
-/// from such a parent inherits nothing and its endpoint stays unterminating.
-pub fn load_egress_tls_delivery(state_dir: &Path) -> Result<Option<EgressTlsDelivery>> {
-    let path = state_dir.join(EGRESS_CA_STATE_FILE);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => Zeroizing::new(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
-    };
-    let record: PersistedEgressCa =
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(Some(EgressTlsDelivery {
-        bound_hosts: record.bound_hosts,
-        cert_pem: record.cert_pem,
-        // Moving the `String` keeps its allocation, so wrapping it here zeroizes
-        // the buffer serde parsed into rather than a copy of it.
-        key_pem: Zeroizing::new(record.key_pem),
-    }))
 }
 
 /// PID of the per-VM `mvm-network-endpoint` moat, and the JSON
@@ -915,8 +759,8 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self
     }
 
-    /// Set `egress_proxy`. Takes a value or an `Option`; unset means `None`,
-    /// which is the endpoint's "dial direct".
+    /// Override host config and ambient proxy variables. `None` inherits host
+    /// settings; `Some(Default::default())` explicitly selects direct.
     #[must_use]
     pub fn egress_proxy(mut self, egress_proxy: impl Into<Option<EgressProxySpawnConfig>>) -> Self {
         self.egress_proxy = egress_proxy.into();
@@ -976,42 +820,8 @@ impl<'a> Default for SubstitutionSpawnParamsBuilder<'a> {
     }
 }
 
-/// The upstream proxy, as strings the endpoint parses.
-///
-/// Strings rather than a parsed type because this only carries a value from
-/// host configuration to the endpoint's stdin; the endpoint is where a bad
-/// value has to be reported, since it is the process that would otherwise fail
-/// to reach anything.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EgressProxySpawnConfig {
-    pub https: Option<String>,
-    pub http: Option<String>,
-    pub no_proxy: Option<String>,
-}
-
-impl EgressProxySpawnConfig {
-    /// Read the conventional proxy environment of the host process.
-    ///
-    /// Returns `None` when nothing is configured, so the common case emits no
-    /// keys at all and the endpoint's defaults keep meaning "dial direct".
-    #[must_use]
-    pub fn from_host_env() -> Option<Self> {
-        let pick = |names: &[&str]| -> Option<String> {
-            names
-                .iter()
-                .find_map(|n| std::env::var(n).ok())
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
-        let all = pick(&["all_proxy", "ALL_PROXY"]);
-        let cfg = Self {
-            https: pick(&["https_proxy", "HTTPS_PROXY"]).or_else(|| all.clone()),
-            http: pick(&["http_proxy", "HTTP_PROXY"]).or(all),
-            no_proxy: pick(&["no_proxy", "NO_PROXY"]),
-        };
-        (cfg.https.is_some() || cfg.http.is_some()).then_some(cfg)
-    }
-}
+mod proxy;
+pub use proxy::EgressProxySpawnConfig;
 
 /// The endpoint config a spawn with (or without) a FlowMux identity emits.
 ///
@@ -1083,19 +893,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     if params.telemetry {
         // The embedded collector's inputs, derived here so the spawner's one
         // provisioning decision fans out to every path the endpoint needs.
-        cfg["telemetry"] = serde_json::json!({
-            "state_dir": params.state_dir,
-            "telemetry_sock": mvm_core::config::vm_hvf_vsock_port_socket_at(
-                params.state_dir,
-                mvm_core::protocol::telemetry::TELEMETRY_PORT,
-            ),
-            "signer_sock": params.state_dir.join(
-                super::broker_services_spawn::AUDIT_SIGNER_SOCK,
-            ),
-            "host_anchor_path": mvm_core::config::mvm_keys_dir()
-                .join(super::broker_services_spawn::HOST_SIGNER_PUB),
-            "records_byte_cap": super::telemetry_provisioning::DEFAULT_RECORDS_BYTE_CAP,
-        });
+        cfg["telemetry"] = telemetry_section(params.tenant, params.state_dir);
     }
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
@@ -1185,9 +983,13 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result<()> {
     use std::io::Write;
     // One resolution point for every backend. A caller that supplied a proxy
-    // explicitly keeps it; everyone else inherits the host's environment.
+    // explicitly keeps it; everyone else resolves host config before ambient
+    // variables. Refuse invalid settings before touching sockets or children.
     if params.egress_proxy.is_none() {
-        params.egress_proxy = EgressProxySpawnConfig::from_host_env();
+        params.egress_proxy = EgressProxySpawnConfig::from_host_config()?;
+    }
+    if let Some(proxy) = &params.egress_proxy {
+        proxy.resolve()?;
     }
     let session_marker = params.state_dir.join(SUBST_SESSION_FILE);
     let session_ready_socket = session_ready_socket_path(params.state_dir);
@@ -1201,7 +1003,10 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     }
     clear_stale_socket(&connector_socket_path(params.state_dir));
     params.session_marker = Some(session_marker);
-    let cfg = build_endpoint_config_json(&params);
+    let mut cfg = build_endpoint_config_json(&params);
+    if params.telemetry {
+        provision_collector(&mut cfg["telemetry"], params.tenant, params.state_dir)?;
+    }
     let SubstitutionSpawnParams {
         telemetry: _,
         vm_name,
@@ -1217,11 +1022,12 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     let stderr_log = endpoint_stderr_log_path(state_dir);
     let log_file = open_endpoint_stderr_log(state_dir)?;
 
-    let mut cmd = mvm_core::env_hygiene::helper_command(&bin);
-    select_lifetime(&mut cmd, lifetime, state_dir);
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(log_file);
+    let mut cmd = endpoint_command(
+        mvm_core::env_hygiene::helper_command(&bin),
+        lifetime,
+        state_dir,
+        log_file,
+    );
     // Detach into its own session so it survives this `mvmctl` process.
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -1467,6 +1273,7 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
     // The endpoint's secrets are gone; the shapes the gate recognised them by
     // go with them, so a recycled VM name cannot inherit them.
     forget_secret_fingerprints(vm_name);
+    reap_telemetry_collector(state_dir);
     // A later boot under the same name must not inherit this endpoint's guest
     // telemetry assertion.
     let _ = super::telemetry_provisioning::record_boot_provisioning(state_dir, false);
@@ -1732,20 +1539,6 @@ mod tests {
         params.session_marker = Some(marker.clone());
         let cfg = build_endpoint_config_json(&params);
         assert_eq!(cfg["session_marker"], serde_json::json!(marker));
-    }
-
-    #[test]
-    fn tls_delivery_debug_redacts_the_private_key() {
-        let delivery = EgressTlsDelivery {
-            bound_hosts: vec!["api.openai.com".to_string()],
-            cert_pem: "endpoint certificate".to_string(),
-            key_pem: Zeroizing::new("never-print-this-private-key".to_string()),
-        };
-
-        let rendered = format!("{delivery:?}");
-        assert!(rendered.contains("<egress ca cert>"));
-        assert!(rendered.contains("<redacted>"));
-        assert!(!rendered.contains("never-print-this-private-key"));
     }
 
     #[test]
@@ -2064,106 +1857,6 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// Clear every proxy name this reads, so a contributor whose own shell
-    /// exports one does not get a different answer from CI.
-    fn proxy_env() -> mvm_core::util::test_env::TestEnv {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        for k in [
-            "https_proxy",
-            "HTTPS_PROXY",
-            "http_proxy",
-            "HTTP_PROXY",
-            "all_proxy",
-            "ALL_PROXY",
-            "no_proxy",
-            "NO_PROXY",
-        ] {
-            env.remove(k);
-        }
-        env
-    }
-
-    /// Nothing configured is the common case, and it has to stay
-    /// distinguishable from "configured with empty values" — the endpoint's
-    /// default for absent keys is "dial direct", so a `Some` of all-`None`
-    /// would emit keys that say nothing and mean something.
-    #[test]
-    fn an_unconfigured_host_carries_no_proxy_config() {
-        let _env = proxy_env();
-        assert_eq!(EgressProxySpawnConfig::from_host_env(), None);
-    }
-
-    /// The value has to survive the trip. A `Some` whose fields are all `None`
-    /// looks configured and forwards nothing.
-    #[test]
-    fn a_configured_https_proxy_reaches_the_endpoint_config() {
-        let mut env = proxy_env();
-        env.set("https_proxy", "http://proxy.internal:3128");
-
-        let cfg = EgressProxySpawnConfig::from_host_env()
-            .expect("a host with https_proxy set is proxy-configured");
-        assert_eq!(cfg.https.as_deref(), Some("http://proxy.internal:3128"));
-        assert_eq!(cfg.http, None);
-    }
-
-    /// Either leg alone is a configured host. Requiring both would silently
-    /// dial direct on a host that set only one, which is the shape most
-    /// http-only and https-only environments actually have.
-    #[test]
-    fn either_proxy_leg_alone_configures_egress() {
-        let mut env = proxy_env();
-        env.set("http_proxy", "http://only-http:3128");
-        let cfg = EgressProxySpawnConfig::from_host_env()
-            .expect("http_proxy alone must configure egress");
-        assert_eq!(cfg.http.as_deref(), Some("http://only-http:3128"));
-        assert_eq!(cfg.https, None);
-        drop(env);
-
-        let mut env = proxy_env();
-        env.set("HTTPS_PROXY", "http://only-https:3128");
-        let cfg = EgressProxySpawnConfig::from_host_env()
-            .expect("HTTPS_PROXY alone must configure egress");
-        assert_eq!(cfg.https.as_deref(), Some("http://only-https:3128"));
-        assert_eq!(cfg.http, None);
-    }
-
-    /// An exported-but-empty proxy var is how a shell spells "unset". Taking
-    /// it literally hands the endpoint an empty upstream and every request
-    /// fails to reach anything.
-    #[test]
-    fn an_empty_or_whitespace_proxy_var_reads_as_unset() {
-        let mut env = proxy_env();
-        env.set("https_proxy", "");
-        env.set("http_proxy", "   ");
-        assert_eq!(
-            EgressProxySpawnConfig::from_host_env(),
-            None,
-            "an empty proxy value must not count as configured"
-        );
-    }
-
-    /// `no_proxy` is an exception list, not a proxy. On its own it configures
-    /// nothing, or every unproxied host would start emitting proxy keys.
-    #[test]
-    fn no_proxy_alone_does_not_configure_a_proxy() {
-        let mut env = proxy_env();
-        env.set("no_proxy", "localhost,127.0.0.1");
-        assert_eq!(EgressProxySpawnConfig::from_host_env(), None);
-    }
-
-    /// all_proxy is the fallback for both legs, and must not override a
-    /// specific one.
-    #[test]
-    fn all_proxy_fills_both_legs_but_yields_to_a_specific_one() {
-        let mut env = proxy_env();
-        env.set("all_proxy", "socks5://fallback:1080");
-        env.set("https_proxy", "http://specific:3128");
-
-        let cfg = EgressProxySpawnConfig::from_host_env().expect("configured");
-        assert_eq!(cfg.https.as_deref(), Some("http://specific:3128"));
-        assert_eq!(cfg.http.as_deref(), Some("socks5://fallback:1080"));
-    }
-
     #[test]
     fn a_silent_endpoint_is_reported_as_silent_not_quoted_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -2358,10 +2051,45 @@ mod tests {
     // for inspection and prints a one-line ready handshake.
     #[test]
     fn a_socket_nothing_serves_is_cleared_and_a_served_one_is_kept() {
+        use std::os::unix::fs::FileTypeExt;
+
         let dir = tempfile::tempdir().unwrap();
         let stale = dir.path().join("stale.sock");
-        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
-        assert!(stale.exists(), "a dropped listener leaves its socket file");
+        // Other tests fork concurrently. A listener bound in this process can
+        // survive its drop through an inherited pre-exec descriptor. Bind in
+        // an isolated single-test process and reap it before probing the path.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "host::network_endpoint_spawn::tests::stale_socket_subprocess_fixture",
+                "--test-threads=1",
+            ])
+            .env("MVM_TEST_STALE_SOCKET_PATH", &stale)
+            .spawn()
+            .unwrap();
+        let waited = crate::host::process_exit::wait_for_test_child(
+            &mut child,
+            std::time::Instant::now() + Duration::from_secs(10),
+        );
+        if !matches!(waited, Ok(Some(_))) {
+            let _ = child.kill();
+            child
+                .wait()
+                .expect("reap the socket fixture after a failed wait");
+        }
+        let status = waited
+            .expect("wait for the socket fixture")
+            .expect("socket fixture must exit within its deadline");
+        assert!(status.success(), "socket fixture failed: {status}");
+        assert!(
+            std::fs::symlink_metadata(&stale)
+                .unwrap()
+                .file_type()
+                .is_socket(),
+            "an exited listener leaves an actual socket inode"
+        );
+        assert!(std::os::unix::net::UnixStream::connect(&stale).is_err());
         clear_stale_socket(&stale);
         assert!(!stale.exists());
         std::os::unix::net::UnixListener::bind(&stale).expect("the path binds again");
@@ -2370,8 +2098,20 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
         clear_stale_socket(&live);
         assert!(live.exists(), "a live endpoint's socket must be left alone");
+        std::os::unix::net::UnixStream::connect(&live)
+            .expect("the retained listener still accepts connections");
 
-        clear_stale_socket(&dir.path().join("absent.sock"));
+        let absent = dir.path().join("absent.sock");
+        clear_stale_socket(&absent);
+        assert!(!absent.exists(), "cleanup of an absent path is a no-op");
+    }
+
+    #[test]
+    #[ignore = "isolated socket fixture invoked by its parent test"]
+    fn stale_socket_subprocess_fixture() {
+        let path = std::env::var_os("MVM_TEST_STALE_SOCKET_PATH")
+            .expect("the parent test supplies the socket path");
+        let _listener = std::os::unix::net::UnixListener::bind(Path::new(&path)).unwrap();
     }
 
     #[test]
@@ -2658,7 +2398,9 @@ mod tests {
             transport: EndpointTransport::Uds {
                 path: dir.join("vsock-5253.sock"),
             },
-            egress_proxy: None,
+            // Isolate sidecar rollback from host-config readability: this test
+            // intentionally makes MVM_HOME unreadable as a directory.
+            egress_proxy: Some(EgressProxySpawnConfig::default()),
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,
@@ -2937,119 +2679,6 @@ mod tests {
         let round: mvm_core::plan::NetworkLimits =
             serde_json::from_value(cfg["network_limits"].clone()).unwrap();
         assert_eq!(round, params.network_limits);
-    }
-
-    // ── the cert-to-guest / key-to-endpoint split ──
-
-    // The whole point of the egress CA: the guest may trust the per-VM cert (to
-    // accept host-terminated bound-host TLS), but the KEY must never reach the
-    // guest — same claim-13 "no key on the guest" invariant the substitution
-    // channel already upholds. Assert the split holds by construction.
-    #[test]
-    fn egress_tls_delivery_gives_cert_to_guest_key_to_endpoint() {
-        let d = build_egress_tls_delivery(&["api.openai.com"]).expect("mint");
-
-        // The endpoint gets BOTH halves (it serves leaves under this CA).
-        assert!(d.cert_pem().contains("BEGIN CERTIFICATE"));
-        assert!(d.key_pem().contains("PRIVATE KEY"));
-
-        // INVARIANT: no private-key material rides along with the certificate,
-        // which is the only half a guest is ever handed.
-        assert!(
-            !d.cert_pem().contains("PRIVATE KEY"),
-            "the egress CA key leaked into the guest-delivered certificate"
-        );
-    }
-
-    /// The recorded host set is the same slice the certificate's permitted
-    /// subtrees were built from, so `first_unpermitted` answers for the
-    /// certificate without re-parsing it. `mvm-core`'s
-    /// `the_name_constraints_cover_exactly_the_plans_bound_hosts` is the other
-    /// half: that the extension really carries what `mint` was handed.
-    #[test]
-    fn the_delivery_records_exactly_the_hosts_it_was_minted_for() {
-        let d = build_egress_tls_delivery(&["api.openai.com", "api.anthropic.com"]).expect("mint");
-        assert_eq!(d.bound_hosts(), ["api.openai.com", "api.anthropic.com"]);
-        assert_eq!(
-            d.first_unpermitted(&["api.anthropic.com".to_string()]),
-            None,
-            "a destination the certificate was minted for is permitted"
-        );
-        assert_eq!(
-            d.first_unpermitted(&[
-                "api.openai.com".to_string(),
-                "files.example.com".to_string(),
-            ]),
-            Some("files.example.com"),
-            "and one it was not is named"
-        );
-    }
-
-    // The key-carrying delivery struct must not expose secret bytes via Debug
-    // (xtask check-no-display-on-secret-types parity).
-    #[test]
-    fn egress_tls_delivery_debug_is_redacted() {
-        let d = build_egress_tls_delivery(&["api.openai.com"]).expect("mint");
-        let dbg = format!("{d:?}");
-        assert!(
-            !dbg.contains("PRIVATE KEY"),
-            "key bytes leaked via Debug: {dbg}"
-        );
-    }
-
-    #[test]
-    fn a_persisted_egress_ca_round_trips_and_is_owner_only() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let minted = build_egress_tls_delivery(&["api.openai.com"]).expect("mint");
-        persist_egress_tls_delivery(dir.path(), &minted).expect("persist");
-
-        let mode = std::fs::metadata(dir.path().join(EGRESS_CA_STATE_FILE))
-            .expect("stat")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "the persisted egress CA carries its key");
-
-        let loaded = load_egress_tls_delivery(dir.path())
-            .expect("load")
-            .expect("a persisted CA is there");
-        assert_eq!(loaded, minted);
-    }
-
-    #[test]
-    fn persisting_over_a_world_readable_predecessor_leaves_the_key_owner_only() {
-        // `OpenOptions::mode()` applies at creation, so a plain write through an
-        // existing 0644 file leaves the key at 0644. Rewriting a state dir
-        // happens on every warm claim, so this is the common path, not an edge.
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join(EGRESS_CA_STATE_FILE);
-        std::fs::write(&path, b"{}").expect("seed a predecessor");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-            .expect("seed its mode");
-
-        let minted = build_egress_tls_delivery(&["api.openai.com"]).expect("mint");
-        persist_egress_tls_delivery(dir.path(), &minted).expect("persist");
-
-        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "a rewritten egress CA must not stay readable");
-        assert_eq!(
-            load_egress_tls_delivery(dir.path())
-                .expect("load")
-                .expect("a persisted CA is there"),
-            minted
-        );
-    }
-
-    #[test]
-    fn a_state_dir_without_a_persisted_egress_ca_loads_as_absent() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert!(
-            load_egress_tls_delivery(dir.path())
-                .expect("absence is not an error")
-                .is_none()
-        );
     }
 
     #[test]

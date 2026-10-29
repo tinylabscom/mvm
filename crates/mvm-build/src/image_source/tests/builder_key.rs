@@ -53,14 +53,14 @@ version = "0.1.0"
 dependencies = ["libc"]
 
 [[package]]
-name = "mvm-build"
+name = "mvm-builder-guest"
 version = "0.1.0"
 dependencies = ["mvm-setpriv"]
 
 [[package]]
 name = "mvm-cli"
 version = "0.1.0"
-dependencies = ["clap", "mvm-build"]
+dependencies = ["clap", "mvm-builder-guest"]
 
 [[package]]
 name = "libc"
@@ -105,13 +105,13 @@ fn mvm_checkout(mvm: &Path) {
     );
     crate_at(
         mvm,
-        "mvm-build",
+        "mvm-builder-guest",
         "[dependencies]\nmvm-setpriv = { path = \"../mvm-setpriv\" }\n",
     );
     crate_at(
         mvm,
         "mvm-cli",
-        "[dependencies]\nclap.workspace = true\nmvm-build = { path = \"../mvm-build\" }\n",
+        "[dependencies]\nclap.workspace = true\nmvm-builder-guest = { path = \"../mvm-builder-guest\" }\n",
     );
     write(&mvm.join("nix/flake.nix"), "{ outputs = _: { }; }\n");
     write(&mvm.join("nix/lib/workspace-filter.nix"), "{ }\n");
@@ -121,9 +121,7 @@ fn mvm_checkout(mvm: &Path) {
 }
 
 fn commit_all(dir: &Path, message: &str) {
-    git(dir, &["init", "-q"]);
-    git(dir, &["add", "-A"]);
-    git(dir, &["commit", "-q", "-m", message]);
+    repository::commit_all(dir, message);
 }
 
 /// An image checkout whose builder source is `builder_image_nix`, built to
@@ -199,6 +197,7 @@ type MvmEdit = (&'static str, fn(&Path));
 
 #[test]
 fn the_builder_image_is_keyed_on_the_sources_it_reads_not_the_checkout() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     assert!(
         matches!(pair.builder_key().mvm, MvmSourceIdentity::ConsumedInputs(_)),
@@ -209,6 +208,7 @@ fn the_builder_image_is_keyed_on_the_sources_it_reads_not_the_checkout() {
 
 #[test]
 fn an_mvm_edit_outside_what_the_builder_image_reads_leaves_its_key_alone() {
+    let _env = TestEnv::new();
     let edits: [MvmEdit; 4] = [
         ("a crate the image never compiles", |mvm| {
             write(&mvm.join("crates/mvm-cli/src/lib.rs"), "pub fn g() {}\n");
@@ -245,6 +245,7 @@ fn an_mvm_edit_outside_what_the_builder_image_reads_leaves_its_key_alone() {
 
 #[test]
 fn an_edit_to_each_source_the_builder_image_reads_changes_its_key() {
+    let _env = TestEnv::new();
     let edits: [MvmEdit; 9] = [
         ("the top-level Nix flake", |mvm| {
             write(&mvm.join("nix/flake.nix"), "{ outputs = _: { x = 1; }; }\n");
@@ -262,7 +263,10 @@ fn an_edit_to_each_source_the_builder_image_reads_changes_its_key() {
             );
         }),
         ("the package the baked host binaries come from", |mvm| {
-            write(&mvm.join("crates/mvm-build/src/lib.rs"), "pub fn g() {}\n");
+            write(
+                &mvm.join("crates/mvm-builder-guest/src/lib.rs"),
+                "pub fn g() {}\n",
+            );
         }),
         ("a lock bump of a crate setpriv reaches", |mvm| {
             write(&mvm.join("Cargo.lock"), &cargo_lock("0.2.1", "4.0.0"));
@@ -362,6 +366,7 @@ fn an_image_without_mvm_binaries_is_not_keyed_on_setprivs_source() {
 
 #[test]
 fn other_roles_still_key_on_the_whole_mvm_checkout() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     let before = pair.key_for(ImageBuildRole::RootlessTenant);
     assert_eq!(
@@ -379,6 +384,7 @@ fn other_roles_still_key_on_the_whole_mvm_checkout() {
 
 #[test]
 fn a_builder_image_reading_an_unlisted_mvm_path_keys_on_the_whole_checkout() {
+    let _env = TestEnv::new();
     for (what, nix) in [
         (
             "a read outside the listed inputs",
@@ -397,6 +403,7 @@ fn a_builder_image_reading_an_unlisted_mvm_path_keys_on_the_whole_checkout() {
 
 #[test]
 fn a_builder_entry_is_served_after_an_unrelated_mvm_commit() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     let cache = LocalImageCache::at(pair.tmp.path().join("cache"));
     let roles = &[ImageSetRole::WorkloadKernel(
@@ -417,8 +424,7 @@ fn a_builder_entry_is_served_after_an_unrelated_mvm_commit() {
         &pair.mvm().join("crates/mvm-cli/src/lib.rs"),
         "pub fn g() {}\n",
     );
-    git(&pair.mvm(), &["add", "-A"]);
-    git(&pair.mvm(), &["commit", "-q", "-m", "an unrelated change"]);
+    repository::commit_all(&pair.mvm(), "an unrelated change");
     assert_ne!(Some(pair.whole_checkout()), built_from.mvm);
 
     let again = pair.builder_key();
@@ -434,6 +440,7 @@ fn a_builder_entry_is_served_after_an_unrelated_mvm_commit() {
 
 #[test]
 fn a_builder_entry_is_not_served_after_an_edit_to_what_it_reads() {
+    let _env = TestEnv::new();
     let pair = Pair::new();
     let key = pair.builder_key();
     let cache = LocalImageCache::at(pair.tmp.path().join("cache"));

@@ -23,6 +23,18 @@ source "$REPO/scripts/e2e-phase-timings.sh"
 # shellcheck source=scripts/sdk-hostlib.sh
 source "$REPO/scripts/sdk-hostlib.sh"
 
+# Diagnostic initialization precedes every build/bootstrap operation. A refusal
+# disables collection for this invocation, never overwriting or uploading an old
+# destination, and never replacing the suite's own failure/cleanup outcome.
+unset MVM_E2E_FAILURE_INITIALIZED
+if [[ "${1:-}" != "--clean-only" && -n "${MVM_E2E_FAILURE_MANIFEST:-}" ]]; then
+  if MVM_E2E_FAILURE_INITIALIZED="$(python3 "$REPO/scripts/e2e-failure-manifest.py")"; then
+    export MVM_E2E_FAILURE_INITIALIZED
+  else
+    unset MVM_E2E_FAILURE_MANIFEST MVM_E2E_FAILURE_INITIALIZED
+  fi
+fi
+
 # Prefer an explicit `MVM_E2E_HOME`, then `MVM_HOME`, then the real home.
 #
 # `scripts/dev-env.sh` gives each worktree its own `MVM_HOME` *and* its own
@@ -81,6 +93,8 @@ echo "    profile: $E2E_PROFILE"
 # first attempt and it under-reaped: the SDK scenarios name their guests
 # `sdk-<registry>-<digest>`, not `bdd-*`, so those leaked on every run.
 # Snapshotting needs no list of prefixes to keep in sync with the suite.
+# This selects cleanup candidates in an isolated home, not process authority:
+# only the existing stop/rm APIs may prove ownership and remove runtime state.
 #
 # The snapshot lives in the home rather than in a shell variable so that
 # `--clean-only` can still reap after a run was killed hard enough to skip its
@@ -90,76 +104,88 @@ echo "    profile: $E2E_PROFILE"
 # the next run fail on a collision that reads as a broken verb.
 # ---------------------------------------------------------------------------
 SNAPSHOT="$E2E_HOME/.e2e-machines-before"
+CLEANUP_BLOCKED=0
 
 machine_names() {
   MVM_HOME="$E2E_HOME" "$MVMCTL" machine ls 2>/dev/null \
-    | awk 'NR>1 && NF {print $1}' | sort || true
+    | awk 'NR>1 && NF {print $1}' | sort
+}
+
+cleanup_failure() {
+  CLEANUP_BLOCKED=1
+  printf '!!! %s; retained evidence: %s\n' "$1" "$E2E_HOME" >&2
 }
 
 snapshot_machines() {
-  ensure_private_home "$E2E_HOME"
-  machine_names > "$SNAPSHOT" 2>/dev/null || : > "$SNAPSHOT"
+  local names staged
+  if ! ensure_private_home "$E2E_HOME" || ! names="$(machine_names)"; then
+    cleanup_failure "could not establish the machine baseline; cleanup disabled"
+    return 1
+  fi
+  if [[ -d "$SNAPSHOT" || -L "$SNAPSHOT" ]] \
+    || ! staged="$(mktemp "$SNAPSHOT.XXXXXX")"; then
+    cleanup_failure "could not stage the machine baseline; cleanup disabled"
+    return 1
+  fi
+  if ! printf '%s\n' "$names" | awk 'NF' > "$staged" \
+    || ! mv -f "$staged" "$SNAPSHOT"; then
+    cleanup_failure "could not persist the machine baseline; cleanup disabled"
+    rm -f "$staged" || true
+    return 1
+  fi
 }
 
 reap() {
   local phase="$1"
-  [[ -x "$MVMCTL" ]] || return 0
+  if [[ "$CLEANUP_BLOCKED" != 0 ]]; then
+    cleanup_failure "$phase cleanup refused after an earlier cleanup or baseline failure"
+    return 1
+  fi
+  if [[ ! -x "$MVMCTL" ]]; then
+    cleanup_failure "$phase cleanup has no usable mvmctl"
+    return 1
+  fi
 
   # Without a snapshot there is no way to tell this run's machines from
   # someone else's, and deleting the wrong one is worse than leaking.
-  if [[ ! -f "$SNAPSHOT" ]]; then
-    echo "==> $phase cleanup: no snapshot to diff against, leaving machines alone"
+  # Only a first run may proceed to establish its baseline.
+  if [[ ! -e "$SNAPSHOT" && ! -L "$SNAPSHOT" && "$phase" == "pre-run" ]]; then
+    echo "==> pre-run cleanup: no previous baseline, leaving machines alone"
     return 0
   fi
+  if [[ ! -f "$SNAPSHOT" || -L "$SNAPSHOT" ]]; then
+    cleanup_failure "$phase cleanup has no usable baseline; leaving machines alone"
+    return 1
+  fi
 
-  local created
-  created="$(comm -13 "$SNAPSHOT" <(machine_names) 2>/dev/null || true)"
+  local current created
+  if ! current="$(machine_names)"; then
+    cleanup_failure "$phase cleanup could not list machines; leaving machines alone"
+    return 1
+  fi
+  if ! created="$(printf '%s\n' "$current" | awk 'NF' | comm -13 "$SNAPSHOT" -)"; then
+    cleanup_failure "$phase cleanup could not compare the baseline; leaving machines alone"
+    return 1
+  fi
 
-  REAPED_NAMES="$created"
   if [[ -n "$created" ]]; then
     echo "==> $phase cleanup: reaping $(echo "$created" | wc -w | tr -d ' ') machine(s) this run created"
     while read -r name; do
       [[ -z "$name" ]] && continue
       echo "    - $name"
-      MVM_HOME="$E2E_HOME" "$MVMCTL" machine stop "$name" --yes >/dev/null 2>&1 || true
-      MVM_HOME="$E2E_HOME" "$MVMCTL" machine rm "$name" --yes >/dev/null 2>&1 || true
+      if ! MVM_HOME="$E2E_HOME" "$MVMCTL" machine stop "$name" --yes >/dev/null 2>&1; then
+        cleanup_failure "$phase cleanup could not confirm stop; removal refused"
+        return 1
+      fi
+      if ! MVM_HOME="$E2E_HOME" "$MVMCTL" machine rm "$name" --yes >/dev/null 2>&1; then
+        cleanup_failure "$phase cleanup could not remove the stopped machine"
+        return 1
+      fi
     done <<< "$created"
   elif [[ "$phase" == "pre-run" ]]; then
     echo "==> pre-run cleanup: nothing left over"
   fi
-
-  # State directories whose spec is gone but whose runtime directory survived.
-  if [[ -d "$E2E_HOME/vms" ]]; then
-    while read -r name; do
-      [[ -z "$name" ]] && continue
-      rm -rf "$E2E_HOME/vms/$name" 2>/dev/null || true
-    done <<< "$created"
-  fi
-}
-
-# Per-VM supervisors outlive a killed suite and keep a vCPU thread and a vsock
-# socket alive. Only supervisors for machines this run created are signalled —
-# another session may be driving its own guests out of the same home, and its
-# supervisor is not ours to kill.
-REAPED_NAMES=""
-reap_orphan_supervisors() {
-  [[ -n "$REAPED_NAMES" ]] || return 0
-  local pids
-  pids="$(pgrep -f 'mvm-(hvf|libkrun)-supervisor' 2>/dev/null || true)"
-  [[ -z "$pids" ]] && return 0
-  for pid in $pids; do
-    local args
-    args="$(ps -o args= -p "$pid" 2>/dev/null || true)"
-    while read -r name; do
-      [[ -z "$name" ]] && continue
-      case "$args" in
-        *"$name"*)
-          echo "    - reaping supervisor $pid for $name"
-          kill -TERM "$pid" 2>/dev/null || true
-          ;;
-      esac
-    done <<< "$REAPED_NAMES"
-  done
+  # Anything not removed by the ownership-aware CLI remains for recovery.
 }
 
 # ---------------------------------------------------------------------------
@@ -201,13 +227,19 @@ stop_watcher() {
 
 on_exit() {
   local status=$?
+  trap - EXIT
   stop_watcher
   echo
-  e2e_phase_summary "Documented surface phase timings ($(uname -s))"
-  reap "post-run"
-  reap_orphan_supervisors
-  release_lock
-  return "$status"
+  e2e_phase_summary "Documented surface phase timings ($(uname -s))" || {
+    [[ "$status" != 0 ]] || status=1
+  }
+  if ! reap "post-run"; then
+    [[ "$status" != 0 ]] || status=1
+  fi
+  if declare -F release_lock >/dev/null; then
+    release_lock || true
+  fi
+  exit "$status"
 }
 trap on_exit EXIT
 trap 'echo; echo "!!! interrupted — cleaning up"; exit 130' INT TERM
@@ -227,11 +259,13 @@ if [[ "${1:-}" == "--clean-only" ]]; then
     trap - EXIT
     exit 1
   fi
-  reap "manual"
-  reap_orphan_supervisors
+  cleanup_status=0
+  reap "manual" || cleanup_status=$?
   trap - EXIT
-  echo "==> clean"
-  exit 0
+  if [[ "$cleanup_status" == 0 ]]; then
+    echo "==> clean"
+  fi
+  exit "$cleanup_status"
 fi
 
 # Two runs against one home corrupt each other: they share the machine
@@ -320,6 +354,29 @@ just payload::supervisors --profile "$E2E_PROFILE"
 # `mvmctl run --mode live` boundary.
 build_sdk_hostlib "$MVMCTL" "$E2E_PROFILE"
 
+if [[ -n "${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}" ]]; then
+  # Keep signed candidate discovery out of the ordinary consumer executable
+  # prefix and every isolated consumer home. This is producer preparation,
+  # not a cold-consumer or logical-pull witness.
+  producer_root="$(mktemp -d "${TMPDIR:-/tmp}/mvm-e2e-producer.XXXXXX")"
+  python3 scripts/runtime-proof-candidate.py stage-producer \
+    --candidate-dir "$MVM_E2E_RUNTIME_CANDIDATE_DIR" --cli "$MVMCTL" \
+    --out-dir "$producer_root/bin"
+  export MVM_E2E_PRODUCER_MVMCTL="$producer_root/bin/mvmctl"
+  # Offline pack admission needs an applied image-set revocation list, and
+  # `image revocations update` fetches nothing. Download the published pair;
+  # the update verifies the signature and freshness before applying it.
+  revocations_dir="$producer_root/revocations"
+  mkdir -p "$revocations_dir"
+  revocations_url="https://github.com/tinylabscom/mvm-images/releases/download/revocations"
+  for name in revocations.json revocations.json.bundle; do
+    curl --fail --silent --show-error --location --retry 3 \
+      --output "$revocations_dir/$name" "$revocations_url/$name"
+  done
+  export MVM_E2E_IMAGE_REVOCATIONS_DIR="$revocations_dir"
+  echo "==> producer-only candidate prefix: $producer_root (retained; cleanup requires confirmed absence of readers)"
+fi
+
 helpers_present() {
   local root="${CARGO_TARGET_DIR:-target}"
   find "$root" -type f -name mvm-network-endpoint 2>/dev/null | grep -q . || return 1
@@ -355,7 +412,6 @@ cargo build -p xtask
 # still holding its name makes the next run fail on a collision that reads as a
 # broken verb.
 reap "pre-run"
-reap_orphan_supervisors
 # Baseline for this run: everything above is the previous run's mess, and
 # everything that appears from here is ours.
 snapshot_machines
@@ -441,7 +497,7 @@ fi
 # sidecar this CLI reads. No builder VM starts.
 e2e_phase sdk-sidecar
 echo "==> packing the SDK sidecar from this tree's guest runtime"
-MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build --source build
+MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" dev sdk-sidecar build --source build
 
 # The dev default image (`mvmctl run` with no image) is the writable variant.
 # With no image checkout selected, `image dev ensure` installs it from the
@@ -476,7 +532,7 @@ fi
 warm_launch_artifacts() {
   echo "==> warming launch artifacts (runtime overlay + universal initramfs)"
 
-  MVM_HOME="$E2E_HOME" "$MVMCTL" build runtime-overlay build >/dev/null 2>&1 \
+  MVM_HOME="$E2E_HOME" "$MVMCTL" dev runtime-overlay build >/dev/null 2>&1 \
     && echo "    runtime overlay ready" \
     || echo "    runtime overlay: not warmed (scenarios needing it will say so)"
 
@@ -747,6 +803,13 @@ SUITE_STARTED=""
 # runner must never be that host, so opting this lane in would be the failure.
 ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share,needs-unenforceable-wall-clock,needs-warm-claim,needs-destructive-lab-opt-in"
 
+# Portable bundle creation needs a signed runtime for this exact release. The
+# nightly `main` run has no versioned candidate, so name those scenarios as
+# skipped there; release.yml supplies the signed candidate and must run them.
+if [[ "${MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP:-false}" == "true" && -z "${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}" ]]; then
+  ALLOWED_SKIPS="$ALLOWED_SKIPS,needs-runtime-candidate"
+fi
+
 # `needs-firecracker` is deliberately intolerable above, and stays that way on
 # the lane that runs Firecracker. On macOS there is no `/dev/kvm` and no
 # Firecracker to put on PATH, so the skip is a property of the tier rather than
@@ -800,6 +863,7 @@ MVM_BDD_GUEST_BIN_DIR="$MVM_BDD_GUEST_BIN_DIR" \
 MVM_BDD_STRICT_SKIPS=1 \
 MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \
+MVM_HOME="$E2E_HOME" \
   python3 scripts/run-bounded-command.py \
     --timeout "$E2E_TIMEOUT_SECS" \
     --grace 5 \

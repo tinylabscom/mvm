@@ -25,101 +25,20 @@
 //! - which images the payload boots — [`abi`], against the image's
 //!   [`IMAGE_ABI_MARKER`].
 
-pub mod abi;
-pub mod cmdline;
-pub mod payload;
+pub use mvm_builder_guest::builder_boot::*;
+
+#[cfg(unix)]
 pub mod stage;
 
-pub use crate::builder_guest_paths::{RUNTIME_HOST_BIN_DIR, guest_host_binary};
-pub use abi::{
-    BootAbiError, IMAGE_ABI_MARKER, baked_only_abis, check_image_abi, parse_image_abi_marker,
-    payload_supported_abis,
-};
-pub use cmdline::{
-    BuilderBoot, LIBKRUN_BUILDER_CONSOLE_BASE, Stage1Cmdline, Stage1CmdlineError,
-    builder_boot_cmdline, parse_stage1_cmdline,
-};
-pub use payload::{
-    BootPayloadError, BuilderBootPayload, BuilderBootPayloadBuilder, PayloadDigest,
-    PayloadManifest, install_payload, verify_unpacked_payload,
-};
+#[cfg(unix)]
 pub use stage::{
     BootPayloadSource, PAYLOAD_FILE_NAME, StageBootError, current_payload_digest,
     read_image_boot_abi, register_boot_payload_source, stage_builder_boot, stage_image_boot,
     supported_image_abis,
 };
 
-/// Where the payload's binaries and manifest sit inside the initramfs,
-/// relative to its root.
-pub const PAYLOAD_DIR_IN_INITRAMFS: &str = "mvm/host-bins";
-
-/// The manifest file inside the payload directory.
-pub const PAYLOAD_MANIFEST_NAME: &str = "MANIFEST";
-
-/// The member that is also the initramfs `/init`.
-pub const STAGE1_MEMBER: &str = "mvm-host-vm-init";
-
-/// The kernel command-line key carrying the payload digest.
-pub const PAYLOAD_CMDLINE_KEY: &str = "mvm.boot_payload";
-
-/// The environment variable stage 1 sets when it re-executes itself as the
-/// builder's PID 1. The kernel command line cannot change between the two
-/// stages, so this is how the second one knows the first already ran.
-pub const STAGE_ENV: &str = "MVM_BUILDER_BOOT_STAGE";
-
-/// The value of [`STAGE_ENV`] in stage 2.
-pub const STAGE2: &str = "2";
-
-/// The same resolution for a shell script the guest runs: assign `var` the
-/// payload's copy of `name` when it is there, the image's baked copy
-/// otherwise. A job script must not name `/sbin` itself, or it runs a stale
-/// baked binary on a legacy image and finds none on one that carries no
-/// builder binaries.
-pub fn guest_host_binary_sh(var: &str, name: &str) -> String {
-    let (runtime, legacy) = (
-        crate::builder_guest_paths::RUNTIME_HOST_BIN_DIR,
-        crate::builder_guest_paths::LEGACY_HOST_BIN_DIR,
-    );
-    format!(
-        "{var}=\"{runtime}/{name}\"\n\
-         [ -f \"${var}\" ] || {var}=\"{legacy}/{name}\"\n"
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The shell form resolves exactly as the Rust one does.
-    #[test]
-    fn the_shell_form_prefers_the_payload_copy() {
-        let root = tempfile::tempdir().unwrap();
-        let script = guest_host_binary_sh("BIN", "mvm-host-vm-init")
-            .replace(
-                crate::builder_guest_paths::RUNTIME_HOST_BIN_DIR,
-                &root.path().join("run").to_string_lossy(),
-            )
-            .replace(
-                crate::builder_guest_paths::LEGACY_HOST_BIN_DIR,
-                &root.path().join("sbin").to_string_lossy(),
-            )
-            + "printf %s \"$BIN\"\n";
-        let resolve = || {
-            let out = std::process::Command::new("sh")
-                .args(["-c", &script])
-                .output()
-                .unwrap();
-            String::from_utf8(out.stdout).unwrap()
-        };
-        assert_eq!(
-            resolve(),
-            root.path().join("sbin/mvm-host-vm-init").to_string_lossy()
-        );
-        std::fs::create_dir_all(root.path().join("run")).unwrap();
-        std::fs::write(root.path().join("run/mvm-host-vm-init"), b"payload").unwrap();
-        assert_eq!(
-            resolve(),
-            root.path().join("run/mvm-host-vm-init").to_string_lossy()
-        );
-    }
+/// Hosts without a builder runtime cannot register a boot payload.
+#[cfg(not(unix))]
+pub fn supported_image_abis() -> mvm_core::image_set::BuilderBootAbiRange {
+    baked_only_abis()
 }

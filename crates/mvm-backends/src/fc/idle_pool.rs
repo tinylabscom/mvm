@@ -76,6 +76,11 @@ const SPAWN_SCOPE_FILE: &str = "spawn-scope";
 const API_SOCKET: &str = "fc.socket";
 const PID_FILE: &str = "fc.pid";
 
+/// Journal written into the claimed entry before adoption begins. Contains the
+/// target `state_dir` as a single line, so crash recovery knows where the claim
+/// was heading and can either finish or roll back.
+const CLAIM_JOURNAL: &str = "claim.journal";
+
 /// What an idle process was prepared for. Two launches of the same shape get
 /// the same scope limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +189,13 @@ fn is_pool_socket_path(path: &Path) -> bool {
 /// Returns `true` when the VM now has a running, unconfigured Firecracker
 /// exactly as a cold start would have left it. `false` means the caller starts
 /// one itself; nothing it needs was touched.
+///
+/// Crash recovery: the claim writes a journal inside the claimed entry before
+/// it begins moving files, recording the target `state_dir`. If the process
+/// dies mid-adopt, [`recover_incomplete_claims`] reads the journal back and
+/// cleans up — destroying the process if it is still running. The journal
+/// uses the same identity-stable signalling as the pool itself (`EndpointPid`
+/// records), never bare numeric PIDs.
 pub fn claim(shape: IdleShape, state_dir: &Path, api_socket: &Path) -> bool {
     let root = mvm_core::config::fc_idle_pool_dir();
     // Only a VM whose sockets live in its state dir can take a process whose
@@ -191,18 +203,33 @@ pub fn claim(shape: IdleShape, state_dir: &Path, api_socket: &Path) -> bool {
     if api_socket.parent() != Some(state_dir) {
         return false;
     }
+    // Clean up any claimed entries left by a crashed predecessor before
+    // scanning for ready entries, so a stale claim does not block the pool.
+    recover_incomplete_claims_in(&root);
     for entry in ready_entries(&root, shape) {
+        // Use a random hex token, not a PID, so the claimed name is
+        // identity-stable across PID-reuse scenarios.
+        let token = claim_token();
         let claimed = root.join(format!(
-            "{CLAIMED_PREFIX}{}-{:x}",
+            "{CLAIMED_PREFIX}{}-{token}",
             entry
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            std::process::id()
         ));
         // The atomic step. A concurrent launch or the reaper that renamed it
         // first wins; try the next one.
         if std::fs::rename(&entry, &claimed).is_err() {
+            continue;
+        }
+        // Persist the claim journal before any file moves, so crash recovery
+        // knows what this claim was targeting.
+        if let Err(error) = write_claim_journal(&claimed, state_dir) {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "could not persist the claim journal; rolling back"
+            );
+            let _ = std::fs::rename(&claimed, &entry);
             continue;
         }
         stop_reaper(&claimed, &entry);
@@ -223,8 +250,112 @@ pub fn claim(shape: IdleShape, state_dir: &Path, api_socket: &Path) -> bool {
     false
 }
 
-/// Idle entries of `shape` whose process is running and whose socket exists,
-/// oldest first.
+/// A random hex token for a claimed directory name, independent of the
+/// claimant's PID. Used only as a collision-avoidance suffix, never for
+/// signalling — identity-stable signalling uses `EndpointPid` records.
+fn claim_token() -> String {
+    // Read 8 bytes from /dev/urandom (always available on Linux, where the
+    // pool runs). Falls back to timestamp + pid, which is still not a bare
+    // PID used for signalling.
+    let mut buf = [0u8; 8];
+    match std::fs::File::open("/dev/urandom").and_then(|mut f| {
+        use std::io::Read as _;
+        f.read_exact(&mut buf)
+    }) {
+        Ok(()) => {
+            let mut hex = String::with_capacity(16);
+            for b in &buf {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{b:02x}");
+            }
+            hex
+        }
+        Err(_) => {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            format!("{:x}{:x}", nanos & 0xffff_ffff, std::process::id())
+        }
+    }
+}
+
+/// Record which `state_dir` this claim targets, so crash recovery can clean up.
+fn write_claim_journal(claimed: &Path, state_dir: &Path) -> Result<()> {
+    write_private(
+        &claimed.join(CLAIM_JOURNAL),
+        state_dir.to_string_lossy().as_bytes(),
+    )
+    .context("writing claim journal")
+}
+
+/// Read the state-dir target from a claimed entry's journal.
+fn read_claim_journal(claimed: &Path) -> Option<PathBuf> {
+    read_private(&claimed.join(CLAIM_JOURNAL)).map(|s| PathBuf::from(s.trim()))
+}
+
+/// Clean up claimed entries left by a process that died mid-adopt.
+///
+/// For each `claimed-*` directory with a journal, the idle Firecracker inside
+/// it is stopped (through its identity record, never a bare PID) and the entry
+/// is removed. Files that were already moved into the target state dir are
+/// cleaned up there too.
+///
+/// Called on the next launch, or by a host-agent restart. Safe to call
+/// concurrently — each entry is handled at most once because destroying
+/// removes the directory.
+pub fn recover_incomplete_claims() {
+    recover_incomplete_claims_in(&mvm_core::config::fc_idle_pool_dir());
+}
+
+fn recover_incomplete_claims_in(root: &Path) {
+    let Ok(read) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if !name_str.starts_with(CLAIMED_PREFIX) {
+            continue;
+        }
+        let claimed = entry.path();
+        let Some(state_dir) = read_claim_journal(&claimed) else {
+            // No journal means either a pre-crash incomplete without a
+            // journal (shouldn't happen with new code) or the cleanup
+            // already ran. Either way, destroy if stale.
+            if older_than(&claimed, ABANDONED_AFTER) {
+                let origin = infer_origin_dir(root, name_str);
+                destroy(&claimed, &origin, &claimed);
+            }
+            continue;
+        };
+        let origin = infer_origin_dir(root, name_str);
+        tracing::info!(
+            claimed = %claimed.display(),
+            state_dir = %state_dir.display(),
+            "recovering incomplete idle-pool claim"
+        );
+        destroy(&claimed, &origin, &state_dir);
+    }
+}
+
+/// Reconstruct the original `idle-*` directory path from a `claimed-*` name.
+fn infer_origin_dir(root: &Path, claimed_name: &str) -> PathBuf {
+    // claimed_name = "claimed-idle-XXXX-TOKEN". Strip the "claimed-" prefix,
+    // then strip the last "-TOKEN" suffix to recover "idle-XXXX".
+    let after_prefix = claimed_name
+        .strip_prefix(CLAIMED_PREFIX)
+        .unwrap_or(claimed_name);
+    let origin_name = match after_prefix.rfind('-') {
+        Some(pos) if pos > 0 => &after_prefix[..pos],
+        _ => after_prefix,
+    };
+    root.join(origin_name)
+}
+
+/// Idle entries of `shape` whose process is running and whose socket has been
+/// handed privately to the invoking user, oldest first.
 fn ready_entries(root: &Path, shape: IdleShape) -> Vec<PathBuf> {
     let mut entries: Vec<(std::time::SystemTime, PathBuf)> = idle_entries(root)
         .into_iter()
@@ -260,10 +391,16 @@ fn entry_shape(dir: &Path) -> Option<IdleShape> {
 }
 
 fn is_ready(dir: &Path) -> bool {
-    use std::os::unix::fs::FileTypeExt as _;
-    let socket_up =
-        std::fs::symlink_metadata(dir.join(API_SOCKET)).is_ok_and(|m| m.file_type().is_socket());
-    socket_up && confirmed_firecracker(dir, &dir.join(API_SOCKET)).is_some()
+    is_ready_socket(&dir.join(API_SOCKET), effective_uid())
+        && confirmed_firecracker(dir, &dir.join(API_SOCKET)).is_some()
+}
+
+fn is_ready_socket(socket: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    // The process and socket appear before refill finishes the ownership
+    // handoff. Claiming earlier moves the root-owned socket out from under it.
+    std::fs::symlink_metadata(socket)
+        .is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid && m.mode() & 0o7777 == 0o600)
 }
 
 fn read_pid(path: &Path) -> Option<u32> {
@@ -334,6 +471,9 @@ fn create_private_dir(path: &Path) -> Result<()> {
 
 /// Move a claimed process's files into the VM's state dir, pid marker last.
 fn adopt(claimed: &Path, origin_dir: &Path, state_dir: &Path, api_socket: &Path) -> Result<()> {
+    if !is_ready_socket(&claimed.join(API_SOCKET), effective_uid()) {
+        bail!("the claimed idle Firecracker socket is not private to the invoking user");
+    }
     if confirmed_firecracker(claimed, &origin_dir.join(API_SOCKET)).is_none() {
         bail!("the claimed idle Firecracker is no longer the process its entry recorded");
     }
@@ -672,6 +812,65 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_socket_is_not_claimable_before_its_private_ownership_handoff() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join(API_SOCKET);
+        let uid = effective_uid();
+        assert!(!is_ready_socket(&socket, uid), "missing socket");
+        std::fs::write(&socket, b"not a socket").unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!is_ready_socket(&socket, uid), "regular file");
+        std::fs::remove_file(&socket).unwrap();
+        let _listener = UnixListener::bind(&socket).unwrap();
+        for mode in [0o755, 0o644, 0o666, 0o400] {
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(!is_ready_socket(&socket, uid), "unadopted mode {mode:o}");
+        }
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            !is_ready_socket(&socket, uid.wrapping_add(1)),
+            "private socket still owned by the launcher, not the caller"
+        );
+        assert!(is_ready_socket(&socket, uid), "handoff complete");
+
+        let claimed = dir.path().join("claimed.socket");
+        std::fs::rename(&socket, &claimed).unwrap();
+        assert!(is_ready_socket(&claimed, uid), "rename preserves custody");
+        std::os::unix::fs::symlink(&claimed, &socket).unwrap();
+        assert!(!is_ready_socket(&socket, uid), "symlink is not a socket");
+        std::fs::set_permissions(&claimed, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            !is_ready_socket(&claimed, uid),
+            "selection must recheck permissions after a rename"
+        );
+    }
+
+    #[test]
+    fn adoption_rechecks_socket_permissions_before_moving_any_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let claimed = root.path().join("claimed-idle-a-1");
+        create_private_dir(&claimed).unwrap();
+        let socket = claimed.join(API_SOCKET);
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let api = state.path().join(API_SOCKET);
+        let error = adopt(&claimed, &root.path().join("idle-a"), state.path(), &api).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not private to the invoking user")
+        );
+        assert!(socket.exists(), "rejection must not move the socket");
+        assert!(!api.exists(), "rejection must not adopt an unready socket");
+    }
+
+    #[test]
     fn a_claim_origin_is_honoured_only_when_it_names_a_pool_socket() {
         let state = tempfile::tempdir().unwrap();
         let api = state.path().join(API_SOCKET);
@@ -896,9 +1095,65 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn entry_dir_for_claim(root: &Path) -> PathBuf {
-        let dir = root.join(format!("claimed-idle-a-{}", entry_id()));
+        let dir = root.join(format!("claimed-idle-a-{}", claim_token()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The claim token never contains the caller's PID as a plain decimal
+    /// number, so it cannot be confused with a signalling target.
+    #[test]
+    fn a_claim_token_is_not_a_bare_pid() {
+        let token = claim_token();
+        assert!(
+            token.parse::<u32>().is_err() || token.len() > 10,
+            "the token must not look like a bare PID: {token}"
+        );
+        // Tokens are non-empty hex strings.
+        assert!(!token.is_empty());
+        assert!(
+            token.chars().all(|c| c.is_ascii_hexdigit()),
+            "token must be hex: {token}"
+        );
+    }
+
+    /// A claim journal round-trips the target state dir.
+    #[test]
+    fn a_claim_journal_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Path::new("/srv/state/vms/test-vm");
+        write_claim_journal(dir.path(), state).unwrap();
+        assert_eq!(read_claim_journal(dir.path()), Some(state.to_path_buf()));
+    }
+
+    /// The origin dir name is recovered from a claimed entry's name.
+    #[test]
+    fn infer_origin_dir_reconstructs_the_idle_entry() {
+        let root = Path::new("/pool");
+        assert_eq!(
+            infer_origin_dir(root, "claimed-idle-abc-deadbeef01234567"),
+            root.join("idle-abc")
+        );
+    }
+
+    /// Recovery cleans up a claimed entry with a journal.
+    #[test]
+    fn recovery_destroys_incomplete_claims_with_journals() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        // Simulate a crash: create a claimed entry with a journal but no
+        // completed adoption.
+        let claimed = entry(root.path(), "claimed-idle-x-aabbccdd", Some(512));
+        std::fs::write(
+            claimed.join(CLAIM_JOURNAL),
+            state.path().to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        assert!(claimed.exists());
+
+        recover_incomplete_claims_in(root.path());
+
+        assert!(!claimed.exists(), "the incomplete claim must be removed");
     }
 
     /// Pool files are created fresh, owner-only, and never through a symlink.

@@ -94,6 +94,61 @@ pub fn acquire_runtime_overlay(
     })
 }
 
+/// The selected overlay and evidence for the archive that produced its bytes.
+pub struct AcquiredRuntimeOverlay {
+    pub artifact: RuntimeOverlayArtifact,
+    pub release_proof: Option<mvm_core::protocol::runtime_release::RuntimeReleaseProof>,
+    pub unsigned_source: bool,
+    pub source_archive_sha256: Option<String>,
+}
+
+/// Read prepared artifacts only. Acquisition belongs to explicit preparation,
+/// never to startup. A rejected release must not fall through to source.
+pub fn acquire_runtime_overlay_for_launch(
+    resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
+    arch: GuestArch,
+) -> Result<AcquiredRuntimeOverlay> {
+    let version = resolver.expected_version();
+    let proof = mvm_build::guest_runtime::cached_runtime_release_proof(
+        resolver.cache_root(),
+        version,
+        arch,
+    )?;
+    let (declaration, source_archive_sha256) = if let Some(proof) = &proof {
+        (
+            mvm_build::guest_runtime::evidence::verify_runtime_release_proof(proof, version, arch)?
+                .declaration(arch)?
+                .clone(),
+            None,
+        )
+    } else {
+        let checked = mvm_build::guest_runtime::source::check_source_runtime(
+            resolver.cache_root(),
+            version,
+            arch,
+        )?;
+        (
+            checked.declaration(arch)?.clone(),
+            Some(checked.archive_sha256().to_owned()),
+        )
+    };
+    let artifact = mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(resolver, arch)?;
+    anyhow::ensure!(
+        artifact.roothash == declaration.overlay_roothash
+            && mvm_core::crypto::verified_digest::sha256_file_verified(&artifact.overlay_ext4)?
+                == declaration.overlay_sha256
+            && mvm_core::crypto::verified_digest::sha256_file_verified(&artifact.sidecar)?
+                == declaration.overlay_verity_sha256,
+        "prepared runtime overlay differs from the selected archive"
+    );
+    Ok(AcquiredRuntimeOverlay {
+        artifact,
+        unsigned_source: proof.is_none(),
+        release_proof: proof,
+        source_archive_sha256,
+    })
+}
+
 /// Prepare the explicitly selected OCI guest runtime.
 ///
 /// This is an acquisition API for `bootstrap` and `image pull`, never for the

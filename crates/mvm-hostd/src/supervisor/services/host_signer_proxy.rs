@@ -50,6 +50,7 @@ impl HostSignerProxy {
 
     /// Sign an ExecutionPlan bytes. Caller is responsible for the
     /// plan's canonical form.
+    /// A correlation failure leaves the signing outcome unknown; no retry is made.
     pub async fn sign_plan(
         &self,
         bytes: Vec<u8>,
@@ -67,6 +68,12 @@ impl HostSignerProxy {
         write_frame(&mut stream, &self.uds_path, req).await?;
         let resp: SignResponse =
             read_frame(&mut stream, &self.uds_path, self.max_frame_bytes).await?;
+        if resp.request_id() != req.request_id() {
+            return Err(ProxyError::Decode {
+                path: self.uds_path.clone(),
+                source: serde::de::Error::custom("host signer response request ID mismatch"),
+            });
+        }
         Ok(match resp {
             SignResponse::Ok {
                 request_id,
@@ -205,5 +212,40 @@ mod tests {
             .await
             .expect_err("connect to missing UDS must fail");
         assert!(matches!(err, ProxyError::Connect { .. }));
+    }
+
+    #[tokio::test]
+    async fn response_correlation_refuses_wrong_ids_in_success_and_service_errors() {
+        for response in [
+            SignResponse::Ok {
+                request_id: "unrelated-response".into(),
+                sig_alg: SIG_ALG_ED25519,
+                signature: vec![0; 64],
+                signer_pubkey: vec![1; 32],
+            },
+            SignResponse::Err {
+                request_id: "unrelated-response".into(),
+                code: HostSignerErrorCode::NotReady,
+                message: "response-payload-marker".into(),
+            },
+        ] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("host-signer.sock");
+            let captured = Arc::new(Mutex::new(None));
+            let mock = spawn_mock(path.clone(), response, captured).await;
+            let proxy = HostSignerProxy::new(&path);
+            let error = proxy
+                .sign_plan(b"plan".to_vec(), "outstanding-request")
+                .await
+                .expect_err("a different request's outcome is unknown");
+            match error {
+                ProxyError::Decode { source, .. } => assert_eq!(
+                    source.to_string(),
+                    "host signer response request ID mismatch"
+                ),
+                other => panic!("expected decode refusal, got {other:?}"),
+            }
+            mock.await.unwrap();
+        }
     }
 }

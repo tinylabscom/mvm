@@ -649,7 +649,8 @@ mod tests {
             }
             let signer_id = "host:test".to_string();
             let signed = sign_plan(&plan, &SigningKey::from_bytes(&[7; 32]), &signer_id);
-            let admitted = AdmittedPlan::for_test(plan, signer_id, signed);
+            let admitted = AdmittedPlan::for_test(plan, signer_id, signed)
+                .with_mock_assurance_runtime_for_test("vm-assurance-runner");
             let artifact_digest =
                 Sha256Digest::parse(format!("sha256:{}", admitted.plan().image.sha256))?;
             let mut declaration = CampaignDeclaration {

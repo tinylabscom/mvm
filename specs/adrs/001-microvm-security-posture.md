@@ -314,9 +314,13 @@ not paraphrase this row without them.
    `mvm-hvf-supervisor`. The dividing line is structural rather than
    incidental: those are the VMM tiers with a process of ours that outlives
    the workload *and* is handed the admitted plan to read a bound from. A
-   restore is deliberately not covered — a child does not inherit its parent's
-   plan, because auditing a child's kill under the parent's identity would
-   write a wrong entry rather than a missing one.
+   restore never inherits its parent's plan, because auditing a child's kill
+   under the parent's identity would write a wrong entry rather than a
+   missing one. An HVF `vm_full` fork child carries its OWN admitted plan to
+   its supervisor, which verifies the signature under the host key, the
+   validity window and that the plan names this child (no nonce is re-spent;
+   admission spent it), then arms the wall clock from the restore, audited
+   under the child's identity. Firecracker restores are not covered.
    `ResourceControls::for_backend` answers `WallClockControl::None` for
    Firecracker, QEMU and Mock, so a wall-clock grant on those tiers is refused
    under `--prod` and warned under dev rather than admitted against nothing.
@@ -369,8 +373,9 @@ not paraphrase this row without them.
    process born grant-less as shared pool capacity, which binding now would
    bind the pool rather than the claim. `bind_spawn` wraps a `Command` and
    this tree has no post-spawn attach, so on those two paths a claimed child's
-   CPU bound is a ledger entry and not a `cpu.max`. Wall clock is likewise not
-   re-armed on a restored child, per limit 2. A claimed child is different: it
+   CPU bound is a ledger entry and not a `cpu.max`. Wall clock is re-armed on an HVF
+   forked child from its own plan, per limit 2; it is not on a Firecracker
+   restore. A claimed child is different: it
    has an admitted plan of its own, and on HVF the resident handoff carries
    that plan, bound into the handoff signature, to the supervisor the child
    inherits. That supervisor arms the plan's wall-clock bound and session idle
@@ -477,6 +482,52 @@ not paraphrase this row without them.
   the project never accidentally commits to defending against them by
   omission.
 
+### PS-21 Firecracker authority boundary
+
+**Approved source-design direction, not shipped enforcement or a live witness.**
+The owner approved [option A for #4414](https://github.com/tinylabscom/mvm/issues/4414#issuecomment-6481580558):
+direct current-user launches with operator-provisioned access and predelegated
+resources. This refines the [existing-role contract](https://github.com/tinylabscom/mvm/issues/4414#issuecomment-6224073768);
+it does not promote a claim, change the tier matrix, or establish that the
+current shell/scope launch paths satisfy this boundary.
+
+- **Provisioning precedes launch.** The operator supplies KVM/device access and
+  delegated resource authority separately. Hosts relying on the old implicit
+  privileged route are unsupported by the replacement until provisioned. Missing
+  rights or mechanisms refuse before process creation; there is no `sudo`,
+  `doas`, `pkexec`, shell, utility, or unbounded-launch fallback.
+- **Containment exists at birth.** Before creating the selected VMM process, the
+  backend validates finite CPU, memory, swap, task, FD and time limits against
+  the admitted plan and operator policy. Linux resource-group placement must be
+  atomic with process creation, not a later move into a cgroup. A mechanism that
+  cannot enforce a required limit cannot launch. Numeric role profiles and their
+  enforcement need review and evidence; this decision invents no default budget.
+- **Authority is closed and prepared.** Only the selected verified VMM binary
+  and the original admitted typed plan authorize a launch. Final effective
+  configuration, environment, generation and retained descriptors stay bound
+  to that admission. Caller-provided program paths, argv, PIDs or callbacks are
+  not execution authority; deferred build, probing or signing is not a launch step.
+- **Original ownership survives failure.** The original process/generation
+  observer, runtime/file leases, required role owners and capture writer remain
+  held through activation, dispatch, flush and confirmed stop. Uncertain stop or
+  writer state remains nonterminal: no destructive cleanup, partial publication
+  or terminal audit seal. PID disappearance alone is not terminal proof.
+- **Existing security boundaries remain.** Keep the VMM supervisor, FlowMux
+  endpoint, broker/signer key-holder, host-agent and conditional GPU roles
+  separate and use only those required by the selected backend. This authorizes
+  no additional service or generic helper. Signed grants, chain-signed audit,
+  the NIC-less guest and authenticated vsock path remain binding; keys and raw
+  credentials do not move into the parser, VMM or guest.
+
+The alternative of a new privileged launch service was not approved: it would
+add privileged IPC, installation and lifecycle authority beyond this contract.
+Implementation must remove the old escalation/utility route and demonstrate
+pre-birth refusal, bounded readiness, confirmed stop, retained recovery ownership
+and cleanup before runtime parity is claimed. Installation, activation, native
+or privileged witnesses, billable runs, signing and release actions still need
+their applicable authorization. This decision alone satisfies none of those
+execution or acceptance gates.
+
 ### Per-backend tier matrix
 
 mvm ships four workload-capable VM backends plus a test-only mock and an
@@ -490,7 +541,7 @@ backend falls below Tier 1.
 |---|---|---|---|---|---|---|
 | Firecracker (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — the production workload runtime, selected automatically whenever native KVM is available. Every numbered claim holds. |
 | HVF / Hypervisor.framework (macOS 26+ Apple Silicon) | ✅ | ✅ | ⚠️ block+ext4 verified boot only | ✅ | ✅ | Tier 2 — the in-house Hypervisor.framework VMM. Egress, admission, and substitution are enforced through a single per-VM vsock gating endpoint: there is no guest network interface and no separate userspace gateway sidecar. The macOS 26+ Apple Silicon default. |
-| libkrun (Linux KVM, macOS Hypervisor.framework) | ✅ | ✅ | ⚠️ block+ext4 verified boot only | ✅ | ✅ | Tier 2 — comparable VMM TCB to Firecracker. The macOS 13–25 default and the Linux `--builder libkrun` / opt-in workload path. |
+| libkrun (Linux KVM, macOS Hypervisor.framework) | ✅ | ✅ | ⚠️ block+ext4 verified boot only | ✅ | ✅ | Tier 2 — comparable VMM TCB to Firecracker. The macOS 13–25 default and the Linux `--builder libkrun` / opt-in workload path; the release archive does not yet include it, so build from source for now (tracked in #4577). |
 | QEMU (Linux KVM/TCG) | ✅ KVM where available | ⚠️ larger device-model TCB | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — a `mvm`-only Linux dev/test substrate, opt-in only, never reachable from the fleet orchestrator. It carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path. This carve-out is type-enforced: a `WorkloadBackend` marker trait gates the admitted workload-launch path, and QEMU does not implement it, so it cannot reach that path regardless of prose. The test-only mock backend does implement the marker — it is a hermetic lifecycle test double that carries no real workload, so permitting it costs nothing. |
 | `wasm-sandbox` (browser / WASI preview) | ❌ | ❌ | ❌ | ❌ | ❌ | **Off the isolation scale.** No KVM, no real kernel, no TAP/virtio/vsock. Asserts none of the numbered claims and declares its own non-virtualization honestly; fails closed on any kernel/TAP/vsock request. Opt-in only; auto-detection never selects it. It is safe *because* it is single-principal — a developer's own code in their own browser sandbox, where the "malicious guest" adversary class does not apply — not because it holds any isolation claim. Promotion to a real, claim-bearing microVM re-materializes the workload from recorded intent through the audited build and admission pipeline; nothing produced in this claims-free tier carries authority into a claim-bearing one. |
 
@@ -817,6 +868,17 @@ tuning decision.
 - Reversing verified boot means dropping a numbered claim outright, which
   itself warrants a superseding decision record rather than a quiet
   rollback.
+- Guest telemetry is scrubbed on the host against the VM's bound-secret
+  fingerprints and the curated redaction seam before it is persisted
+  (defence in depth under claim 13, not a claim of its own). A secret split
+  across stdio chunks is caught by joining each chunk to its stream's last
+  bytes, but a guest that pauses more than 500 ms mid-secret gets the part
+  before the pause written; only the completing chunk is withheld, and two
+  processes writing one stream at once can separate a split secret's pieces
+  far enough to be missed. Holding
+  output longer would delay every quiet stream, and the host holds
+  fingerprints, not values, so it cannot recognise a secret's prefix. See
+  `specs/telemetry/studio-contract.md`.
 
 ### Non-goals
 
@@ -1014,6 +1076,22 @@ guest-enforced plan-bound re-verification); it does **not** witness claim 3.
 Prod / sealed / `--prod` workloads — and Firecracker on every tier — stay on
 Option B, where claim 3 holds unchanged. No numbered claim is weakened; this
 note only scopes which backends the existing witness covers.
+
+**Canonical kernel custody on Firecracker — limits.** A bundle carrying a
+canonical Linux proof is launched on HVF and on Linux Firecracker; every other
+backend refuses it. The two backends do not offer the same lifetime evidence.
+HVF releases the kernel generation on an authenticated, instance-bound exit
+proof. Firecracker releases it on a process-table identity only: the pid read
+from the VM's pid file, accepted only if that process serves this VM's
+`--api-sock`, recorded with its start time and the host boot id, and judged
+exited when `/proc` no longer shows that start time or the boot id differs.
+Firecracker is therefore not instance-bound in HVF's sense, and the identity
+is only as trustworthy as the host's process table. An unreaped zombie still
+has a process-table entry and counts as not exited, so its generation is
+retained. A start that fails or crashes between boot and recording the
+identity leaves the generation retained and the VM name blocked. This
+narrows nothing in claims 3 or 8; it states what the Firecracker release
+mechanism rests on.
 
 **Claim 20 boundaries — five refusing paths and the installer trust root.** The
 four consuming paths inside `mvmctl` verify the Sigstore bundle in-process

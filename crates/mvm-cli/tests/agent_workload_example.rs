@@ -55,12 +55,34 @@ fn agent_workload_declares_a_placeholder_secret_and_tight_egress() {
 }
 
 #[test]
+fn agent_workload_uses_the_same_initial_resources_for_smoke_and_real_requests() {
+    for name in ["workload.json", "workload-smoke.json"] {
+        let workload: serde_json::Value =
+            serde_json::from_str(&read(&example_file(name))).expect("valid workload JSON");
+        assert_eq!(workload["apps"][0]["resources"]["cpu_cores"], 2, "{name}");
+        assert_eq!(
+            workload["apps"][0]["resources"]["memory_mb"], 4096,
+            "{name}"
+        );
+    }
+
+    let manifest = read(&example_file("mvm.toml"));
+    assert!(manifest.lines().any(|line| line == "cpus = 2"));
+    assert!(manifest.lines().any(|line| line == "mem = \"4G\""));
+    let flake = read(&example_file("flake.nix"));
+    assert!(flake.contains("vcpus = 2;"));
+    assert!(flake.contains("memory_mib = 4096;"));
+}
+
+#[test]
 fn agent_workload_is_a_guest_image_with_a_per_call_entrypoint() {
     let flake = read(&example_file("flake.nix"));
 
     assert!(flake.contains("mkGuest"));
-    assert!(flake.contains("entrypoint.command = [ \"${entrypoint}\" ];"));
+    assert!(flake.contains("entrypoint.command = [ \"/etc/mvm/entrypoint\" ];"));
     assert!(flake.contains("extraFiles.\"/etc/mvm/entrypoint\""));
+    assert!(flake.contains("tools = [ \"WebFetch\" ];"));
+    assert!(flake.contains("--allowedTools WebFetch --max-turns 3 --max-budget-usd 0.50"));
     assert!(flake.contains("exec ${agent}/bin/mvm-agent"));
     assert!(!flake.contains("bootCommand"));
     assert!(flake.contains("ANTHROPIC_API_KEY"));
@@ -74,6 +96,7 @@ fn agent_workload_documents_and_live_tests_the_secure_run() {
     assert!(readme.contains("--from-workload-ir examples/agent-workload/workload.json"));
     assert!(readme.contains("secret.substituted"));
     assert!(readme.contains("trust audit verify"));
+    assert!(readme.contains("trust audit verify \"$SESSION_ID\" --json"));
     assert!(
         !readme
             .lines()

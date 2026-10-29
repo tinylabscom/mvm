@@ -46,22 +46,7 @@ pub(in crate::commands) fn manifest_arg_uses_oci_image(arg: &str) -> Result<bool
     Ok(manifest.is_image_source())
 }
 
-/// Resolve a flake reference: relative/absolute paths are canonicalized,
-/// remote refs (containing `:`) pass through unchanged.
-pub fn resolve_flake_ref(flake_ref: &str) -> Result<String> {
-    if flake_ref.contains(':') {
-        // Remote ref like "github:user/repo" — pass through
-        return Ok(flake_ref.to_string());
-    }
-
-    // Local path — canonicalize to absolute
-    let path = std::path::Path::new(flake_ref);
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("Flake path '{}' does not exist", flake_ref))?;
-
-    Ok(canonical.to_string_lossy().to_string())
-}
+pub use mvm_core::domain::manifest::resolve_flake_ref;
 
 /// How faithfully the resolved `backend` enforces `policy` on the transient
 /// (no-signed-bundle) run path. Recorded in the signed receipt **alongside**

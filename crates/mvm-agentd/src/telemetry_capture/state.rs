@@ -51,6 +51,10 @@ impl ProducerId {
         }
     }
 
+    /// Every producer, in wire-number order.
+    pub const ALL: [ProducerId; PRODUCER_COUNT] =
+        [Self::AgentDiagnostics, Self::Stdout, Self::Stderr];
+
     fn index(self) -> usize {
         match self {
             Self::AgentDiagnostics => 0,
@@ -136,7 +140,10 @@ struct EpochState {
 /// draining cadence belongs to the transport worker that owns the outbox.
 pub struct CaptureState {
     epoch: RwLock<EpochState>,
-    outbox: Arc<Outbox>,
+    /// The queue each producer offers into, by producer index. Every entry
+    /// is the same queue unless [`CaptureState::with_queue_for`] gave a
+    /// producer one of its own.
+    outboxes: [Arc<Outbox>; PRODUCER_COUNT],
     counters: [SourceCounters; PRODUCER_COUNT],
 }
 
@@ -146,9 +153,29 @@ impl CaptureState {
     pub fn new(outbox: Arc<Outbox>) -> Result<Self, RecordError> {
         Ok(Self {
             epoch: RwLock::new(mint_epoch()?),
-            outbox,
+            outboxes: [Arc::clone(&outbox), Arc::clone(&outbox), outbox],
             counters: Default::default(),
         })
+    }
+
+    /// Give `producer` a queue of its own, so a flood from it fills only its
+    /// own slots and cannot crowd out the others'. The session drains every
+    /// distinct queue in turn.
+    #[must_use]
+    pub fn with_queue_for(mut self, producer: ProducerId, outbox: Arc<Outbox>) -> Self {
+        self.outboxes[producer.index()] = outbox;
+        self
+    }
+
+    /// Every distinct queue, the shared diagnostics queue first.
+    pub fn queues(&self) -> Vec<&Outbox> {
+        let mut distinct: Vec<&Arc<Outbox>> = Vec::with_capacity(PRODUCER_COUNT);
+        for outbox in &self.outboxes {
+            if !distinct.iter().any(|seen| Arc::ptr_eq(seen, outbox)) {
+                distinct.push(outbox);
+            }
+        }
+        distinct.into_iter().map(|outbox| outbox.as_ref()).collect()
     }
 
     /// Replace the epoch and its monotonic origin for a generation change
@@ -212,8 +239,15 @@ impl CaptureState {
         cell.add(1, bytes);
     }
 
+    /// The diagnostics producer's queue: the shared queue when no producer
+    /// has one of its own.
+    #[cfg(test)]
     pub(super) fn outbox(&self) -> &Outbox {
-        &self.outbox
+        &self.outboxes[ProducerId::AgentDiagnostics.index()]
+    }
+
+    pub(super) fn outbox_for(&self, producer: ProducerId) -> &Outbox {
+        &self.outboxes[producer.index()]
     }
 }
 

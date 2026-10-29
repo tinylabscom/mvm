@@ -14,7 +14,7 @@ Feature: The documented flake build runs for real
     Then the command exits with code 0
 
   # The last step of the README's "from dev loop to attested image" flow, and
-  # the only one nothing ran: `build compile` was covered, `machine build` was
+  # the only one nothing ran: `dev compile` was covered, `machine build` was
   # covered, and booting the result under its own entrypoint was not. The
   # hermetic suite proves `--entrypoint` is *refused* against an OCI image,
   # which is the opposite claim from the flake form working.
@@ -23,14 +23,17 @@ Feature: The documented flake build runs for real
   # the expensive part and this scenario reuses what the one above just built.
   # Named so it takes the cold path: an unnamed launch has to claim a prepared
   # warm standby, and nothing warms one for a freshly built flake.
-  @live @release_gate_flake
+  # Native CLI invocation is deliberately refused on HVF until verified input
+  # custody and a held recovery lifetime are available there; this live witness
+  # therefore runs only on Firecracker.
+  @live @release_gate_flake @firecracker
   Scenario: the documented entrypoint launch runs the compiled workload
     When I run mvmctl in an isolated live home with "machine run --name bdd-documented-entrypoint --entrypoint --flake examples/exit_code"
     Then the command exits with code 7
 
   # The image a builder VM produced, sealed on the host that ran it and
   # installed somewhere else. The builder is untrusted and never holds the
-  # signing key: `bundle export` signs on the host, after the build is done,
+  # signing key: the archive is signed on the host after the build is done,
   # and a second home that trusts only the signer's public half verifies and
   # installs the result without booting it. The manifest build registers the
   # template slot export consumes; --flake alone only builds the artifacts.
@@ -44,3 +47,33 @@ Feature: The documented flake build runs for real
     When I install the sealed bundle into a fresh home that trusts its builder
     Then the command exits with code 0
     And the install reports a bundle content address
+
+  # Locking is offline; building requires the builder VM, prepared guest
+  # runtime and workload kernel, and network access to the pinned Nix inputs.
+  # The ordinary hermetic lane skips this scenario through the @live gate.
+  # A successful build includes a zero-exit health boot before signing.
+  # The health boot is an entrypoint boot, which HVF refuses until verified
+  # input custody and a held recovery lifetime exist there (#4655), so this
+  # witness runs only on Firecracker.
+  @live @documented_pack_live @firecracker @runtime_candidate
+  Scenario: the documented pack build health-boots and signs a frozen workload
+    Given a local pack build fixture
+    And the isolated mvm home is prepared for live launches
+    When I run mvmctl against the pack fixture with "pack lock pack.json --mvm-revision 543e2dc1b5401d743688ab2da57a43b7d6b463a1"
+    Then the command exits with code 0
+    When I run mvmctl against the live pack fixture with "build pack.json --out build.mvmpkg"
+    Then the command exits with code 0
+    And the pack build reports a signed archive
+    When I install the sealed bundle into a fresh home that trusts its builder
+    Then the command exits with code 0
+    And the install reports a bundle content address
+
+  Scenario: a pack build refuses source drift before building or signing
+    Given a local pack build fixture
+    When I run mvmctl against the pack fixture with "pack lock pack.json --mvm-revision 543e2dc1b5401d743688ab2da57a43b7d6b463a1"
+    Then the command exits with code 0
+    When the pack fixture source changes after locking
+    And I run mvmctl against the pack fixture with "build pack.json --out build.mvmpkg"
+    Then the command exits with code 1
+    And the error output contains "source_tree_sha256"
+    And the pack fixture has no archive or build progress

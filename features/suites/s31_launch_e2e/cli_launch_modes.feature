@@ -15,7 +15,6 @@ Feature: every README-documented CLI launch mode boots a real guest
   Background:
     Given an artifact-warm mvm home
     And the documented launch images are prepared
-    And an Alpine warm parent is ready
 
   @live
   Scenario: the documented preparation commands populate images and standbys explicitly
@@ -343,3 +342,20 @@ Feature: every README-documented CLI launch mode boots a real guest
     Then the launch succeeds
     When I launch "machine rm e2e-web --yes"
     Then the launch succeeds
+
+  # The quick start's headline run: a named, bounded, dev-profile transient
+  # launch of a cached image, plus the teardown inventory the demo page tells
+  # the reader to check. The tagged image stands in for the digest-pinned
+  # reference the preparation step captures — a witness carries the flag set,
+  # not the value. A named foreground run boots cold and tears down on exit,
+  # so the complete inventory afterwards must not contain its name.
+  @live
+  Scenario: the documented local demo run boots a cached image and leaves no record
+    When I launch "machine run --name bdd-local-demo --profile dev --image alpine --cpus 1 --memory 256M --timeout 120 -- /bin/sh -c 'echo hello from a microVM; uname -s'"
+    Then the launch succeeds
+    And the guest printed "hello from a microVM"
+    And the guest printed "Linux"
+    And the guest control plane came up
+    When I launch "machine ps --all --show-expired --json"
+    Then the launch succeeds
+    And the output does not mention "bdd-local-demo"

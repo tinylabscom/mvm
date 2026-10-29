@@ -1,6 +1,11 @@
-{ pkgs }:
+{ pkgs, tools ? null }:
 
 let
+  toolFlags =
+    if tools == null then
+      "--bare"
+    else
+      "--restricted --strict-mcp-config --tools ${pkgs.lib.escapeShellArg (pkgs.lib.concatStringsSep "," tools)}";
   version = "2.1.273";
   releases = {
     x86_64-linux = {
@@ -58,6 +63,6 @@ in
       exec ${claudeCode}/bin/claude --version
     fi
 
-    printf '%s' "$input" | ${claudeCode}/bin/claude --bare -p "$@"
+    printf '%s' "$input" | ${claudeCode}/bin/claude ${toolFlags} -p "$@"
   '';
 }

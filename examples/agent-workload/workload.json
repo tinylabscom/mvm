@@ -16,7 +16,7 @@
       ],
       "resources": {
         "cpu_cores": 2,
-        "memory_mb": 2048,
+        "memory_mb": 4096,
         "rootfs_size_mb": 4096
       },
       "env": {

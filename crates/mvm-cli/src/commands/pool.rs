@@ -7,13 +7,14 @@
 //!
 //! A standby is claimable by a launch whose kernel, resources, **rootfs image**
 //! and **guest egress enablement** all match (`StandbyCompat`, exact equality) and whose
-//! shape a shared parent can serve at all (`warm_eligible_launch` — no extra volumes).
+//! shape a shared parent can serve at all (`warm_eligible_launch` — read-only mounts only,
+//! through the parent's late-volume slots).
 //! Anything else boots cold, and records why. An unnamed run of an eligible shape
 //! leaves a standby of its image behind for the next run (`refill`). Both halves of
 //! the pool build that key and that eligibility test through one function each, because
 //! a spawn and a claim that compute them separately are free to disagree, and a
 //! disagreement is invisible: the pool fills and never drains. Multi-kernel keying and
-//! honouring an explicit `--name`/volumes are deferred follow-ups.
+//! honouring an explicit `--name` are deferred follow-ups.
 
 use std::path::Path;
 
@@ -23,7 +24,7 @@ use mvm_core::checkpoint::CheckpointId;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
     RuntimeSourceRootStrategy, StandbyClaim, StandbyCompat, StandbyError, StandbyHandle,
-    StandbySpec, StandbyState, VmBackend, VmId, VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
+    StandbySpec, VmBackend, VmId, VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
 };
 use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::backend::AnyBackend;
@@ -43,6 +44,7 @@ use mvm_hostd::plan_admission::{
 };
 
 mod cold_start;
+mod late_volumes;
 mod refill;
 mod select;
 mod status;
@@ -51,9 +53,9 @@ mod warm_source;
 
 pub use cold_start::{ColdStartReason, WarmClaimOutcome};
 use cold_start::{claim_gate, claim_required, outcome_for_refusal};
+use late_volumes::late_volumes_attachable;
 pub use refill::{StandbyRefill, schedule_standby_refill};
 use select::{recent_image_limit, warm_each, warm_sources};
-use status::{PoolStatus, PoolStatusEntry};
 pub use warm::WarmResult;
 #[cfg(test)]
 use warm_source::manifest_template_source;
@@ -646,7 +648,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 .vsock_egress(want.vsock_egress)
                 .build()?,
         )?;
-        match p.backend.spawn_standby_via_runner(&spawn_ctx, &spec) {
+        match p.backend.spawn_standby_via_runner_owned(&spawn_ctx, &spec) {
             Ok(handle) => {
                 // Audit before recording: the claim refuses a parent with no
                 // signed creation entry, so pooling an unauditable one only
@@ -705,6 +707,19 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 }
             }
             Err(e) => {
+                let e = match e.downcast::<mvm_backends::driver::hvf::ColdHvfBootFailure>() {
+                    Ok(native) => match native.into_released_error() {
+                        Ok(error) => error,
+                        Err(native) => {
+                            // Unconfirmed native ownership is not an ordinary
+                            // failed pool fill. Return it before generic
+                            // continuation, keeping this exact pool lock too.
+                            return Err(anyhow::Error::new(native.retain_support(_warm_guard))
+                                .context("native standby launch remains owned; retain error for stop retry"));
+                        }
+                    },
+                    Err(error) => error,
+                };
                 failures.push(format!("spawning standby: {e:#}"));
                 tracing::warn!(error = %e, "spawn standby failed; pool stays under target");
                 failed += 1;
@@ -962,8 +977,10 @@ fn compat_for_launch(cfg: &VmStartConfig) -> Result<StandbyCompat> {
 ///
 /// Excluded:
 ///
-/// - **extra volumes** — the attach threads only the rootfs, so a volume disk
-///   would be missing from the child;
+/// - **volumes no late-volume slot can serve** — a writable disk, a volume with
+///   no materialized image, or more volumes than the backend's parents boot
+///   slots for. A restored child inherits its parent's device model, so a
+///   volume reaches it only through a read-only slot the parent booted;
 /// - **bundle-pinned boot assets** — a parent of such a bundle has to boot the
 ///   bundle's own signed overlay and initramfs, and the guest runtime those
 ///   carry predates the claim handshake: it refuses the claiming plan's seccomp
@@ -992,12 +1009,12 @@ fn compat_for_launch(cfg: &VmStartConfig) -> Result<StandbyCompat> {
 /// its signed plan recorded, so a parent shared across claims carries no
 /// launch's allow-list to the next one.
 ///
-/// Materialized directory grants are included in the volume check. The current
-/// factory-parent path has no late attachment operation for their image, so
-/// they remain cold-path-only.
-fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
+/// Read-only materialized mounts (`--mount DIR:PATH:ro`) are keyed on nothing:
+/// the parent boots placeholder slots, and the claim points them at the
+/// launch's own images before the child resumes.
+fn warm_eligible_launch(cfg: &VmStartConfig, late_volume_slots: u8) -> bool {
     cfg.bundle_boot_assets.is_none()
-        && cfg.volumes.is_empty()
+        && late_volumes_attachable(cfg, late_volume_slots)
         && !mvm_vmm::host::egress_shared::launch_terminates_egress_tls(cfg)
 }
 
@@ -1021,9 +1038,13 @@ pub fn try_warm_claim(
     cfg: &VmStartConfig,
     user_named: bool,
 ) -> Result<WarmClaimOutcome> {
-    if let Err(reason) = claim_gate(cfg, user_named) {
+    if let Err(reason) = claim_gate(cfg, user_named, backend.late_volume_slots()) {
         return Ok(WarmClaimOutcome::Cold(reason));
     }
+    // A claimed standby was activated when it was prepared, so nothing on the
+    // claim path holds the workload behind the admission's sync. Wait for it
+    // before claiming.
+    cfg.wait_for_admission_durability()?;
     let Some(tenant) = cfg.tenant_id.clone() else {
         return Ok(WarmClaimOutcome::Cold(ColdStartReason::Unadmitted));
     };
@@ -1039,6 +1060,7 @@ pub fn try_warm_claim(
         }
         return Ok(WarmClaimOutcome::Cold(ColdStartReason::BackendUnsupported));
     }
+    mvm_client::admission::enforce_shares_for_claim(&cfg.volumes, &plan_json)?;
     // The same builder the spawn side records with, so the key searched for is
     // the key recorded. The rootfs digest comes from the sidecar cache plan
     // admission just populated, so this costs a read, not a re-hash.
@@ -1244,7 +1266,7 @@ mod tests {
         let mut c = eligible_cfg();
         c.warm_pool_size = 0;
         assert_eq!(
-            claim_gate(&c, false),
+            claim_gate(&c, false, 0),
             Err(ColdStartReason::StandbysDisabled)
         );
         let b = AnyBackend::from_hypervisor("libkrun");
@@ -1257,10 +1279,10 @@ mod tests {
     #[test]
     fn a_named_launch_never_claims_and_an_eligible_unnamed_one_does() {
         let mut cfg = eligible_cfg();
-        assert_eq!(claim_gate(&cfg, false), Ok(()));
-        assert_eq!(claim_gate(&cfg, true), Err(ColdStartReason::Named));
+        assert_eq!(claim_gate(&cfg, false, 0), Ok(()));
+        assert_eq!(claim_gate(&cfg, true, 0), Err(ColdStartReason::Named));
         cfg.warm_pool_size = 0;
-        assert_eq!(claim_gate(&cfg, true), Err(ColdStartReason::Named));
+        assert_eq!(claim_gate(&cfg, true, 0), Err(ColdStartReason::Named));
     }
 
     /// Finding nothing to claim is the first run of an image, not an error.
@@ -1340,18 +1362,18 @@ mod tests {
         let kernel = tmp.path().join("vmlinux");
         let rootfs = tmp.path().join("rootfs.ext4");
         let mut cfg = bundle_launch(&kernel, &rootfs, &"a".repeat(64));
-        assert!(warm_eligible_launch(&cfg));
+        assert!(warm_eligible_launch(&cfg, 0));
         let mut spawned = 0;
-        warm_if_eligible(&cfg, || {
+        warm_if_eligible(&cfg, 0, || {
             spawned += 1;
             Ok(())
         })
         .unwrap();
         assert_eq!(spawned, 1);
-        assert_eq!(claim_gate(&cfg, false), Ok(()));
+        assert_eq!(claim_gate(&cfg, false, 0), Ok(()));
         cfg.warm_pool_size = 0;
         assert_eq!(
-            claim_gate(&cfg, false),
+            claim_gate(&cfg, false, 0),
             Err(ColdStartReason::StandbysDisabled)
         );
     }
@@ -1373,9 +1395,9 @@ mod tests {
         });
         for pool_size in [0, 2] {
             cfg.warm_pool_size = pool_size;
-            assert!(!warm_eligible_launch(&cfg));
+            assert!(!warm_eligible_launch(&cfg, 0));
             let mut spawned = 0;
-            let error = warm_if_eligible(&cfg, || {
+            let error = warm_if_eligible(&cfg, 0, || {
                 spawned += 1;
                 Ok(())
             })
@@ -1386,7 +1408,7 @@ mod tests {
                 "ineligible warming performs no spawn preparation"
             );
             assert_eq!(
-                claim_gate(&cfg, false),
+                claim_gate(&cfg, false, 0),
                 Err(ColdStartReason::IneligibleShape)
             );
         }
@@ -1513,9 +1535,73 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            claim_gate(&cfg, false),
+            claim_gate(&cfg, false, 0),
             Err(ColdStartReason::IneligibleShape)
         );
+    }
+
+    fn read_only_mount(guest: &str) -> mvm_core::vm_backend::VmVolume {
+        mvm_core::vm_backend::VmVolume {
+            host: "/workspace".into(),
+            guest: guest.into(),
+            materialized_image: Some(format!("/cache{guest}.ext4")),
+            read_only: true,
+            ..Default::default()
+        }
+    }
+
+    /// A read-only directory mount is served by a parent's late-volume slot,
+    /// so on a backend with slots it requires a claim like any eligible shape.
+    #[test]
+    fn a_read_only_mount_is_warm_eligible_where_the_backend_boots_slots() {
+        let mut cfg = eligible_cfg();
+        cfg.volumes = vec![read_only_mount("/data"), read_only_mount("/work")];
+        assert!(warm_eligible_launch(&cfg, 4));
+        assert_eq!(claim_gate(&cfg, false, 4), Ok(()));
+        cfg.warm_pool_size = 0;
+        assert_eq!(
+            claim_gate(&cfg, false, 4),
+            Err(ColdStartReason::StandbysDisabled),
+            "an unwarmed mount launch boots cold, not refused"
+        );
+        assert!(
+            !warm_eligible_launch(&cfg, 0),
+            "a backend with no slots keeps every volume launch cold"
+        );
+    }
+
+    /// Only what a read-only slot can serve is attached late: a writable
+    /// mount, a disk with no materialized image, or more volumes than slots
+    /// keep the cold path.
+    #[test]
+    fn volumes_a_slot_cannot_serve_keep_their_cold_path() {
+        let mut writable = eligible_cfg();
+        let mut volume = read_only_mount("/data");
+        volume.read_only = false;
+        writable.volumes = vec![volume];
+
+        let mut disk = eligible_cfg();
+        let mut volume = read_only_mount("/data");
+        volume.materialized_image = None;
+        disk.volumes = vec![volume];
+
+        let mut too_many = eligible_cfg();
+        too_many.volumes = (0..5)
+            .map(|i| read_only_mount(&format!("/data/{i}")))
+            .collect();
+
+        for (why, cfg) in [
+            ("a writable mount", writable),
+            ("an unmaterialized disk", disk),
+            ("more volumes than slots", too_many),
+        ] {
+            assert!(!warm_eligible_launch(&cfg, 4), "{why}");
+            assert_eq!(
+                claim_gate(&cfg, false, 4),
+                Err(ColdStartReason::IneligibleShape),
+                "{why}"
+            );
+        }
     }
 
     // ── Auditing a captured factory parent ───────────────────────────────
@@ -1779,7 +1865,7 @@ mod tests {
         // still declares it on its recorded spec, so the compat check keeps
         // comparing the field rather than assuming it.
         assert_eq!(key.root_strategy, RuntimeSourceRootStrategy::BlockExt4);
-        assert!(warm_eligible_launch(&cfg));
+        assert!(warm_eligible_launch(&cfg, 0));
     }
 
     #[test]
@@ -1891,20 +1977,20 @@ mod tests {
         })];
 
         assert!(
-            warm_eligible_launch(&eligible_cfg()),
+            warm_eligible_launch(&eligible_cfg(), 0),
             "the baseline launch shape must be warm-eligible, or this test proves nothing"
         );
         let b = AnyBackend::from_hypervisor("libkrun");
         for (why, cfg) in ineligible {
             assert!(
-                !warm_eligible_launch(&cfg),
+                !warm_eligible_launch(&cfg, 0),
                 "{why} must not be warm-eligible"
             );
             for size in [0, 2] {
                 let mut cfg = cfg.clone();
                 cfg.warm_pool_size = size;
                 assert_eq!(
-                    claim_gate(&cfg, false),
+                    claim_gate(&cfg, false, 0),
                     Err(ColdStartReason::IneligibleShape),
                     "{why}"
                 );
@@ -1938,11 +2024,11 @@ mod tests {
                 mvm_vmm::host::egress_shared::effective_vsock_egress(&cfg),
                 "{why} must boot the egress client, or this proves nothing"
             );
-            assert!(warm_eligible_launch(&cfg), "{why} must be warm-eligible");
-            assert_eq!(claim_gate(&cfg, false), Ok(()), "{why}");
+            assert!(warm_eligible_launch(&cfg, 0), "{why} must be warm-eligible");
+            assert_eq!(claim_gate(&cfg, false, 0), Ok(()), "{why}");
             cfg.warm_pool_size = 0;
             assert_eq!(
-                claim_gate(&cfg, false),
+                claim_gate(&cfg, false, 0),
                 Err(ColdStartReason::StandbysDisabled),
                 "{why} boots cold for want of standbys, not for its shape"
             );
@@ -1996,12 +2082,12 @@ mod tests {
             ("a bound secret", with_secret),
             ("an intercepted route", intercepting),
         ] {
-            assert!(!warm_eligible_launch(&cfg), "{why} must stay cold");
+            assert!(!warm_eligible_launch(&cfg, 0), "{why} must stay cold");
             for size in [0, 2] {
                 let mut cfg = cfg.clone();
                 cfg.warm_pool_size = size;
                 assert_eq!(
-                    claim_gate(&cfg, false),
+                    claim_gate(&cfg, false, 0),
                     Err(ColdStartReason::IneligibleShape),
                     "{why}"
                 );
@@ -2271,24 +2357,6 @@ mod tests {
         assert_eq!(id.as_str(), "standby-warm-parent");
     }
 
-    #[test]
-    fn build_pool_status_reports_dead_standbys_separately() {
-        let live = idle_handle("live", "aa");
-        let mut dead = idle_handle("dead", "aa");
-        dead.pid = 999_999_999;
-        let saved = saved_idle_handle("saved", "aa", "img");
-
-        let report = build_pool_status(&[live, dead, saved]);
-
-        assert_eq!(report.idle, 2, "live process + saved-state are idle");
-        assert_eq!(report.claimed, 0);
-        assert_eq!(report.parked, 0);
-        assert_eq!(report.dead, 1);
-        assert_eq!(report.standbys[0].state, "idle");
-        assert_eq!(report.standbys[1].state, "dead");
-        assert_eq!(report.standbys[2].state, "idle");
-    }
-
     // The following tests need a backend that actually reaches the spawn loop
     // (`capabilities().standby_pool == true`) — every real `AnyBackend` variant
     // selectable via the CLI reports `false` until a live run proves its spawn
@@ -2453,7 +2521,7 @@ mod tests {
             "the warm key must name the rootfs, or it matches nothing"
         );
         assert!(
-            warm_eligible_launch(&warmed.start_config),
+            warm_eligible_launch(&warmed.start_config, 0),
             "the resolved warm shape must be one a shared parent can serve"
         );
     }
@@ -2920,7 +2988,7 @@ fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch>
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
-        PoolAction::Status { json } => run_status(&SupervisorStandbyPool::open()?, json),
+        PoolAction::Status { json } => status::run_status(json),
         PoolAction::Refill {
             image,
             cpus,
@@ -2982,20 +3050,24 @@ pub(in crate::commands) fn warm_request(req: &WarmRequest) -> Result<()> {
 fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
     let target = req.target;
     let launch = resolve_warm_launch(req)?;
-    let result = warm_if_eligible(&launch.start_config, || {
-        // Ensure the host signer exists only for a parent a launch can claim.
-        let signer = host_signer::load_or_init()?;
-        warm_to_target(
-            pool,
-            &WarmParams {
-                backend: &launch.backend,
-                signer_id: &host_signer::host_signer_id(),
-                signing_key_path: &signer.secret_path,
-                target,
-                launch: &launch.start_config,
-            },
-        )
-    })?;
+    let result = warm_if_eligible(
+        &launch.start_config,
+        launch.backend.late_volume_slots(),
+        || {
+            // Ensure the host signer exists only for a parent a launch can claim.
+            let signer = host_signer::load_or_init()?;
+            warm_to_target(
+                pool,
+                &WarmParams {
+                    backend: &launch.backend,
+                    signer_id: &host_signer::host_signer_id(),
+                    signing_key_path: &signer.secret_path,
+                    target,
+                    launch: &launch.start_config,
+                },
+            )
+        },
+    )?;
     // A state-changing verb emits one audit record per attempt.
     mvm_core::audit_emit!(
         PoolWarm,
@@ -3034,85 +3106,5 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
          runs with a non-zero warm pool size (MVM_RESIDENCY=warm on hosts whose default is \
          parked).",
     );
-    Ok(())
-}
-
-fn build_pool_status(standbys: &[StandbyHandle]) -> PoolStatus {
-    let idle = standbys
-        .iter()
-        .filter(|h| h.state == StandbyState::Idle && SupervisorStandbyPool::is_live_or_saved(h))
-        .count();
-    let parked = standbys
-        .iter()
-        .filter(|h| h.state == StandbyState::Parked && SupervisorStandbyPool::is_live_or_saved(h))
-        .count();
-    let claimed = standbys
-        .iter()
-        .filter(|h| h.state == StandbyState::Claimed && SupervisorStandbyPool::is_live_or_saved(h))
-        .count();
-    let dead = standbys
-        .iter()
-        .filter(|h| !SupervisorStandbyPool::is_live_or_saved(h))
-        .count();
-    PoolStatus {
-        idle,
-        claimed,
-        parked,
-        dead,
-        standbys: standbys
-            .iter()
-            .map(|h| PoolStatusEntry {
-                id: h.id.clone(),
-                state: if SupervisorStandbyPool::is_live_or_saved(h) {
-                    match h.state {
-                        StandbyState::Idle => "idle",
-                        StandbyState::Claimed => "claimed",
-                        StandbyState::Parked => "parked",
-                    }
-                } else {
-                    "dead"
-                },
-                pid: h.pid,
-                kernel_sha256: h.kernel_sha256.clone(),
-                vcpus: h.vcpus,
-                mem_mib: h.mem_mib,
-                image_sha256: h.image_sha256.clone(),
-            })
-            .collect(),
-    }
-}
-
-fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
-    let standbys = pool.list()?;
-    let report = build_pool_status(&standbys);
-    if json {
-        crate::json_out::emit_json(&report)?;
-        return Ok(());
-    }
-    println!(
-        "Supervisor standby pool: {} idle, {} claimed, {} parked, {} dead",
-        report.idle, report.claimed, report.parked, report.dead
-    );
-    for e in &report.standbys {
-        let image_tag = e
-            .image_sha256
-            .as_deref()
-            .map(|s| format!(" · image {}", &s[..s.len().min(12)]))
-            .unwrap_or_default();
-        println!(
-            "  {} · {} · {} · {} vcpu / {} MiB · kernel {}{}",
-            e.id,
-            e.state,
-            if e.pid == 0 {
-                "saved-state".to_string()
-            } else {
-                format!("pid {}", e.pid)
-            },
-            e.vcpus,
-            e.mem_mib,
-            &e.kernel_sha256[..e.kernel_sha256.len().min(12)],
-            image_tag,
-        );
-    }
     Ok(())
 }

@@ -70,7 +70,6 @@ require_text .githooks/pre-commit 'sweep_args="--workspace"'
 require_text .githooks/pre-commit 'focus_args="${pkg_args# } --all-targets"'
 require_text .github/workflows/ci.yml './scripts/cargo-stable.sh clippy --all-targets -- -D warnings'
 require_text .github/workflows/ci.yml 'uses: dtolnay/rust-toolchain@1.97.1'
-require_text .github/workflows/ci-full.yml 'uses: dtolnay/rust-toolchain@1.97.1'
 require_text .github/workflows/cache-warm.yml './scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings'
 require_text .github/workflows/cache-warm.yml 'uses: dtolnay/rust-toolchain@1.97.1'
 require_recipe_text './scripts/cargo-stable.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets'
@@ -92,19 +91,24 @@ if grep -Fq 'rust-toolchain@nightly' .github/workflows/cache-warm.yml; then
   echo "check-fast-cargo: cache-warm.yml floats a nightly toolchain; pin ${toolchain}" >&2
   exit 1
 fi
-# ci.yml keeps exactly one, and only for as long as its cause exists. The eBPF
+# ci-main.yml keeps exactly one, and only for as long as its cause exists. The eBPF
 # lane's sub-build resolves its toolchain by the literal name `nightly` — from
 # `crates/mvm-hostd/ebpf/rust-toolchain.toml` and two `cargo +nightly`
 # invocations — so a dated pin there leaves `+nightly` on a rustup-auto-installed
 # toolchain with no `rust-src`, and `just check::ebpf` fails asking for it.
 # Tying the count to the `cargo +nightly` that forces it means removing the
 # hardcoding forces removing the exemption, rather than leaving a hole behind.
-floating_nightly="$(grep -Fc 'rust-toolchain@nightly' .github/workflows/ci.yml || true)"
+floating_nightly="$(grep -Fc 'rust-toolchain@nightly' .github/workflows/ci-main.yml || true)"
 if [[ "${floating_nightly}" -ne 1 ]]; then
-  echo "check-fast-cargo: ci.yml has ${floating_nightly} floating nightly installs; only the eBPF lane may float, and it must" >&2
+  echo "check-fast-cargo: ci-main.yml has ${floating_nightly} floating nightly installs; only the eBPF lane may float, and it must" >&2
   exit 1
 fi
-require_text .github/workflows/ci.yml 'cargo +nightly install --locked --version 0.10.4 bpf-linker'
+require_text .github/workflows/ci-main.yml 'cargo +nightly install --locked --version 0.11.1'
+# The LLVM the linker is built against has to be named, not inherited from the
+# crate's default: the linker links that LLVM's shared library, so a silent
+# default change moves the ABI under the lane. This is the same pin
+# `check_workflow_paths` asserts from the other side.
+require_text .github/workflows/ci-main.yml '--no-default-features --features llvm-23 bpf-linker'
 require_text crates/mvm-hostd/ebpf/rust-toolchain.toml 'channel = "nightly"'
 require_text .github/workflows/ci.yml "toolchain: ${toolchain}"
 require_recipe_text 'cargo build --bin mvmctl --features user'

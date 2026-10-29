@@ -13,7 +13,7 @@ authors.workspace = true
 [dependencies]
 # The bundle format itself: manifest types, canonical signing, and the archive
 # writer. This crate decides what goes into a bundle; it does not define one.
-mvm-core = { workspace = true }
+mvm-core = { workspace = true, features = ["host-state"] }
 # The signer hands over the key the archive writer signs the manifest under.
 ed25519-dalek = { workspace = true }
 anyhow = { workspace = true }
@@ -22,9 +22,11 @@ chrono = { workspace = true }
 # The optional debug summary written beside an exported bundle.
 serde = { workspace = true }
 serde_json = { workspace = true }
+tar = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+mvm-core = { workspace = true, features = ["manifest-verify"] }
 
 [lints]
 workspace = true

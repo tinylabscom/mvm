@@ -15,7 +15,7 @@ Set the secret on the host first (the value is piped, never on argv):
 
 Run it locally on a /dev/kvm host:
 
-    mvmctl build compile examples/python/secret-egress/app.py --out /tmp/secret-egress
+    mvmctl dev compile examples/python/secret-egress/app.py --out /tmp/secret-egress
     mvmctl machine run --flake /tmp/secret-egress --entrypoint \
         --from-workload-ir /tmp/secret-egress/workload.json \
         --allow-host httpbin.org:80

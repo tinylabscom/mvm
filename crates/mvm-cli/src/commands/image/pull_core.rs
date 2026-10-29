@@ -206,11 +206,19 @@ fn resolve_run_image_with(
         }
         (Some(cached), Some(trust)) if acquisition == RunImageAcquisition::PreparedOnly => {
             let cached_reference = cached.reference.clone();
+            let prepared_tag = cached.runtime_tag.clone();
             match adopt_prepared_rootfs(cache_root, cached, &runtime_tag, prod)? {
                 Some(adopted) => (adopted, false, trust, None),
-                None => bail!(
-                    "cached OCI image {cached_reference} is not launch-ready; run `mvmctl image pull {reference}` first"
-                ),
+                None => {
+                    tracing::warn!(
+                        launch_runtime_tag = %runtime_tag,
+                        prepared_runtime_tag = ?prepared_tag,
+                        "no rootfs prepared for the launch-time guest runtime"
+                    );
+                    bail!(
+                        "cached OCI image {cached_reference} is not launch-ready; run `mvmctl image pull {reference}` first"
+                    )
+                }
             }
         }
         (Some(cached), Some(trust)) => {
@@ -224,11 +232,6 @@ fn resolve_run_image_with(
                     (cached, true, trust, Some(auth_source))
                 }
             }
-        }
-        _ if acquisition == RunImageAcquisition::PreparedOnly => {
-            bail!(
-                "OCI image {reference} is not prepared; run `mvmctl image pull {reference}` first"
-            );
         }
         _ => {
             sweep_before_builder_vm();
@@ -1193,6 +1196,126 @@ mod tests {
         );
     }
 
+    /// The pre-materialization sweep must actually run the orphan reaper: the
+    /// launch that follows may spawn a builder VM of its own.
+    #[test]
+    fn the_pre_builder_sweep_runs_the_orphan_reaper() {
+        if !crate::test_boot_payload::in_fresh_test_process(
+            module_path!(),
+            "the_pre_builder_sweep_runs_the_orphan_reaper",
+        ) {
+            return;
+        }
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        assert!(!crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+        sweep_before_builder_vm();
+        assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+        sweep_before_builder_vm();
+        assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+    }
+
+    /// An orphan planted before a launch that may spawn a builder VM is gone
+    /// once the pre-spawn sweep has run.
+    #[cfg(unix)]
+    #[test]
+    fn the_pre_builder_sweep_kills_a_planted_orphan() {
+        if !crate::test_boot_payload::in_fresh_test_process(
+            module_path!(),
+            "the_pre_builder_sweep_kills_a_planted_orphan",
+        ) {
+            return;
+        }
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+
+        let name = "mvm-workload-plantedorphan-5d1e-stopped";
+        let vm = mvm_core::config::vms_dir().join(name);
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("libkrun.pid"), format!("{}\n", i32::MAX)).expect("dead owner");
+
+        // The inner shell is detached so init adopts it; the trailing `: name`
+        // keeps the shell from exec-ing sleep and dropping the dir name from
+        // its command line.
+        let pid_file = home.path().join("orphan.pid");
+        let script = format!(
+            "(sh -c 'echo $$ > {}; sleep 60; : {name}' >/dev/null 2>&1 &)",
+            pid_file.display()
+        );
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .status()
+            .expect("plant orphan");
+        assert!(status.success());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            assert!(std::time::Instant::now() < deadline, "orphan never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let reparented = |pid: i32| {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "ppid=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout).trim() == "1"
+        };
+        while !reparented(pid) {
+            if std::time::Instant::now() > deadline {
+                // A subreaper (user session manager) adopted it; the reaper
+                // only recognises init-parented orphans, so nothing to witness.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        sweep_before_builder_vm();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let gone = loop {
+            // Signal 0 still succeeds on an unreaped zombie, so read the state.
+            let out = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps");
+            let stat = String::from_utf8_lossy(&out.stdout);
+            if stat.trim().is_empty() || stat.trim().starts_with('Z') {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        if !gone {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(gone, "the planted orphan survived the pre-spawn sweep");
+    }
+
+    #[test]
+    fn a_prior_parent_sweep_does_not_contaminate_the_cold_sweep_witness() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        sweep_before_builder_vm();
+        assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+        drop(env);
+
+        the_pre_builder_sweep_runs_the_orphan_reaper();
+
+        assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+    }
+
     fn prod_fixture() -> ProdFixture {
         prod_fixture_with(true)
     }
@@ -1720,6 +1843,93 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
         rel
     }
 
+    #[test]
+    fn inspect_digest_reference_resolves_tag_preparation_without_acquisition_or_alias_writes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let relative = seed_current_dev_image(tmp.path(), PINNED_DIGEST);
+        let index_path = tmp.path().join(super::super::oci_types::INDEX_FILE);
+        let before = fs::read(&index_path).unwrap();
+        let inspected = super::super::cache::inspect_image(tmp.path(), "alpine:3.20")
+            .expect("inspect the canonical preparation through its short tag");
+        let reference = inspected.image.digest_reference().unwrap();
+        assert_eq!(reference, PINNED);
+        let resolved = resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            refusing_runtime_materialize,
+            &RejectingVerifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect("the printed pin reuses the tag's prepared rootfs");
+        assert!(!resolved.pulled);
+        assert_eq!(resolved.rootfs_path, tmp.path().join(relative));
+        assert_eq!(fs::read(&index_path).unwrap(), before);
+        for invalid in [
+            reference.replace("docker.io", "evil.example"),
+            reference.replace("library/alpine", "library/other"),
+        ] {
+            let error = resolve_run_image_with(
+                tmp.path(),
+                &invalid,
+                false,
+                refusing_runtime_materialize,
+                &RejectingVerifier,
+                RunImageAcquisition::PreparedOnly,
+            )
+            .expect_err("a different repository or registry is not prepared");
+            assert!(error.to_string().contains("image pull"), "{error:#}");
+        }
+        assert_eq!(fs::read(&index_path).unwrap(), before);
+    }
+
+    #[test]
+    fn inspect_digest_reference_reuses_index_pin_without_introducing_a_child_alias() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let relative = seed_current_dev_image(tmp.path(), PINNED_DIGEST);
+        let index_path = tmp.path().join(super::super::oci_types::INDEX_FILE);
+        let index_digest = format!("sha256:{}", "b".repeat(64));
+        let original = format!("docker.io/library/alpine:3.20@{index_digest}");
+        let mut index = super::super::cache::load_index(tmp.path()).unwrap();
+        index.images[0].reference = original.clone();
+        super::super::cache::save_index(tmp.path(), &index).unwrap();
+        let before = fs::read(&index_path).unwrap();
+        let inspected = super::super::cache::inspect_image(tmp.path(), &original).unwrap();
+        let reference = inspected.image.digest_reference().unwrap();
+        assert_eq!(
+            reference,
+            format!("docker.io/library/alpine@{index_digest}")
+        );
+        let resolved = resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            refusing_runtime_materialize,
+            &RejectingVerifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect("the original immutable index pin reuses its prepared child");
+        assert!(!resolved.pulled);
+        assert_eq!(resolved.rootfs_path, tmp.path().join(relative));
+        for invalid in [
+            PINNED.to_string(),
+            reference.replace("docker.io", "evil.example"),
+            reference.replace("library/alpine", "library/other"),
+        ] {
+            let error = resolve_run_image_with(
+                tmp.path(),
+                &invalid,
+                false,
+                refusing_runtime_materialize,
+                &RejectingVerifier,
+                RunImageAcquisition::PreparedOnly,
+            )
+            .expect_err("no unproven child alias or cross-source alias is introduced");
+            assert!(error.to_string().contains("image pull"), "{error:#}");
+        }
+        assert_eq!(fs::read(&index_path).unwrap(), before);
+    }
+
     /// A local archive or stdin is read only by an explicit pull. A launch
     /// resolves the entry that pull published and never ingests the source
     /// itself. `--prod` makes each path refuse with its own message before
@@ -1765,6 +1975,127 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
                 "{reference}: a launch must not ingest the source, got {launch}"
             );
         }
+    }
+
+    #[test]
+    fn prepared_only_refuses_an_uncached_image_without_acquisition() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reference = "127.0.0.1:1/library/not-cached:latest";
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+        let error = resolve_run_image_with(
+            tmp.path(),
+            reference,
+            false,
+            refusing_runtime_materialize,
+            &verifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect_err("a launch cannot acquire a missing image");
+        assert!(error.to_string().contains("is not prepared"), "{error:#}");
+        assert_eq!(verifier.0.get(), 0);
+        assert!(
+            !tmp.path()
+                .join(super::super::oci_types::INDEX_FILE)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn prepared_only_refuses_missing_trust_evidence_before_materialization() {
+        let fixture = prod_fixture();
+        let index_path = fixture.cache.join(super::super::oci_types::INDEX_FILE);
+        let index_before = fs::read(&index_path).expect("read original index");
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+        let error = resolve_run_image_with(
+            &fixture.cache,
+            PINNED,
+            true,
+            refusing_runtime_materialize,
+            &verifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect_err("a production launch needs its pull's verification evidence");
+        assert!(
+            error
+                .to_string()
+                .contains("production verification evidence is unusable"),
+            "{error:#}"
+        );
+        assert_eq!(verifier.0.get(), 0, "a launch must not reverify online");
+        assert_eq!(
+            fs::read(index_path).expect("read unchanged index"),
+            index_before
+        );
+    }
+
+    #[test]
+    fn prepared_only_refuses_a_repairable_cache_before_calling_the_materializer() {
+        fn observe_materialization(
+            call: super::super::materialize::MaterializeCall<'_>,
+        ) -> Result<()> {
+            fs::write(call.cache_root.join("materializer-called"), b"called")?;
+            bail!("test materializer reached")
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let reference = "docker.io/library/alpine:3.20";
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![sample_image(reference, digest, "blobs/a")],
+            },
+        );
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+        // Both sidecars make the cached layers repairable, so allowing
+        // acquisition must reach the observing materializer.
+        super::super::cache::write_deferred_nodes(tmp.path(), digest, &[])
+            .expect("record empty deferred nodes");
+        assert!(
+            super::super::cache::read_cached_unpack(tmp.path(), digest)
+                .expect("read complete cached unpack")
+                .is_some()
+        );
+        let index_path = tmp.path().join(super::super::oci_types::INDEX_FILE);
+        let index_before = fs::read(&index_path).expect("read original index");
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+
+        let error = resolve_run_image_with(
+            tmp.path(),
+            reference,
+            false,
+            observe_materialization,
+            &verifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect_err("a launch refuses even when cached layers could repair the image");
+        assert!(error.to_string().contains("not launch-ready"), "{error:#}");
+        assert!(!tmp.path().join("materializer-called").exists());
+        assert_eq!(
+            fs::read(&index_path).expect("read unchanged index"),
+            index_before
+        );
+
+        let error = resolve_run_image_with(
+            tmp.path(),
+            reference,
+            false,
+            observe_materialization,
+            &verifier,
+            RunImageAcquisition::Allow,
+        )
+        .expect_err("the observing materializer deliberately returns an error");
+        assert!(
+            format!("{error:#}").contains("test materializer reached"),
+            "{error:#}"
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("materializer-called")).expect("explicit acquisition repairs"),
+            b"called"
+        );
     }
 
     /// A cached image whose rootfs is not current for this runtime is repaired

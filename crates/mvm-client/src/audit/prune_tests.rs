@@ -124,6 +124,87 @@ fn public_facade_validates_before_io_and_never_initializes_missing_keys() {
 }
 
 #[test]
+fn wire_intent_defaults_to_preview_and_cannot_replace_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(root.path());
+    let body = serde_json::json!({"tenant": "local", "through": 1});
+    let request: AuditPruneRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_eq!(request.mode, AuditPruneMode::Preview);
+    assert!(
+        request
+            .execute()
+            .unwrap_err()
+            .to_string()
+            .contains("authority")
+    );
+    for field in [
+        "root",
+        "path",
+        "keys_dir",
+        "pubkey",
+        "signer",
+        "unsafe",
+        "skip_pins",
+    ] {
+        let mut forbidden = body.clone();
+        forbidden[field] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<AuditPruneRequest>(forbidden).is_err(),
+            "{field}"
+        );
+    }
+    for mode in ["execute", "force", "unsafe"] {
+        let mut forbidden = body.clone();
+        forbidden["mode"] = serde_json::json!(mode);
+        assert!(serde_json::from_value::<AuditPruneRequest>(forbidden).is_err());
+    }
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn wire_request_runs_the_same_preview_commit_and_replay_refusals() {
+    let fixture = Fixture::new(false);
+    let before = fixture.snapshot();
+    let request: AuditPruneRequest = serde_json::from_value(serde_json::json!({
+        "tenant": "local", "through": 1
+    }))
+    .unwrap();
+    let preview = request.execute().unwrap();
+    assert_eq!(
+        preview,
+        prune_audit("local", 1, AuditPruneMode::Preview).unwrap()
+    );
+    assert_eq!(fixture.snapshot(), before);
+    let encoded = serde_json::to_value(&preview).unwrap();
+    assert_eq!(encoded["outcome"], "would_prune");
+    assert_eq!(
+        serde_json::from_value::<AuditPruneOutcome>(encoded).unwrap(),
+        preview
+    );
+    let commit: AuditPruneRequest = serde_json::from_value(serde_json::json!({
+        "tenant": "local", "through": 1, "mode": "commit"
+    }))
+    .unwrap();
+    let outcome = commit.execute().unwrap();
+    assert!(matches!(
+        outcome,
+        AuditPruneOutcome::Pruned { through: 1, .. }
+    ));
+    assert_eq!(
+        serde_json::from_value::<AuditPruneOutcome>(serde_json::to_value(&outcome).unwrap())
+            .unwrap(),
+        outcome
+    );
+    let after = fixture.snapshot();
+    assert!(matches!(
+        commit.execute().unwrap(),
+        AuditPruneOutcome::NothingToPrune { .. }
+    ));
+    assert_eq!(fixture.snapshot(), after);
+}
+
+#[test]
 fn public_facade_preserves_pins_in_both_modes() {
     let fixture = Fixture::new(true);
     let before = fixture.snapshot();

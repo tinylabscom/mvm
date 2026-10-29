@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use mvm_bundler::{
     BundleExportInputs, BundleSigner, DebugOutput, ExportedBundle, PostureInputs,
-    export_bundle_with_signer,
+    export_bundle_with_signer, stage_bundle_with_signer,
 };
 use mvm_core::plan::bundle::{
     ArtifactRole, BundleVerifyError, KeyId, MAX_BUNDLE_ENTRY_BYTES, TrustStore, VerifiedBundle,
@@ -21,6 +21,145 @@ const INITRD: &[u8] = b"initrd bytes";
 const VERITY: &[u8] = b"verity hash tree";
 const SIDECAR: &[u8] = br#"{"accessible":false}"#;
 const ROOTHASH: &str = "abababababababababababababababababababababababababababababababab";
+
+#[test]
+fn supplemental_files_are_signed_verified_and_tamper_evident() {
+    let slot = Slot::new();
+    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let path = slot.dir.path().join("diagnostic.txt");
+    let bytes = b"unique supplemental diagnostic payload";
+    std::fs::write(&path, bytes).unwrap();
+    let extras = [("diagnostic.txt", path.as_path())];
+    let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+    assert!(inputs.supplemental_artifacts.is_empty());
+    inputs.supplemental_artifacts = &extras;
+    export(&inputs, &signer);
+    let bundle = verify(&out, &signer).unwrap();
+    assert_eq!(bundle.manifest.schema_version, 3);
+    let artifact = bundle.manifest.find_by_name("diagnostic.txt").unwrap();
+    assert_eq!(artifact.role, ArtifactRole::Other);
+    assert_eq!(artifact.path, "artifacts/diagnostic.txt");
+    assert_eq!(artifact.sha256, sha256_hex(bytes));
+    assert_eq!(artifact.size_bytes, bytes.len() as u64);
+    assert_eq!(bundle.artifacts[&artifact.path], bytes);
+    let mut archive = std::fs::read(&out).unwrap();
+    let at = archive
+        .windows(bytes.len())
+        .position(|window| window == bytes)
+        .unwrap();
+    archive[at] ^= 1;
+    assert!(matches!(
+        read_and_verify_bundle(&archive, &OneKey(signer.key.verifying_key())),
+        Err(BundleVerifyError::ArtifactSha256Mismatch { .. })
+    ));
+    let mut archive = std::fs::read(&out).unwrap();
+    let at = archive
+        .windows(artifact.sha256.len())
+        .position(|window| window == artifact.sha256.as_bytes())
+        .unwrap();
+    archive[at] = if archive[at] == b'a' { b'b' } else { b'a' };
+    assert!(
+        read_and_verify_bundle(&archive, &OneKey(signer.key.verifying_key())).is_err(),
+        "changing a supplemental manifest digest must invalidate its signature"
+    );
+}
+
+#[test]
+fn supplemental_names_refuse_unsafe_reserved_and_duplicate_inputs() {
+    let slot = Slot::new();
+    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let path = Path::new(&kernel);
+    let signer = TestSigner::new(7);
+    for name in [
+        "",
+        ".",
+        "..",
+        "../escape",
+        "/absolute",
+        "nested/file",
+        r"nested\file",
+        "C:drive",
+        "vmlinux",
+        "rootfs.ext4",
+        "initrd",
+        "rootfs.verity",
+        "mvm-meta.json",
+        "boot-image-set.json",
+        "boot-image-set.json.bundle",
+        "image-set-revocations.json",
+        "image-set-revocations.json.bundle",
+        mvm_core::registry_pack_boot::APPLICATION_ROOT_HASH_MEMBER_NAME,
+        "guest-runtime.tar.gz",
+        "guest-runtime.sha256",
+        "guest-runtime.bundle",
+        "guest-runtime.sha256.bundle",
+        "runtime-overlay.ext4",
+        "runtime-overlay.verity",
+    ] {
+        let extras = [(name, path)];
+        let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+        inputs.supplemental_artifacts = &extras;
+        assert!(
+            export_bundle_with_signer(&inputs, &signer).is_err(),
+            "{name:?}"
+        );
+        assert_nothing_written(&out);
+    }
+    let extras = [("duplicate", path), ("duplicate", path)];
+    let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+    inputs.supplemental_artifacts = &extras;
+    let error = export_bundle_with_signer(&inputs, &signer).unwrap_err();
+    assert!(format!("{error:#}").contains("duplicate bundle artifact"));
+    assert_nothing_written(&out);
+}
+
+#[test]
+fn supplemental_files_refuse_directories_missing_files_and_oversized_files() {
+    let slot = Slot::new();
+    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let large = slot.dir.path().join("large");
+    std::fs::File::create(&large)
+        .unwrap()
+        .set_len(MAX_BUNDLE_ENTRY_BYTES + 1)
+        .unwrap();
+    let missing = slot.dir.path().join("missing");
+    for path in [slot.dir.path(), missing.as_path(), large.as_path()] {
+        let extras = [("diagnostic", path)];
+        let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+        inputs.supplemental_artifacts = &extras;
+        assert!(export_bundle_with_signer(&inputs, &TestSigner::new(7)).is_err());
+        assert_nothing_written(&out);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn supplemental_symlinks_follow_regular_targets_only() {
+    let slot = Slot::new();
+    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let link = slot.dir.path().join("link");
+    std::os::unix::fs::symlink(&kernel, &link).unwrap();
+    let extras = [("diagnostic", link.as_path())];
+    let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
+    inputs.supplemental_artifacts = &extras;
+    let signer = TestSigner::new(7);
+    export(&inputs, &signer);
+    assert_eq!(
+        verify(&out, &signer).unwrap().artifacts["artifacts/diagnostic"],
+        KERNEL
+    );
+    let bad_link = slot.dir.path().join("directory-link");
+    std::os::unix::fs::symlink(slot.dir.path(), &bad_link).unwrap();
+    let extras = [("diagnostic", bad_link.as_path())];
+    inputs.supplemental_artifacts = &extras;
+    assert!(export_bundle_with_signer(&inputs, &signer).is_err());
+    let socket = slot.dir.path().join("socket");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let extras = [("diagnostic", socket.as_path())];
+    inputs.supplemental_artifacts = &extras;
+    assert!(export_bundle_with_signer(&inputs, &signer).is_err());
+}
 
 struct TestSigner {
     key: SigningKey,
@@ -112,7 +251,7 @@ impl TrustStore for OneKey {
     }
 }
 
-/// A built template's artifact directory, as `mvmctl bundle export` finds it.
+/// A built template's artifact directory, as `mvmctl build` finds it.
 struct Slot {
     dir: tempfile::TempDir,
 }
@@ -156,23 +295,6 @@ fn assert_nothing_written(out: &Path) {
 
 fn export(inputs: &BundleExportInputs<'_>, signer: &TestSigner) -> ExportedBundle {
     export_bundle_with_signer(inputs, signer).expect("export")
-}
-
-#[test]
-fn boot_archives_without_a_signed_primary_initrd_are_refused() {
-    let slot = Slot::new();
-    let (kernel, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
-    let root = mvm_core::packs::Sha256Hex::new("0".repeat(64)).unwrap();
-    let mut inputs = BundleExportInputs::new(&kernel, &rootfs, "aarch64", &out);
-    inputs.boot_assets = Some(mvm_bundler::BootAssetsInputs {
-        manifest_bytes: b"unread because the boot contract is incomplete",
-        manifest_sha256: &root,
-        runtime_overlay: Path::new("unused-overlay"),
-        initramfs: Path::new("unused-initramfs"),
-    });
-    let error = export_bundle_with_signer(&inputs, &TestSigner::new(7)).unwrap_err();
-    assert!(error.to_string().contains("require a signed initrd"));
-    assert_nothing_written(&out);
 }
 
 #[test]
@@ -497,6 +619,178 @@ fn no_debug_summary_is_written_unless_asked_for() {
 }
 
 #[test]
+fn staged_validation_and_publication_use_the_same_owned_archive() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out);
+    let mut staged = stage_bundle_with_signer(&inputs, &signer).unwrap();
+    assert!(!out.exists());
+    let manifest = staged.manifest().unwrap();
+    let sha256 = staged.sha256().unwrap();
+    assert_eq!(staged.manifest().unwrap(), manifest);
+    assert_eq!(staged.sha256().unwrap(), sha256);
+    let exported = staged.publish().unwrap();
+    let actual = std::fs::read(&out).unwrap();
+    assert_eq!(sha256, bundle_sha256(&actual));
+    assert_eq!(exported.size_bytes, actual.len() as u64);
+    assert_eq!(verify(&out, &signer).unwrap().manifest, manifest);
+}
+
+#[test]
+fn source_path_substitution_cannot_redirect_owned_manifest_or_hash_reads() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out);
+    let mut staged = stage_bundle_with_signer(&inputs, &signer).unwrap();
+    let expected = staged.manifest().unwrap();
+    let digest = staged.sha256().unwrap();
+    let namespace = std::fs::read_dir(out.parent().unwrap())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let source = namespace.join("archive");
+    std::fs::rename(&source, namespace.join("moved-owned")).unwrap();
+    std::fs::write(&source, b"foreign").unwrap();
+    assert_eq!(staged.manifest().unwrap(), expected);
+    assert_eq!(staged.sha256().unwrap(), digest);
+    let error = staged.publish().unwrap_err();
+    assert!(format!("{error:#}").contains("ownership changed"));
+    assert_eq!(std::fs::read(&source).unwrap(), b"foreign");
+    assert!(!out.exists());
+}
+
+#[test]
+fn existing_and_substituted_destinations_survive_refused_publication() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out);
+    std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+    std::fs::write(&out, b"original").unwrap();
+    assert!(export_bundle_with_signer(&inputs, &signer).is_err());
+    assert_eq!(std::fs::read(&out).unwrap(), b"original");
+
+    let mut staged = stage_bundle_with_signer(&inputs, &signer).unwrap();
+    std::fs::rename(&out, out.with_extension("original")).unwrap();
+    std::fs::write(&out, b"substituted").unwrap();
+    assert_eq!(staged.manifest().unwrap().key_id, signer.key_id());
+    assert_ne!(staged.sha256().unwrap(), sha256_hex(b"substituted"));
+    assert!(staged.publish().is_err());
+    assert_eq!(std::fs::read(&out).unwrap(), b"substituted");
+    assert_eq!(
+        std::fs::read(out.with_extension("original")).unwrap(),
+        b"original"
+    );
+    assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 2);
+}
+
+#[test]
+fn concurrent_bundle_exports_have_one_winner_and_isolated_staging() {
+    use std::sync::{Arc, Barrier};
+
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let barrier = Arc::new(Barrier::new(2));
+    let threads = (0..2)
+        .map(|seed| {
+            let (vmlinux, rootfs, out, barrier) = (
+                vmlinux.clone(),
+                rootfs.clone(),
+                out.clone(),
+                barrier.clone(),
+            );
+            std::thread::spawn(move || {
+                let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out);
+                let staged = stage_bundle_with_signer(&inputs, &TestSigner::new(seed)).unwrap();
+                barrier.wait();
+                staged.publish()
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let winner = results.into_iter().find_map(Result::ok).unwrap();
+    let actual = std::fs::read(&out).unwrap();
+    assert_eq!(actual.len() as u64, winner.size_bytes);
+    assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 1);
+}
+
+#[test]
+fn summary_publication_failure_reports_and_preserves_the_published_archive() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let not_directory = slot.dir.path().join("not-directory");
+    std::fs::write(&not_directory, b"preserved").unwrap();
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out)
+        .debug_out(DebugOutput::json(not_directory.join("summary")));
+    let signer = TestSigner::new(7);
+    let error = export_bundle_with_signer(&inputs, &signer).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("archive was published"),
+        "{error:#}"
+    );
+    verify(&out, &signer).expect("summary failure must preserve the signed archive");
+    assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 1);
+    assert_eq!(std::fs::read(&not_directory).unwrap(), b"preserved");
+}
+
+fn assert_case_variant_summary_preserves_archive(existing: bool) {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let parent = out.parent().unwrap();
+    std::fs::create_dir_all(parent).unwrap();
+    let probe = parent.join("case-probe");
+    std::fs::write(&probe, b"probe").unwrap();
+    let case_insensitive = parent.join("CASE-PROBE").exists();
+    std::fs::remove_file(probe).unwrap();
+    eprintln!("case-insensitive filesystem witness: {case_insensitive}");
+    let summary = parent.join("APP.MVMPKG");
+    if existing {
+        std::fs::write(&out, b"existing archive").unwrap();
+    }
+    let signer = TestSigner::new(7);
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out)
+        .debug_out(DebugOutput::json(&summary));
+    let result = export_bundle_with_signer(&inputs, &signer);
+    if existing {
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&out).unwrap(), b"existing archive");
+        if !case_insensitive {
+            assert!(!summary.exists());
+        }
+    } else {
+        if case_insensitive {
+            let error = result.unwrap_err();
+            assert!(
+                format!("{error:#}").contains("archive was published"),
+                "{error:#}"
+            );
+        } else {
+            result.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&summary).unwrap()).unwrap();
+        }
+        verify(&out, &signer).expect("the final pathname must contain a signed archive");
+    }
+}
+
+#[test]
+fn case_variant_summary_preserves_existing_archive() {
+    assert_case_variant_summary_preserves_archive(true);
+}
+
+#[test]
+fn case_variant_summary_cannot_occupy_the_new_archive_path() {
+    assert_case_variant_summary_preserves_archive(false);
+}
+
+#[test]
 fn an_export_without_declarations_carries_no_members() {
     let slot = Slot::new();
     let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
@@ -645,60 +939,6 @@ fn an_environment_survives_export_and_stamps_schema_five() {
         manifest.environment(),
         Some(&environment_descriptor(&["egress"]))
     );
-}
-
-#[test]
-fn an_application_policy_survives_signed_export_and_installation() {
-    let slot = Slot::new();
-    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
-    let signer = TestSigner::new(19);
-    let profile = b"description = \"agent environment\"\n[overrides.network]\nallow = [\"api.example.test:443\"]\n";
-    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out)
-        .environment(environment_descriptor(&[]))
-        .application_policy(profile);
-    export(&inputs, &signer);
-    let verified = verify(&out, &signer).unwrap();
-    assert_eq!(verified.artifacts["artifacts/policy/profile.toml"], profile);
-    let registry = mvm_core::plan::BundleRegistry::new(slot.dir.path().join("installed"));
-    let installed = registry
-        .install_file(&out, &OneKey(signer.verifying_key()), false)
-        .unwrap();
-    assert_eq!(
-        std::fs::read(installed.path_for_name("policy/profile.toml").unwrap()).unwrap(),
-        profile
-    );
-    assert_eq!(
-        installed.manifest.environment(),
-        Some(&environment_descriptor(&[]))
-    );
-}
-
-#[test]
-fn an_application_policy_without_a_package_identity_is_refused() {
-    let slot = Slot::new();
-    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
-    let signer = TestSigner::new(19);
-    let mut environment = environment_descriptor(&[]);
-    environment.pack = None;
-    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out)
-        .environment(environment)
-        .application_policy(b"description = \"agent environment\"\n");
-    let error = export_bundle_with_signer(&inputs, &signer).unwrap_err();
-    assert!(error.to_string().contains("package identity"));
-    assert_nothing_written(&out);
-}
-
-#[test]
-fn an_oversized_application_policy_is_refused_before_signing() {
-    let slot = Slot::new();
-    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
-    let signer = TestSigner::new(19);
-    let policy = vec![b' '; mvm_core::registry_pack::MAX_APPLICATION_POLICY_BYTES + 1];
-    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out)
-        .environment(environment_descriptor(&[]))
-        .application_policy(&policy);
-    assert!(export_bundle_with_signer(&inputs, &signer).is_err());
-    assert_nothing_written(&out);
 }
 
 #[test]

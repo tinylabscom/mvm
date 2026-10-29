@@ -1,0 +1,19 @@
+name: python3 via uv
+description: >-
+  Put a uv-provisioned Python 3.12 first on PATH as `python3`, for runners
+  whose system python3 is too old for the repository scripts (a self-hosted
+  macOS runner ships 3.9, which has no tomllib). uv must already be on PATH
+  (astral-sh/setup-uv).
+runs:
+  using: composite
+  steps:
+    - name: Install Python 3.12 and expose it as python3
+      shell: bash
+      run: |
+        set -euo pipefail
+        uv python install 3.12
+        shim="${RUNNER_TEMP}/python3-shim"
+        mkdir -p "$shim"
+        ln -sf "$(uv python find 3.12)" "$shim/python3"
+        echo "$shim" >> "$GITHUB_PATH"
+        "$shim/python3" -c 'import sys, tomllib; print(sys.version)'

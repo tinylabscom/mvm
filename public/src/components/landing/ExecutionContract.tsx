@@ -2,16 +2,8 @@ import { Section } from "./primitives/Section";
 import { Eyebrow } from "./primitives/Eyebrow";
 import { Reveal } from "./primitives/Reveal";
 
-// The composition argument: isolation alone is table stakes (every
-// serious runtime has a microVM now), so this section makes the case that
-// what a security team actually approves is the contract around the box —
-// told the way the pitch script tells it, as three moves in order:
-// declare → sign → prove. This collapsed from six parallel layer cards
-// (pitch-script reshape): each step absorbs two or three of the old
-// layers, and the CI-enforced claim(s) backing each step are noted in a
-// comment per step, not rendered (/security/ci-claims/ mirrors the
-// machine-checked ADR-001 ledger and is linked below the grid). Do not
-// add a step here without a shipped claim to cite.
+// Keep the plan, admission, and audit steps distinct. Each step links
+// back to the enforced security claims listed below.
 const LAYERS: Array<{
   num: string;
   title: string;
@@ -21,19 +13,19 @@ const LAYERS: Array<{
   {
     num: "01",
     title: "Declare",
-    body: "Say what's allowed before anything runs — what's in the box, what it can reach, what it can do. Everything else is blocked by default.",
+    body: "List the files, tools, secrets, and outbound connections the workload can use. Access is denied unless the plan allows it.",
   },
   // claims 8, 9, 14 (signed admission, pinned artifact) + 3, 15 (sealed)
   {
     num: "02",
     title: "Sign",
-    body: "Your declaration is signed and the code is locked to it. What runs is exactly what you approved — proof, not hope.",
+    body: "Sign the plan and pin the workload artifacts. Admission checks the signature before the workload starts.",
   },
   // claims 8, 14 (verifiable record)
   {
     num: "03",
-    title: "Prove",
-    body: "Every run leaves a signed record of what happened and what was allowed — tamper with it and it shows. Evidence you can hand to an auditor.",
+    title: "Verify",
+    body: "Review the signed execution record after a run. Verify its integrity rather than relying on an unsigned log.",
   },
 ];
 
@@ -46,7 +38,7 @@ export function ExecutionContract() {
     // raised — keeping this one on the canvas preserves the alternation.
     <Section id="execution-contract" rule>
       <Reveal>
-        <Eyebrow>The contract</Eyebrow>
+        <Eyebrow>Execution plans</Eyebrow>
         {/* Inline margins, not margin utilities: Starlight's unlayered
             stylesheet beats layered utilities on this page (see
             Positioning.tsx). */}
@@ -54,14 +46,13 @@ export function ExecutionContract() {
           className="lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl"
           style={{ marginBottom: "1.5rem" }}
         >
-          the box is table stakes.{" "}
-          <span className="text-accent-2">the contract is the product.</span>
+          Set the rules{" "}
+          <span className="text-accent-2">before the workload starts.</span>
         </h2>
         <p className="max-w-2xl text-base leading-relaxed text-body">
-          Before anything runs, you declare what&rsquo;s allowed &mdash;
-          what&rsquo;s in the box, what it can reach, what it can do &mdash;
-          and sign it. What runs is what you approved: proof, not hope. Three
-          moves, enforced and witnessed.
+          Isolation is one part of running untrusted code. A signed execution
+          plan also defines what the workload can access, and a signed record
+          lets you review the execution afterward.
         </p>
       </Reveal>
 
@@ -107,7 +98,7 @@ export function ExecutionContract() {
             href={`${base}security/ci-claims/`}
             className="text-sm text-accent underline underline-offset-2 hover:text-accent/80"
           >
-            The numbered claims, with witnesses
+            Read the enforced security claims
           </a>
         </div>
       </Reveal>

@@ -551,6 +551,19 @@ fn drain_batch(rx: &Receiver<EntrypointEvent>, sink: &mut dyn FnMut(EntrypointEv
     while drained < EVENTS_PER_POLL {
         match rx.try_recv() {
             Ok(event) => {
+                // Workload output also goes to guest capture, so it reaches
+                // the VM's collector whoever is (or is not) reading this call.
+                match &event {
+                    EntrypointEvent::Stdout { chunk } => crate::telemetry_capture::offer_stdio(
+                        mvm_core::protocol::telemetry::StdioStream::Stdout,
+                        chunk,
+                    ),
+                    EntrypointEvent::Stderr { chunk } => crate::telemetry_capture::offer_stdio(
+                        mvm_core::protocol::telemetry::StdioStream::Stderr,
+                        chunk,
+                    ),
+                    _ => {}
+                }
                 sink(event);
                 drained += 1;
             }

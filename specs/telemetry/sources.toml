@@ -6,7 +6,7 @@ version = 1
 # --- Rust subscriber / global diagnostic-state initialization sites ---------
 
 [[subscriber_init]]
-file = "crates/mvm-observability/src/logging.rs"
+file = "crates/mvm-cli/src/observability/logging.rs"
 anchor = "tracing_subscriber::registry()"
 scope = "global"
 role = "host"
@@ -273,7 +273,7 @@ activation = "always"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-guest-agent"
-launcher = "crates/mvm-build/src/bin/mvm-host-vm-init.rs"
+launcher = "crates/mvm-builder-guest/src/bin/mvm-host-vm-init.rs"
 anchor = "fork_guest_agent();"
 activation = "always"
 
@@ -370,21 +370,21 @@ anchor = "mvm-builder-agent"
 activation = "unwired"
 
 [[launch_edge]]
-producer = "mvm-build/mvm-host-vm-init"
-launcher = "crates/mvm-build/src/builder_boot/cmdline.rs"
+producer = "mvm-builder-guest/mvm-host-vm-init"
+launcher = "crates/mvm-builder-guest/src/builder_boot/cmdline.rs"
 anchor = "init={BAKED_INIT}"
 activation = "always"
 
 [[launch_edge]]
-producer = "mvm-build/mvm-builderd"
-launcher = "crates/mvm-build/src/bin/mvm-host-vm-init.rs"
+producer = "mvm-builder-guest/mvm-builderd"
+launcher = "crates/mvm-builder-guest/src/bin/mvm-host-vm-init.rs"
 anchor = "spawn_builderd"
 activation = "conditional"
 condition = "persistent builder dispatch loop"
 
 [[launch_edge]]
-producer = "mvm-build/stage0-init"
-launcher = "crates/mvm-build/src/host_payload_manifest.rs"
+producer = "mvm-builder-guest/stage0-init"
+launcher = "crates/mvm-builder-guest/src/host_payload_manifest.rs"
 anchor = "SEED_BINARIES"
 activation = "seed"
 

@@ -1,5 +1,10 @@
 set working-directory := "../.."
 
+# Show available subcommands
+[private]
+default:
+    @just --list mem
+
 # ── Agent memory (.agent-memory/notes) ───────────────────────────────────
 
 # Lexical, because at a few hundred terse, keyword-dense notes a substring match beats anything with a model in it.

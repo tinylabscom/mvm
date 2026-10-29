@@ -8,14 +8,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use clap::{Args as ClapArgs, ValueEnum};
+use clap::Args as ClapArgs;
 use mvm_compiler::PinnedMvmRevision;
-use mvm_compiler::pack::{PackInput, compile_frozen, lock_pack};
 use mvm_contract::pack_lock::PackLock;
 use mvm_contract::pack_spec::PackSpec;
+use mvm_sdk::pack::{PackInput, compile_frozen, lock_pack};
 
 /// File name a lock is written to beside its spec when no path is given.
-pub(super) use mvm_compiler::pack::LOCK_FILE as DEFAULT_LOCK_FILE;
+pub(super) use mvm_sdk::pack::LOCK_FILE as DEFAULT_LOCK_FILE;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct LockArgs {
@@ -45,21 +45,6 @@ pub(in crate::commands) struct CompileArgs {
     /// Directory the compiled flake artifact is written to
     #[arg(long, value_name = "DIR")]
     pub out: PathBuf,
-}
-
-#[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct BuildArgs {
-    #[command(flatten)]
-    pub compile: CompileArgs,
-    /// Select the generated guest variant; development is never inferred
-    #[arg(long, value_enum, default_value = "default")]
-    pub profile: BuildProfile,
-}
-
-#[derive(ValueEnum, Debug, Clone, Copy)]
-pub(in crate::commands) enum BuildProfile {
-    Default,
-    Dev,
 }
 
 /// A spec read as data, with the directory its source path resolves against.
@@ -159,47 +144,6 @@ pub(super) fn run_compile(args: CompileArgs) -> Result<()> {
     Ok(())
 }
 
-/// Author-only materialization. Consumer run-by-name never enters this path.
-pub(super) fn run_build(args: BuildArgs) -> Result<()> {
-    let slot = build_with(args, crate::commands::build::build::build_flake_to_slot)?;
-    let (_, _, _, rootfs, _) =
-        mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(&slot)?;
-    let directory = Path::new(&rootfs)
-        .parent()
-        .context("materialized rootfs has no output directory")?;
-    // Integrity is mandatory even for a development package. Never rewrite the
-    // accessibility sidecar to obtain it or relax the consumer's verity gate.
-    mvm_build::builder_output::seal_rootfs_for_export(directory)
-        .context("binding authored package bytes before archive export")?;
-    println!("{slot}");
-    Ok(())
-}
-
-fn build_with(
-    args: BuildArgs,
-    build: impl FnOnce(&str, Option<&str>) -> Result<String>,
-) -> Result<String> {
-    let loaded = LoadedSpec::read(&args.compile.spec)?;
-    let target = match loaded.spec.target {
-        mvm_contract::pack_spec::PackTarget::Aarch64Linux => "aarch64-linux",
-        mvm_contract::pack_spec::PackTarget::X86_64Linux => "x86_64-linux",
-    };
-    anyhow::ensure!(
-        target == mvm_core::arch::GuestArch::host().nix_system(),
-        "pack target {target} does not match the builder guest architecture"
-    );
-    let out = args.compile.out.clone();
-    run_compile(args.compile)?;
-    let artifact = fs::canonicalize(&out)
-        .with_context(|| format!("resolving compiled artifact {}", out.display()))?;
-    let artifact = artifact.to_str().context("artifact path must be UTF-8")?;
-    let profile = match args.profile {
-        BuildProfile::Default => None,
-        BuildProfile::Dev => Some("dev"),
-    };
-    build(artifact, profile).context("materializing the frozen pack in the builder VM")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,7 +156,7 @@ mod tests {
         let spec = serde_json::json!({
             "schema": "mvm.pack-spec/v1",
             "identity": { "name": "acme/hello", "version": "1.0.0" },
-            "target": mvm_core::arch::GuestArch::host().nix_system(),
+            "target": "aarch64-linux",
             "source": { "kind": "local", "path": "." },
             "packages": [{ "name": "busybox", "scope": "runtime" }],
             "dependencies": [],
@@ -289,73 +233,6 @@ mod tests {
         .unwrap_err();
         assert!(format!("{error:#}").contains("source_tree_sha256"));
         assert!(!dir.path().join("artifact").exists());
-    }
-
-    #[test]
-    fn frozen_build_uses_the_shared_materializer_and_explicit_variant() {
-        for profile in [BuildProfile::Default, BuildProfile::Dev] {
-            let dir = TempDir::new().unwrap();
-            let spec = write_pack(dir.path());
-            run_lock(LockArgs {
-                spec: spec.clone(),
-                mvm_revision: REVISION.into(),
-                out: None,
-                stdout: false,
-            })
-            .unwrap();
-            let out = dir.path().join("artifact");
-            let slot = build_with(
-                BuildArgs {
-                    compile: CompileArgs {
-                        spec,
-                        lock: None,
-                        out: out.clone(),
-                    },
-                    profile,
-                },
-                |artifact, selected| {
-                    assert_eq!(Path::new(artifact), fs::canonicalize(&out).unwrap());
-                    assert!(out.join("src/hello.txt").is_file());
-                    assert_eq!(
-                        selected,
-                        match profile {
-                            BuildProfile::Default => None,
-                            BuildProfile::Dev => Some("dev"),
-                        }
-                    );
-                    Ok("verified-slot".into())
-                },
-            )
-            .unwrap();
-            assert_eq!(slot, "verified-slot");
-        }
-    }
-
-    #[test]
-    fn stale_build_never_enters_the_materializer() {
-        let dir = TempDir::new().unwrap();
-        let spec = write_pack(dir.path());
-        run_lock(LockArgs {
-            spec: spec.clone(),
-            mvm_revision: REVISION.into(),
-            out: None,
-            stdout: false,
-        })
-        .unwrap();
-        fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
-        let error = build_with(
-            BuildArgs {
-                compile: CompileArgs {
-                    spec,
-                    lock: None,
-                    out: dir.path().join("artifact"),
-                },
-                profile: BuildProfile::Dev,
-            },
-            |_, _| panic!("a stale source must not start a builder"),
-        )
-        .unwrap_err();
-        assert!(format!("{error:#}").contains("source_tree_sha256"));
     }
 
     #[test]

@@ -91,6 +91,27 @@ pub(super) enum UdpPeerAdmission {
     ObservedOnly,
 }
 
+/// Whether a datagram that arrived on the association's socket may reach the guest.
+///
+/// An outbound association (`GuestMayIntroduce`) exists to let the guest talk to
+/// destinations egress policy admitted, so only a source the guest itself sent to
+/// may answer. Anything else is unsolicited traffic from the host's network and
+/// would reach a guest whose egress is default-deny, and spoofed sources would
+/// also fill the bounded peer table until the guest's own sends were dropped. An
+/// ingress mapping (`ObservedOnly`) is the opposite by design: external peers
+/// start the conversation, and they are learned up to the peer limit.
+fn inbound_admitted(
+    admission: UdpPeerAdmission,
+    already_peer: bool,
+    peer_count: usize,
+    max_peers: usize,
+) -> bool {
+    match admission {
+        UdpPeerAdmission::GuestMayIntroduce => already_peer,
+        UdpPeerAdmission::ObservedOnly => already_peer || peer_count < max_peers,
+    }
+}
+
 /// Per-association UDP relay thread: read datagrams from the upstream socket
 /// and forward them to the guest as `UdpRecv` frames. Guest `UdpSend`
 /// requests arrive through a channel so the socket stays owned by one thread.
@@ -144,7 +165,12 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
                         Ok((len, source)) => {
                             activity_this_iter = true;
                             let already_peer = peers.contains(&source);
-                            if !already_peer && peers.len() >= max_peers {
+                            if !inbound_admitted(
+                                peer_admission,
+                                already_peer,
+                                peers.len(),
+                                max_peers,
+                            ) {
                                 continue;
                             }
                             peers.insert(source);
@@ -318,6 +344,31 @@ pub(super) fn decode_udp_addr(bytes: &[u8]) -> Result<(IpAddr, u16, &[u8]), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_outbound_association_only_hears_from_peers_the_guest_sent_to() {
+        use UdpPeerAdmission::GuestMayIntroduce;
+        assert!(inbound_admitted(GuestMayIntroduce, true, 1, 16));
+        assert!(
+            !inbound_admitted(GuestMayIntroduce, false, 0, 16),
+            "an unsolicited datagram must not reach the guest"
+        );
+        // Spoofed sources cannot fill the table: none is ever admitted, so the
+        // guest keeps all of its peer slots for destinations it chose.
+        assert!(!inbound_admitted(GuestMayIntroduce, false, 15, 16));
+    }
+
+    #[test]
+    fn an_ingress_association_learns_external_peers_up_to_its_limit() {
+        use UdpPeerAdmission::ObservedOnly;
+        assert!(inbound_admitted(ObservedOnly, false, 0, 16));
+        assert!(inbound_admitted(ObservedOnly, false, 15, 16));
+        assert!(
+            !inbound_admitted(ObservedOnly, false, 16, 16),
+            "the peer limit still applies"
+        );
+        assert!(inbound_admitted(ObservedOnly, true, 16, 16));
+    }
 
     #[test]
     fn udp_addr_roundtrips_ipv4_and_ipv6() {

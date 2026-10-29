@@ -30,7 +30,28 @@ fn libkrun_is_an_optional_backend_not_a_generic_capability_switch() {
 
     let lib = std::fs::read_to_string(crate_root().join("src/lib.rs")).unwrap();
     for module in ["libkrun_builder", "libkrun_network_provider"] {
-        let gated = format!("#[cfg(feature = \"builder-libkrun\")]\npub mod {module};");
+        let gated =
+            format!("#[cfg(feature = \"builder-libkrun\")]\n#[cfg(unix)]\npub mod {module};");
         assert!(lib.contains(&gated), "{module} must stay feature-gated");
+    }
+}
+
+#[test]
+fn runtime_implementation_dependencies_are_unix_only() {
+    let text = std::fs::read_to_string(crate_root().join("Cargo.toml")).unwrap();
+    let manifest: toml::Value = toml::from_str(&text).unwrap();
+    let portable = manifest["dependencies"].as_table().unwrap();
+    let unix = manifest["target"]["cfg(unix)"]["dependencies"]
+        .as_table()
+        .unwrap();
+    for dependency in ["mvm-vmm", "mvm-agentd", "mvm-net", "libkrun-sys"] {
+        assert!(
+            !portable.contains_key(dependency),
+            "{dependency} must not enter portable builds"
+        );
+        assert!(
+            unix.contains_key(dependency),
+            "{dependency} must remain available on Unix"
+        );
     }
 }

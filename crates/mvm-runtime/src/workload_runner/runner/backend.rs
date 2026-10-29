@@ -3,6 +3,87 @@
 use super::*;
 use std::time::Instant;
 
+/// A VM state directory belongs to a booted VM when it holds its console log or
+/// the pid file its supervisor wrote. A machine whose console is not captured
+/// (a named HVF machine) has only the pid file, and must still be listed.
+fn has_vm_marker(state_dir: &std::path::Path) -> bool {
+    state_dir.join("console.log").exists()
+        || mvm_vmm::host::process_liveness::PID_FILE_NAMES
+            .iter()
+            .any(|name| state_dir.join(name).exists())
+}
+
+impl<S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
+    WorkloadRunner<mvm_backends::driver::hvf::HvfDriver, S, B>
+{
+    /// Preserve native launch failures and this exact runtime lease before any
+    /// compatibility conversion to the string-only standby error.
+    pub fn spawn_standby_captured_owned(
+        &self,
+        ctx: &SpawnContext<'_>,
+        spec: &StandbySpec,
+    ) -> Result<StandbyHandle> {
+        self.spawn_standby_captured(ctx, spec).map_err(Into::into)
+    }
+
+    /// Prepare lower transport custody, not an admission capability. No native
+    /// launch occurs until the returned owner's `activate` method is called.
+    /// Client integration must still pair its original opaque admission.
+    pub fn prepare_cold_hvf_channel(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::host::boot_images::FrozenBootImageBytes,
+    ) -> Result<ColdHvfChannel> {
+        cold_hvf_channel::require_cold_start_config(config)?;
+        anyhow::ensure!(
+            config.roothash.as_deref() == Some(images.root_hash()),
+            "original frozen root hash differs from the final config"
+        );
+        self.require_caller_registration_shape(config)?;
+        let lifecycle = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&config.name)?;
+        let config = lifecycle.bind(config)?;
+        let launch =
+            crate::kernel_custody::KernelBoundLaunch::bind(config, self.driver.kind(), &lifecycle)?;
+        let config = launch.config();
+        cold_hvf_channel::require_cold_start_config(config)?;
+        ClaimGuards::new(&self.spawner)
+            .admit_overlay_contract(std::path::Path::new(&config.rootfs_path))?;
+        refuse_rootfs_needing_journal_replay(&config.rootfs_path)?;
+        let state_dir = vm_state_dir(&config.name);
+        let decoded = decode_plan_secrets_from_state(&state_dir)?;
+        let default_redaction = RedactionPolicy::default();
+        let (secrets, redaction, tenant) = match &decoded {
+            Some((secrets, redaction, tenant)) => (secrets.as_slice(), redaction, tenant.as_str()),
+            None => (
+                &[][..],
+                &default_redaction,
+                config.tenant_id.as_deref().unwrap_or("local"),
+            ),
+        };
+        let inputs = WorkloadLaunchInputs {
+            config,
+            tenant,
+            secrets,
+            redaction,
+            network_policy: &config.network_policy,
+            cmdline: cmdline::runner_cmdline(config, &state_dir, |has_disk| {
+                self.driver.workload_base_bootargs(has_disk)
+            }),
+        };
+        let prepared = self.prepare_workload_boot(&inputs)?;
+        let (broker, _) = self.register_workload_broker(config, &prepared.socks)?;
+        Ok(ColdHvfChannel::new(cold_hvf_channel::ColdHvfPreparation {
+            launch,
+            images,
+            _lifecycle: lifecycle,
+            prepared,
+            _broker: broker,
+            streamer: Arc::clone(&self.console_streamer),
+            redaction: redaction.clone(),
+        }))
+    }
+}
+
 /// Refuse a rootfs whose ext4 journal still needs replay, without touching it.
 ///
 /// The rootfs is attached to the guest read-only, so the guest kernel cannot
@@ -49,6 +130,11 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
     }
 
     fn terminate_with_timing(&self, id: &VmId, prepare_guest: bool) -> Result<StopTiming> {
+        mvm_core::naming::validate_vm_name(&id.0)?;
+        let lifecycle = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&id.0)?;
+        // Measurement is diagnostic, never permission to terminate or delete.
+        // Keep the lifecycle lease even if retention accounting fails.
+        lifecycle.report_retained_best_effort();
         let total_started = Instant::now();
         let attach_started = Instant::now();
         let vm = match self.driver.attach(id) {
@@ -70,10 +156,10 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
             if prepare_guest {
                 vm.prepare_stop()?;
             }
-            vm.terminate_with_timing()
+            vm.terminate_with_kernel_exit()
         })();
         let driver_detail = match &kill_result {
-            Ok(detail) => *detail,
+            Ok(detail) => detail.timing,
             Err(_) => None,
         };
         let driver_kill = kill_started.elapsed();
@@ -81,7 +167,21 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         let console_started = Instant::now();
         self.console_streamer.stop(&id.0);
         let console_cleanup = console_started.elapsed();
-        kill_result?;
+        let stopped = kill_result?;
+        if crate::kernel_custody::has_retained_kernel(&lifecycle)? {
+            #[cfg(unix)]
+            {
+                match stopped.hvf_exit.as_ref() {
+                    Some(proof) => {
+                        crate::kernel_custody::release_after_confirmed_exit(&lifecycle, proof)?
+                    }
+                    None => crate::kernel_custody::release_after_process_exit(&lifecycle)
+                        .context("kernel generation retained: backend did not provide instance-bound exit evidence")?,
+                }
+            }
+            #[cfg(not(unix))]
+            anyhow::bail!("kernel generation retained: lifetime release unsupported");
+        }
 
         let timing = StopTiming {
             attach,
@@ -174,11 +274,6 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         ClaimGuards::new(&self.spawner)
             .admit_overlay_contract(std::path::Path::new(&config.rootfs_path))?;
         refuse_rootfs_needing_journal_replay(&config.rootfs_path)?;
-        crate::base::runtime_meta::record_from_start_config(
-            &config.name,
-            StartMode::Detached,
-            config,
-        )?;
 
         let default_redaction = RedactionPolicy::default();
         let decoded = decode_plan_secrets_from_state(&state_dir)?;
@@ -263,7 +358,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         };
         let mut vms = Vec::new();
         for entry in entries.flatten() {
-            if !entry.path().join("console.log").exists() {
+            if !has_vm_marker(&entry.path()) {
                 continue;
             }
             let Ok(name) = entry.file_name().into_string() else {

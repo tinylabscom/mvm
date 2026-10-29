@@ -86,11 +86,15 @@ impl ColdStartReason {
 /// boots cold without looking. The order is the order a reader asks in: a
 /// named machine is never a claim, a shape a shared parent cannot serve is
 /// never a claim, and a host that keeps no standbys has nothing to claim.
-pub(super) fn claim_gate(cfg: &VmStartConfig, user_named: bool) -> Result<(), ColdStartReason> {
+pub(super) fn claim_gate(
+    cfg: &VmStartConfig,
+    user_named: bool,
+    late_volume_slots: u8,
+) -> Result<(), ColdStartReason> {
     if user_named {
         return Err(ColdStartReason::Named);
     }
-    if !super::warm_eligible_launch(cfg) {
+    if !super::warm_eligible_launch(cfg, late_volume_slots) {
         return Err(ColdStartReason::IneligibleShape);
     }
     if cfg.warm_pool_size == 0 {

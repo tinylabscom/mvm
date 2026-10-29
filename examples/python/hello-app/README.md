@@ -15,7 +15,7 @@ Demonstrates:
 ## Build, run, invoke
 
 ```sh
-mvmctl build compile examples/python/hello-app/app.py --out /tmp/hello-app
+mvmctl dev compile examples/python/hello-app/app.py --out /tmp/hello-app
 mvmctl machine run --flake /tmp/hello-app --entrypoint
 # expect: "hello ari"
 ```

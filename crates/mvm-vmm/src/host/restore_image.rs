@@ -209,6 +209,59 @@ impl VerifiedRestoreFile {
         Ok(Self { file, len, copy })
     }
 
+    /// Snapshot an already-open original file using CoW only. Unsupported
+    /// filesystems refuse before the ordinary restore copy fallback.
+    ///
+    /// This verifies byte/size mechanics relative to the supplied expectation,
+    /// not publisher authenticity, admission, or a native launch. Same-user
+    /// hostile writers remain outside the module's isolation guarantee.
+    pub fn prepare_clone_only(
+        source: &File,
+        private_dir: &Path,
+        expected_sha256: &str,
+        expected_len: u64,
+    ) -> Result<Self, RestoreImageError> {
+        let metadata = source
+            .metadata()
+            .map_err(|e| io_err("stat strict clone source in", private_dir, e))?;
+        // SAFETY: F_GETFL only inspects the borrowed live descriptor.
+        let flags = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GETFL) };
+        if !metadata.is_file()
+            || metadata.len() != expected_len
+            || flags == -1
+            || flags & libc::O_ACCMODE != libc::O_RDONLY
+        {
+            return Err(io_err(
+                "validate strict clone source in",
+                private_dir,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "expected read-only regular source of exact size",
+                ),
+            ));
+        }
+        let dir = open_trusted_dir(private_dir)?;
+        let file =
+            private_unlinked_clone_with(source, private_dir, &dir, private_dir, &clone_into)?;
+        let len = file
+            .metadata()
+            .map_err(|e| io_err("stat strict private clone in", private_dir, e))?
+            .len();
+        let actual = sha256_of(&file, private_dir)?;
+        if len != expected_len || !actual.eq_ignore_ascii_case(expected_sha256) {
+            return Err(RestoreImageError::DigestMismatch {
+                path: private_dir.to_owned(),
+                expected: expected_sha256.to_ascii_lowercase(),
+                actual,
+            });
+        }
+        Ok(Self {
+            file,
+            len,
+            copy: PrivateCopy::Cloned,
+        })
+    }
+
     /// The verified private copy.
     pub fn file(&self) -> &File {
         &self.file
@@ -561,22 +614,44 @@ fn private_unlinked_copy_with(
         }
         Err(e) => return Err(io_err("clone", source, e)),
     };
+    finish_private_copy(dir, &name, dir_path, open).map(|file| (file, copy))
+}
+
+fn private_unlinked_clone_with(
+    src: &File,
+    source: &Path,
+    dir: &File,
+    dir_path: &Path,
+    clone: &dyn Fn(&File, &File, &CString) -> io::Result<()>,
+) -> Result<File, RestoreImageError> {
+    let name = private_name().map_err(|e| io_err("name private clone in", dir_path, e))?;
+    // No call to copy_into exists on this path, including unsupported CoW.
+    clone(src, dir, &name).map_err(|e| io_err("required CoW clone of", source, e))?;
+    finish_private_copy(dir, &name, dir_path, &openat_readonly)
+}
+
+fn finish_private_copy(
+    dir: &File,
+    name: &CString,
+    dir_path: &Path,
+    open: &dyn Fn(&File, &CString) -> io::Result<File>,
+) -> Result<File, RestoreImageError> {
     // From here the copy has a name. The guard removes it on every path out
     // of this function, and a removal that fails is reported, not ignored.
-    let named = NamedCopy { dir, name: &name };
+    let named = NamedCopy { dir, name };
     // A clone keeps its source's mode. Narrow it before anything else, so
     // even a source left readable or writable by others yields a copy only
     // this user can open; the directory being owner-only already keeps other
     // users from reaching the name.
-    if let Err(e) = restrict_to_owner(dir, &name) {
+    if let Err(e) = restrict_to_owner(dir, name) {
         return Err(named.remove_after(io_err("restrict private copy in", dir_path, e), dir_path));
     }
-    let opened = open(dir, &name);
+    let opened = open(dir, name);
     named
         .unlink()
         .map_err(|e| io_err("unlink private copy in", dir_path, e))?;
     let file = opened.map_err(|e| io_err("open private copy in", dir_path, e))?;
-    Ok((file, copy))
+    Ok(file)
 }
 
 /// Set `name` in `dir` to mode `0600` without following a symlink.
@@ -780,6 +855,101 @@ mod tests {
         let source = private.join("memory.bin");
         std::fs::write(&source, bytes).unwrap();
         (root, private, source)
+    }
+
+    #[test]
+    fn strict_clone_unsupported_never_enters_copy_fallback_or_reads_source() {
+        use std::io::{Seek, SeekFrom};
+        let (_root, private, source) = fixture(b"small original bytes");
+        let mut src = File::open(&source).unwrap();
+        src.seek(SeekFrom::Start(3)).unwrap();
+        let dir = open_trusted_dir(&private).unwrap();
+        let before = std::fs::read_dir(&private).unwrap().count();
+        let unsupported =
+            |_: &File, _: &File, _: &CString| Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+        let error =
+            private_unlinked_clone_with(&src, &source, &dir, &private, &unsupported).unwrap_err();
+        assert!(matches!(
+            error,
+            RestoreImageError::Io {
+                step: "required CoW clone of",
+                ..
+            }
+        ));
+        assert_eq!(src.stream_position().unwrap(), 3);
+        assert_eq!(std::fs::read_dir(&private).unwrap().count(), before);
+        assert_eq!(std::fs::read(&source).unwrap(), b"small original bytes");
+        // copy_into uses io::copy and advances the original FD. This strict
+        // unsupported path neither reads it nor creates a destination.
+    }
+
+    #[test]
+    fn strict_clone_refuses_wrong_size_and_writable_source_before_clone() {
+        let (_root, private, source) = fixture(b"small original bytes");
+        let src = File::open(&source).unwrap();
+        let before = std::fs::read_dir(&private).unwrap().count();
+        let digest = sha256_hex(b"small original bytes");
+        assert!(VerifiedRestoreFile::prepare_clone_only(&src, &private, &digest, 1).is_err());
+        let writable = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&source)
+            .unwrap();
+        assert!(
+            VerifiedRestoreFile::prepare_clone_only(
+                &writable,
+                &private,
+                &digest,
+                b"small original bytes".len() as u64,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_dir(&private).unwrap().count(), before);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn strict_clone_uses_original_fd_and_isolates_later_overwrite_and_truncate() {
+        let bytes = b"small original bytes";
+        let (_root, private, source) = fixture(bytes);
+        let src = File::open(&source).unwrap();
+        let original = source.with_extension("original");
+        std::fs::rename(&source, &original).unwrap();
+        std::fs::write(&source, b"replacement path").unwrap();
+        let frozen = VerifiedRestoreFile::prepare_clone_only(
+            &src,
+            &private,
+            &sha256_hex(bytes),
+            bytes.len() as u64,
+        )
+        .unwrap();
+        assert_eq!(frozen.copy(), PrivateCopy::Cloned);
+        assert_eq!(frozen.file().metadata().unwrap().nlink(), 0);
+        // SAFETY: inspect the live owned descriptor without changing it.
+        let flags = unsafe { libc::fcntl(frozen.file().as_raw_fd(), libc::F_GETFL) };
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY);
+        std::fs::write(&original, b"in-place mutation").unwrap();
+        File::options()
+            .write(true)
+            .open(&original)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        assert_eq!(
+            sha256_of(frozen.file(), &source).unwrap(),
+            sha256_hex(bytes)
+        );
+        assert_eq!(frozen.len(), bytes.len() as u64);
+        assert!(
+            VerifiedRestoreFile::prepare_clone_only(
+                &src,
+                &private,
+                &sha256_hex(bytes),
+                bytes.len() as u64,
+            )
+            .is_err()
+        );
+        // Real filesystem snapshot mechanics only, not a signed-open or VM proof.
     }
 
     fn read_all(file: &File) -> Vec<u8> {

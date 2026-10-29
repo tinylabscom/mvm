@@ -639,7 +639,7 @@ nav[aria-label="Main"] ul ul li {
 
 .blog-index,
 .blog-article {
-  padding-block: 4.5rem;
+  padding-block: 2.5rem;
 }
 
 .blog-index-hero {
@@ -671,9 +671,14 @@ nav[aria-label="Main"] ul ul li {
   max-width: 54rem;
   margin: 0;
   color: var(--color-heading);
-  font-size: clamp(2.5rem, 7vw, 5.25rem);
-  line-height: 1;
+  font-size: clamp(1.75rem, 3vw, 2.5rem);
+  line-height: 1.2;
   letter-spacing: 0;
+}
+
+.blog-article-header h1 {
+  font-size: clamp(1.65rem, 2.5vw, 2.1rem);
+  line-height: 1.3;
 }
 
 .blog-lede,
@@ -695,18 +700,14 @@ nav[aria-label="Main"] ul ul li {
 
 .blog-featured a {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(20rem, 0.9fr);
-  min-height: 24rem;
+  grid-template-columns: minmax(10rem, 16rem) minmax(0, 1fr);
 }
 
 .blog-featured img {
   width: 100%;
   height: 100%;
-  min-height: 22rem;
-  /* contain, not cover: the hero SVGs are 16:9 diagrams carrying text,
-     and the featured box is taller than 16:9, so cover crops both sides
-     mid-word. The letterbox bands take the SVGs' own canvas colour so
-     the seam is invisible. */
+  min-height: 0;
+  /* Preserve the full diagram and its text without cropping. */
   object-fit: contain;
   background: var(--color-blog-hero-canvas);
 }
@@ -715,14 +716,14 @@ nav[aria-label="Main"] ul ul li {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: clamp(1.5rem, 4vw, 3rem);
+  padding: 1.25rem;
 }
 
 .blog-featured h2 {
   margin: 1rem 0 0;
   color: var(--color-heading);
-  font-size: clamp(1.9rem, 4vw, 3.1rem);
-  line-height: 1.05;
+  font-size: 1.6rem;
+  line-height: 1.25;
   letter-spacing: 0;
 }
 
@@ -778,9 +779,9 @@ nav[aria-label="Main"] ul ul li {
 
 .blog-list-item a {
   display: grid;
-  grid-template-columns: minmax(10rem, 16rem) 1fr;
+  grid-template-columns: minmax(8rem, 11rem) minmax(0, 1fr);
   gap: 1.5rem;
-  padding-block: 1.75rem;
+  padding-block: 1.25rem;
 }
 
 .blog-list-item img {
@@ -795,7 +796,7 @@ nav[aria-label="Main"] ul ul li {
 .blog-list-item h2 {
   margin: 0 0 0.5rem;
   color: var(--color-heading);
-  font-size: 1.35rem;
+  font-size: 1.3rem;
   line-height: 1.25;
   letter-spacing: 0;
 }
@@ -825,8 +826,10 @@ nav[aria-label="Main"] ul ul li {
 
 .blog-article-header {
   display: grid;
-  grid-template-columns: minmax(0, 0.85fr) minmax(18rem, 0.45fr);
-  gap: 2rem;
+  grid-template-columns: 1fr;
+  max-width: 44rem;
+  margin-inline: auto;
+  gap: 0.75rem;
   align-items: end;
   margin-block-end: 2.25rem;
   padding-block-end: 2rem;
@@ -836,6 +839,52 @@ nav[aria-label="Main"] ul ul li {
 .blog-article-header time {
   display: block;
   margin-block: 1rem 0.75rem;
+}
+
+.blog-subtitle-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.75rem 1.25rem;
+  margin-block-start: 1.25rem;
+}
+
+.blog-subtitle-row p {
+  flex: 1 1 20rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.blog-share {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.125rem;
+  margin-inline-start: auto;
+  color: var(--color-muted);
+}
+
+.blog-share button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.blog-share button:hover {
+  background: var(--color-surface);
+  color: var(--color-accent);
+}
+
+.blog-share button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 .blog-tags {
@@ -856,7 +905,8 @@ nav[aria-label="Main"] ul ul li {
 }
 
 .blog-hero-image {
-  margin: 0 0 3.5rem;
+  max-width: 42rem;
+  margin: 0 auto 2rem;
 }
 
 .blog-hero-image img {
@@ -900,6 +950,67 @@ nav[aria-label="Main"] ul ul li {
 
 .blog-prose strong {
   color: var(--color-heading);
+}
+
+.blog-prose a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.blog-prose a:hover {
+  text-decoration-thickness: 2px;
+}
+
+.blog-prose h3 {
+  margin-block: 2rem 1rem;
+  color: var(--color-heading);
+  font-size: 1.2rem;
+  line-height: 1.4;
+}
+
+.blog-prose blockquote {
+  margin: 1.25rem 0;
+  padding: 1.25rem 1.5rem;
+  border-inline-start: 4px solid var(--color-accent);
+  border-radius: 0 0.5rem 0.5rem 0;
+  background: var(--color-surface);
+}
+
+.blog-prose blockquote p:last-child {
+  margin-block-end: 0;
+}
+
+.blog-prose table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  margin-block: 1.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  border-spacing: 0;
+  background: var(--color-surface);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.blog-prose th,
+.blog-prose td {
+  min-width: 10rem;
+  padding: 0.9rem 1rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.blog-prose th {
+  color: var(--color-heading);
+  background: var(--color-page);
+  font-weight: 650;
+}
+
+.blog-prose tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 .blog-prose code:not(pre code) {
@@ -1005,10 +1116,16 @@ nav[aria-label="Main"] ul ul li {
   .blog-featured img {
     min-height: auto;
     aspect-ratio: 16 / 9;
+    max-width: 16rem;
+    justify-self: center;
   }
 
   .blog-list-item a {
     grid-template-columns: 1fr;
+  }
+
+  .blog-list-item img {
+    max-width: 11rem;
   }
 
   .blog-section-heading,

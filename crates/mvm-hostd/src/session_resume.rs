@@ -277,7 +277,7 @@ pub struct ResumedSession {
 /// that lets a mislabelled plan pick its own resource controls. `Dev` because
 /// the resume path has no way yet to carry a sealed-production request — when
 /// it grows one, this becomes a field of `ResumeRequest` rather than a constant.
-fn resume_posture() -> RunPosture {
+fn resume_posture() -> RunPosture<'static> {
     RunPosture::without_backend(Variant::Dev)
 }
 
@@ -884,7 +884,6 @@ mod tests {
     fn isolated_host_with_runtime_overlay() -> (TestEnv, TempDir) {
         let (env, home) = isolated_host(GrantCeiling::default());
         crate::test_fixtures::install_runtime_overlay(home.path());
-        mvm_runtime::universal_initramfs::seed_warm_universal_initramfs(home.path());
         (env, home)
     }
 

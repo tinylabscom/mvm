@@ -13,7 +13,7 @@ use cucumber::{given, then, when};
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, key_id_from_pubkey,
-    sha256_hex, write_bundle,
+    mark_local_build, sha256_hex, write_bundle,
 };
 
 use crate::world::CliWorld;
@@ -47,8 +47,7 @@ fn home(world: &CliWorld) -> &Path {
 }
 
 /// A signed kernel + rootfs bundle for this host's architecture.
-fn sealed_bundle() -> Vec<u8> {
-    let key = publisher();
+fn sealed_bundle_with(key: &SigningKey, local_build: bool) -> Vec<u8> {
     let kernel = b"signed-artifact-conformance-kernel".to_vec();
     let artifact = |name: &str, role, bytes: &[u8]| BundleArtifact {
         name: name.to_string(),
@@ -57,7 +56,7 @@ fn sealed_bundle() -> Vec<u8> {
         sha256: sha256_hex(bytes),
         size_bytes: bytes.len() as u64,
     };
-    let manifest = BundleManifest {
+    let mut manifest = BundleManifest {
         schema_version: BUNDLE_SCHEMA_VERSION,
         publisher: "conformance".to_string(),
         key_id: key_id_from_pubkey(&key.verifying_key()),
@@ -75,15 +74,22 @@ fn sealed_bundle() -> Vec<u8> {
         verity: None,
         resources: None,
     };
+    if local_build {
+        mark_local_build(&mut manifest);
+    }
     write_bundle(
         &manifest,
-        &key,
+        key,
         vec![
             ("artifacts/vmlinux".to_string(), kernel),
             ("artifacts/rootfs.ext4".to_string(), ROOTFS.to_vec()),
         ],
     )
     .expect("seal the conformance bundle")
+}
+
+fn sealed_bundle() -> Vec<u8> {
+    sealed_bundle_with(&publisher(), false)
 }
 
 /// Put `public_key` in the isolated home's trust store under `key_id_of`'s id.
@@ -97,6 +103,14 @@ fn enrol(world: &CliWorld, key_id_of: &SigningKey, public_key: [u8; 32]) {
 #[given(expr = "a signed artifact {string} in the scratch directory")]
 fn signed_artifact(world: &mut CliWorld, name: String) {
     std::fs::write(scratch(world).join(name), sealed_bundle()).expect("write the artifact");
+}
+
+#[given(expr = "a host-signed local build {string} in the scratch directory")]
+fn local_build_artifact(world: &mut CliWorld, name: String) {
+    let signer = mvm_hostd::audit::host_keypair::load_or_init_at(&home(world).join("keys"))
+        .expect("initialize the isolated host signer");
+    let bytes = sealed_bundle_with(&signer.signing, true);
+    std::fs::write(scratch(world).join(name), bytes).expect("write the local build");
 }
 
 #[given(expr = "the artifact {string} has its rootfs altered after signing")]

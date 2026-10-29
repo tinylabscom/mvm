@@ -638,14 +638,40 @@ impl AnyBackend {
         spec: &mvm_core::vm_backend::StandbySpec,
     ) -> std::result::Result<mvm_core::vm_backend::StandbyHandle, mvm_core::vm_backend::StandbyError>
     {
+        self.spawn_standby_via_runner_owned(ctx, spec)
+            .map_err(|error| {
+                match error.downcast::<mvm_core::vm_backend::StandbyError>() {
+                    Ok(error) => error,
+                    // An unconfirmed native error retains its original aggregate
+                    // on Drop. This compatibility string does not permit retry.
+                    Err(error) => {
+                        mvm_core::vm_backend::StandbyError::SpawnFailed(format!("{error:#}"))
+                    }
+                }
+            })
+    }
+
+    /// Host-only launch-error boundary. Concrete HVF launch failures retain
+    /// their original child and runtime lifecycle lease as typed error custody.
+    pub fn spawn_standby_via_runner_owned(
+        &self,
+        ctx: &crate::workload_runner::SpawnContext<'_>,
+        spec: &mvm_core::vm_backend::StandbySpec,
+    ) -> Result<mvm_core::vm_backend::StandbyHandle> {
         match self {
-            AnyBackend::Firecracker(runner) => runner.spawn_standby_captured(ctx, spec),
-            AnyBackend::Libkrun(runner) => runner.spawn_standby_captured(ctx, spec),
-            AnyBackend::Hvf(runner) => runner.spawn_standby_captured(ctx, spec),
+            AnyBackend::Firecracker(runner) => {
+                runner.spawn_standby_captured(ctx, spec).map_err(Into::into)
+            }
+            AnyBackend::Libkrun(runner) => {
+                runner.spawn_standby_captured(ctx, spec).map_err(Into::into)
+            }
+            AnyBackend::Hvf(runner) => runner.spawn_standby_captured_owned(ctx, spec),
             // The hermetic lifecycle double mirrors the runner's captured
             // checkpoint contract while keeping the VM itself in memory.
             #[cfg(feature = "test-support")]
-            AnyBackend::Mock(backend) => backend.spawn_standby_captured(ctx, spec),
+            AnyBackend::Mock(backend) => backend
+                .spawn_standby_captured(ctx, spec)
+                .map_err(Into::into),
             // No warm pool on these backends: qemu and wasm are not
             // workload-bearing; apple-container is, but the HVF driver has no
             // standby support — all fail closed.
@@ -654,7 +680,8 @@ impl AnyBackend {
             | AnyBackend::AppleContainer(_)
             | AnyBackend::WebLinux(_) => Err(mvm_core::vm_backend::StandbyError::Unsupported {
                 backend: self.inner().name().to_string(),
-            }),
+            }
+            .into()),
         }
     }
 
@@ -697,6 +724,22 @@ impl AnyBackend {
             | AnyBackend::Wasm(_)
             | AnyBackend::AppleContainer(_)
             | AnyBackend::WebLinux(_) => false,
+        }
+    }
+
+    /// How many read-only volumes a warm claim on this backend can attach to a
+    /// restored child. Zero keeps every volume launch on the cold path.
+    pub fn late_volume_slots(&self) -> u8 {
+        match self {
+            AnyBackend::Firecracker(runner) => runner.late_volume_slots(),
+            AnyBackend::Libkrun(runner) => runner.late_volume_slots(),
+            AnyBackend::Hvf(runner) => runner.late_volume_slots(),
+            #[cfg(feature = "test-support")]
+            AnyBackend::Mock(_) => 0,
+            AnyBackend::Qemu(_)
+            | AnyBackend::Wasm(_)
+            | AnyBackend::AppleContainer(_)
+            | AnyBackend::WebLinux(_) => 0,
         }
     }
 
@@ -787,8 +830,46 @@ impl AnyBackend {
     /// configuration (e.g., Firecracker allocates a VmSlot and builds
     /// a `FlakeRunConfig`; Apple Container substitutes Apple's prebuilt
     /// container kernel into the HVF runner's launch).
+    ///
+    /// A config still carrying an in-flight admission sync is honoured here:
+    /// the workload-runner backends wait for it immediately before they
+    /// activate the guest, so their VMM boots beside it; every other backend
+    /// has no activation step to hold the workload behind, so it waits before
+    /// it starts anything.
     pub fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        if !self.activation_waits_for_admission() {
+            config.wait_for_admission_durability()?;
+        }
         self.inner().start(config)
+    }
+
+    /// Prepare native custody without creating a child. The caller must keep
+    /// this return through activation, dispatch, flush and terminal stop.
+    pub fn prepare_owned_launch(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::host::boot_images::FrozenBootImageBytes,
+    ) -> Result<crate::workload_runner::runner::OwnedRuntimeLaunch> {
+        match self {
+            AnyBackend::Hvf(runner) => runner.prepare_cold_hvf_channel(config, images),
+            _ => anyhow::bail!("owned native launch requires concrete macOS HVF"),
+        }
+    }
+
+    /// Whether this backend's start holds the guest's activation until the
+    /// admission's audit sync has succeeded — true exactly for the backends
+    /// that boot through the workload runner.
+    fn activation_waits_for_admission(&self) -> bool {
+        match self {
+            Self::Firecracker(_)
+            | Self::Libkrun(_)
+            | Self::Qemu(_)
+            | Self::Hvf(_)
+            | Self::AppleContainer(_) => true,
+            #[cfg(feature = "test-support")]
+            Self::Mock(_) => false,
+            Self::Wasm(_) | Self::WebLinux(_) => false,
+        }
     }
 
     /// Host process that owns the running VM's address space, when known.
@@ -954,6 +1035,43 @@ fn dedup_by_owning_backend(
 mod tests {
     use super::*;
     use mvm_core::vm_backend::ClaimStatus;
+
+    /// A backend with no activation step has nothing to hold the workload
+    /// behind, so a config whose admission sync failed starts nothing on it.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_backend_without_activation_waits_for_the_admission_sync_before_starting() {
+        let mock = MockBackend::new();
+        let backend = AnyBackend::Mock(mock.clone());
+        assert!(!backend.activation_waits_for_admission());
+        let config = VmStartConfig {
+            name: "undurable-admission".into(),
+            admission_durability: Some(
+                mvm_core::admission_durability::AdmissionDurability::settled(Err(anyhow::anyhow!(
+                    "fdatasync failed"
+                ))),
+            ),
+            ..Default::default()
+        };
+        assert!(backend.start(&config).is_err());
+        assert_eq!(mock.count(), 0, "nothing started");
+    }
+
+    #[test]
+    fn every_workload_runner_backend_holds_activation_for_the_admission_sync() {
+        for kind in ["firecracker", "libkrun", "qemu", "hvf", "apple-container"] {
+            assert!(
+                AnyBackend::from_hypervisor(kind).activation_waits_for_admission(),
+                "{kind} boots through the workload runner"
+            );
+        }
+        for kind in ["wasm", "web-linux"] {
+            assert!(
+                !AnyBackend::from_hypervisor(kind).activation_waits_for_admission(),
+                "{kind} has no activation step"
+            );
+        }
+    }
 
     fn vm_named(name: &str, cpus: u32) -> VmInfo {
         VmInfo {

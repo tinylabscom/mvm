@@ -1,6 +1,6 @@
 use super::*;
+use crate::commands::image;
 use crate::commands::vm::up;
-use crate::commands::{image, shared};
 
 pub(super) fn run_start(cmd: MachineStartCmd) -> Result<()> {
     if cmd.names.len() > 1 && (cmd.receipt.is_some() || cmd.json || cmd.dry_run) {
@@ -164,11 +164,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
     enforce_persisted_volume_profile(&spec.profile, &spec.volumes)?;
-    let effective_hypervisor = args
-        .hypervisor
-        .as_deref()
-        .map(String::from)
-        .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"));
+    let effective_hypervisor = super::runtime::effective_hypervisor(args.hypervisor.as_deref());
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     let started = mvm_client::launch::machine_start::start_machine_spec(
         &spec,
@@ -356,7 +352,7 @@ pub(in crate::commands) fn exec_machine(
                     console::ConsoleSessionOptions::default(),
                 )?;
                 if exit_code != 0 {
-                    mvm_observability::exit(exit_code);
+                    crate::observability::exit(exit_code);
                 }
                 Ok(())
             }

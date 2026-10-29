@@ -231,20 +231,26 @@ fn check_yarn_lock(text: &str) -> Result<(), String> {
 
 /// uv.lock: TOML with `[[package]]` blocks. Each dep block must carry
 /// a `hash = "..."` somewhere in its scope (either at top-level or
-/// inside `[package.source]` / `[[package.wheels]]`).
+/// inside `[package.source]` / `[[package.wheels]]`). The project's own
+/// block (`source = { virtual = "." }` or `{ editable = "." }`) is the tree
+/// being built, not a fetched artifact, so it has nothing to pin.
 fn check_uv_lock(text: &str) -> Result<(), String> {
     // Split on `[[package]]` headers and inspect each block.
     let mut total = 0usize;
     let mut unpinned = 0usize;
     let mut current_block: Option<String> = None;
+    let mut tally = |block: String| {
+        total += 1;
+        let pinned = block.contains("hash = \"") || block.contains("hash=\"");
+        if !pinned && !is_uv_project_block(&block) {
+            unpinned += 1;
+        }
+    };
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed == "[[package]]" {
             if let Some(block) = current_block.take() {
-                total += 1;
-                if !block.contains("hash = \"") && !block.contains("hash=\"") {
-                    unpinned += 1;
-                }
+                tally(block);
             }
             current_block = Some(String::new());
         } else if let Some(block) = current_block.as_mut() {
@@ -253,10 +259,7 @@ fn check_uv_lock(text: &str) -> Result<(), String> {
         }
     }
     if let Some(block) = current_block.take() {
-        total += 1;
-        if !block.contains("hash = \"") && !block.contains("hash=\"") {
-            unpinned += 1;
-        }
+        tally(block);
     }
     if total == 0 {
         return Err("no [[package]] blocks found — is this a uv.lock?".to_string());
@@ -265,6 +268,16 @@ fn check_uv_lock(text: &str) -> Result<(), String> {
         return Err(format!("{unpinned}/{total} packages missing hash"));
     }
     Ok(())
+}
+
+/// Whether a `[[package]]` block is the project itself, as uv writes it.
+fn is_uv_project_block(block: &str) -> bool {
+    block.lines().any(|line| {
+        matches!(
+            line.trim(),
+            r#"source = { virtual = "." }"# | r#"source = { editable = "." }"#
+        )
+    })
 }
 
 /// requirements.txt rendered with `pip-compile --generate-hashes`. Every
@@ -458,6 +471,20 @@ hash = "sha256:def"
 "#;
         let err = check_uv_lock(text).unwrap_err();
         assert!(err.contains("missing hash"), "got: {err}");
+    }
+
+    #[test]
+    fn uv_lock_project_block_needs_no_hash() {
+        for source in [r#"{ virtual = "." }"#, r#"{ editable = "." }"#] {
+            let text = format!(
+                "[[package]]\nname = \"app\"\nversion = \"0.1.0\"\nsource = {source}\n\n\
+                 [[package]]\nname = \"a\"\nversion = \"1.0\"\n\
+                 wheels = [{{ url = \"https://x/a.whl\", hash = \"sha256:abc\" }}]\n"
+            );
+            check_uv_lock(&text).unwrap();
+        }
+        let elsewhere = "[[package]]\nname = \"lib\"\nversion = \"0.1.0\"\nsource = { editable = \"../lib\" }\n";
+        assert!(check_uv_lock(elsewhere).is_err());
     }
 
     #[test]

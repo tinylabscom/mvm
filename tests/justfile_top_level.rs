@@ -419,6 +419,8 @@ script:
 fn test_module_keeps_scoped_runs_without_the_removed_cache_wrapper() {
     let tests = include_str!("../just/tests/mod.just");
     assert!(tests.contains("scoped CRATE FILTER=\"\""));
-    assert!(tests.contains("nextest run -p {{ CRATE }} -E 'test({{ FILTER }})'"));
+    assert!(tests.contains("[positional-arguments]\nscoped CRATE FILTER=\"\" *ARGS:"));
+    assert!(tests.contains("args=(nextest run -p \"$crate\" \"$@\")"));
+    assert!(tests.contains("args+=(-E \"test($filter)\")"));
     assert!(!tests.contains("cached FILTER="));
 }

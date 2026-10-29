@@ -1,9 +1,10 @@
 mod agent_session;
+mod backend;
 mod bench;
 mod bootstrap;
 mod build;
 mod builder_shell_job;
-mod bundle;
+pub(crate) mod bundle;
 mod capture;
 pub mod catalog;
 mod cmd_audit;
@@ -48,6 +49,7 @@ pub mod warm_artifact_source {
 }
 
 pub(in crate::commands) use build::ir_input::load_ir_json_workload;
+pub(crate) use env::caller_identity::load_enrolled_identity;
 pub(crate) use shared::{DirShareSpec, parse_dir_share_spec};
 pub(crate) use vm::exec::RunProfile;
 
@@ -129,9 +131,12 @@ pub(in crate::commands) enum Commands {
     /// Beginner microVM workflows (run an OCI image and more)
     #[command(display_order = 1)]
     Machine(machine::Args),
-    /// Build-time commands (image, compile, validate, kernel)
-    #[command(display_order = 3)]
-    Build(build::group::Args),
+    /// Build a host-signed local workload archive
+    #[command(display_order = 2)]
+    Build(build::front_door::Args),
+    /// Contributor build and inspection commands
+    #[command(display_order = 20)]
+    Dev(build::group::Args),
     /// Build, seal, and record a workload; optionally ship it to mvmd
     #[command(display_order = 4)]
     Deploy(deploy::Args),
@@ -153,6 +158,9 @@ pub(in crate::commands) enum Commands {
     /// System diagnostics and dependency checks
     #[command(display_order = 5)]
     Doctor(env::doctor::Args),
+    /// Inspect and manage per-backend host component sets
+    #[command(display_order = 5)]
+    Backend(backend::Args),
     /// Check the local mvm-studio dashboard install (dev surface; hidden until
     /// the server handshake is frozen upstream)
     #[command(display_order = 20, hide = true)]
@@ -391,7 +399,7 @@ fn run_command() -> Result<()> {
             if let Some(tip) = separator_tip(error.kind(), &args) {
                 eprintln!("{tip}");
             }
-            mvm_observability::exit(exit_code);
+            crate::observability::exit(exit_code);
         }
     };
     apply_startup_env(&cli);
@@ -411,7 +419,7 @@ fn run_command() -> Result<()> {
     register_builder_image_acquirer();
     register_stream_plane();
     // Bound for the rest of the command so queued trace spans are flushed as
-    // it returns. A verb that ends early goes through `mvm_observability::exit`,
+    // it returns. A verb that ends early goes through `crate::observability::exit`,
     // which flushes the same export first.
     let _observability = configure_runtime_logging(&cli);
 
@@ -670,6 +678,9 @@ fn allow_helper_builds_from_source(
     channel: mvm_build::artifact_acquisition::DistributionChannel,
     command: &Commands,
 ) {
+    if !channel.permits_automatic_builds() {
+        mvm_vmm::host::aux_bin::declare_release_binary();
+    }
     if channel.permits_automatic_builds() && command_allows_helper_source_builds(command) {
         mvm_vmm::host::aux_bin::allow_helper_builds_from_source();
     }
@@ -681,9 +692,10 @@ fn command_allows_helper_source_builds(command: &Commands) -> bool {
 
 fn command_allows_builder_auto_bootstrap(command: &Commands) -> bool {
     match command {
-        Commands::Build(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => true,
+        Commands::Build(_) | Commands::Dev(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => {
+            true
+        }
         Commands::PersistentBuilder(_) => true,
-        Commands::Pack(args) => matches!(args.action, pack::PackAction::Build(_)),
         // `machine build` is `build` under its documented name.
         Commands::Machine(machine_args) => matches!(
             machine_args.action,
@@ -724,7 +736,8 @@ fn apply_startup_env(cli: &Cli) {
     // path reads (`MVM_ALLOW_LOCAL_BUILDER_BUILD=1`) so callers that expect the
     // env-var semantics continue to work.
     let allow_local_builder = match &cli.command {
-        Commands::Build(group_args) => group_args.allow_local_builder_build,
+        Commands::Build(args) => args.allow_local_builder_build,
+        Commands::Dev(group_args) => group_args.allow_local_builder_build,
         Commands::Machine(m_args) => match &m_args.action {
             crate::commands::machine::MachineAction::Build(b) => b.allow_local_builder_build,
             _ => false,
@@ -847,7 +860,7 @@ fn configure_runtime_logging(cli: &Cli) -> logging::ObservabilityGuard {
 
 fn install_signal_handler() {
     let handler = termination_handler(Arc::clone(&CHILD_PIDS), |code| {
-        mvm_observability::exit_after_interrupt(code)
+        crate::observability::exit_after_interrupt(code)
     });
     if let Err(e) = crate::signal::set_ctrlc_handler(handler) {
         tracing::warn!("failed to install signal handler: {e}");
@@ -981,7 +994,7 @@ mod builder_bootstrap_policy_tests {
     #[test]
     fn only_builder_owning_commands_may_auto_bootstrap() {
         assert!(command_allows_builder_auto_bootstrap(&command(&[
-            "build", "kernel", "build",
+            "dev", "kernel", "build",
         ])));
         assert!(command_allows_builder_auto_bootstrap(&command(&[
             "env",
@@ -989,20 +1002,6 @@ mod builder_bootstrap_policy_tests {
         ])));
         assert!(!command_allows_builder_auto_bootstrap(&command(&[
             "cache", "info",
-        ])));
-        assert!(command_allows_builder_auto_bootstrap(&command(&[
-            "pack",
-            "build",
-            "pack.json",
-            "--out",
-            "artifact",
-        ])));
-        assert!(!command_allows_builder_auto_bootstrap(&command(&[
-            "pack",
-            "compile",
-            "pack.json",
-            "--out",
-            "artifact",
         ])));
     }
 

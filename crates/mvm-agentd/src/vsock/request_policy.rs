@@ -336,6 +336,7 @@ mod tests {
                 host_epoch_secs: None,
                 grant_envelope: None,
                 seccomp_tier: None,
+                volumes: Vec::new(),
             },
             GuestRequest::FsDiff,
             GuestRequest::SyncFilesystems,
@@ -665,6 +666,7 @@ mod tests {
                 host_epoch_secs: None,
                 grant_envelope: None,
                 seccomp_tier: None,
+                volumes: Vec::new(),
             },
             GuestRequest::UpdateIdleTimeout { secs: 600 },
             GuestRequest::MountVolume {

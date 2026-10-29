@@ -10,10 +10,8 @@
 //! discipline an arc42 Ch.10 architecture doc enforces, scoped to what
 //! is mechanically checkable.
 //!
-//! The table parser lives in `claims_ledger`, shared with
-//! `check-mutation-witnesses`, which derives its mutation surface from
-//! the same rows. This gate asserts a witness *exists*; that one asks
-//! whether the witness can actually detect the property breaking.
+//! The table parser lives in `claims_ledger`. This gate asserts a witness
+//! *exists*, not that it can detect the property breaking.
 //!
 //! The ledger also carries degenerate claim frontmatter (status
 //! `Shipped`, no gated phrases) so `check-no-overclaim` — which scans
@@ -205,10 +203,9 @@ fn toml_array_field(block: &str, name: &str) -> Vec<String> {
 /// be a representative anchor — a subset — but never to name a witness the
 /// model has never heard of. Nothing else compares the two: this gate
 /// resolves the ledger's witnesses against the tree, `check-conformance`
-/// compares the model against `CONFORMANCE.md`, and
-/// `check-mutation-witnesses` derives its surface from the ledger. A
-/// witness added to the ADR table but not to the model was invisible to
-/// all three, which is how two claims had already drifted.
+/// compares the model against `docs/CONFORMANCE.md`. A witness added to
+/// the ADR table but not to the model was invisible to both, which is how
+/// two claims had already drifted.
 fn ledger_witnesses_are_known_to_the_model(
     rows: &[Row],
     model_toml: &str,

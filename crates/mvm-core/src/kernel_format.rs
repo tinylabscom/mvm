@@ -10,6 +10,17 @@ use serde::{Deserialize, Serialize};
 use crate::arch::GuestArch;
 use crate::vm_backend::BackendKind;
 
+/// Sibling files retained when a kernel is extracted to an ELF for launch.
+/// Cache verification may tolerate these names, but must never trust their bytes.
+#[must_use]
+pub fn extracted_elf_files(path: &Path) -> [PathBuf; 2] {
+    [".elf", ".elf.src"].map(|suffix| {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KernelFormat {
@@ -293,6 +304,17 @@ fn notes_contain_type(notes: &[u8], align: u64, wanted: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracted_kernel_names_append_to_the_entire_filename() {
+        assert_eq!(
+            extracted_elf_files(Path::new("kernels/kernel.image")),
+            [
+                PathBuf::from("kernels/kernel.image.elf"),
+                PathBuf::from("kernels/kernel.image.elf.src")
+            ]
+        );
+    }
 
     #[test]
     fn serde_roundtrips() {

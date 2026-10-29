@@ -142,6 +142,9 @@ pub struct PostRestoreOutcome {
     /// `None` when the request named no tier, or when the guest refused the
     /// one it was handed.
     pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    /// How many late volumes the guest reports mounting. `None` when the
+    /// request named none, or when the guest refused them.
+    pub volumes_mounted: Option<u32>,
 }
 
 /// Turn the guest's answer into an outcome. Split out so the mapping — which
@@ -155,6 +158,7 @@ fn outcome_from_response(response: mvm_agentd::vsock::GuestResponse) -> Result<P
             clock_resynced,
             reseed_shortfall,
             seccomp_tier,
+            volumes_mounted,
         } => Ok(PostRestoreOutcome {
             acknowledged: success,
             detail,
@@ -162,6 +166,7 @@ fn outcome_from_response(response: mvm_agentd::vsock::GuestResponse) -> Result<P
             clock_resynced,
             reseed_shortfall,
             seccomp_tier,
+            volumes_mounted,
         }),
         other => bail!("unexpected response to PostRestore: {other:?}"),
     }
@@ -188,14 +193,30 @@ pub trait PostRestoreSignal {
 pub const POST_RESTORE_PROBE_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How long a resumed guest gets to make its agent reachable before the
-/// post-restore signal is declared undelivered. Every production caller uses
-/// this so one restore does not get a quietly more generous deadline than
-/// another; tests pass their own.
+/// post-restore signal is declared undelivered on an operator-driven resume.
+/// The sealed-snapshot resume admission pairs this with a ten-second exchange
+/// budget and documents the fifteen-second sum as the longest a refused guest
+/// can run, so this value is load-bearing for that bound; tests pass their
+/// own.
 pub const POST_RESTORE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound each authenticated readiness exchange so one accepted-but-unserved
-/// transport cannot consume the whole restore deadline in a blocking read.
-const POST_RESTORE_PROBE_IO_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a restored child gets to make its agent reachable where the
+/// post-restore handshake gates a launch — a warm-pool claim's identity
+/// delivery or a `vm_full` fork — and a timeout refuses the launch rather
+/// than a retryable operator resume. Sized to the standby-parent agent
+/// readiness budget on the same host class: the child is restored out of
+/// exactly such a parent, and under host contention its agent can
+/// legitimately start answering only after the tighter resume budget has
+/// elapsed.
+pub const POST_RESTORE_CLAIM_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound one readiness probe's I/O so an accepted-but-unserved transport
+/// fails its attempt instead of consuming the readiness budget in a blocking
+/// read. Half a second is far beyond a healthy local handshake exchange, so
+/// the budgets buy materially more attempts than the one-second bound this
+/// replaced; a partial handshake still fails the attempt, and the next poll
+/// retries on a fresh connection.
+const POST_RESTORE_PROBE_IO_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn authenticated_agent_is_ready(stream: &mut std::os::unix::net::UnixStream) -> bool {
     if stream
@@ -270,6 +291,9 @@ pub struct ChildIdentity {
     /// parent boots with no plan and holds no tier, so the child's has to
     /// arrive here.
     pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    /// Read-only volumes the claim attached to the parent's late-volume
+    /// slots, for the guest to mount before it acknowledges.
+    pub volumes: Vec<mvm_agentd::vsock::VolumeConfig>,
 }
 
 impl ChildIdentity {
@@ -278,6 +302,7 @@ impl ChildIdentity {
     pub fn signal(self) -> VsockPostRestoreSignal {
         VsockPostRestoreSignal::for_resumed_child(self.token, self.grant_envelope)
             .with_seccomp_tier(self.seccomp_tier)
+            .with_volumes(self.volumes)
     }
 }
 
@@ -301,6 +326,8 @@ pub struct VsockPostRestoreSignal {
     /// acknowledges. Set for a child restored out of a standby parent, which
     /// booted with no plan and so holds no tier of its own.
     pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    /// Late volumes the restored guest must mount before it acknowledges.
+    pub volumes: Vec<mvm_agentd::vsock::VolumeConfig>,
 }
 
 impl VsockPostRestoreSignal {
@@ -322,7 +349,15 @@ impl VsockPostRestoreSignal {
             hostname: None,
             grant_envelope,
             seccomp_tier: None,
+            volumes: Vec::new(),
         }
+    }
+
+    /// Hand the restored guest the late volumes its claim attached.
+    #[must_use]
+    pub fn with_volumes(mut self, volumes: Vec<mvm_agentd::vsock::VolumeConfig>) -> Self {
+        self.volumes = volumes;
+        self
     }
 
     /// Hand the restored guest the seccomp tier its claiming plan admits.
@@ -342,6 +377,7 @@ impl VsockPostRestoreSignal {
             host_epoch_secs: Some(host_epoch_secs),
             grant_envelope: self.grant_envelope.clone(),
             seccomp_tier: self.seccomp_tier,
+            volumes: self.volumes.clone(),
         }
     }
 }
@@ -438,15 +474,18 @@ mod tests {
 
     /// A mock signal source that becomes ready after a configurable number of
     /// probes so the "poll until ready, then send once" policy is testable
-    /// without a live guest.
+    /// without a live guest. `probe_delay` stands in for the I/O a real probe
+    /// spends on its handshake exchange.
     struct MockSignalCount {
         calls: std::cell::RefCell<usize>,
         ready_after: usize,
         outcome: Result<PostRestoreOutcome>,
+        probe_delay: Duration,
     }
 
     impl PostRestoreSignal for MockSignalCount {
         fn probe_ready(&self, _vm_name: &str) -> bool {
+            std::thread::sleep(self.probe_delay);
             let mut c = self.calls.borrow_mut();
             *c += 1;
             *c > self.ready_after
@@ -471,7 +510,9 @@ mod tests {
                 clock_resynced: true,
                 reseed_shortfall: None,
                 seccomp_tier: None,
+                volumes_mounted: None,
             }),
+            probe_delay: Duration::ZERO,
         };
         let outcome = signal_post_restore("vm-1", &signal, Duration::from_millis(500))
             .expect("should succeed once the guest is ready");
@@ -497,11 +538,13 @@ mod tests {
             clock_resynced: true,
             reseed_shortfall: Some(mvm_agentd::vsock::ReseedShortfall::HelperMissing),
             seccomp_tier: None,
+            volumes_mounted: None,
         };
         let signal = MockSignalCount {
             calls: std::cell::RefCell::new(0),
             ready_after: 0,
             outcome: outcome_from_response(response),
+            probe_delay: Duration::ZERO,
         };
         let outcome = signal_post_restore("vm-1", &signal, Duration::from_millis(500))
             .expect("a resume whose only shortfall is the reseed completes");
@@ -536,12 +579,102 @@ mod tests {
                 clock_resynced: true,
                 reseed_shortfall: None,
                 seccomp_tier: None,
+                volumes_mounted: None,
             }),
+            probe_delay: Duration::ZERO,
         };
         let err = signal_post_restore("vm-1", &signal, Duration::from_millis(30)).unwrap_err();
         assert!(
             err.to_string().contains("did not become reachable"),
             "timeout must fail closed before post_restore: {err}"
+        );
+    }
+
+    /// The claim-side budget is deliberately wider than the operator resume
+    /// budget: the resume value is half of the documented fifteen-second bound
+    /// on how long a refused guest may run, while a claim's handshake gates a
+    /// launch and matches the ten seconds a standby parent's agent gets to
+    /// start serving on the same host class.
+    #[test]
+    fn the_claim_readiness_budget_is_wider_than_the_resume_budget() {
+        assert_eq!(POST_RESTORE_READY_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(POST_RESTORE_CLAIM_READY_TIMEOUT, Duration::from_secs(10));
+    }
+
+    /// One wedged probe costs at most its I/O bound per exchange, so the claim
+    /// budget buys attempts rather than hangs.
+    #[test]
+    fn a_wedged_probe_is_bounded_so_the_budget_buys_many_attempts() {
+        assert_eq!(POST_RESTORE_PROBE_IO_TIMEOUT, Duration::from_millis(500));
+        let attempt_cost =
+            (POST_RESTORE_PROBE_IO_TIMEOUT + POST_RESTORE_PROBE_INTERVAL).as_millis();
+        let attempts = POST_RESTORE_CLAIM_READY_TIMEOUT.as_millis() / attempt_cost;
+        assert!(attempts >= 12, "the claim budget buys {attempts} attempts");
+    }
+
+    /// A guest that accepts the connection and then says nothing fails the
+    /// probe at its I/O bound instead of hanging: the poll gets its attempts
+    /// back.
+    #[test]
+    fn post_restore_readiness_fails_a_connected_guest_that_stays_silent() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let _host_key = seeded_host_signer(home.path());
+        // Held open and never written to: the guest end is connected but silent.
+        let (mut host, guest) = UnixStream::pair().unwrap();
+
+        let started = std::time::Instant::now();
+        assert!(!authenticated_agent_is_ready(&mut host));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "a silent peer must fail at the probe I/O bound, not hang: {:?}",
+            started.elapsed()
+        );
+        drop(guest);
+    }
+
+    /// The budget, not a faster guest, decides a slow restore: the same
+    /// late-answering guest is refused inside a tight budget with the
+    /// unreachable-agent error shape, and admitted within the claim budget.
+    #[test]
+    fn a_late_answering_guest_is_admitted_within_the_claim_budget() {
+        let ok_outcome = || {
+            Ok(PostRestoreOutcome {
+                acknowledged: true,
+                detail: None,
+                reseeded: true,
+                clock_resynced: true,
+                reseed_shortfall: None,
+                seccomp_tier: None,
+                volumes_mounted: None,
+            })
+        };
+        let refused = MockSignalCount {
+            calls: std::cell::RefCell::new(0),
+            ready_after: 3,
+            outcome: ok_outcome(),
+            probe_delay: Duration::from_millis(100),
+        };
+        let err = signal_post_restore("vm-1", &refused, Duration::from_millis(250))
+            .expect_err("a tight budget refuses the late guest");
+        assert!(
+            err.to_string().contains("did not become reachable"),
+            "the refusal keeps the unreachable-agent shape: {err}"
+        );
+
+        let admitted = MockSignalCount {
+            calls: std::cell::RefCell::new(0),
+            ready_after: 3,
+            outcome: ok_outcome(),
+            probe_delay: Duration::from_millis(100),
+        };
+        let outcome = signal_post_restore("vm-1", &admitted, POST_RESTORE_CLAIM_READY_TIMEOUT)
+            .expect("the claim budget admits the same late guest");
+        assert!(outcome.acknowledged);
+        assert!(
+            *admitted.calls.borrow() > 3,
+            "the guest was reached on a late attempt"
         );
     }
 
@@ -645,6 +778,7 @@ mod tests {
             clock_resynced: true,
             reseed_shortfall: None,
             seccomp_tier: Some(SeccompTier::Standard),
+            volumes_mounted: None,
         })
         .unwrap();
         assert_eq!(outcome.seccomp_tier, Some(SeccompTier::Standard));
@@ -689,6 +823,7 @@ mod tests {
             hostname: Some("child-final".to_string()),
             grant_envelope: Some(envelope),
             seccomp_tier: None,
+            volumes: Vec::new(),
         };
 
         let mvm_agentd::vsock::GuestRequest::PostRestore {

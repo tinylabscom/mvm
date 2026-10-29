@@ -4,7 +4,10 @@ The SDK package train and signed CLI guest-runtime train are independent.
 `sdks/release.toml` declares SDK `version` and compatible `runtime_version`.
 The latter must exactly equal the workspace version compiled into the host
 library; it is not inferred from the SDK tag. Currently SDK 0.15.2 requires
-runtime 0.23.1.
+runtime 0.26.0. A workspace version bump must move `runtime_version` with it:
+the preflight's hermetic tests (`scripts/test-sdk-release-preflight.py`)
+refuse a manifest that names another version, and they run in the SDK
+release dry-run, not on pull requests.
 
 `publish-sdk.yml` accepts real publication only on a published `sdk-vVERSION`
 release. Before either registry publishes, the preflight:

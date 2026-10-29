@@ -582,7 +582,24 @@ fn run_ts_codegen(workspace: &Path, schema: &Path, out: &Path) -> Result<()> {
     if !status.success() {
         bail!("json-schema-to-typescript exited {status}");
     }
+    let generated = std::fs::read_to_string(out)?;
+    std::fs::write(out, normalize_typescript_doc_lines(&generated))?;
     Ok(())
+}
+
+fn normalize_typescript_doc_lines(source: &str) -> String {
+    source
+        .split_inclusive('\n')
+        .map(|line| {
+            let body = line.strip_suffix('\n').unwrap_or(line);
+            if body.trim() == "*" {
+                let ending = if line.ends_with('\n') { "\n" } else { "" };
+                format!("{}{ending}", body.trim_end())
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect()
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -755,6 +772,16 @@ mod tests {
         std::fs::write(&a, b"same").unwrap();
         std::fs::write(&b, b"same").unwrap();
         assert!(!diff_or_report(&a, &b).unwrap());
+    }
+
+    #[test]
+    fn typescript_blank_doc_lines_have_no_trailing_whitespace() {
+        let generated = "/**\n * A description\n * \n */\nexport type Name = \"a \";\n";
+        let expected = "/**\n * A description\n *\n */\nexport type Name = \"a \";\n";
+        assert_eq!(normalize_typescript_doc_lines(generated), expected);
+        assert_eq!(normalize_typescript_doc_lines(expected), expected);
+        assert_eq!(normalize_typescript_doc_lines(" * "), " *");
+        assert_eq!(normalize_typescript_doc_lines("name  \n"), "name  \n");
     }
 
     #[test]

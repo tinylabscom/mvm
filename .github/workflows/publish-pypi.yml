@@ -118,6 +118,21 @@ jobs:
           cp "${HOSTLIB}" crates/mvm-sdk/sdks/python/mvm/_native/
           echo "embedded ${HOSTLIB}"
 
+      - name: Mandatory ad-hoc producer signing
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          python3 scripts/release/sign_macos.py --producer-adhoc \
+            --payload crates/mvm-sdk/sdks/python/mvm/_native \
+            --report "${RUNNER_TEMP}/pypi-producer-signing.json"
+
+      - name: Retain macOS producer signing evidence
+        if: ${{ always() && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pypi-producer-signing-${{ matrix.platform }}
+          path: ${{ runner.temp }}/pypi-producer-signing.json
+          if-no-files-found: warn
+
       - name: Developer ID sign and notarize macOS native payload
         if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
         env:
@@ -196,6 +211,30 @@ jobs:
           '
           ls -la dist/
 
+      - name: Inspect final macOS wheel bytes
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheels=(dist/*.whl)
+          [[ "${#wheels[@]}" -eq 1 ]]
+          cmd=(python3 scripts/release/verify_macos_package.py
+            --archive "${wheels[0]}" --sdk-layout
+            --producer-report "${RUNNER_TEMP}/pypi-producer-signing.json"
+            --report "${RUNNER_TEMP}/pypi-final-package.json")
+          if [[ "${{ !inputs.dry_run || github.ref_type == 'tag' }}" == true ]]; then
+            cmd+=(--notary-report "${RUNNER_TEMP}/pypi-notarization.json")
+          fi
+          "${cmd[@]}"
+
+      - name: Retain final macOS wheel inspection
+        if: ${{ always() && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pypi-final-package-${{ matrix.platform }}
+          path: ${{ runner.temp }}/pypi-final-package.json
+          if-no-files-found: warn
+
       - name: Smoke the wheel in a fresh venv
         if: ${{ runner.os == 'macOS' }}
         run: |
@@ -228,7 +267,9 @@ jobs:
         with:
           name: pypi-dist-${{ matrix.platform }}
           path: dist/*
-          retention-days: 1
+          # Keep the actual package bytes available for release evidence review.
+          retention-days: 30
+          if-no-files-found: error
 
   publish:
     if: ${{ !inputs.dry_run }}

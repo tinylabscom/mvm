@@ -26,8 +26,10 @@ const SURFACES: [&str; 2] = ["host", "user"];
 /// forwards are inlined in the root Cargo.toml); what remains here is `default`
 /// plus platform/storage opt-ins that genuinely cannot always be on. Keep this
 /// list tiny — a new entry is a conscious "this cannot live in a surface".
-const INTERNAL: [&str; 9] = [
+const INTERNAL: [&str; 10] = [
     "default",
+    // Platform-native caller custody; included by the user product surface.
+    "native-caller-identity",
     // Platform: link the libkrun C VMM (absent on a macOS-26 HVF host).
     "libkrun-sys",
     "libkrun-live",
@@ -139,7 +141,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     for (label, path) in [
         ("Cargo.toml", workspace.join("Cargo.toml")),
         ("ci.yml", workflows.join("ci.yml")),
-        ("ci-full.yml", workflows.join("ci-full.yml")),
+        ("ci-main.yml", workflows.join("ci-main.yml")),
     ] {
         validate_retired_builder_feature_references(label, &std::fs::read_to_string(path)?)?;
     }

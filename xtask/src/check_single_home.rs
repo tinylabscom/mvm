@@ -75,13 +75,6 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "the single legitimate resolver: owns the MVM_HOME | $HOME/.mvm derivation and the child layout",
     ),
     (
-        "xtask/src/check_mutation_witnesses/runner.rs",
-        &[Rule::HomeRead, Rule::HomeLiteral],
-        "confines a mutation run away from the real state root, so it must read the real $HOME \
-         before redirecting it (to keep CARGO_HOME/RUSTUP_HOME pointing at the toolchain) and \
-         name .mvm/keys to refuse running if the redirect did not take",
-    ),
-    (
         "xtask/src/check_single_home.rs",
         ALL_RULES,
         "defines the very patterns it scans for",
@@ -107,6 +100,11 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "crates/mvm-build/src/embed_toolchain.rs",
         &[Rule::HomeRead],
         "host toolchain discovery (~/.cargo/bin/rustup, mise python installs) lives in the real $HOME",
+    ),
+    (
+        "crates/mvm-build/src/image_source/repository_config.rs",
+        &[Rule::HomeRead],
+        "Git global configuration and user-path expansion read the user's HOME, not an mvm state root",
     ),
     (
         "crates/mvm-cli/src/commands/shared/parse.rs",
@@ -239,7 +237,11 @@ fn scan_source(rel: &str, src: &str, matchers: &Matchers) -> Vec<String> {
     }
     if !exempt(rel, Rule::DeletedEnv) {
         for (idx, text) in src.lines().enumerate() {
-            if matchers.deleted_env.is_match(text) {
+            if matchers
+                .deleted_env
+                .find_iter(text)
+                .any(|found| !allowed_git_xdg_config_read(rel, text, found))
+            {
                 push(idx + 1, Rule::DeletedEnv, text);
             }
         }
@@ -259,6 +261,16 @@ fn scan_source(rel: &str, src: &str, matchers: &Matchers) -> Vec<String> {
         }
     }
     hits
+}
+
+fn allowed_git_xdg_config_read(rel: &str, text: &str, found: regex::Match<'_>) -> bool {
+    // Git's configuration, attributes and ignore files are user data, not mvm
+    // state. Allow this exact literal read, not other XDG or removed mvm knobs.
+    rel == "crates/mvm-build/src/image_source/git_rules.rs"
+        && found.as_str().ends_with("\"XDG_")
+        && text[found.end()..]
+            .strip_prefix("CONFIG_HOME\"")
+            .is_some_and(|rest| rest.trim_start().starts_with(')'))
 }
 
 fn contains_mvm_home_child_join(statement: &str) -> bool {
@@ -503,6 +515,73 @@ mod tests {
         assert!(out[0].contains("[deleted-env]"), "{out:?}");
         let out = hits(PLAIN, "let d = std::env::var(\"XDG_CACHE_HOME\");\n");
         assert_eq!(out.len(), 1, "{out:?}");
+    }
+
+    const GIT_RULES: &str = "crates/mvm-build/src/image_source/git_rules.rs";
+    const GIT_CONFIG: &str = "crates/mvm-build/src/image_source/repository_config.rs";
+
+    #[test]
+    fn git_xdg_config_read_allowance_is_path_and_variable_scoped() {
+        let reads = "let a = std::env::var_os(\"XDG_CONFIG_HOME\");\nlet b = env::var(\"XDG_CONFIG_HOME\" );\n";
+        assert!(hits(GIT_RULES, reads).is_empty());
+        for rel in [PLAIN, GIT_CONFIG, "crates/foo/src/git_rules.rs"] {
+            assert_eq!(hits(rel, reads).len(), 2, "{rel}");
+        }
+        for variable in ["XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME_EXTRA"] {
+            let source = format!("let a = std::env::var_os(\"{variable}\");\n");
+            let out = hits(GIT_RULES, &source);
+            assert_eq!(out.len(), 1, "{variable}: {out:?}");
+            assert!(out[0].contains("[deleted-env]"), "{out:?}");
+        }
+        let computed = "let a = env::var(\"XDG_CONFIG_HOME\".to_owned() + \"_OTHER\");\n";
+        assert_eq!(hits(GIT_RULES, computed).len(), 1);
+    }
+
+    #[test]
+    fn allowed_git_xdg_read_does_not_hide_other_matches_on_the_same_line() {
+        let allowed = "let a = env::var_os(\"XDG_CONFIG_HOME\");";
+        for variable in [
+            "MVM_DATA_DIR",
+            "MVM_CACHE_DIR",
+            "MVM_CONFIG_DIR",
+            "MVM_RUNTIME_DIR",
+            "MVM_STATE_DIR",
+            "MVM_SHARE_DIR",
+            "MVM_DEPS_VOLUMES_DIR",
+            "XDG_CACHE_HOME",
+        ] {
+            let denied = format!("let b = env::var_os(\"{variable}\");");
+            for source in [
+                format!("{allowed} {denied}\n"),
+                format!("{denied} {allowed}\n"),
+            ] {
+                let out = hits(GIT_RULES, &source);
+                assert_eq!(out.len(), 1, "{variable}: {out:?}");
+                assert!(out[0].contains("[deleted-env]"), "{out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn git_data_allowances_leave_other_home_rules_active() {
+        assert!(hits(GIT_CONFIG, "let h = env::var_os(\"HOME\");\n").is_empty());
+        assert_eq!(hits(GIT_RULES, "let h = env::var_os(\"HOME\");\n").len(), 1);
+        for rel in [GIT_RULES, GIT_CONFIG] {
+            let source = "let a = env::var_os(\"XDG_CONFIG_HOME\"); let p = home.join(\".mvm/keys\"); let q = mvm_home().join(\"vms\");\n";
+            let out = hits(rel, source);
+            assert!(
+                out.iter().any(|hit| hit.contains("[home-literal]")),
+                "{out:?}"
+            );
+            assert!(
+                out.iter().any(|hit| hit.contains("[home-child-join]")),
+                "{out:?}"
+            );
+            assert_eq!(
+                hits(rel, "let a = env::var_os(\"MVM_DATA_DIR\");\n").len(),
+                1
+            );
+        }
     }
 
     #[test]
