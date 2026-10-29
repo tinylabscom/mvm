@@ -73,19 +73,26 @@ impl AuditSignerProxy {
         write_frame(&mut stream, &self.uds_path, &req).await?;
         let resp: AppendEntryResponse =
             read_frame(&mut stream, &self.uds_path, self.max_frame_bytes).await?;
+        if resp.request_id() != req.request_id() {
+            return Err(ProxyError::Decode {
+                path: self.uds_path.clone(),
+                source: serde::de::Error::custom("audit signer response request ID mismatch"),
+            });
+        }
         match resp {
             AppendEntryResponse::Pong {
                 request_id: echoed_id,
             } => Ok(echoed_id),
-            other => Err(ProxyError::Decode {
+            _ => Err(ProxyError::Decode {
                 path: self.uds_path.clone(),
-                source: serde::de::Error::custom(format!("expected Pong, got {:?}", other)),
+                source: serde::de::Error::custom("expected Pong for probe"),
             }),
         }
     }
 
     /// Append one typed audit entry. Returns the new chain head on
-    /// success.
+    /// success. A correlation failure leaves append effects unknown; do not
+    /// automatically resend with a new request ID.
     pub async fn append_entry(
         &self,
         request_id: impl Into<String>,
@@ -105,6 +112,12 @@ impl AuditSignerProxy {
         write_frame(&mut stream, &self.uds_path, &req).await?;
         let resp: AppendEntryResponse =
             read_frame(&mut stream, &self.uds_path, self.max_frame_bytes).await?;
+        if resp.request_id() != req.request_id() {
+            return Err(ProxyError::Decode {
+                path: self.uds_path.clone(),
+                source: serde::de::Error::custom("audit signer response request ID mismatch"),
+            });
+        }
         Ok(match resp {
             AppendEntryResponse::Ok {
                 request_id,
@@ -295,5 +308,87 @@ mod tests {
             .expect_err("probe must reject unexpected variant");
         assert!(matches!(err, ProxyError::Decode { .. }), "got {:?}", err);
         mock.abort();
+    }
+
+    fn responses(request_id: &str) -> [AppendEntryResponse; 3] {
+        [
+            AppendEntryResponse::Ok {
+                request_id: request_id.into(),
+                chain_head: "response-payload-marker".into(),
+                entry_hash: "response-payload-marker".into(),
+                sig_alg: SIG_ALG_ED25519,
+            },
+            AppendEntryResponse::Err {
+                request_id: request_id.into(),
+                code: AuditSignerErrorCode::NotReady,
+                message: "response-payload-marker".into(),
+            },
+            AppendEntryResponse::Pong {
+                request_id: request_id.into(),
+            },
+        ]
+    }
+
+    fn assert_decode_reason(error: ProxyError, reason: &str) {
+        match error {
+            ProxyError::Decode { source, .. } => assert_eq!(source.to_string(), reason),
+            other => panic!("expected decode refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn response_correlation_probe_rejects_wrong_ids_for_every_variant() {
+        for response in responses("unrelated-response") {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("audit-signer.sock");
+            let mock = spawn_mock(path.clone(), response, Arc::new(Mutex::new(None))).await;
+            let error = AuditSignerProxy::new(&path)
+                .probe("outstanding-request")
+                .await
+                .expect_err("a different request's outcome is unknown");
+            assert_decode_reason(error, "audit signer response request ID mismatch");
+            mock.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn response_correlation_append_rejects_wrong_ids_for_every_variant() {
+        for response in responses("unrelated-response") {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("audit-signer.sock");
+            let mock = spawn_mock(path.clone(), response, Arc::new(Mutex::new(None))).await;
+            let error = AuditSignerProxy::new(&path)
+                .append_entry("outstanding-request", sample_fields())
+                .await
+                .expect_err("a different request's outcome is unknown");
+            assert_decode_reason(error, "audit signer response request ID mismatch");
+            mock.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn response_correlation_wrong_variants_refuse_without_payload_diagnostics() {
+        for response in responses("outstanding-request") {
+            let probe = !matches!(response, AppendEntryResponse::Pong { .. });
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("audit-signer.sock");
+            let mock = spawn_mock(path.clone(), response, Arc::new(Mutex::new(None))).await;
+            let proxy = AuditSignerProxy::new(&path);
+            if probe {
+                assert_decode_reason(
+                    proxy.probe("outstanding-request").await.unwrap_err(),
+                    "expected Pong for probe",
+                );
+            } else {
+                assert_decode_reason(
+                    proxy
+                        .append_entry("outstanding-request", sample_fields())
+                        .await
+                        .unwrap_err(),
+                    "expected Ok/Err for append_entry, got Pong",
+                );
+            }
+            mock.await.unwrap();
+        }
     }
 }
