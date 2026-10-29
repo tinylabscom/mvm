@@ -97,6 +97,35 @@ plan, or write the audit chain — machine-checked by
   Firecracker is driven directly and has no separate gateway/supervisor
   process.
 
+#### Cold HVF invocation owner
+
+For [#4655](https://github.com/tinylabscom/mvm/issues/4655), the owner approved
+the direction of a minimal unprivileged per-VM lifecycle process, conditional
+on security review. The selected executable identity is `mvm-hvf-run-owner`
+in the existing `mvm-client` package, separate from the HVF VMM supervisor.
+This is an implementation direction, not a shipped executable or approval
+to activate it. The [custody contract](../contracts/hvf-entrypoint-owner.md)
+records the pre-birth refusal conditions.
+
+The process must originate and retain the native child, admission, verified
+inputs, supporting leases and independent errors through frontend exit.
+CLI and Studio consume typed library operations; neither replays a hidden
+CLI command. A later connection can request recovery from the original live
+owner, never reconstruct ownership from a PID, name, journal or serialized
+completion. A result acknowledgement is not cleanup authority.
+
+Both admission/audit and HVF adoption/stop must use narrowly authorized
+signer-backed operations without moving signing keys into the owner parser.
+The current APIs do not yet establish that boundary. Numeric resource
+profiles, native enforcement and owner-death containment also require review
+before a positive factory is exposed. Missing prerequisites refuse before
+birth; there is no weaker-key, unbounded-resource or privileged fallback.
+
+This decision does not add a fleet daemon, root service, generic executor,
+Firecracker owner, or shared backend lifecycle framework. Backend terminal
+proofs remain distinct. Source review and tests do not authorize native
+execution, credential changes, signing, installation or release publication.
+
 ### 4. Consumption topology — library, thin CLI, one client trait
 
 `mvmctl`'s root crate is a facade: it re-exports the workspace's library
