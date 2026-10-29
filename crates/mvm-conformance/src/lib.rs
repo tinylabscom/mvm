@@ -434,10 +434,10 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
 /// Narrow a run to the scenarios carrying `only_tag` without replacing the
 /// capability checks.
 ///
-/// Cucumber's command-line tag filter *replaces* the programmatic filter, so
-/// `--tags @warm_claim` runs that scenario even where its opt-in or `/dev/kvm`
-/// is missing — and a lane asserting it ran can then never see it skipped.
-/// Selecting here keeps a missing live opt-in or KVM capability failing closed.
+/// Cucumber's raw command-line filter replaces its programmatic predicate.
+/// The runner composes CLI selection with this gate instead, so name/tag
+/// filtering cannot bypass a missing live opt-in or KVM capability.
+/// `MVM_BDD_ONLY_TAG` is narrowed here without replacing those checks.
 pub fn scenario_gate_for_selection(
     tags: &[String],
     caps: RuntimeCaps,

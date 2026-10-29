@@ -3,10 +3,9 @@
 //! Requires an operator-prepared isolated artifact/slot fixture, freshly built
 //! entitled helpers, and a public pin provisioned by the native-custody owner.
 //! This test only loads that existing key. Missing inputs fail, never skip.
-//! Live execution is currently unavailable: the public HVF stop path cannot
-//! establish lifetime-safe teardown. Both entrypoints fail closed rather than
-//! erasing process evidence or treating missing state as proof of death.
-//! Tracked by https://github.com/tinylabscom/mvm/issues/4276.
+//! Cold boots retain the original runtime through validation and stop.
+//! Replay and detached cleanup remain unavailable: neither may erase evidence
+//! without its own lifetime-safe custody proof.
 
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
@@ -16,13 +15,13 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, ensure};
-use mvm_client::entrypoint::{
-    AGENT_WAIT_SECS, EntrypointAdmission, EntrypointVm, SessionVmName, WorkloadSource,
-    boot_entrypoint_vm, resolve_slot,
+use super::OwnedClientBoot;
+use crate::LocalBackend;
+use crate::entrypoint::call::boot_entrypoint_vm_owned;
+use crate::entrypoint::{
+    EntrypointAdmission, EntrypointVm, SessionVmName, WorkloadSource, resolve_slot,
 };
-use mvm_client::{LocalBackend, MvmClient};
-use mvm_core::client::dto::MachineId;
+use anyhow::{Context, Result, ensure};
 use mvm_core::config;
 use mvm_core::crypto::entrypoint_identity::EnrolledIdentity;
 use mvm_core::stream_client::protected::ProtectedRun;
@@ -33,10 +32,13 @@ use serde::{Deserialize, Serialize};
 const REPLAY_LIMIT: Duration = Duration::from_secs(30);
 const REPLAY_DIAGNOSTIC_LIMIT: usize = 4096;
 
+#[path = "foreground_diagnostic.rs"]
+mod foreground_diagnostic;
+
 fn require_lifetime_safe_teardown() -> Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "native witness blocked by #4276: lifetime-safe HVF teardown unavailable; owned evidence retained",
+        "detached/replay witness custody unavailable; owned evidence retained",
     )
     .into())
 }
@@ -191,8 +193,12 @@ struct Inputs {
 
 impl Inputs {
     fn read() -> Result<Self> {
+        Self::read_for(true)
+    }
+
+    fn read_for(caller_identity: bool) -> Result<Self> {
         ensure!(
-            cfg!(feature = "native-caller-identity"),
+            !caller_identity || cfg!(feature = "native-caller-identity"),
             "native-caller-identity feature required"
         );
         let root = owned_root()?;
@@ -229,8 +235,12 @@ impl Inputs {
             supervisor.is_file(),
             "current supervisor executable required"
         );
-        let pin_json = std::env::var("MVM_CALLER_WITNESS_PIN_JSON")
-            .context("custody controller's public enrollment pin required")?;
+        let pin_json = if caller_identity {
+            std::env::var("MVM_CALLER_WITNESS_PIN_JSON")
+                .context("custody controller's public enrollment pin required")?
+        } else {
+            String::new()
+        };
         ensure!(
             pin_json.len() <= 4096,
             "public enrollment pin exceeds its bound"
@@ -245,10 +255,11 @@ impl Inputs {
     }
 }
 
-/// Armed before resolution so partial launches use the same public cleanup.
+/// Retains the original boot owner before any fallible witness validation.
 struct OwnedVm {
     client: LocalBackend,
     name: String,
+    owner: Option<OwnedClientBoot>,
     cleaned: bool,
 }
 
@@ -257,28 +268,37 @@ impl OwnedVm {
         Self {
             client: LocalBackend::with_hypervisor("hvf"),
             name,
+            owner: None,
             cleaned: false,
         }
     }
 
     fn stop(&mut self) -> Result<()> {
-        require_lifetime_safe_teardown()?;
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(self.client.stop_machine(&MachineId(self.name.clone())))?;
-        self.client.cleanup_transient(&self.name)?;
+        let owner = self.owner.as_mut().context("original boot owner missing")?;
+        stop_before_cleanup(
+            || owner.stop(),
+            || Ok(self.client.cleanup_transient(&self.name)?),
+        )?;
+        self.owner = None;
         ensure!(
             !config::vm_state_dir(&self.name).exists(),
-            "public teardown retained runtime state"
+            "original-owner teardown retained runtime state"
         );
         ensure!(
             !config::vm_stream_socket(&self.name).exists(),
-            "public teardown retained stream socket"
+            "original-owner teardown retained stream socket"
         );
         self.cleaned = true;
         Ok(())
     }
+}
+
+fn stop_before_cleanup(
+    stop: impl FnOnce() -> Result<()>,
+    cleanup: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    stop()?;
+    cleanup()
 }
 
 impl Drop for OwnedVm {
@@ -297,7 +317,7 @@ struct BootEvidence {
     timing: serde_json::Value,
 }
 
-fn boot(inputs: &Inputs, vm: &OwnedVm, opted_in: bool) -> Result<BootEvidence> {
+fn boot(inputs: &Inputs, vm: &mut OwnedVm, opted_in: bool) -> Result<BootEvidence> {
     // This clock precedes public-pin and workload resolution, native lookup,
     // actual admission, startup verification, replay fsync, and guest readiness.
     let started = Instant::now();
@@ -312,7 +332,8 @@ fn boot(inputs: &Inputs, vm: &OwnedVm, opted_in: bool) -> Result<BootEvidence> {
         None => policy,
     }
     .build()?;
-    let booted = boot_entrypoint_vm(
+    ensure!(vm.owner.is_none(), "original boot owner already retained");
+    vm.owner = Some(boot_entrypoint_vm_owned(
         EntrypointVm {
             slot: &slot,
             vm_name: SessionVmName::Exact(&vm.name),
@@ -322,9 +343,10 @@ fn boot(inputs: &Inputs, vm: &OwnedVm, opted_in: bool) -> Result<BootEvidence> {
             portable_boot_assets: None,
         },
         None,
-    )?;
+    )?);
     let boot_returned = Instant::now();
-    booted.await_agent(AGENT_WAIT_SECS)?;
+    let booted = vm.owner.as_mut().context("original boot owner missing")?;
+    booted.with_original(|_, runtime| runtime.validate_live())?;
     let guest_ready = Instant::now();
 
     let state = config::vm_state_dir(&vm.name);
@@ -346,7 +368,10 @@ fn boot(inputs: &Inputs, vm: &OwnedVm, opted_in: bool) -> Result<BootEvidence> {
     let run = ProtectedRun::read(&config::vm_protected_stream_dir(&vm.name))?
         .context("actual owner did not publish its protected run")?;
     ensure!(
-        cfg.plan.as_ref() == Some(&serde_json::to_value(booted.admission.admitted.signed())?),
+        cfg.plan.as_ref()
+            == Some(&serde_json::to_value(
+                booted.resources().admission.admitted.signed()
+            )?),
         "supervisor did not consume the actually admitted plan"
     );
     match (pin.as_ref(), cfg.caller_registration.as_ref()) {
@@ -357,7 +382,7 @@ fn boot(inputs: &Inputs, vm: &OwnedVm, opted_in: bool) -> Result<BootEvidence> {
             );
             mvm_hostd::supervisor::caller_registration::verify_cold_start(
                 &vm.name,
-                booted.admission.admitted.signed(),
+                booted.resources().admission.admitted.signed(),
                 registration,
             )?;
             ensure!(
@@ -408,6 +433,7 @@ fn require_replay_denial(status: ExitStatus, diagnostic: &[u8]) -> Result<()> {
 fn replay_process(supervisor: &Path, cfg: &HvfSupervisorConfig) -> Result<ExitStatus> {
     use tokio::io::AsyncReadExt as _;
     use tokio::io::AsyncWriteExt as _;
+    require_lifetime_safe_teardown()?;
     let bytes = serde_json::to_vec(cfg)?;
     let command = mvm_core::env_hygiene::helper_command(supervisor);
     tokio::runtime::Builder::new_current_thread()
@@ -449,7 +475,6 @@ fn replay_process(supervisor: &Path, cfg: &HvfSupervisorConfig) -> Result<ExitSt
 fn native_cold_entrypoint_registration_and_replay() -> Result<()> {
     // Test-only ownership control, not an admission or caller authority.
     await_controller_record()?;
-    require_lifetime_safe_teardown()?;
     declare_helpers()?;
     let inputs = Inputs::read()?;
     let owned = Ownership::new();
@@ -465,11 +490,11 @@ fn native_cold_entrypoint_registration_and_replay() -> Result<()> {
         "witness roots are single-use; refusing to overwrite cleanup ownership"
     );
     let mut baseline = OwnedVm::new(owned.names[0].clone());
-    let baseline_evidence = boot(&inputs, &baseline, false)?;
+    let baseline_evidence = boot(&inputs, &mut baseline, false)?;
     baseline.stop()?;
 
     let mut registered = OwnedVm::new(owned.names[1].clone());
-    let first = boot(&inputs, &registered, true)?;
+    let first = boot(&inputs, &mut registered, true)?;
     let ledger_path = config::mvm_home_strict()?.join("caller-registration/ledger.json");
     let ledger = fs::read(&ledger_path)?;
     registered.stop()?;
@@ -516,10 +541,11 @@ fn native_cold_entrypoint_registration_and_replay() -> Result<()> {
         fs::read(&ledger_path)? == ledger,
         "replay mutated consumed bookkeeping"
     );
+    require_lifetime_safe_teardown()?;
     registered.client.cleanup_transient(&registered.name)?;
 
     registered.cleaned = false;
-    let fresh = boot(&inputs, &registered, true)?;
+    let fresh = boot(&inputs, &mut registered, true)?;
     ensure!(
         fresh.run != first.run,
         "fresh admission reused the old capture run"
@@ -589,6 +615,37 @@ fn native_caller_registration_cleanup() -> Result<()> {
         b"owned-vms-stopped-v1\n",
     )?;
     Ok(())
+}
+
+#[test]
+fn original_stop_failure_prevents_cleanup() {
+    let cleaned = std::cell::Cell::new(false);
+    let result = stop_before_cleanup(
+        || anyhow::bail!("original stop unconfirmed"),
+        || {
+            cleaned.set(true);
+            Ok(())
+        },
+    );
+    assert!(result.is_err());
+    assert!(!cleaned.get());
+}
+
+#[test]
+fn original_stop_success_precedes_cleanup_and_preserves_cleanup_error() {
+    let stopped = std::cell::Cell::new(false);
+    let result = stop_before_cleanup(
+        || {
+            stopped.set(true);
+            Ok(())
+        },
+        || {
+            assert!(stopped.get());
+            anyhow::bail!("cleanup refused")
+        },
+    );
+    assert_eq!(result.unwrap_err().to_string(), "cleanup refused");
+    stop_before_cleanup(|| Ok(()), || Ok(())).unwrap();
 }
 
 #[test]

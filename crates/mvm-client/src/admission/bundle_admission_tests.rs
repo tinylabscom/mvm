@@ -649,6 +649,7 @@ fn signed_environment_policy_refuses_missing_or_wider_runtime_and_audits() {
         environment.secret_slots.clear();
         environment.policy = Some(mvm_core::plan::EnvironmentPolicy {
             allow_hosts: vec!["api.anthropic.com:443".into()],
+            request_budget: None,
         });
         let fixture =
             InstalledFixture::with_members(vec![mvm_core::plan::BundleMember::Environment(

@@ -111,11 +111,28 @@ pub struct NativeCompletion {
     _exit: mvm_vmm::host::hvf_stop::ConfirmedExit,
     _barrier: CompletionBarrier,
     terminal: mvm_agentd::vsock::EntrypointEvent,
+    evidence: NativeCompletionEvidence,
+}
+
+/// Observations copied from original retained custody, not a cleanup permit.
+#[derive(Debug, serde::Serialize)]
+pub struct NativeCompletionEvidence {
+    pub instance: mvm_core::protocol::hvf_control::HvfInstance,
+    pub rootfs_sha256: String,
+    pub rootfs_roothash: String,
+    pub runtime_archive_sha256: Option<String>,
+    pub runtime_version: Option<String>,
+    pub runtime_overlay_roothash: Option<String>,
+    pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
 impl NativeCompletion {
     pub fn terminal(&self) -> &mvm_agentd::vsock::EntrypointEvent {
         &self.terminal
+    }
+
+    pub fn evidence(&self) -> &NativeCompletionEvidence {
+        &self.evidence
     }
 }
 
@@ -388,13 +405,40 @@ impl ColdHvfChannel {
             .entrypoint_terminal
             .clone()
             .context("native completion has no original entrypoint terminal")?;
+        let config = custody.preparation.launch.config();
+        let rootfs_sha256 = custody
+            .preparation
+            .images
+            .sha256(mvm_core::registry_pack_boot::BootImageAsset::Rootfs)
+            .to_owned();
+        let rootfs_roothash = custody.preparation.images.root_hash().to_owned();
+        let runtime_archive_sha256 = config
+            .runtime_release_proof
+            .as_ref()
+            .map(|proof| proof.archive_sha256.clone());
+        let runtime_version = config
+            .runtime_release_proof
+            .as_ref()
+            .map(|proof| proof.version.clone());
+        let runtime_overlay_roothash = config.runtime_overlay_roothash.clone();
+        let network_policy = config.network_policy.clone();
         let proof = self
             .stop_retaining_evidence()?
             .context("native completion has no original exit proof")?;
+        let evidence = NativeCompletionEvidence {
+            instance: proof.instance().clone(),
+            rootfs_sha256,
+            rootfs_roothash,
+            runtime_archive_sha256,
+            runtime_version,
+            runtime_overlay_roothash,
+            network_policy,
+        };
         Ok(NativeCompletion {
             _exit: proof,
             _barrier: barrier,
             terminal,
+            evidence,
         })
     }
 

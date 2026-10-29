@@ -233,6 +233,19 @@ def test_network_agent_preset_and_ai_budget_are_reachable():
     assert network.ai.budget.max_total_tokens == 12_000
 
 
+def test_pre_forward_budget_is_preserved_without_metering():
+    from mvm._ir.workload import AiBudgetModel, AiRequestBudget
+
+    budget = AiRequestBudget(
+        max_requests=1,
+        max_spend_microusd=500_000,
+        model=AiBudgetModel.claude_haiku_4_5_20251001,
+    )
+    policy = mvm.ai_policy(metering=False, request_budget=budget)
+    assert policy.metering is False
+    assert policy.request_budget == budget
+
+
 def test_network_preset_conflicts_with_explicit_egress():
     with pytest.raises(ValueError, match="mutually exclusive"):
         mvm.network(

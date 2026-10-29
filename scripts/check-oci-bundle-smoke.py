@@ -261,7 +261,10 @@ class Runner:
     def __init__(self, evidence, report):
         self.evidence, self.report = evidence, report
 
-    def run(self, label, argv, env, timeout=120):
+    def run(self, label, argv, env, timeout=120, *, stdin_bytes=None):
+        require(stdin_bytes is None or
+                (isinstance(stdin_bytes, bytes) and len(stdin_bytes) <= 4096),
+                "one-shot stdin must be at most 4096 bytes")
         argv = [str(arg) for arg in argv]
         record = {"label": label, "argv": argv, "timeout_seconds": timeout,
                   "mvm_home": env.get("MVM_HOME")}
@@ -269,11 +272,15 @@ class Runner:
         buffers = {"stdout": bytearray(), "stderr": bytearray()}
         started = time.monotonic()
         proc = subprocess.Popen(
-            argv, cwd=self.evidence, env=env, stdin=subprocess.DEVNULL,
+            argv, cwd=self.evidence, env=env,
+            stdin=subprocess.DEVNULL if stdin_bytes is None else subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
         )
         record["pid"] = proc.pid
         try:
+            if stdin_bytes is not None:
+                proc.stdin.write(stdin_bytes)
+                proc.stdin.close()
             with selectors.DefaultSelector() as selector:
                 selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
                 selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
@@ -305,6 +312,8 @@ class Runner:
             if proc.poll() is None:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=10)
+            if proc.stdin is not None and not proc.stdin.closed:
+                proc.stdin.close()
             proc.stdout.close()
             proc.stderr.close()
             record["returncode"] = proc.returncode
@@ -642,6 +651,24 @@ class HelperTests(unittest.TestCase):
                 require_reused_install(before, {**before, "unknown.sha256cache": {}})
             (directory / "new").write_text("changed")
             self.assertNotEqual(before, installed_snapshot(directory))
+
+    def test_one_shot_stdin_is_exact_and_not_logged(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp:
+            report = {"commands": []}
+            runner = Runner(Path(temp), report)
+            expected = hashlib.sha256(b"tell me a joke\n").hexdigest()
+            result = runner.run("stdin", [sys.executable, "-c",
+                                "import hashlib,sys; data=sys.stdin.buffer.read(); "
+                                f"assert hashlib.sha256(data).hexdigest() == '{expected}'; "
+                                "print('received')"],
+                                {"PATH": "/usr/bin:/bin"},
+                                stdin_bytes=b"tell me a joke\n")
+            self.assertEqual(result["stdout"], "received\n")
+            self.assertNotIn("tell me a joke", json.dumps(report))
+            for invalid in ("text", b"x" * 4097):
+                with self.assertRaises(Blocked):
+                    runner.run("invalid", [], {}, stdin_bytes=invalid)
+            self.assertEqual(len(report["commands"]), 1)
 
 
 def interrupted(signum, _frame):

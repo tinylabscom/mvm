@@ -45,6 +45,9 @@ pub struct CanonicalLinuxProofInputs<'a> {
 /// that is refused.
 #[derive(Debug, Clone)]
 pub struct BundleExportInputs<'a> {
+    /// Additional named files sealed as `Other` artifacts. Names must be
+    /// nonreserved basenames; regular-file symlinks are followed.
+    pub supplemental_artifacts: &'a [(&'a str, &'a Path)],
     pub boot_assets: Option<BootAssetsInputs<'a>>,
     pub cli_boot_assets: Option<CliBootAssetsInputs<'a>>,
     pub canonical_linux_proof: Option<CanonicalLinuxProofInputs<'a>>,
@@ -95,6 +98,7 @@ impl<'a> BundleExportInputs<'a> {
     /// An export of a kernel and a rootfs, with nothing optional set.
     pub fn new(vmlinux: &'a str, rootfs: &'a str, arch_label: &'a str, out: &'a Path) -> Self {
         Self {
+            supplemental_artifacts: &[],
             boot_assets: None,
             cli_boot_assets: None,
             canonical_linux_proof: None,
