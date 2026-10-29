@@ -17,6 +17,8 @@ use super::vsock_transport::{
 };
 
 pub(crate) struct VsockLifecycleState {
+    /// Host-observed fallback-port history, retained by the original parent.
+    /// This is not a transport queue and never enters the device snapshot.
     pub(crate) received: Vec<u8>,
     pub(crate) workload_exit_code: Option<i32>,
     pub(crate) exit_stop: Option<&'static AtomicBool>,
@@ -458,6 +460,15 @@ impl VsockHandlerRegistry {
             .expect("agent handler present")
             .bridge
             .stream_fd(conn_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_test_guest_handler(
+        &mut self,
+        port: u32,
+        handler: Box<dyn GuestPortHandler>,
+    ) {
+        self.guest_ports.insert(port, handler);
     }
 
     /// Whether any handler holds guest bytes a host socket has not taken yet.
