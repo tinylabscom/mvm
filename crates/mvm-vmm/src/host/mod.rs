@@ -15,6 +15,8 @@ pub mod console_capture;
 pub mod drive_file;
 pub mod egress_bridge;
 pub mod egress_shared;
+#[cfg(target_os = "linux")]
+pub mod fc_cgroup;
 pub mod fc_kernel;
 pub mod flowmux_identity;
 pub mod gpu_endpoint_spawn;

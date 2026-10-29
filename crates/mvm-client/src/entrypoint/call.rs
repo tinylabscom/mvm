@@ -350,17 +350,27 @@ fn close_native_audit<O>(group: &mut TransientCustody<O>) {
             Ok(())
         })
     } else {
-        close_call_session_checked(
-            ctx,
-            &resources.config.name,
-            resources.backend.name(),
-            CallEnd::of(
-                &group
-                    .outcome
-                    .clone()
-                    .context("native call returned no outcome"),
-            ),
-        )
+        // Session closure owns its batch; record the completion before it.
+        (|| {
+            ctx.emitter.emit_native_completed(
+                ctx.admitted.plan(),
+                group
+                    .completion
+                    .as_ref()
+                    .context("original native completion missing")?,
+            )?;
+            close_call_session_checked(
+                ctx,
+                &resources.config.name,
+                resources.backend.name(),
+                CallEnd::of(
+                    &group
+                        .outcome
+                        .clone()
+                        .context("native call returned no outcome"),
+                ),
+            )
+        })()
     };
     match closure {
         Ok(()) => group.native_audit = NativeAuditClosure::Complete,

@@ -25,8 +25,9 @@ pub(super) const INSTALLATION: &str = "d3676c8c-8f2e-4d2b-b70b-d23ccb8c4018";
 const PIN_ENV: &str = "MVM_CALLER_WITNESS_PIN_JSON";
 const PROBE: &str = "caller_identity::production_fixture::production_fixture_missing";
 const RECOVER: &str = "caller_identity::production_fixture::recover_production_fixture";
-const CHILD_TEST: &str = "native_cold_entrypoint_registration_and_replay";
-const CHILD_CLEANUP: &str = "native_caller_registration_cleanup";
+const CHILD_TEST: &str = "entrypoint::boot::caller_registration_live_hvf::native_cold_entrypoint_registration_and_replay";
+const CHILD_CLEANUP: &str =
+    "entrypoint::boot::caller_registration_live_hvf::native_caller_registration_cleanup";
 const STORE_TIMEOUT: Duration = Duration::from_secs(30);
 const CHILD_TIMEOUT: Duration = Duration::from_secs(300);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);

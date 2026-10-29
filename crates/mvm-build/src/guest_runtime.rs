@@ -2234,15 +2234,89 @@ mod tests {
         // Same length as the original member, so only the content and the
         // entry's timestamps move.
         let member = runtime.root.join("x86_64/bin/mvm-ping");
-        let len = fs::metadata(&member).unwrap().len() as usize;
+        let before_edit = crate::source_stamp::EntryStamp::of(&fs::metadata(&member).unwrap());
+        let len = before_edit.len as usize;
         fs::write(&member, vec![b'!'; len]).unwrap();
+        // Change the stamp deterministically even if the write shares a filesystem clock tick.
+        File::options()
+            .write(true)
+            .open(&member)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let after_edit = crate::source_stamp::EntryStamp::of(&fs::metadata(&member).unwrap());
+        assert_eq!(after_edit.len, before_edit.len);
+        assert_eq!(after_edit.ino, before_edit.ino);
+        assert_eq!(after_edit.mode, before_edit.mode);
+        assert_ne!(after_edit.mtime, before_edit.mtime);
+        assert_ne!(after_edit, before_edit);
+        let before_verification = full_object_verifications();
+        let observed = load_as_a_new_process();
         assert!(
-            matches!(
-                load_as_a_new_process(),
-                Err(GuestRuntimeError::TreeDigest { .. })
-            ),
-            "a member changed after the recorded verification is verified again, and refused"
+            matches!(&observed, Err(GuestRuntimeError::TreeDigest { .. })),
+            "a member changed after the recorded verification is verified again, and refused: \
+             observed={observed:?}, before={before_edit:?}, after={after_edit:?}"
         );
+        assert_eq!(full_object_verifications() - before_verification, 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_recent_same_length_mutation_is_verified_despite_seeded_caches() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = fixture_manifest(GuestArch::X86_64);
+        let input = archive(temp.path(), &manifest);
+        let base = temp.path().join("cache");
+        let runtime = install_archive(&base, &input, "1.2.3", GuestArch::X86_64).unwrap();
+        let object = base.join("objects").join(&runtime.digest);
+        let member = runtime.root.join("x86_64/bin/mvm-ping");
+        // Hold a captured non-future clock fixed to test the settling boundary, not clock speed.
+        let now = std::time::SystemTime::now();
+        let set_mtime = || {
+            File::options()
+                .write(true)
+                .open(&member)
+                .unwrap()
+                .set_modified(now)
+                .unwrap();
+        };
+        set_mtime();
+        let later = now + std::time::Duration::from_secs(3600);
+        load_cached_at(&base, &runtime.digest, "1.2.3", GuestArch::X86_64, later).unwrap();
+        let recorded_stamp = settled_stamp(&object, later).unwrap();
+        assert_eq!(
+            VERIFIED_OBJECTS.get(&object).expect("seeded memo").0,
+            recorded_stamp
+        );
+        assert!(verified_earlier(&base, &runtime.digest, &recorded_stamp));
+
+        let before_edit = crate::source_stamp::EntryStamp::of(&fs::metadata(&member).unwrap());
+        fs::write(&member, vec![b'!'; before_edit.len as usize]).unwrap();
+        set_mtime();
+        let after_edit = crate::source_stamp::EntryStamp::of(&fs::metadata(&member).unwrap());
+        assert_eq!(after_edit.len, before_edit.len);
+        assert_eq!(after_edit.ino, before_edit.ino);
+        assert_eq!(after_edit.mode, before_edit.mode);
+        assert_eq!(after_edit.mtime, before_edit.mtime);
+        // ctime may advance or share a tick; either way this state is too recent to reuse.
+        assert!(settled_stamp(&object, now).is_none());
+
+        for clear_memo in [false, true] {
+            if clear_memo {
+                VERIFIED_OBJECTS.remove(&object);
+            }
+            assert_eq!(VERIFIED_OBJECTS.get(&object).is_none(), clear_memo);
+            assert!(verified_earlier(&base, &runtime.digest, &recorded_stamp));
+            let before_verification = full_object_verifications();
+            let observed = load_cached_at(&base, &runtime.digest, "1.2.3", GuestArch::X86_64, now);
+            assert!(
+                matches!(&observed, Err(GuestRuntimeError::TreeDigest { .. })),
+                "a recent mutation must be verified and refused even with cached verification: \
+                 clear_memo={clear_memo}, observed={observed:?}, \
+                 before={before_edit:?}, after={after_edit:?}"
+            );
+            assert_eq!(full_object_verifications() - before_verification, 1);
+        }
     }
 
     #[test]

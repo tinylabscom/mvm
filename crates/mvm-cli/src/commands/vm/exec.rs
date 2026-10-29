@@ -629,7 +629,7 @@ pub(in crate::commands) fn run_secure_started(
     let outputs = super::outputs::PreparedOutputs::prepare(&args.outputs, &args.mounts)?;
     let admit_outputs = outputs.grants();
     let host_config = mvm_core::user_config::load(None);
-    let ai_policy = super::shared::resolve_ai_policy(args.ai_token_budget);
+    let ai_policy = application_source::ai_policy(&args)?;
     let routes = super::run_routes::launch_routes(&args)?;
     crate::approval::configure(super::run_routes::launch_approval(&args)?);
     let allow_host = routes.with_allow_host(&args.allow_host);

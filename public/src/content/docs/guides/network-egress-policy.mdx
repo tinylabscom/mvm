@@ -421,6 +421,69 @@ Use a dedicated profile:
 
 ## AI egress metering and budgets
 
+### Strict pre-forward reservations
+
+The signed AI policy also accepts `request_budget`, independently of `metering`:
+
+```json
+{
+  "metering": true,
+  "request_budget": {
+    "max_requests": 1,
+    "max_spend_microusd": 500000,
+    "model": "claude-haiku-4-5-20251001"
+  }
+}
+```
+
+This is a field of the canonical network `ai` policy carried by the signed plan,
+not a demo-runner flag. Existing policies without it retain their behavior.
+A bundle's signed environment `policy.request_budget` is a subtractive ceiling.
+The installed application route applies it without runtime flags, and admission
+refuses missing or wider limits. Existing archives are not silently rewritten.
+
+When present, the host permits only `POST https://api.anthropic.com:443/v1/messages`
+with the exact dated model ID, bounded JSON and an explicit positive `max_tokens`.
+Aliases, other endpoints, query strings, beta headers, non-identity request
+encoding, alternate API versions, server-side tools, and unreviewed top-level
+parameters are refused before forwarding. Client-side custom tools are permitted.
+`/v1/messages/count_tokens` is also refused before forwarding and does not
+consume an upstream-attempt reservation; no auxiliary provider call is made.
+Request bodies are limited to 1 MiB and canonicalized after inspection; the
+forwarder receives exactly the JSON whose model and output bound were checked.
+Streaming request bodies are collected within the existing bounded replay path
+before this check; streaming responses do not defer the reservation.
+
+Each admitted attempt atomically reserves one request and its conservative cost.
+Concurrent requests share both ceilings across all three HTTP request paths.
+Reservations remain spent after upstream failures, cancellation, missing usage,
+or truncated responses; there is no automatic refund or retry. A configured
+audit recorder receives `host.ai.budget_reserved` with the endpoint's VM label,
+budget-lifetime UUID, substituted binding names and cumulative reservations.
+Strict limits refuse forwarding without an audit recorder and VM identity.
+If that append fails, the request is not forwarded
+and the reservation remains spent.
+
+The supported tariff reserves **all 200,000 context tokens at $2/MTok**, the
+highest documented Haiku 4.5 input/cache-write rate, plus `max_tokens` at $5/MTok.
+Thus a request with `max_tokens = 20000` reserves exactly $0.50, even if its
+actual prompt is tiny. No tokenizer estimate or promised cache hit reduces it.
+The model's documented 64,000 output-token maximum is also checked.
+See Anthropic's [model specifications](https://platform.claude.com/docs/en/models/haiku-4-5/overview)
+and [pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+
+This is a conservative bound under that reviewed model/tariff, **not a provider
+account spending cap**. Operator review of current pricing remains necessary;
+taxes, account charges and future provider pricing changes are outside it.
+Counters last for one endpoint lifetime, not across endpoint recreation or VM
+relaunch. Do not reset/recreate an endpoint as recovery during a one-request
+acceptance witness. Audit reservations are not native clean-stop evidence.
+The consumer acceptance runner verifies signed application policy, endpoint
+lifetime, provider usage, credential handoff and original-owner completion before
+accepting a result. Its live path still requires separate operator authorization.
+
+### Response-time token accounting
+
 When a workload is allowed to call AI APIs, you can meter token usage and
 cap it with a budget. Enable metering in the `[network.ai]` section of
 `mvm.toml`:

@@ -88,6 +88,9 @@ pub struct EnvironmentPolicy {
     /// Canonical lowercase DNS names or IP literals with an explicit nonzero
     /// port. IPv6 literals use brackets; patterns and implicit ports are refused.
     pub allow_hosts: Vec<String>,
+    /// Signed pre-forward ceiling, applied without granting additional egress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_budget: Option<crate::policy::network_policy::AiRequestBudget>,
 }
 
 impl EnvironmentPolicy {
@@ -652,6 +655,7 @@ mod tests {
         let mut d = descriptor();
         d.policy = Some(EnvironmentPolicy {
             allow_hosts: vec![s("api.anthropic.com:443"), s("[2001:db8::1]:443")],
+            request_budget: None,
         });
         d.validate().unwrap();
         let mut value = serde_json::to_value(&d).unwrap();
@@ -660,6 +664,23 @@ mod tests {
             d
         );
         value["policy"]["allow_any"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<EnvironmentDescriptor>(value).is_err());
+    }
+
+    #[test]
+    fn signed_request_budget_round_trips_and_rejects_unreviewed_fields() {
+        let mut value = serde_json::to_value(descriptor()).unwrap();
+        value["policy"] = serde_json::json!({
+            "allow_hosts": ["api.anthropic.com:443"],
+            "request_budget": {
+                "max_requests": 1, "max_spend_microusd": 500000,
+                "model": "claude-haiku-4-5-20251001"
+            }
+        });
+        let parsed: EnvironmentDescriptor = serde_json::from_value(value.clone()).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        value["policy"]["request_budget"]["allow_unknown_models"] = serde_json::json!(true);
         assert!(serde_json::from_value::<EnvironmentDescriptor>(value).is_err());
     }
 
@@ -695,6 +716,7 @@ mod tests {
         }
         let mut policy = EnvironmentPolicy {
             allow_hosts: vec![s("api.anthropic.com:443"); 2],
+            request_budget: None,
         };
         assert!(matches!(
             policy.validate(),

@@ -162,6 +162,59 @@ fn scratch_working_directory(world: &mut CliWorld) {
     world.scratch_dir = Some(tempfile::tempdir().expect("create scratch working directory"));
 }
 
+#[when(expr = "I run the conformance runner with {string}")]
+fn run_conformance_runner(world: &mut CliWorld, args: String) {
+    run_conformance_child(world, &args, None);
+}
+
+#[when(expr = "I run the conformance runner with {string} excluding probe {string} by shard")]
+fn run_conformance_excluding_probe(world: &mut CliWorld, args: String, probe: String) {
+    let feature = include_str!("../../../../features/suites/s0_cli/conformance_selection.feature")
+        .lines()
+        .find_map(|line| line.strip_prefix("Feature:").map(str::trim))
+        .expect("selection fixture feature name");
+    let first = mvm_conformance::sharding::ScenarioShard::parse("0/2").expect("first shard");
+    let excluding = if first.contains(feature, None, &probe) {
+        "1/2"
+    } else {
+        "0/2"
+    };
+    run_conformance_child(world, &args, Some(excluding));
+}
+
+fn run_conformance_child(world: &mut CliWorld, args: &str, shard: Option<&str>) {
+    let home = tempfile::tempdir().expect("isolated child runner home");
+    let mut command = Command::new(std::env::current_exe().expect("conformance runner"));
+    command
+        .args(mvm_conformance::doc_examples::tokenize(args))
+        .isolated_home(home.path())
+        .env_remove("CUCUMBER_FILTER_TAGS")
+        .env_remove("MVM_BDD_ONLY_TAG")
+        .env_remove("MVM_BDD_SHARD")
+        .env_remove("MVM_BDD_LIVE")
+        .env_remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV)
+        .env_remove("MVM_BDD_STRICT_SKIPS")
+        .env_remove("MVM_BDD_ALLOWED_SKIPS")
+        .env_remove("MVM_E2E_FAILURE_MANIFEST")
+        .env_remove("MVM_E2E_FAILURE_INITIALIZED")
+        .stdin(std::process::Stdio::null());
+    if let Some(shard) = shard {
+        command.env("MVM_BDD_SHARD", shard);
+    }
+    let output = command
+        .output()
+        .expect("run the isolated conformance child");
+    world.last_run = Some(output);
+}
+
+#[then(expr = "the conformance live opt-in is present")]
+fn conformance_live_opt_in_is_present(_world: &mut CliWorld) {
+    assert!(
+        std::env::var_os("MVM_BDD_LIVE").is_some(),
+        "a live-tagged fixture executed without its opt-in"
+    );
+}
+
 #[given(expr = "a command launch plan in the scratch directory")]
 fn command_launch_plan_in_scratch(world: &mut CliWorld) {
     let scratch = world

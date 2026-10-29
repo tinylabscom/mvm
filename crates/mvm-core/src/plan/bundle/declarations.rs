@@ -427,6 +427,14 @@ pub fn environment_network_permitted(
     if policy.validate().is_err() || !network.peers().is_empty() {
         return false;
     }
+    if let Some(ceiling) = policy.request_budget {
+        let Some(actual) = network.ai().and_then(|ai| ai.request_budget) else {
+            return false;
+        };
+        if !ceiling.permits(&actual) {
+            return false;
+        }
+    }
     let Some(rules) = network.resolve_rules() else {
         return false;
     };
@@ -944,6 +952,7 @@ mod tests {
         let mut descriptor = environment(&["egress"]);
         descriptor.policy = Some(mvm_contract::plan::EnvironmentPolicy {
             allow_hosts: vec!["api.anthropic.com:443".into()],
+            request_budget: None,
         });
         for network in [
             NetworkPolicy::deny_all(),
@@ -1000,11 +1009,47 @@ mod tests {
     }
 
     #[test]
+    fn signed_request_budget_cannot_be_omitted_or_widened() {
+        use crate::network_policy::{AiPolicy, HostPort, NetworkPolicy};
+        use mvm_contract::policy::network_policy::{AiBudgetModel, AiRequestBudget};
+        let ceiling = AiRequestBudget {
+            max_requests: 1,
+            max_spend_microusd: 500_000,
+            model: AiBudgetModel::ClaudeHaiku45,
+        };
+        let mut descriptor = environment(&["egress"]);
+        descriptor.policy = Some(mvm_contract::plan::EnvironmentPolicy {
+            allow_hosts: vec!["api.anthropic.com:443".into()],
+            request_budget: Some(ceiling),
+        });
+        let network = || NetworkPolicy::allow_list(vec![HostPort::new("api.anthropic.com", 443)]);
+        assert!(!environment_network_permitted(&descriptor, &network()));
+        for (requests, spend, permitted) in [
+            (1, 500_000, true),
+            (0, 1, true),
+            (2, 500_000, false),
+            (1, 500_001, false),
+        ] {
+            let mut ai = AiPolicy::metered();
+            ai.request_budget = Some(AiRequestBudget {
+                max_requests: requests,
+                max_spend_microusd: spend,
+                ..ceiling
+            });
+            assert_eq!(
+                environment_network_permitted(&descriptor, &network().with_ai(Some(ai))),
+                permitted
+            );
+        }
+    }
+
+    #[test]
     fn signed_ipv6_authorities_match_only_the_canonical_runtime_host() {
         use crate::network_policy::{HostPort, NetworkPolicy};
         let mut descriptor = environment(&["egress"]);
         descriptor.policy = Some(mvm_contract::plan::EnvironmentPolicy {
             allow_hosts: vec!["[2001:db8::1]:443".into()],
+            request_budget: None,
         });
         assert!(environment_network_permitted(
             &descriptor,
