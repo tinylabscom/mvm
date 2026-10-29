@@ -229,15 +229,15 @@ mod tests {
         let finished = crate::host::process_exit::wait_for_test_child(
             &mut child,
             std::time::Instant::now() + std::time::Duration::from_secs(30),
-        )
-        .unwrap();
-        if finished.is_none() {
+        );
+        let exited = matches!(&finished, Ok(Some(_)));
+        if !exited {
             let _ = child.kill();
         }
         let output = child.wait_with_output().unwrap();
         assert!(
-            finished.is_some() && output.status.success(),
-            "kernel fixtures must isolate key initialization from inherited home state:\n{}\n{}",
+            exited && output.status.success(),
+            "kernel fixtures must isolate key initialization from inherited home state (wait: {finished:?}):\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
