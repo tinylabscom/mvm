@@ -190,6 +190,32 @@ for (const record of Machine.ls()) {
 }
 ```
 
+## Host-local telemetry reads
+
+```ts
+import { telemetry } from "@runmvm/mvm";
+
+const status = telemetry.status("worker");
+const page = telemetry.records("worker", { limit: 100 });
+const nextPage = telemetry.records("worker", { cursor: page.next_cursor });
+```
+
+Each synchronous call reads once through the existing host ABI; it does not
+start a collector, poll, retry, or run a CLI. Keep cursors with their selected
+machine and record file. The host defaults to 256 records and clamps supplied
+limits, including zero, to 1–1024. `exhausted` means the current file end,
+not workload completion; empty records do not imply health.
+
+Typed status/page envelopes validate known fields and retain losses, optional
+and additive fields; record bodies remain uninterpreted JSON, not fully
+Rust-validated records. Envelope integers, including **received cursor
+offsets**, must be non-negative JavaScript safe integers. Larger values refuse
+with `telemetry.TelemetryError` before a rounded cursor can be returned or reused.
+This is not full-u64 parity: opaque nested record numbers retain the existing
+JSON/JavaScript precision limitation. Argument errors use `TypeError`/`RangeError`;
+host refusals preserve their typed code and retryability without an automatic
+cursor reset.
+
 ## Host library
 
 The SDK never runs `mvmctl` or any other program. Every live `Sandbox` and
