@@ -785,7 +785,7 @@ roots = ["mvm-contract", "runmvm-client"]
 # interpreter dependency, so it boots in any rootfs — the same reason the
 # universal initramfs agent is static. Both binaries are libc-only (no
 # TLS/ring/openssl), so the musl build is unencumbered.
-rust = "1.91.1"
+rust = "1.97.1"
 zig = "0.13.0"
 cargo-zigbuild = "0.23.0"
 

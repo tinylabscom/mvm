@@ -2,8 +2,8 @@
   "kernel_version": "6.12.114",
   "kernel_hash": "sha256-eoWJkSvXqK2wf+0HQoNlLPSCo1+s74lUVUZU8BVLSvM=",
   "embedded_rust": {
-    "version": "1.91.1",
-    "aarch64_unknown_linux_musl_hash": "sha256-W95G9gKLSyz+ogTZiIt93mYDG3eKuEtoXrUjQ1kpt7U=",
-    "x86_64_unknown_linux_musl_hash": "sha256-fcoP5fERdHCAB+tTVG6pWq2MN9/Ww8sGTF8cZS7WsPI="
+    "version": "1.97.1",
+    "aarch64_unknown_linux_musl_hash": "sha256-mWWX9m7CLNBAHh8XFUXNhyZ9LvtVGdgRm3R0ZwU/Q4w=",
+    "x86_64_unknown_linux_musl_hash": "sha256-0WDfyB0h/cclNIWfriSf7ParcGQDdfZPxOdwBaSMGNA="
   }
 }

@@ -53,8 +53,6 @@ let
   # instead rebuild the toolchain itself against musl, which this crate does
   # not need: its closure is pure Rust, so nothing here compiles C.
   muslToolchain = pkgs.callPackage ./embedded-rust-toolchain.nix {
-    cargo = pkgs.rust_1_91.packages.prebuilt.cargo;
-    rustc = pkgs.rust_1_91.packages.prebuilt.rustc;
     target = muslTarget;
   };
 

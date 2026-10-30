@@ -31,8 +31,6 @@ let
   # from source on the image builders. The shims are pure Rust, so use the
   # same lightweight prebuilt Rust + musl-std wrapper as the SDK cdylib.
   muslToolchain = pkgs.callPackage ./embedded-rust-toolchain.nix {
-    cargo = pkgs.rust_1_91.packages.prebuilt.cargo;
-    rustc = pkgs.rust_1_91.packages.prebuilt.rustc;
     target = muslTarget;
   };
 

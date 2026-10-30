@@ -61,6 +61,11 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
 
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     # microvm.nix — the foundation. MIT-licensed; pinned by hash in
     # flake.lock; CI re-audits on every bump (xtask audit-flake).
     microvm = {
@@ -85,6 +90,8 @@
       self,
       nixpkgs,
       microvm,
+      # Direct library-only consumers call outputs without resolving flake inputs.
+      rust-overlay ? null,
       mvm-workspace,
       ...
     }:
@@ -155,7 +162,7 @@
       hostPackagesFor =
         system:
         import ./packages {
-          pkgs = nixpkgs.legacyPackages.${system};
+          pkgs = nixpkgs.legacyPackages.${system}.extend rust-overlay.overlays.default;
           mvmSrc = workspaceSrc;
         };
 
@@ -177,7 +184,7 @@
       guestPackagesFor =
         system:
         import ./packages/guest.nix {
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = (import nixpkgs { inherit system; }).extend rust-overlay.overlays.default;
           mvmSrc = workspaceSrc;
           inherit workspaceVersion;
         };
@@ -195,7 +202,7 @@
         final: _prev:
         let
           hostPackages = import ./packages {
-            pkgs = final;
+            pkgs = final.extend rust-overlay.overlays.default;
             mvmSrc = workspaceSrc;
           };
         in
