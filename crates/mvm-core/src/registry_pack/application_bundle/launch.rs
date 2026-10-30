@@ -70,13 +70,114 @@ pub struct ResolvedApplication {
     pub bundle_sha256: String,
 }
 
-/// The kind of the descriptor cached for `reference`'s pin, if one is cached.
-/// Nothing is authenticated; use [`resolve_installed_application_bundle`]
-/// before preparing a runtime.
-fn cached_kind_is_application(
+/// Pin-bound metadata classification, not publisher or launch authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedRegistryKind {
+    Application,
+    Legacy,
+}
+
+/// Classify a pinned coordinate without losing metadata errors as image fallback.
+///
+/// An absent pin is distinct from an unreadable or invalid pinned descriptor.
+/// The existing resolver must still authenticate the publisher, exact version,
+/// archive and current trust before preparing a runtime.
+pub fn classify_pinned_registry_reference(
     reference: &PackReference,
     store: &ApplicationInstallStore,
-) -> Option<bool> {
+) -> Result<Option<PinnedRegistryKind>, ApplicationLaunchError> {
+    use crate::registry_pack::{
+        REGISTRY_PACK_MANIFEST_SCHEMA_VERSION, RegistryPackManifest, RegistryPackVerificationError,
+        application::parse_application_manifest,
+    };
+
+    // Parser diagnostics can contain source excerpts, not just file context.
+    let lock = load_pack_lockfile(&store.lock_path).map_err(|error| match error {
+        crate::registry_pack_store::RegistryPackStoreError::Parse { path, .. } => {
+            crate::registry_pack_store::RegistryPackStoreError::Parse {
+                path,
+                reason: "invalid registry lock file".into(),
+            }
+        }
+        error => error,
+    })?;
+    let Some(pin) = pinned(&lock, reference) else {
+        return Ok(None);
+    };
+    let path = store
+        .descriptor_cache_root
+        .join(pin.manifest_sha256().as_str())
+        .join(REGISTRY_MANIFEST_FILE_NAME);
+    let bytes = super::super::local_input::read_metadata(&path)?;
+    lock.verify_manifest(pin.reference(), &bytes)
+        .map_err(RegistryPackVerificationError::Lock)?;
+    let header: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+        RegistryPackVerificationError::ManifestParse("invalid cached registry descriptor".into())
+    })?;
+    let (kind, manifest_reference) = match header.get("kind") {
+        Some(serde_json::Value::String(kind)) if kind == "application" => {
+            let manifest = parse_application_manifest(&bytes)?;
+            (PinnedRegistryKind::Application, manifest.reference)
+        }
+        None => {
+            let manifest: RegistryPackManifest = serde_json::from_slice(&bytes).map_err(|_| {
+                RegistryPackVerificationError::ManifestParse(
+                    "invalid cached legacy registry manifest".into(),
+                )
+            })?;
+            if manifest.schema_version != REGISTRY_PACK_MANIFEST_SCHEMA_VERSION {
+                return Err(RegistryPackVerificationError::UnsupportedManifestSchema {
+                    got: manifest.schema_version,
+                    expected: REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
+                }
+                .into());
+            }
+            (PinnedRegistryKind::Legacy, manifest.reference)
+        }
+        _ => {
+            return Err(RegistryPackVerificationError::ManifestParse(
+                "unsupported cached registry manifest kind".into(),
+            )
+            .into());
+        }
+    };
+    if &manifest_reference != pin.reference() {
+        return Err(RegistryPackVerificationError::ManifestReferenceMismatch {
+            manifest: manifest_reference.to_string(),
+            locked: pin.reference().to_string(),
+        }
+        .into());
+    }
+    Ok(Some(kind))
+}
+
+/// Lossy metadata hint, not authentication. Errors produce `false`.
+///
+/// Display hints (`pack registry ls`, `pack registry rm`) read the cached
+/// descriptor's `kind` field without full manifest validation: a readable
+/// JSON descriptor decides by `kind` alone, while missing, unreadable or
+/// unparsable metadata yields neither hint rather than a wrong one. Source
+/// routing must use [`classify_pinned_registry_reference`] to distinguish
+/// an absent pin from broken registry metadata.
+pub fn names_installed_application(
+    reference: &PackReference,
+    store: &ApplicationInstallStore,
+) -> bool {
+    cached_kind_hint(reference, store) == Some(true)
+}
+
+/// Lossy legacy-pack hint. Use the fallible classifier for source routing.
+pub fn names_installed_policy_pack(
+    reference: &PackReference,
+    store: &ApplicationInstallStore,
+) -> bool {
+    cached_kind_hint(reference, store) == Some(false)
+}
+
+/// The cached descriptor's `kind` for `reference`'s pin: `Some(true)` for an
+/// application, `Some(false)` for anything else that parses as JSON, `None`
+/// when the pin or readable descriptor is absent or the bytes are not JSON.
+fn cached_kind_hint(reference: &PackReference, store: &ApplicationInstallStore) -> Option<bool> {
     let lock = load_pack_lockfile(&store.lock_path).ok()?;
     let pin = pinned(&lock, reference)?;
     let path = store
@@ -84,30 +185,8 @@ fn cached_kind_is_application(
         .join(pin.manifest_sha256().as_str())
         .join(REGISTRY_MANIFEST_FILE_NAME);
     let bytes = super::super::local_input::read_metadata(&path).ok()?;
-    Some(is_application(&bytes))
-}
-
-/// Whether `reference` names an installed application, by its pin and cached
-/// descriptor kind alone.
-pub fn names_installed_application(
-    reference: &PackReference,
-    store: &ApplicationInstallStore,
-) -> bool {
-    cached_kind_is_application(reference, store) == Some(true)
-}
-
-/// Whether `reference` names an installed pack that is not an application, so
-/// `run` can refuse it by name instead of treating it as an OCI image.
-pub fn names_installed_policy_pack(
-    reference: &PackReference,
-    store: &ApplicationInstallStore,
-) -> bool {
-    cached_kind_is_application(reference, store) == Some(false)
-}
-
-fn is_application(manifest: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(manifest)
-        .is_ok_and(|value| value.get("kind").and_then(|kind| kind.as_str()) == Some("application"))
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(value.get("kind").and_then(|kind| kind.as_str()) == Some("application"))
 }
 
 fn pinned<'a>(

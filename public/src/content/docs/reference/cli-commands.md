@@ -840,7 +840,12 @@ without it is a parse error.
 an installed application reference `NAMESPACE/NAME[@VERSION]`. An application is
 installed with `mvmctl pack pull <ref>`. As a positional, a value is read as an
 application only when it parses as a reference and names an installed
-application; otherwise it is an image or a bundle as before. `-a`, `--app` and
+application. A pinned coordinate with missing, unreadable or invalid cached
+metadata is refused, not silently treated as an image. Repair the registry
+metadata before retrying, or use `--image` for an intentional image selection.
+Never-pinned image references and bundle paths keep their existing route while
+the registry lock is readable; an unreadable or corrupt lock refuses every
+reference-shaped positional rather than guessing at pin status. `-a`, `--app` and
 `--application` are one flag that takes the value strictly as an application
 reference, with no fallback: a missing install is refused and names
 `mvmctl pack pull`. The flag conflicts with `--image`, `--manifest`, `--flake`,
