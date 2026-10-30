@@ -110,14 +110,63 @@ fn remaining(deadline: Instant) -> io::Result<Duration> {
     Ok(time)
 }
 
+fn read_after_timeout_setup(
+    stream: &mut UnixStream,
+    bytes: &mut [u8],
+    setup: io::Result<()>,
+) -> io::Result<usize> {
+    let setup_error = match setup {
+        Ok(()) => return stream.read(bytes),
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => error,
+        Err(error) => return Err(error),
+    };
+    // Darwin can reject SO_RCVTIMEO after peer closure, even with bytes queued.
+    // Probe once without blocking or changing the file description's flags.
+    use std::os::fd::AsRawFd;
+    // SAFETY: the borrowed stream owns a live socket descriptor; bytes supplies
+    // a writable pointer of exactly bytes.len() capacity for the call's lifetime.
+    // MSG_DONTWAIT bounds this single receive without mutating descriptor flags.
+    let count = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+            libc::MSG_DONTWAIT,
+        )
+    };
+    if count < 0 {
+        return Err(timeout_fallback_error(
+            setup_error,
+            io::Error::last_os_error(),
+        ));
+    }
+    let count = usize::try_from(count).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    if count > bytes.len() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    Ok(count)
+}
+
+fn timeout_fallback_error(setup_error: io::Error, read_error: io::Error) -> io::Error {
+    if read_error.kind() == io::ErrorKind::WouldBlock {
+        setup_error
+    } else {
+        read_error
+    }
+}
+
 pub fn read_exact(
     stream: &mut UnixStream,
     mut bytes: &mut [u8],
     deadline: Instant,
 ) -> io::Result<()> {
     while !bytes.is_empty() {
-        stream.set_read_timeout(Some(remaining(deadline)?))?;
-        match stream.read(bytes) {
+        let timeout = remaining(deadline)?;
+        let setup = match stream.set_read_timeout(Some(timeout)) {
+            Err(error) if error.raw_os_error() != Some(libc::EINVAL) => return Err(error),
+            setup => setup,
+        };
+        match read_after_timeout_setup(stream, bytes, setup) {
             Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
             Ok(count) => bytes = &mut bytes[count..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -172,6 +221,112 @@ pub fn write_frame<T: Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_exact_drains_buffered_bytes_before_reporting_eof() {
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        sender.write_all(b"ready").unwrap();
+        drop(sender);
+        let deadline = Instant::now() + CONNECTION_BUDGET;
+        let mut bytes = [0; 5];
+        read_exact(&mut receiver, &mut bytes, deadline).unwrap();
+        assert_eq!(&bytes, b"ready");
+        assert_eq!(
+            read_exact(&mut receiver, &mut [0], deadline)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn read_exact_reports_clean_and_truncated_eof() {
+        for bytes in [b"".as_slice(), b"x"] {
+            let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+            sender.write_all(bytes).unwrap();
+            drop(sender);
+            assert_eq!(
+                read_exact(
+                    &mut receiver,
+                    &mut [0; 2],
+                    Instant::now() + CONNECTION_BUDGET
+                )
+                .unwrap_err()
+                .kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_setup_fallback_preserves_errors_and_never_blocks() {
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        let mut byte = [0];
+        let setup_error = || Err(io::Error::from_raw_os_error(libc::EINVAL));
+        // With a live idle peer, nonblocking recv must preserve the setup error.
+        assert_eq!(
+            read_after_timeout_setup(&mut receiver, &mut byte, setup_error())
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EINVAL)
+        );
+        sender.write_all(b"x").unwrap();
+        for errno in [libc::EACCES, libc::EBADF, libc::EINTR] {
+            assert_eq!(
+                read_after_timeout_setup(
+                    &mut receiver,
+                    &mut byte,
+                    Err(io::Error::from_raw_os_error(errno))
+                )
+                .unwrap_err()
+                .raw_os_error(),
+                Some(errno)
+            );
+        }
+        // Other setup failures must not have consumed the queued byte.
+        assert_eq!(
+            read_after_timeout_setup(&mut receiver, &mut byte, setup_error()).unwrap(),
+            1
+        );
+        assert_eq!(byte, [b'x']);
+        drop(sender);
+        assert_eq!(
+            read_after_timeout_setup(&mut receiver, &mut byte, setup_error()).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn timeout_setup_success_reads_normally_and_expired_deadline_consumes_nothing() {
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        sender.write_all(b"x").unwrap();
+        assert_eq!(
+            read_exact(&mut receiver, &mut [0], Instant::now())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        let mut byte = [0];
+        assert_eq!(
+            read_after_timeout_setup(&mut receiver, &mut byte, Ok(())).unwrap(),
+            1
+        );
+        assert_eq!(byte, [b'x']);
+    }
+
+    #[test]
+    fn fallback_read_errors_other_than_would_block_are_preserved() {
+        for errno in [libc::EINTR, libc::EIO, libc::EBADF, libc::ECONNRESET] {
+            assert_eq!(
+                timeout_fallback_error(
+                    io::Error::from_raw_os_error(libc::EINVAL),
+                    io::Error::from_raw_os_error(errno)
+                )
+                .raw_os_error(),
+                Some(errno)
+            );
+        }
+    }
 
     #[test]
     fn deep_home_control_path_reuses_existing_short_socket_namespace() {
