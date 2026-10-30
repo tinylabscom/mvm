@@ -170,6 +170,30 @@ for record in mv.Machine.ls():
     print(record["name"], record["build_mode"], record["status"])
 ```
 
+## Host-local telemetry reads
+
+```python
+import mvm
+
+status = mvm.telemetry.status("worker")
+page = mvm.telemetry.records("worker", limit=100)
+next_page = mvm.telemetry.records("worker", cursor=page["next_cursor"])
+```
+
+Each call reads once through the existing host ABI; it does not start a
+collector, poll, retry, or run a CLI. Keep cursors with the machine and record
+file that produced them. The host defaults to 256 records and clamps supplied
+limits, including zero, to 1–1024. `exhausted` describes the current file end,
+not completion of the workload. An empty page is not a health assertion.
+
+Typed envelopes validate known fields and preserve collection state, loss counts,
+omitted receive times, additive fields and opaque nested record JSON without
+interpreting health. This is not full Rust record validation. Python preserves
+unsigned 64-bit cursor integers. Invalid arguments raise `ValueError`; malformed
+reply envelopes raise `mvm.telemetry.TelemetryError`. Host refusals retain the
+existing typed `HostLibraryError` code and retryability. No automatic cursor
+reset occurs on a host refusal.
+
 ## Host library
 
 The SDK never runs `mvmctl` or any other program. Every live `Sandbox` and
