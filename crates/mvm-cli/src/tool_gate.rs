@@ -31,11 +31,11 @@ use mvm_contract::policy::tool_rules::{ToolDecision, ToolRules};
 use mvm_core::plan::TenantId;
 use mvm_hostd::audit::active_signer::active_signer_for;
 use mvm_hostd::supervisor::{EventCategory, Recorder};
-use mvm_mcp::{ToolCallGate, ToolGateDenial};
 use serde_json::Map;
 use serde_json::Value;
 
 use crate::approval::tty::TerminalBackend;
+use crate::mcp::{ToolCallGate, ToolGateDenial};
 
 /// Authorize MCP tool calls against one resolved `[tools]` section.
 pub struct McpToolGate {

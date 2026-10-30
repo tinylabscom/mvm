@@ -6,8 +6,8 @@ mocks, workload output streams, volumes, secrets, readiness, and audit records.
 
 ## Who uses it
 
-`mvm-cli` uses the facade for command implementation and `mvm-mcp` translates
-MCP requests into the same operations. External Rust automation can depend on
+`mvm-cli` uses the facade for commands and its private MCP adapter.
+External Rust automation can depend on
 this crate instead of the full `mvmctl` facade. `mvm-conformance` tests the
 contract. The trait and common DTOs are defined in feature-gated `mvm-core` so
 `mvm-sdk` can share them without creating a dependency cycle.
@@ -28,6 +28,11 @@ of discovering unsupported behavior after mutation. Launch helpers normalize
 requests and bind grants, registration, and readiness records. Stream helpers
 read captured workload output; the optional tracing bridge republishes it into
 a consumer's tracing subscriber.
+
+Local machine list and inspect return a backend error if the name registry cannot
+be read or parsed, rather than silently omitting stopped entries or metadata.
+A missing registry remains a valid empty initial registry. Bulk-stop target
+discovery stays best-effort and excludes registry-only entries.
 
 ## Main modules
 

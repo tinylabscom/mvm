@@ -105,6 +105,11 @@ libkrun:
 task-context ISSUE:
     python3 scripts/task-context.py {{ ISSUE }}
 
+# Watch unchecked issue tasks (#3731 and #4839); accepts --once and additional refs
+[positional-arguments]
+watch-issues *ARGS:
+    @python3 scripts/watch-issues.py "$@"
+
 # Clean build artifacts, the regenerable mvm cache, and the dev state root
 clean: clean-dev-state
     cargo clean

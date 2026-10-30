@@ -13,8 +13,9 @@ use mvm_client::dto::{
 };
 use mvm_client::mock::MockBackend;
 use mvm_client::{BackendCapabilityReport, MvmClient, MvmError};
-use mvm_mcp::{CURRENT_PROTOCOL_VERSION, McpServer};
 use serde_json::{Value, json};
+
+use super::{CURRENT_PROTOCOL_VERSION, McpServer};
 
 fn current_request(id: u64, method: &str, extra: Value) -> String {
     let mut params = extra.as_object().cloned().expect("params object");
@@ -257,6 +258,20 @@ async fn unavailable_is_classified_and_is_the_only_retryable_variant() {
         },
         "UNAVAILABLE",
         true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn recovery_required_is_classified_and_not_retryable() {
+    assert_variant_is_classified(
+        MvmError::RecoveryRequired {
+            machine_id: "m1".into(),
+            plan_id: "plan-1".into(),
+            reason: "retained input custody needs recovery".into(),
+        },
+        "RECOVERY_REQUIRED",
+        false,
     )
     .await;
 }

@@ -249,7 +249,7 @@ if [ "$has_rust" -eq 1 ]; then
             [ -z "$pass" ] && continue
             # Unquoted on purpose: $pass is a list of flags we built.
             # shellcheck disable=SC2086
-            if ! ./scripts/cargo-stable.sh clippy $pass -- -D warnings; then
+            if ! ./scripts/cargo.sh clippy $pass -- -D warnings; then
                 clippy_failed=1
                 break
             fi

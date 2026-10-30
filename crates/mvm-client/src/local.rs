@@ -740,11 +740,10 @@ impl Default for LocalBackend {
     }
 }
 
-/// Load the persistent VM name registry, degrading to empty when absent or
-/// unreadable so a listing falls back to backend-only rows rather than failing.
-fn load_name_registry() -> VmNameRegistry {
+/// Load the persistent VM name registry; a missing file is an empty registry.
+fn load_name_registry() -> Result<VmNameRegistry> {
     let path = mvm_runtime::vm::name_registry::registry_path();
-    VmNameRegistry::load(&path).unwrap_or_default()
+    VmNameRegistry::load(&path).map_err(|e| backend_err(format!("loading VM name registry: {e}")))
 }
 
 /// Remove a stopped machine's runtime state directory.
@@ -1134,7 +1133,7 @@ impl MvmClient for LocalBackend {
     }
 
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
-        let registry = load_name_registry();
+        let registry = load_name_registry()?;
 
         // Aggregate every backend's live VMs (the host-wide view `mvmctl ls`
         // shows), then fold in this backend's own listing — the in-process mock
@@ -1182,7 +1181,7 @@ impl MvmClient for LocalBackend {
     }
 
     async fn inspect_machine(&self, id: &MachineId) -> Result<MachineState> {
-        let registry = load_name_registry();
+        let registry = load_name_registry()?;
         self.backend
             .list()
             .map_err(backend_err)?
@@ -2149,6 +2148,122 @@ mod tests {
             .await
             .unwrap();
         assert!(none.len() <= machines.len());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn registry_read_list_refuses_corruption_instead_of_losing_stopped_entries() {
+        let _data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+        let path = register("registry-only");
+        let mut registry = VmNameRegistry::load(&path).unwrap();
+        let entry = registry.vms.get_mut("registry-only").unwrap();
+        entry.tags.insert("purpose".into(), "inventory-test".into());
+        entry.expires_at = Some("2030-01-02T03:04:05Z".into());
+        registry.save(&path).unwrap();
+
+        let machines = be.list_machines(MachineFilter::all()).await.unwrap();
+        assert_eq!(machines.len(), 1);
+        assert_eq!(machines[0].name, "registry-only");
+        assert_eq!(machines[0].status, MachineStatus::Stopped);
+        assert_eq!(machines[0].tags["purpose"], "inventory-test");
+        assert_eq!(
+            machines[0].expires_at.as_deref(),
+            Some("2030-01-02T03:04:05Z")
+        );
+        assert!(be.list_stop_targets().is_empty());
+
+        std::fs::write(&path, r#"{"vms":"private-registry-content"}"#).unwrap();
+        let error = be
+            .list_machines(MachineFilter::all())
+            .await
+            .expect_err("a corrupt registry must not look like an empty inventory");
+        assert!(matches!(&error, MvmError::Backend { .. }), "{error}");
+        assert!(error.to_string().contains("loading VM name registry"));
+        assert!(!error.to_string().contains("private-registry-content"));
+        assert!(be.list_stop_targets().is_empty());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn registry_read_inspect_refuses_corruption_but_stop_targets_remain_available() {
+        let data = IsolatedDataDir::new();
+        let rootfs = data.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
+        let be = LocalBackend::with_hypervisor("mock");
+        let state = be
+            .run_machine(MachineSpec {
+                name: "registry-inspect".into(),
+                image: rootfs.to_string_lossy().parse().unwrap(),
+                cpus: 1,
+                memory_mib: 128,
+                env: vec![],
+                grants: None,
+                assurance_campaign: None,
+            })
+            .await
+            .expect("mock machine");
+        let path = mvm_runtime::vm::name_registry::registry_path();
+        let mut registry = VmNameRegistry::load(&path).unwrap();
+        let entry = registry.vms.get_mut(&state.name).unwrap();
+        entry.tags.insert("purpose".into(), "inventory-test".into());
+        entry.expires_at = Some("2030-01-02T03:04:05Z".into());
+        registry.save(&path).unwrap();
+
+        let inspected = be.inspect_machine(&state.id).await.unwrap();
+        assert_eq!(inspected.tags["purpose"], "inventory-test");
+        assert_eq!(
+            inspected.expires_at.as_deref(),
+            Some("2030-01-02T03:04:05Z")
+        );
+        let stop_targets = be.list_stop_targets();
+        assert_eq!(stop_targets.len(), 1);
+        assert_eq!(stop_targets[0].id, state.id);
+
+        std::fs::write(&path, r#"{"vms":"private-registry-content"}"#).unwrap();
+        let error = be
+            .inspect_machine(&state.id)
+            .await
+            .expect_err("a corrupt registry must not fabricate metadata-free state");
+        assert!(matches!(&error, MvmError::Backend { .. }), "{error}");
+        assert!(error.to_string().contains("loading VM name registry"));
+        assert!(!error.to_string().contains("private-registry-content"));
+        let after = be.list_stop_targets();
+        assert_eq!(after.len(), stop_targets.len());
+        assert_eq!(after[0].id, stop_targets[0].id);
+        assert_eq!(after[0].status, stop_targets[0].status);
+
+        std::fs::remove_file(&path).unwrap();
+        let inspected = be.inspect_machine(&state.id).await.unwrap();
+        assert_eq!(inspected.id, state.id);
+        assert!(inspected.tags.is_empty());
+        assert!(inspected.expires_at.is_none());
+        assert_eq!(
+            be.list_machines(MachineFilter::all()).await.unwrap().len(),
+            1
+        );
+        assert!(!path.exists(), "inventory reads must not create a registry");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn registry_read_missing_registry_preserves_empty_initial_inventory() {
+        let _data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+        let path = mvm_runtime::vm::name_registry::registry_path();
+        assert!(!path.exists());
+        assert!(
+            be.list_machines(MachineFilter::all())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            be.inspect_machine(&MachineId("absent".into())).await,
+            Err(MvmError::NotFound { .. })
+        ));
+        assert!(be.list_stop_targets().is_empty());
+        assert!(!path.exists());
     }
 
     /// `std::env::set_current_dir` is process-wide; this Mutex stops

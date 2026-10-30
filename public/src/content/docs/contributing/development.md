@@ -75,7 +75,12 @@ socket-custody fix in #4808. This entrypoint alone does not complete #4764.
 
 ## Prerequisites
 
-- **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
+- **Rust 1.97.1** (Edition 2024) — install via [rustup](https://rustup.rs).
+  `rust-toolchain.toml` pins ordinary builds, tests, linting, and release builds
+  to this compiler. `just` recipes use the same LLVM backend and worktree target
+  directory as plain Cargo; there is no separate Cranelift development build.
+  Fuzzing and eBPF retain their nightly-only tooling. Embedded Linux payloads
+  retain the separate reproducibility pin installed by `just payload::toolchain`.
 - **macOS 26+ Apple Silicon or Linux** — standard source-checkout development
   uses native HVF on macOS and native `/dev/kvm` on Linux. Downloaded releases
   also carry an explicitly selected libkrun preview for macOS 13–25 Apple

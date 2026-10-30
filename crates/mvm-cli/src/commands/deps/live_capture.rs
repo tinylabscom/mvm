@@ -134,16 +134,16 @@ pub(super) fn run(args: Args) -> Result<()> {
     )?;
 
     let cache_root = mvm_build::app_deps::resolve_cache_root(args.cache_root.as_deref());
-    let request = CaptureRequest::builder()
-        .cache_root(&cache_root)
-        .prior_hash(&args.volume_hash)
-        .captured_content(&content)
-        .sbom(&sbom)
-        .fetch_log(&fetch_log)
-        .cve(&cve)
-        .declaration_path(args.declaration.as_deref())
-        .lockfile_path(args.lockfile.as_deref())
-        .build()?;
+    let request = CaptureRequest {
+        cache_root: &cache_root,
+        prior_hash: &args.volume_hash,
+        captured_content: &content,
+        sbom: &sbom,
+        fetch_log: &fetch_log,
+        cve: &cve,
+        declaration_path: args.declaration.as_deref(),
+        lockfile_path: args.lockfile.as_deref(),
+    };
     let capture = capture_volume(request)?;
     let outcome = LiveCaptureOutcome {
         capture,

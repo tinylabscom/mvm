@@ -13,18 +13,18 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 COMMANDS = [
     ["cargo", "build", "--bin", "mvmctl", "--features", "user"],
-    ["cargo-fast.sh", "build", "-p", "xtask"],
-    ["cargo-fast.sh", "build", "-p", "mvm-sdk", "--features", "schema",
+    ["cargo.sh", "build", "-p", "xtask"],
+    ["cargo.sh", "build", "-p", "mvm-sdk", "--features", "schema",
      "--bin", "emit_workload_schema", "--bin", "emit_runtime_schema"],
-    ["cargo-fast.sh", "build", "-p", "mvm-agentd", "--features", "schema",
+    ["cargo.sh", "build", "-p", "mvm-agentd", "--features", "schema",
      "--bin", "emit_protocol_schema"],
-    ["cargo-fast.sh", "build", "-p", "mvm-core", "--features", "schema",
+    ["cargo.sh", "build", "-p", "mvm-core", "--features", "schema",
      "--bin", "emit_broker_schema"],
-    ["cargo-fast.sh", "build", "-p", "mvm-sdk", "--bin", "emit_sdk_env",
+    ["cargo.sh", "build", "-p", "mvm-sdk", "--bin", "emit_sdk_env",
      "--bin", "emit_sdk_errors", "--bin", "emit_sdk_ctors"],
     ["just", "sdk::install-typescript"],
     ["just", "sdk::build-typescript"],
-    ["cargo-fast.sh", "test", "-p", "mvm-conformance", "--test", "conformance",
+    ["cargo.sh", "test", "-p", "mvm-conformance", "--test", "conformance",
      "--features", "bdd"],
 ]
 PHASES = ["mvmctl-build", "schema-emitters", "typescript-preparation",
@@ -47,7 +47,7 @@ class BddPhaseTimings(unittest.TestCase):
         scripts.mkdir()
         shutil.copyfile(ROOT / "scripts/e2e-phase-timings.sh",
                         scripts / "e2e-phase-timings.sh")
-        for name in ["cargo", "cargo-fast.sh", "just"]:
+        for name in ["cargo", "cargo.sh", "just"]:
             stub = scripts / name
             stub.write_text(
                 "#!/usr/bin/env python3\n"

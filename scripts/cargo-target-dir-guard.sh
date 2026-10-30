@@ -11,7 +11,7 @@
 # from a different revision, where the field still existed. Nothing about
 # the message says the cache lied.
 #
-# Sourced by the cargo wrapper scripts (cargo-fast.sh, cargo-stable.sh)
+# Sourced by scripts/cargo.sh
 # before they resolve the target dir. The reclaim mirrors scripts/dev-env.sh:
 # a value already inside this worktree is a real override and is honored; a
 # value pointing anywhere else — another worktree, a sibling shared dir, a

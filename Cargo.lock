@@ -3772,7 +3772,6 @@ dependencies = [
  "mvm-fs",
  "mvm-hostd",
  "mvm-http",
- "mvm-mcp",
  "mvm-runtime",
  "mvm-sdk",
  "mvm-vmm",
@@ -3788,6 +3787,7 @@ dependencies = [
  "sha2 0.11.0",
  "tar",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "toml",
  "toml_edit",
@@ -3867,7 +3867,6 @@ name = "mvm-conformance"
 version = "0.26.0"
 dependencies = [
  "anyhow",
- "assert_cmd",
  "blake3",
  "clap",
  "cucumber",
@@ -3966,20 +3965,6 @@ dependencies = [
  "x25519-dalek",
  "x509-parser",
  "zeroize",
-]
-
-[[package]]
-name = "mvm-fc-lifecycle"
-version = "0.26.0"
-dependencies = [
- "hex",
- "libc",
- "mvm-vmm",
- "serde",
- "serde_json",
- "socket2",
- "tempfile",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4176,20 +4161,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-mcp"
-version = "0.26.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "mvm-client",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "mvm-net"
 version = "0.26.0"
 dependencies = [
@@ -4305,7 +4276,6 @@ dependencies = [
  "virtio-queue",
  "virtio-vsock",
  "vm-memory",
- "wait-timeout",
  "zeroize",
 ]
 

@@ -11,7 +11,7 @@ default:
 # Run a single crate's tests
 crate CRATE:
     ./scripts/require-nextest.sh
-    ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
+    ./scripts/cargo.sh nextest run -p {{ CRATE }}
 
 # Usage: just tests::scoped CRATE [FILTER] [--lib | --test NAME]
 
@@ -28,7 +28,7 @@ scoped CRATE FILTER="" *ARGS:
     if [ -n "$filter" ]; then
       args+=(-E "test($filter)")
     fi
-    exec ./scripts/cargo-fast.sh "${args[@]}"
+    exec ./scripts/cargo.sh "${args[@]}"
 
 # No retries, slow-test warnings, and a JUnit report at
 # target/nextest/ci/junit.xml carrying pass/fail structure only (no captured
@@ -42,9 +42,9 @@ ci FILTER="":
     set -euo pipefail
     ./scripts/require-nextest.sh
     if [ -n "{{ FILTER }}" ]; then
-    ./scripts/cargo-fast.sh nextest run --workspace --profile ci -E 'test({{ FILTER }})'
+    ./scripts/cargo.sh nextest run --workspace --profile ci -E 'test({{ FILTER }})'
     else
-    ./scripts/cargo-fast.sh nextest run --workspace --profile ci
+    ./scripts/cargo.sh nextest run --workspace --profile ci
     fi
 
 # `cargo test` takes a plain substring filter, not a nextest `-E` expression.
@@ -56,9 +56,9 @@ cargo FILTER="":
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{ FILTER }}" ]; then
-    ./scripts/cargo-fast.sh test --workspace -- '{{ FILTER }}'
+    ./scripts/cargo.sh test --workspace -- '{{ FILTER }}'
     else
-    ./scripts/cargo-fast.sh test --workspace
+    ./scripts/cargo.sh test --workspace
     fi
 
 # nextest does NOT run doctests, so `just test` skips them; this is the
@@ -66,4 +66,4 @@ cargo FILTER="":
 
 # Run the workspace doctests
 doc:
-    ./scripts/cargo-fast.sh test --workspace --doc
+    ./scripts/cargo.sh test --workspace --doc

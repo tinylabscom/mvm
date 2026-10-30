@@ -27,7 +27,7 @@ class ScopedTests(unittest.TestCase):
         guard = scripts / "require-nextest.sh"
         guard.write_text('#!/bin/sh\nexit "${GUARD_STATUS:-0}"\n')
         guard.chmod(0o755)
-        cargo = scripts / "cargo-fast.sh"
+        cargo = scripts / "cargo.sh"
         cargo.write_text(
             '#!/usr/bin/env python3\nimport json, os, sys\n'
             'from pathlib import Path\n'

@@ -170,14 +170,14 @@ echo "==> building mvmctl + host helpers"
 # runtime error, which must never be papered over with MVM_SKIP_COSIGN_VERIFY.
 # `user` matches the released binary and builds with standard cargo.
 cargo build --bin mvmctl --features user,embed-host-bins
-./scripts/cargo-fast.sh build -p xtask
+./scripts/cargo.sh build -p xtask
 
 # Build the library-seam test targets here too, not when phase 2 reaches them.
 # `cargo build --bin mvmctl` does not build another crate's test targets, so
 # they were compiling *after* 23 scenarios had already booted guests — a minute
 # of build output in the middle of a run, and a compile error there arriving
 # only once the expensive part was already paid for.
-./scripts/cargo-fast.sh build -p mvm-client --tests
+./scripts/cargo.sh build -p mvm-client --tests
 
 # Always rebuild the per-VM helpers, never just check they exist.
 #
@@ -287,7 +287,7 @@ MVM_BDD_DIR_SHARE=1 \
 MVM_BDD_STRICT_SKIPS=1 \
 MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \
-  ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd \
+  ./scripts/cargo.sh test -p mvm-conformance --test conformance --features bdd \
   -- -i "$REPO/features/suites/s31_launch_e2e/{cli_launch_modes,launch_budget,sdk_and_library_modes}.feature" -c 1 \
   2>&1 | tee "$SCENARIO_LOG"
 
@@ -341,7 +341,7 @@ if [[ -n "$KERNEL" && -n "$ROOTFS" && -n "$SUPERVISOR" ]]; then
   MVM_E2E_ROOTFS="$ROOTFS" \
   MVM_HVF_SUPERVISOR_PATH="$SUPERVISOR" \
   MVM_HOME="$E2E_HOME" \
-    ./scripts/cargo-fast.sh test -p mvm-client --test launch_lifecycle_live \
+    ./scripts/cargo.sh test -p mvm-client --test launch_lifecycle_live \
       --test launch_lifecycle_live_hvf -- --ignored
 else
   # Loud, not silent: a skipped library seam is a coverage hole, and reporting

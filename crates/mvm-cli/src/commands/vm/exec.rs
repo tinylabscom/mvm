@@ -391,6 +391,9 @@ pub(in crate::commands) struct RunArgs {
     /// surfaces cannot reopen something it denied.
     #[arg(skip)]
     pub applied_policy: Option<mvm_client::policy_profiles::PolicyBody>,
+    /// Internal: effective AI limits retained from the ordinary policy fold.
+    #[arg(skip)]
+    pub applied_ai_policy: Option<mvm_core::network_policy::AiPolicy>,
     /// Internal: backend used to resolve a backend-conditioned policy.
     #[arg(skip)]
     pub policy_backend: Option<mvm_core::protocol::vm_backend::BackendKind>,

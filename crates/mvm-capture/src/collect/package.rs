@@ -23,13 +23,7 @@ pub struct PackageRecord {
 
 /// All built-in providers, tried in order on Linux hosts.
 pub fn all_providers() -> Vec<Box<dyn PackageProvider>> {
-    vec![
-        Box::new(DpkgProvider),
-        Box::new(RpmProvider),
-        Box::new(PacmanProvider),
-        Box::new(ApkProvider),
-        Box::new(NixIndexProvider),
-    ]
+    vec![Box::new(DpkgProvider), Box::new(NixIndexProvider)]
 }
 
 /// Debian/Ubuntu provider using `dpkg` and `dpkg-query`.
@@ -81,57 +75,6 @@ fn parse_dpkg_version(output: &str) -> Option<&str> {
         None
     } else {
         Some(trimmed)
-    }
-}
-
-/// RPM-based provider (Fedora, RHEL, openSUSE).
-pub struct RpmProvider;
-
-impl PackageProvider for RpmProvider {
-    fn name(&self) -> &'static str {
-        "rpm"
-    }
-
-    fn owner_of(&self, _path: &Path) -> Option<PackageRecord> {
-        None
-    }
-
-    fn version_of(&self, _package_name: &str) -> Option<String> {
-        None
-    }
-}
-
-/// Pacman-based provider (Arch, Manjaro).
-pub struct PacmanProvider;
-
-impl PackageProvider for PacmanProvider {
-    fn name(&self) -> &'static str {
-        "pacman"
-    }
-
-    fn owner_of(&self, _path: &Path) -> Option<PackageRecord> {
-        None
-    }
-
-    fn version_of(&self, _package_name: &str) -> Option<String> {
-        None
-    }
-}
-
-/// APK-based provider (Alpine Linux).
-pub struct ApkProvider;
-
-impl PackageProvider for ApkProvider {
-    fn name(&self) -> &'static str {
-        "apk"
-    }
-
-    fn owner_of(&self, _path: &Path) -> Option<PackageRecord> {
-        None
-    }
-
-    fn version_of(&self, _package_name: &str) -> Option<String> {
-        None
     }
 }
 
@@ -211,7 +154,7 @@ mod tests {
     #[test]
     fn all_providers_contains_expected_names() {
         let names: Vec<_> = all_providers().iter().map(|p| p.name()).collect();
-        assert_eq!(names, vec!["dpkg", "rpm", "pacman", "apk", "nix-index"]);
+        assert_eq!(names, vec!["dpkg", "nix-index"]);
     }
 
     #[test]

@@ -215,6 +215,10 @@ fn launch_flags(args: &RunArgs) -> Result<LaunchFlags> {
         net: args.net,
         network_preset: args.network_preset.is_some(),
         allow_endpoint: args.allow_endpoint.clone(),
+        ai: args
+            .applied_ai_policy
+            .clone()
+            .or_else(|| crate::commands::shared::resolve_ai_policy(args.ai_token_budget)),
         cpu_limit: args.cpu_limit,
         timeout: args.timeout,
         secret: args.secret.clone(),
@@ -238,6 +242,14 @@ fn launch_flags(args: &RunArgs) -> Result<LaunchFlags> {
 pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
     let selected = select(args)?;
     let environment = super::exec::application_source::environment(args)?;
+    apply_selected_policy(args, selected, environment)
+}
+
+fn apply_selected_policy(
+    args: &mut RunArgs,
+    selected: Option<Selected>,
+    environment: Option<mvm_core::plan::EnvironmentDescriptor>,
+) -> Result<()> {
     if selected.is_none() && environment.as_ref().is_none_or(|env| env.policy.is_none()) {
         return Ok(());
     }
@@ -265,6 +277,7 @@ pub(in crate::commands) fn apply_run_policy(args: &mut RunArgs) -> Result<()> {
     };
     args.allow_host = folded.allow_host;
     args.policy_routes = folded.routes;
+    args.applied_ai_policy = folded.ai;
     args.cpu_limit = folded.cpu_limit;
     args.timeout = folded.timeout;
     args.secret = folded.secret;
@@ -592,6 +605,117 @@ mod tests {
         );
         assert!(args.flake.is_none());
         assert!(args.registry_pack_image.is_none());
+    }
+
+    #[test]
+    fn signed_budget_fold_is_the_ai_policy_retained_by_the_runtime_route() {
+        let (_env, _home) = isolated();
+        let environment: mvm_core::plan::EnvironmentDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "descriptor_version": 1,
+                "target": "aarch64-linux",
+                "entrypoint": {"argv": ["/bin/agent"]},
+                "policy": {
+                    "allow_hosts": ["api.anthropic.com:443"],
+                    "request_budget": {
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_requests": 1,
+                        "max_spend_microusd": 500000
+                    }
+                }
+            }))
+            .unwrap();
+        let mut args = RunArgs {
+            ai_token_budget: Some(100),
+            ..RunArgs::default()
+        };
+        apply_selected_policy(&mut args, None, Some(environment)).unwrap();
+        let folded = args.applied_ai_policy.clone().unwrap();
+        assert_eq!(folded.request_budget.unwrap().max_spend_microusd, 500_000);
+        assert_eq!(
+            folded.budget,
+            crate::commands::shared::resolve_ai_policy(Some(100))
+                .unwrap()
+                .budget,
+        );
+        assert_eq!(args.allow_host, ["api.anthropic.com:443"]);
+        // Runtime must use the checked policy, not reconstruct a wider one from flags.
+        args.ai_token_budget = Some(1_000);
+        assert_eq!(
+            super::super::exec::application_source::ai_policy(&args).unwrap(),
+            Some(folded)
+        );
+    }
+
+    #[test]
+    fn ordinary_policy_folding_preserves_operator_ai_flags() {
+        let (_env, _home) = isolated();
+        for policies in [vec![], vec!["offline".into()]] {
+            let mut args = RunArgs {
+                policy: policies,
+                ai_token_budget: Some(321),
+                ..RunArgs::default()
+            };
+            apply_run_policy(&mut args).unwrap();
+            assert_eq!(
+                super::super::exec::application_source::ai_policy(&args).unwrap(),
+                crate::commands::shared::resolve_ai_policy(Some(321)),
+            );
+        }
+    }
+
+    #[test]
+    fn configured_authority_and_signed_budget_reach_the_same_runtime_policy() {
+        let (_env, home) = isolated();
+        let profile = home.path().join("local.toml");
+        std::fs::write(
+            &profile,
+            "[overrides.network]\nallow = [\"api.example.test:443\"]\n",
+        )
+        .unwrap();
+        mvm_core::user_config::save(
+            &mvm_core::user_config::MvmConfig {
+                default_policy: vec![profile.display().to_string()],
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let environment = serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": "aarch64-linux",
+            "entrypoint": {"argv": ["/app/start"]},
+            "policy": {
+                "allow_hosts": ["api.example.test:443", "spare.example.test:443"],
+                "request_budget": {
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_requests": 1,
+                    "max_spend_microusd": 500000
+                }
+            }
+        }))
+        .unwrap();
+        let mut args = RunArgs {
+            ai_token_budget: Some(100),
+            ..RunArgs::default()
+        };
+        let selected = select(&args).unwrap();
+        assert!(selected.is_some());
+        apply_selected_policy(&mut args, selected, Some(environment)).unwrap();
+        assert_eq!(args.allow_host, ["api.example.test:443"]);
+        let folded = args.applied_ai_policy.clone().unwrap();
+        assert_eq!(folded.request_budget.unwrap().max_spend_microusd, 500_000);
+        assert_eq!(
+            folded.budget,
+            crate::commands::shared::resolve_ai_policy(Some(100))
+                .unwrap()
+                .budget
+        );
+        args.ai_token_budget = Some(1_000);
+        assert_eq!(
+            super::super::exec::application_source::ai_policy(&args).unwrap(),
+            Some(folded)
+        );
     }
 
     #[test]

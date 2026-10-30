@@ -78,123 +78,28 @@ pub(in crate::commands::deps) struct CaptureOutcome {
 /// Inputs for one atomic dependency-volume capture.
 #[derive(Debug)]
 pub(in crate::commands::deps) struct CaptureRequest<'a> {
-    cache_root: &'a Path,
-    prior_hash: &'a str,
-    captured_content: &'a Path,
-    sbom: &'a Path,
-    fetch_log: &'a Path,
-    cve: &'a Path,
-    declaration_path: Option<&'a Path>,
-    lockfile_path: Option<&'a Path>,
-}
-
-/// Builder for [`CaptureRequest`].
-pub(in crate::commands::deps) struct CaptureRequestBuilder<'a> {
-    cache_root: Option<&'a Path>,
-    prior_hash: Option<&'a str>,
-    captured_content: Option<&'a Path>,
-    sbom: Option<&'a Path>,
-    fetch_log: Option<&'a Path>,
-    cve: Option<&'a Path>,
-    declaration_path: Option<&'a Path>,
-    lockfile_path: Option<&'a Path>,
-}
-
-impl<'a> CaptureRequest<'a> {
-    /// Start building a capture request.
-    pub(in crate::commands::deps) fn builder() -> CaptureRequestBuilder<'a> {
-        CaptureRequestBuilder {
-            cache_root: None,
-            prior_hash: None,
-            captured_content: None,
-            sbom: None,
-            fetch_log: None,
-            cve: None,
-            declaration_path: None,
-            lockfile_path: None,
-        }
-    }
-}
-
-impl<'a> CaptureRequestBuilder<'a> {
-    pub(in crate::commands::deps) fn cache_root(mut self, value: &'a Path) -> Self {
-        self.cache_root = Some(value);
-        self
-    }
-
-    pub(in crate::commands::deps) fn prior_hash(mut self, value: &'a str) -> Self {
-        self.prior_hash = Some(value);
-        self
-    }
-
-    pub(in crate::commands::deps) fn captured_content(mut self, value: &'a Path) -> Self {
-        self.captured_content = Some(value);
-        self
-    }
-
-    pub(in crate::commands::deps) fn sbom(mut self, value: &'a Path) -> Self {
-        self.sbom = Some(value);
-        self
-    }
-
-    pub(in crate::commands::deps) fn fetch_log(mut self, value: &'a Path) -> Self {
-        self.fetch_log = Some(value);
-        self
-    }
-
-    pub(in crate::commands::deps) fn cve(mut self, value: &'a Path) -> Self {
-        self.cve = Some(value);
-        self
-    }
-
-    pub(in crate::commands::deps) fn declaration_path(mut self, value: Option<&'a Path>) -> Self {
-        self.declaration_path = value;
-        self
-    }
-
-    pub(in crate::commands::deps) fn lockfile_path(mut self, value: Option<&'a Path>) -> Self {
-        self.lockfile_path = value;
-        self
-    }
-
-    pub(in crate::commands::deps) fn build(self) -> Result<CaptureRequest<'a>> {
-        Ok(CaptureRequest {
-            cache_root: self
-                .cache_root
-                .ok_or_else(|| anyhow::anyhow!("capture cache root is required"))?,
-            prior_hash: self
-                .prior_hash
-                .ok_or_else(|| anyhow::anyhow!("capture prior volume hash is required"))?,
-            captured_content: self
-                .captured_content
-                .ok_or_else(|| anyhow::anyhow!("captured content directory is required"))?,
-            sbom: self
-                .sbom
-                .ok_or_else(|| anyhow::anyhow!("capture SBOM path is required"))?,
-            fetch_log: self
-                .fetch_log
-                .ok_or_else(|| anyhow::anyhow!("capture fetch log path is required"))?,
-            cve: self
-                .cve
-                .ok_or_else(|| anyhow::anyhow!("capture CVE path is required"))?,
-            declaration_path: self.declaration_path,
-            lockfile_path: self.lockfile_path,
-        })
-    }
+    pub(super) cache_root: &'a Path,
+    pub(super) prior_hash: &'a str,
+    pub(super) captured_content: &'a Path,
+    pub(super) sbom: &'a Path,
+    pub(super) fetch_log: &'a Path,
+    pub(super) cve: &'a Path,
+    pub(super) declaration_path: Option<&'a Path>,
+    pub(super) lockfile_path: Option<&'a Path>,
 }
 
 pub(super) fn run(args: Args) -> Result<()> {
     let cache_root = mvm_build::app_deps::resolve_cache_root(args.cache_root.as_deref());
-    let request = CaptureRequest::builder()
-        .cache_root(&cache_root)
-        .prior_hash(&args.volume_hash)
-        .captured_content(&args.content_dir)
-        .sbom(&args.sbom)
-        .fetch_log(&args.fetch_log)
-        .cve(&args.cve)
-        .declaration_path(args.declaration.as_deref())
-        .lockfile_path(args.lockfile.as_deref())
-        .build()?;
+    let request = CaptureRequest {
+        cache_root: &cache_root,
+        prior_hash: &args.volume_hash,
+        captured_content: &args.content_dir,
+        sbom: &args.sbom,
+        fetch_log: &args.fetch_log,
+        cve: &args.cve,
+        declaration_path: args.declaration.as_deref(),
+        lockfile_path: args.lockfile.as_deref(),
+    };
     let outcome = capture_volume(request)?;
     mvm_core::audit_emit!(
         DepsAudit,
@@ -597,14 +502,6 @@ mod tests {
     }
 
     #[test]
-    fn capture_request_builder_requires_core_inputs() {
-        let error = CaptureRequest::builder()
-            .build()
-            .expect_err("an incomplete capture request must be rejected");
-        assert!(error.to_string().contains("capture cache root is required"));
-    }
-
-    #[test]
     fn capture_reseals_content_and_refreshes_lockfile_index() {
         let tmp = tempfile::tempdir().unwrap();
         let old_hash = seed_volume(tmp.path(), Some(LOCKFILE_HASH));
@@ -618,15 +515,16 @@ mod tests {
         fs::write(&fetch, b"new fetch\n").unwrap();
         fs::write(&cve, b"{\"results\":[]}").unwrap();
 
-        let request = CaptureRequest::builder()
-            .cache_root(tmp.path())
-            .prior_hash(&old_hash)
-            .captured_content(&captured)
-            .sbom(&sbom)
-            .fetch_log(&fetch)
-            .cve(&cve)
-            .build()
-            .unwrap();
+        let request = CaptureRequest {
+            cache_root: tmp.path(),
+            prior_hash: &old_hash,
+            captured_content: &captured,
+            sbom: &sbom,
+            fetch_log: &fetch,
+            cve: &cve,
+            declaration_path: None,
+            lockfile_path: None,
+        };
         let outcome = capture_volume(request).unwrap();
         assert_ne!(outcome.prior_volume_hash, outcome.volume_hash);
         assert!(!tmp.path().join(&old_hash).exists());
@@ -652,15 +550,16 @@ mod tests {
         fs::write(&sbom, b"sbom").unwrap();
         fs::write(&fetch, b"fetch\n").unwrap();
         fs::write(&cve, b"{}").unwrap();
-        let request = CaptureRequest::builder()
-            .cache_root(tmp.path())
-            .prior_hash(&old_hash)
-            .captured_content(&captured)
-            .sbom(&sbom)
-            .fetch_log(&fetch)
-            .cve(&cve)
-            .build()
-            .unwrap();
+        let request = CaptureRequest {
+            cache_root: tmp.path(),
+            prior_hash: &old_hash,
+            captured_content: &captured,
+            sbom: &sbom,
+            fetch_log: &fetch,
+            cve: &cve,
+            declaration_path: None,
+            lockfile_path: None,
+        };
         assert!(capture_volume(request).is_err());
         assert!(tmp.path().join(&old_hash).exists());
     }
@@ -685,15 +584,16 @@ mod tests {
         fs::write(&sbom, b"sbom").unwrap();
         fs::write(&fetch, b"fetch\n").unwrap();
         fs::write(&cve, b"{}").unwrap();
-        let request = CaptureRequest::builder()
-            .cache_root(tmp.path())
-            .prior_hash(&old_hash)
-            .captured_content(&captured)
-            .sbom(&sbom)
-            .fetch_log(&fetch)
-            .cve(&cve)
-            .build()
-            .unwrap();
+        let request = CaptureRequest {
+            cache_root: tmp.path(),
+            prior_hash: &old_hash,
+            captured_content: &captured,
+            sbom: &sbom,
+            fetch_log: &fetch,
+            cve: &cve,
+            declaration_path: None,
+            lockfile_path: None,
+        };
         assert!(capture_volume(request).is_err());
     }
 
@@ -727,17 +627,16 @@ mod tests {
         let declaration_dir = tempfile::tempdir().unwrap();
         let declaration = declaration_dir.path().join("dependencies.json");
 
-        let request = CaptureRequest::builder()
-            .cache_root(tmp.path())
-            .prior_hash(&old_hash)
-            .captured_content(&captured)
-            .sbom(&sbom)
-            .fetch_log(&fetch)
-            .cve(&cve)
-            .declaration_path(Some(&declaration))
-            .lockfile_path(Some(&lockfile))
-            .build()
-            .unwrap();
+        let request = CaptureRequest {
+            cache_root: tmp.path(),
+            prior_hash: &old_hash,
+            captured_content: &captured,
+            sbom: &sbom,
+            fetch_log: &fetch,
+            cve: &cve,
+            declaration_path: Some(&declaration),
+            lockfile_path: Some(&lockfile),
+        };
         let outcome = capture_volume(request).unwrap();
 
         assert_eq!(outcome.declaration, Some(declaration.clone()));
@@ -781,17 +680,16 @@ mod tests {
         let declaration_dir = tempfile::tempdir().unwrap();
         let declaration = declaration_dir.path().join("dependencies.json");
 
-        let request = CaptureRequest::builder()
-            .cache_root(tmp.path())
-            .prior_hash(&old_hash)
-            .captured_content(&captured)
-            .sbom(&sbom)
-            .fetch_log(&fetch)
-            .cve(&cve)
-            .declaration_path(Some(&declaration))
-            .lockfile_path(Some(&lockfile))
-            .build()
-            .unwrap();
+        let request = CaptureRequest {
+            cache_root: tmp.path(),
+            prior_hash: &old_hash,
+            captured_content: &captured,
+            sbom: &sbom,
+            fetch_log: &fetch,
+            cve: &cve,
+            declaration_path: Some(&declaration),
+            lockfile_path: Some(&lockfile),
+        };
         let error = capture_volume(request)
             .expect_err("capture must refuse an unmatching declaration lockfile");
         assert!(error.to_string().contains("does not match sealed SHA-256"));

@@ -474,28 +474,12 @@ fn restore(cache: &EmbedCache, key: Option<&str>, binary: &str, dest: &Path) -> 
     build_embed_cache::lookup(root, key, binary, dest)
 }
 
-/// Watch exactly the crates the cached binaries are built from.
-///
-/// The blanket walk this replaces covered every workspace crate including
-/// `mvm-cli`'s own 251 files — which are downstream of these binaries and
-/// cannot affect them, yet re-ran the whole script on every edit to the
-/// crate under active development. Anything reachable is still watched,
-/// because the set is taken from the manifest graph rather than named by
-/// hand. Each crate's watched files are exactly the ones its key hashes, so
-/// an edit that would move the key always re-runs the script. The watch is
-/// per file because cargo does not reliably re-trigger a directory-level
-/// `rerun-if-changed` on a content edit to a file already in it.
 fn emit_rerun(cache: &EmbedCache) {
-    for member in &cache.watched {
-        let Some(dir) = cache.graph.dirs.get(member) else {
-            continue;
-        };
-        for (path, _) in build_embed_cache::hash_member(&cache.workspace_root, dir) {
-            println!(
-                "cargo:rerun-if-changed={}",
-                cache.workspace_root.join(path).display()
-            );
-        }
+    for path in cache.watched_paths() {
+        println!(
+            "cargo:rerun-if-changed={}",
+            cache.workspace_root.join(path).display()
+        );
     }
 }
 

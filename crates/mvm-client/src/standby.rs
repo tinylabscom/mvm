@@ -70,7 +70,7 @@ pub fn make_room(budget: StandbyBudget, needed_mib: u64, idle_timeout: Duration)
 /// outlive every record of them, so the watcher stops the ones it last saw.
 pub fn watch_idle(idle_timeout: Duration) {
     match SupervisorStandbyPool::open() {
-        Ok(pool) => watch_idle_in(&pool, idle_timeout, WATCH_TICK),
+        Ok(pool) => watch_idle_in(&pool, idle_timeout, WATCH_TICK, |_| {}),
         Err(error) => tracing::debug!(%error, "cannot open the standby pool to watch it"),
     }
 }
@@ -122,13 +122,19 @@ fn live_standbys(pool: &SupervisorStandbyPool) -> BTreeMap<String, u32> {
         .collect()
 }
 
-fn watch_idle_in(pool: &SupervisorStandbyPool, idle_timeout: Duration, tick: Duration) {
+fn watch_idle_in(
+    pool: &SupervisorStandbyPool,
+    idle_timeout: Duration,
+    tick: Duration,
+    mut observed: impl FnMut(&BTreeMap<String, u32>),
+) {
     let lock_path = pool.root().join(WATCH_LOCK);
     loop {
         let Ok(Some(guard)) = mvm_core::atomic_io::FileLock::try_acquire(&lock_path) else {
             return;
         };
         let mut seen = live_standbys(pool);
+        observed(&seen);
         while !seen.is_empty() {
             std::thread::sleep(tick);
             if !pool_root_exists(pool.root()) {
@@ -348,7 +354,12 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path());
         // An empty pool: the watcher takes the lock, finds nothing, and
         // returns without sleeping, leaving the lock free for the next one.
-        watch_idle_in(&pool, Duration::from_secs(60), Duration::from_secs(60));
+        watch_idle_in(
+            &pool,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            |_| {},
+        );
         assert!(
             mvm_core::atomic_io::FileLock::try_acquire(&tmp.path().join(WATCH_LOCK))
                 .unwrap()
@@ -362,7 +373,12 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path());
         let _held = mvm_core::atomic_io::FileLock::acquire(&tmp.path().join(WATCH_LOCK)).unwrap();
         let started = std::time::Instant::now();
-        watch_idle_in(&pool, Duration::from_secs(60), Duration::from_secs(60));
+        watch_idle_in(
+            &pool,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            |_| {},
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
@@ -396,26 +412,17 @@ mod tests {
         };
         pool.record(&handle).unwrap();
         let tick = Duration::from_millis(100);
-        let watcher =
-            std::thread::spawn(move || watch_idle_in(&pool, Duration::from_secs(3600), tick));
-        // Remove the home only once the watcher has seen the standby: it holds
-        // the watch lock from before its first sweep until it returns, so the
-        // lock still being taken after the file appeared means the first
-        // sweep listed s1 and the watcher is parked in its loop. Removing
-        // earlier would race that sweep, and the watcher stops only standbys
-        // it last saw. The extra half tick lands the removal inside the
-        // watcher's sleep rather than on its wake-up check. (An explicit
-        // "armed" signal from the watcher would replace probing its lock.)
-        let lock_path = root.join(WATCH_LOCK);
-        wait_until("the watcher to take the watch lock", || {
-            lock_path.with_extension("lock").exists()
+        let (observed, ready) = std::sync::mpsc::sync_channel(1);
+        let watcher = std::thread::spawn(move || {
+            watch_idle_in(&pool, Duration::from_secs(3600), tick, |seen| {
+                observed.send(seen.get("s1").copied()).unwrap();
+            })
         });
-        std::thread::sleep(tick + tick / 2);
-        wait_until("the watcher to still hold the watch lock", || {
-            mvm_core::atomic_io::FileLock::try_acquire(&lock_path)
-                .unwrap()
-                .is_none()
-        });
+        assert_eq!(
+            ready.recv_timeout(Duration::from_secs(10)).unwrap(),
+            Some(child.id()),
+            "the watcher observed the original child before its pool is removed"
+        );
         std::fs::remove_dir_all(&root).unwrap();
         watcher.join().unwrap();
         let status = child.wait().expect("waiting for the stand-in");
@@ -437,12 +444,17 @@ mod tests {
         handle.spawned_unix_secs = mvm_core::time::now_unix_secs();
         pool.record(&handle).unwrap();
         let tick = Duration::from_millis(50);
-        let watcher =
-            std::thread::spawn(move || watch_idle_in(&pool, Duration::from_secs(3600), tick));
-        let lock_path = tmp.path().join(WATCH_LOCK);
-        wait_until("the watcher to take the watch lock", || {
-            lock_path.with_extension("lock").exists()
+        let (observed, ready) = std::sync::mpsc::sync_channel(1);
+        let watcher = std::thread::spawn(move || {
+            watch_idle_in(&pool, Duration::from_secs(3600), tick, |seen| {
+                observed.send(seen.get("s1").copied()).unwrap();
+            })
         });
+        assert_eq!(
+            ready.recv_timeout(Duration::from_secs(10)).unwrap(),
+            Some(pid),
+            "the watcher observed the original child before it is stopped"
+        );
         child.kill().unwrap();
         watcher.join().unwrap();
         // ECHILD from the std handle means the watcher already collected it.
@@ -450,16 +462,5 @@ mod tests {
             child.try_wait().is_err(),
             "the watcher collected the stopped standby"
         );
-    }
-
-    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while std::time::Instant::now() < deadline {
-            if done() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("timed out waiting for {what}");
     }
 }
