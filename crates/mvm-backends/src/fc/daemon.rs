@@ -27,7 +27,9 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
 /// Start a Firecracker daemon in a per-VM directory with its own socket.
 #[instrument(skip_all)]
 pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
-    start_vm_firecracker_inner(abs_dir, abs_socket, "")
+    ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
+    start_vm_firecracker_inner(abs_dir, abs_socket, "", None)
 }
 
 /// Start a Firecracker daemon inside a scope carrying its guest's memory and
@@ -44,9 +46,13 @@ pub fn start_vm_firecracker_bounded(
     abs_socket: &str,
     machine_id: &str,
     bounds: &mvm_core::spawn_scope::SpawnBounds,
+    guard: &mut super::FirecrackerGuard,
 ) -> Result<()> {
-    let prefix = spawn_scope_prefix(machine_id, std::path::Path::new(abs_dir), bounds);
-    start_vm_firecracker_inner(abs_dir, abs_socket, &prefix)
+    validate_required_scope(machine_id, bounds)?;
+    ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
+    let prefix = spawn_scope_prefix(machine_id, std::path::Path::new(abs_dir), bounds)?;
+    start_vm_firecracker_inner(abs_dir, abs_socket, &prefix, Some(guard))
 }
 
 /// Start Firecracker for a snapshot load, inside a scope prefix the caller has
@@ -61,11 +67,16 @@ pub(crate) fn start_vm_firecracker_scoped(
     abs_socket: &str,
     scope: &str,
 ) -> Result<()> {
-    start_vm_firecracker_inner(abs_dir, abs_socket, scope)
+    anyhow::ensure!(
+        !scope.trim().is_empty(),
+        "required Firecracker scope is missing"
+    );
+    ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
+    start_vm_firecracker_inner(abs_dir, abs_socket, scope, None)
 }
 
-/// The `systemd-run` scope prefix for the launch line, shell-quoted, or empty
-/// when nothing is to be bound.
+/// The required legacy `systemd-run` scope prefix, or a pre-launch refusal.
 ///
 /// Firecracker is the one per-VM process this repo starts through a shell
 /// rather than a `Command` — it is `sudo`-elevated and detaches itself with
@@ -76,14 +87,24 @@ pub(crate) fn spawn_scope_prefix(
     machine_id: &str,
     state_dir: &std::path::Path,
     bounds: &mvm_core::spawn_scope::SpawnBounds,
-) -> String {
-    match mvm_core::spawn_scope::scope_prefix_for_spawn(machine_id, state_dir, bounds) {
-        Some(tokens) => {
-            let quoted: Vec<String> = tokens.iter().map(|t| shell_quote(t)).collect();
-            format!("{} ", quoted.join(" "))
-        }
-        None => String::new(),
+) -> Result<String> {
+    validate_required_scope(machine_id, bounds)?;
+    let tokens = mvm_core::spawn_scope::scope_prefix_for_spawn(machine_id, state_dir, bounds)
+        .context("required Firecracker scope could not be prepared")?;
+    let quoted: Vec<String> = tokens.iter().map(|t| shell_quote(t)).collect();
+    Ok(format!("{} ", quoted.join(" ")))
+}
+
+pub(crate) fn validate_required_scope(
+    machine_id: &str,
+    bounds: &mvm_core::spawn_scope::SpawnBounds,
+) -> Result<()> {
+    bounds.validate_required_inputs()?;
+    mvm_core::spawn_scope::validate_scope_id(machine_id)?;
+    if let Some(gap) = mvm_core::spawn_scope::mechanism_gap() {
+        anyhow::bail!("required Firecracker scope unavailable: {}", gap.describe());
     }
+    Ok(())
 }
 
 /// The file the launch script records a scoped launcher's pid in, so the
@@ -102,10 +123,18 @@ fn secure_socket_dir(abs_dir: &str) -> Result<()> {
         .context("securing the Firecracker socket directory")
 }
 
-fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
-    ensure_api_socket_fits(abs_socket)?;
-    secure_socket_dir(abs_dir)?;
+fn start_vm_firecracker_inner(
+    abs_dir: &str,
+    abs_socket: &str,
+    scope: &str,
+    guard: Option<&mut super::FirecrackerGuard>,
+) -> Result<()> {
     ui::info("Starting Firecracker...");
+    if let Some(guard) = guard {
+        guard
+            .arm(abs_dir)
+            .context("retiring prior Firecracker markers before launch")?;
+    }
     // A process started here serves the socket its own command line names, so
     // any record that this dir's VMM came from the idle pool is now stale.
     super::idle_pool::forget_claim_origin(std::path::Path::new(abs_dir));
@@ -124,6 +153,10 @@ fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> R
 /// Start an idle Firecracker for the pool: the same launch line as a VM's,
 /// inside the scope `scope` names, without the progress lines a launch prints.
 pub(crate) fn start_idle_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
+    anyhow::ensure!(
+        !scope.trim().is_empty(),
+        "required Firecracker scope is missing"
+    );
     ensure_api_socket_fits(abs_socket)?;
     secure_socket_dir(abs_dir)?;
     let identity = std::path::Path::new(abs_dir).join(super::idle_pool::FC_IDENTITY_FILE);
@@ -919,7 +952,8 @@ mod tests {
             &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(512).with_cpu_grant(Some(
                 mvm_contract::grants::CpuGrant::Share { millicores: 1500 },
             )),
-        );
+        )
+        .expect("required scope");
         let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", &prefix, 1000);
 
         assert!(script.contains("CPUQuota=150%"), "{script}");
@@ -957,7 +991,8 @@ mod tests {
             "vm-ceilinged",
             scratch.path(),
             &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(2048),
-        );
+        )
+        .expect("required scope");
         assert!(prefix.contains("'MemoryMax=2304M'"), "{prefix}");
         assert!(prefix.contains("'TasksMax=1024'"), "{prefix}");
         assert!(!prefix.contains("CPUQuota"), "{prefix}");
@@ -1103,9 +1138,75 @@ mod tests {
     }
 
     #[test]
-    fn a_host_without_the_mechanism_leaves_the_launch_line_untouched() {
-        // No mechanism on this host: the boot proceeds unbounded rather than
-        // failing, and the read-back reports it as declared.
+    fn invalid_required_bounds_never_reach_the_launcher() {
+        use mvm_contract::grants::CpuGrant;
+        use mvm_core::spawn_scope::SpawnBounds;
+
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+        let _guard = mvm_vmm::host::shell::mock::install_handler(|_| {
+            panic!("invalid bounds must not launch")
+        });
+        for bounds in [
+            SpawnBounds::for_guest_memory(0),
+            SpawnBounds::for_guest_memory(512)
+                .with_cpu_grant(Some(CpuGrant::Share { millicores: 0 })),
+            SpawnBounds::for_guest_memory(512)
+                .with_cpu_grant(Some(CpuGrant::Share { millicores: 9 })),
+        ] {
+            assert!(
+                start_vm_firecracker_bounded(
+                    scratch.path().to_str().unwrap(),
+                    scratch.path().join("fc.socket").to_str().unwrap(),
+                    "invalid-bounds",
+                    &bounds,
+                    &mut super::super::FirecrackerGuard::pending(),
+                )
+                .is_err()
+            );
+        }
+        for scope in ["", " \t"] {
+            assert!(start_vm_firecracker_scoped("/unused", "/unused/socket", scope).is_err());
+            assert!(start_idle_firecracker("/unused", "/unused/socket", scope).is_err());
+        }
+        assert!(
+            spawn_scope_prefix(
+                "../invalid",
+                scratch.path(),
+                &SpawnBounds::for_guest_memory(512),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn required_bounds_refuse_before_the_shell_launcher_is_called() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let empty = scratch.path().join("empty-path");
+        std::fs::create_dir(&empty).expect("empty PATH");
+        env.set("PATH", &empty);
+        env.remove("XDG_RUNTIME_DIR");
+        env.remove("DBUS_SESSION_BUS_ADDRESS");
+        let _guard = mvm_vmm::host::shell::mock::install_handler(|_| {
+            panic!("missing required bounds must refuse before invoking the launcher")
+        });
+        let socket = scratch.path().join("fc.socket");
+        let error = start_vm_firecracker_bounded(
+            scratch.path().to_str().expect("directory"),
+            socket.to_str().expect("socket"),
+            "required-bounds",
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(512),
+            &mut super::super::FirecrackerGuard::pending(),
+        )
+        .expect_err("missing scope must refuse");
+        assert!(format!("{error:#}").contains("scope"), "{error:#}");
+    }
+
+    #[test]
+    fn a_host_without_the_mechanism_refuses_the_required_scope() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let empty = scratch.path().join("empty-path");
@@ -1113,13 +1214,13 @@ mod tests {
         env.set("PATH", &empty);
         env.remove("XDG_RUNTIME_DIR");
         env.remove("DBUS_SESSION_BUS_ADDRESS");
-        assert_eq!(
+        assert!(
             spawn_scope_prefix(
                 "vm-x",
                 scratch.path(),
                 &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(512)
-            ),
-            ""
+            )
+            .is_err()
         );
     }
 }

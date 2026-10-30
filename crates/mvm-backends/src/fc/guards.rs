@@ -17,6 +17,27 @@ pub struct FirecrackerGuard {
 }
 
 impl FirecrackerGuard {
+    /// No process cleanup is armed yet.
+    pub(crate) fn pending() -> Self {
+        Self { abs_dir: None }
+    }
+
+    /// Retire prior markers at commit-to-effects, before cleanup can read them.
+    pub(crate) fn arm(&mut self, abs_dir: &str) -> std::io::Result<()> {
+        if self.abs_dir.is_some() {
+            return Ok(());
+        }
+        for name in ["fc.pid", ".fc-pid"] {
+            match std::fs::remove_file(std::path::Path::new(abs_dir).join(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.abs_dir = Some(abs_dir.to_string());
+        Ok(())
+    }
+
     /// Create a new guard for a Firecracker process in the given directory.
     pub fn new(abs_dir: &str) -> Self {
         Self {
@@ -90,6 +111,38 @@ impl Drop for SlotReservationGuard {
 mod tests {
     use super::*;
     use mvm_vmm::host::shell::mock as shell_mock;
+
+    #[test]
+    fn failed_marker_retirement_does_not_arm_cleanup_or_retry() {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(state.path().join("fc.pid"), b"11111").unwrap();
+        std::fs::create_dir(state.path().join(".fc-pid")).unwrap();
+        let _handler = shell_mock::install_handler(|_| {
+            panic!("failed retirement must not arm cleanup");
+        });
+        let mut guard = FirecrackerGuard::pending();
+        assert!(guard.arm(state.path().to_str().unwrap()).is_err());
+        assert!(
+            !state.path().join("fc.pid").exists(),
+            "first retirement already occurred"
+        );
+        assert!(state.path().join(".fc-pid").is_dir());
+        drop(guard);
+    }
+
+    #[test]
+    fn already_armed_guard_keeps_the_new_attempt_marker() {
+        let state = tempfile::tempdir().unwrap();
+        let mut guard = FirecrackerGuard::pending();
+        guard.arm(state.path().to_str().unwrap()).unwrap();
+        std::fs::write(state.path().join("fc.pid"), b"33333").unwrap();
+        guard.arm(state.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read(state.path().join("fc.pid")).unwrap(),
+            b"33333"
+        );
+        guard.defuse();
+    }
 
     #[test]
     fn firecracker_guard_defuse_prevents_cleanup() {

@@ -325,6 +325,20 @@ impl SpawnBounds {
         self.cpu_grant = cpu_grant;
         self
     }
+
+    /// Validate inputs for callers requiring the existing memory/task scope.
+    ///
+    /// This does not qualify an OS mechanism or a native containment profile.
+    /// No CPU grant or a fuel grant still requests no CPU share from this scope.
+    pub fn validate_required_inputs(&self) -> Result<()> {
+        if self.guest_memory_mib == 0 {
+            bail!("required scope needs a known nonzero guest memory size");
+        }
+        if let Some(CpuGrant::Share { millicores }) = self.cpu_grant {
+            cpu_quota_percent(millicores)?;
+        }
+        Ok(())
+    }
 }
 
 /// The limits a scope is created with, resolved from [`SpawnBounds`].
@@ -1232,6 +1246,40 @@ pub fn rendered_argv(cmd: &Command) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_scope_inputs_preserve_optional_cpu_and_reject_invalid_shares() {
+        assert!(
+            SpawnBounds::for_guest_memory(0)
+                .validate_required_inputs()
+                .is_err()
+        );
+        for millicores in [0, 1, 9] {
+            assert!(
+                SpawnBounds::for_guest_memory(512)
+                    .with_cpu_grant(Some(CpuGrant::Share { millicores }))
+                    .validate_required_inputs()
+                    .is_err()
+            );
+        }
+        for cpu in [
+            None,
+            Some(CpuGrant::Fuel { instructions: 1 }),
+            Some(CpuGrant::Share { millicores: 10 }),
+            Some(CpuGrant::Share {
+                millicores: u32::MAX,
+            }),
+        ] {
+            SpawnBounds::for_guest_memory(u32::MAX)
+                .with_cpu_grant(cpu)
+                .validate_required_inputs()
+                .expect("representable existing inputs");
+        }
+        assert_eq!(
+            memory_max_bytes_for_guest(u32::MAX),
+            (u64::from(u32::MAX) + VMM_MEMORY_OVERHEAD_MIB) * BYTES_PER_MIB
+        );
+    }
 
     /// Never claim HVF vCPU-quota enforcement without a bounded quota record.
     ///
