@@ -203,7 +203,45 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
+    use mvm_core::util::test_env::TestEnv;
     use std::io::Write;
+
+    #[test]
+    fn kernel_fixtures_isolate_the_process_digest_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let invalid_home = dir.path().join("not-a-directory");
+        std::fs::write(&invalid_home, b"not a home").unwrap();
+
+        // A fresh process makes a failed first key initialization observable.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "host::fc_kernel::tests::",
+                "--skip",
+                "kernel_fixtures_isolate_the_process_digest_key",
+                "--test-threads=16",
+            ])
+            .env("MVM_HOME", &invalid_home)
+            .env("HOME", &invalid_home)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let finished = crate::host::process_exit::wait_for_test_child(
+            &mut child,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        let exited = matches!(&finished, Ok(Some(_)));
+        if !exited {
+            let _ = child.kill();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            exited && output.status.success(),
+            "kernel fixtures must isolate key initialization from inherited home state (wait: {finished:?}):\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 
     #[test]
     fn arm64_image_magic_detected_not_extracted() {
@@ -301,6 +339,7 @@ mod tests {
     /// superseded kernel.
     #[test]
     fn a_replaced_vmlinux_is_not_served_from_the_previous_extraction() {
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let kpath = dir.path().join("vmlinux");
 
@@ -329,6 +368,7 @@ mod tests {
     /// The cache must still be a cache: an unchanged kernel does not re-extract.
     #[test]
     fn an_unchanged_vmlinux_reuses_the_cached_sibling() {
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let kpath = dir.path().join("vmlinux");
         std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x33))).unwrap();
@@ -360,6 +400,7 @@ mod tests {
     /// crashed swap. Either way it is unattributable and must be re-derived.
     #[test]
     fn an_unstamped_sibling_is_re_extracted_rather_than_trusted() {
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let kpath = dir.path().join("vmlinux");
         let real = fake_vmlinux_tagged(0x44);
@@ -375,6 +416,7 @@ mod tests {
     /// A stamp naming a different kernel must not vouch for the sibling.
     #[test]
     fn a_stamp_that_does_not_match_the_kernel_forces_a_re_extract() {
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let kpath = dir.path().join("vmlinux");
         let real = fake_vmlinux_tagged(0x66);
@@ -396,6 +438,7 @@ mod tests {
     fn preparing_a_kernel_leaves_the_shared_digest_cache_warm() {
         use mvm_core::crypto::image_verify::{DigestSource, sha256_file_cached_report_source};
 
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let kpath = dir.path().join("vmlinux");
         std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x99))).unwrap();
@@ -417,6 +460,7 @@ mod tests {
     /// here beside one, so an extraction must leave nothing else behind.
     #[test]
     fn an_extraction_leaves_only_the_files_it_names_beside_the_kernel() {
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let kpath = dir.path().join("vmlinux");
         std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x42))).unwrap();
@@ -442,6 +486,7 @@ mod tests {
 
     #[test]
     fn an_extraction_records_a_stamp_matching_the_kernel_on_disk() {
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let kpath = dir.path().join("vmlinux");
         std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x88))).unwrap();
@@ -455,6 +500,7 @@ mod tests {
 
     #[test]
     fn ensure_fc_loadable_passes_through_an_elf_kernel() {
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let kpath = dir.path().join("vmlinux");
         std::fs::write(&kpath, fake_vmlinux()).unwrap();
@@ -466,6 +512,7 @@ mod tests {
 
     #[test]
     fn ensure_fc_loadable_extracts_a_bzimage_to_a_cached_sibling() {
+        let _env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let kpath = dir.path().join("vmlinux"); // a bzImage misnamed as vmlinux
         let vmlinux = fake_vmlinux();

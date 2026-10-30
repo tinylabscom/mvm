@@ -539,7 +539,7 @@ mod source_resolution {
     /// carries the same profile and the same deny-all egress as one that
     /// named its image, or "convenience" would be a policy bypass.
     #[test]
-    fn a_detected_run_is_still_deny_all_and_standard_profile() {
+    fn a_detected_run_is_still_deny_all_and_development_profile() {
         let dir = sealed_dir();
         touch(dir.path(), "package.json");
         let mut args = RunArgs::default();
@@ -553,7 +553,7 @@ mod source_resolution {
             before,
             "detection changed a policy field"
         );
-        assert_eq!(args.profile, RunProfile::Standard);
+        assert_eq!(args.profile, RunProfile::Dev);
         assert!(!args.net, "detected runs stay deny-all");
         assert!(args.allow_host.is_empty());
     }

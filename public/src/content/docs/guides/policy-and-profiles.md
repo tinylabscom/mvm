@@ -35,6 +35,30 @@ mvmctl run --policy ./org-base.toml --policy ./team.toml --policy ./mine.json --
 That is exactly equivalent to a profile whose `extends` lists the same
 references in the same order.
 
+### Configured local defaults
+
+Set ordered launch policies in `$MVM_HOME/config/config.toml`:
+
+```toml
+default_policy = ["agent-apis", "/etc/policy/team.toml"]
+```
+
+Selection is explicit `--plan`, otherwise repeated `--policy`, otherwise the
+project's `[policy]` profile/include, otherwise `default_policy`. Project
+`[network] allow_hosts` still contributes when selecting authored profiles.
+Configured defaults are fallback selections, not mandatory organization
+restrictions: explicit flags or a project policy replace them. Use the
+existing mandatory policy/admission controls for restrictions a caller must
+not replace. Malformed or unreadable configuration refuses launch rather than
+silently dropping configured restrictions.
+
+The same ordered composition applies to `run`, `machine run`, and policy
+selection during persistent machine creation. Explicit local network
+restrictions remain effective when an installed application's signed network
+defaults are folded. A signed application ceiling cannot be widened by local
+policy. This does not change the existing rule that signed network defaults
+apply when no local network selection exists.
+
 Ask one question of the resolved policy without booting anything:
 
 ```sh

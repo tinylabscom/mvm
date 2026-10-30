@@ -13,8 +13,8 @@
 
 use anyhow::{Context, Result};
 use mvm_client::policy_profiles::{
-    LaunchFlags, Platform, PolicyRef, PolicySelection, PolicyStore, ProjectPolicy,
-    ResolvedManifest, ResolvedPolicy, fold, resolve,
+    LaunchFlags, Platform, PolicyRef, PolicyStore, ProjectPolicy, ResolvedManifest, ResolvedPolicy,
+    fold, resolve,
 };
 
 use super::exec::RunArgs;
@@ -117,6 +117,7 @@ struct Selected {
 }
 
 fn select(args: &RunArgs) -> Result<Option<Selected>> {
+    let config = mvm_core::user_config::load_strict(None)?;
     if let Some(path) = &args.plan {
         let manifest = ResolvedManifest::read(path)?;
         return Ok(Some(Selected {
@@ -126,7 +127,12 @@ fn select(args: &RunArgs) -> Result<Option<Selected>> {
     }
     let project = super::run_routes::project_manifest(args)?
         .map(|(path, manifest)| ProjectPolicy::from_manifest(&path, &manifest));
-    let Some(selection) = PolicySelection::for_launch(&args.policy, project)? else {
+    let Some(selection) = crate::commands::shared::select_launch_policy(
+        &args.policy,
+        project,
+        &config.default_policy,
+    )?
+    else {
         return Ok(None);
     };
     let label = if !args.policy.is_empty() {
@@ -294,6 +300,91 @@ fn apply_selected_policy(
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn configured_policy_applies_without_sources_and_flags_or_plan_replace_it() {
+        let (_env, home) = isolated();
+        mvm_core::user_config::save(
+            &mvm_core::user_config::MvmConfig {
+                default_policy: vec!["offline".into()],
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let args = RunArgs::default();
+        assert_eq!(
+            select(&args)
+                .unwrap()
+                .unwrap()
+                .resolved
+                .policy
+                .network
+                .block,
+            Some(true)
+        );
+        let selected = select(&RunArgs {
+            policy: vec!["agent-apis".into()],
+            ..RunArgs::default()
+        })
+        .unwrap()
+        .unwrap();
+        assert!(
+            selected
+                .resolved
+                .policy
+                .network
+                .allow
+                .contains(&"api.openai.com:443".into())
+        );
+        let plan = home.path().join("plan.json");
+        std::fs::write(&plan, r#"{"policy":{"network":{"allow":["plan.test"]}}}"#).unwrap();
+        let selected = select(&RunArgs {
+            plan: Some(plan),
+            policy: vec!["absent".into()],
+            ..RunArgs::default()
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.resolved.policy.network.allow, ["plan.test:443"]);
+    }
+
+    #[test]
+    fn malformed_config_refuses_policy_selection() {
+        let (_env, home) = isolated();
+        std::fs::create_dir_all(home.path().join("config")).unwrap();
+        std::fs::write(home.path().join("config/config.toml"), "default_policy = 7").unwrap();
+        assert!(select(&RunArgs::default()).is_err());
+    }
+
+    #[test]
+    fn configured_network_restriction_is_not_replaced_by_signed_defaults() {
+        let (_env, _home) = isolated();
+        mvm_core::user_config::save(
+            &mvm_core::user_config::MvmConfig {
+                default_policy: vec!["offline".into()],
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let local = select(&RunArgs::default()).unwrap().unwrap();
+        let environment = serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": "aarch64-linux",
+            "entrypoint": {"argv": ["/app/start"]},
+            "policy": {"allow_hosts": ["api.example.test:443"]}
+        }))
+        .unwrap();
+        let (_, folded) = mvm_client::policy_profiles::environment::fold_environment_policy(
+            &environment,
+            Some(&local.resolved),
+            &LaunchFlags::default(),
+            None,
+        )
+        .unwrap();
+        assert!(folded.allow_host.is_empty());
+    }
 
     #[cfg(feature = "manifest-verify")]
     const PYTHON_MANIFEST: &[u8] =
@@ -574,6 +665,60 @@ mod tests {
                 crate::commands::shared::resolve_ai_policy(Some(321)),
             );
         }
+    }
+
+    #[test]
+    fn configured_authority_and_signed_budget_reach_the_same_runtime_policy() {
+        let (_env, home) = isolated();
+        let profile = home.path().join("local.toml");
+        std::fs::write(
+            &profile,
+            "[overrides.network]\nallow = [\"api.example.test:443\"]\n",
+        )
+        .unwrap();
+        mvm_core::user_config::save(
+            &mvm_core::user_config::MvmConfig {
+                default_policy: vec![profile.display().to_string()],
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let environment = serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": "aarch64-linux",
+            "entrypoint": {"argv": ["/app/start"]},
+            "policy": {
+                "allow_hosts": ["api.example.test:443", "spare.example.test:443"],
+                "request_budget": {
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_requests": 1,
+                    "max_spend_microusd": 500000
+                }
+            }
+        }))
+        .unwrap();
+        let mut args = RunArgs {
+            ai_token_budget: Some(100),
+            ..RunArgs::default()
+        };
+        let selected = select(&args).unwrap();
+        assert!(selected.is_some());
+        apply_selected_policy(&mut args, selected, Some(environment)).unwrap();
+        assert_eq!(args.allow_host, ["api.example.test:443"]);
+        let folded = args.applied_ai_policy.clone().unwrap();
+        assert_eq!(folded.request_budget.unwrap().max_spend_microusd, 500_000);
+        assert_eq!(
+            folded.budget,
+            crate::commands::shared::resolve_ai_policy(Some(100))
+                .unwrap()
+                .budget
+        );
+        args.ai_token_budget = Some(1_000);
+        assert_eq!(
+            super::super::exec::application_source::ai_policy(&args).unwrap(),
+            Some(folded)
+        );
     }
 
     #[test]

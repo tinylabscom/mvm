@@ -1,8 +1,30 @@
 //! Environment-aware resolution helpers (running VMs, flake refs, network policy).
 
 use anyhow::{Context, Result};
+use mvm_client::policy_profiles::{PolicySelection, ProjectPolicy};
 
 pub use mvm_client::launch::manifest_ref::{ManifestArgRef, resolve_manifest_arg};
+
+/// Select launch policy with operator-configured fallbacks.
+///
+/// # Errors
+///
+/// A selected policy reference is malformed.
+pub(in crate::commands) fn select_launch_policy(
+    cli: &[String],
+    project: Option<ProjectPolicy>,
+    defaults: &[String],
+) -> Result<Option<PolicySelection>> {
+    let project_selects = project
+        .as_ref()
+        .is_some_and(|policy| policy.profile.is_some() || !policy.include.is_empty());
+    if cli.is_empty() && !project_selects {
+        PolicySelection::for_launch(defaults, project)
+            .context("selecting configured default_policy")
+    } else {
+        PolicySelection::for_launch(cli, project).map_err(Into::into)
+    }
+}
 
 /// True when the launch source selectors resolve to an OCI image boot, whether
 /// the image was named directly (`--image`) or indirectly through `--manifest`.
@@ -89,7 +111,98 @@ pub fn egress_enforcement_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_client::policy_profiles::{Platform, PolicyRef, PolicyStore, resolve};
     use mvm_core::network_policy::{HostPort, NetworkPolicy};
+
+    fn project(profile: Option<&str>, include: &[&str], hosts: &[&str]) -> ProjectPolicy {
+        ProjectPolicy {
+            manifest: std::path::PathBuf::from("/p/mvm.toml"),
+            profile: profile.map(str::to_string),
+            include: include.iter().map(ToString::to_string).collect(),
+            allow_hosts: hosts.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn configured_defaults_compose_in_order_with_denies_and_minimum_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.toml");
+        let team = dir.path().join("team.toml");
+        std::fs::write(
+            &base,
+            "[overrides.network]\nallow = [\"a.test\"]\n[overrides.resources]\nwall_clock_secs = 20\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &team,
+            "[overrides.network]\nallow = [\"b.test\"]\ndeny = [\"a.test\"]\n[overrides.resources]\nwall_clock_secs = 60\n",
+        )
+        .unwrap();
+        let defaults = [base.display().to_string(), team.display().to_string()];
+        let selection =
+            select_launch_policy(&[], Some(project(None, &[], &["project.test"])), &defaults)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            selection.profiles,
+            defaults
+                .iter()
+                .map(|value| PolicyRef::parse(value).unwrap())
+                .collect::<Vec<_>>()
+        );
+        let resolved = resolve(
+            &PolicyStore::at(dir.path()),
+            &selection,
+            Platform::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.policy.network.allow,
+            ["b.test:443", "project.test:443"]
+        );
+        assert_eq!(resolved.policy.resources.wall_clock_secs, Some(20));
+    }
+
+    #[test]
+    fn flags_and_project_policy_replace_configured_defaults_but_keep_project_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        for (flags, profile, include) in [
+            (vec!["agent-apis".into()], None, vec![]),
+            (vec![], Some("agent-apis"), vec![]),
+            (vec![], None, vec!["llm-apis"]),
+        ] {
+            let selection = select_launch_policy(
+                &flags,
+                Some(project(profile, &include, &["project.test"])),
+                &["Bad Default".into()],
+            )
+            .unwrap()
+            .unwrap();
+            let resolved = resolve(
+                &PolicyStore::at(dir.path()),
+                &selection,
+                Platform::default(),
+            )
+            .unwrap();
+            assert!(
+                resolved
+                    .policy
+                    .network
+                    .allow
+                    .contains(&"api.openai.com:443".into())
+            );
+            assert!(
+                resolved
+                    .policy
+                    .network
+                    .allow
+                    .contains(&"project.test:443".into())
+            );
+        }
+        let error = select_launch_policy(&[], None, &["Bad Default".into()]).unwrap_err();
+        assert!(error.to_string().contains("default_policy"), "{error:#}");
+        assert!(select_launch_policy(&[], None, &[]).unwrap().is_none());
+    }
 
     #[test]
     fn enforcement_tier_uniform_for_deny_all_and_unrestricted() {

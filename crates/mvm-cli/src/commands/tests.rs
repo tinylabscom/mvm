@@ -1542,6 +1542,29 @@ fn parse_machine_run(argv: &[&str]) -> Result<machine::MachineRunArgs, clap::Err
 }
 
 #[test]
+fn both_run_verbs_default_to_development_and_accept_an_explicit_standard_profile() {
+    for verb in [vec!["run"], vec!["machine", "run"]] {
+        for (flags, expected) in [
+            (vec![], exec::RunProfile::Dev),
+            (vec!["--profile", "standard"], exec::RunProfile::Standard),
+        ] {
+            let mut argv = vec!["mvmctl"];
+            argv.extend(verb.iter().copied());
+            argv.extend(flags);
+            let parsed = Cli::try_parse_from(argv).unwrap();
+            let profile = match parsed.command {
+                Commands::Run(run) => run.machine.run.profile,
+                Commands::Machine(machine::Args {
+                    action: machine::MachineAction::Run(run),
+                }) => run.run.profile,
+                other => panic!("expected run, got {other:?}"),
+            };
+            assert_eq!(profile, expected);
+        }
+    }
+}
+
+#[test]
 fn machine_run_entrypoint_flag_parses() {
     // `--manifest m --entrypoint` selects the entrypoint action; the source and
     // entrypoint flags round-trip.
@@ -2461,7 +2484,7 @@ fn test_run_command_is_recognized() {
                 run: exec::RunArgs { profile, argv, .. },
                 ..
             }) => {
-                assert_eq!(profile, exec::RunProfile::Standard);
+                assert_eq!(profile, exec::RunProfile::Dev);
                 assert_eq!(argv, vec!["/bin/true".to_string()]);
             }
             _ => panic!("Expected machine run"),
@@ -4263,7 +4286,7 @@ fn run_default_profile_argv_only() {
                 assert!(allow_host.is_empty());
                 assert_eq!(cpus, crate::commands::shared::default_vcpus());
                 assert_eq!(memory, "512M");
-                assert_eq!(profile, exec::RunProfile::Standard);
+                assert_eq!(profile, exec::RunProfile::Dev);
                 assert!(volume.is_empty());
                 assert!(env.is_empty());
                 assert_eq!(timeout, None);
@@ -4962,6 +4985,8 @@ fn direct_production_oci_run_accepts_the_baked_entrypoint() {
         "--image",
         "registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
         "--prod",
+        "--profile",
+        "standard",
         "--dry-run",
     ])
     .expect("parse a digest-pinned production image run");
@@ -6511,7 +6536,7 @@ fn machine_run_up_json_guards_stdout() {
 }
 
 #[test]
-fn up_json_reports_prod_when_the_launch_grant_is_prodsafe_only() {
+fn up_json_reports_prod_when_an_explicit_standard_launch_grant_is_prodsafe_only() {
     // The SDK gates its DevOnly surfaces on this field:
     //   if self.build_mode != "dev": raise SandboxDevOnly
     // Reporting the *image* posture let that gate pass for a launch whose grant
@@ -6520,15 +6545,31 @@ fn up_json_reports_prod_when_the_launch_grant_is_prodsafe_only() {
     // SandboxDevOnly. The field has to answer the question it is asked: can
     // this launch use DevOnly verbs?
     //
-    // This is the exact argv the Python SDK's live transport shells: no tty, no
-    // trailing argv, no --profile dev. That is grant-eligible, so the launch
-    // carries the attenuated ProdSafe set.
-    let args = parse_machine_run(&["-d", "--up-json", "--name", "vm", "--image", "alpine"])
-        .expect("sdk-shaped run args parse");
+    // Production-safe envelope behavior requires an explicit non-development
+    // profile now that an unqualified CLI launch selects development.
+    let args = parse_machine_run(&[
+        "-d",
+        "--up-json",
+        "--name",
+        "vm",
+        "--image",
+        "alpine",
+        "--profile",
+        "standard",
+    ])
+    .expect("production-safe run args parse");
     assert!(
         crate::commands::machine::runtime::launch_carries_restricted_grant(&args),
         "an SDK-shaped launch is grant-eligible and gets the ProdSafe-only set"
     );
+}
+
+#[test]
+fn default_up_json_launch_retains_development_intent() {
+    let args = parse_machine_run(&["-d", "--up-json", "--name", "vm", "--image", "alpine"])
+        .expect("development run args parse");
+    assert_eq!(args.run.profile, exec::RunProfile::Dev);
+    assert!(!crate::commands::machine::runtime::launch_carries_restricted_grant(&args));
 }
 
 #[test]

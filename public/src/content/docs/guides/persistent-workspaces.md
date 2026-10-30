@@ -160,7 +160,7 @@ Security rules:
   directory, so `--rw` follows the same profile grant as a
   `HOST.img:/GUEST:SIZE:rw` disk image: every start (`mvmctl machine start`,
   `LocalBackend`, or the language SDKs through their host library) admits it
-  when the machine's profile is `standard` (the default), `dev`, or
+  when the machine's profile is `standard`, `dev` (the CLI default), or
   `permissive`, and refuses it under `restrictive`. `volume mount --rw` against
   an existing `restrictive` machine is refused at registration.
 

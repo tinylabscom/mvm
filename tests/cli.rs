@@ -1409,6 +1409,8 @@ fn run_prod_refuses_an_ad_hoc_command_before_pulling() {
             "--image",
             "registry.invalid/team/app@sha256:0000000000000000000000000000000000000000000000000000000000000000",
             "--prod",
+            "--profile",
+            "standard",
             "--",
             "/bin/true",
         ])
@@ -1424,30 +1426,31 @@ fn run_prod_refuses_an_ad_hoc_command_before_pulling() {
     assert!(stderr.contains("declared entrypoint"), "stderr: {stderr}");
 }
 
-/// `--prod --profile dev` is refused before any pull.
+/// Explicit and default development profiles refuse `--prod` before any pull.
 #[test]
 fn run_prod_refuses_the_dev_profile_before_pulling() {
     let mvm_home = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .env("MVM_HOME", mvm_home.path())
-        .env("HOME", mvm_home.path())
-        .env("MVM_NO_AUTO_DEV", "1")
-        .args([
-            "machine",
-            "run",
-            "--image",
-            "registry.invalid/team/app@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            "--prod",
-            "--profile",
-            "dev",
-            "--",
-            "/bin/true",
-        ])
-        .output()
-        .expect("run mvmctl machine run --prod --profile dev");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--profile dev"), "stderr: {stderr}");
+    for verb in [vec!["run"], vec!["machine", "run"]] {
+        for profile in [vec![], vec!["--profile", "dev"]] {
+            let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+                .env("MVM_HOME", mvm_home.path())
+                .env("HOME", mvm_home.path())
+                .env("MVM_NO_AUTO_DEV", "1")
+                .args(&verb)
+                .args([
+                    "--image",
+                    "registry.invalid/team/app@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "--prod",
+                ])
+                .args(profile)
+                .args(["--", "/bin/true"])
+                .output()
+                .expect("run production preflight");
+            assert!(!out.status.success());
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stderr.contains("--profile dev"), "stderr: {stderr}");
+        }
+    }
 }
 
 /// `--prod` with a tag must be refused from the reference alone. The

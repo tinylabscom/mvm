@@ -255,7 +255,7 @@ pub(in crate::commands) struct RunArgs {
     #[arg(long, value_name = "ORDINAL")]
     pub gpu_device: Option<u32>,
     /// Select a security profile.
-    #[arg(long, value_enum, default_value = "standard")]
+    #[arg(long, value_enum, default_value = "dev")]
     pub profile: RunProfile,
     // One flag, two shapes, dispatched by `parse_volume_spec`:
     // `HOST:/GUEST[:ro]` materializes the directory into an ext4 image and
