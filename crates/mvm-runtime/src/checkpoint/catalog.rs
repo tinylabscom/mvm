@@ -17,7 +17,25 @@ const DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
+#[derive(Clone, Copy)]
+enum MissingMetadata {
+    Skip,
+    Refuse,
+}
+
 pub(super) fn list(store: &CheckpointStore) -> Result<Vec<CheckpointMeta>> {
+    list_with_policy(store, MissingMetadata::Skip)
+}
+
+/// Destructive guards cannot infer absent dependents from incomplete directories.
+pub(super) fn list_for_removal(store: &CheckpointStore) -> Result<Vec<CheckpointMeta>> {
+    list_with_policy(store, MissingMetadata::Refuse)
+}
+
+fn list_with_policy(
+    store: &CheckpointStore,
+    missing_metadata: MissingMetadata,
+) -> Result<Vec<CheckpointMeta>> {
     // Ancestors remain the caller's trusted prefix. Strip trailing separators
     // and current-directory components so NOFOLLOW checks the catalog itself.
     let root: std::path::PathBuf = store.root.components().collect();
@@ -26,10 +44,10 @@ pub(super) fn list(store: &CheckpointStore) -> Result<Vec<CheckpointMeta>> {
         Err(rustix::io::Errno::NOENT) => return Ok(Vec::new()),
         Err(error) => return Err(error).context("opening checkpoints directory"),
     };
-    list_opened(&root)
+    list_opened(&root, missing_metadata)
 }
 
-fn list_opened(root: &File) -> Result<Vec<CheckpointMeta>> {
+fn list_opened(root: &File, missing_metadata: MissingMetadata) -> Result<Vec<CheckpointMeta>> {
     let mut records = Vec::new();
     for entry in rustix::fs::Dir::read_from(root)? {
         let entry = entry?;
@@ -50,7 +68,9 @@ fn list_opened(root: &File) -> Result<Vec<CheckpointMeta>> {
             Mode::empty(),
         ) {
             Ok(file) => File::from(file),
-            Err(rustix::io::Errno::NOENT) => continue,
+            Err(rustix::io::Errno::NOENT) if matches!(missing_metadata, MissingMetadata::Skip) => {
+                continue;
+            }
             Err(error) => return Err(error).context("opening checkpoint metadata"),
         };
         // Ignore unrelated entries before requiring a checkpoint's lossless ID.
@@ -120,6 +140,19 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn removal_requires_metadata_for_every_visible_directory_but_listing_does_not() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = seed(root.path(), "parent");
+        std::fs::create_dir_all(root.path().join(".staging/incomplete")).unwrap();
+        std::fs::write(root.path().join("unrelated"), b"not a directory").unwrap();
+        let store = CheckpointStore::at(root.path());
+        assert_eq!(list_for_removal(&store).unwrap(), vec![parent.clone()]);
+        std::fs::create_dir(root.path().join("unknown")).unwrap();
+        assert_eq!(store.list().unwrap(), vec![parent]);
+        assert!(list_for_removal(&store).is_err());
     }
 
     #[test]
@@ -213,7 +246,10 @@ mod tests {
         let held = File::from(rustix::fs::open(&root, DIRECTORY, Mode::empty()).unwrap());
         std::fs::rename(&root, parent.path().join("moved")).unwrap();
         symlink(parent.path().join("outside"), &root).unwrap();
-        assert_eq!(list_opened(&held).unwrap(), vec![original.clone()]);
+        assert_eq!(
+            list_opened(&held, MissingMetadata::Skip).unwrap(),
+            vec![original.clone()]
+        );
         let path = parent.path().join("moved/a/meta.json");
         let file = File::open(&path).unwrap();
         std::fs::rename(&path, path.with_file_name("old.json")).unwrap();

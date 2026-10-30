@@ -1,12 +1,18 @@
 {
   "abi_major": 1,
-  "abi_minor": 10,
+  "abi_minor": 11,
   "methods": [
     {
       "classification": "prod_safe",
       "key": "checkpoint_list",
       "name": "checkpoint.list",
       "summary": "Lists complete local checkpoint metadata in deterministic ID order."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "checkpoint_remove",
+      "name": "checkpoint.remove",
+      "summary": "Remove a host-local checkpoint only after metadata, session-pin and descendant checks."
     },
     {
       "classification": "prod_safe",

@@ -642,18 +642,6 @@ fn diff(a: &str, b: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// The id of a live or hibernated session whose resume point is `digest`, if
-/// any. Delegates the pin rule to `mvm_runtime::agent_session::pinning_session`
-/// — the one place that decides whether a session's resume point still needs
-/// holding — so `rm` can tell the operator what is holding the checkpoint it
-/// refused to remove without re-deriving that rule here.
-fn session_pinning_checkpoint(
-    digest: &CheckpointDigest,
-) -> Result<Option<mvm_contract::protocol::agent_session::AgentSessionId>> {
-    let sessions = mvm_runtime::agent_session::AgentSessionStore::open();
-    mvm_runtime::agent_session::pinning_session(&sessions, digest).context("listing agent sessions")
-}
-
 /// `mvmctl vm checkpoint rm <id>`: delete a checkpoint by id.
 ///
 /// Refuses when the checkpoint is still the resume point of a live or
@@ -670,28 +658,7 @@ fn session_pinning_checkpoint(
 /// operator must close the session, or remove the descendants, first.
 fn rm(id: &str, json: bool) -> Result<()> {
     let id = validated_checkpoint_id(id)?;
-    let store = CheckpointStore::open();
-    if let Ok(meta) = store.read_meta(&id) {
-        if let Some(session_id) = session_pinning_checkpoint(&meta.meta_digest)? {
-            bail!(
-                "cannot remove checkpoint '{}': it is the resume point for agent session '{}'; \
-                 close that session before removing the checkpoint",
-                id.as_str(),
-                session_id.as_str()
-            );
-        }
-        let descendants = mvm_runtime::checkpoint::dependent_children(&store, &meta)
-            .context("listing checkpoints that name this one as their parent")?;
-        if !descendants.is_empty() {
-            bail!(
-                "cannot remove checkpoint '{}': {} through it; remove {} first",
-                id.as_str(),
-                descendants_restoring_through(&descendants),
-                if descendants.len() == 1 { "it" } else { "them" }
-            );
-        }
-    }
-    store.remove(&id)?;
+    mvm_client::checkpoint::Checkpoints::open().remove(&id)?;
     if json {
         crate::json_out::emit_json(&CheckpointRemoveJson {
             schema_version: 1,
@@ -703,18 +670,6 @@ fn rm(id: &str, json: bool) -> Result<()> {
         ui::success(&format!("checkpoint {} removed", id.as_str()));
     }
     Ok(())
-}
-
-/// `checkpoint 'a' restores` or `checkpoints 'a', 'b' restore`, for a refusal
-/// message.
-fn descendants_restoring_through(ids: &[CheckpointId]) -> String {
-    let quoted: Vec<String> = ids.iter().map(|id| format!("'{}'", id.as_str())).collect();
-    let (noun, verb) = if ids.len() == 1 {
-        ("checkpoint", "restores")
-    } else {
-        ("checkpoints", "restore")
-    };
-    format!("{noun} {} {verb}", quoted.join(", "))
 }
 
 /// JSON shape of a completed same-identity restore.
@@ -2302,18 +2257,6 @@ mod tests {
     }
 
     #[test]
-    fn descendants_restoring_through_agrees_in_number() {
-        assert_eq!(
-            descendants_restoring_through(&[CheckpointId::new("a")]),
-            "checkpoint 'a' restores"
-        );
-        assert_eq!(
-            descendants_restoring_through(&[CheckpointId::new("a"), CheckpointId::new("b")]),
-            "checkpoints 'a', 'b' restore"
-        );
-    }
-
-    #[test]
     fn rm_removes_a_checkpoint_no_session_pins() {
         use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
 
@@ -2340,6 +2283,45 @@ mod tests {
                 .is_err(),
             "a checkpoint no session pins must still be removable"
         );
+    }
+
+    #[test]
+    fn rm_refuses_incomplete_or_unreadable_metadata_without_deleting_content() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        let store = CheckpointStore::open();
+        for name in ["missing-meta", "corrupt-meta"] {
+            let id = CheckpointId::new(name);
+            let directory = store.dir_for(&id);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("keep"), b"checkpoint content").unwrap();
+            if name == "corrupt-meta" {
+                std::fs::write(directory.join("meta.json"), b"{").unwrap();
+            }
+            assert!(rm(name, false).is_err(), "{name}");
+            assert!(directory.join("keep").is_file(), "{name}");
+        }
+    }
+
+    #[test]
+    fn rm_failed_pin_lookup_preserves_the_checkpoint() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        let store = CheckpointStore::open();
+        let id = CheckpointId::new("guarded");
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            id.clone(),
+            mvm_core::checkpoint::CheckpointClass::FsQuick,
+            "vm",
+        )
+        .build();
+        store.write_meta(&meta).unwrap();
+        std::fs::create_dir_all(mvm_core::config::agent_sessions_dir().join("sess-incomplete"))
+            .unwrap();
+        assert!(rm(id.as_str(), false).is_err());
+        assert_eq!(store.read_meta(&id).unwrap(), meta);
     }
 
     #[test]

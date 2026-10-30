@@ -152,6 +152,24 @@ impl CheckpointStore {
         catalog::list(self)
     }
 
+    /// Observe metadata for a removal plan, refusing incomplete visible directories.
+    ///
+    /// Unlike [`Self::list`], every observed non-hidden directory must carry
+    /// readable metadata: a missing record cannot establish absent dependents.
+    /// Missing roots, hidden staging and non-directory entries retain the
+    /// ordinary listing behavior.
+    ///
+    /// This read acquires no lock, grants no deletion authority and is not
+    /// atomic with concurrent publication, pin changes or deletion.
+    ///
+    /// # Errors
+    ///
+    /// Missing, unreadable, malformed, unsafe or misbound metadata refuses the
+    /// whole observation before a caller can build its removal plan.
+    pub fn list_for_removal(&self) -> Result<Vec<CheckpointMeta>> {
+        catalog::list_for_removal(self)
+    }
+
     pub fn by_tag(&self, tag: &str) -> Result<Vec<CheckpointMeta>> {
         Ok(self
             .list()?
