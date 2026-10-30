@@ -269,6 +269,7 @@ mod tests {
 
     #[test]
     fn acquire_cold_boots_when_pool_is_empty() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
         let mock = Arc::new(MockBackend::new()); // no standby support
@@ -294,6 +295,7 @@ mod tests {
 
     #[test]
     fn acquire_claims_a_compatible_idle_standby_and_release_replenishes() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
         pool.record(&handle("sb-1")).unwrap();
@@ -328,6 +330,7 @@ mod tests {
 
     #[test]
     fn dropping_a_claimed_lease_stops_and_replenishes() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
         pool.record(&handle("sb-2")).unwrap();
@@ -354,6 +357,7 @@ mod tests {
 
     #[test]
     fn release_surfaces_a_stop_error_that_drop_would_swallow() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
         let mock = Arc::new(MockBackend::new().with_failing_stop());

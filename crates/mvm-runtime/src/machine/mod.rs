@@ -370,6 +370,7 @@ mod tests {
         use crate::mock::MockBackend;
         use mvm_core::vm_backend::VmBackend;
 
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let machine = Machine::builder().image("alpine").build().unwrap();
         let cfg = machine.to_start_config(LaunchInputs {
             name: "m1".into(),
