@@ -82,6 +82,8 @@ printf '%s\n' 'tell me a joke' | mvmctl run agent/claude
 
 The readiness reads precede version/search in the implementation. The final
 invocation uses an actual stdin pipe containing exactly `tell me a joke\n`.
+The fixed prompt is written and the pipe's writer closed before spawning the
+CLI, so its immediate stdin-readiness check sees both the payload and EOF.
 There is one invocation and no automatic retry. A durable create-only
 `MVM_HOME/claude-demo-attempt.json` reservation is synced **before** spawning.
 Failure or interruption never releases that reservation.
