@@ -32,6 +32,8 @@ impl VolumeImageLock {
 /// Read-only files must already exist and are never created or modified. Existing
 /// files are never resized or reformatted, and are refused unless their ext4
 /// superblock magic is valid.
+/// Read-write callers acquire the sidecar lock before inspecting or mutating the
+/// image, so a refused contender cannot create, resize or format it.
 pub fn ensure_persistent_volume_image(
     host_path: &Path,
     size_bytes: u64,
@@ -58,6 +60,10 @@ pub(crate) fn ensure_persistent_volume_image_within(
     }
 
     prepare_private_parent(host_path)?;
+    let lock = Some(acquire_sidecar_lock_within(
+        &sidecar_lock_path(host_path),
+        wait,
+    )?);
     create_or_admit_private_image(host_path)?;
 
     let needs_format = match std::fs::metadata(host_path) {
@@ -76,10 +82,6 @@ pub(crate) fn ensure_persistent_volume_image_within(
     }
     validate_ext4(host_path)?;
 
-    let lock = Some(acquire_sidecar_lock_within(
-        &sidecar_lock_path(host_path),
-        wait,
-    )?);
     Ok(VolumeImageLock {
         path: host_path.to_path_buf(),
         _lock: lock,
@@ -247,6 +249,86 @@ mod tests {
 
     fn rw(path: &Path) -> Result<VolumeImageLock, BuilderVmError> {
         ensure_persistent_volume_image_within(path, SIZE, false, LockWait::none())
+    }
+
+    #[test]
+    fn a_contended_volume_lock_refuses_before_resizing_or_formatting() {
+        let scratch = tempfile::tempdir().unwrap();
+        let image = scratch.path().join("data.img");
+        std::fs::write(&image, []).unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _original_owner =
+            acquire_sidecar_lock_within(&sidecar_lock_path(&image), LockWait::none()).unwrap();
+        assert_eq!(std::fs::metadata(&image).unwrap().len(), 0);
+
+        let error = rw(&image).expect_err("the original owner still holds the lock");
+
+        assert_eq!(
+            std::fs::metadata(&image).unwrap().len(),
+            0,
+            "a refused contender must not resize or format the owner's image: {error}"
+        );
+        assert!(std::fs::read(&image).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_contended_volume_lock_refuses_before_creating_the_image() {
+        let scratch = tempfile::tempdir().unwrap();
+        let image = scratch.path().join("data.img");
+        let owner =
+            acquire_sidecar_lock_within(&sidecar_lock_path(&image), LockWait::none()).unwrap();
+
+        rw(&image).expect_err("the original owner still holds the lock");
+
+        assert!(
+            !image.try_exists().unwrap(),
+            "a refused contender must not create the owner's image"
+        );
+        drop(owner);
+        let initialized = rw(&image).expect("initialize after the owner releases");
+        validate_ext4(initialized.path()).expect("the successful initializer formats ext4");
+        assert_eq!(mode(&image), 0o600);
+    }
+
+    #[test]
+    fn a_contender_reuses_the_owners_initialized_bytes_after_release() {
+        use std::io::Write as _;
+
+        let scratch = tempfile::tempdir().unwrap();
+        let image = scratch.path().join("data.img");
+        std::fs::write(&image, []).unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let owner =
+            acquire_sidecar_lock_within(&sidecar_lock_path(&image), LockWait::none()).unwrap();
+        rw(&image).expect_err("contender observes an unfinished image under another lock");
+
+        // The owner finishes initialization before allowing a contender to retry.
+        sparse_create_image(&image, SIZE).unwrap();
+        format_new_ext4(&image).unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .unwrap();
+        writer.write_all(b"owner-written bytes").unwrap();
+        writer.sync_all().unwrap();
+        drop(writer);
+        let expected = std::fs::read(&image).unwrap();
+
+        rw(&image).expect_err("a complete image still requires its owner's lock");
+        assert_eq!(std::fs::read(&image).unwrap(), expected);
+        let readonly =
+            ensure_persistent_volume_image_within(&image, SIZE, true, LockWait::none()).unwrap();
+        assert!(readonly._lock.is_none(), "read-only behavior is unchanged");
+        drop(readonly);
+        drop(owner);
+
+        let _contender = rw(&image).expect("recheck current image state after acquiring the lock");
+        assert_eq!(
+            std::fs::read(&image).unwrap(),
+            expected,
+            "a former contender must not reuse an earlier needs-format decision"
+        );
+        assert_eq!(mode(&image), 0o600);
     }
 
     #[test]
