@@ -12,7 +12,7 @@
 
 use anyhow::{Context, Result, bail};
 use mvm_client::policy_profiles::{
-    LaunchFlags, Platform, PolicyBody, PolicySelection, PolicyStore, ProjectPolicy, fold, resolve,
+    LaunchFlags, Platform, PolicyBody, PolicyStore, ProjectPolicy, fold, resolve,
 };
 
 /// What `build_machine_spec` asks of the policy.
@@ -66,7 +66,7 @@ fn refuse_unrecordable(policy: &PolicyBody) -> Result<()> {
 /// the policy denies, blocks or bounds.
 pub(super) fn machine_policy(inputs: MachinePolicyInputs<'_>) -> Result<MachinePolicy> {
     let config = mvm_core::user_config::load_strict(None)?;
-    let selection = PolicySelection::for_launch_with_defaults(
+    let selection = crate::commands::shared::select_launch_policy(
         inputs.policies,
         inputs.project.cloned(),
         &config.default_policy,

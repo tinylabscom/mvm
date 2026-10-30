@@ -13,8 +13,8 @@
 
 use anyhow::{Context, Result};
 use mvm_client::policy_profiles::{
-    LaunchFlags, Platform, PolicyRef, PolicySelection, PolicyStore, ProjectPolicy,
-    ResolvedManifest, ResolvedPolicy, fold, resolve,
+    LaunchFlags, Platform, PolicyRef, PolicyStore, ProjectPolicy, ResolvedManifest, ResolvedPolicy,
+    fold, resolve,
 };
 
 use super::exec::RunArgs;
@@ -127,8 +127,11 @@ fn select(args: &RunArgs) -> Result<Option<Selected>> {
     }
     let project = super::run_routes::project_manifest(args)?
         .map(|(path, manifest)| ProjectPolicy::from_manifest(&path, &manifest));
-    let Some(selection) =
-        PolicySelection::for_launch_with_defaults(&args.policy, project, &config.default_policy)?
+    let Some(selection) = crate::commands::shared::select_launch_policy(
+        &args.policy,
+        project,
+        &config.default_policy,
+    )?
     else {
         return Ok(None);
     };

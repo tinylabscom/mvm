@@ -37,6 +37,7 @@ pub(super) use parse::{
     validate_volume_spec, vm_volume_from_spec_validated,
 };
 pub(in crate::commands) use parse::{parse_output_spec, resolve_output_destination};
+pub(in crate::commands) use resolve::select_launch_policy;
 pub(crate) use resolve::{ManifestArgRef, resolve_manifest_arg};
 pub(super) use resolve::{egress_enforcement_label, launch_uses_oci_image, resolve_flake_ref};
 pub(in crate::commands) use signed_input::read_signed_input;
