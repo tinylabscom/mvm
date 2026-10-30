@@ -119,6 +119,21 @@ pub struct RemoveOptions {
     pub force: bool,
 }
 
+struct CommandStartFailure {
+    command: anyhow::Error,
+    stop: Result<()>,
+}
+
+impl CommandStartFailure {
+    fn into_error(self) -> MvmError {
+        let reason = match self.stop {
+            Ok(()) => format!("{:#}", self.command),
+            Err(stop) => format!("{:#}; rollback stop failed: {stop}", self.command),
+        };
+        MvmError::Backend { reason }
+    }
+}
+
 /// Generate a name for a nameless transient launch.
 fn generated_transient_name() -> String {
     let n: u64 = rand::random();
@@ -802,7 +817,7 @@ impl LocalBackend {
             )),
             mp::SpecReconcile::Recreate { changed } => {
                 if self.machine_running(name) {
-                    self.stop_for_recreate(name);
+                    self.stop_for_recreate(name)?;
                 }
                 mp::overwrite_machine_spec(&desired).map_err(crate::local::backend_err)?;
                 mvm_core::audit_emit!(
@@ -815,17 +830,16 @@ impl LocalBackend {
         }
     }
 
-    /// Stop the old instance ahead of a forced recreate. Best-effort: the
-    /// overwrite proceeds either way and the boot surfaces any leftover.
-    fn stop_for_recreate(&self, name: &str) {
+    /// Refuse destructive follow-up when the existing instance cannot be stopped.
+    fn stop_for_recreate(&self, name: &str) -> Result<()> {
         let vid = VmId(name.to_string());
         let result = match AnyBackend::for_started_vm(name) {
             Some(owner) => owner.stop(&vid),
             None => self.backend.stop(&vid),
         };
-        if let Err(e) = result {
-            tracing::warn!(error = %e, machine = name, "stopping old instance before recreate failed");
-        }
+        result.map(|_| ()).map_err(|error| {
+            crate::local::backend_err(format!("stopping machine {name:?}: {error:#}"))
+        })
     }
 
     /// Launch a machine from a fully-validated typed request. Transient
@@ -847,7 +861,15 @@ impl LocalBackend {
                     .expect("validated: persistent requests carry a name");
                 let (_, origin) = self.create_definition(&request, &name)?;
                 let booted = self.boot_persistent(&name, &request).await;
-                self.discard_definition_on_failure(&name, origin, booted)
+                let outcome = self.discard_definition_on_failure(&name, origin, booted)?;
+                match self.start_requested_command(outcome, &request) {
+                    Ok(outcome) => Ok(outcome),
+                    // A later name-based observation cannot erase a known stop error.
+                    Err(failure) if failure.stop.is_err() => Err(failure.into_error()),
+                    Err(failure) => {
+                        self.discard_definition_on_failure(&name, origin, Err(failure.into_error()))
+                    }
+                }
             }
         }
     }
@@ -954,7 +976,7 @@ impl LocalBackend {
             plan,
             launched_at: Some(launched_at),
         };
-        self.start_requested_command(outcome, request)
+        Ok(outcome)
     }
 
     /// Boot a persisted definition through the admitted start the CLI's
@@ -1000,14 +1022,13 @@ impl LocalBackend {
     }
 
     /// Start the request's command in the machine the launch just booted, and
-    /// record its token on the outcome. A command that will not start fails
-    /// the launch and stops the machine: the caller asked for a machine
-    /// running that command, not an idle one.
+    /// record its token on the outcome. A command failure attempts stop and
+    /// retains its actual result until the caller decides whether to clean up.
     fn start_requested_command(
         &self,
         mut outcome: LaunchOutcome,
         request: &LaunchRequest,
-    ) -> Result<LaunchOutcome> {
+    ) -> std::result::Result<LaunchOutcome, CommandStartFailure> {
         if request.command.is_empty() {
             return Ok(outcome);
         }
@@ -1025,12 +1046,10 @@ impl LocalBackend {
                 outcome.process = Some(token);
                 Ok(outcome)
             }
-            Err(e) => {
-                self.stop_for_recreate(&name);
-                Err(MvmError::Backend {
-                    reason: format!("{e:#}"),
-                })
-            }
+            Err(command) => Err(CommandStartFailure {
+                command,
+                stop: self.stop_for_recreate(&name),
+            }),
         }
     }
 
@@ -1265,7 +1284,8 @@ impl LocalBackend {
     /// is refused unless `options.force` explicitly requests the reviewed
     /// force flow (stop, then remove). A spec-less name gets transient
     /// semantics: stop + idempotent session cleanup. Removing an absent
-    /// machine is `Ok`.
+    /// machine is `Ok`. A failed stop preserves the definition and resources;
+    /// force does not bypass that failure.
     pub async fn remove_machine_with(&self, id: &MachineId, options: RemoveOptions) -> Result<()> {
         let name = id.0.as_str();
         let has_spec = machine_spec_path(name).exists();
@@ -1279,7 +1299,7 @@ impl LocalBackend {
                         ),
                     });
                 }
-                self.stop_for_recreate(name);
+                self.stop_for_recreate(name)?;
             }
             self.remove_definition(name)?;
             mvm_core::audit_emit!(
@@ -1321,10 +1341,11 @@ impl LocalBackend {
 
     /// Idempotent transient cleanup: stop the VM when live, release every
     /// session-owned resource, and drop the per-VM state dirs. Safe to call
-    /// repeatedly and on names that never launched.
+    /// repeatedly and on names that never launched. An attempted stop error
+    /// returns before any session resource is released.
     pub fn cleanup_transient(&self, name: &str) -> Result<()> {
         if self.machine_running(name) {
-            self.stop_for_recreate(name);
+            self.stop_for_recreate(name)?;
         }
         self.release_session_resources(name)?;
         remove_vm_runtime_dirs(name)?;

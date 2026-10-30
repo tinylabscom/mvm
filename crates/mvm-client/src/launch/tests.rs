@@ -59,6 +59,13 @@ fn mock_client() -> LocalBackend {
     LocalBackend::with_hypervisor("mock")
 }
 
+fn client_with_failing_stop() -> (LocalBackend, AnyBackend) {
+    let mock = mvm_runtime::MockBackend::new();
+    let mut client = mock_client();
+    client.backend = AnyBackend::Mock(mock.clone().with_failing_stop());
+    (client, AnyBackend::Mock(mock))
+}
+
 /// A file-store-backed secret service rooted inside the isolated home whose
 /// machines root matches the launch path's sidecar location.
 fn fixture_secret_service(home: &Isolated) -> Arc<SecretService> {
@@ -786,6 +793,233 @@ async fn removing_a_running_persistent_machine_needs_the_force_flow() {
 }
 
 #[tokio::test]
+async fn failed_stop_preserves_persistent_definition_on_force_remove() {
+    let home = Isolated::new();
+    let (client, cleanup) = client_with_failing_stop();
+    let name = "p-failed-remove";
+    let outcome = client
+        .launch(persistent_request(&home.rootfs(), name).build().unwrap())
+        .await
+        .expect("launch");
+    let path = machine_spec_path(name);
+    let before = std::fs::read(&path).unwrap();
+
+    let error = client
+        .remove_machine_with(&outcome.machine.id, RemoveOptions { force: true })
+        .await
+        .expect_err("failed stop must prevent removal");
+
+    assert!(error.to_string().contains("forced stop failure"), "{error}");
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert!(client.machine_running(name));
+    cleanup.stop(&VmId(name.into())).unwrap();
+}
+
+#[tokio::test]
+async fn failed_stop_preserves_persistent_definition_on_force_recreate() {
+    let home = Isolated::new();
+    let (client, cleanup) = client_with_failing_stop();
+    let name = "p-failed-recreate";
+    let rootfs = home.rootfs();
+    client
+        .launch(persistent_request(&rootfs, name).cpus(1).build().unwrap())
+        .await
+        .expect("launch");
+    let path = machine_spec_path(name);
+    let before = std::fs::read(&path).unwrap();
+    let replacement = persistent_request(&rootfs, name)
+        .cpus(4)
+        .force(true)
+        .build()
+        .unwrap();
+
+    let error = client
+        .create_from_request(&replacement)
+        .expect_err("failed stop must prevent replacement");
+
+    assert!(error.to_string().contains("forced stop failure"), "{error}");
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert!(client.machine_running(name));
+    cleanup.stop(&VmId(name.into())).unwrap();
+}
+
+#[tokio::test]
+async fn failed_stop_preserves_transient_sidecar_and_runtime_state() {
+    let home = Isolated::new();
+    let (client, cleanup) = client_with_failing_stop();
+    let service = fixture_secret_service(&home);
+    let secret_ref = seeded_secret_ref(&service);
+    let client = client.with_secret_service(service);
+    let name = "t-failed-cleanup";
+    client
+        .launch(
+            transient_request(&home.rootfs())
+                .name(name)
+                .secret_ref(secret_ref)
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("launch");
+    let sidecar = machine_state_dir(name).join(crate::secret::refs::MACHINE_SECRET_REFS_FILENAME);
+    let before = std::fs::read(&sidecar).unwrap();
+    let runtime = vm_state_dir(name);
+    std::fs::create_dir_all(&runtime).unwrap();
+    let retained = runtime.join("retained-state");
+    std::fs::write(&retained, b"original runtime state").unwrap();
+
+    let error = client
+        .cleanup_transient(name)
+        .expect_err("failed stop must prevent session cleanup");
+
+    assert!(error.to_string().contains("forced stop failure"), "{error}");
+    assert_eq!(std::fs::read(sidecar).unwrap(), before);
+    assert_eq!(std::fs::read(retained).unwrap(), b"original runtime state");
+    assert!(client.machine_running(name));
+    cleanup.stop(&VmId(name.into())).unwrap();
+}
+
+#[tokio::test]
+async fn failed_stop_during_command_rollback_preserves_persistent_state() {
+    use crate::volume::CreateBlockVolumeRequest;
+
+    for existing in [false, true] {
+        for observed_running in [true, false] {
+            let home = Isolated::new();
+            let (client, cleanup) = client_with_failing_stop();
+            let service = fixture_secret_service(&home);
+            let secret_ref = seeded_secret_ref(&service);
+            let starter = Arc::new(RecordingStarter {
+                refuse: true,
+                stop_before_refusal: (!observed_running).then(|| cleanup.handle()),
+                ..Default::default()
+            });
+            let client = client
+                .with_secret_service(service)
+                .with_command_starter(starter.clone());
+            let volumes = crate::volume::test_support::service();
+            volumes
+                .create_block_volume(
+                    &CreateBlockVolumeRequest::builder("work")
+                        .unwrap()
+                        .capacity_mib(crate::volume::test_support::TEST_VOLUME_MIB)
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            volumes.unlock_volume("work").unwrap();
+            let name = "p-failed-command-stop";
+            let rootfs = home.rootfs();
+            let request = persistent_request(&rootfs, name)
+                .secret_ref(secret_ref)
+                .volume(LaunchVolumeSpec {
+                    volume: "work".into(),
+                    guest_path: "/data/work".into(),
+                    access: AccessMode::ReadOnly,
+                });
+            if existing {
+                client
+                    .create_from_request(&request.clone().build().unwrap())
+                    .unwrap();
+            }
+            let request = request.command(["/bin/serve".to_string()]).build().unwrap();
+
+            let error = client.launch(request).await.expect_err("command refused");
+
+            starter.assert_retained_state();
+            assert_eq!(starter.started.lock().unwrap().len(), 1);
+            assert!(machine_spec_path(name).exists());
+            assert_eq!(client.machine_running(name), observed_running);
+            assert_eq!(
+                volumes
+                    .describe_volume("work")
+                    .unwrap()
+                    .attached_to
+                    .as_deref(),
+                Some(name),
+                "failed stop cannot release the volume lease"
+            );
+            let message = error.to_string();
+            let primary = message
+                .find("guest refused the command")
+                .expect("primary error");
+            let rollback = message.find("forced stop failure").expect("rollback error");
+            assert!(primary < rollback, "{message}");
+            cleanup.stop(&VmId(name.into())).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_stop_during_transient_command_rollback_preserves_state() {
+    use crate::volume::CreateBlockVolumeRequest;
+
+    for observed_running in [true, false] {
+        let home = Isolated::new();
+        let (client, cleanup) = client_with_failing_stop();
+        let service = fixture_secret_service(&home);
+        let secret_ref = seeded_secret_ref(&service);
+        let starter = Arc::new(RecordingStarter {
+            refuse: true,
+            stop_before_refusal: (!observed_running).then(|| cleanup.handle()),
+            ..Default::default()
+        });
+        let client = client
+            .with_secret_service(service)
+            .with_command_starter(starter.clone());
+        let volumes = crate::volume::test_support::service();
+        volumes
+            .create_block_volume(
+                &CreateBlockVolumeRequest::builder("work")
+                    .unwrap()
+                    .capacity_mib(crate::volume::test_support::TEST_VOLUME_MIB)
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        volumes.unlock_volume("work").unwrap();
+        let name = "t-failed-command-stop";
+        let request = transient_request(&home.rootfs())
+            .name(name)
+            .secret_ref(secret_ref)
+            .volume(LaunchVolumeSpec {
+                volume: "work".into(),
+                guest_path: "/data/work".into(),
+                access: AccessMode::ReadOnly,
+            })
+            .command(["/bin/serve".to_string()])
+            .build()
+            .unwrap();
+        // Transient boot acquires attachments that are already registered.
+        client
+            .register_volume_attachments(
+                name,
+                &request.volumes,
+                AdmittedProfile::from_profile_name(&request.profile),
+            )
+            .unwrap();
+
+        let error = client.launch(request).await.expect_err("command refused");
+
+        starter.assert_retained_state();
+        assert_eq!(starter.started.lock().unwrap().len(), 1);
+        assert_eq!(client.machine_running(name), observed_running);
+        assert_eq!(
+            volumes
+                .describe_volume("work")
+                .unwrap()
+                .attached_to
+                .as_deref(),
+            Some(name)
+        );
+        let message = error.to_string();
+        assert!(message.contains("guest refused the command"), "{message}");
+        assert!(message.contains("forced stop failure"), "{message}");
+        cleanup.stop(&VmId(name.into())).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
     let _home = Isolated::new();
     let client = mock_client();
@@ -1369,6 +1603,18 @@ fn launch_request_refuses_a_malformed_port_before_anything_is_persisted() {
 struct RecordingStarter {
     started: std::sync::Mutex<Vec<(String, super::detached::BootCommand)>>,
     refuse: bool,
+    stop_before_refusal: Option<AnyBackend>,
+    retained_state: std::sync::Mutex<Vec<(PathBuf, Vec<u8>)>>,
+}
+
+impl RecordingStarter {
+    fn assert_retained_state(&self) {
+        let retained = self.retained_state.lock().unwrap();
+        assert!(retained.len() >= 2, "capture the sidecar and runtime state");
+        for (path, before) in retained.iter() {
+            assert_eq!(std::fs::read(path).unwrap(), *before, "{}", path.display());
+        }
+    }
 }
 
 impl super::detached::CommandStarter for RecordingStarter {
@@ -1378,6 +1624,25 @@ impl super::detached::CommandStarter for RecordingStarter {
             .expect("recorder lock")
             .push((name.to_string(), command));
         if self.refuse {
+            let runtime = vm_state_dir(name);
+            std::fs::create_dir_all(&runtime)?;
+            let marker = runtime.join("command-rollback-state");
+            std::fs::write(&marker, b"original post-boot state")?;
+            for path in [
+                machine_spec_path(name),
+                machine_state_dir(name).join(crate::secret::refs::MACHINE_SECRET_REFS_FILENAME),
+                marker,
+            ] {
+                if path.exists() {
+                    self.retained_state
+                        .lock()
+                        .expect("retained state lock")
+                        .push((path.clone(), std::fs::read(&path)?));
+                }
+            }
+            if let Some(backend) = &self.stop_before_refusal {
+                backend.stop(&VmId(name.into()))?;
+            }
             anyhow::bail!("the guest refused the command");
         }
         Ok("proc-1".to_string())
@@ -1482,6 +1747,38 @@ async fn a_command_the_guest_refuses_fails_the_launch_and_stops_the_machine() {
             .all(|m| m.status != mvm_core::client::dto::MachineStatus::Running),
         "{listed:?}"
     );
+}
+
+#[tokio::test]
+async fn successful_command_rollback_removes_only_a_new_definition() {
+    for existing in [false, true] {
+        let home = Isolated::new();
+        let starter = Arc::new(RecordingStarter {
+            refuse: true,
+            ..Default::default()
+        });
+        let client = client_starting_commands_with(&starter);
+        let name = "p-command-rollback-ok";
+        let request = persistent_request(&home.rootfs(), name);
+        if existing {
+            client
+                .create_from_request(&request.clone().build().unwrap())
+                .unwrap();
+        }
+        let error = client
+            .launch(request.command(["/bin/serve".to_string()]).build().unwrap())
+            .await
+            .expect_err("command refused");
+
+        assert!(error.to_string().contains("guest refused the command"));
+        assert!(!client.machine_running(name));
+        assert_eq!(machine_spec_path(name).exists(), existing);
+        assert_eq!(
+            vm_state_dir(name).join("command-rollback-state").exists(),
+            existing
+        );
+        assert_eq!(starter.started.lock().unwrap().len(), 1);
+    }
 }
 
 #[test]

@@ -41,8 +41,9 @@ impl LocalBackend {
 
     /// Settle `result` for a launch whose definition has `origin`: a failure
     /// removes a definition this launch created, stopping its machine first
-    /// if the failure came after the boot. The launch's own error is what the
-    /// caller gets either way; a removal that also fails is logged beside it.
+    /// if the failure came after the boot. A failed stop preserves its state.
+    /// The launch's own error is returned; an additional rollback failure is
+    /// logged separately.
     pub(super) fn discard_definition_on_failure<T>(
         &self,
         name: &str,
@@ -50,8 +51,15 @@ impl LocalBackend {
         result: Result<T>,
     ) -> Result<T> {
         if result.is_err() && origin == DefinitionOrigin::Created {
-            if self.machine_running(name) {
-                self.stop_for_recreate(name);
+            if self.machine_running(name)
+                && let Err(stop) = self.stop_for_recreate(name)
+            {
+                tracing::warn!(
+                    error = %stop,
+                    machine = name,
+                    "rollback stop failed; preserving the failed launch definition and resources"
+                );
+                return result;
             }
             match self.remove_definition(name) {
                 Ok(()) => mvm_core::audit_emit!(
