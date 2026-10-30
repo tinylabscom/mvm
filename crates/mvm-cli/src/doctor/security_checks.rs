@@ -1421,7 +1421,7 @@ mod tests {
         // reconciled, so it is worth holding.
         assert_eq!(
             profile,
-            crate::commands::RunProfile::Standard,
+            crate::commands::RunProfile::Dev,
             "if the default moves, this line's claim about both verbs needs re-checking"
         );
     }

@@ -114,10 +114,14 @@ the VM boots.
 ### Resolver — pluggable, identical story with or without a fleet control plane
 
 A `SecretResolver` trait resolves a secret reference (name + auth-type +
-allowed-hosts) to material at substitution time. The local backend is the
-OS keyring or an encrypted file (`KeyProvider` in `mvm-core::crypto`:
-`KeyringProvider` layered over a file fallback), configured with `mvmctl
-secret set <NAME> --host <allowed-host> --type sigv4|hmac|bearer|basic`.
+allowed-hosts) to material at substitution time. `LocalResolver` reads named
+credential values through `mvm-core::crypto::secret_store::SecretStore`.
+The network endpoint's local resolver selects the encrypted `FileSecretStore`;
+it does not select the CLI's keyring/auto store. The separate
+`mvm-core::crypto::keystore::KeyProvider` boundary retrieves tenant
+data-encryption keys, not named credential values; `KeyringProvider` implements
+that key-retrieval boundary. Secret values and bindings are configured with
+`mvmctl secret set <NAME> --host <allowed-host> --type sigv4|hmac|bearer|basic`.
 The value can be read, on the host and once, from where it already lives —
 `--from env://…`, `file://…`, `keychain://…`, `op://…` or `bw://…` — instead of
 being typed. The password-manager CLIs run only from `PATH` directories

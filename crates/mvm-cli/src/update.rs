@@ -2095,6 +2095,7 @@ mod tests {
 
     #[test]
     fn source_helper_routing_uses_new_tag_then_only_archive_404_falls_back() {
+        let _env = TestEnv::new();
         let commit = "a".repeat(40);
         let archive = format!("mvm-host-helpers-{commit}-test.tar.gz");
         for (statuses, override_base, legacy) in [
@@ -2152,6 +2153,7 @@ mod tests {
 
     #[test]
     fn source_helper_non_404_and_explicit_missing_never_fall_back() {
+        let _env = TestEnv::new();
         for (status, explicit) in [(401, false), (403, false), (500, false), (404, true)] {
             let (base, requests) = source_helper_server(vec![status]);
             let tmp = tempfile::tempdir().unwrap();
@@ -2179,6 +2181,7 @@ mod tests {
 
     #[test]
     fn source_helper_invalid_commit_and_transport_failure_are_errors() {
+        let _env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         for commit in ["main".to_owned(), "A".repeat(40), "a".repeat(40)] {
             assert!(

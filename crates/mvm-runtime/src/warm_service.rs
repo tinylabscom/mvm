@@ -418,6 +418,7 @@ mod integration_tests {
 
     #[test]
     fn service_claims_and_releases_the_owned_lease() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let pool_root = tempfile::tempdir().expect("pool tempdir");
         let pool = SupervisorStandbyPool::at(pool_root.path());
         let shape = compatibility();
@@ -466,6 +467,7 @@ mod integration_tests {
 
     #[test]
     fn service_reports_cold_fallback_and_retains_failed_release() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let pool_root = tempfile::tempdir().expect("pool tempdir");
         let pool = SupervisorStandbyPool::at(pool_root.path());
         let backend: Arc<dyn VmBackend> = Arc::new(crate::MockBackend::new().with_failing_stop());

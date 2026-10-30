@@ -53,7 +53,11 @@ exists applies the same check at registration, so a `restrictive` machine
 refuses the registration rather than the next start. A read-only managed
 volume is accepted under every profile.
 
-The default is `standard`. Use `restrictive` when the workload does not need
+The interactive CLI default is `dev`. Signed package posture ceilings and
+admission gates still apply: this does not turn a sealed package into a
+development image. Production-safe CLI runs must explicitly select
+`--prod --profile standard`; daemon launch defaults are unchanged.
+Use `restrictive` when the workload does not need
 host files or host-provided environment values:
 
 ```sh

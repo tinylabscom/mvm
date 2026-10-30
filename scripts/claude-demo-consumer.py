@@ -110,20 +110,22 @@ def dispatch_once(args, env, evidence, report):
     persist(evidence, report)
     # Regular private log files keep the original CLI independent of this
     # observer's lifetime. No group kill, numeric signal, stop or credential cleanup.
-    with (evidence / "joke.stdout").open("xb") as stdout, \
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb") as stdin, os.fdopen(write_fd, "wb") as prompt, \
+            (evidence / "joke.stdout").open("xb") as stdout, \
             (evidence / "joke.stderr").open("xb") as stderr:
+        # This fixed 14-byte payload fits in an empty pipe. Make bytes and EOF
+        # ready before exec: the CLI intentionally ignores idle inherited pipes.
+        prompt.write(PROMPT)
+        prompt.close()
         process = subprocess.Popen(record["argv"], cwd=evidence, env=env,
-                                   stdin=subprocess.PIPE, stdout=stdout, stderr=stderr,
+                                   stdin=stdin, stdout=stdout, stderr=stderr,
                                    start_new_session=True)
         record["owner_pid_observation_only"] = process.pid
         persist(evidence, report)
         try:
-            process.stdin.write(PROMPT)
-            process.stdin.close()
             record["returncode"] = process.wait(timeout=args.run_timeout)
         finally:
-            if not process.stdin.closed:
-                process.stdin.close()
             persist(evidence, report)
     require(record["returncode"] == 0, "joke command failed; retain original owner and evidence")
     paths = [evidence / "joke.stdout", evidence / "joke.stderr"]

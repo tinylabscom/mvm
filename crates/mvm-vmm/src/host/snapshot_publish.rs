@@ -9,6 +9,7 @@
 //! the next turn of the pause hold tries again, and records why in
 //! [`ERROR_FILE`] for the host to quote if it never publishes.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Why the last capture attempt was refused, beside the request file.
@@ -51,10 +52,16 @@ pub fn clear_error(state_dir: &Path) {
 }
 
 /// The reason the supervisor last gave for not publishing, if it gave one.
+///
+/// Oversized, malformed or unreadable records are ignored. The byte limit does
+/// not bound filesystem wait time or prevent following links.
 pub fn last_error(state_dir: &Path) -> Option<String> {
-    std::fs::read_to_string(state_dir.join(ERROR_FILE))
-        .ok()
-        .filter(|reason| !reason.is_empty())
+    let file = std::fs::File::open(state_dir.join(ERROR_FILE)).ok()?;
+    let mut reason = String::new();
+    file.take((MAX_REASON_BYTES + 1) as u64)
+        .read_to_string(&mut reason)
+        .ok()?;
+    (!reason.is_empty() && reason.len() <= MAX_REASON_BYTES).then_some(reason)
 }
 
 #[cfg(test)]
@@ -94,6 +101,50 @@ mod tests {
         let kept = last_error(dir.path()).unwrap();
         assert!(kept.len() <= MAX_REASON_BYTES);
         assert!(kept.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn a_reason_at_the_byte_limit_is_preserved_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let reason = "é".repeat(MAX_REASON_BYTES / 2);
+        std::fs::write(dir.path().join(ERROR_FILE), &reason).unwrap();
+        assert_eq!(last_error(dir.path()), Some(reason));
+    }
+
+    #[test]
+    fn an_oversized_replacement_is_not_a_refusal_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = dir.path().join("snapshot.request");
+        settle_attempt(&request, &mut String::new(), Err("device busy".into()));
+        assert_eq!(last_error(dir.path()).as_deref(), Some("device busy"));
+
+        for size in [MAX_REASON_BYTES + 1, MAX_REASON_BYTES * 1024] {
+            let replacement = dir.path().join("replacement");
+            std::fs::write(&replacement, "x".repeat(size)).unwrap();
+            std::fs::rename(&replacement, dir.path().join(ERROR_FILE)).unwrap();
+            assert_eq!(last_error(dir.path()), None, "replacement size {size}");
+        }
+    }
+
+    #[test]
+    fn malformed_utf8_is_not_a_refusal_record() {
+        let dir = tempfile::tempdir().unwrap();
+        for bytes in [b"busy\xff".as_slice(), b"busy\xc3".as_slice()] {
+            std::fs::write(dir.path().join(ERROR_FILE), bytes).unwrap();
+            assert_eq!(last_error(dir.path()), None);
+        }
+    }
+
+    #[test]
+    fn missing_empty_or_unreadable_records_add_no_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(last_error(dir.path()), None);
+        let path = dir.path().join(ERROR_FILE);
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(last_error(dir.path()), None);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(last_error(dir.path()), None);
     }
 
     #[test]

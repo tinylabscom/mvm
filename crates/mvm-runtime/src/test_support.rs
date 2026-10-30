@@ -33,6 +33,15 @@ pub(crate) fn error_chain_has_permission_denied(err: &(dyn Error + 'static)) -> 
 }
 
 #[cfg(all(test, feature = "test-support"))]
+fn io_failure_details(err: &anyhow::Error) -> Option<(std::io::ErrorKind, Option<i32>)> {
+    err.chain().find_map(|source| {
+        source
+            .downcast_ref::<std::io::Error>()
+            .map(|error| (error.kind(), error.raw_os_error()))
+    })
+}
+
+#[cfg(all(test, feature = "test-support"))]
 pub(crate) fn start_mock_guest_agent(vm_dir: &Path) -> Option<MockGuestAgent> {
     match MockGuestAgent::start(vm_dir, None) {
         Ok(agent) => Some(agent),
@@ -44,8 +53,40 @@ pub(crate) fn start_mock_guest_agent(vm_dir: &Path) -> Option<MockGuestAgent> {
             None
         }
         Err(err) => panic!(
-            "starting MockGuestAgent under {} failed: {err}",
-            vm_dir.display()
+            "starting MockGuestAgent under {} failed: {err}; I/O (kind, OS code): {:?}",
+            vm_dir.display(),
+            io_failure_details(&err)
         ),
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod tests {
+    use super::io_failure_details;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn startup_io_details_survive_context_without_formatting_inner_payloads() {
+        let error = anyhow::Error::new(Error::new(
+            ErrorKind::AlreadyExists,
+            "synthetic-sensitive-inner-payload",
+        ))
+        .context("creating fixture signer")
+        .context("starting fixture");
+        let details = io_failure_details(&error);
+        assert_eq!(details, Some((ErrorKind::AlreadyExists, None)));
+        assert!(!format!("{details:?}").contains("synthetic-sensitive-inner-payload"));
+    }
+
+    #[test]
+    fn startup_io_details_preserve_os_code_and_distinguish_non_io_errors() {
+        let io = Error::from_raw_os_error(2);
+        let expected = (io.kind(), io.raw_os_error());
+        let error = anyhow::Error::new(io).context("creating fixture signer");
+        assert_eq!(io_failure_details(&error), Some(expected));
+        assert_eq!(
+            io_failure_details(&anyhow::anyhow!("fixture failure")),
+            None
+        );
     }
 }

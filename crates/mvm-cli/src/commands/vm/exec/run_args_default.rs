@@ -49,7 +49,7 @@ impl Default for RunArgs {
             grants_file: None,
             memory: "512M".to_string(),
             explicit_resources: Default::default(),
-            profile: RunProfile::Standard,
+            profile: RunProfile::Dev,
             mounts: Vec::new(),
             env: Vec::new(),
             allow_env: Vec::new(),

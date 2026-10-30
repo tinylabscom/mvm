@@ -670,7 +670,7 @@ fn run_defaults_match_the_lower_level_runner() {
     assert_eq!(args.run.memory, "512M");
     assert_eq!(
         args.run.profile,
-        RunProfile::Standard,
+        RunProfile::Dev,
         "`machine run` and `mvmctl run` share one default"
     );
     assert!(!args.run.json);
@@ -1148,6 +1148,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
 
 #[test]
 fn run_spec_maps_run_args_into_a_machine_spec() {
+    let _state = IsolatedMachineState::new();
     let args = parse_run(&[
         "run",
         "--image",
@@ -1189,6 +1190,7 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
 
 #[test]
 fn run_spec_records_tool_rules_with_their_scope() {
+    let _state = IsolatedMachineState::new();
     let mut args =
         parse_run(&["run", "--image", "alpine:3.20", "--name", "toolbox"]).expect("parse");
     args.run.applied_policy = Some(
@@ -1213,6 +1215,7 @@ fn run_spec_records_tool_rules_with_their_scope() {
 
 #[test]
 fn run_spec_persists_endpoint_routes_and_their_concrete_hosts() {
+    let _state = IsolatedMachineState::new();
     let args = parse_run(&[
         "run",
         "--image",
@@ -1240,6 +1243,7 @@ fn run_spec_persists_endpoint_routes_and_their_concrete_hosts() {
 
 #[test]
 fn run_gpu_device_pin_enables_gpu_and_persists_the_ordinal() {
+    let _state = IsolatedMachineState::new();
     let args = parse_run(&[
         "run",
         "--image",
@@ -1294,6 +1298,7 @@ fn run_spec_persists_agent_rules_and_ai_budget() {
 
 #[test]
 fn deployment_source_is_verified_and_persisted_as_canonical_directory() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("deployment dir");
     let rootfs = dir.path().join("rootfs.ext4");
     std::fs::write(&rootfs, b"rootfs bytes").expect("rootfs");
@@ -1347,6 +1352,7 @@ fn deployment_source_is_verified_and_persisted_as_canonical_directory() {
 
 #[test]
 fn manifest_backed_persistent_runs_persist_the_local_workload_directory() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("project dir");
     std::fs::write(dir.path().join("mvm.toml"), "image = \"alpine:3.20\"\n").expect("manifest");
     let args = parse_run(&[
@@ -1375,6 +1381,7 @@ fn manifest_backed_persistent_runs_persist_the_local_workload_directory() {
 
 #[test]
 fn flake_backed_persistent_runs_persist_the_local_workload_directory_after_slot_resolution() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("flake dir");
     std::fs::write(dir.path().join("flake.nix"), "{ }").expect("flake");
     let args = parse_run(&[
@@ -1451,6 +1458,7 @@ fn agent_verb_flag_persisted_in_spec_and_survives_roundtrip() {
 
 #[test]
 fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tmpdir");
     let host = dir.path().join("state.img").to_string_lossy().into_owned();
     let args = parse_run(&[
@@ -1482,6 +1490,7 @@ fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
 /// boot. `dev` and `permissive` used to accept a writable one here.
 #[test]
 fn run_directory_volume_is_refused_under_every_profile() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tmpdir");
     let host = dir.path().to_string_lossy().into_owned();
     for profile in [None, Some("standard"), Some("dev"), Some("permissive")] {
@@ -1499,7 +1508,7 @@ fn run_directory_volume_is_refused_under_every_profile() {
 }
 
 /// A persistent `machine run` spec for `--volume <volume>` under `profile`.
-/// `None` leaves the flag off, which is the default (`standard`) profile.
+/// `None` leaves the flag off, selecting the default CLI profile.
 fn machine_run_spec_with_volume(profile: Option<&str>, volume: &str) -> Result<MachineSpec> {
     let mut argv = vec!["run", "--image", "x", "--name", "web"];
     if let Some(profile) = profile {
@@ -1515,6 +1524,7 @@ fn machine_run_spec_with_volume(profile: Option<&str>, volume: &str) -> Result<M
 /// does an explicit `standard`.
 #[test]
 fn run_rw_disk_image_is_accepted_without_the_dev_profile() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tmpdir");
     let image = dir.path().join("state.img");
     let volume = format!("{}:/data:20G:rw", image.display());
@@ -1534,6 +1544,7 @@ fn run_rw_disk_image_is_accepted_without_the_dev_profile() {
 /// data in: a disk image, or a snapshot registered with `machine volume mount`.
 #[test]
 fn run_directory_refusal_points_at_a_disk_image_and_a_snapshot() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tmpdir");
     let volume = format!("{}:/work:rw", dir.path().display());
     let message = machine_run_spec_with_volume(Some("dev"), &volume)
@@ -1554,6 +1565,7 @@ fn run_directory_refusal_points_at_a_disk_image_and_a_snapshot() {
 /// writable disk image either.
 #[test]
 fn run_restrictive_refuses_every_volume() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tmpdir");
     let image = dir.path().join("state.img");
     for volume in [
@@ -1573,6 +1585,7 @@ fn run_restrictive_refuses_every_volume() {
 /// `standard` must not let one land on a system path.
 #[test]
 fn run_rw_disk_image_on_a_system_path_is_refused_by_the_mount_allow_list() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tmpdir");
     let image = dir.path().join("bin.img");
     for profile in [Some("standard"), Some("dev")] {
@@ -1632,6 +1645,7 @@ fn manifest_with_volume(dir: &Path, volume: &str) -> PathBuf {
 /// writable disk image under `standard` is accepted.
 #[test]
 fn create_accepts_a_rw_disk_image_under_standard() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     let manifest = manifest_with_volume(dir.path(), "./state.img:/data:20G:rw");
     let spec = create_args_from_manifest(&manifest, Some(RunProfile::Standard))
@@ -1649,6 +1663,7 @@ fn create_accepts_a_rw_disk_image_under_standard() {
 
 #[test]
 fn create_persists_manifest_endpoint_routes() {
+    let _state = IsolatedMachineState::new();
     let project = tempfile::tempdir().expect("project dir");
     let manifest = project.path().join("mvm.toml");
     std::fs::write(
@@ -1678,6 +1693,7 @@ rules = [{ method = "GET", path = "/repos/org/**", outcome = "allow" }]
 /// spec that `machine start` would refuse.
 #[test]
 fn create_refuses_a_directory_volume_under_every_profile() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
     for volume in ["./src:/work:ro", "./src:/work:rw"] {
@@ -1707,6 +1723,7 @@ fn create_refuses_a_directory_volume_under_every_profile() {
 /// ...and refuses any volume under `restrictive`.
 #[test]
 fn create_restrictive_refuses_a_disk_image() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     let manifest = manifest_with_volume(dir.path(), "./state.img:/data:20G:rw");
     let message = create_args_from_manifest(&manifest, Some(RunProfile::Restrictive))
@@ -2531,6 +2548,7 @@ fn create_auto_generates_a_name_when_omitted() {
 
 #[test]
 fn create_sources_machine_defaults_from_manifest() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("mvm.toml"),
@@ -2629,6 +2647,7 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
 
 #[test]
 fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("mvm.toml"),

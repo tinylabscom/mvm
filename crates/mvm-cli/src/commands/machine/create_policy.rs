@@ -12,7 +12,7 @@
 
 use anyhow::{Context, Result, bail};
 use mvm_client::policy_profiles::{
-    LaunchFlags, Platform, PolicyBody, PolicySelection, PolicyStore, ProjectPolicy, fold, resolve,
+    LaunchFlags, Platform, PolicyBody, PolicyStore, ProjectPolicy, fold, resolve,
 };
 
 /// What `build_machine_spec` asks of the policy.
@@ -65,7 +65,12 @@ fn refuse_unrecordable(policy: &PolicyBody) -> Result<()> {
 /// A policy that does not resolve, a section a spec cannot record, or a flag
 /// the policy denies, blocks or bounds.
 pub(super) fn machine_policy(inputs: MachinePolicyInputs<'_>) -> Result<MachinePolicy> {
-    let selection = PolicySelection::for_launch(inputs.policies, inputs.project.cloned())?;
+    let config = mvm_core::user_config::load_strict(None)?;
+    let selection = crate::commands::shared::select_launch_policy(
+        inputs.policies,
+        inputs.project.cloned(),
+        &config.default_policy,
+    )?;
     let Some(selection) = selection else {
         return Ok(MachinePolicy {
             allow_host: inputs.allow_host.to_vec(),
@@ -147,6 +152,34 @@ mod tests {
         let hosts = vec!["a.test".to_string()];
         let resolved = machine_policy(inputs(&[], None, &hosts)).unwrap();
         assert_eq!(resolved.allow_host, hosts);
+    }
+
+    #[test]
+    fn configured_policy_is_used_without_a_project_and_flags_replace_it() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        mvm_core::user_config::save(
+            &mvm_core::user_config::MvmConfig {
+                default_policy: vec!["offline".into()],
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            machine_policy(inputs(&[], None, &[]))
+                .unwrap()
+                .policy
+                .unwrap()
+                .network
+                .block,
+            Some(true)
+        );
+        let selected = machine_policy(inputs(&["agent-apis".into()], None, &[])).unwrap();
+        assert!(selected.allow_host.contains(&"api.openai.com:443".into()));
+        std::fs::write(home.path().join("config/config.toml"), "default_policy = 7").unwrap();
+        assert!(machine_policy(inputs(&[], None, &[])).is_err());
     }
 
     #[test]

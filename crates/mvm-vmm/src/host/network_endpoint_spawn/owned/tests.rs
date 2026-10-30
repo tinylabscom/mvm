@@ -93,7 +93,10 @@ fn invalid_handshake_does_not_echo_secret_or_release_ownership() {
 fn oversized_handshake_is_bounded() {
     let mut endpoint = helper("cat >/dev/null; printf '%01048577d' 0; exec sleep 30");
     let error = exchange(&mut endpoint, b"{}", Duration::from_secs(3)).unwrap_err();
-    assert!(error.to_string().contains("byte limit"));
+    assert!(
+        error.to_string().contains("byte limit"),
+        "expected byte-limit refusal, got {error}"
+    );
     endpoint.shutdown().unwrap();
 }
 
