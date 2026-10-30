@@ -57,10 +57,45 @@ mod tests {
     }
 
     fn reaped_child_pid() -> String {
-        let mut child = std::process::Command::new("true").spawn().unwrap();
+        // Libtest's help exits without running tests or consulting PATH.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--help")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
         let pid = child.id();
-        child.wait().unwrap();
+        assert!(child.wait().unwrap().success());
         pid.to_string()
+    }
+
+    #[test]
+    fn dead_supervisor_fixture_does_not_require_path() {
+        use mvm_vmm::host::process_exit::{ProcessExitObserver, ProcessExitWait};
+        use std::time::Duration;
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "driver::hvf::stop_state::tests::refused_socket_and_dead_supervisor_is_already_stopped",
+                "--nocapture",
+            ])
+            .env("PATH", "")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let exited = ProcessExitObserver::arm(child.id().try_into().unwrap())
+            .and_then(|observer| observer.wait_event(Instant::now() + Duration::from_secs(10)));
+        if !matches!(exited, Ok(ProcessExitWait::Exited)) {
+            let _ = child.kill();
+            child.wait().unwrap();
+            panic!("fixture exit was not observed: {exited:?}");
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("1 passed"), "{stdout}");
+        assert!(output.status.success(), "{stdout}");
     }
 
     #[test]
