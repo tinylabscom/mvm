@@ -42,8 +42,11 @@ pub struct TelemetryHandshake {
 
 /// What the supervisor is asking the host-signer to sign.
 ///
-/// `SignPlan` carries `ExecutionPlan` bytes; the host-signer
-/// treats the input as opaque bytes and does not parse them.
+/// `SignPlan` carries size-bounded `ExecutionPlan` bytes. The host-signer checks
+/// the supported schema, content ID and exact current `serde_json` signing
+/// encoding before signing the original bytes. This encoding differs from the
+/// content ID's `Value` encoding. These checks do not independently authorize
+/// the principal or admit the plan's policy; the keystore primitive stays opaque.
 /// `SignTelemetryHandshake` instead carries typed public messages whose
 /// service domain, field bounds and guest proof must pass validation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
