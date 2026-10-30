@@ -1,10 +1,12 @@
 import copy
 import importlib.util
-import io
 import json
 import os
 from pathlib import Path
+import select
+import stat
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -198,17 +200,14 @@ class ConsumerTests(unittest.TestCase):
             spawn.assert_not_called()
 
     def fake_spawn(self, *, timeout=False, code=0):
-        class Input(io.BytesIO):
-            def close(self):
-                self.sent = self.getvalue()
-                super().close()
-        process = Mock(pid=12345, stdin=Input())
+        process = Mock(pid=12345)
         process.wait.side_effect = (
             subprocess.TimeoutExpired("fixture", 1) if timeout else None)
         process.wait.return_value = code
         def spawn(argv, **kwargs):
             self.assertEqual(argv, [str(self.args.cli), "run", "agent/claude"])
             self.assertTrue(kwargs["start_new_session"])
+            process.sent = kwargs["stdin"].read()
             kwargs["stdout"].write(b"A fresh, arbitrary response\n")
             kwargs["stdout"].flush()
             return process
@@ -219,11 +218,66 @@ class ConsumerTests(unittest.TestCase):
         report = {"commands": []}
         with patch.object(demo.subprocess, "Popen", side_effect=spawn) as calls:
             demo.dispatch_once(self.args, {}, self.evidence, report)
-        self.assertEqual(process.stdin.sent, b"tell me a joke\n")
+        self.assertEqual(process.sent, b"tell me a joke\n")
         calls.assert_called_once()
         process.kill.assert_not_called()
         process.terminate.assert_not_called()
         self.assertFalse(report["cleanup_authorized"])
+        self.assertTrue((self.home / "claude-demo-attempt.json").exists())
+
+    def test_prompt_pipe_is_ready_and_closed_before_spawn(self):
+        def spawn(argv, **kwargs):
+            stdin = kwargs["stdin"]
+            self.assertNotEqual(stdin, subprocess.PIPE,
+                                "a child must not race a later parent write")
+            self.assertTrue(stat.S_ISFIFO(os.fstat(stdin.fileno()).st_mode))
+            self.assertEqual(select.select([stdin], [], [], 0)[0], [stdin])
+            self.assertEqual(os.read(stdin.fileno(), 4096), b"tell me a joke\n")
+            self.assertEqual(select.select([stdin], [], [], 0)[0], [stdin])
+            self.assertEqual(os.read(stdin.fileno(), 1), b"", "writer must already be closed")
+            kwargs["stdout"].write(b"fixture response\n")
+            kwargs["stdout"].flush()
+            return Mock(pid=12345, wait=Mock(return_value=0))
+        with patch.object(demo.subprocess, "Popen", side_effect=spawn) as calls:
+            demo.dispatch_once(self.args, {}, self.evidence, {"commands": []})
+        calls.assert_called_once()
+
+    def test_real_child_observes_immediate_prompt_and_eof(self):
+        real_spawn = subprocess.Popen
+        probe = (
+            "import os,select,stat;"
+            "assert stat.S_ISFIFO(os.fstat(0).st_mode);"
+            "assert select.select([0],[],[],0)[0]==[0];"
+            "assert os.read(0,4096)==b'tell me a joke\\n';"
+            "assert select.select([0],[],[],0)[0]==[0];"
+            "assert os.read(0,1)==b'';"
+            "print('pipe probe passed')"
+        )
+        def spawn(argv, **kwargs):
+            self.assertEqual(argv, [str(self.args.cli), "run", "agent/claude"])
+            # Execute only an isolated Python pipe probe, never mvmctl.
+            return real_spawn([sys.executable, "-I", "-c", probe], **kwargs)
+        self.args.run_timeout = 10
+        with patch.object(demo.subprocess, "Popen", side_effect=spawn) as calls:
+            demo.dispatch_once(self.args, {}, self.evidence, {"commands": []})
+        calls.assert_called_once()
+        self.assertEqual((self.evidence / "joke.stdout").read_bytes(), b"pipe probe passed\n")
+
+    def test_spawn_failure_closes_pipe_descriptors_and_retains_attempt(self):
+        real_pipe = os.pipe
+        descriptors = []
+        def pipe():
+            pair = real_pipe()
+            descriptors.extend(pair)
+            return pair
+        with patch.object(demo.os, "pipe", side_effect=pipe), \
+                patch.object(demo.subprocess, "Popen", side_effect=OSError("fixture")) as calls, \
+                self.assertRaises(OSError):
+            demo.dispatch_once(self.args, {}, self.evidence, {"commands": []})
+        calls.assert_called_once()
+        for descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
         self.assertTrue((self.home / "claude-demo-attempt.json").exists())
 
     def test_timeout_retains_original_owner_files_and_reservation(self):
