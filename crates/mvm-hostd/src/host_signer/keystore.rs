@@ -18,6 +18,11 @@ use ed25519_dalek::{Signer, SigningKey};
 use mvm_core::protocol::host_signer::HostSignerErrorCode;
 use mvm_core::security::SIG_ALG_ED25519;
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_SIGNING_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A software-only host signer. Threaded into the server via `Arc`;
 /// safe to share across the tokio spawn boundary.
 ///
@@ -70,6 +75,15 @@ impl Keystore {
     /// (JCS for credentials, ExecutionPlan's own canonical form for
     /// plans).
     pub fn sign(&self, bytes: &[u8]) -> SignResult {
+        #[cfg(test)]
+        TEST_SIGNING_CALLS.with(|calls| {
+            calls.set(
+                calls
+                    .get()
+                    .checked_add(1)
+                    .expect("test signing count overflow"),
+            );
+        });
         let signature = self.signing_key.sign(bytes);
         SignResult {
             sig_alg: SIG_ALG_ED25519,
@@ -81,6 +95,12 @@ impl Keystore {
     /// Public key bytes (32 for Ed25519). Cheap clone.
     pub fn pub_key(&self) -> Vec<u8> {
         self.pub_key_bytes.clone()
+    }
+
+    /// Test-only synchronous observation; it does not count another worker thread.
+    #[cfg(test)]
+    pub(crate) fn test_signing_calls() -> usize {
+        TEST_SIGNING_CALLS.with(std::cell::Cell::get)
     }
 
     /// Typed public identity for protocol validation; no private bytes escape.
