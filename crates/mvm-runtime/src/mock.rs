@@ -543,6 +543,7 @@ mod tests {
 
     #[test]
     fn start_records_vm_and_returns_id() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let b = MockBackend::new();
         let id = b.start(&cfg("vm-a")).unwrap();
         assert_eq!(id.0, "vm-a");
@@ -551,6 +552,7 @@ mod tests {
 
     #[test]
     fn double_start_fails() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let b = MockBackend::new();
         b.start(&cfg("vm-a")).unwrap();
         let err = b.start(&cfg("vm-a")).unwrap_err();
@@ -559,6 +561,7 @@ mod tests {
 
     #[test]
     fn stop_removes_from_registry() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let b = MockBackend::new();
         b.start(&cfg("vm-a")).unwrap();
         b.stop(&VmId("vm-a".to_string())).unwrap();
@@ -567,6 +570,7 @@ mod tests {
 
     #[test]
     fn pause_resume_round_trip() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let b = MockBackend::new();
         b.start(&cfg("vm-a")).unwrap();
         let id = VmId("vm-a".to_string());
@@ -579,6 +583,7 @@ mod tests {
 
     #[test]
     fn list_returns_recorded_vms() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let b = MockBackend::new();
         b.start(&cfg("vm-a")).unwrap();
         b.start(&cfg("vm-b")).unwrap();
@@ -620,6 +625,7 @@ mod tests {
 
     #[test]
     fn stop_all_clears_the_registry() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let b = MockBackend::new();
         b.start(&cfg("vm-a")).unwrap();
         b.start(&cfg("vm-b")).unwrap();
@@ -630,6 +636,7 @@ mod tests {
 
     #[test]
     fn shared_state_across_clones() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         // The `Arc` lets `AnyBackend::Mock(MockBackend)` clone the
         // outer wrapper without losing track of in-flight VMs.
         let b1 = MockBackend::new();
