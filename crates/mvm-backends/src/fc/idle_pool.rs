@@ -187,8 +187,8 @@ fn is_pool_socket_path(path: &Path) -> bool {
 /// `state_dir` and whose API socket is to be `api_socket`.
 ///
 /// Returns `true` when the VM now has a running, unconfigured Firecracker
-/// exactly as a cold start would have left it. `false` means the caller starts
-/// one itself; nothing it needs was touched.
+/// exactly as a cold start would have left it. `Ok(false)` means the caller
+/// starts one itself. Missing required bounds refuse before recovery or claim.
 ///
 /// Crash recovery: the claim writes a journal inside the claimed entry before
 /// it begins moving files, recording the target `state_dir`. If the process
@@ -196,13 +196,19 @@ fn is_pool_socket_path(path: &Path) -> bool {
 /// cleans up — destroying the process if it is still running. The journal
 /// uses the same identity-stable signalling as the pool itself (`EndpointPid`
 /// records), never bare numeric PIDs.
-pub fn claim(shape: IdleShape, state_dir: &Path, api_socket: &Path) -> bool {
+pub fn claim(
+    shape: IdleShape,
+    state_dir: &Path,
+    api_socket: &Path,
+    guard: &mut super::FirecrackerGuard,
+) -> Result<bool> {
     let root = mvm_core::config::fc_idle_pool_dir();
     // Only a VM whose sockets live in its state dir can take a process whose
     // files are renamed there.
     if api_socket.parent() != Some(state_dir) {
-        return false;
+        return Ok(false);
     }
+    super::daemon::validate_required_scope("fc-idle-claim", &shape.bounds())?;
     // Clean up any claimed entries left by a crashed predecessor before
     // scanning for ready entries, so a stale claim does not block the pool.
     recover_incomplete_claims_in(&root);
@@ -233,21 +239,45 @@ pub fn claim(shape: IdleShape, state_dir: &Path, api_socket: &Path) -> bool {
             continue;
         }
         stop_reaper(&claimed, &entry);
-        match adopt(&claimed, &entry, state_dir, api_socket) {
-            Ok(()) => {
-                let _ = std::fs::remove_dir_all(&claimed);
-                return true;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %format!("{error:#}"),
-                    "claimed idle Firecracker could not be handed to the launch; starting one"
-                );
-                destroy(&claimed, &entry, state_dir);
-            }
+        if let Err(error) = validate_adoption(&claimed, &entry) {
+            tracing::warn!(error = %format!("{error:#}"), "idle candidate no longer eligible");
+            destroy(&claimed, &entry, state_dir);
+            continue;
+        }
+        if finish_claim(&claimed, &entry, state_dir, api_socket, guard)? {
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
+}
+
+fn finish_claim(
+    claimed: &Path,
+    entry: &Path,
+    state_dir: &Path,
+    api_socket: &Path,
+    guard: &mut super::FirecrackerGuard,
+) -> Result<bool> {
+    if let Err(error) = guard.arm(&state_dir.to_string_lossy()) {
+        // No target adoption occurred: clean only the pool-owned candidate.
+        // A target preparation failure is not permission to try a cold launch.
+        destroy(claimed, entry, claimed);
+        return Err(error).context("retiring prior Firecracker markers before adoption");
+    }
+    match move_files(claimed, entry, state_dir, api_socket) {
+        Ok(()) => {
+            let _ = std::fs::remove_dir_all(claimed);
+            Ok(true)
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "claimed idle Firecracker could not be handed to the launch; starting one"
+            );
+            destroy(claimed, entry, state_dir);
+            Ok(false)
+        }
+    }
 }
 
 /// A random hex token for a claimed directory name, independent of the
@@ -469,18 +499,18 @@ fn create_private_dir(path: &Path) -> Result<()> {
         .with_context(|| format!("creating {}", path.display()))
 }
 
-/// Move a claimed process's files into the VM's state dir, pid marker last.
-fn adopt(claimed: &Path, origin_dir: &Path, state_dir: &Path, api_socket: &Path) -> Result<()> {
+/// Recheck a claimed candidate before touching the target VM's state.
+fn validate_adoption(claimed: &Path, origin_dir: &Path) -> Result<()> {
     if !is_ready_socket(&claimed.join(API_SOCKET), effective_uid()) {
         bail!("the claimed idle Firecracker socket is not private to the invoking user");
     }
     if confirmed_firecracker(claimed, &origin_dir.join(API_SOCKET)).is_none() {
         bail!("the claimed idle Firecracker is no longer the process its entry recorded");
     }
-    move_files(claimed, origin_dir, state_dir, api_socket)
+    Ok(())
 }
 
-/// The renames of [`adopt`], split from its liveness check so they can be
+/// The renames after adoption validation, split from its liveness check so they can be
 /// exercised without a Firecracker.
 fn move_files(
     claimed: &Path,
@@ -589,6 +619,7 @@ pub fn refill_in_background(shape: IdleShape) {
 }
 
 fn refill(root: &Path, shape: IdleShape) -> Result<()> {
+    super::daemon::validate_required_scope("fc-idle-refill", &shape.bounds())?;
     discard_abandoned(root);
     let entries = idle_entries(root);
     if !needs_refill(&entries, shape) {
@@ -608,6 +639,7 @@ fn refill(root: &Path, shape: IdleShape) -> Result<()> {
     }
     create_private_dir(&dir)?;
     write_private(&dir.join(SHAPE_FILE), shape.render().as_bytes())?;
+    let scope = super::spawn_scope_prefix(&format!("fc-idle-{id}"), &dir, &shape.bounds())?;
     // The reaper first: if this process dies anywhere below, the entry is still
     // released on time.
     if let Err(error) = start_reaper(&dir) {
@@ -615,7 +647,6 @@ fn refill(root: &Path, shape: IdleShape) -> Result<()> {
         return Err(error);
     }
     let abs_dir = dir.to_string_lossy().into_owned();
-    let scope = super::spawn_scope_prefix(&format!("fc-idle-{id}"), &dir, &shape.bounds());
     super::start_idle_firecracker(&abs_dir, &socket.to_string_lossy(), &scope)
         .context("starting an idle Firecracker")?;
     if confirmed_firecracker(&dir, &socket).is_none() {
@@ -732,6 +763,144 @@ mod tests {
 
     fn shape(mib: u32) -> IdleShape {
         IdleShape::for_bounds(mib, None).expect("a plain shape")
+    }
+
+    #[test]
+    fn missing_required_scope_refuses_before_pool_recovery_or_refill() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", scratch.path());
+        let empty = scratch.path().join("empty-path");
+        std::fs::create_dir(&empty).unwrap();
+        env.set("PATH", &empty);
+        env.remove("XDG_RUNTIME_DIR");
+        env.remove("DBUS_SESSION_BUS_ADDRESS");
+        let root = mvm_core::config::fc_idle_pool_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let abandoned = root.join("claimed-idle-preserve-1");
+        std::fs::create_dir(&abandoned).unwrap();
+        std::fs::write(abandoned.join(SHAPE_FILE), shape(512).render()).unwrap();
+        let state = scratch.path().join("target");
+        let _guard = mvm_vmm::host::shell::mock::install_handler(|_| {
+            panic!("missing bounds must not start an idle VMM")
+        });
+        let error = claim(
+            shape(512),
+            &state,
+            &state.join(API_SOCKET),
+            &mut super::super::FirecrackerGuard::pending(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("scope unavailable"),
+            "{error:#}"
+        );
+        assert!(abandoned.is_dir(), "refusal must precede claim recovery");
+        assert!(!state.exists());
+        let error = refill(&root, shape(512)).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("scope unavailable"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        assert!(abandoned.is_dir(), "refusal must precede pool cleanup");
+    }
+
+    #[test]
+    fn claim_retirement_error_propagates_after_pool_only_cleanup() {
+        let scratch = tempfile::tempdir().unwrap();
+        let state = scratch.path().join("target");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::write(state.join(PID_FILE), b"11111").unwrap();
+        std::fs::create_dir(state.join(".fc-pid")).unwrap();
+        std::fs::write(state.join(API_SOCKET), b"prior socket").unwrap();
+        std::fs::write(state.join(CLAIM_ORIGIN_FILE), b"prior origin").unwrap();
+        let claimed = entry(scratch.path(), "claimed-idle-test-1", Some(512));
+        write_claim_journal(&claimed, &state).unwrap();
+        let _handler = mvm_vmm::host::shell::mock::install_handler(|_| {
+            panic!("target retirement refusal must not launch or arm target cleanup");
+        });
+        let mut guard = super::super::FirecrackerGuard::pending();
+        let error = finish_claim(
+            &claimed,
+            &scratch.path().join("idle-test"),
+            &state,
+            &state.join(API_SOCKET),
+            &mut guard,
+        )
+        .expect_err("claim must propagate, not return the cold-fallback false");
+        assert!(format!("{error:#}").contains("retiring prior Firecracker"));
+        assert!(
+            !claimed.exists(),
+            "pool-owned candidate cleanup is retained"
+        );
+        assert!(!state.join(PID_FILE).exists(), "first retirement occurred");
+        assert!(state.join(".fc-pid").is_dir());
+        assert_eq!(
+            std::fs::read(state.join(API_SOCKET)).unwrap(),
+            b"prior socket"
+        );
+        assert_eq!(
+            std::fs::read(state.join(CLAIM_ORIGIN_FILE)).unwrap(),
+            b"prior origin"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn partial_target_adoption_keeps_cleanup_armed() {
+        use std::sync::{Arc, Mutex};
+        let scratch = tempfile::tempdir().unwrap();
+        let state = scratch.path().join("target");
+        std::fs::create_dir(&state).unwrap();
+        let claimed = scratch.path().join("claimed");
+        std::fs::create_dir(&claimed).unwrap();
+        let api = state.join(API_SOCKET);
+        std::fs::write(&api, b"old socket bytes").unwrap();
+        std::fs::write(state.join(PID_FILE), b"11111").unwrap();
+        std::fs::write(state.join(".fc-pid"), b"22222").unwrap();
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let capture = Arc::clone(&scripts);
+        let cleanup_state = state.clone();
+        let _handler = mvm_vmm::host::shell::mock::install_handler(move |script| {
+            assert!(
+                !cleanup_state.join(PID_FILE).exists(),
+                "old PID must not reach cleanup"
+            );
+            assert!(
+                !cleanup_state.join(".fc-pid").exists(),
+                "no legacy fallback PID"
+            );
+            capture.lock().unwrap().push(script.to_string());
+            mvm_vmm::host::shell::mock::MockResponse::empty()
+        });
+        {
+            let mut guard = super::super::FirecrackerGuard::pending();
+            // Removing the stale target succeeds; moving the missing source fails.
+            assert!(!finish_claim(&claimed, &claimed, &state, &api, &mut guard).unwrap());
+            assert!(!api.exists(), "fixture reached a partial target effect");
+        }
+        let scripts = scripts.lock().unwrap();
+        assert_eq!(scripts.len(), 1);
+        assert!(scripts[0].contains("sudo kill"));
+    }
+
+    #[test]
+    fn available_scope_with_no_idle_entry_preserves_the_cold_start_choice() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", scratch.path());
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        let state = scratch.path().join("target");
+        assert!(
+            !claim(
+                shape(512),
+                &state,
+                &state.join(API_SOCKET),
+                &mut super::super::FirecrackerGuard::pending(),
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -860,7 +1029,7 @@ mod tests {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o644)).unwrap();
         let state = tempfile::tempdir().unwrap();
         let api = state.path().join(API_SOCKET);
-        let error = adopt(&claimed, &root.path().join("idle-a"), state.path(), &api).unwrap_err();
+        let error = validate_adoption(&claimed, &root.path().join("idle-a")).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -968,11 +1137,15 @@ mod tests {
     fn a_vm_whose_socket_is_outside_its_state_dir_starts_its_own_process() {
         let state = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
-        assert!(!claim(
-            shape(512),
-            state.path(),
-            &elsewhere.path().join(API_SOCKET)
-        ));
+        assert!(
+            !claim(
+                shape(512),
+                state.path(),
+                &elsewhere.path().join(API_SOCKET),
+                &mut super::super::FirecrackerGuard::pending(),
+            )
+            .expect("ineligible socket is not a claim")
+        );
     }
 
     #[cfg(target_os = "linux")]

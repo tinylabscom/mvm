@@ -92,25 +92,46 @@ impl FirecrackerIO {
         Ok(())
     }
 
-    /// The scope prefix the fresh VMM's launch line carries, or empty when
-    /// this host cannot scope it. The launch uses this exact value, so reading
-    /// it back is reading what the restored guest actually runs inside.
-    pub(crate) fn restore_scope_prefix(&self, state_dir: &Path, guest_memory_mib: u32) -> String {
+    /// Create the replacement scope record only after the old VMM has stopped.
+    pub(crate) fn restore_scope_prefix(
+        &self,
+        state_dir: &Path,
+        guest_memory_mib: u32,
+    ) -> Result<String> {
+        let (machine_id, bounds) = self.restore_scope_inputs(state_dir, guest_memory_mib);
+        super::spawn_scope_prefix(&machine_id, state_dir, &bounds)
+    }
+
+    fn restore_scope_inputs(
+        &self,
+        state_dir: &Path,
+        guest_memory_mib: u32,
+    ) -> (String, mvm_core::spawn_scope::SpawnBounds) {
         let bounds = mvm_core::spawn_scope::SpawnBounds::for_guest_memory(guest_memory_mib);
         match &self.restore_bound {
-            Some(bound) => super::spawn_scope_prefix(
-                &bound.machine_id,
-                state_dir,
-                &bounds.with_cpu_grant(bound.cpu_grant),
+            Some(bound) => (
+                bound.machine_id.clone(),
+                bounds.with_cpu_grant(bound.cpu_grant),
             ),
             None => {
                 let machine_id = state_dir
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                super::spawn_scope_prefix(&machine_id, state_dir, &bounds)
+                (machine_id, bounds)
             }
         }
+    }
+
+    fn scope_after_stop(
+        &self,
+        vm_dir: &Path,
+        memory_mib: u32,
+        stop: impl FnOnce() -> Result<()>,
+    ) -> Result<String> {
+        stop().context("stopping paused Firecracker before snapshot restore")?;
+        // Preflight did not reserve the mechanism or authorize a new record.
+        self.restore_scope_prefix(vm_dir, memory_mib)
     }
 
     /// Stop the Firecracker recorded in `vm_dir/fc.pid`, if it is the one
@@ -149,6 +170,9 @@ impl FirecrackerIO {
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Firecracker socket path has no parent directory"))?;
         let socket_str = self.socket_path.to_string_lossy();
+        let memory_mib = snapshot_guest_memory_mib(dir)?;
+        let (machine_id, bounds) = self.restore_scope_inputs(vm_dir, memory_mib);
+        super::daemon::validate_required_scope(&machine_id, &bounds)?;
         if let Some(devices) = fork {
             devices
                 .ensure_recorded_drives_exist()
@@ -161,14 +185,9 @@ impl FirecrackerIO {
         // resume from the sealed snapshot rather than assuming a live API. Only
         // this VM's own Firecracker is ever signalled: a pid left from before
         // a reboot may name another process now.
-        self.stop_own_vmm(vm_dir)
-            .with_context(|| "stopping paused Firecracker before snapshot restore")?;
-        super::start_vm_firecracker_scoped(
-            &vm_dir.to_string_lossy(),
-            &socket_str,
-            &self.restore_scope_prefix(vm_dir, snapshot_guest_memory_mib(dir)),
-        )
-        .with_context(|| "starting fresh Firecracker for snapshot restore")?;
+        let scope = self.scope_after_stop(vm_dir, memory_mib, || self.stop_own_vmm(vm_dir))?;
+        super::start_vm_firecracker_scoped(&vm_dir.to_string_lossy(), &socket_str, &scope)
+            .with_context(|| "starting fresh Firecracker for snapshot restore")?;
         // Firecracker runs through `sudo` and binds its API socket as root. Take
         // it over before the first call, as the cold boot does, or a caller
         // that is not root cannot dial it.
@@ -238,15 +257,20 @@ impl FirecrackerIO {
 /// file.
 ///
 /// The memory file is the guest's RAM byte for byte, so its length is the
-/// guest size the restored VMM will map — whatever any record says. Zero when
-/// it cannot be read, which leaves the VMM without a memory ceiling rather than
-/// with one sized from nothing.
-pub(crate) fn snapshot_guest_memory_mib(dir: &Path) -> u32 {
+/// guest size the restored VMM will map — whatever any record says. Failure
+/// refuses restore rather than silently omitting the required memory ceiling.
+pub(crate) fn snapshot_guest_memory_mib(dir: &Path) -> Result<u32> {
+    let meta = std::fs::metadata(dir.join(MEM_FILENAME))
+        .context("reading snapshot memory size for required Firecracker scope")?;
+    anyhow::ensure!(meta.is_file(), "snapshot memory must be a regular file");
+    snapshot_memory_mib_from_bytes(meta.len())
+}
+
+fn snapshot_memory_mib_from_bytes(bytes: u64) -> Result<u32> {
     const BYTES_PER_MIB: u64 = 1024 * 1024;
-    std::fs::metadata(dir.join(MEM_FILENAME))
-        .ok()
-        .and_then(|meta| u32::try_from(meta.len().div_ceil(BYTES_PER_MIB)).ok())
-        .unwrap_or(0)
+    anyhow::ensure!(bytes > 0, "snapshot memory must be nonempty");
+    u32::try_from(bytes.div_ceil(BYTES_PER_MIB))
+        .context("snapshot memory size exceeds supported MiB range")
 }
 
 impl SnapshotIO for FirecrackerIO {
@@ -370,6 +394,134 @@ fn stop_restored_vmm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_snapshot_memory_rejects_zero_and_overflow() {
+        assert!(snapshot_memory_mib_from_bytes(0).is_err());
+        assert!(snapshot_memory_mib_from_bytes(u64::MAX).is_err());
+        assert_eq!(snapshot_memory_mib_from_bytes(1).unwrap(), 1);
+        assert_eq!(
+            snapshot_memory_mib_from_bytes(u64::from(u32::MAX) * 1024 * 1024).unwrap(),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn invalid_snapshot_bounds_refuse_before_stop_or_launch() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        let vm = scratch.path().join("vm");
+        std::fs::create_dir(&vm).unwrap();
+        let marker = vm.join("fc.pid");
+        std::fs::write(&marker, "do-not-read-or-stop").unwrap();
+        let scope_record = vm.join("spawn-scope");
+        std::fs::write(&scope_record, b"old-generation.scope").unwrap();
+        let io = FirecrackerIO::new(vm.join("fc.socket"));
+        let snapshot = scratch.path().join("snapshot");
+        std::fs::create_dir(&snapshot).unwrap();
+        let _guard = mvm_vmm::host::shell::mock::install_handler(|_| {
+            panic!("invalid snapshot bounds must not launch")
+        });
+        for empty_file in [false, true] {
+            if empty_file {
+                std::fs::write(snapshot.join(MEM_FILENAME), b"").unwrap();
+            }
+            let error = io.load_snapshot_inner(&snapshot, None).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("snapshot memory"),
+                "{error:#}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&marker).unwrap(),
+                "do-not-read-or-stop"
+            );
+        }
+        std::fs::write(snapshot.join(MEM_FILENAME), b"x").unwrap();
+        env.set("PATH", &snapshot);
+        env.remove("XDG_RUNTIME_DIR");
+        env.remove("DBUS_SESSION_BUS_ADDRESS");
+        let error = io.load_snapshot_inner(&snapshot, None).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("scope unavailable"),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "do-not-read-or-stop"
+        );
+        assert_eq!(
+            std::fs::read(&scope_record).unwrap(),
+            b"old-generation.scope"
+        );
+    }
+
+    #[test]
+    fn failed_old_stop_preserves_scope_record_and_never_launches_replacement() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        let vm = scratch.path().join("vm");
+        std::fs::create_dir(&vm).unwrap();
+        std::fs::write(vm.join("fc.pid"), "invalid-old-pid").unwrap();
+        let scope_record = vm.join("spawn-scope");
+        std::fs::write(&scope_record, b"old-generation.scope").unwrap();
+        let snapshot = scratch.path().join("snapshot");
+        std::fs::create_dir(&snapshot).unwrap();
+        std::fs::write(snapshot.join(MEM_FILENAME), b"x").unwrap();
+        let io = FirecrackerIO::new(vm.join("fc.socket"));
+        let _guard = mvm_vmm::host::shell::mock::install_handler(|_| {
+            panic!("failed old stop must not launch a replacement")
+        });
+
+        let error = io.load_snapshot_inner(&snapshot, None).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("stopping paused Firecracker"),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read(&scope_record).unwrap(),
+            b"old-generation.scope"
+        );
+        assert_eq!(
+            std::fs::read(vm.join("fc.pid")).unwrap(),
+            b"invalid-old-pid"
+        );
+    }
+
+    #[test]
+    fn stop_error_and_post_stop_mechanism_loss_never_prepare_a_replacement() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        let scope = scratch.path().join("spawn-scope");
+        std::fs::write(&scope, b"old.scope").unwrap();
+        let io = FirecrackerIO::new(scratch.path().join("fc.socket")).bounded_by(RestoreBound {
+            machine_id: "restored-vm".into(),
+            cpu_grant: None,
+        });
+        let _handler = mvm_vmm::host::shell::mock::install_handler(|_| {
+            panic!("failed stop or lost scope must not launch");
+        });
+        let error = io
+            .scope_after_stop(scratch.path(), 512, || anyhow::bail!("termination refused"))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("termination refused"));
+        assert_eq!(std::fs::read(&scope).unwrap(), b"old.scope");
+
+        let error = io
+            .scope_after_stop(scratch.path(), 512, || {
+                std::fs::remove_file(scratch.path().join("bin/systemd-run"))?;
+                env.set("PATH", scratch.path().join("bin"));
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("scope unavailable"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read(&scope).unwrap(), b"old.scope");
+    }
 
     #[test]
     fn a_restore_that_started_no_vmm_has_nothing_to_stop() {

@@ -1527,7 +1527,9 @@ mod tests {
 
         // Shell-quoted, because Firecracker's launch is a script: the prefix is
         // spliced ahead of the launch line rather than exec'd as argv.
-        let prefix = io.restore_scope_prefix(&child_dir, 512);
+        let prefix = io
+            .restore_scope_prefix(&child_dir, 512)
+            .expect("required scope");
         let launcher = scratch
             .path()
             .join("bin/systemd-run")
@@ -1556,7 +1558,9 @@ mod tests {
 
         let io = child_io("restored-child", &child_dir, None);
 
-        let prefix = io.restore_scope_prefix(&child_dir, 1024);
+        let prefix = io
+            .restore_scope_prefix(&child_dir, 1024)
+            .expect("required scope");
         assert!(!prefix.contains("CPUQuota"), "{prefix}");
         assert!(prefix.contains("'MemoryMax=1280M'"), "{prefix}");
         assert!(prefix.contains("restored-child-"), "{prefix}");
@@ -1567,14 +1571,17 @@ mod tests {
     #[test]
     fn a_snapshot_sizes_its_guest_from_the_memory_file() {
         let dir = tempfile::tempdir().expect("snapshot dir");
-        assert_eq!(crate::fc::io::snapshot_guest_memory_mib(dir.path()), 0);
+        assert!(crate::fc::io::snapshot_guest_memory_mib(dir.path()).is_err());
         let mem = std::fs::File::create(
             dir.path()
                 .join(mvm_core::crypto::snapshot_hmac::MEM_FILENAME),
         )
         .expect("memory file");
         mem.set_len(512 * 1024 * 1024 + 1).expect("sparse length");
-        assert_eq!(crate::fc::io::snapshot_guest_memory_mib(dir.path()), 513);
+        assert_eq!(
+            crate::fc::io::snapshot_guest_memory_mib(dir.path()).expect("memory size"),
+            513
+        );
     }
 
     #[cfg(target_os = "linux")]

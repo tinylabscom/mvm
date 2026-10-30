@@ -629,10 +629,8 @@ fn resolve_standby_parent_pid(
     })
 }
 
-/// Clear a dead process's stale marker before a new launch. A live marker is
-/// retained and the launch is refused: replacing it would make the existing
-/// Firecracker invisible to every normal list, stop, and orphan-reap path.
-fn clear_stale_pid_marker_for_start(
+/// Refuse a live marker; retain stale bytes until launch/adoption replaces them.
+fn validate_pid_marker_for_start(
     pid_file: &Path,
     is_running: impl FnOnce() -> Result<bool>,
 ) -> Result<()> {
@@ -645,8 +643,33 @@ fn clear_stale_pid_marker_for_start(
             pid_file.display()
         );
     }
-    std::fs::remove_file(pid_file)
-        .with_context(|| format!("remove stale Firecracker pid marker {}", pid_file.display()))
+    Ok(())
+}
+
+fn start_or_claim_firecracker(
+    spec: &VmmSpec,
+    state_dir: &Path,
+    socket: &str,
+    idle_shape: Option<crate::fc::idle_pool::IdleShape>,
+) -> Result<(FirecrackerGuard, bool)> {
+    let mut guard = FirecrackerGuard::pending();
+    let claimed = match idle_shape {
+        Some(shape) => {
+            crate::fc::idle_pool::claim(shape, state_dir, Path::new(socket), &mut guard)?
+        }
+        None => false,
+    };
+    if !claimed {
+        start_vm_firecracker_bounded(
+            &state_dir.to_string_lossy(),
+            socket,
+            &spec.name,
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+                .with_cpu_grant(spec.cpu_grant),
+            &mut guard,
+        )?;
+    }
+    Ok((guard, claimed))
 }
 
 /// SIGTERM → grace → SIGKILL escalation against a Firecracker process, mirroring
@@ -1106,6 +1129,9 @@ impl VmmDriver for FcDriver {
                 spec.shares.len()
             );
         }
+        let bounds = mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+            .with_cpu_grant(spec.cpu_grant);
+        crate::fc::validate_required_scope(&spec.name, &bounds)?;
         let kernel_path = resolve_fc_kernel_path(spec)?;
 
         let state_dir = vm_state_dir(&spec.name);
@@ -1114,11 +1140,14 @@ impl VmmDriver for FcDriver {
         let mut trace = LaunchTraceRecorder::new("fc");
         let pid_file = fc_pid_path(&spec.name)
             .ok_or_else(|| anyhow!("resolve Firecracker pid path for '{}'", spec.name))?;
-        // Clear only a marker proven stale. Removing a live process's marker
-        // would orphan that Firecracker as soon as this launch overwrote the
-        // rest of its state directory.
+        // Keep even stale marker bytes until this attempt has passed all
+        // preparation and actually starts replacing the old state.
         let pid_file_str = pid_file.to_string_lossy().into_owned();
-        clear_stale_pid_marker_for_start(&pid_file, || crate::fc::is_vm_running(&pid_file_str))?;
+        for marker in [&pid_file, &state_dir.join(".fc-pid")] {
+            validate_pid_marker_for_start(marker, || {
+                crate::fc::is_vm_running(&marker.to_string_lossy())
+            })?;
+        }
 
         let abs_dir = state_dir.to_string_lossy().into_owned();
         // Under the state dir unless that is too deep for a Unix socket, in
@@ -1149,23 +1178,12 @@ impl VmmDriver for FcDriver {
 
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
         let socket = crate::fc::fc_api_socket_path(&abs_dir);
-        let mut firecracker_guard = FirecrackerGuard::new(&abs_dir);
         // A workload whose scope limits an idle process already carries takes
         // that process instead of starting one; anything else starts its own.
         let idle_shape = crate::fc::idle_pool::IdleShape::for_launch(spec)
             .filter(|_| crate::fc::idle_pool::enabled());
-        let claimed = idle_shape.is_some_and(|shape| {
-            crate::fc::idle_pool::claim(shape, &state_dir, std::path::Path::new(&socket))
-        });
-        if !claimed {
-            start_vm_firecracker_bounded(
-                &abs_dir,
-                &socket,
-                &spec.name,
-                &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
-                    .with_cpu_grant(spec.cpu_grant),
-            )?;
-        }
+        let (mut firecracker_guard, claimed) =
+            start_or_claim_firecracker(spec, &state_dir, &socket, idle_shape)?;
         let spawned_at = Instant::now();
         tracing::debug!(
             vm = %spec.name,
@@ -1558,6 +1576,146 @@ mod tests {
             read_only: true,
             ephemeral: false,
             slot,
+        }
+    }
+
+    #[test]
+    fn cold_driver_bounds_refusal_preserves_existing_state_without_shell_cleanup() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", scratch.path());
+        let empty = scratch.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        env.set("PATH", &empty);
+        env.remove("XDG_RUNTIME_DIR");
+        env.remove("DBUS_SESSION_BUS_ADDRESS");
+        let mut spec = spec_with(KernelImage::Path("/unused".into()), vec![], vec![]);
+        let state = vm_state_dir(&spec.name);
+        std::fs::create_dir_all(&state).unwrap();
+        for name in ["fc.pid", ".fc-pid", "spawn-scope", "fc.socket"] {
+            std::fs::write(state.join(name), name.as_bytes()).unwrap();
+        }
+        let _handler = mvm_vmm::host::shell::mock::install_handler(|_| {
+            panic!("child-free driver refusal must not launch or clean up");
+        });
+        for memory in [512, 0] {
+            spec.memory_mib = memory;
+            let error = FcDriver::new().boot(&spec).err().expect("bounds refusal");
+            assert!(format!("{error:#}").contains("scope"), "{error:#}");
+            for name in ["fc.pid", ".fc-pid", "spawn-scope", "fc.socket"] {
+                assert_eq!(std::fs::read(state.join(name)).unwrap(), name.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn lost_mechanism_after_preflight_does_not_arm_driver_cleanup() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        let spec = spec_with(KernelImage::Path("/unused".into()), vec![], vec![]);
+        crate::fc::validate_required_scope(
+            &spec.name,
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib),
+        )
+        .unwrap();
+        std::fs::remove_file(scratch.path().join("bin/systemd-run")).unwrap();
+        env.set("PATH", scratch.path().join("bin"));
+        for name in ["fc.pid", ".fc-pid", "spawn-scope", "fc.socket"] {
+            std::fs::write(scratch.path().join(name), name.as_bytes()).unwrap();
+        }
+        let _handler = mvm_vmm::host::shell::mock::install_handler(|_| {
+            panic!("lost mechanism must not run launch or cleanup");
+        });
+        let socket = scratch.path().join("fc.socket");
+        assert!(
+            start_or_claim_firecracker(&spec, scratch.path(), socket.to_str().unwrap(), None)
+                .is_err()
+        );
+        for name in ["fc.pid", ".fc-pid", "spawn-scope", "fc.socket"] {
+            assert_eq!(
+                std::fs::read(scratch.path().join(name)).unwrap(),
+                name.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn marker_retirement_failure_never_launches_or_arms_cleanup() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        std::fs::write(scratch.path().join("fc.pid"), b"11111").unwrap();
+        std::fs::create_dir(scratch.path().join(".fc-pid")).unwrap();
+        let _handler = mvm_vmm::host::shell::mock::install_handler(|_| {
+            panic!("retirement failure must not launch or clean up");
+        });
+        let spec = spec_with(KernelImage::Path("/unused".into()), vec![], vec![]);
+        let error = start_or_claim_firecracker(
+            &spec,
+            scratch.path(),
+            scratch.path().join("fc.socket").to_str().unwrap(),
+            None,
+        )
+        .err()
+        .expect("retirement refuses a directory");
+        assert!(format!("{error:#}").contains("retiring prior Firecracker"));
+        // The commit-to-effects phase may have retired one marker before failing.
+        assert!(!scratch.path().join("fc.pid").exists());
+        assert!(scratch.path().join(".fc-pid").is_dir());
+    }
+
+    #[test]
+    fn failed_launch_attempt_keeps_driver_cleanup_armed() {
+        use std::sync::{Arc, Mutex};
+        let scratch = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        for publish_new_marker in [false, true] {
+            std::fs::write(scratch.path().join("fc.pid"), b"11111").unwrap();
+            std::fs::write(scratch.path().join(".fc-pid"), b"22222").unwrap();
+            let scripts = Arc::new(Mutex::new(Vec::new()));
+            let capture = Arc::clone(&scripts);
+            let state = scratch.path().to_path_buf();
+            let _handler = mvm_vmm::host::shell::mock::install_handler(move |script| {
+                let mut scripts = capture.lock().unwrap();
+                assert!(!state.join(".fc-pid").exists());
+                if scripts.is_empty() {
+                    assert!(
+                        !state.join("fc.pid").exists(),
+                        "old PID retired before launch"
+                    );
+                    if publish_new_marker {
+                        std::fs::write(state.join("fc.pid"), b"33333").unwrap();
+                    }
+                } else if publish_new_marker {
+                    assert_eq!(std::fs::read(state.join("fc.pid")).unwrap(), b"33333");
+                } else {
+                    assert!(
+                        !state.join("fc.pid").exists(),
+                        "cleanup cannot select old PID"
+                    );
+                }
+                scripts.push(script.to_string());
+                mvm_vmm::host::shell::mock::MockResponse {
+                    exit_code: 1,
+                    stdout: String::new(),
+                }
+            });
+            let spec = spec_with(KernelImage::Path("/unused".into()), vec![], vec![]);
+            assert!(
+                start_or_claim_firecracker(
+                    &spec,
+                    scratch.path(),
+                    scratch.path().join("fc.socket").to_str().unwrap(),
+                    None,
+                )
+                .is_err()
+            );
+            let scripts = scripts.lock().unwrap();
+            assert_eq!(scripts.len(), 2, "launch followed by cleanup");
+            assert!(scripts[0].contains("exec firecracker"));
+            assert!(scripts[1].contains("sudo kill"));
         }
     }
 
@@ -2342,7 +2500,7 @@ mod tests {
         let pid_file = dir.path().join("fc.pid");
         std::fs::write(&pid_file, "4242").unwrap();
 
-        let err = clear_stale_pid_marker_for_start(&pid_file, || Ok(true))
+        let err = validate_pid_marker_for_start(&pid_file, || Ok(true))
             .expect_err("a second start must refuse a live Firecracker");
 
         assert!(
@@ -2357,15 +2515,15 @@ mod tests {
     }
 
     #[test]
-    fn start_removes_a_stale_pid_marker_after_proving_the_process_is_gone() {
+    fn start_preserves_a_stale_pid_marker_until_replacement_has_effects() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("fc.pid");
         std::fs::write(&pid_file, "4242").unwrap();
 
-        clear_stale_pid_marker_for_start(&pid_file, || Ok(false))
-            .expect("a dead process leaves a removable stale marker");
+        validate_pid_marker_for_start(&pid_file, || Ok(false))
+            .expect("a dead process permits a later replacement");
 
-        assert!(!pid_file.exists());
+        assert_eq!(std::fs::read(&pid_file).unwrap(), b"4242");
     }
 
     #[test]
