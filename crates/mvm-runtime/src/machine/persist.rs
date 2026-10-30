@@ -225,11 +225,13 @@ pub fn load_machine_spec_from_path(path: &Path) -> Result<MachineSpec> {
 /// Return all persisted machine specs, sorted by name.
 pub fn list_machine_specs() -> Result<Vec<MachineSpec>> {
     let root = config::machine_state_root();
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("listing {}", root.display())),
+    };
     let mut specs = Vec::new();
-    for entry in fs::read_dir(&root).with_context(|| format!("listing {}", root.display()))? {
+    for entry in entries {
         let entry = entry.with_context(|| format!("reading entry in {}", root.display()))?;
         if !entry
             .file_type()
@@ -239,8 +241,14 @@ pub fn list_machine_specs() -> Result<Vec<MachineSpec>> {
             continue;
         }
         let spec_path = entry.path().join("machine.json");
-        if spec_path.exists() {
-            specs.push(load_machine_spec_from_path(&spec_path)?);
+        match load_machine_spec_from_path(&spec_path) {
+            Ok(spec) => specs.push(spec),
+            // A directory alone is not a published definition.
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error),
         }
     }
     specs.sort_by(|left, right| left.name.cmp(&right.name));
@@ -811,6 +819,65 @@ mod tests {
         // Root dir doesn't exist yet — must return empty, not error.
         let specs = list_machine_specs().expect("list empty");
         assert!(specs.is_empty());
+    }
+
+    #[test]
+    fn list_machine_specs_ignores_unpublished_directories_but_refuses_invalid_files() {
+        let _state = IsolatedMachineState::new();
+        let path = config::machine_spec_path("unpublished");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        assert!(list_machine_specs().unwrap().is_empty());
+        fs::create_dir(&path).unwrap();
+        assert!(list_machine_specs().is_err(), "a directory is not a spec");
+    }
+
+    #[test]
+    fn list_machine_specs_refuses_a_non_directory_root() {
+        let _state = IsolatedMachineState::new();
+        fs::write(config::machine_state_root(), b"not a directory").unwrap();
+        assert!(list_machine_specs().is_err());
+    }
+
+    #[test]
+    fn list_machine_specs_refuses_a_non_directory_parent() {
+        let mut state = IsolatedMachineState::new();
+        let home = state._tmp.path().join("not-a-directory");
+        fs::write(&home, b"not a directory").unwrap();
+        state._env.set("MVM_HOME", home);
+        assert!(
+            list_machine_specs().is_err(),
+            "a lookup error is not absence"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_machine_specs_refuses_inaccessible_root_and_definition() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _state = IsolatedMachineState::new();
+        save_machine_spec(&spec_fixture("saved"), false).unwrap();
+        let spec_path = config::machine_spec_path("saved");
+        for denied_dir in [
+            std::path::PathBuf::from(config::mvm_home()),
+            config::machine_state_dir("saved"),
+        ] {
+            let permissions = fs::metadata(&denied_dir).unwrap().permissions();
+            fs::set_permissions(&denied_dir, fs::Permissions::from_mode(0o000)).unwrap();
+            let denied = fs::metadata(&spec_path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied);
+            let result = list_machine_specs();
+            fs::set_permissions(&denied_dir, permissions).unwrap();
+            if !denied {
+                eprintln!("permission witness unavailable for a privileged process");
+                continue;
+            }
+            let error = result.expect_err("a lookup failure is not an absent spec");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
     }
 
     // ---------------------------------------------------------------------------

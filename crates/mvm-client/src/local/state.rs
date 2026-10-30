@@ -1,9 +1,9 @@
 //! Mapping backend VM state into the client-facing machine inventory.
 
 use mvm_core::client::dto::{MachineId, MachineState, MachineStatus, PortMapping};
-use mvm_core::protocol::vm_backend::{VmInfo, VmStatus};
+use mvm_core::protocol::vm_backend::{VmId, VmInfo, VmStatus};
 use mvm_runtime::AnyBackend;
-use mvm_runtime::vm::name_registry::VmRegistration;
+use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
 
 pub(crate) fn map_status(s: &VmStatus) -> MachineStatus {
     match s {
@@ -71,6 +71,49 @@ pub(super) fn to_state(info: VmInfo, reg: Option<&VmRegistration>) -> MachineSta
         last_readiness_change_at: reg.and_then(|r| r.last_readiness_change_at.clone()),
         name: info.name,
     }
+}
+
+pub(super) fn registered_vm_info(name: &str, reg: &VmRegistration) -> VmInfo {
+    VmInfo {
+        id: VmId(name.to_string()),
+        name: name.to_string(),
+        status: VmStatus::Stopped,
+        guest_ip: reg.guest_ip.clone(),
+        cpus: 0,
+        memory_mib: 0,
+        profile: None,
+        revision: None,
+        flake_ref: None,
+        ports: Vec::new(),
+    }
+}
+
+/// Join backend and registry observations with persisted definitions.
+pub(super) fn observed_states(
+    infos: Vec<VmInfo>,
+    registry: &VmNameRegistry,
+) -> mvm_core::client::Result<Vec<MachineState>> {
+    let mut specs: std::collections::BTreeMap<_, _> = crate::inventory::read_persisted_specs()?
+        .into_iter()
+        .map(|spec| (spec.name.clone(), spec))
+        .collect();
+    let mut machines: Vec<_> = infos
+        .into_iter()
+        .map(|info| {
+            let reg = registry.lookup(&info.name);
+            let state = to_state(info, reg);
+            match specs.remove(&state.name) {
+                Some(spec) => crate::inventory::persisted_machine_state(&spec, Some(state)),
+                None => state,
+            }
+        })
+        .collect();
+    machines.extend(
+        specs
+            .into_values()
+            .map(|spec| crate::inventory::persisted_machine_state(&spec, None)),
+    );
+    Ok(machines)
 }
 
 #[cfg(test)]

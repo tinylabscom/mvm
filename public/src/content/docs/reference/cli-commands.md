@@ -1875,6 +1875,8 @@ auto-generated dev-sandbox name. The lower-level `machine checkpoint fork` and
 `sandbox gc` never tears down a live VM. Entries that still appear as starting,
 running, or paused in a backend listing are skipped; cleanup only removes stale
 host registry records.
+If machine observation fails, including an unreadable or malformed persisted
+definition, cleanup refuses without changing registry records.
 `--json` does not change the safety mode: cleanup remains dry-run unless
 `--apply` is also passed.
 
