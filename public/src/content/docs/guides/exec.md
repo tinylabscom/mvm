@@ -72,13 +72,18 @@ A sized disk image (`HOST.img:GUEST:SIZE:rw`) is an ext4 file mvm creates at
 `HOST` if it is absent and attaches as a block device. The guest writes into
 that image, never into the host filesystem, so every profile that accepts
 `--mount` accepts it writable — including `standard` and `--prod`.
-This is the way to keep data without `--profile dev`, which would also hand the
-guest the dev shell agent and the DevOnly verbs:
+Writable disks do not require the development profile. Select
+`--profile standard` explicitly when using that posture with the CLI's
+development default:
 
 ```bash
-mvmctl machine run --image alpine --mount ./state.img:/data/state:1G:rw \
+mvmctl machine run --profile standard --image alpine --mount ./state.img:/data/state:1G:rw \
   -- sh -c 'echo kept > /data/state/note'
 ```
+
+This shell command still uses the ad-hoc DevOnly `Exec` path. It is not a
+ProdSafe or `--prod` example; production-safe launch runs the image's declared
+entrypoint instead.
 
 The guest mount path still has to sit under `/data` or `/work`; the profile
 decides whether a volume may be writable, not where it may mount.
