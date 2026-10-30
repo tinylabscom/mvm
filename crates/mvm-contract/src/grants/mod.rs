@@ -4,6 +4,7 @@
 //! means "what a VMM backend supports", and `capability` additionally collides
 //! with Linux `capabilities(7)`, which this project drops via bounding-set.
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
@@ -308,8 +309,9 @@ where
     if roots.is_empty() {
         return Err(serde::de::Error::custom(DriveGrantError::NoWorkspaceRoots));
     }
-    for (index, root) in roots.iter().enumerate() {
-        if roots[..index].contains(root) {
+    let mut seen = BTreeSet::new();
+    for root in &roots {
+        if !seen.insert(root) {
             return Err(serde::de::Error::custom(
                 DriveGrantError::DuplicateWorkspaceRoot(root.clone()),
             ));
@@ -402,6 +404,63 @@ mod tests {
         );
         assert!(json.contains(r#""program_id":"claude-code""#));
         assert!(json.contains(r#""workspace_roots":["/workspace"]"#));
+    }
+
+    #[test]
+    fn workspace_roots_decode_preserves_original_order() {
+        let mut grant = drive_grant();
+        grant.workspace_roots = ["/z", "/a", "/m"]
+            .into_iter()
+            .map(|root| WorkspaceRoot::parse(root).unwrap())
+            .collect();
+        let decoded: DriveGrant =
+            serde_json::from_str(&serde_json::to_string(&grant).unwrap()).unwrap();
+        assert_eq!(decoded, grant);
+    }
+
+    #[test]
+    fn workspace_roots_decode_reports_the_first_repeated_root() {
+        for (roots, first) in [
+            (vec!["/z", "/z"], "/z"),
+            (vec!["/z", "/a", "/z", "/a"], "/z"),
+            (vec!["/a", "/z", "/z", "/a"], "/z"),
+        ] {
+            let mut value = serde_json::to_value(drive_grant()).unwrap();
+            value["workspace_roots"] = serde_json::to_value(roots).unwrap();
+            let error = serde_json::from_value::<DriveGrant>(value).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                DriveGrantError::DuplicateWorkspaceRoot(WorkspaceRoot::parse(first).unwrap())
+                    .to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_roots_decode_many_unique_roots_without_sorting_them() {
+        let mut grant = drive_grant();
+        grant.workspace_roots = (0..4096)
+            .rev()
+            .map(|index| WorkspaceRoot::parse(alloc::format!("/r{index:04}")).unwrap())
+            .collect();
+        let json = serde_json::to_string(&grant).unwrap();
+        let decoded: DriveGrant = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, grant);
+    }
+
+    #[test]
+    fn workspace_root_ordering_and_equality_use_the_same_identity() {
+        let roots = ["/", "/a", "/A", "/é", "/e\u{301}", "/a"];
+        for left in roots {
+            for right in roots {
+                let left = WorkspaceRoot::parse(left).unwrap();
+                let right = WorkspaceRoot::parse(right).unwrap();
+                assert_eq!(
+                    left == right,
+                    left.cmp(&right) == core::cmp::Ordering::Equal
+                );
+            }
+        }
     }
 
     #[test]

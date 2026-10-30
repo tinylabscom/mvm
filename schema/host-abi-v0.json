@@ -529,6 +529,26 @@
         }
       ]
     },
+    "CheckpointRemoveReply": {
+      "additionalProperties": false,
+      "description": "A request that carries nothing.",
+      "title": "Empty",
+      "type": "object"
+    },
+    "CheckpointRemoveRequest": {
+      "additionalProperties": false,
+      "description": "A host-local checkpoint ID, with no force or storage-root override.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "CheckpointRemoveRequest",
+      "type": "object"
+    },
     "ContentBlob": {
       "additionalProperties": false,
       "description": "One named artifact inside a checkpoint's `content/` dir, with its hash.",
@@ -4673,6 +4693,23 @@
       "title": "CheckpointList",
       "type": "object"
     },
+    "checkpoint_remove": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointRemoveReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointRemoveRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointRemove",
+      "type": "object"
+    },
     "entrypoint_call": {
       "additionalProperties": false,
       "properties": {
@@ -5475,6 +5512,7 @@
   },
   "required": [
     "checkpoint_list",
+    "checkpoint_remove",
     "attestation_export",
     "attestation_verify",
     "attestation_status",

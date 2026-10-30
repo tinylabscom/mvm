@@ -1908,6 +1908,23 @@ and metadata exceeding 16 MiB refuse the entire listing. Catalog reads use held
 directory handles and do not open checkpoint content, verify lineage, or grant
 permission to restore.
 
+`machine checkpoint rm` delegates to the same guarded client operation exposed as
+hostlib `checkpoint.remove` (ABI 1.11) and `mvm.checkpoint.remove(id)` in Python
+and TypeScript. A missing checkpoint directory is already removed. Existing
+incomplete/unreadable metadata, failed session-pin/dependency reads, session
+pins, and dependent checkpoints refuse deletion without
+removing the checkpoint. A visible sibling directory without metadata also refuses
+removal: it may hold a dependent whose record was lost. Read-only listing still
+ignores incomplete directories. There is no force override. The checks are preflight:
+concurrent pin, lineage and path changes are not serialized with deletion.
+This host-local operation grants no guest, MCP or remote deletion authority.
+
+The checkpoint sweep in `cache prune` uses the same complete-metadata observation
+before deleting any checkpoint in its batch. Missing, unreadable or malformed
+records refuse the checkpoint sweep; ordinary retention rules remain unchanged.
+This does not make the overall cache prune transactional or roll back later
+deletion failures.
+
 The rootfs and memory image are stored as 1 MiB chunks shared, by hard link, with every other checkpoint of the same tenant that holds the same bytes; each blob's recorded hash is the digest of its chunk index. A checkpoint from a pre-release that stored those images as whole files is refused by restore and fork, with a message naming it. Remove it with `mvmctl machine checkpoint rm <checkpoint>` and capture the machine again; there is no migration.
 
 ## Durable Agent Sessions

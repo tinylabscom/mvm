@@ -31,7 +31,7 @@ void     mvm_hostlib_free(MvmHostlibBuf buf);
    `MVM_HOSTLIB_ABI_NOT_NEGOTIATED`: a binding and library that disagree about
    the buffer layout would otherwise read and free memory neither described.
 2. It calls a dotted method with a JSON request. Request types refuse unknown
-   fields. The ABI is 1.10.
+   fields. The ABI is 1.11.
 3. It gets back a status and a JSON buffer, and releases the buffer with
    `mvm_hostlib_free`. Statuses 1 to 7 mirror `MvmError`, and the error body
    carries the same `code` and `retryable` every other programmatic surface
@@ -154,7 +154,7 @@ classes and method tables for both SDKs.
 | Log streams | `machine.logs.stream.{open,next,close}` | `mvm_core::stream_client::open_vm_output` (what `mvmctl machine logs --follow` reads), on a reader thread |
 | Functions | `entrypoint.call`, `session.{start,call,stop,info}` | `mvm_client::entrypoint`, the dispatch `mvmctl machine run --entrypoint` and `machine session` use |
 | Host identity | `attestation.export`, `attestation.verify`, `attestation.status` | bounded `mvm_client::attestation` facade, without machine services |
-| Checkpoint catalog | `checkpoint.list` | `mvm_client::checkpoint::Checkpoints::list`, without machine services |
+| Host-local checkpoints | `checkpoint.list`, `checkpoint.remove` | `mvm_client::checkpoint::Checkpoints`, without machine services |
 | Image revocations | `image_revocations.update`, `image_revocations.status` | canonical signed revocation store through `mvm_client::image_admin::revocations` |
 
 ABI 1.10 adds `checkpoint.list`, a strict empty-object request returning the
@@ -168,7 +168,20 @@ ignored. Listing does not open content or verify lineage and grants no restore
 authority. The method is `ProdSafe` data access, not authentication or a role
 grant, and needs negotiation but no machine service construction.
 
-These five host-local methods are `ProdSafe` data/admin operations under the
+ABI 1.11 adds `checkpoint.remove`, accepting only `{"id":"checkpoint-id"}` and
+returning `{}` after the shared client's guarded removal. Missing directories are
+already removed; existing incomplete/unreadable metadata and failed pin or
+dependency reads refuse deletion. Session pins and dependent
+checkpoints return nonretryable `CONFLICT`; invalid IDs return `INVALID_SPEC`;
+read failures return `BACKEND_ERROR` without parser payloads. A visible sibling
+directory without metadata refuses removal rather than establishing no dependents.
+Read-only listing keeps its incomplete-entry filter. There is no force or root
+override, VM stop, guest-agent, MCP, or remote route. This remains host-local
+administration under the caller's existing filesystem authority, not a new grant.
+The guards are preflight checks, not an atomic transaction with concurrent pin,
+lineage or path changes.
+
+These host-local methods are `ProdSafe` data/admin operations under the
 registry's guest-tier classification, not authentication or a role grant. They
 run after ABI negotiation and before machine service construction. Empty
 operations require literal `{}`. Verification requires explicit

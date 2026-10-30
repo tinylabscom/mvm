@@ -45,7 +45,7 @@
 //! in [`entrypoint::METHODS`], the guest methods in
 //! [`guest::METHODS`], and the stream methods in [`stream::METHODS`] and
 //! [`stream::LOG_METHODS`], plus local registry inspection in [`manifest::METHODS`]
-//! and checkpoint catalog access in [`checkpoint::METHODS`].
+//! and host-local checkpoint operations in [`checkpoint::METHODS`].
 //! Each call builds a single-threaded runtime and drops it before returning.
 //! The one thing that outlives a call is a process stream's reader, which
 //! lives until the process ends or its wait times out; see [`stream`].
@@ -102,7 +102,8 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// 8 added host-local attestation/revocation data and nonretryable recovery details.
 /// 9 added caller-owned invocation contexts with independent negotiation.
 /// 10 added complete read-only checkpoint catalog metadata.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 10;
+/// 11 added guarded host-local checkpoint removal.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 11;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -597,6 +598,22 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_removal_is_host_local_and_requires_negotiation() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let request = br#"{"id":"absent"}"#;
+        assert_eq!(
+            handle(false, b"checkpoint.remove", request, &Untouched).status,
+            MVM_HOSTLIB_ABI_NOT_NEGOTIATED
+        );
+        let outcome = handle(true, b"checkpoint.remove", request, &Untouched);
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(outcome.body, b"{}");
+        assert!(!mvm_core::config::checkpoints_dir().exists());
+    }
+
+    #[test]
     fn host_local_routes_require_negotiation_without_constructing_services() {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
@@ -647,12 +664,13 @@ mod tests {
 
     #[test]
     fn recovery_status_and_c_buffer_do_not_depend_on_last_negotiated_minor() {
-        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 10));
+        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 11));
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 7), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 8), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 9), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 10), 1);
-        assert_eq!(mvm_hostlib_abi_is_compatible(1, 11), 0);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 11), 1);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 12), 0);
         for minor in [7, 8, 9, 7] {
             assert_eq!(mvm_hostlib_abi_is_compatible(1, minor), 1);
             let outcome = Outcome::from(mvm_core::client::MvmError::RecoveryRequired {

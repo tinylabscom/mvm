@@ -1,6 +1,6 @@
-/** Read-only checkpoint catalog access through the client-owned host service. */
+/** Host-local checkpoint operations through the client-owned host service. */
 import { call } from "./_hostlib.js";
-import { CHECKPOINT_LIST } from "./hostabi/methods.js";
+import { CHECKPOINT_LIST, CHECKPOINT_REMOVE } from "./hostabi/methods.js";
 import type { CheckpointListReply } from "./hostabi/host_abi.js";
 
 export type CheckpointMeta = CheckpointListReply[number];
@@ -12,4 +12,14 @@ export type CheckpointMeta = CheckpointListReply[number];
  */
 export function list(): CheckpointListReply {
   return call(CHECKPOINT_LIST, {});
+}
+
+/**
+ * Remove a host-local checkpoint after metadata, pin and descendant checks.
+ * Missing directories are already removed; incomplete metadata or failed guard
+ * reads refuse deletion. These preflight checks do not serialize concurrent
+ * pin, lineage or path changes, or grant guest/remote deletion authority.
+ */
+export function remove(id: string): void {
+  call(CHECKPOINT_REMOVE, { id });
 }

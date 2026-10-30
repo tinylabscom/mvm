@@ -166,6 +166,16 @@ CheckpointProtection = Union[CheckpointProtection1, CheckpointProtection2]
 
 
 @dataclass
+class CheckpointRemoveReply:
+    pass
+
+
+@dataclass
+class CheckpointRemoveRequest:
+    id: str
+
+
+@dataclass
 class ContentBlob:
     name: str
     sha256: str
@@ -1075,6 +1085,12 @@ class BackendCapabilities:
 
 
 @dataclass
+class CheckpointRemove:
+    reply: CheckpointRemoveReply
+    request: CheckpointRemoveRequest
+
+
+@dataclass
 class GuestCp:
     reply: GuestCpReply
     request: GuestCpRequest
@@ -1758,6 +1774,7 @@ class HostAbi:
     attestation_verify: AttestationVerify
     backend_capabilities: BackendCapabilities
     checkpoint_list: CheckpointList
+    checkpoint_remove: CheckpointRemove
     entrypoint_call: EntrypointCall
     guest_cp: GuestCp
     guest_fs_list: GuestFsList

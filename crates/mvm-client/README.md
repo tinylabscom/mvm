@@ -34,6 +34,15 @@ be read or parsed, rather than silently omitting stopped entries or metadata.
 A missing registry remains a valid empty initial registry. Bulk-stop target
 discovery stays best-effort and excludes registry-only entries.
 
+`checkpoint::Checkpoints::remove` owns host-local checkpoint removal for the CLI
+and host library. It refuses incomplete/unreadable metadata, session pins,
+dependent checkpoints, and failed guard reads. An absent checkpoint directory is
+already removed. Removal also refuses any visible checkpoint directory lacking
+metadata: it cannot establish that the directory is not a dependent. Read-only
+listing still ignores incomplete directories and staging. These preflight checks
+do not serialize concurrent pin, lineage,
+or path changes with deletion; they do not grant guest, MCP, or remote authority.
+
 ## Main modules
 
 | Module | Responsibility |
@@ -42,6 +51,7 @@ discovery stays best-effort and excludes registry-only entries.
 | `local` | In-process local implementation |
 | `launch` / `boot` | Request validation and machine startup |
 | `inventory` / `registration` | Machine discovery and durable identity |
+| `checkpoint` | Host-local catalog access and guarded checkpoint removal |
 | `stream` | Captured output access |
 | `volume` | Volume lifecycle, leases, and snapshots |
 | `secret` | Secret-reference inputs and audit records |

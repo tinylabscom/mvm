@@ -212,6 +212,14 @@ pub const REGISTRY: &[MethodDef] = &[
         reply: array_of::<CheckpointMeta>,
     },
     MethodDef {
+        name: crate::checkpoint::REMOVE,
+        key: "checkpoint_remove",
+        summary: "Remove a host-local checkpoint only after metadata, session-pin and descendant checks.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<crate::checkpoint::CheckpointRemoveRequest>,
+        reply: schema_of::<DispatchEmpty>,
+    },
+    MethodDef {
         name: crate::attestation::EXPORT,
         key: "attestation_export",
         summary: "Export a host-signed v0 identity report, not measured-boot evidence.",

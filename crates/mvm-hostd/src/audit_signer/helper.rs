@@ -586,8 +586,16 @@ mod tests {
     fn sign_host_signs_plan_bytes_with_helper_key() {
         let dir = tempdir().unwrap();
         let mut helper = SignerHelper::new("local", Some(key_path(dir.path())));
-        let plan_bytes = b"canonical-plan".to_vec();
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let plan_bytes = mvm_core::plan::sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[23; 32]),
+            "plan-fixture",
+        )
+        .0
+        .payload;
 
+        let before = Keystore::test_signing_calls();
         let response = helper.dispatch(SignerHelperRequest::SignHost(SignerHelperSignHost {
             request_id: "sign-1".into(),
             request: SignRequest::SignPlan {
@@ -595,6 +603,7 @@ mod tests {
                 request_id: "sign-1".into(),
             },
         }));
+        assert_eq!(Keystore::test_signing_calls(), before + 1);
 
         match response {
             SignerHelperResponse::HostSigned {
@@ -620,11 +629,19 @@ mod tests {
     #[test]
     fn sign_host_without_key_path_returns_typed_error() {
         let mut helper = SignerHelper::new("local", None);
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let plan_bytes = mvm_core::plan::sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[23; 32]),
+            "plan-fixture",
+        )
+        .0
+        .payload;
 
         let response = helper.dispatch(SignerHelperRequest::SignHost(SignerHelperSignHost {
             request_id: "sign-missing".into(),
             request: SignRequest::SignPlan {
-                bytes: b"canonical-plan".to_vec(),
+                bytes: plan_bytes,
                 request_id: "sign-missing".into(),
             },
         }));
@@ -635,6 +652,42 @@ mod tests {
                 ..
             } => assert_eq!(code, HostSignerErrorCode::KeyUnavailable),
             other => panic!("expected host sign error response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sign_plan_payload_rejects_cross_purpose_bytes_in_real_helper() {
+        let dir = tempdir().unwrap();
+        let mut helper = SignerHelper::new("local", Some(key_path(dir.path())));
+        let before = Keystore::test_signing_calls();
+        let response = helper.dispatch(SignerHelperRequest::SignHost(SignerHelperSignHost {
+            request_id: "invalid-plan-fixture".into(),
+            request: SignRequest::SignPlan {
+                bytes: b"mvm.prebirth.grant.v1\0{}".to_vec(),
+                request_id: "invalid-plan-fixture".into(),
+            },
+        }));
+        assert_eq!(
+            Keystore::test_signing_calls(),
+            before,
+            "helper refusal must precede the signing primitive"
+        );
+        match response {
+            SignerHelperResponse::HostSigned {
+                request_id,
+                response:
+                    SignResponse::Err {
+                        request_id: inner_id,
+                        code,
+                        message,
+                    },
+            } => {
+                assert_eq!(request_id, "invalid-plan-fixture");
+                assert_eq!(inner_id, "invalid-plan-fixture");
+                assert_eq!(code, HostSignerErrorCode::InvalidRequest);
+                assert_eq!(message, "invalid execution plan payload");
+            }
+            other => panic!("expected static invalid-plan refusal, got {other:?}"),
         }
     }
 }

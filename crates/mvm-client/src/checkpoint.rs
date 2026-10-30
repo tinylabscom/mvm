@@ -1,4 +1,4 @@
-//! Read-only local checkpoint access for command and embedder workflows.
+//! Host-local checkpoint access for command and embedder workflows.
 //!
 //! Checkpoint storage layout is runtime-owned. This service keeps callers from
 //! opening that store or reconstructing its content paths themselves.
@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
+use mvm_core::client::MvmError;
 use mvm_runtime::checkpoint::{CheckpointStore, checked_workspace_blob_name};
 
 pub mod fs_quick;
 
-/// Read-only access to the local checkpoint catalog and its workspace images.
+/// Access to the local checkpoint catalog, guarded removal and workspace images.
 pub struct Checkpoints {
     store: CheckpointStore,
 }
@@ -26,8 +27,9 @@ impl Checkpoints {
 
     /// Open a checkpoint catalog at an explicit root.
     ///
-    /// This is useful to embedders with isolated state and keeps tests from
-    /// changing process-global configuration.
+    /// Catalog reads can use isolated state without changing process-global
+    /// configuration. Removal still checks the configured host-wide session
+    /// pins; an explicit catalog root does not select another session policy.
     pub fn at(root: impl AsRef<Path>) -> Self {
         Self {
             store: CheckpointStore::at(root.as_ref().to_path_buf()),
@@ -58,6 +60,91 @@ impl Checkpoints {
             );
         }
         Ok(meta)
+    }
+
+    /// Remove a checkpoint only after metadata, session-pin and descendant checks.
+    ///
+    /// An absent directory is already removed. An existing directory without
+    /// readable complete metadata is not absence. Pin checks use the host-wide
+    /// agent-session store selected by `MVM_HOME`, also for an explicit catalog root.
+    ///
+    /// These are preflight guards, not an atomic transaction: concurrent pin,
+    /// lineage and path changes are not serialized with deletion.
+    ///
+    /// # Errors
+    ///
+    /// Invalid IDs return `MvmError::InvalidSpec`; pins and descendants return
+    /// `MvmError::Conflict`. Observation or deletion failures return
+    /// `MvmError::Backend`, without expanding parser diagnostics.
+    pub fn remove(&self, id: &CheckpointId) -> Result<()> {
+        let id = validated_id(id.as_str()).map_err(|_| MvmError::InvalidSpec {
+            reason: "invalid checkpoint id".into(),
+        })?;
+        match std::fs::symlink_metadata(self.store.dir_for(&id)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(MvmError::Backend {
+                    reason: format!("inspecting checkpoint directory: {error}"),
+                }
+                .into());
+            }
+        }
+        let meta = self
+            .store
+            .list()
+            .map_err(|error| MvmError::Backend {
+                reason: format!("reading checkpoint metadata: {error}"),
+            })?
+            .into_iter()
+            .find(|meta| meta.id == id)
+            .ok_or_else(|| MvmError::Backend {
+                reason: format!(
+                    "checkpoint '{}' has missing or incomplete metadata",
+                    id.as_str()
+                ),
+            })?;
+        let sessions = mvm_runtime::agent_session::AgentSessionStore::open();
+        let pin = mvm_runtime::agent_session::pinning_session(&sessions, &meta.meta_digest)
+            .map_err(|error| MvmError::Backend {
+                reason: format!("listing agent sessions: {error}"),
+            })?;
+        if let Some(session_id) = pin {
+            return Err(MvmError::Conflict {
+                reason: format!(
+                    "cannot remove checkpoint '{}': it is the resume point for agent session '{}'; \
+                     close that session before removing the checkpoint",
+                    id.as_str(),
+                    session_id.as_str()
+                ),
+            }
+            .into());
+        }
+        let descendants =
+            mvm_runtime::checkpoint::dependent_children(&self.store, &meta).map_err(|error| {
+                MvmError::Backend {
+                    reason: format!(
+                        "listing checkpoints that name this one as their parent: {error}"
+                    ),
+                }
+            })?;
+        if !descendants.is_empty() {
+            return Err(MvmError::Conflict {
+                reason: format!(
+                    "cannot remove checkpoint '{}': {} through it; remove {} first",
+                    id.as_str(),
+                    descendants_restoring_through(&descendants),
+                    if descendants.len() == 1 { "it" } else { "them" }
+                ),
+            }
+            .into());
+        }
+        self.store.remove(&id).map_err(|error| {
+            MvmError::Backend {
+                reason: format!("removing checkpoint: {error}"),
+            }
+            .into()
+        })
     }
 
     /// Resolve the frozen image for `volume` in `id`.
@@ -135,6 +222,16 @@ pub fn validated_id(raw: &str) -> Result<CheckpointId> {
     CheckpointId::try_from_path_component(raw).map_err(Into::into)
 }
 
+fn descendants_restoring_through(ids: &[CheckpointId]) -> String {
+    let quoted: Vec<String> = ids.iter().map(|id| format!("'{}'", id.as_str())).collect();
+    let (noun, verb) = if ids.len() == 1 {
+        ("checkpoint", "restores")
+    } else {
+        ("checkpoints", "restore")
+    };
+    format!("{noun} {} {verb}", quoted.join(", "))
+}
+
 impl Default for Checkpoints {
     fn default() -> Self {
         Self::open()
@@ -144,6 +241,195 @@ impl Default for Checkpoints {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descendants_restoring_through_agrees_in_number() {
+        assert_eq!(
+            descendants_restoring_through(&[CheckpointId::new("a")]),
+            "checkpoint 'a' restores"
+        );
+        assert_eq!(
+            descendants_restoring_through(&[CheckpointId::new("a"), CheckpointId::new("b")]),
+            "checkpoints 'a', 'b' restore"
+        );
+    }
+
+    fn removal_fixture() -> (
+        tempfile::TempDir,
+        mvm_core::util::test_env::TestEnv,
+        Checkpoints,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        (home, env, Checkpoints::open())
+    }
+
+    fn seed_removal_record(
+        checkpoints: &Checkpoints,
+        id: &str,
+        parent: Option<&CheckpointMeta>,
+    ) -> CheckpointMeta {
+        let meta = CheckpointMeta::builder(
+            CheckpointId::new(id),
+            mvm_core::checkpoint::CheckpointClass::FsQuick,
+            "vm",
+        )
+        .parent(parent.map(|record| record.meta_digest.clone()))
+        .build();
+        checkpoints.store.write_meta(&meta).unwrap();
+        meta
+    }
+
+    #[test]
+    fn checkpoint_remove_preserves_missing_directory_idempotency() {
+        let (_home, _env, checkpoints) = removal_fixture();
+        checkpoints.remove(&CheckpointId::new("absent")).unwrap();
+        assert!(!checkpoints.store.root().exists());
+        let meta = seed_removal_record(&checkpoints, "present", None);
+        checkpoints.remove(&meta.id).unwrap();
+        checkpoints.remove(&meta.id).unwrap();
+        assert!(!checkpoints.store.dir_for(&meta.id).exists());
+    }
+
+    #[test]
+    fn checkpoint_remove_refuses_invalid_ids_before_effects() {
+        let (_home, _env, checkpoints) = removal_fixture();
+        for raw in ["", ".", "..", "../outside", "a/b", "a\\b", "a\0b", "a\nb"] {
+            let error = checkpoints.remove(&CheckpointId::new(raw)).unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<mvm_core::client::MvmError>(),
+                Some(mvm_core::client::MvmError::InvalidSpec { .. })
+            ));
+        }
+        assert!(!checkpoints.store.root().exists());
+    }
+
+    #[test]
+    fn checkpoint_remove_refuses_missing_corrupt_or_nonregular_metadata() {
+        for name in ["incomplete", "corrupt", "nonregular"] {
+            let (_home, _env, checkpoints) = removal_fixture();
+            let id = CheckpointId::new(name);
+            let directory = checkpoints.store.dir_for(&id);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("keep"), b"checkpoint content").unwrap();
+            match name {
+                "corrupt" => std::fs::write(directory.join("meta.json"), b"{").unwrap(),
+                "nonregular" => std::fs::create_dir(directory.join("meta.json")).unwrap(),
+                _ => {}
+            }
+            assert!(checkpoints.remove(&id).is_err(), "{name}");
+            assert!(directory.join("keep").is_file(), "{name}");
+        }
+    }
+
+    #[test]
+    fn checkpoint_remove_refuses_a_pin_until_the_session_is_closed() {
+        use mvm_contract::protocol::agent_session::AgentSessionId;
+        use mvm_runtime::agent_session::{AgentSessionRecord, AgentSessionStore, SandboxResidency};
+
+        let (_home, _env, checkpoints) = removal_fixture();
+        let meta = seed_removal_record(&checkpoints, "pinned", None);
+        let sessions = AgentSessionStore::open();
+        let mut record = AgentSessionRecord::opened(
+            AgentSessionId::parse("sess-pinned").unwrap(),
+            vec!["vm".into()],
+            Some(meta.meta_digest.clone()),
+            0,
+        );
+        record.state = SandboxResidency::Hibernated;
+        sessions.write(&record).unwrap();
+        let error = checkpoints.remove(&meta.id).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<mvm_core::client::MvmError>(),
+            Some(mvm_core::client::MvmError::Conflict { .. })
+        ));
+        assert!(error.to_string().contains("sess-pinned"));
+        assert_eq!(checkpoints.read(&meta.id).unwrap(), meta);
+        record.state = SandboxResidency::Closed;
+        sessions.write(&record).unwrap();
+        checkpoints.remove(&meta.id).unwrap();
+        assert!(!checkpoints.store.dir_for(&meta.id).exists());
+    }
+
+    #[test]
+    fn checkpoint_remove_requires_descendants_to_be_removed_first() {
+        let (_home, _env, checkpoints) = removal_fixture();
+        let parent = seed_removal_record(&checkpoints, "parent", None);
+        let child = seed_removal_record(&checkpoints, "child", Some(&parent));
+        let error = checkpoints.remove(&parent.id).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<mvm_core::client::MvmError>(),
+            Some(mvm_core::client::MvmError::Conflict { .. })
+        ));
+        assert!(error.to_string().contains("child"));
+        assert_eq!(checkpoints.read(&parent.id).unwrap(), parent);
+        checkpoints.remove(&child.id).unwrap();
+        checkpoints.remove(&parent.id).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_remove_failed_pin_lookup_leaves_checkpoint_untouched() {
+        let (_home, _env, checkpoints) = removal_fixture();
+        let meta = seed_removal_record(&checkpoints, "guarded", None);
+        std::fs::create_dir_all(mvm_core::config::agent_sessions_dir().join("sess-incomplete"))
+            .unwrap();
+        assert!(checkpoints.remove(&meta.id).is_err());
+        assert_eq!(checkpoints.read(&meta.id).unwrap(), meta);
+        checkpoints.remove(&CheckpointId::new("absent")).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_remove_failed_dependency_lookup_leaves_checkpoint_untouched() {
+        let (_home, _env, checkpoints) = removal_fixture();
+        let meta = seed_removal_record(&checkpoints, "guarded", None);
+        let other = seed_removal_record(&checkpoints, "unreadable-child", Some(&meta));
+        std::fs::write(checkpoints.store.dir_for(&other.id).join("meta.json"), b"{").unwrap();
+        assert!(checkpoints.remove(&meta.id).is_err());
+        assert_eq!(checkpoints.read(&meta.id).unwrap(), meta);
+    }
+
+    #[test]
+    fn checkpoint_remove_missing_sibling_metadata_preserves_parent_and_child_state() {
+        let (_home, _env, checkpoints) = removal_fixture();
+        let parent = seed_removal_record(&checkpoints, "parent", None);
+        let child = seed_removal_record(&checkpoints, "child", Some(&parent));
+        let parent_dir = checkpoints.store.dir_for(&parent.id);
+        let child_dir = checkpoints.store.dir_for(&child.id);
+        std::fs::write(parent_dir.join("keep"), b"parent content").unwrap();
+        std::fs::write(child_dir.join("keep"), b"child content").unwrap();
+        std::fs::remove_file(child_dir.join("meta.json")).unwrap();
+
+        assert_eq!(checkpoints.list().unwrap(), vec![parent.clone()]);
+        assert!(checkpoints.remove(&parent.id).is_err());
+        assert_eq!(checkpoints.read(&parent.id).unwrap(), parent);
+        assert_eq!(
+            std::fs::read(parent_dir.join("keep")).unwrap(),
+            b"parent content"
+        );
+        assert_eq!(
+            std::fs::read(child_dir.join("keep")).unwrap(),
+            b"child content"
+        );
+        assert!(!child_dir.join("meta.json").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn checkpoint_remove_preserves_metadata_path_guards() {
+        let (home, _env, checkpoints) = removal_fixture();
+        let meta = seed_removal_record(&checkpoints, "guarded", None);
+        let path = checkpoints.store.dir_for(&meta.id).join("meta.json");
+        let outside = home.path().join("outside.json");
+        std::fs::rename(&path, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(checkpoints.remove(&meta.id).is_err());
+        assert!(std::fs::symlink_metadata(path).unwrap().is_symlink());
+        assert_eq!(
+            serde_json::from_slice::<CheckpointMeta>(&std::fs::read(outside).unwrap()).unwrap(),
+            meta
+        );
+    }
 
     #[test]
     fn checkpoint_list_preserves_complete_and_legacy_json() {
