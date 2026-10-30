@@ -430,7 +430,7 @@ where
                 // when the guest is idle in WFI rather than doing MMIO.
                 poll_all::<C, _, _>(bus, &set_irq)?;
             }
-            VcpuExit::Canceled => {
+            VcpuExit::Canceled => loop {
                 // A forced exit: either a real stop or a heartbeat wake. Poll
                 // host-side async work either way (this is how an egress reply
                 // reaches a guest blocked in WFI), then end only if a stop was
@@ -497,7 +497,12 @@ where
                 if (hooks.should_stop)() {
                     return Ok(RunOutcome::Canceled);
                 }
-            }
+                // A pause can end the throttle hold without another forced exit.
+                // Handle it here before allowing the next guest instruction.
+                if !(hooks.should_pause)() {
+                    break;
+                }
+            },
             VcpuExit::Halt => return Ok(RunOutcome::Halt),
             VcpuExit::Mmio {
                 phys_addr,
@@ -1232,17 +1237,17 @@ mod tests {
 
     /// A device that counts how many times `poll()` is called.
     struct PollCountDev {
-        polls: RefCell<usize>,
+        polls: Arc<AtomicUsize>,
     }
 
     impl PollCountDev {
         fn new() -> Self {
             Self {
-                polls: RefCell::new(0),
+                polls: Arc::new(AtomicUsize::new(0)),
             }
         }
         fn polls(&self) -> usize {
-            *self.polls.borrow()
+            self.polls.load(Ordering::SeqCst)
         }
     }
 
@@ -1260,7 +1265,7 @@ mod tests {
             None
         }
         fn poll(&mut self) -> Option<u32> {
-            *self.polls.borrow_mut() += 1;
+            self.polls.fetch_add(1, Ordering::SeqCst);
             None
         }
     }
@@ -1403,29 +1408,27 @@ mod tests {
     fn a_throttle_hold_keeps_polling_devices() {
         let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Halt]);
         let mut dev = PollCountDev::new();
+        let polls = Arc::clone(&dev.polls);
         let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
-        let throttle = Arc::new(AtomicBool::new(true));
-        let throttle_for_clear = Arc::clone(&throttle);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
-            throttle_for_clear.store(false, Ordering::SeqCst);
-        });
+        // Release on device progress, not on the scheduler delivering ten polls in 50ms.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
 
-        run(
+        let outcome = run(
             &vcpu,
             |_, _| Ok(()),
             &mut devs,
             RunHooks {
                 _marker: std::marker::PhantomData,
                 on_exception: no_exceptions,
-                should_stop: || false,
+                should_stop: || std::time::Instant::now() >= deadline,
                 should_pause: || false,
                 on_pause: |_, _| Ok(()),
-                should_throttle: || throttle.load(Ordering::SeqCst),
+                should_throttle: || polls.load(Ordering::SeqCst) < 10,
             },
         )
         .unwrap();
 
+        assert_eq!(outcome, RunOutcome::Halt, "poll progress watchdog expired");
         assert!(
             dev.polls() >= 10,
             "device poll count {} should rise during a throttle hold",
@@ -1474,24 +1477,13 @@ mod tests {
 
     #[test]
     fn a_pause_during_a_throttle_takes_precedence() {
-        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Canceled, VcpuExit::Halt]);
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Halt]);
         let mut dev = SnapshotCountDev::new();
         let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
         let throttle = Arc::new(AtomicBool::new(true));
         let pause = Arc::new(AtomicBool::new(false));
-        let throttle_for_thread = Arc::clone(&throttle);
-        let pause_for_thread = Arc::clone(&pause);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(30));
-            throttle_for_thread.store(false, Ordering::SeqCst);
-            pause_for_thread.store(true, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(30));
-            pause_for_thread.store(false, Ordering::SeqCst);
-        });
         let pause_calls = Arc::new(AtomicUsize::new(0));
-        let pause_calls_for_hook = Arc::clone(&pause_calls);
 
-        let started = std::time::Instant::now();
         let out = run(
             &vcpu,
             |_, _| Ok(()),
@@ -1501,28 +1493,33 @@ mod tests {
                 on_exception: no_exceptions,
                 should_stop: || false,
                 should_pause: || pause.load(Ordering::SeqCst),
-                on_pause: move |_, _| {
-                    pause_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                on_pause: |vcpu, _| {
+                    assert_eq!(vcpu.script.borrow().len(), 1, "guest must remain parked");
+                    pause_calls.fetch_add(1, Ordering::SeqCst);
+                    pause.store(false, Ordering::SeqCst);
+                    throttle.store(false, Ordering::SeqCst);
                     Ok(())
                 },
-                should_throttle: || throttle.load(Ordering::SeqCst),
+                should_throttle: || {
+                    let held = throttle.load(Ordering::SeqCst);
+                    // Latch pause at the throttle boundary until its hook acknowledges it.
+                    if held {
+                        pause.store(true, Ordering::SeqCst);
+                    }
+                    held
+                },
             },
         )
         .unwrap();
 
         assert_eq!(out, RunOutcome::Halt);
-        assert!(
-            started.elapsed() >= Duration::from_millis(50),
-            "pause hold should extend the park"
+        assert_eq!(
+            dev.prepare_count(),
+            1,
+            "pause must prepare before guest reentry"
         );
-        assert!(
-            dev.prepare_count() > 0,
-            "pause machinery must run when pause takes over"
-        );
-        assert!(
-            pause_calls.load(Ordering::SeqCst) > 0,
-            "pause hook must run when pause takes over"
-        );
+        assert_eq!(pause_calls.load(Ordering::SeqCst), 1);
+        assert!(!pause.load(Ordering::SeqCst), "pause must be acknowledged");
     }
 
     #[test]

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 
 import { checkpoint } from "../src/index.js";
 import { setInvokeForTesting } from "../src/_hostlib.js";
-import { MachineBackendError } from "../src/_errors/types.js";
+import { MachineBackendError, MachineConflictError, MachineSpecError } from "../src/_errors/types.js";
 
 afterEach(() => setInvokeForTesting(null));
 
@@ -26,4 +26,32 @@ it("preserves a nonretryable host refusal", () => {
     code: "BACKEND_ERROR", message: "host-local operation failed", retryable: false,
   }))]);
   expect(() => checkpoint.list()).toThrow(MachineBackendError);
+});
+
+it("removes only through the host-local closed operation", () => {
+  const calls: unknown[] = [];
+  setInvokeForTesting((method, body) => {
+    calls.push([method, JSON.parse(body.toString("utf8"))]);
+    return [0, Buffer.from("{}")];
+  });
+  expect(checkpoint.remove("ckpt-local")).toBeUndefined();
+  expect(calls).toEqual([["checkpoint.remove", { id: "ckpt-local" }]]);
+});
+
+it.each([
+  { code: "INVALID_SPEC", errorType: MachineSpecError },
+  { code: "CONFLICT", errorType: MachineConflictError },
+  { code: "BACKEND_ERROR", errorType: MachineBackendError },
+])("preserves nonretryable removal refusal $code", ({ code, errorType }) => {
+  setInvokeForTesting(() => [1, Buffer.from(JSON.stringify({
+    code, message: "checkpoint removal refused", retryable: false,
+  }))]);
+  let failure: unknown;
+  try {
+    checkpoint.remove("ckpt-local");
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(errorType);
+  expect(failure).toMatchObject({ code, retryable: false, message: "checkpoint removal refused" });
 });

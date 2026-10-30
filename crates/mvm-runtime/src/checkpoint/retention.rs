@@ -98,13 +98,16 @@ pub fn retention_verdicts(
 
 /// Every stored checkpoint that names `meta` as its parent, by id. Removing
 /// `meta` while any exist leaves each of them unrestorable.
+/// Missing metadata in a visible directory refuses this destructive guard:
+/// it may be a lost child record, not evidence that no dependent exists.
 pub fn dependent_children(
     store: &CheckpointStore,
     meta: &CheckpointMeta,
 ) -> Result<Vec<CheckpointId>> {
     let mut children: Vec<CheckpointId> = store
-        .children_of(&meta.meta_digest)?
+        .list_for_removal()?
         .into_iter()
+        .filter(|child| child.parent.as_ref() == Some(&meta.meta_digest))
         .map(|child| child.id)
         .filter(|id| id != &meta.id)
         .collect();
@@ -278,6 +281,22 @@ mod tests {
         let ids: Vec<&str> = children.iter().map(CheckpointId::as_str).collect();
         assert_eq!(ids, vec!["child-a", "child-b"]);
         assert!(dependent_children(&store, &first).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dependent_children_refuses_a_missing_child_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let parent = ckpt("parent", None, None, AGED);
+        let child = ckpt("child", None, Some(&parent), AGED);
+        store.write_meta(&parent).unwrap();
+        store.write_meta(&child).unwrap();
+        std::fs::remove_file(store.dir_for(&child.id).join("meta.json")).unwrap();
+
+        assert_eq!(store.list().unwrap(), vec![parent.clone()]);
+        assert!(dependent_children(&store, &parent).is_err());
+        assert!(store.dir_for(&child.id).is_dir());
+        assert_eq!(store.read_meta(&parent.id).unwrap(), parent);
     }
 
     #[test]

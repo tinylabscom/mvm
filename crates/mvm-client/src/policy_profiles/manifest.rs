@@ -140,6 +140,8 @@ pub struct LaunchFlags {
     pub network_preset: bool,
     /// `--allow-endpoint`.
     pub allow_endpoint: Vec<String>,
+    /// Effective AI accounting and request limits selected by the caller.
+    pub ai: Option<mvm_core::network_policy::AiPolicy>,
     /// `--cpu-limit`.
     pub cpu_limit: Option<u32>,
     /// `--timeout`.
@@ -169,6 +171,8 @@ pub struct FoldedLaunch {
     /// Endpoint routes the policy contributes; `--allow-endpoint` routes are
     /// merged with these where routes are resolved.
     pub routes: Vec<EgressRoute>,
+    /// AI policy retained for the concrete launch, including signed ceilings.
+    pub ai: Option<mvm_core::network_policy::AiPolicy>,
     pub cpu_limit: Option<u32>,
     pub timeout: Option<u64>,
     pub secret: Vec<String>,
@@ -200,6 +204,7 @@ pub fn fold(policy: &PolicyBody, flags: &LaunchFlags) -> Result<FoldedLaunch, Po
         } else {
             policy.network.routes.clone()
         },
+        ai: flags.ai.clone(),
         cpu_limit,
         timeout,
         secret: fold_secrets(policy, flags)?,

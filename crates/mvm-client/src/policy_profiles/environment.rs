@@ -5,6 +5,23 @@ use mvm_core::plan::EnvironmentDescriptor;
 use super::merge::{Layer, ResolvedPolicy, merge_layers};
 use super::{FoldedLaunch, LaunchFlags, LayerOrigin, PolicyBody, PolicyError, fold};
 
+/// Apply a signed request ceiling without widening the caller's AI limits.
+pub fn with_request_ceiling(
+    mut ai: Option<mvm_core::network_policy::AiPolicy>,
+    ceiling: Option<mvm_core::network_policy::AiRequestBudget>,
+) -> Result<Option<mvm_core::network_policy::AiPolicy>, PolicyError> {
+    if let Some(ceiling) = ceiling {
+        let ai = ai.get_or_insert_with(mvm_core::network_policy::AiPolicy::metered);
+        ai.request_budget = Some(match ai.request_budget {
+            Some(current) => current
+                .intersect(ceiling)
+                .map_err(|reason| PolicyError::new("signed application environment", reason))?,
+            None => ceiling,
+        });
+    }
+    Ok(ai)
+}
+
 /// Fold signed network defaults without widening an explicit operator selection.
 ///
 /// # Errors
@@ -27,6 +44,7 @@ pub fn fold_environment_policy(
     // Keep the authored fold aware of an actual preset even for non-CLI callers.
     let flags = LaunchFlags {
         network_preset: flags.network_preset || preset.is_some(),
+        ai: with_request_ceiling(flags.ai.clone(), ceiling.request_budget)?,
         ..flags.clone()
     };
     let mut policy = operator
@@ -76,7 +94,8 @@ pub fn fold_environment_policy(
         &destinations,
         &[],
     )
-    .map_err(|reason| error(reason.to_string()))?;
+    .map_err(|reason| error(reason.to_string()))?
+    .with_ai(folded.ai.clone());
     if !mvm_core::plan::environment_network_permitted(environment, &actual) {
         return Err(error(
             "operator network selection exceeds the signed application's allow_hosts ceiling"
@@ -121,6 +140,136 @@ mod tests {
             });
         }
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn signed_request_budget_defaults_without_launch_flags() {
+        let mut env = environment(true);
+        env.policy.as_mut().unwrap().request_budget =
+            Some(mvm_core::network_policy::AiRequestBudget {
+                model: mvm_core::network_policy::AiBudgetModel::ClaudeHaiku45,
+                max_requests: 1,
+                max_spend_microusd: 500_000,
+            });
+        let original = env.clone();
+        let (_, folded) = fold_environment_policy(&env, None, &LaunchFlags::default(), None)
+            .expect("signed network and request budget must fold together");
+        assert_eq!(folded.allow_host.len(), 2);
+        assert_eq!(
+            folded.ai.as_ref().unwrap().request_budget,
+            env.policy.as_ref().unwrap().request_budget
+        );
+        let actual = crate::admission::run_network::resolve_run_network_policy(
+            false,
+            None,
+            &folded.allow_host,
+            &[],
+        )
+        .unwrap()
+        .with_ai(folded.ai);
+        assert!(mvm_core::plan::environment_network_permitted(&env, &actual));
+        assert!(!mvm_core::plan::environment_network_permitted(
+            &env,
+            &actual.clone().with_ai(None),
+        ));
+        let mut widened = actual.ai().unwrap().clone();
+        widened.request_budget.as_mut().unwrap().max_spend_microusd += 1;
+        assert!(!mvm_core::plan::environment_network_permitted(
+            &env,
+            &actual.with_ai(Some(widened)),
+        ));
+        assert_eq!(env, original, "folding must not mutate signed metadata");
+    }
+
+    #[test]
+    fn signed_request_budget_preserves_narrower_operator_limits_and_token_accounting() {
+        use mvm_core::network_policy::{AiBudgetModel, AiPolicy, AiRequestBudget};
+
+        let ceiling = AiRequestBudget {
+            model: AiBudgetModel::ClaudeHaiku45,
+            max_requests: 1,
+            max_spend_microusd: 500_000,
+        };
+        let mut env = environment(true);
+        env.policy.as_mut().unwrap().request_budget = Some(ceiling);
+        for (requests, spend) in [(0, 100_000), (1, 500_000), (2, 600_000)] {
+            let mut ai = AiPolicy::metered().with_total_budget(100);
+            ai.request_budget = Some(AiRequestBudget {
+                max_requests: requests,
+                max_spend_microusd: spend,
+                ..ceiling
+            });
+            let flags = LaunchFlags {
+                ai: Some(ai.clone()),
+                ..Default::default()
+            };
+            let (_, folded) = fold_environment_policy(&env, None, &flags, None).unwrap();
+            let actual = folded.ai.unwrap();
+            assert_eq!(actual.budget, ai.budget);
+            assert_eq!(
+                actual.request_budget,
+                Some(ai.request_budget.unwrap().intersect(ceiling).unwrap())
+            );
+            assert_eq!(flags.ai, Some(ai), "caller policy must not be mutated");
+        }
+        // There is only one reviewed model variant; incompatible model identifiers
+        // must fail parsing rather than becoming a typed policy the fold can accept.
+        let mut value = serde_json::to_value(&env).unwrap();
+        value["policy"]["request_budget"]["model"] = serde_json::json!("claude-haiku-4-5");
+        assert!(serde_json::from_value::<EnvironmentDescriptor>(value).is_err());
+    }
+
+    #[test]
+    fn signed_request_budget_preserves_resource_only_and_offline_operator_choices() {
+        let mut env = environment(true);
+        env.policy.as_mut().unwrap().request_budget =
+            Some(mvm_core::network_policy::AiRequestBudget {
+                model: mvm_core::network_policy::AiBudgetModel::ClaudeHaiku45,
+                max_requests: 1,
+                max_spend_microusd: 500_000,
+            });
+        let mut policy = PolicyBody::default();
+        policy.resources.max_cpus = Some(2);
+        let flags = LaunchFlags {
+            cpus: 2,
+            ..Default::default()
+        };
+        let (_, resource_only) =
+            fold_environment_policy(&env, Some(&policy), &flags, None).unwrap();
+        assert_eq!(resource_only.allow_host.len(), 2);
+        policy.network.block = Some(true);
+        let (_, offline) = fold_environment_policy(&env, Some(&policy), &flags, None).unwrap();
+        assert!(offline.allow_host.is_empty());
+        assert_eq!(offline.ai, resource_only.ai);
+        let (_, preset_offline) = fold_environment_policy(
+            &env,
+            None,
+            &flags,
+            Some(mvm_core::network_policy::NetworkPreset::None),
+        )
+        .unwrap();
+        assert!(preset_offline.allow_host.is_empty());
+        assert_eq!(preset_offline.ai, resource_only.ai);
+        let flags = LaunchFlags {
+            allow_host: vec!["api.anthropic.com:443".into()],
+            ..flags
+        };
+        assert!(fold_environment_policy(&env, Some(&policy), &flags, None).is_err());
+    }
+
+    #[test]
+    fn an_environment_without_a_request_ceiling_preserves_the_operator_ai_policy() {
+        let ai = mvm_core::network_policy::AiPolicy::metered().with_total_budget(123);
+        let flags = LaunchFlags {
+            ai: Some(ai.clone()),
+            ..Default::default()
+        };
+        for has_policy in [false, true] {
+            let (_, folded) =
+                fold_environment_policy(&environment(has_policy), None, &flags, None).unwrap();
+            assert_eq!(folded.ai, Some(ai.clone()));
+        }
+        assert_eq!(fold(&PolicyBody::default(), &flags).unwrap().ai, Some(ai));
     }
 
     #[test]
