@@ -272,6 +272,14 @@ highest):
   images is cleaned up.
 - **Non-zero exit**: same as normal exit; `mvmctl machine run` propagates the
   guest's exit code.
+- **Stop failure after workload execution**: the command returns an error and
+  retains the requested and effective VM state directories and output scratch.
+  It does not collect outputs or continue the normal audit-sealing and success
+  path. If the workload also failed, both errors are preserved. Retained files
+  are not proof that the VM stopped: writable disk-image locks remain scoped
+  to the CLI invocation and are released when it returns. This retention does
+  not provide exclusive volume custody after CLI exit; do not reuse those
+  volumes while the old VM's termination is uncertain.
 - **Ctrl-C**: a SIGINT handler triggers teardown so the Firecracker
   process and the per-VM network endpoint don't get orphaned. (There is no
   tap interface to orphan — a workload microVM has no guest NIC.)
