@@ -8,8 +8,8 @@ use mvm_core::launch_trace::failure::{Phase, Record};
 impl LocalBackend {
     /// The transient launch path: collision check, secret-ref validation +
     /// recording, attachment registration, lease acquisition, admitted boot,
-    /// registration. Any failure after recording rolls the session-owned
-    /// state back (leases via RAII, secret refs + attachments explicitly).
+    /// registration. Failures attempt existing rollback; a known command-stop
+    /// failure retains state and resources without another stop or liveness check.
     #[tracing::instrument(skip_all)]
     pub(super) async fn launch_transient(&self, request: LaunchRequest) -> Result<LaunchOutcome> {
         let name = request
@@ -23,7 +23,14 @@ impl LocalBackend {
         let result = match self.attach_lease_and_boot(&name, &request, true).await {
             Ok(outcome) => {
                 phase = Phase::TransientCommand;
-                self.start_requested_command(outcome, &request)
+                match self.start_requested_command(outcome, &request) {
+                    Ok(outcome) => Ok(outcome),
+                    Err(failure) if failure.stop.is_err() => {
+                        Record::new(phase).emit();
+                        return Err(failure.into_error());
+                    }
+                    Err(failure) => Err(failure.into_error()),
+                }
             }
             Err(e) => Err(e),
         };
