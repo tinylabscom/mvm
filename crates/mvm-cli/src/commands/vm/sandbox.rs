@@ -74,7 +74,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 }
 
 fn run_gc(_cli: &Cli, args: GcArgs, _cfg: &MvmConfig) -> Result<()> {
-    let running_names = collect_live_vm_names();
+    let running_names = collect_live_vm_names()?;
     let now = chrono::Utc::now().to_rfc3339();
     let stale = mvm_client::gc_stale_registrations(&running_names, &now, args.apply)
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -163,18 +163,16 @@ fn emit_gc_summary(summary: &GcSummary, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn collect_live_vm_names() -> BTreeSet<String> {
+fn collect_live_vm_names() -> Result<BTreeSet<String>> {
     let client = mvm_client::LocalBackend::new();
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    else {
-        return BTreeSet::new();
-    };
+        .context("building runtime for sandbox inventory")?;
     let machines = runtime
         .block_on(client.list_machines(mvm_client::MachineFilter::all()))
-        .unwrap_or_default();
-    machines
+        .context("observing machines before sandbox GC")?;
+    Ok(machines
         .into_iter()
         .filter(|m| {
             matches!(
@@ -185,12 +183,105 @@ fn collect_live_vm_names() -> BTreeSet<String> {
             )
         })
         .map(|m| m.name)
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut result = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(root).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                result.insert(path.clone(), vec![]);
+                result.extend(snapshot(&path));
+            } else {
+                result.insert(path.clone(), std::fs::read(path).unwrap());
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn gc_apply_preserves_registry_when_machine_observation_fails() {
+        use clap::Parser;
+        use mvm_core::util::test_env::TestEnv;
+        use mvm_runtime::vm::name_registry::{RegisterParams, VmNameRegistry, registry_path};
+
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let path = registry_path();
+        let mut registry = VmNameRegistry::default();
+        registry
+            .register(RegisterParams::minimal("kept", "/unused", "default"))
+            .unwrap();
+        registry.save(&path).unwrap();
+        let spec = mvm_core::config::machine_spec_path("corrupt");
+        std::fs::create_dir_all(spec.parent().unwrap()).unwrap();
+        std::fs::write(&spec, b"{").unwrap();
+        let before = snapshot(home.path());
+        let cli = Cli::try_parse_from(["mvmctl", "machine", "sandbox", "gc", "--apply"]).unwrap();
+
+        let result = run_gc(
+            &cli,
+            GcArgs {
+                dry_run: false,
+                apply: true,
+                json: false,
+            },
+            &MvmConfig::default(),
+        );
+        assert!(result.is_err(), "uncertain inventory must refuse GC");
+        assert_eq!(snapshot(home.path()), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gc_apply_preserves_all_state_when_a_spec_lookup_is_denied() {
+        use clap::Parser;
+        use mvm_core::util::test_env::TestEnv;
+        use mvm_runtime::vm::name_registry::{RegisterParams, VmNameRegistry, registry_path};
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let mut registry = VmNameRegistry::default();
+        registry
+            .register(RegisterParams::minimal("kept", "/unused", "default"))
+            .unwrap();
+        registry.save(&registry_path()).unwrap();
+        let path = mvm_core::config::machine_spec_path("denied");
+        let dir = path.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "machine", "sandbox", "gc", "--apply"]).unwrap();
+        let before = snapshot(home.path());
+        let permissions = std::fs::metadata(dir).unwrap().permissions();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::metadata(&path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied);
+        let result = run_gc(
+            &cli,
+            GcArgs {
+                dry_run: false,
+                apply: true,
+                json: false,
+            },
+            &MvmConfig::default(),
+        );
+        std::fs::set_permissions(dir, permissions).unwrap();
+        if !denied {
+            eprintln!("permission witness unavailable for a privileged process");
+            return;
+        }
+        assert!(result.is_err(), "lookup failure must not authorize GC");
+        assert_eq!(snapshot(home.path()), before);
+    }
 
     #[test]
     fn gc_summary_serializes_candidates_and_counts() {

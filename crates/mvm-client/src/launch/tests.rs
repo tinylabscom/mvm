@@ -1158,6 +1158,22 @@ async fn persistent_relaunch_revalidates_sidecar_refs_recorded_earlier() {
     // An identical-config launch carrying NO refs hits the Reuse arm — the
     // sidecar's recorded references must still be re-validated fail-closed.
     let without_refs = persistent_request(&rootfs, "p-refs").build().unwrap();
+    let spec_path = machine_spec_path("p-refs");
+    let refs_path = machine_state_root()
+        .join("p-refs")
+        .join(crate::secret::refs::MACHINE_SECRET_REFS_FILENAME);
+    let spec_before = std::fs::read(&spec_path).unwrap();
+    let refs_before = std::fs::read(&refs_path).unwrap();
+    let audit_before = home.audit_text();
+    let stopped_before = client.inspect_machine(&outcome.machine.id).await.unwrap();
+    assert_eq!(stopped_before.id, outcome.machine.id);
+    assert_eq!(stopped_before.name, "p-refs");
+    assert_eq!(stopped_before.status, MachineStatus::Stopped);
+    assert_eq!(stopped_before.cpus, outcome.machine.cpus);
+    assert_eq!(stopped_before.memory_mib, outcome.machine.memory_mib);
+    assert_eq!(stopped_before.profile, outcome.machine.profile);
+    assert!(client.backend.list().unwrap().is_empty());
+
     let err = client.launch(without_refs).await.unwrap_err();
     assert!(
         matches!(err, mvm_core::client::MvmError::Rejected { .. }),
@@ -1165,8 +1181,21 @@ async fn persistent_relaunch_revalidates_sidecar_refs_recorded_earlier() {
     );
     assert!(err.to_string().contains("no egress binding"), "got: {err}");
     assert!(
-        !listed_names(&client).await.contains(&"p-refs".to_string()),
-        "nothing boots on a refused relaunch"
+        client.backend.list().unwrap().is_empty(),
+        "no backend machine remains after a refused relaunch"
+    );
+    assert!(
+        std::fs::read(spec_path).unwrap() == spec_before,
+        "definition changed"
+    );
+    assert!(
+        std::fs::read(refs_path).unwrap() == refs_before,
+        "secret references changed"
+    );
+    assert!(home.audit_text() == audit_before, "tenant audit changed");
+    assert_eq!(
+        client.inspect_machine(&outcome.machine.id).await.unwrap(),
+        stopped_before
     );
 }
 

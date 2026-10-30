@@ -153,6 +153,60 @@ fn spec_memory_mib(spec: &PersistedMachineSpec) -> u32 {
     mvm_core::util::parse_human_size(&spec.memory).unwrap_or(0)
 }
 
+/// Observe a definition without inventing runtime state. Backend and registry
+/// fields win; declared resources fill the same unknowns as the rich inventory.
+pub(crate) fn persisted_machine_state(
+    spec: &PersistedMachineSpec,
+    observed: Option<MachineState>,
+) -> MachineState {
+    let mut state = observed.unwrap_or_else(|| MachineState {
+        id: MachineId(spec.name.clone()),
+        name: spec.name.clone(),
+        ..Default::default()
+    });
+    if state.cpus == 0 {
+        state.cpus = spec.cpus;
+    }
+    if state.memory_mib == 0 {
+        state.memory_mib = spec_memory_mib(spec);
+    }
+    if state.profile.is_none() {
+        state.profile = Some(spec.profile.clone());
+    }
+    state
+}
+
+pub(crate) fn read_persisted_specs() -> Result<Vec<PersistedMachineSpec>> {
+    persist::list_machine_specs().map_err(|e| MvmError::Backend {
+        // Keep parser payloads out of the public error.
+        reason: format!("listing machine specs: {e}"),
+    })
+}
+
+/// Only true absence is a missing definition; reuse the canonical parser.
+pub(crate) fn read_persisted_spec(name: &str) -> Result<Option<PersistedMachineSpec>> {
+    if mvm_core::naming::validate_id(name, "machine name").is_err() {
+        return Ok(None);
+    }
+    let path = mvm_core::config::machine_spec_path(name);
+    match persist::load_machine_spec_from_path(&path) {
+        Ok(spec) if spec.name != name => Err(MvmError::Backend {
+            reason: "machine definition identity does not match requested name".into(),
+        }),
+        Ok(spec) => Ok(Some(spec)),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(MvmError::Backend {
+            reason: format!("reading machine definition: {error}"),
+        }),
+    }
+}
+
 /// Build the record for a persisted definition, folding in its live state
 /// when booted. Declared resources back-fill anything the live row does not
 /// know (a stopped machine reports `0` from the backend).
@@ -165,18 +219,29 @@ fn persistent_record(
         .image
         .clone()
         .or_else(|| spec.manifest.clone())
-        .or_else(|| live.as_ref().and_then(live_source));
+        .or_else(|| {
+            live.as_ref().and_then(|live| {
+                live.flake_ref.clone().or_else(|| {
+                    // A back-filled resource profile is not artifact identity.
+                    // A coincidentally equal backend profile is also unknown.
+                    live.profile
+                        .clone()
+                        .filter(|profile| profile != &spec.profile)
+                })
+            })
+        });
     let volumes = spec
         .volumes
         .iter()
         .map(|raw| summarize_volume_spec(raw))
         .collect();
+    let state = persisted_machine_state(&spec, live);
 
     let mut builder = MachineInventoryRecord::builder(&spec.name, MachineKind::Persistent)
         .build_mode(posture)
         .source(source)
-        .cpus(spec.cpus)
-        .memory_mib(spec_memory_mib(&spec))
+        .cpus(state.cpus)
+        .memory_mib(state.memory_mib)
         .created_at(spec.created_at)
         .last_started_at(spec.last_started_at)
         .volumes(volumes)
@@ -185,24 +250,16 @@ fn persistent_record(
         // sidecar via [`apply_secret_ref_counts`] — a count, never a value.
         .secret_ref_count(0);
 
-    if let Some(live) = live {
-        builder = builder
-            .id(MachineId(live.id.0))
-            .status(live.status)
-            .backend(non_empty(live.backend))
-            .readiness(live.readiness)
-            .ports(live.ports)
-            .tags(live.tags)
-            .expires_at(live.expires_at);
-        if let Some(detail) = live.status_detail {
-            builder = builder.status_detail(detail);
-        }
-        if live.cpus > 0 {
-            builder = builder.cpus(live.cpus);
-        }
-        if live.memory_mib > 0 {
-            builder = builder.memory_mib(live.memory_mib);
-        }
+    builder = builder
+        .id(state.id)
+        .status(state.status)
+        .backend(non_empty(state.backend))
+        .readiness(state.readiness)
+        .ports(state.ports)
+        .tags(state.tags)
+        .expires_at(state.expires_at);
+    if let Some(detail) = state.status_detail {
+        builder = builder.status_detail(detail);
     }
     builder.build()
 }
@@ -315,9 +372,7 @@ pub fn apply_telemetry_status(records: &mut [MachineInventoryRecord]) {
 /// Filter with [`InventoryQuery::matches`]; the unfiltered stream includes
 /// stopped and expired machines so callers own visibility policy.
 pub async fn list_local_inventory(client: &dyn MvmClient) -> Result<Vec<MachineInventoryRecord>> {
-    let specs = persist::list_machine_specs().map_err(|e| MvmError::Backend {
-        reason: format!("listing machine specs: {e:#}"),
-    })?;
+    let specs = read_persisted_specs()?;
     let mut records = inventory_with_specs(client, specs).await?;
     apply_registry_readiness(&mut records);
     apply_attended_runs(&mut records);
@@ -426,6 +481,58 @@ mod tests {
         assert_eq!(r.memory_mib, 512, "declared memory parses to MiB");
         assert!(r.backend.is_none());
         assert_eq!(r.created_at.as_deref(), Some("2026-07-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn persisted_defaults_preserve_every_observed_field() {
+        let mut observed = live("web", MachineStatus::Failed);
+        observed.status_detail = Some("backend failure".into());
+        observed.backend = "mock".into();
+        observed.cpus = 4;
+        observed.memory_mib = 1024;
+        observed.profile = Some("observed".into());
+        observed.revision = Some("revision".into());
+        observed.flake_ref = Some("source".into());
+        observed.guest_ip = Some("127.0.0.1".into());
+        observed.ports = vec![mvm_core::client::dto::PortMapping {
+            host: 8080,
+            guest: 80,
+        }];
+        observed.tags.insert("purpose".into(), "observed".into());
+        observed.expires_at = Some("2030-01-02T03:04:05Z".into());
+        observed.auto_resume = false;
+        observed.readiness = Some(mvm_core::domain::instance::InstanceReadiness::AgentReady);
+        observed.last_readiness_change_at = Some("2026-01-02T03:04:05Z".into());
+        assert_eq!(
+            persisted_machine_state(&spec("web"), Some(observed.clone())),
+            observed
+        );
+    }
+
+    #[test]
+    fn persisted_source_never_infers_artifact_identity_from_its_resource_profile() {
+        let mut definition = spec("web");
+        definition.image = None;
+        definition.manifest = None;
+        let mut observed = live("web", MachineStatus::Running);
+        observed.profile = Some(definition.profile.clone());
+        let records = join_inventory(
+            vec![definition.clone()],
+            vec![observed.clone()],
+            stub_posture,
+        );
+        assert!(records[0].source.is_none());
+        observed.profile = Some("actual-backend-source".into());
+        let records = join_inventory(
+            vec![definition.clone()],
+            vec![observed.clone()],
+            stub_posture,
+        );
+        assert_eq!(records[0].source.as_deref(), Some("actual-backend-source"));
+        observed.flake_ref = Some("explicit-flake".into());
+        observed.profile = Some(definition.profile.clone());
+        let records = join_inventory(vec![definition], vec![observed], stub_posture);
+        assert_eq!(records[0].source.as_deref(), Some("explicit-flake"));
     }
 
     #[test]

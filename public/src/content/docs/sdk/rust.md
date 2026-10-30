@@ -90,6 +90,24 @@ For ports, a TTL, a profile, or a persistent definition, build a
 `LaunchRequest` and call `LocalBackend::launch`; see the
 [Rust quickstart](/getting-started/rust-quickstart/).
 
+`create_machine` (or `create_from_request` with a persistent request) saves a
+definition without booting. `list_machines` includes these stopped definitions,
+subject to the requested filter, and `inspect_machine` can read them before
+their first start. Reads do not create a runtime directory or name-registry entry.
+Existing backend and registry metadata take precedence; the definition supplies
+unknown resource counts and a missing profile. Inspect keeps its selected-backend
+lookup first, consulting only the named definition on a miss. A missing definition
+is `NotFound`; malformed or unreadable spec files are backend errors, not an empty
+listing. Targeted inspect also refuses a stored name that differs from the requested
+name. An unparseable memory string retains inventory's existing zero-MiB fallback.
+A live inspect hit does not depend on the persisted definition.
+Use `inventory::list_local_inventory` for the richer source, volume, posture,
+timestamp, and telemetry projection.
+For a definition without an explicit image or manifest, inventory can use an
+observed flake reference or differing backend profile as its source. A profile
+equal to the definition's resource profile is not evidence of artifact identity:
+even if a backend supplied that same string, the source remains unknown.
+
 Two `LocalBackend` limits are worth knowing before you build against it:
 
 - `run_machine` and `create_machine` **refuse** a spec with a non-empty `env`.

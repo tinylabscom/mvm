@@ -50,7 +50,7 @@ use mvm_runtime::vm::instance_snapshot::{
     VsockPostRestoreSignal, VsockPrimedSignalSource, admit_host_snapshot_key, await_primed_barrier,
     describe_missing_reseed, pause_and_seal, signal_post_restore, verify_and_resume,
 };
-use mvm_runtime::vm::name_registry::VmNameRegistry;
+use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
 
 /// Drives the host's VM backend directly. Construct with [`LocalBackend::new`]
 /// (auto-selected backend) or [`LocalBackend::with_hypervisor`].
@@ -746,6 +746,21 @@ fn load_name_registry() -> Result<VmNameRegistry> {
     VmNameRegistry::load(&path).map_err(|e| backend_err(format!("loading VM name registry: {e}")))
 }
 
+fn registered_vm_info(name: &str, reg: &VmRegistration) -> VmInfo {
+    VmInfo {
+        id: VmId(name.to_string()),
+        name: name.to_string(),
+        status: VmStatus::Stopped,
+        guest_ip: reg.guest_ip.clone(),
+        cpus: 0,
+        memory_mib: 0,
+        profile: None,
+        revision: None,
+        flake_ref: None,
+        ports: Vec::new(),
+    }
+}
+
 /// Remove a stopped machine's runtime state directory.
 ///
 /// A stop that leaves it behind leaves whatever the last run put there, and a
@@ -1155,43 +1170,51 @@ impl MvmClient for LocalBackend {
             .vms
             .iter()
             .filter(|(name, _)| !listed.contains(name.as_str()))
-            .map(|(name, reg)| VmInfo {
-                id: VmId(name.clone()),
-                name: name.clone(),
-                status: VmStatus::Stopped,
-                guest_ip: reg.guest_ip.clone(),
-                cpus: 0,
-                memory_mib: 0,
-                profile: None,
-                revision: None,
-                flake_ref: None,
-                ports: Vec::new(),
-            })
+            .map(|(name, reg)| registered_vm_info(name, reg))
             .collect();
         infos.extend(registry_only);
 
-        Ok(infos
+        let mut specs: std::collections::BTreeMap<_, _> = crate::inventory::read_persisted_specs()?
+            .into_iter()
+            .map(|spec| (spec.name.clone(), spec))
+            .collect();
+        let mut machines: Vec<_> = infos
             .into_iter()
             .map(|info| {
                 let reg = registry.lookup(&info.name);
-                to_state(info, reg)
+                let state = to_state(info, reg);
+                match specs.remove(&state.name) {
+                    Some(spec) => crate::inventory::persisted_machine_state(&spec, Some(state)),
+                    None => state,
+                }
             })
-            .filter(|m| filter.matches(m))
-            .collect())
+            .collect();
+        machines.extend(
+            specs
+                .into_values()
+                .map(|spec| crate::inventory::persisted_machine_state(&spec, None)),
+        );
+        Ok(machines.into_iter().filter(|m| filter.matches(m)).collect())
     }
 
     async fn inspect_machine(&self, id: &MachineId) -> Result<MachineState> {
         let registry = load_name_registry()?;
-        self.backend
+        if let Some(info) = self
+            .backend
             .list()
             .map_err(backend_err)?
             .into_iter()
             .find(|v| v.id.0 == id.0)
-            .map(|info| {
-                let reg = registry.lookup(&info.name);
-                to_state(info, reg)
-            })
-            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
+        {
+            let reg = registry.lookup(&info.name);
+            return Ok(to_state(info, reg));
+        }
+        let spec = crate::inventory::read_persisted_spec(&id.0)?
+            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })?;
+        let observed = registry
+            .lookup(&spec.name)
+            .map(|reg| to_state(registered_vm_info(&spec.name, reg), Some(reg)));
+        Ok(crate::inventory::persisted_machine_state(&spec, observed))
     }
 
     async fn create_machine(&self, spec: MachineSpec) -> Result<MachineState> {
@@ -2216,6 +2239,15 @@ mod tests {
             inspected.expires_at.as_deref(),
             Some("2030-01-02T03:04:05Z")
         );
+        // A selected-backend hit must not acquire a dependency on persisted
+        // definitions, including an unreadable definition for the live name.
+        for name in [state.name.as_str(), "unrelated-corrupt"] {
+            let spec_path = mvm_core::config::machine_spec_path(name);
+            std::fs::create_dir_all(spec_path.parent().unwrap()).unwrap();
+            std::fs::write(&spec_path, b"{").unwrap();
+            assert_eq!(be.inspect_machine(&state.id).await.unwrap(), inspected);
+            std::fs::remove_file(spec_path).unwrap();
+        }
         let stop_targets = be.list_stop_targets();
         assert_eq!(stop_targets.len(), 1);
         assert_eq!(stop_targets[0].id, state.id);
