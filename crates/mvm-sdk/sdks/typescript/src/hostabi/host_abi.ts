@@ -209,6 +209,7 @@ attestation_status: AttestationStatus
 attestation_verify: AttestationVerify
 backend_capabilities: BackendCapabilities
 checkpoint_list: CheckpointList
+checkpoint_remove: CheckpointRemove
 entrypoint_call: EntrypointCall
 guest_cp: GuestCp
 guest_fs_list: GuestFsList
@@ -545,6 +546,22 @@ session_id: AgentSessionId
 export interface ListRequest {
 
 }
+export interface CheckpointRemove {
+reply: Empty1
+request: CheckpointRemoveRequest
+}
+/**
+ * A request that carries nothing.
+ */
+export interface Empty1 {
+
+}
+/**
+ * A host-local checkpoint ID, with no force or storage-root override.
+ */
+export interface CheckpointRemoveRequest {
+id: string
+}
 export interface EntrypointCall {
 reply: EntrypointCallReply
 request: EntrypointCallRequest
@@ -608,10 +625,10 @@ timeout_secs?: (number | null)
 workload?: (string | null)
 }
 export interface GuestCp {
-reply: Empty1
+reply: Empty2
 request: CopyRequest
 }
-export interface Empty1 {
+export interface Empty2 {
 
 }
 /**
@@ -653,10 +670,10 @@ id: string
 path: string
 }
 export interface GuestFsMkdir {
-reply: Empty2
+reply: Empty3
 request: MkdirRequest
 }
-export interface Empty2 {
+export interface Empty3 {
 
 }
 export interface MkdirRequest {
@@ -692,10 +709,10 @@ path: string
 recursive?: boolean
 }
 export interface GuestFsRename {
-reply: Empty3
+reply: Empty4
 request: RenameRequest
 }
-export interface Empty3 {
+export interface Empty4 {
 
 }
 export interface RenameRequest {
@@ -747,10 +764,10 @@ mode?: (number | null)
 path: string
 }
 export interface GuestProcKill {
-reply: Empty4
+reply: Empty5
 request: ProcessRequest
 }
-export interface Empty4 {
+export interface Empty5 {
 
 }
 export interface ProcessRequest {
@@ -780,10 +797,10 @@ export interface MachineRequest {
 id: string
 }
 export interface GuestProcSignal {
-reply: Empty5
+reply: Empty6
 request: SignalRequest
 }
-export interface Empty5 {
+export interface Empty6 {
 
 }
 export interface SignalRequest {
@@ -819,10 +836,10 @@ id: string
 token: string
 }
 export interface GuestProcStreamClose {
-reply: Empty6
+reply: Empty7
 request: CloseRequest
 }
-export interface Empty6 {
+export interface Empty7 {
 
 }
 export interface CloseRequest {
@@ -1124,12 +1141,12 @@ id: string
 }
 export interface MachineInventory {
 reply: MachineInventoryReply
-request: Empty7
+request: Empty8
 }
 /**
  * A request that carries nothing.
  */
-export interface Empty7 {
+export interface Empty8 {
 
 }
 export interface MachineList {
@@ -1224,10 +1241,10 @@ id: string
 tail_lines?: (number | null)
 }
 export interface MachineLogsStreamClose {
-reply: Empty8
+reply: Empty9
 request: CloseRequest1
 }
-export interface Empty8 {
+export interface Empty9 {
 
 }
 export interface CloseRequest1 {
@@ -1489,10 +1506,10 @@ id: string
 warm?: boolean
 }
 export interface MachineRm {
-reply: Empty9
+reply: Empty10
 request: RemoveRequest1
 }
-export interface Empty9 {
+export interface Empty10 {
 
 }
 /**
@@ -1646,10 +1663,10 @@ template?: (string | null)
 ttl_seconds?: (number | null)
 }
 export interface MachineSetTtl {
-reply: Empty10
+reply: Empty11
 request: SetTtlRequest
 }
-export interface Empty10 {
+export interface Empty11 {
 
 }
 /**
@@ -1739,10 +1756,10 @@ export interface MachineRef1 {
 id: string
 }
 export interface MachineStop {
-reply: Empty11
+reply: Empty12
 request: StopRequest
 }
-export interface Empty11 {
+export interface Empty12 {
 
 }
 /**
@@ -1914,10 +1931,10 @@ memory_mib?: (number | null)
 workload?: (string | null)
 }
 export interface SessionStop {
-reply: Empty12
+reply: Empty13
 request: SessionRef1
 }
-export interface Empty12 {
+export interface Empty13 {
 
 }
 /**

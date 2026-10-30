@@ -922,10 +922,10 @@ impl AgentSessionStore {
         Ok(current)
     }
 
-    /// Every record that parses cleanly, sorted by session id for a stable
-    /// listing. A read or IO error on the store root itself is returned, but
-    /// the first record that fails to parse aborts the whole listing rather
-    /// than being skipped — mirrors `CheckpointStore::list`.
+    /// Every record, sorted by session id. Missing roots and non-directory
+    /// entries are ignored; existing session directories must have readable,
+    /// regular records. An incomplete publication cannot establish absent pins.
+    /// Metadata, read and parse failures abort the listing.
     pub fn list(&self) -> Result<Vec<AgentSessionRecord>> {
         let mut out = Vec::new();
         let entries = match std::fs::read_dir(&self.root) {
@@ -937,9 +937,23 @@ impl AgentSessionStore {
         };
         for entry in entries {
             let entry = entry.with_context(|| format!("read {}", self.root.display()))?;
-            let path = entry.path().join(RECORD_FILE);
-            if !path.is_file() {
+            let directory = entry.path();
+            let metadata = match std::fs::metadata(&directory) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("inspect session entry {}", directory.display()));
+                }
+            };
+            if !metadata.is_dir() {
                 continue;
+            }
+            let path = directory.join(RECORD_FILE);
+            let metadata = std::fs::metadata(&path)
+                .with_context(|| format!("inspect session record {}", path.display()))?;
+            if !metadata.is_file() {
+                bail!("session record is not a regular file: {}", path.display());
             }
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("read session record {}", path.display()))?;
@@ -1392,12 +1406,94 @@ mod tests {
     }
 
     #[test]
+    fn list_refuses_existing_session_directories_without_authoritative_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        std::fs::remove_file(store.record_path(&rec.session_id)).unwrap();
+        assert!(
+            store.list().is_err(),
+            "a lost record is not an absent session"
+        );
+
+        let unpublished = AgentSessionStore::at(tmp.path().join("unpublished"));
+        std::fs::create_dir_all(unpublished.session_dir(&rec.session_id)).unwrap();
+        assert!(
+            unpublished.list().is_err(),
+            "an incomplete first publication cannot establish the absence of pins"
+        );
+    }
+
+    #[test]
+    fn list_refuses_a_nonregular_authoritative_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        std::fs::create_dir_all(store.record_path(&rec.session_id)).unwrap();
+        assert!(store.list().is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn list_preserves_following_session_and_record_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path().join("sessions"));
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        let record = tmp.path().join("record.json");
+        std::fs::rename(store.record_path(&rec.session_id), &record).unwrap();
+        symlink(&record, store.record_path(&rec.session_id)).unwrap();
+        let directory = tmp.path().join("directory");
+        std::fs::rename(store.session_dir(&rec.session_id), &directory).unwrap();
+        symlink(&directory, store.session_dir(&rec.session_id)).unwrap();
+        assert_eq!(store.list().unwrap(), vec![rec]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn list_propagates_session_metadata_permission_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // SAFETY: geteuid only observes the effective user of this process.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("permission-denial witness skipped: root bypasses directory permissions");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        let directory = store.session_dir(&rec.session_id);
+        let permissions = std::fs::metadata(&directory).unwrap().permissions();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let metadata = std::fs::metadata(store.record_path(&rec.session_id));
+        let result = store.list();
+        std::fs::set_permissions(&directory, permissions).unwrap();
+
+        assert_eq!(
+            metadata.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(store.list().unwrap(), vec![rec]);
+    }
+
+    #[test]
     fn list_skips_a_stray_file_sitting_in_the_store_root() {
         let tmp = tempfile::tempdir().unwrap();
         let store = AgentSessionStore::at(tmp.path());
         store.write(&record("sess-alpha")).unwrap();
-        // A plain file (not a session directory) at the store root should be
-        // skipped by the `is_file()` guard rather than tripping `list()`.
+        // A plain file at the store root is not a session directory.
         std::fs::write(tmp.path().join("stray.txt"), b"not a session").unwrap();
         let ids: Vec<String> = store
             .list()

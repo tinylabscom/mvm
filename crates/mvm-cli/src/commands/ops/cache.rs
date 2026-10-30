@@ -947,7 +947,9 @@ fn reclaim_entries(entries: &[CacheEntry], kind: &str, dry_run: bool) -> (u64, u
 /// would otherwise become permanently unresumable, its record pointing at
 /// nothing. Restoring walks the whole parent chain, so every ancestor of a
 /// retained checkpoint is retained too; only what lies outside that closure is
-/// removed. Returns the count removed.
+/// removed. The full plan requires complete readable metadata before any
+/// checkpoint is deleted; this observation is not atomic with deletion.
+/// Returns the count removed.
 pub(super) fn sweep_untagged_checkpoints(
     store: &mvm_runtime::checkpoint::CheckpointStore,
     now_unix: u64,
@@ -960,7 +962,7 @@ pub(super) fn sweep_untagged_checkpoints(
         session_pinned: pinned,
     };
     let mut removed = 0;
-    for verdict in mvm_runtime::checkpoint::retention_verdicts(store.list()?, &cut)? {
+    for verdict in mvm_runtime::checkpoint::retention_verdicts(store.list_for_removal()?, &cut)? {
         let id = &verdict.meta.id;
         match verdict.kept {
             Some(reason) => {
@@ -1417,6 +1419,98 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(present(&store, "old-tagged"));
         assert!(!present(&store, "old-untagged"));
+    }
+
+    #[test]
+    fn prune_refuses_incomplete_siblings_before_any_deletion() {
+        use ckpt_fixture::*;
+
+        for fault in ["missing", "corrupt", "nonregular"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = CheckpointStore::at(tmp.path());
+            let eligible = ckpt("a-eligible", None, None, AGED);
+            let parent = ckpt("parent", None, None, AGED);
+            let child = ckpt("z-child", None, Some(&parent), AGED);
+            for record in [&eligible, &parent, &child] {
+                store.write_meta(record).unwrap();
+                std::fs::write(
+                    store.dir_for(&record.id).join("keep"),
+                    b"checkpoint content",
+                )
+                .unwrap();
+            }
+            let child_meta = store.dir_for(&child.id).join("meta.json");
+            match fault {
+                "missing" => std::fs::remove_file(&child_meta).unwrap(),
+                "corrupt" => std::fs::write(&child_meta, b"{").unwrap(),
+                _ => {
+                    std::fs::remove_file(&child_meta).unwrap();
+                    std::fs::create_dir(&child_meta).unwrap();
+                }
+            }
+            assert!(
+                super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &Default::default())
+                    .is_err(),
+                "{fault}"
+            );
+            for record in [&eligible, &parent, &child] {
+                assert_eq!(
+                    std::fs::read(store.dir_for(&record.id).join("keep")).unwrap(),
+                    b"checkpoint content",
+                    "{fault}: {}",
+                    record.id
+                );
+            }
+            assert_eq!(store.read_meta(&eligible.id).unwrap(), eligible);
+            assert_eq!(store.read_meta(&parent.id).unwrap(), parent);
+
+            if fault == "missing" {
+                store.write_meta(&child).unwrap();
+                assert_eq!(
+                    super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &Default::default())
+                        .unwrap(),
+                    3,
+                    "a complete plan still removes the eligible parent/child chain"
+                );
+                for record in [&eligible, &parent, &child] {
+                    assert!(!store.dir_for(&record.id).exists());
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prune_refuses_unreadable_siblings_before_any_deletion() {
+        use ckpt_fixture::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        // SAFETY: geteuid only observes the effective user of this process.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("permission-denial witness skipped: root bypasses file permissions");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let eligible = ckpt("a-eligible", None, None, AGED);
+        let sibling = ckpt("z-unreadable", None, None, AGED);
+        for record in [&eligible, &sibling] {
+            store.write_meta(record).unwrap();
+        }
+        let path = store.dir_for(&sibling.id).join("meta.json");
+        let permissions = std::fs::metadata(&path).unwrap().permissions();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let read = std::fs::read(&path);
+        let result = super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &Default::default());
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        assert_eq!(
+            read.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(result.is_err());
+        assert_eq!(store.read_meta(&eligible.id).unwrap(), eligible);
+        assert_eq!(store.read_meta(&sibling.id).unwrap(), sibling);
     }
 
     /// The content GC runs after the sweep, so the chunks of a checkpoint the
