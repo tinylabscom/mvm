@@ -437,6 +437,10 @@ pub(crate) fn utf8(path: &Path) -> Result<&str> {
         .with_context(|| format!("artifact path {} is not valid UTF-8", path.display()))
 }
 
+#[cfg(all(test, unix))]
+#[path = "portable_boot_assets_diagnostic.rs"]
+mod diagnostic;
+
 #[cfg(test)]
 mod tests {
     use super::*;
