@@ -1632,6 +1632,7 @@ fn manifest_with_volume(dir: &Path, volume: &str) -> PathBuf {
 /// writable disk image under `standard` is accepted.
 #[test]
 fn create_accepts_a_rw_disk_image_under_standard() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     let manifest = manifest_with_volume(dir.path(), "./state.img:/data:20G:rw");
     let spec = create_args_from_manifest(&manifest, Some(RunProfile::Standard))
@@ -1649,6 +1650,7 @@ fn create_accepts_a_rw_disk_image_under_standard() {
 
 #[test]
 fn create_persists_manifest_endpoint_routes() {
+    let _state = IsolatedMachineState::new();
     let project = tempfile::tempdir().expect("project dir");
     let manifest = project.path().join("mvm.toml");
     std::fs::write(
@@ -1678,6 +1680,7 @@ rules = [{ method = "GET", path = "/repos/org/**", outcome = "allow" }]
 /// spec that `machine start` would refuse.
 #[test]
 fn create_refuses_a_directory_volume_under_every_profile() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
     for volume in ["./src:/work:ro", "./src:/work:rw"] {
@@ -1707,6 +1710,7 @@ fn create_refuses_a_directory_volume_under_every_profile() {
 /// ...and refuses any volume under `restrictive`.
 #[test]
 fn create_restrictive_refuses_a_disk_image() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     let manifest = manifest_with_volume(dir.path(), "./state.img:/data:20G:rw");
     let message = create_args_from_manifest(&manifest, Some(RunProfile::Restrictive))
@@ -2531,6 +2535,7 @@ fn create_auto_generates_a_name_when_omitted() {
 
 #[test]
 fn create_sources_machine_defaults_from_manifest() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("mvm.toml"),
@@ -2629,6 +2634,7 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
 
 #[test]
 fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
+    let _state = IsolatedMachineState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("mvm.toml"),

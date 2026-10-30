@@ -260,7 +260,10 @@ mod tests {
 
     #[test]
     fn update_flags_remain_required_and_reject_overrides_before_effects() {
-        let home = tempfile::tempdir().unwrap();
+        let home = tempfile::Builder::new()
+            .prefix("revocations-no-effects-")
+            .tempdir()
+            .unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
         for args in [
@@ -271,7 +274,11 @@ mod tests {
             let error = invoke(args).unwrap_err();
             assert!(error.downcast_ref::<clap::Error>().is_some());
         }
-        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        let entries: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert!(entries.is_empty(), "unexpected home entries: {entries:?}");
     }
 
     #[test]
