@@ -8,9 +8,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::client::MvmError;
-use mvm_runtime::checkpoint::{CheckpointStore, checked_workspace_blob_name};
+use mvm_runtime::checkpoint::checked_workspace_blob_name;
 
 pub mod fs_quick;
+
+// Types and the liveness probe commands need without naming the runtime.
+pub use mvm_runtime::checkpoint::{CheckpointStore, WorkspaceVolume, vm_is_running};
 
 /// Access to the local checkpoint catalog, guarded removal and workspace images.
 pub struct Checkpoints {

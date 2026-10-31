@@ -106,7 +106,6 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("vm/checkpoint.rs", BOTH),
     ("vm/checkpoint/fork_vm_full.rs", BOTH),
     ("vm/checkpoint/lineage.rs", BOTH),
-    ("vm/checkpoint/prompt_step.rs", RUNTIME),
     ("vm/checkpoint/revert.rs", BOTH),
     ("vm/checkpoint/timeline.rs", RUNTIME),
     ("vm/checkpoint/vm_state.rs", RUNTIME),
@@ -114,14 +113,11 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("vm/exec.rs", BOTH),
     ("vm/invoke.rs", BOTH),
     ("vm/outputs.rs", HOSTD),
-    ("vm/phase_timing.rs", RUNTIME),
     ("vm/plan_persist.rs", HOSTD),
     ("vm/prompt_replay.rs", RUNTIME),
     ("vm/run_plan.rs", HOSTD),
     ("vm/session.rs", RUNTIME),
     ("vm/volume.rs", RUNTIME),
-    ("vm/workspace.rs", RUNTIME),
-    ("vm/workspace_apply.rs", RUNTIME),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

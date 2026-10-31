@@ -248,7 +248,7 @@ fn review_workspace(
 
 /// The guest's writes reach the disk before anything is planned from it.
 fn flush_running_guest(vm: &str) -> Result<()> {
-    if mvm_runtime::checkpoint::vm_is_running(vm) {
+    if mvm_client::checkpoint::vm_is_running(vm) {
         diff::flush_guest(vm)?;
     }
     Ok(())

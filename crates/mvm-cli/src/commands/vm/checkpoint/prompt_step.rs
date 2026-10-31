@@ -1,9 +1,9 @@
 //! Agent-prompt steps captured as session-bound `vm_full` checkpoints.
 
 use anyhow::{Context, Result, bail};
+use mvm_client::checkpoint::{CheckpointStore, vm_is_running};
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::vm_state_dir;
-use mvm_runtime::checkpoint::{CheckpointStore, vm_is_running};
 
 use super::{
     CaptureVmFullArgs, SessionStep, backend_for_vm, bind_checkpoint_created,
