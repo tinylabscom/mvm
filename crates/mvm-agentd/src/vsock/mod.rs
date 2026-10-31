@@ -159,8 +159,7 @@ const _: () = assert!(EGRESS_PORT == 5253);
 /// 5300 sits above the privileged range and above 5251/5252/5253, and below
 /// the console-data range ([`CONSOLE_PORT_BASE`] = 20_000), so the host-side proxy
 /// allowlist keeps its disjoint-union shape. It reuses the number the
-/// pre-broker secrets channel once held (that channel was removed), so there
-/// is no live collision.
+/// retired pre-broker secrets channel, so there is no live collision.
 pub const BROKER_PORT: u32 = 5300;
 /// Connect and request deadline for the in-guest tool shim and helper.
 pub const TOOL_REQUEST_TIMEOUT_SECS: u64 = 10;

@@ -369,8 +369,8 @@ enum EndpointState {
 ///
 /// The endpoint is detached but stays this process's child, and nothing reaps
 /// it until this process exits. A bare `kill(pid, 0)` answers for that zombie,
-/// so an endpoint killed by its seccomp filter used to read as alive and the
-/// launch reported a closed socket instead of the death.
+/// so an endpoint killed by its seccomp filter would read as alive and the
+/// launch would report a closed socket instead of the death.
 fn endpoint_state(pid: libc::pid_t) -> EndpointState {
     if let Some(exit) = peek_child_exit(pid) {
         return EndpointState::Exited(Some(exit));
@@ -1151,9 +1151,8 @@ impl Drop for SpawnedEndpointGuard {
 /// that is not a handshake, SIGKILL the endpoint and fail (the caller rolls
 /// back the VM — fail closed).
 ///
-/// Shared by every spawner of this binary. The builder path used to carry its
-/// own copy that accepted *any* non-empty line as a handshake, so stray chrome
-/// on a shared stdout read as success there and as a parse failure here.
+/// Shared by every spawner of this binary, so stray chrome on a shared stdout
+/// is a parse failure everywhere rather than a successful handshake.
 pub fn read_handshake_line(
     stdout: std::process::ChildStdout,
     pid: u32,
@@ -1850,7 +1849,7 @@ mod tests {
         .expect_err("a silent endpoint must time out");
         let msg = err.to_string();
         assert!(msg.contains("timed out"), "{msg}");
-        // The three things the operator needs and used to have to guess.
+        // The three things the operator needs.
         assert!(msg.contains("/opt/mvm/mvm-network-endpoint"), "{msg}");
         assert!(msg.contains("Address already in use"), "{msg}");
         assert!(msg.contains(HANDSHAKE_TIMEOUT_ENV), "{msg}");
@@ -1887,8 +1886,7 @@ mod tests {
 
     #[test]
     fn a_non_handshake_line_is_refused() {
-        // The builder path used to accept any non-empty line, so stray chrome
-        // on a shared stdout read as a successful handshake there.
+        // Stray chrome on a shared stdout must not read as a handshake.
         let mut child = Command::new("sh")
             .args([
                 "-c",
@@ -2288,9 +2286,8 @@ mod tests {
 
     #[test]
     fn a_handshake_that_is_not_a_handshake_fails_the_spawn() {
-        // Fail closed. A line the spawner could not parse used to be written
-        // to the env sidecar verbatim, so a broken endpoint produced a VM that
-        // booted with no placeholders and no fingerprints and said nothing.
+        // Fail closed. An unparseable line must not reach the env sidecar,
+        // or a broken endpoint yields a VM with no placeholders or fingerprints.
         let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-subst-badline-{}", std::process::id()));

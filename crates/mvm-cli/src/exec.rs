@@ -131,10 +131,6 @@ pub enum ImageSource {
         /// The unpacked+injected OCI tree behind this image, when it came from
         /// one. Carried because it is what distinguishes an OCI-derived
         /// prebuilt from the cached dev image, which take different initrds.
-        ///
-        /// It used to be a virtiofs-root *candidate*, and the tier gate read it
-        /// to decide whether to serve the tree over virtio-fs. That gate is
-        /// gone; the fact it recorded is not.
         unpacked_oci_root: Option<String>,
     },
     /// Pre-built `wasm32-wasip1` module run directly under the wasm backend.
@@ -1226,7 +1222,7 @@ pub struct ResolvedLaunch {
 
 /// Resolve a launch's bootable [`VmStartConfig`] **without starting a VM**.
 ///
-/// Composes the four steps that used to exist only inline in [`run_inner`]:
+/// Composes four steps:
 /// image-artifact resolution, the boot-strategy tier gate, the start-config
 /// assembly, and the admission + runtime-overlay/initramfs attach. Anything
 /// that wants a launch's boot shape calls this; resolving it a second way is
@@ -2160,13 +2156,8 @@ mod tests {
         }
     }
 
-    /// The virtiofs tier gate is gone, so what used to be tested here is that
-    /// it could never fire. What survived it is the distinction the gate's
-    /// input happened to encode: an OCI-derived prebuilt and the cached dev
-    /// image take different initrds, and only the first has an unpacked tree.
-    ///
-    /// Deleting the field outright would have quietly given every prebuilt the
-    /// OCI initrd, which nothing would have failed on.
+    /// An OCI-derived prebuilt and the cached dev image take different
+    /// initrds, and only the first has an unpacked tree.
     #[test]
     fn only_an_oci_derived_prebuilt_resolves_the_oci_initrd() {
         let oci = ImageSource::Prebuilt {

@@ -930,8 +930,8 @@ mod tests {
     }
 
     /// The form the README documents. `commands.start(["python", ...])` and
-    /// `exec("uname", "-sr")` both send a bare name, and the guest used to
-    /// refuse it outright — so the SDK example in the README could not run.
+    /// `exec("uname", "-sr")` both send a bare name, which must resolve so the
+    /// SDK example in the README runs.
     #[test]
     fn a_bare_command_name_resolves_through_the_search_path() {
         let probe = FakeProbe(&["/bin/uname"]);
@@ -966,8 +966,7 @@ mod tests {
         );
     }
 
-    /// An absolute path is taken as given — this is the pre-existing contract
-    /// and the only form that used to be accepted.
+    /// An absolute path is taken as given — this is the base contract.
     #[test]
     fn an_absolute_path_is_used_verbatim() {
         let probe = FakeProbe(&[]);
