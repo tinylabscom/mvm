@@ -89,6 +89,38 @@ fn captured_output(file: &mut std::fs::File) -> std::io::Result<Vec<u8>> {
 }
 
 fn run_test_child(command: &mut Command, within: Duration) -> anyhow::Result<Output> {
+    run_test_child_with(command, within, wait_for_child)
+}
+
+fn reap_owned_child(child: &mut Child) -> anyhow::Result<ExitStatus> {
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+    child.kill().context("terminate owned isolated child")?;
+    collect_after_exit_event(Instant::now() + CLEANUP_DEADLINE, || child.try_wait())?
+        .context("owned child was not reaped within cleanup deadline")
+}
+
+fn failure_summary(
+    outcome: anyhow::Result<Option<ExitStatus>>,
+    cleanup: anyhow::Result<ExitStatus>,
+) -> String {
+    let reason = match outcome {
+        Ok(_) => "execution deadline exceeded".to_owned(),
+        Err(error) => format!("exit observation failed: {error:#}"),
+    };
+    let cleanup = match cleanup {
+        Ok(status) => format!("owned child reaped: {status}"),
+        Err(error) => format!("cleanup failed: {error:#}"),
+    };
+    format!("{reason}; {cleanup}")
+}
+
+fn run_test_child_with(
+    command: &mut Command,
+    within: Duration,
+    wait: impl FnOnce(&mut Child, Instant) -> anyhow::Result<Option<ExitStatus>>,
+) -> anyhow::Result<Output> {
     // Files avoid pipe backpressure while the parent waits for the exit event.
     let mut stdout = tempfile::tempfile().context("create child stdout capture")?;
     let mut stderr = tempfile::tempfile().context("create child stderr capture")?;
@@ -100,8 +132,7 @@ fn run_test_child(command: &mut Command, within: Duration) -> anyhow::Result<Out
     let started = Instant::now();
     let mut child = command.spawn().context("spawn isolated test child")?;
     let pid = child.id();
-    let waited = wait_for_child(&mut child, started + within);
-    match waited {
+    match wait(&mut child, started + within) {
         Ok(Some(status)) => Ok(Output {
             status,
             stdout: captured_output(&mut stdout)?,
@@ -109,25 +140,9 @@ fn run_test_child(command: &mut Command, within: Duration) -> anyhow::Result<Out
         }),
         outcome => {
             // The retained Child is the authority; never rediscover or signal a PID.
-            let cleanup = (|| -> anyhow::Result<ExitStatus> {
-                if let Some(status) = child.try_wait()? {
-                    return Ok(status);
-                }
-                child.kill().context("terminate owned isolated child")?;
-                collect_after_exit_event(Instant::now() + CLEANUP_DEADLINE, || child.try_wait())?
-                    .context("owned child was not reaped within cleanup deadline")
-            })();
-            let reason = match outcome {
-                Ok(None) => "execution deadline exceeded".to_owned(),
-                Err(error) => format!("exit observation failed: {error:#}"),
-                Ok(Some(_)) => unreachable!(),
-            };
-            let cleanup = match cleanup {
-                Ok(status) => format!("owned child reaped: {status}"),
-                Err(error) => format!("cleanup failed: {error:#}"),
-            };
+            let summary = failure_summary(outcome, reap_owned_child(&mut child));
             bail!(
-                "child {pid} after {:?}: {reason}; {cleanup}\nstdout:\n{}\nstderr:\n{}",
+                "child {pid} after {:?}: {summary}\nstdout:\n{}\nstderr:\n{}",
                 started.elapsed(),
                 String::from_utf8_lossy(&captured_output(&mut stdout)?),
                 String::from_utf8_lossy(&captured_output(&mut stderr)?),
@@ -235,6 +250,31 @@ mod tests {
             .to_string();
         assert!(error.contains("execution deadline exceeded"), "{error}");
         assert!(error.contains("owned child reaped"), "{error}");
+    }
+
+    #[test]
+    fn observer_error_is_returned_after_the_child_is_killed_and_reaped() {
+        let error = run_test_child_with(&mut fixture("block"), Duration::from_secs(10), |_, _| {
+            bail!("observer unavailable")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("exit observation failed: observer unavailable"),
+            "{error}"
+        );
+        assert!(error.contains("owned child reaped"), "{error}");
+    }
+
+    #[test]
+    fn cleanup_failure_is_reported_not_swallowed() {
+        let summary = failure_summary(Ok(None), Err(anyhow::anyhow!("kill refused")));
+        assert!(summary.contains("execution deadline exceeded"), "{summary}");
+        assert!(
+            summary.contains("cleanup failed: kill refused"),
+            "{summary}"
+        );
+        assert!(!summary.contains("owned child reaped"), "{summary}");
     }
 
     #[test]
