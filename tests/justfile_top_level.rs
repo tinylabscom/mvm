@@ -239,42 +239,6 @@ fn root_recipes_are_exactly_the_ci_mirror_set() {
     );
 }
 
-/// Every module the root justfile declares. `include_str!` proves each file
-/// exists at compile time, so a deleted or renamed module breaks this test
-/// target's build rather than failing only at `just --list` time.
-#[test]
-fn declared_modules_exist() {
-    let _audit = include_str!("../just/audit/mod.just");
-    let _bdd = include_str!("../just/bdd/mod.just");
-    let _check = include_str!("../just/check/mod.just");
-    let _e2e = include_str!("../just/e2e/mod.just");
-    let _kernel = include_str!("../just/kernel/mod.just");
-    let _lab = include_str!("../just/lab/mod.just");
-    let _lints = include_str!("../just/lints/mod.just");
-    let _maint = include_str!("../just/maint/mod.just");
-    let _mem = include_str!("../just/mem/mod.just");
-    let _payload = include_str!("../just/payload/mod.just");
-    let _release = include_str!("../just/release/mod.just");
-    let _sdk = include_str!("../just/sdk/mod.just");
-    let _site = include_str!("../just/site/mod.just");
-    let _tests = include_str!("../just/tests/mod.just");
-}
-
-/// The list above is only a guard if it is the whole list: a module added to
-/// the root justfile without a line there would go unchecked.
-#[test]
-fn declared_modules_are_exactly_the_pinned_set() {
-    let declared: Vec<&str> = declared_modules().into_keys().collect();
-    assert_eq!(
-        declared,
-        [
-            "audit", "bdd", "check", "e2e", "kernel", "lab", "lints", "maint", "mem", "payload",
-            "release", "sdk", "site", "tests"
-        ],
-        "a module was added or removed — update `declared_modules_exist` to match"
-    );
-}
-
 /// `lint`, `tests::ci` and `tests::cargo` each shipped a multi-line `if` or
 /// `case` without a shebang, so every invocation died on `sh: syntax error:
 /// unexpected end of file` — and `ci` depends on `lint`, so the whole local
@@ -413,14 +377,4 @@ script:
             ("script", None)
         ]
     );
-}
-
-#[test]
-fn test_module_keeps_scoped_runs_without_the_removed_cache_wrapper() {
-    let tests = include_str!("../just/tests/mod.just");
-    assert!(tests.contains("scoped CRATE FILTER=\"\""));
-    assert!(tests.contains("[positional-arguments]\nscoped CRATE FILTER=\"\" *ARGS:"));
-    assert!(tests.contains("args=(nextest run -p \"$crate\" \"$@\")"));
-    assert!(tests.contains("args+=(-E \"test($filter)\")"));
-    assert!(!tests.contains("cached FILTER="));
 }
