@@ -1,0 +1,53 @@
+---
+import { Code } from "astro:components";
+import { wireDefinitions, wireShape } from "../lib/vsock-reference.mjs";
+
+interface Props {
+  family: string;
+}
+const definitions = wireDefinitions(Astro.props.family);
+---
+
+<details class="wire-index">
+  <summary>Type index ({definitions.length})</summary>
+  <ul aria-label="Type index">
+    {definitions.map(({ name, id }) => <li><a href={`#${id}`}>{name}</a></li>)}
+  </ul>
+</details>
+{definitions.map((definition) => {
+  const { name, id, code, lang, path, url } = definition;
+  const shape = wireShape(definition);
+  return (
+    <section id={id} aria-label={name}>
+      <details>
+        <summary><code>{name}</code></summary>
+        <p><a href={url}>Source: {path}</a></p>
+        {shape.unknownFields === false && <p>Unknown object fields are refused.</p>}
+        {shape.fields.length > 0 && (
+          <table>
+            <thead><tr><th>Field</th><th>Required</th><th>Serialized type</th></tr></thead>
+            <tbody>
+              {shape.fields.map((field) => (
+                <tr><td><code>{field.name}</code></td><td>{field.required ? "Yes" : "No"}</td><td><code>{field.type}</code></td></tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {shape.variants.length > 0 && (
+          <table>
+            <thead><tr><th>Variant / tag</th><th>Serialized shape</th></tr></thead>
+            <tbody>
+              {shape.variants.map((variant) => (
+                <tr><td><code>{variant.name}</code></td><td><code>{variant.type}</code></td></tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <details>
+          <summary>Full {lang === "json" ? "JSON Schema" : "Rust declaration"}</summary>
+          <Code code={code} lang={lang} wrap />
+        </details>
+      </details>
+    </section>
+  );
+})}

@@ -1,0 +1,599 @@
+---
+title: Vsock message reference
+description: The complete typed vsock vocabulary, field definitions, framing, service availability, and raw-stream boundaries.
+---
+
+import VsockTypes from "../../../components/VsockTypes.astro";
+
+Vsock is a transport, not one serialization format. This reference covers the
+registered guest services, builder channels, authentication messages, and
+auxiliary preludes. It distinguishes a wire type from permission to use it:
+a defined operation can still be unavailable on a backend, refused by a signed
+plan, or recognized but not implemented.
+
+**Fields and variants are source-derived.** Expand a type for its compact
+field/variant table and full guest/broker JSON Schema definition or Rust
+declaration, including Serde attributes. The [plain Markdown version](/reference/vsock-messages.md)
+contains the same definitions without collapsed sections. Rust excerpts retain
+their field comments and attributes but omit implementations.
+
+In a schema, `required`, `default`, `additionalProperties`, `oneOf`, and
+`$ref` describe the serialized shape. A `#/definitions/Name` reference names
+another entry in that family's type index. Schemars represents some optional
+fields as `anyOf` containing the value type and `null`. Rust `Option<T>` is
+nullable or optional according to its Serde attributes; `skip_serializing_if`
+controls omission, not authorization. Schema `uint32`/`uint64` formats and
+`minimum`/`maximum` values are descriptive; they do not replace the decoder's
+bounds checks. Do not rely on JSON object-field order for canonical bytes.
+Unless a custom codec is stated, `Vec<u8>` in JSON is an array of integers,
+not base64. **Schema validity does not bypass handler, profile, grant, size,
+or state-machine checks.**
+
+## Services and transport hops
+
+Host transport adapters may expose a Unix socket, a VMM-owned stream, or
+AF_VSOCK. That host-side representation is not a different guest protocol and
+is not an authorization input. The browser/WASM tier has no hardware vsock.
+
+| Registered service | Guest port | Initiator and traffic | Availability / format |
+| --- | --- | --- | --- |
+| `MachineControl` | 5252 | Host connects; host requests, guest replies/events | Guest agent, with profile/grant gates; authenticated session carrying JSON |
+| `WorkloadExit` | 5251 | Guest connects to host and reports exit | One little-endian `i32`, not JSON |
+| `NetworkFlow` | 5253 | Guest connects; bidirectional flows | One authenticated, NIC-less network-egress path; binary FlowMux |
+| `Telemetry` | 5254 | Host connects; guest sends observations | Guest listener requires `mvm.telemetry=1`; host collection policy is separate; sealed JSON records |
+| `DisplayFrame` | 5255 | Guest connects and sends images | Admitted `host.display.view.v1`; binary frames, no reply |
+| `Gpu` | 5256 | Guest shim calls host endpoint | Admitted/configured GPU endpoint; length-prefixed JSON; hardware support is backend-specific |
+| `Broker` | 5300 | Guest calls host services | Host-mediated service bindings; length-prefixed JSON |
+| `ConsoleData` | 20001–20128 in the preopened development range | Host attaches; bidirectional PTY bytes | Development console only; raw stream after typed control setup |
+| `BuilderDispatch` | 21471 | Host dispatches; builder sends logs/result | Builder-tier only; length-prefixed JSON |
+| `BuilderdControl` | 21473 | Host requests; resident builder replies | Builder-tier only; length-prefixed JSON, exact protocol v1 |
+
+Additional channels outside that registry are the legacy builder agent
+(21470 by default), nested-workload forwarder (21472), configured addon ports,
+and control-requested Unix-socket forwards. Their distinct formats are below.
+Independent typed services do not share one application queue merely because
+they share a virtio-vsock device.
+
+<VsockTypes family="services" />
+
+## Authenticated session framing
+
+On Firecracker's host mux, `CONNECT 5252\n` selects a guest port and the mux
+returns an `OK` line. This is a **host transport prelude**, not an RPC from the
+guest agent. Direct/per-port transports do not send that mux prelude.
+
+The shared authenticated session then exchanges:
+
+1. Host → guest: `SessionHello`.
+2. Guest → host: `SessionHelloAck`, including the guest challenge and key proof.
+3. Host → guest: `SessionHelloConfirm`, signing the complete transcript.
+4. Both directions: binary `SealedFrame` values, each prefixed by its
+   big-endian `u32` encoded length.
+
+Handshake messages use big-endian `u32` length + JSON, with a **64 KiB**
+JSON-body bound in the shared session implementation. Authenticated protocol
+version **2** is distinct from the guest-control version, even though both
+currently equal 2. Ephemeral X25519 keys establish the session key; AES-256-GCM
+protects payloads and Ed25519 signatures bind frame context and ciphertext.
+Host/guest role, session, sequence, key identity and replay checks remain
+mandatory. The older two-message handshake helpers are not a substitute for
+the three-message authenticated-session exchange.
+
+The sealed-frame body is already binary:
+
+```text
+version:u8 | sig_alg:u8
+session_id_len:u8 | session_id bytes
+sequence:u64 BE
+timestamp_len:u8 | timestamp bytes
+signer_id_len:u8 | signer_id bytes
+signature_len:u16 BE | signature bytes
+ciphertext_len:u32 BE | ciphertext bytes (includes the GCM tag)
+```
+
+Lengths count bytes, not characters; these byte sequences are explicit codecs,
+not a Rust `repr(C)` memory dump. The producer uses an RFC 3339 UTC timestamp;
+the decoder validates that these strings are UTF-8, not that the timestamp is
+RFC 3339. Signature/session checks still cover its exact bytes. A sealed
+write failure poisons the session after its sequence has been spent; callers
+must not retry a partially written frame as if it had never existed. Malformed,
+tampered, replayed, wrong-role or wrong-session frames are refused rather than
+used as resynchronization hints. Each service applies its own frame bound.
+
+[Session codec and validation](https://github.com/tinylabscom/mvm/blob/main/crates/mvm-core/src/net/session.rs#L541-L764).
+
+<VsockTypes family="session" />
+
+## Guest control: requests, responses and nested payloads
+
+Guest-control protocol **2**, minimum supported version **2**, uses externally
+tagged JSON **inside** the authenticated envelope. Unit variants are JSON
+strings; payload variants are objects keyed by the exact case-sensitive
+variant name. There is no generic `type` field.
+
+These are plaintext examples for understanding the shape, not bytes to send
+directly on an authenticated socket:
+
+{/* example:ping */}
+```json
+"Ping"
+```
+
+The corresponding unit response is `"Pong"`. A negotiation request has this
+shape; an empty requested-capability set is shown independently of the ping
+example:
+
+{/* example:hello */}
+```json
+{
+  "ProtocolHello": {
+    "host_protocol_version": 2,
+    "min_supported_version": 2,
+    "host_version": "docs-example",
+    "requested_capabilities": []
+  }
+}
+```
+
+Unknown variants and unknown object fields are refused. For example,
+`{"ProtocolHello":{"host_protocol_version":2,"min_supported_version":2,"host_version":"docs-example","requested_capabilities":[],"unexpected":true}}`
+is invalid. A version mismatch is reported as `ProtocolMismatch` with a typed
+upgrade action; it does not authorize a fallback to unauthenticated messages.
+
+### Bounds and authorization
+
+- Maximum encoded plaintext request or response: **256 KiB**.
+- Maximum encoded sealed-frame body: **264 KiB**, plus its outer 4-byte prefix.
+- Maximum raw content chunk: **62 KiB** (63,488 bytes), derived as
+  `(256 KiB - 8 KiB) / 4`. JSON integer arrays can cost four characters per
+  payload byte; the binary envelope does **not** add another JSON expansion.
+- These are transport ceilings, not a promise that any operation accepts every
+  payload below them. File, process, input, extension and policy limits still
+  apply. Larger transfers use bounded chunks/offsets.
+- The dispatcher reserves control capacity: up to 64 requests, at most 48
+  data-plane requests, leaving 16 slots for control. Profile, signed verb grant,
+  workload privilege and per-operation checks are independent gates.
+
+`ProtocolHello` negotiates the control vocabulary/capabilities before
+capability-dependent work. Initramfs activation is a separate boot state:
+operational requests can be refused with `NotActivated` until activation.
+`ReadinessStatus`, not a successful socket connect or `Ping`, describes
+component readiness. Disabled, initializing, ready and failed are distinct.
+
+### Request → response contracts
+
+Every row also permits the universal `Error`, `UnsupportedInProfile`,
+`VerbNotAuthorized`, or `WorkloadPrivilegeRefused` response. A stream is
+consumed through its typed terminal event, not merely through its first frame.
+
+| Request | Normal response(s) | Exchange |
+| --- | --- | --- |
+| `ActivateEnvironment` | `ActivateEnvironmentAck`, `ActivateEnvironmentError`, `NotActivated` | Unary |
+| `ProtocolHello` | `ProtocolHelloAck`, `ProtocolMismatch` | Unary |
+| `WorkerStatus` | `WorkerStatus` | Unary |
+| `SleepPrep` | `SleepPrepAck` | Unary |
+| `Wake` | `WakeAck` | Unary |
+| `Ping` | `Pong` | Unary |
+| `ResourceUsage` | `ResourceUsageReport` | Unary |
+| `IntegrationStatus` | `IntegrationStatusReport` | Unary |
+| `CheckpointIntegrations` | `CheckpointResult` | Unary |
+| `ProbeStatus` | `ProbeStatusReport` | Unary |
+| `PrimedStatus` | `PrimedStatusReport` | Unary |
+| `Exec`, `RunCode` | `ExecEvent` | Stream |
+| `MediatedExec` | `ToolCheckRequired`, then `ExecEvent` | Paused decision exchange, then stream |
+| `ExecBatch` | `ExecBatchResult` | Unary, buffered per-command outcomes |
+| `RunEntrypoint`, `AgentPrompt`, `RunExtension` | `EntrypointEvent` | Stream |
+| `DriveOpen` | `DriveEvent`, `DriveRefused` | Stream or refusal |
+| `DriveFile` | `FsResult`, `DriveRefused` | Unary |
+| `CancelExtension` | `ExtensionCancellationAck` | Unary |
+| `RunDetached` | `DetachedStarted` | Unary; later workload exit uses port 5251 |
+| `PostRestore` | `PostRestoreAck` | Unary |
+| `FsDiff` | `FsDiffResult` | Unary |
+| `SyncFilesystems` | `FilesystemsSynced` | Unary |
+| `StartUnixSocketForward` | `UnixSocketForwardStarted` | Unary; forwarded bytes use a separate raw connection |
+| `ConsoleOpen` | `ConsoleOpened` | Unary |
+| `ConsoleAttach` | `ConsoleAttached`, `ConsoleBusy` | Unary |
+| `ConsoleDetach` | `ConsoleDetached` | Unary |
+| `ConsoleList` | `ConsoleSessions` | Unary |
+| `ConsoleClose` | `ConsoleExited` | Unary |
+| `ConsoleResize` | `ConsoleResized` | Unary |
+| `EntrypointStatus` | `EntrypointStatusReport` | Unary |
+| `ReadinessStatus` | `ReadinessStatusReport` | Unary |
+| `FsRead`, `FsWrite`, `FsList`, `FsStat`, `FsMkdir`, `FsRemove`, `FsMove` | `FsResult` | Unary per operation/chunk |
+| `ProcStart`, `ProcList`, `ProcSignal`, `ProcSendInput`, `ProcKill` | `ProcResult` | Unary |
+| `ProcWait` | `ProcWaitEvent` | Stream |
+| `MountVolume`, `UnmountVolume` | `VolumeMountResult` | Unary |
+| `UpdateIdleTimeout` | `UpdateIdleTimeoutAck` | Unary |
+| `StreamInput`, `CloseStreamInput` | `StreamInputResult` | Unary |
+| `DisplayInput` | `DisplayInputResult` | Unary |
+
+`ToolCheckReply` is a separate mid-stream host message: `allow`,
+`allow_bound` with an invocation binding, or `deny`. It is not a
+`GuestRequest` variant and is accepted only while the matching mediated
+invocation is paused. The binding is a host-minted 32-character lowercase
+hex string; it is not an authorization assertion the guest can invent.
+
+`EntrypointEvent`/`DriveEvent` terminate on `Exit` or `Error`; `ExecEvent`
+terminates on `Exit` or `TimedOut`; `ProcWaitEvent` terminates on `Exit`,
+`Killed`, `TimedOut`, or `Error`. Backpressure/control/output events are
+nonterminal. Closed input delivers the permitted tail and closes stdin;
+it is not a sentinel byte. Cancellation addresses an exact extension invocation,
+not an arbitrary PID or signal.
+
+The definitions include **all** request/response fields and reachable nested
+types: activation and volumes, grants and extension bindings, process and
+filesystem results/errors, stream events, input/display input, capabilities,
+integration/probe reports, readiness and boot timing. The root schema's
+`request`/`response` wrapper is a documentation/code-generation container,
+not an additional message transmitted on port 5252.
+
+<VsockTypes family="guest" />
+
+## FlowMux networking
+
+Port **5253** carries the one host-mediated egress path, including DNS,
+TCP/UDP, typed HTTP/tool mediation and declared ingress. The connection is
+authenticated; FlowMux's own binary codec and state machine run inside that
+transport. Do not interpret its framing as encrypted by itself.
+
+```text
+frame_len:u32 BE  (bytes after this prefix)
+magic:"MVFM"[4] | version:u8 | opcode:u8
+flags:u16 BE=0 | header_len:u16 BE=20 | reserved:u16 BE=0
+stream_id:u32 BE | payload_len:u32 BE
+payload bytes
+```
+
+Major version is **1**; hello behavior revision is **3**. Mismatches are
+refused, not downgraded. Payloads are at most **65,536 bytes**; the framed
+body is at most **65,556 bytes**, or **65,560** including the FlowMux length
+prefix, before enclosing session overhead. Session frames use stream 0;
+guest-opened flows use odd IDs and host ingress uses even IDs. Direction comes
+from the local socket role, never a peer-supplied authorization field.
+
+| Family | Guest → host | Host → guest | Either direction |
+| --- | --- | --- | --- |
+| Session | `Hello`, `ToolCheck` | `HelloAck`, `ToolAllowed`, `ToolDenied` | `GoAway` |
+| TCP | `OpenTcp` | `Opened`, `Refused`, `ConnectFailed` | `Data`, `WindowUpdate`, `HalfClose`, `Reset` |
+| UDP | `OpenUdp`, `UdpSend` | `UdpOpened`, `UdpRecv` | `CloseUdp` |
+| DNS | `Resolve` | `Resolved`, `ResolveRefused` | — |
+| Ingress | `InboundReady`, `InboundRefused` | `InboundOpen` | Common data/credit/close frames after readiness |
+| HTTP | `OpenHttp`, `HttpRequestHead`, `HttpRequestBody` | `HttpResponseHead`, `HttpResponseBody`, `HttpComplete` | Common flow operations |
+| ICMP | `IcmpEcho` | `IcmpReply`, `IcmpRefused` | — |
+
+The `Opcode` declaration below gives every numeric discriminant. Legal
+direction alone is insufficient: the stream state must also permit the frame.
+Unknown opcodes, reserved bits, inconsistent lengths and illegal transitions
+fail closed. Typed vocabulary does not promise that every backend/policy enables
+every operation.
+
+### Payloads and flow control
+
+| Payload | Exact representation / bound |
+| --- | --- |
+| `Hello`, `HelloAck` | `Handshake` binary payload: behavior revision `u32 BE`, build length `u16 BE`, then up to 128 UTF-8 build bytes; exact revision equality required |
+| `GoAway` | Raw reason bytes, displayed with lossy UTF-8 conversion; not a JSON error object |
+| `OpenTcp` | UTF-8 `host:port` target up to 256 bytes; optionally NUL followed by a 32-lowercase-hex invocation binding; at most 289 bytes |
+| `Opened` | Empty payload; `Opened` confirms TCP and typed-HTTP opens in the stream's own class |
+| `Refused` | Raw refusal reason bytes, displayed with lossy UTF-8 conversion |
+| `ConnectFailed` | Raw upstream-connect failure reason bytes, distinct from policy `Refused` |
+| `Data` | Opaque stream bytes, bounded by frame size and credit |
+| `WindowUpdate` | Exactly 4 bytes: nonzero big-endian `u32` credit increment; initial per-stream credit 262,144 bytes, maximum 4,194,304 |
+| `HalfClose` | Empty payload; only the sender's direction closes |
+| `Reset` | Raw abort/reason bytes; retires the stream rather than starting a graceful half-close |
+| `OpenUdp` | Empty payload; admission happens before the association is opened |
+| `UdpOpened` | Empty payload |
+| `UdpSend` | Address-family tag `0x01` (mapped IPv4) or `0x04` (IPv6), 16-byte address slot, `u16 BE` port, then up to 65,507 datagram bytes |
+| `UdpRecv` | The same 19-byte peer-address prefix followed by datagram bytes; the prefix is not part of the application datagram returned to the guest socket |
+| `CloseUdp` | No structured payload; the current guest emits an empty payload, and a receiver may also expose a raw reason string |
+| `Resolve` | Raw bounded DNS query: one A/AAAA IN question, no compression pointers or extra sections; 4,096-byte cap |
+| `Resolved` | Raw DNS response produced by `encode_response`: matching transaction ID/question, big-endian header fields, matching-family A/AAAA answers, 120-second TTL, bounded at 4,096 bytes |
+| `ResolveRefused` | Raw policy/resolution refusal reason bytes, not a DNS packet |
+| `InboundOpen` | Exactly a declared ingress mapping ID as `u16 BE`; class/target is looked up from admitted configuration, not supplied by the peer |
+| `InboundReady` | Empty payload |
+| `InboundRefused` | Raw reason bytes |
+| `OpenHttp` | Empty payload; opens a typed transform flow only when the endpoint has a substitution service and admission permits it |
+| `HttpRequestHead` | JSON `HttpFlowHead`: method, URL, ordered header pairs, exact `body_len:u64`; host request-body bound 32 MiB |
+| `HttpRequestBody` | Raw request-body chunks; the accumulated body must match the declared length and bound |
+| `HttpResponseHead` | JSON `HttpFlowResponseHead` tagged `result`: `ok {status,headers,body_len}` or `refused {message}` |
+| `HttpResponseBody` | Raw response-body chunks |
+| `HttpComplete` | Empty payload; cleanly terminates the exchange |
+| `IcmpEcho` | JSON `IcmpEchoRequest`: host, count, payload length, timeout; one echo per flow |
+| `IcmpReply` | JSON `IcmpEchoReply`: `reply`, `timeout`, or `refused` under the `result` tag |
+| `IcmpRefused` | JSON `IcmpEchoReply::Refused { message }`; no echo was sent |
+| `ToolCheck` | JSON `ToolCheckRequest`; tool name up to 128 bytes, rendered argv up to 16 KiB, optional executable up to 4,096 bytes |
+| `ToolAllowed` | Empty payload in the current endpoint |
+| `ToolDenied` | Raw denial reason bytes; not the richer broker `ToolDecisionReply` envelope |
+
+The ICMP request bounds are 1–64 echoes in the generic line contract, up to
+1,024 payload bytes and a 1–10,000 ms timeout; the FlowMux host carries one
+echo per flow. That host first applies lossy UTF-8 conversion to the JSON
+payload, then parses the typed request. Generic ICMP **line** framing is a
+separate host-local mediator contract; do not add newlines to FlowMux JSON
+payloads. HTTP `body_len` is authoritative for request completion, while an
+optional response length permits streaming until `HttpComplete`; independent
+response ceilings remain in force.
+
+`DnsRecordType`/`DnsQuestion` describe the validated query (name, A/AAAA type
+and transaction ID); `DnsRcode` selects success or policy refusal when encoding.
+They are logical decoded values, not JSON representations of the DNS packet.
+The complete field declarations follow with the shared binary/JSON types.
+
+Byte reduction must not remove credit, state, length or direction checks.
+See the [frame state machine](https://github.com/tinylabscom/mvm/blob/main/crates/mvm-contract/src/protocol/network_flow/state.rs#L335-L639)
+and [endpoint payload dispatch](https://github.com/tinylabscom/mvm/blob/main/crates/mvm-hostd/src/supervisor/flowmux.rs#L450-L730).
+`ToolDecisionReply` and `ToolInvocationRelease` are shown alongside their
+shared tool types, but their structured replies/releases are used by the
+broker/control surfaces, not interchangeable FlowMux payloads.
+
+<VsockTypes family="flow" />
+
+## Telemetry
+
+Port **5254** is a dedicated authenticated connection. After the three-message
+handshake, the guest emits one-way `TelemetryRecord` JSON inside sealed frames.
+There is no per-record acknowledgement. The guest listener requires the kernel
+assertion `mvm.telemetry=1` and is absent from the Unix/container transport;
+normal host collection and opt-out behavior are described in
+[Guest Agent](/reference/guest-agent/#guest-telemetry).
+
+`TelemetryRecord` contains format, producer epoch, producer ID, sequence,
+monotonic nanoseconds, source kind and body. Guest-authored host/VM/tenant
+identity is not accepted as authority. `RecordBody` has exactly the
+`span_open`, `span_update`, `span_close`, `event`, `log`, `stdio`, `coverage`,
+and `loss` shapes below. A record type's existence does not mean every source
+currently produces it; in particular, do not equate a producer startup record
+with complete capture.
+
+Bounds before encryption: **32 KiB** record JSON, depth **8**, **16**
+attributes, **8** span links, **128-byte** labels, **2 KiB** message text,
+**4 KiB** stdio chunks. `Text<N>` serializes as a string and `BoundedList<T,N>`
+as an array. `ProducerEpoch` is a nonzero 16-byte array; producer/sequence IDs
+are nonzero. `TraceReference` is a validated canonical version-00 traceparent
+string with flags `01`; `FiniteFloat` rejects NaN/infinities. Attributes are
+closed tagged primitive values, not recursively arbitrary objects.
+
+Malformed input ends the connection without echoing payloads. Queue overflow
+and partial transport writes are accounted as loss/uncertain delivery, not
+successful collection. These observations do not replace mandatory signed
+audit. The service has bounded handshake/write deadlines and bounded turns;
+host retention/redaction policy remains a separate gate.
+
+<VsockTypes family="telemetry" />
+
+## Display frames
+
+Port **5255** is guest → host only, admitted by `host.display.view.v1`.
+Although the type has Serde support, this channel uses its **binary** codec:
+
+```text
+encoded_length:u32 BE
+version:u8=1 | mime:u8 (1=JPEG, 2=PNG) | step_id_len:u16 BE
+width:u32 BE | height:u32 BE | image_len:u32 BE
+step_id UTF-8 bytes | image bytes
+```
+
+The header after the outer prefix is **16 bytes**; the optional step ID
+is at most **256 bytes**, and the image body at most **2 MiB**. Dimensions
+must be nonzero, the image nonempty, and a present step ID nonempty and free
+of control characters. Wrong versions/MIME, inconsistent lengths, trailing
+bytes and invalid UTF-8 are refused. JPEG/PNG are already compressed.
+
+The host writes no response on this source and can drop frames during a
+credential-entry pause. CDP acknowledgements belong to the guest's local
+browser bridge, not this vsock stream. Display **input** goes through the
+separately admitted `GuestRequest::DisplayInput` control path.
+
+<VsockTypes family="display" />
+
+## GPU remoting
+
+Port **5256** carries one driver-shaped vocabulary shared by guest CUDA/NVML
+shims and the host endpoint. Requests use `{"op": "...", "args": ...}`;
+responses use `{"op": "...", "result": ...}` with snake-case operation names.
+Unit variants omit their payload. Each JSON message has a big-endian `u32`
+body length with a **64 MiB** cap checked before body allocation.
+
+Every request and response operation is expanded below. Handles are opaque
+connection-scoped `u64` values, not guest-dereferenceable host pointers.
+Kernel launch dimensions are three `u32` values each; at most **256**
+parameters are accepted, each at most **16 MiB**, still subject to the whole
+message cap. Buffer bytes serialize as JSON integer arrays. Error codes retain
+CUDA driver/runtime or NVML numeric meanings; the error message is not a
+replacement for the numeric code.
+
+An unsupported operation/device is a typed error, not a reason to widen
+guest access. A compiled shim or deterministic endpoint test is not proof of
+native GPU capability or snapshot/device-memory support.
+
+<VsockTypes family="gpu" />
+
+## Host-service broker
+
+Port **5300** carries `ServiceCall` followed by `ServiceResponse`, framed with
+a big-endian `u32` JSON-body length, one call per connection. The supplied guest
+client uses the shared **256 KiB** frame bound; the broker's current default
+`max_frame_bytes` is **65,536 bytes**, applied before allocating/parsing. The
+per-VM ingress derives the workload
+context, checks admitted service/capability bindings and proxies to host-local
+handlers. This channel must not be described as automatically inheriting the
+guest-control encrypted envelope.
+
+`ServiceCall` names a versioned `ServiceId`, verb, correlation ID, payload and
+nullable capability invocation (`anyOf: CapabilityInvocation | null`). The
+response has `kind: "ok"` and a payload,
+or `kind: "err"` with a typed service error. Host-side identity/correlation
+handling is authoritative: ingress rewrites the correlation ID, so callers
+must not assume a guest-chosen ID is echoed or multiplex calls on this
+connection. Guest payload identity is not authority. `ServiceId` uses
+dot-separated alphanumeric/hyphen segments ending in `.v` plus digits.
+
+| Service / verbs | Typed payloads | Availability and limits |
+| --- | --- | --- |
+| `host.audit.v1`: `emit`, `emit_batch` | `EmitRequest`, `EmitResponse`, `EmitBatchRequest`, `EmitBatchResponse`, `EmitBatchEntryStatus`, `EmitErrorCode` | Requires audit signer; canonical record fields up to 4,096 bytes, at most 100 records / 256 KiB per batch; 20 tokens/s/workload |
+| `host.beacon.v1`: `report` | `BeaconReport`, `BeaconAck` | Requires audit signer; 4 KiB handler cap, 1 token/s |
+| `host.kv.v1`: `get`, `put`, `delete`, `list` | All `Kv*Request` / `Kv*Response` types below | Host-derived per-workload namespace; keys up to 256 bytes, nonempty printable ASCII excluding `.`, `/`, and `\`; values up to 64 KiB |
+| `host.time.v1`: `now` | Empty request object, `TimeNowResponse` | Host Unix epoch milliseconds |
+| `host.tool.v1`: `decide`, `release` | Shared `ToolCheckRequest`, `ToolDecisionReply`, `ToolInvocationRelease`; `ToolReleaseResponse` | Requires admitted tool binding/socket; release is idempotent |
+| `host.cost.v1`: `workload`, `tenant` | Empty request object, `CostReport` | DTO/client vocabulary exists; handler is not registered in the current host broker |
+
+Batch audit statuses are `ok`, `err`, or `skipped`; a stopping failure does
+not turn later entries into successes. The full `ServiceErrorCode` vocabulary
+below includes authorization/binding, rate/quota, queue, timeout, readiness,
+availability, composition and capability failures.
+
+The generic `payload` is JSON, not an unbounded permission to invoke arbitrary
+host functions. Per-handler framing/body/response quotas and timeouts apply
+in addition to each payload's bounds. A dynamically registered service proxy
+owns its own versioned payload schema; the broker envelope does not claim to
+enumerate all third-party application values.
+
+<VsockTypes family="broker" />
+
+## Builder-tier protocols
+
+These are not workload-agent capabilities. They have separate ports, framing,
+version rules and trust boundaries; none should be presented as encrypted
+merely because machine control uses authenticated sessions.
+
+### Persistent dispatch: 21471
+
+`HostVmRequest` / `HostVmResponse` in **mvm-builder-guest** use `kind`-tagged,
+snake-case JSON with big-endian `u32` body length and the shared **256 KiB**
+JSON-frame cap. Requests are `run`, `shutdown`, `workload_start`,
+`workload_stop`, `workload_status`. Responses are `stderr_chunk`, `result`,
+`bye`, `workload_started`, `workload_stopped`, `workload_status_report`,
+`workload_failed`. IDs are UUID strings and responses are correlated to the
+job/workload.
+
+Nested `BuilderJob` is **externally tagged**: `Flake`,
+`FrozenFlakeDiagnostic`, `Install`, not snake-case `kind` objects.
+`Install` is not implemented; the frozen diagnostic is refused by resident
+builders. Defined workload stop/status messages must not be interpreted as
+proof that their guest operation is wired. Result reading has a legacy
+file-result compatibility path on EOF/timeout, separate from wire success.
+The full job payload and boot/job timing fields follow.
+
+<VsockTypes family="builder" />
+
+### Resident builder daemon: 21473
+
+`BuilderRequest` / `BuilderResponse` use `kind`-tagged snake-case JSON,
+big-endian `u32` body length and the shared **256 KiB** cap. Handshake
+requires exact protocol **1**; mismatch produces typed `failed`/`version`.
+Operations use UUID-string `OperationId`s.
+
+The bare daemon serves handshake, probe and cancellation. Its recognized
+flake/build/prefetch/store operations require an operation executor; otherwise
+they return `unsupported`. `accepted`, `progress`, `log_chunk` and
+artifact/store-path results precede terminal `completed`, `failed` or
+`cancelled` outcomes according to the operation. A progress event is not
+completion or proof of an artifact.
+
+<VsockTypes family="builderd" />
+
+### Legacy builder agent: 21470
+
+The identically named `HostVmRequest` / `HostVmResponse` in **mvm-agentd**
+are a different protocol: **newline-delimited JSON**, not the length-prefixed
+dispatch wire. Requests are externally tagged `Build` and `Ping`;
+responses are `Ok`, `Err`, `Log` and `Pong`. A build client consumes logs
+until its terminal result. The client can override the default port through
+`MVM_BUILDER_AGENT_PORT`.
+
+A Linux listener/client exists; non-Linux builds are unsupported and the
+owning build mode/admission policy still decides whether the path is usable.
+Do not recommend this legacy channel as a replacement for resident builder
+control, or infer a 256 KiB length-prefix bound for its line-based parser.
+
+<VsockTypes family="legacy_builder" />
+
+## Auxiliary preludes and raw streams
+
+| Channel | What actually crosses vsock |
+| --- | --- |
+| Workload exit, 5251 | Four-byte little-endian signed `i32` exit code. The guest may wait for one ignored acknowledgement byte; this is not an authenticated JSON result. |
+| Nested workload forwarder, 21472 | Big-endian `u32` length, 1–256 bytes of UTF-8 `workload_id port`, then an inner Firecracker mux connection and opaque forwarded stream. Invalid UTF-8, port, path traversal or length is refused. |
+| Addon bridge, configured port | Big-endian `u32` header length + `PeerHeader` JSON up to 4 KiB, then bidirectional opaque application bytes. Loopback binding and host routing are separate admission boundaries. |
+| Console data port | Raw PTY bytes. `ConsoleAttached.replay_bytes` identifies the leading scrollback; disconnect detaches rather than necessarily terminating the shell. Close/resize/list are typed requests on 5252. |
+| Guest Unix-socket forward | Raw bidirectional bytes after `StartUnixSocketForward`; no message envelope per read. Guest socket path is constrained under `/run/mvm/`. |
+
+The addon prelude is the only typed message before that bridge switches to
+raw forwarding:
+
+<VsockTypes family="addon" />
+
+## Deliberate exclusions and future surfaces
+
+This reference does not label every type with “protocol” in its path a vsock
+message:
+
+- `WorkerCallRequest`, `WorkerCallResponse`, `WorkerControlRecord` and
+  `WorkerOutcome` are local wrapper stdin/stdout messages.
+- CRNG reseed request/reply values use privileged guest-local Unix IPC.
+- Host signer, audit signer, broker registration/control, VMM lifecycle
+  control and `MVEX` extension-controller messages are host-local IPC.
+  The substitution endpoint's `WireRequest`/`WireResponse` and secret-resolver
+  `ResolveWireRequest`/`ResolveWireResponse` also use separate host-local
+  sockets. Only the derived `HttpFlowHead`/`HttpFlowResponseHead` values above
+  are typed FlowMux payloads; raw secret values never become a new vsock DTO.
+- `LoopbackBinding` is addon configuration, not a transmitted addon prelude.
+  Local addon DNS is UDP; FlowMux DNS is a raw DNS payload, not another
+  DNS-vsock JSON service.
+- `ToolCheckDenial` and `ToolOrigin` describe host tool/audit context, not
+  an extra peer-controlled FlowMux response.
+- Mailbox routing/envelope/capability/receipt types are a transport-neutral
+  contract. The dedicated vsock service remains tracked by
+  [#4629](https://github.com/tinylabscom/mvm/issues/4629); do not infer a live
+  mailbox port from those types.
+- Image compatibility metadata, host-only admission objects and bridge-local
+  CDP acknowledgements are not additional guest messages.
+
+## Keeping this reference complete
+
+The page renders the committed guest and broker schemas and explicitly
+catalogued Rust wire declarations at build time, also expanding them into its
+plain-Markdown twin. There is no second handwritten field schema. Changes to
+existing declarations appear automatically after the owning schema/stub
+regeneration. Additions to the service registry or to the catalogue require
+an availability/framing disposition here. These schema- and source-coverage
+checks make drift visible, but do not prove reachability or replace the
+protocol's own compatibility tests.
+
+Run the docs checks and build from `public/`:
+
+```sh
+pnpm check:docs
+pnpm build
+```
+
+For a Rust schema change, regenerate the existing SDK/schema artifacts and
+run their owning drift gate:
+
+```sh
+cargo xtask gen-stubs
+cargo xtask check-stubs
+```
+
+The docs checks verify service/opcode coverage, source-derived field content,
+schema references, bounds, examples and navigation. They are not a live-vsock
+or cryptographic correctness witness. New transports, dynamic proxy schemas
+and newly wired roots still require reachability and security review.
+
+## Future size and latency work
+
+[#4882](https://github.com/tinylabscom/mvm/issues/4882) tracks measured compact
+payload/bit-packing and struct/storage-layout exploration. The sealed envelope,
+FlowMux and display frames are already binary. Reducing inner JSON byte-array
+expansion is a candidate, not a measured startup improvement.
+
+`repr(Rust)` is already the default memory representation; `repr(C)` can add
+padding and does not compact Serde output or define a portable disk format.
+Blanket `repr(packed)` changes risk unaligned access and are not a serialization
+strategy. Wire size, heap footprint, snapshot pages and durable encoding need
+separate measurements and compatibility decisions.
+
+The requested targets are `<300 ms` cold and `<51 ms` warm. They do not
+replace the stricter lane/percentile gates in
+[Launch performance](/reference/performance/). No protocol or performance
+guarantee changes as a result of this reference.

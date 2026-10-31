@@ -4,6 +4,7 @@
 // rather than each growing its own copy.
 import { getCollection, type CollectionEntry } from "astro:content";
 import { sidebar } from "../sidebar";
+import { expandWireReferences } from "./vsock-reference.mjs";
 
 export type DocEntry = CollectionEntry<"docs">;
 
@@ -40,7 +41,7 @@ export function markdownTwinPath(id: string): string {
  * a `<TabItem label="Python">` still says which variant follows.
  */
 export function readableBody(entry: DocEntry): string {
-  return (entry.body ?? "")
+  return expandWireReferences(entry.body ?? "")
     .replace(/^import\s.*?from\s*["'][^"']+["'];?\s*$/gm, "")
     .replace(/^\n{2,}/, "");
 }
