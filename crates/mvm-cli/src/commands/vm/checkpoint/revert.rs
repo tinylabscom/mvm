@@ -32,15 +32,13 @@ use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
 
+use mvm_client::checkpoint::{
+    CheckpointStore, ImageStore, VerifiedNode, bind_checkpoint_restored, checkpoint_ancestry,
+    checkpoint_children, image_ancestry, image_children, template_artifacts_for_slot_revision,
+    verify_image_lineage, verify_lineage,
+};
 use mvm_core::checkpoint::CheckpointMeta;
 use mvm_core::image_lineage::{ImageBuildIdentity, ImageCanonicalId, ImageNode};
-use mvm_runtime::checkpoint::{
-    CheckpointStore, checkpoint_ancestry, checkpoint_children, verify_lineage,
-};
-use mvm_runtime::image_lineage::{
-    ImageStore, image_ancestry, image_children, verify_image_lineage,
-};
-use mvm_runtime::lineage::VerifiedNode;
 
 use super::SignedChainAnchor;
 use super::timeline::{LineageKind, ResolvedTarget, resolve_target};
@@ -385,13 +383,9 @@ fn reconstruct_image_source(node: &ImageNode) -> Result<RevertImageSource> {
                 );
             };
             let (_, _, _, rootfs, _) =
-                mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision(
-                    slot_hash,
-                    revision_hash,
-                )
-                .with_context(|| {
-                    format!("resolving stored flake revision {slot_hash}@{revision_hash}")
-                })?;
+                template_artifacts_for_slot_revision(slot_hash, revision_hash).with_context(
+                    || format!("resolving stored flake revision {slot_hash}@{revision_hash}"),
+                )?;
             reconcile_flake_artifacts(
                 node,
                 Path::new(&rootfs).parent().ok_or_else(|| {
@@ -656,14 +650,8 @@ fn emit_revert_audit(
     let emitter = crate::commands::vm::audit_chain::AuditEmitter::new(signer.signing)
         .map(|e| e.with_receipts())
         .context("refusing an unaudited restore: audit emitter unavailable")?;
-    mvm_hostd::audit::bind::bind_checkpoint_restored(
-        &emitter,
-        &plan,
-        target,
-        restored_vm_name,
-        via.as_str(),
-    )
-    .context("refusing an unaudited restore")?;
+    bind_checkpoint_restored(&emitter, &plan, target, restored_vm_name, via.as_str())
+        .context("refusing an unaudited restore")?;
     Ok(())
 }
 
