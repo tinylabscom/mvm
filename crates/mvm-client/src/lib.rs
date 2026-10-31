@@ -139,6 +139,7 @@ pub use launch::{
     RemoveOptions,
 };
 pub use local::{LocalBackend, auto_selected_backend_name, default_vcpus};
+pub use mvm_runtime::workload_runner::StopTiming;
 pub use oci_bundle::{
     MaterializedOciBundle, OciBundleRequest, OciBundleResult, export_materialized_oci_bundle,
     materialize_and_export_oci_bundle, materialize_oci_bundle,

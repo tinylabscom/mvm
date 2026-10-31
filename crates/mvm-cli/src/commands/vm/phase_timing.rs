@@ -10,8 +10,8 @@
 use std::time::Instant;
 
 use crate::bench::cold_launch::MIN_MATRIX_SAMPLES;
+use mvm_client::StopTiming;
 use mvm_core::launch_trace::PhaseTimingMode;
-use mvm_runtime::workload_runner::StopTiming;
 use serde::{Deserialize, Serialize};
 
 use super::launch_sample::LaunchSubTimings;

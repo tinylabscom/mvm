@@ -10,8 +10,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use mvm_client::checkpoint::WorkspaceVolume;
 use mvm_client::volume::{AccessMode, AttachmentRecord, LocalVolumeService, VolumeService};
-use mvm_runtime::checkpoint::WorkspaceVolume;
 
 /// One workspace volume attached to a machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
