@@ -103,7 +103,7 @@ pub enum ResourceLimitError {
 pub struct ResourceLedger {
     limits: ResourceLimits,
     streams: BTreeMap<TransportIdentity, u32>,
-    retries: u32,
+    retries: BTreeMap<TransportIdentity, u32>,
     relay_bytes: u64,
 }
 
@@ -113,7 +113,7 @@ impl ResourceLedger {
         Self {
             limits,
             streams: BTreeMap::new(),
-            retries: 0,
+            retries: BTreeMap::new(),
             relay_bytes: 0,
         }
     }
@@ -142,18 +142,24 @@ impl ResourceLedger {
         }
     }
 
-    /// Spend one retry; refused once the budget is used up.
-    pub fn take_retry(&mut self) -> Result<(), ResourceLimitError> {
-        if self.retries >= self.limits.max_retries {
+    /// Spend one of `peer`'s retries; refused once its budget is used up.
+    /// Budgets are per peer, and tracking a new peer counts against `max_peers`.
+    pub fn take_retry(&mut self, peer: &TransportIdentity) -> Result<(), ResourceLimitError> {
+        if !self.retries.contains_key(peer) && self.retries.len() >= self.limits.max_peers as usize
+        {
+            return Err(ResourceLimitError::TooManyPeers);
+        }
+        let used = self.retries.entry(*peer).or_insert(0);
+        if *used >= self.limits.max_retries {
             return Err(ResourceLimitError::RetriesExhausted);
         }
-        self.retries += 1;
+        *used += 1;
         Ok(())
     }
 
-    /// A completed delivery restores the retry budget.
-    pub fn reset_retries(&mut self) {
-        self.retries = 0;
+    /// A completed delivery to `peer` restores that peer's retry budget only.
+    pub fn reset_retries(&mut self, peer: &TransportIdentity) {
+        self.retries.remove(peer);
     }
 
     /// Charge `bytes` to relay usage. Direct traffic is never charged.
@@ -244,16 +250,33 @@ mod tests {
     }
 
     #[test]
-    fn retries_are_bounded_until_a_delivery_resets_them() {
+    fn retries_are_bounded_per_peer_until_that_peers_delivery_resets_them() {
         let mut ledger = ResourceLedger::new(small());
-        ledger.take_retry().expect("one");
-        ledger.take_retry().expect("two");
+        ledger.take_retry(&peer(1)).expect("one");
+        ledger.take_retry(&peer(1)).expect("two");
         assert_eq!(
-            ledger.take_retry(),
+            ledger.take_retry(&peer(1)),
             Err(ResourceLimitError::RetriesExhausted)
         );
-        ledger.reset_retries();
-        ledger.take_retry().expect("restored");
+        ledger.take_retry(&peer(2)).expect("peer B untouched");
+        ledger.reset_retries(&peer(2));
+        assert_eq!(
+            ledger.take_retry(&peer(1)),
+            Err(ResourceLimitError::RetriesExhausted)
+        );
+        ledger.reset_retries(&peer(1));
+        ledger.take_retry(&peer(1)).expect("restored");
+    }
+
+    #[test]
+    fn retry_tracking_cannot_grow_past_the_peer_bound() {
+        let mut ledger = ResourceLedger::new(small());
+        ledger.take_retry(&peer(1)).expect("p1");
+        ledger.take_retry(&peer(2)).expect("p2");
+        assert_eq!(
+            ledger.take_retry(&peer(3)),
+            Err(ResourceLimitError::TooManyPeers)
+        );
     }
 
     #[test]
