@@ -575,7 +575,7 @@ fn pull_image_ref(
         .build()
         .context("build Tokio runtime for OCI pull")?;
 
-    let pull = mvm_runtime::ui::activity::start(format!("Pulling {supplied_reference}"));
+    let pull = mvm_client::ui::activity::start(format!("Pulling {supplied_reference}"));
     pull.set_detail("resolving the manifest");
     let manifest_fetcher = OciManifestFetcher::with_auth(registry_auth.auth);
     let manifest = runtime

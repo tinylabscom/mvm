@@ -347,7 +347,7 @@ pub(super) fn inject_runtime_and_materialize(call: MaterializeCall<'_>) -> Resul
     // The in-process ext4 writer walks and copies the whole image, and a tree
     // it cannot emit falls back to a builder VM; either can take a while.
     let phase =
-        mvm_runtime::ui::activity::start(format!("Building the root filesystem for {image_label}"));
+        mvm_client::ui::activity::start(format!("Building the root filesystem for {image_label}"));
     mvm_build::run_image::inject_and_materialize(
         mvm_build::run_image::InjectAndMaterializeRequest::builder(
             cache_root,
@@ -385,7 +385,7 @@ pub(super) fn prepare_rootfs_only_tree(
     let parent = prepared_root
         .parent()
         .with_context(|| format!("{} has no parent", prepared_root.display()))?;
-    let phase = mvm_runtime::ui::activity::start(
+    let phase = mvm_client::ui::activity::start(
         "Preparing the image tree for boot (first run of this image)",
     );
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;

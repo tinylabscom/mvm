@@ -69,6 +69,7 @@ pub mod image_admin;
 pub mod instruction_trust;
 pub mod inventory;
 pub mod launch;
+pub mod linux_shell;
 pub mod local;
 pub mod manifest;
 pub mod notices;
@@ -93,8 +94,10 @@ pub mod stream;
 pub mod stream_tracing;
 pub mod telemetry;
 pub mod telemetry_summary;
+pub mod template;
 pub mod tool_mediation;
 pub mod transcript;
+pub mod ui;
 pub mod volume;
 pub mod workspace_apply;
 

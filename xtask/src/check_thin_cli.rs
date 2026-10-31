@@ -77,13 +77,8 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("env/builder_vm/kernel.rs", RUNTIME),
     ("env/builder_vm/local_pair.rs", RUNTIME),
     ("env/builder_vm/shell_job.rs", RUNTIME),
-    ("env/cleanup.rs", RUNTIME),
     ("env/setup.rs", RUNTIME),
     // Images and manifests.
-    ("image/base_image.rs", RUNTIME),
-    ("image/materialize.rs", RUNTIME),
-    ("image/pull_core.rs", RUNTIME),
-    ("manifest/export_oci.rs", RUNTIME),
     // Machine lifecycle.
     ("machine/checkpoint.rs", RUNTIME),
     ("machine/input_journal.rs", RUNTIME),
