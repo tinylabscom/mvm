@@ -430,7 +430,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                         "(dry-run) Would scan for orphaned builds — see `mvmctl manifest prune --orphans --dry-run` for details.",
                     );
                 } else {
-                    match mvm_runtime::vm::template::lifecycle::template_prune_orphan_slots() {
+                    match mvm_client::cache_admin::template_prune_orphan_slots() {
                         Ok((count, _)) => {
                             mvm_core::audit_emit!(SlotPrune, "source=cache_prune count={count}");
                             if count > 0 {
@@ -511,7 +511,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     ui::info("(dry-run) Would sweep expired flow-byte-log records.");
                 }
             } else {
-                match mvm_hostd::supervisor::network::flow_byte_log::sweep_retention(
+                match mvm_client::cache_admin::sweep_retention(
                     &flow_bytes_dir,
                     FLOW_BYTE_LOG_MAX_AGE_DAYS,
                 ) {
@@ -525,9 +525,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // live-expired standby's entitled supervisor is SIGTERM'd before its dir is
             // dropped, so idle entitled processes never accumulate. Shares
             // `STANDBY_POOL_TTL` with the launch-path reaper so both agree on "stale".
-            use mvm_runtime::standby_pool::STANDBY_POOL_TTL;
+            use mvm_client::cache_admin::standby_pool::STANDBY_POOL_TTL;
             if dry_run {
-                if let Ok(pool) = mvm_runtime::standby_pool::SupervisorStandbyPool::open()
+                if let Ok(pool) =
+                    mvm_client::cache_admin::standby_pool::SupervisorStandbyPool::open()
                     && let Ok(n) = pool.list().map(|v| v.len())
                     && n > 0
                 {
@@ -536,9 +537,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     ));
                 }
             } else {
-                match mvm_runtime::standby_pool::SupervisorStandbyPool::open().and_then(|pool| {
-                    pool.reap_stale(STANDBY_POOL_TTL, mvm_core::time::now_unix_secs())
-                }) {
+                match mvm_client::cache_admin::standby_pool::SupervisorStandbyPool::open().and_then(
+                    |pool| pool.reap_stale(STANDBY_POOL_TTL, mvm_core::time::now_unix_secs()),
+                ) {
                     Ok(reaped) if !reaped.is_empty() => {
                         removed += reaped.len() as u64;
                         ui::info(&format!("Reaped {} stale standby(s).", reaped.len()));
@@ -554,7 +555,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // it. One corrupt meta.json makes list() fail, which logs a warning
             // and skips the sweep — acceptable for a prune pass.
             const CHECKPOINT_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
-            let ckpt_store = mvm_runtime::checkpoint::CheckpointStore::open();
+            let ckpt_store = mvm_client::cache_admin::checkpoint::CheckpointStore::open();
             if dry_run {
                 if !ckpt_store.list().unwrap_or_default().is_empty() {
                     ui::info("(dry-run) Would sweep expired untagged checkpoints.");
@@ -564,8 +565,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                let sessions = mvm_runtime::agent_session::AgentSessionStore::open();
-                match mvm_runtime::agent_session::pinned_checkpoints(&sessions) {
+                let sessions = mvm_client::cache_admin::AgentSessionStore::open();
+                match mvm_client::cache_admin::pinned_checkpoints(&sessions) {
                     Ok(pinned) => {
                         match sweep_untagged_checkpoints(
                             &ckpt_store,
@@ -587,7 +588,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // checkpoints used are reclaimed in the same run: pool objects no
             // checkpoint links, staging a dead capture left, and cached restore
             // images whose checkpoint is gone.
-            match mvm_runtime::checkpoint::prune_unreferenced_content(&ckpt_store, dry_run) {
+            match mvm_client::cache_admin::checkpoint::prune_unreferenced_content(
+                &ckpt_store,
+                dry_run,
+            ) {
                 Ok(report) if !report.is_empty() => {
                     ui::info(&checkpoint_content_prune_report(&report, dry_run));
                     removed += report.entries();
@@ -951,18 +955,20 @@ fn reclaim_entries(entries: &[CacheEntry], kind: &str, dry_run: bool) -> (u64, u
 /// checkpoint is deleted; this observation is not atomic with deletion.
 /// Returns the count removed.
 pub(super) fn sweep_untagged_checkpoints(
-    store: &mvm_runtime::checkpoint::CheckpointStore,
+    store: &mvm_client::cache_admin::checkpoint::CheckpointStore,
     now_unix: u64,
     max_age_secs: u64,
     pinned: &std::collections::BTreeSet<mvm_core::checkpoint::CheckpointDigest>,
 ) -> anyhow::Result<usize> {
-    let cut = mvm_runtime::checkpoint::RetentionCut {
+    let cut = mvm_client::cache_admin::checkpoint::RetentionCut {
         now_unix,
         max_age_secs,
         session_pinned: pinned,
     };
     let mut removed = 0;
-    for verdict in mvm_runtime::checkpoint::retention_verdicts(store.list_for_removal()?, &cut)? {
+    for verdict in
+        mvm_client::cache_admin::checkpoint::retention_verdicts(store.list_for_removal()?, &cut)?
+    {
         let id = &verdict.meta.id;
         match verdict.kept {
             Some(reason) => {
@@ -983,7 +989,7 @@ pub(super) fn sweep_untagged_checkpoints(
 /// One line summarizing the checkpoint content GC, split out so the wording is
 /// testable without a checkpoint store.
 fn checkpoint_content_prune_report(
-    report: &mvm_runtime::checkpoint::ContentPruneReport,
+    report: &mvm_client::cache_admin::checkpoint::ContentPruneReport,
     dry_run: bool,
 ) -> String {
     let verb = if dry_run {
@@ -1003,8 +1009,8 @@ fn checkpoint_content_prune_report(
 
 /// The note `cache prune` prints for a checkpoint it kept, or `None` for the
 /// reasons that need no explanation: a tag, or an age inside the cut.
-fn kept_checkpoint_note(reason: &mvm_runtime::checkpoint::Retention) -> Option<String> {
-    use mvm_runtime::checkpoint::Retention;
+fn kept_checkpoint_note(reason: &mvm_client::cache_admin::checkpoint::Retention) -> Option<String> {
+    use mvm_client::cache_admin::checkpoint::Retention;
     match reason {
         Retention::Tagged | Retention::Young => None,
         Retention::SessionResumePoint => {
@@ -1357,10 +1363,10 @@ mod tests {
     /// under every cut the tests use; [`SWEEP_NOW`] is young under a one-second
     /// cut.
     mod ckpt_fixture {
+        pub use mvm_client::cache_admin::checkpoint::CheckpointStore;
         use mvm_core::checkpoint::{
             CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
         };
-        pub use mvm_runtime::checkpoint::CheckpointStore;
 
         pub const SWEEP_NOW: u64 = 10_000_000;
         pub const AGED: u64 = 0;
@@ -1518,7 +1524,7 @@ mod tests {
     #[test]
     fn content_gc_after_the_sweep_reclaims_the_swept_checkpoints_chunks() {
         use ckpt_fixture::*;
-        use mvm_runtime::checkpoint::{
+        use mvm_client::cache_admin::checkpoint::{
             CaptureFsQuickParams, capture_fs_quick, prune_unreferenced_content,
         };
 
@@ -1549,7 +1555,7 @@ mod tests {
 
     #[test]
     fn checkpoint_content_prune_report_reflects_dry_run() {
-        let report = mvm_runtime::checkpoint::ContentPruneReport {
+        let report = mvm_client::cache_admin::checkpoint::ContentPruneReport {
             abandoned_staging: 1,
             objects: 3,
             object_bytes: 3 * 1024 * 1024,
@@ -1747,8 +1753,8 @@ mod tests {
 
     #[test]
     fn kept_checkpoint_note_explains_only_the_non_obvious_reasons() {
+        use mvm_client::cache_admin::checkpoint::Retention;
         use mvm_core::checkpoint::CheckpointId;
-        use mvm_runtime::checkpoint::Retention;
 
         assert_eq!(super::kept_checkpoint_note(&Retention::Tagged), None);
         assert_eq!(super::kept_checkpoint_note(&Retention::Young), None);
@@ -1776,8 +1782,8 @@ mod tests {
         // `pinned_checkpoints` the prune path calls, must protect that exact
         // checkpoint and its ancestry — and nothing else.
         use ckpt_fixture::*;
+        use mvm_client::cache_admin::{AgentSessionRecord, AgentSessionStore, SandboxResidency};
         use mvm_contract::protocol::agent_session::AgentSessionId;
-        use mvm_runtime::agent_session::{AgentSessionRecord, AgentSessionStore, SandboxResidency};
 
         let ckpt_tmp = tempfile::tempdir().unwrap();
         let ckpt_store = CheckpointStore::at(ckpt_tmp.path());
@@ -1807,7 +1813,7 @@ mod tests {
         };
         session_store.write(&record).unwrap();
 
-        let pinned = mvm_runtime::agent_session::pinned_checkpoints(&session_store).unwrap();
+        let pinned = mvm_client::cache_admin::pinned_checkpoints(&session_store).unwrap();
 
         let removed =
             super::sweep_untagged_checkpoints(&ckpt_store, SWEEP_NOW, 1, &pinned).unwrap();
@@ -1838,13 +1844,10 @@ mod tests {
         std::fs::create_dir_all(&tenant).unwrap();
         std::fs::write(tenant.join("vm.bin"), b"x").unwrap();
         // age = 0 (cutoff = now) removes the just-written file; large window keeps it.
-        let removed =
-            mvm_hostd::supervisor::network::flow_byte_log::sweep_retention(root.path(), 0).unwrap();
+        let removed = mvm_client::cache_admin::sweep_retention(root.path(), 0).unwrap();
         assert_eq!(removed, 1);
         std::fs::write(tenant.join("vm.bin"), b"x").unwrap();
-        let kept =
-            mvm_hostd::supervisor::network::flow_byte_log::sweep_retention(root.path(), 3650)
-                .unwrap();
+        let kept = mvm_client::cache_admin::sweep_retention(root.path(), 3650).unwrap();
         assert_eq!(kept, 0);
     }
 

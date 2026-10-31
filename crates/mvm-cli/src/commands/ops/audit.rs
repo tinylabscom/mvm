@@ -16,16 +16,16 @@ use crate::ui;
 use std::path::PathBuf;
 
 use ed25519_dalek::VerifyingKey;
+use mvm_client::audit::chain::supervisor::SignedEnvelope;
 use mvm_client::audit::{AuditSourceId, AuditSourceKind, LocalAuditReader};
 use mvm_contract::merkle::{InclusionProof, SignedAuditRoot, verify_membership};
 use mvm_core::user_config::MvmConfig;
-use mvm_hostd::supervisor::SignedEnvelope;
 
 use super::super::vm::audit_chain::{AuditEmitter, audit_path_for_tenant, default_audit_dir};
 use super::super::vm::host_signer;
 use super::Cli;
+use mvm_client::audit::chain::decisions::DecisionStore;
 use mvm_contract::provenance::DecisionId;
-use mvm_hostd::audit::decisions::DecisionStore;
 
 use inspect::audit_tail;
 use prune::audit_prune;
@@ -611,12 +611,12 @@ fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
                 "--full-chain covers the whole tenant chain; the --plan-id filter is ignored.",
             );
         }
-        let req = mvm_hostd::audit::receipt_archive::ArchiveRequest::builder()
+        let req = mvm_client::audit::chain::receipt_archive::ArchiveRequest::builder()
             .audit_dir(&dir)
             .tenant(args.tenant.clone())
             .scope(args.scope())
             .build()?;
-        let bytes = mvm_hostd::audit::receipt_archive::write_archive(&req, &signer.signing)
+        let bytes = mvm_client::audit::chain::receipt_archive::write_archive(&req, &signer.signing)
             .with_context(|| format!("building the evidence archive for '{}'", args.tenant))?;
         std::fs::write(path, &bytes)
             .with_context(|| format!("writing archive to {}", path.display()))?;
@@ -643,7 +643,7 @@ fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
         return Ok(());
     }
 
-    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+    let evidence = mvm_client::audit::chain::receipt_export::export_evidence(
         &dir,
         &args.tenant,
         args.plan_id.as_deref(),
@@ -693,11 +693,11 @@ fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
 
 /// Verify a `.mvmev` archive and report the three results separately.
 fn audit_receipts_verify(archive: &std::path::Path, json: bool) -> Result<()> {
-    use mvm_hostd::audit::receipt_archive_verify::{CheckResult, CompletenessResult};
+    use mvm_client::audit::chain::receipt_archive_verify::{CheckResult, CompletenessResult};
 
     let bytes =
         std::fs::read(archive).with_context(|| format!("reading archive {}", archive.display()))?;
-    let report = mvm_hostd::audit::receipt_archive_verify::verify_archive(&bytes)
+    let report = mvm_client::audit::chain::receipt_archive_verify::verify_archive(&bytes)
         .with_context(|| format!("verifying archive {}", archive.display()))?;
 
     let word = |r: &CheckResult| match r {
@@ -779,7 +779,7 @@ fn verify_cert(
     json: bool,
 ) -> Result<()> {
     use base64::Engine;
-    use mvm_runtime::vm::overlay::{
+    use mvm_client::audit::chain::overlay::{
         SignedDestructionReceipt, cert_fingerprint, verify_destruction_receipt,
     };
 
@@ -831,7 +831,7 @@ fn verify_cert(
 
     // 4. Verify each. Fail fast on the first refusal so the
     //    operator sees a clear error per cert.
-    let mut verified: Vec<&mvm_runtime::vm::overlay::DestructionReceipt> =
+    let mut verified: Vec<&mvm_client::audit::chain::overlay::DestructionReceipt> =
         Vec::with_capacity(certs.len());
     for (i, signed) in certs.iter().enumerate() {
         let receipt =
@@ -947,7 +947,7 @@ fn audit_prove(tenant: &str, selector: &str, json: bool) -> Result<()> {
     let dir = default_audit_dir()?;
     // Read the verified leaf set once; the selector resolves against exactly
     // the leaves the proof is built over, so indices can't drift.
-    let leaves = mvm_hostd::audit::merkle::read_leaves(&dir, tenant, &signer.verifying)
+    let leaves = mvm_client::audit::chain::merkle::read_leaves(&dir, tenant, &signer.verifying)
         .with_context(|| format!("reading the verified audit chain for tenant '{tenant}'"))?;
     let index = resolve_selector(&leaves, selector)?;
     let proof = build_inclusion_proof(&leaves, index)
@@ -1184,7 +1184,8 @@ fn load_chain_fingerprint_index(
         }
         // Each line is a `SignedEnvelope { entry, prev_hash,
         // signature }`. We only need `entry.event` + `entry.labels`.
-        let Ok(envelope) = serde_json::from_str::<mvm_hostd::supervisor::SignedEnvelope>(&line)
+        let Ok(envelope) =
+            serde_json::from_str::<mvm_client::audit::chain::supervisor::SignedEnvelope>(&line)
         else {
             continue;
         };
@@ -1283,7 +1284,7 @@ fn print_chain_line(line: &str) {
 /// a *divergence* is a finding, and it is printed as an error so an operator
 /// reading the output cannot miss it.
 fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::VerifyingKey) {
-    match mvm_hostd::audit::merkle::verify_root_history(dir, tenant, vk) {
+    match mvm_client::audit::chain::merkle::verify_root_history(dir, tenant, vk) {
         Ok(r) if r.roots == 0 => ui::info(
             "No published audit roots, so nothing attests the log was only appended to. \
              Roots are published at admission and exit.",
@@ -1295,7 +1296,7 @@ fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::V
         Err(e) => ui::error(&format!("append-only check failed: {e:#}")),
     }
 
-    let Some(source) = mvm_hostd::audit::witness::configured_source() else {
+    let Some(source) = mvm_client::audit::chain::witness::configured_source() else {
         // Said out loud rather than passed over in silence: without an
         // off-host witness the roots above were all signed by this host and
         // stored beside the log they attest, which is no evidence against
@@ -1306,7 +1307,7 @@ fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::V
         );
         return;
     };
-    match mvm_hostd::audit::witness::detect_divergence(dir, tenant, source.as_ref(), vk) {
+    match mvm_client::audit::chain::witness::detect_divergence(dir, tenant, source.as_ref(), vk) {
         Ok(r) if !r.is_clean() => {
             ui::error(&format!(
                 "WITNESS DIVERGENCE: {} witnessed root(s) disagree with this host",
@@ -1424,7 +1425,7 @@ mod verify_cert_tests {
     use super::*;
     use base64::Engine;
     use ed25519_dalek::SigningKey;
-    use mvm_runtime::vm::overlay::{
+    use mvm_client::audit::chain::overlay::{
         DestructionReceipt, SignedDestructionReceipt, sign_destruction_receipt,
     };
     use rand::Rng;
@@ -1590,9 +1591,9 @@ mod verify_cert_tests {
     // shape matches the overlay erasure chain-anchor format.
     // ──────────────────────────────────────────────────────────────
 
+    use mvm_client::audit::chain::overlay::cert_fingerprint;
+    use mvm_client::audit::chain::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
     use mvm_core::plan::{PlanId, TenantId};
-    use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
-    use mvm_runtime::vm::overlay::cert_fingerprint;
     use std::collections::BTreeMap;
 
     fn write_chain_with_entries(
@@ -1624,12 +1625,13 @@ mod verify_cert_tests {
             let entry = PlanAuditEntry {
                 timestamp: chrono::Utc::now(),
                 tenant: TenantId(tenant.to_string()),
-                plan_id: PlanId(mvm_hostd::supervisor::UNBOUND_PLAN_ID.to_string()),
+                plan_id: PlanId(mvm_client::audit::chain::supervisor::UNBOUND_PLAN_ID.to_string()),
                 plan_version: 0,
                 bundle_id: None,
                 bundle_version: None,
-                image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
-                image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
+                image_name: mvm_client::audit::chain::supervisor::UNBOUND_IMAGE_NAME.to_string(),
+                image_sha256: mvm_client::audit::chain::supervisor::UNBOUND_IMAGE_SHA256
+                    .to_string(),
                 event: "lifecycle.tenant.destroyed".to_string(),
                 caller_commitment: None,
                 labels,
@@ -1753,12 +1755,12 @@ mod verify_cert_tests {
         let destroy_entry = PlanAuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: TenantId("local".to_string()),
-            plan_id: PlanId(mvm_hostd::supervisor::UNBOUND_PLAN_ID.to_string()),
+            plan_id: PlanId(mvm_client::audit::chain::supervisor::UNBOUND_PLAN_ID.to_string()),
             plan_version: 0,
             bundle_id: None,
             bundle_version: None,
-            image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
-            image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
+            image_name: mvm_client::audit::chain::supervisor::UNBOUND_IMAGE_NAME.to_string(),
+            image_sha256: mvm_client::audit::chain::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
             event: "lifecycle.tenant.destroyed".to_string(),
             caller_commitment: None,
             labels,
@@ -1771,12 +1773,12 @@ mod verify_cert_tests {
         let other_entry = PlanAuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: TenantId("local".to_string()),
-            plan_id: PlanId(mvm_hostd::supervisor::UNBOUND_PLAN_ID.to_string()),
+            plan_id: PlanId(mvm_client::audit::chain::supervisor::UNBOUND_PLAN_ID.to_string()),
             plan_version: 0,
             bundle_id: None,
             bundle_version: None,
-            image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
-            image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
+            image_name: mvm_client::audit::chain::supervisor::UNBOUND_IMAGE_NAME.to_string(),
+            image_sha256: mvm_client::audit::chain::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
             event: "cmd.up.completed".to_string(),
             caller_commitment: None,
             labels: other_labels,
@@ -1980,7 +1982,7 @@ mod merkle_verb_tests {
     /// Seed a real chain of SignedEnvelope lines via `FileAuditSigner`,
     /// returning the verified leaf set. `plan_ids` names each entry's plan_id.
     fn seed_leaves(plan_ids: &[&str]) -> (tempfile::TempDir, Vec<String>) {
-        use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
+        use mvm_client::audit::chain::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
         use std::collections::BTreeMap;
 
         let dir = tempfile::tempdir().unwrap();
@@ -2009,7 +2011,8 @@ mod merkle_verb_tests {
             };
             rt.block_on(signer.sign_and_emit(&entry)).unwrap();
         }
-        let leaves = mvm_hostd::audit::merkle::read_leaves(&chain_dir, "local", &vk).unwrap();
+        let leaves =
+            mvm_client::audit::chain::merkle::read_leaves(&chain_dir, "local", &vk).unwrap();
         (dir, leaves)
     }
 

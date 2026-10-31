@@ -30,9 +30,9 @@
 
 use std::sync::Arc;
 
+use mvm_client::audit::chain::active_signer::{ActiveSignerGuard, register_active_signer};
+use mvm_client::audit::chain::supervisor::{EventCategory, FileAuditSigner, Recorder};
 use mvm_core::plan::TenantId;
-use mvm_hostd::audit::active_signer::{ActiveSignerGuard, register_active_signer};
-use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
 
 use super::Commands;
 use super::machine;
@@ -306,7 +306,7 @@ fn machine_run_touches_vm_state(run: &machine::MachineRunArgs) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_hostd::supervisor::CapturingAuditSigner;
+    use mvm_client::audit::chain::supervisor::CapturingAuditSigner;
 
     fn recorder_with_capturing_signer() -> (Recorder, Arc<CapturingAuditSigner>) {
         let signer = Arc::new(CapturingAuditSigner::new());
@@ -318,7 +318,7 @@ mod tests {
     /// audit directory, and only while the command runs.
     #[test]
     fn the_active_file_signer_is_scoped_to_the_command_and_directory() {
-        use mvm_hostd::audit::active_signer::active_signer_for;
+        use mvm_client::audit::chain::active_signer::active_signer_for;
 
         let dir = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();

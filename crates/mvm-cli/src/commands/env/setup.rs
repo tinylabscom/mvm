@@ -8,9 +8,9 @@ use anyhow::Result;
 
 use crate::ui;
 
-use mvm_runtime::config;
-use mvm_runtime::firecracker;
-use mvm_runtime::shell;
+use mvm_client::firecracker_setup::config;
+use mvm_client::firecracker_setup::firecracker;
+use mvm_client::firecracker_setup::shell;
 
 /// True when this host provisions Firecracker as its workload backend, so
 /// `bootstrap` should install it, fetch its kernel/rootfs assets, and lay
@@ -84,7 +84,7 @@ pub(super) fn run_setup_steps(force: bool, _builder_cpus: u32, _builder_mem: u32
 ///
 /// Idempotent — each step checks before acting.
 pub(super) fn setup_security_baseline() -> Result<()> {
-    use mvm_runtime::security::{jailer, seccomp};
+    use mvm_client::firecracker_setup::{jailer, seccomp};
 
     // Deploy strict seccomp filter profile
     seccomp::ensure_strict_profile()?;

@@ -570,10 +570,14 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
     // pre-obtained token set by hand.
     let client_secret = resolve_client_secret(&oauth_args)?;
     let token_set = match (oauth_args.login, client_secret) {
-        (Some(_), client_secret) => Some(mvm_hostd::keyholder::oauth::awaiting_consent_token_set(
-            client_secret.as_deref(),
+        (Some(_), client_secret) => Some(
+            mvm_client::secret::keyholder::oauth::awaiting_consent_token_set(
+                client_secret.as_deref(),
+            ),
+        ),
+        (None, Some(secret)) => Some(mvm_client::secret::keyholder::oauth::initial_token_set(
+            &secret,
         )),
-        (None, Some(secret)) => Some(mvm_hostd::keyholder::oauth::initial_token_set(&secret)),
         (None, None) => None,
     };
     let input = match token_set {
@@ -1071,9 +1075,9 @@ fn read_secret_from_stdin() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_client::secret::keyholder::FileBindingStore;
     use mvm_client::secret::{MachineSecretRef, SecretAudit};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore as _};
-    use mvm_hostd::keyholder::FileBindingStore;
     use secrecy::ExposeSecret as _;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1810,7 +1814,7 @@ mod tests {
         assert!(err.to_string().contains("not set"), "got: {err}");
     }
 
-    fn stored_token_set(f: &Fixture) -> mvm_hostd::keyholder::resolver::OAuthTokenSet {
+    fn stored_token_set(f: &Fixture) -> mvm_client::secret::keyholder::resolver::OAuthTokenSet {
         let store = FileSecretStore::with_dir(&f.secrets_dir);
         let stored = store.get("local", "oauth-secret").unwrap();
         serde_json::from_str(stored.expose_secret()).unwrap()
@@ -2100,7 +2104,7 @@ mod tests {
         let stored = stored_token_set(&f);
         assert_eq!(
             stored.grant,
-            mvm_hostd::keyholder::resolver::OAuthGrant::AuthorizationCode
+            mvm_client::secret::keyholder::resolver::OAuthGrant::AuthorizationCode
         );
         assert!(stored.access_token.expose_secret().is_empty());
         assert!(stored.refresh_token.is_none());

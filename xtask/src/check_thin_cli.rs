@@ -60,7 +60,6 @@ const BOTH: &[Below] = &[Below::Hostd, Below::Runtime];
 const ALLOWLIST: &[(&str, &[Below])] = &[
     // Command dispatch and top-level verbs.
     ("agent_session.rs", BOTH),
-    ("cmd_audit.rs", HOSTD),
     ("mod.rs", BOTH),
     ("pool.rs", BOTH),
     // Builds, bundles and the builder VM.
@@ -70,17 +69,10 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("env/builder_vm/kernel.rs", RUNTIME),
     ("env/builder_vm/local_pair.rs", RUNTIME),
     ("env/builder_vm/shell_job.rs", RUNTIME),
-    ("env/setup.rs", RUNTIME),
     // Images and manifests.
     // Machine lifecycle.
     ("machine/mod.rs", RUNTIME),
     // Audit, cache, secrets, storage and trust operations.
-    ("ops/audit.rs", BOTH),
-    ("ops/audit/sessions.rs", HOSTD),
-    ("ops/audit_posture.rs", HOSTD),
-    ("ops/cache.rs", BOTH),
-    ("ops/secret.rs", HOSTD),
-    ("ops/transcript.rs", HOSTD),
     // Runs, checkpoints, workspaces and the audit-chain readers behind them.
     ("vm/artifact.rs", RUNTIME),
     ("vm/audit_chain.rs", HOSTD),

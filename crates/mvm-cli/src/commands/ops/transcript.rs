@@ -15,6 +15,13 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde::Serialize;
 
+use mvm_client::audit::chain::emitter::AuditEmitter;
+use mvm_client::audit::chain::plan_persist::{PLAN_FILENAME, read_plan_at};
+use mvm_client::audit::chain::supervisor::audit::{
+    LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
+    TRANSCRIPT_SEALED_EVENT,
+};
+use mvm_client::audit::chain::supervisor::verify_audit_chain_entries;
 use mvm_core::config;
 use mvm_core::crypto::aead;
 use mvm_core::policy::audit::{LocalAuditBuilder, LocalAuditKind, event};
@@ -23,13 +30,6 @@ use mvm_core::transcript::{
     TRANSCRIPT_KEK_RECIPIENT as KEK_RECIPIENT, TranscriptManifest, TranscriptWriter,
     TranscriptWriterConfig,
 };
-use mvm_hostd::audit::emitter::AuditEmitter;
-use mvm_hostd::audit::plan_persist::{PLAN_FILENAME, read_plan_at};
-use mvm_hostd::supervisor::audit::{
-    LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
-    TRANSCRIPT_SEALED_EVENT,
-};
-use mvm_hostd::supervisor::verify_audit_chain_entries;
 
 use super::super::vm::host_signer::PUBLIC_FILENAME;
 
@@ -341,12 +341,14 @@ impl TranscriptCtx {
     }
 
     fn reconcile(&self, tenant: &str, capture_id: &str) -> Result<()> {
-        use mvm_hostd::audit::transcript_retirement::{RetirementContext, reconcile_capture};
+        use mvm_client::audit::chain::transcript_retirement::{
+            RetirementContext, reconcile_capture,
+        };
         let (_, manifest) = self.load_manifest(tenant, capture_id)?;
         self.validate_manifest_binding(tenant, capture_id, &manifest)?;
         let trusted = super::audit::load_verifying_key(&self.verifying_key_path)?;
         if manifest.at_rest.is_some() && manifest.sealed_unix_secs.is_some() {
-            mvm_hostd::audit::transcript_retirement::authenticated_retirement(
+            mvm_client::audit::chain::transcript_retirement::authenticated_retirement(
                 &self.audit_dir,
                 &trusted,
                 &manifest,
@@ -355,7 +357,7 @@ impl TranscriptCtx {
         let (signing, verifying) = mvm_core::crypto::ed25519_keypair::load_existing(
             &self
                 .keys_dir
-                .join(mvm_hostd::audit::host_keypair::SECRET_FILENAME),
+                .join(mvm_client::audit::chain::host_keypair::SECRET_FILENAME),
             &self.verifying_key_path,
         )?;
         anyhow::ensure!(
@@ -415,7 +417,7 @@ impl TranscriptCtx {
             if manifest.at_rest.is_some() {
                 let trusted = super::audit::load_verifying_key(&self.verifying_key_path)?;
                 anyhow::ensure!(
-                    !mvm_hostd::audit::transcript_retirement::authenticated_retirement(
+                    !mvm_client::audit::chain::transcript_retirement::authenticated_retirement(
                         &self.audit_dir,
                         &trusted,
                         &manifest,
@@ -588,7 +590,7 @@ mod tests {
             .build();
         let vm_dir = c.vms_dir.join(vm);
         std::fs::create_dir_all(&vm_dir).unwrap();
-        let path = vm_dir.join(mvm_hostd::audit::plan_persist::PLAN_FILENAME);
+        let path = vm_dir.join(mvm_client::audit::chain::plan_persist::PLAN_FILENAME);
         std::fs::write(&path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
@@ -603,7 +605,7 @@ mod tests {
     }
 
     fn anchor(c: &TranscriptCtx, manifest: &TranscriptManifest, root: &str) {
-        use mvm_hostd::audit::emitter::AuditEmitter;
+        use mvm_client::audit::chain::emitter::AuditEmitter;
 
         let key = trusted_host_key(c);
         let emitter = AuditEmitter::with_dir(key, &c.audit_dir).unwrap();
@@ -696,13 +698,16 @@ mod tests {
         entry.labels = labels(&terminal).unwrap();
         let (signing, _) = mvm_core::crypto::ed25519_keypair::load_existing(
             &c.keys_dir
-                .join(mvm_hostd::audit::host_keypair::SECRET_FILENAME),
+                .join(mvm_client::audit::chain::host_keypair::SECRET_FILENAME),
             &c.verifying_key_path,
         )
         .unwrap();
         AuditEmitter::with_dir(signing, &c.audit_dir)
             .unwrap()
-            .emit_entry_for_evidence(&entry, mvm_hostd::audit::evidence::EvidenceReceipt::Omitted)
+            .emit_entry_for_evidence(
+                &entry,
+                mvm_client::audit::chain::evidence::EvidenceReceipt::Omitted,
+            )
             .unwrap();
         // This fixture isolates historical authority from current plan state.
         // Actual partial-unlink fault boundaries are exercised in core cleanup.
@@ -769,7 +774,7 @@ mod tests {
         std::fs::write(dir.join("foreign"), b"synthetic foreign").unwrap();
         let signer_path = c
             .keys_dir
-            .join(mvm_hostd::audit::host_keypair::SECRET_FILENAME);
+            .join(mvm_client::audit::chain::host_keypair::SECRET_FILENAME);
         let original_signer = std::fs::read(&signer_path).unwrap();
         std::fs::remove_file(&signer_path).unwrap();
         assert!(c.reconcile("local", &id).is_err());
@@ -846,7 +851,7 @@ mod tests {
         // explicit reconciliation retires the payload afterwards.
         let trusted = super::super::audit::load_verifying_key(&c.verifying_key_path).unwrap();
         assert!(
-            !mvm_hostd::audit::transcript_retirement::authenticated_retirement(
+            !mvm_client::audit::chain::transcript_retirement::authenticated_retirement(
                 &c.audit_dir,
                 &trusted,
                 &terminal
