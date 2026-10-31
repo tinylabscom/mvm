@@ -79,6 +79,7 @@ pub mod policy_profiles;
 pub mod portable_boot_assets;
 pub mod profile;
 pub mod readiness;
+pub mod reconcile;
 pub mod registration;
 pub mod registry_application;
 pub mod registry_pack_local;
@@ -86,6 +87,7 @@ pub mod replay;
 pub mod secret;
 pub mod snapshot;
 pub mod standby;
+pub mod storage;
 pub mod stream;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;
