@@ -1,12 +1,12 @@
 //! `trust audit sessions`, `trust audit show <session>`, and
 //! `trust audit verify <session>`: the per-session view of the chain-signed
-//! log. The logic lives in `mvm_hostd::audit::session`; this is rendering.
+//! log. The logic lives in `mvm_client::audit::chain::session`; this is rendering.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 
-use mvm_hostd::audit::session::{
+use mvm_client::audit::chain::session::{
     EventFilter, LedgerCheck, SessionSummary, SessionVerification, TimeRange, Verdict,
     list_sessions, resolve_session, session_events, verify_session_in_lines,
 };
@@ -118,7 +118,7 @@ pub(super) fn verified_lines(tenant: &str) -> Result<Option<Vec<String>>> {
     }
     let signer =
         host_signer::load_or_init().context("loading host signer to read the audit chain")?;
-    mvm_hostd::audit::merkle::read_leaves(&dir, tenant, &signer.verifying)
+    mvm_client::audit::chain::merkle::read_leaves(&dir, tenant, &signer.verifying)
         .map(Some)
         .with_context(|| {
             format!(
@@ -215,11 +215,11 @@ fn session_state(session: &SessionSummary) -> String {
     }
 }
 
-fn reason_label(reason: mvm_hostd::audit::session::SealReason) -> &'static str {
+fn reason_label(reason: mvm_client::audit::chain::session::SealReason) -> &'static str {
     match reason {
-        mvm_hostd::audit::session::SealReason::Exited => "exited",
-        mvm_hostd::audit::session::SealReason::Failed => "failed",
-        mvm_hostd::audit::session::SealReason::Stopped => "stopped",
+        mvm_client::audit::chain::session::SealReason::Exited => "exited",
+        mvm_client::audit::chain::session::SealReason::Failed => "failed",
+        mvm_client::audit::chain::session::SealReason::Stopped => "stopped",
     }
 }
 
@@ -288,7 +288,11 @@ pub(in crate::commands) fn audit_verify_session(
         let signer =
             host_signer::load_or_init().context("loading host signer to verify the session")?;
         // One walk from genesis serves both the selector and the verdict.
-        match mvm_hostd::audit::session::read_lines_from_genesis(&dir, tenant, &signer.verifying) {
+        match mvm_client::audit::chain::session::read_lines_from_genesis(
+            &dir,
+            tenant,
+            &signer.verifying,
+        ) {
             Ok(lines) => {
                 let plan_id =
                     resolve_or_exact(&lines, session).unwrap_or_else(|_| session.to_string());
@@ -356,8 +360,8 @@ fn print_verdict(report: &SessionVerification) {
     }
 }
 
-fn reason_name(reason: mvm_hostd::audit::session::MismatchReason) -> &'static str {
-    use mvm_hostd::audit::session::MismatchReason as R;
+fn reason_name(reason: mvm_client::audit::chain::session::MismatchReason) -> &'static str {
+    use mvm_client::audit::chain::session::MismatchReason as R;
     match reason {
         R::ChainBreak => "chain break",
         R::Signature => "signature",
@@ -422,7 +426,7 @@ mod tests {
     #[test]
     fn a_checkpoint_root_mismatch_has_a_distinct_operator_reason() {
         assert_eq!(
-            reason_name(mvm_hostd::audit::session::MismatchReason::SnapshotRootMismatch),
+            reason_name(mvm_client::audit::chain::session::MismatchReason::SnapshotRootMismatch),
             "checkpoint root mismatch"
         );
     }
@@ -430,7 +434,7 @@ mod tests {
     #[test]
     fn an_environment_mismatch_has_a_distinct_operator_reason() {
         assert_eq!(
-            reason_name(mvm_hostd::audit::session::MismatchReason::EnvironmentMismatch),
+            reason_name(mvm_client::audit::chain::session::MismatchReason::EnvironmentMismatch),
             "environment identity mismatch"
         );
     }

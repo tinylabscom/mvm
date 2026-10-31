@@ -10,7 +10,7 @@
 //! - **Host signer** — does `~/.mvm/keys/host-signer.ed25519`
 //!   exist? Is it mode 0600?
 //! - **Audit chain** — does `~/.mvm/audit/local.jsonl` exist?
-//!   Does it verify clean via [`mvm_hostd::supervisor::verify_audit_chain`]?
+//!   Does it verify clean via [`mvm_client::audit::chain::supervisor::verify_audit_chain`]?
 //! - **Web-fetch allowlist** — count of hosts in
 //!   `$MVM_WEB_FETCH_ALLOWLIST`.
 //! - **Web-search allowlist** — count + names of providers in
@@ -205,18 +205,21 @@ fn check_audit_chain(home: Option<&std::path::Path>) -> PostureCheck {
     // key. Load it lazily — if it fails, surface that.
     let keys_dir = mvm_core::config::mvm_keys_dir();
     match crate::commands::vm::host_signer::load_or_init_at(&keys_dir) {
-        Ok(signer) => match mvm_hostd::supervisor::verify_audit_chain(&path, &signer.verifying) {
-            Ok(count) => PostureCheck {
-                name: "audit_chain",
-                status: PostureStatus::Ok,
-                detail: format!("verified {count} entry/entries at {}", path.display()),
-            },
-            Err(e) => PostureCheck {
-                name: "audit_chain",
-                status: PostureStatus::Fail,
-                detail: format!("verify_audit_chain refused {}: {e}", path.display()),
-            },
-        },
+        Ok(signer) => {
+            match mvm_client::audit::chain::supervisor::verify_audit_chain(&path, &signer.verifying)
+            {
+                Ok(count) => PostureCheck {
+                    name: "audit_chain",
+                    status: PostureStatus::Ok,
+                    detail: format!("verified {count} entry/entries at {}", path.display()),
+                },
+                Err(e) => PostureCheck {
+                    name: "audit_chain",
+                    status: PostureStatus::Fail,
+                    detail: format!("verify_audit_chain refused {}: {e}", path.display()),
+                },
+            }
+        }
         Err(e) => PostureCheck {
             name: "audit_chain",
             status: PostureStatus::Fail,
@@ -226,8 +229,9 @@ fn check_audit_chain(home: Option<&std::path::Path>) -> PostureCheck {
 }
 
 fn check_web_fetch_allowlist() -> PostureCheck {
-    let raw = std::env::var(mvm_hostd::supervisor::tools::web_fetch::ALLOWLIST_ENV_VAR)
-        .unwrap_or_default();
+    let raw =
+        std::env::var(mvm_client::audit::chain::supervisor::tools::web_fetch::ALLOWLIST_ENV_VAR)
+            .unwrap_or_default();
     let count = raw
         .split(',')
         .map(str::trim)
@@ -239,7 +243,7 @@ fn check_web_fetch_allowlist() -> PostureCheck {
             status: PostureStatus::Warn,
             detail: format!(
                 "${} unset or empty — mvm.web_fetch is fail-closed (no host reachable)",
-                mvm_hostd::supervisor::tools::web_fetch::ALLOWLIST_ENV_VAR
+                mvm_client::audit::chain::supervisor::tools::web_fetch::ALLOWLIST_ENV_VAR
             ),
         };
     }
@@ -248,14 +252,15 @@ fn check_web_fetch_allowlist() -> PostureCheck {
         status: PostureStatus::Ok,
         detail: format!(
             "{count} host(s) allowlisted via ${}",
-            mvm_hostd::supervisor::tools::web_fetch::ALLOWLIST_ENV_VAR
+            mvm_client::audit::chain::supervisor::tools::web_fetch::ALLOWLIST_ENV_VAR
         ),
     }
 }
 
 fn check_web_search_allowlist() -> PostureCheck {
-    let raw = std::env::var(mvm_hostd::supervisor::tools::web_search::ALLOWLIST_ENV_VAR)
-        .unwrap_or_default();
+    let raw =
+        std::env::var(mvm_client::audit::chain::supervisor::tools::web_search::ALLOWLIST_ENV_VAR)
+            .unwrap_or_default();
     let providers: Vec<String> = raw
         .split(',')
         .map(|s| s.trim().to_string())
@@ -267,7 +272,7 @@ fn check_web_search_allowlist() -> PostureCheck {
             status: PostureStatus::Warn,
             detail: format!(
                 "${} unset or empty — mvm.web_search is fail-closed (no provider reachable)",
-                mvm_hostd::supervisor::tools::web_search::ALLOWLIST_ENV_VAR
+                mvm_client::audit::chain::supervisor::tools::web_search::ALLOWLIST_ENV_VAR
             ),
         };
     }
@@ -280,25 +285,29 @@ fn check_web_search_allowlist() -> PostureCheck {
     for p in &providers {
         let configured = match p.as_str() {
             "brave" => {
-                std::env::var(mvm_hostd::supervisor::tools::web_search::BRAVE_API_KEY_ENV_VAR)
-                    .is_ok()
+                std::env::var(
+                    mvm_client::audit::chain::supervisor::tools::web_search::BRAVE_API_KEY_ENV_VAR,
+                )
+                .is_ok()
                     || std::env::var("BRAVE_API_KEY_FROM_SECRET").is_ok()
             }
             "tavily" => {
-                std::env::var(mvm_hostd::supervisor::tools::web_search::TAVILY_API_KEY_ENV_VAR)
-                    .is_ok()
+                std::env::var(
+                    mvm_client::audit::chain::supervisor::tools::web_search::TAVILY_API_KEY_ENV_VAR,
+                )
+                .is_ok()
                     || std::env::var("TAVILY_API_KEY_FROM_SECRET").is_ok()
             }
-            "google" => {
-                (std::env::var(mvm_hostd::supervisor::tools::web_search::GOOGLE_API_KEY_ENV_VAR)
-                    .is_ok()
-                    || std::env::var("GOOGLE_API_KEY_FROM_SECRET").is_ok())
-                    && (std::env::var(
-                        mvm_hostd::supervisor::tools::web_search::GOOGLE_CSE_ID_ENV_VAR,
-                    )
-                    .is_ok()
-                        || std::env::var("GOOGLE_CSE_ID_FROM_SECRET").is_ok())
-            }
+            "google" => (std::env::var(
+                mvm_client::audit::chain::supervisor::tools::web_search::GOOGLE_API_KEY_ENV_VAR,
+            )
+            .is_ok()
+                || std::env::var("GOOGLE_API_KEY_FROM_SECRET").is_ok())
+                && (std::env::var(
+                    mvm_client::audit::chain::supervisor::tools::web_search::GOOGLE_CSE_ID_ENV_VAR,
+                )
+                .is_ok()
+                    || std::env::var("GOOGLE_CSE_ID_FROM_SECRET").is_ok()),
             _ => false,
         };
         details.push(format!(
@@ -324,7 +333,9 @@ fn check_web_search_allowlist() -> PostureCheck {
 }
 
 fn check_tool_staging_dir(home: Option<&std::path::Path>) -> PostureCheck {
-    let path = match std::env::var_os(mvm_hostd::supervisor::tools::staging::STAGING_DIR_ENV_VAR) {
+    let path = match std::env::var_os(
+        mvm_client::audit::chain::supervisor::tools::staging::STAGING_DIR_ENV_VAR,
+    ) {
         Some(p) => std::path::PathBuf::from(p),
         None => match home {
             Some(_) => mvm_core::config::tool_staging_dir(),
@@ -410,7 +421,7 @@ fn check_tls_minimum() -> PostureCheck {
     // unit test `w7_min_tls_version_is_pinned_at_1_3` would have
     // caught a regression at compile time, but the operator-
     // visible report mentioning it adds confidence.
-    let v = mvm_hostd::supervisor::tools::http_hardening::MIN_TLS_VERSION;
+    let v = mvm_client::audit::chain::supervisor::tools::http_hardening::MIN_TLS_VERSION;
     let detail = format!("pinned to {v:?} (plan 65 W7)");
     if v == mvm_http::TlsVersion::Tls13 {
         PostureCheck {

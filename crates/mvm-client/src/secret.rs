@@ -56,6 +56,7 @@ pub use audit::SecretAudit;
 pub use input::SecretValueInput;
 pub use mvm_contract::ir::{AuthType, Sigv4Params};
 pub use mvm_core::crypto::secret_binding::SecretApproval;
+pub use mvm_hostd::keyholder;
 pub use mvm_hostd::keyholder::SecretBindingMeta;
 pub use oauth_login::{DEFAULT_CONSENT_TIMEOUT, OAuthLoginOptions};
 pub use refs::{MachineSecretRef, MachineSecretRefSet};
