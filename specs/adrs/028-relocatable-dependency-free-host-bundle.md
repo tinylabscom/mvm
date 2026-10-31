@@ -2,10 +2,13 @@
 
 ## Status
 
-Accepted — staged. The bundling machinery this ADR describes has not
-landed yet; today's install still requires the Homebrew VMM trio on
-macOS. One pre-merge checklist item remains before the VMM-vendoring step
-can land (see "Why Option A, and how it's staged").
+Accepted — staged. The release archive for macOS 13-25 now carries the
+libkrun compatibility tier (#4688), so a release install needs no Homebrew
+VMM package; macOS 26+ uses HVF and needs none either. A source build still
+needs the Homebrew trio. The fully relocatable, detached-signature-verified
+bundle described below is not complete, and #4577 stays open until a signed
+archive boots a guest on macOS 13-25 hardware. The "Context" section
+describes the state before #4688.
 
 ## Context
 
