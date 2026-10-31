@@ -37,8 +37,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ui;
 
+use mvm_client::linux_shell;
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::{linux_env, shell};
 use mvm_vmm::host::process_liveness::state_dir_has_live_process;
 
 use super::Cli;
@@ -191,7 +191,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
     }
 
     // ---- dev-VM maintenance + host build prune (runs every invocation) ----
-    let vm_maintenance = VmMaintenance::for_env(linux_env::default_env_runs_on_host());
+    let vm_maintenance = VmMaintenance::for_env(linux_shell::default_env_runs_on_host());
     let disk_before = match vm_maintenance {
         VmMaintenance::Run => clear_dev_vm_scratch(),
         VmMaintenance::Skip => {
@@ -514,7 +514,7 @@ fn clear_dev_vm_scratch() -> Option<u8> {
         ui::info(&format!("Dev VM disk usage: {}%", pct));
     }
     ui::info("Clearing temporary files...");
-    let _ = shell::run_in_vm("sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null");
+    let _ = linux_shell::run_in_vm("sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null");
     disk_before
 }
 
@@ -525,13 +525,13 @@ fn collect_dev_vm_garbage(disk_before: Option<u8>) {
         return;
     }
     ui::info("Running nix-collect-garbage...");
-    match shell::run_in_vm_stdout("nix-collect-garbage -d 2>&1 | tail -3") {
+    match linux_shell::run_in_vm_stdout("nix-collect-garbage -d 2>&1 | tail -3") {
         Ok(output) => print_trimmed(&output),
         Err(e) => {
             ui::warn(&format!("nix-collect-garbage failed: {e}"));
             ui::info("Retrying after clearing Nix profile generations...");
-            let _ = shell::run_in_vm("rm -rf ~/.local/state/nix/profiles/* 2>/dev/null");
-            match shell::run_in_vm_stdout("nix-collect-garbage -d 2>&1 | tail -3") {
+            let _ = linux_shell::run_in_vm("rm -rf ~/.local/state/nix/profiles/* 2>/dev/null");
+            match linux_shell::run_in_vm_stdout("nix-collect-garbage -d 2>&1 | tail -3") {
                 Ok(output) => print_trimmed(&output),
                 Err(e2) => ui::warn(&format!("nix-collect-garbage retry failed: {e2}")),
             }
@@ -554,7 +554,7 @@ fn print_trimmed(output: &str) {
 }
 
 fn vm_disk_usage_pct() -> Option<u8> {
-    let output = shell::run_in_vm_stdout("df --output=pcent / 2>/dev/null | tail -1").ok()?;
+    let output = linux_shell::run_in_vm_stdout("df --output=pcent / 2>/dev/null | tail -1").ok()?;
     output.trim().trim_end_matches('%').trim().parse().ok()
 }
 
