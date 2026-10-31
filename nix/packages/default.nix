@@ -20,8 +20,6 @@ let
       throw "mvmctl Nix package only supports embedded host binaries on aarch64 and x86_64 hosts";
 
   embeddedRustToolchain = pkgs.callPackage ./embedded-rust-toolchain.nix {
-    cargo = pkgs.rust_1_91.packages.prebuilt.cargo;
-    rustc = pkgs.rust_1_91.packages.prebuilt.rustc;
     target = embeddedRustTarget;
   };
 

@@ -521,8 +521,6 @@ fn native_vmm_outputs_stay_optional_and_non_default() {
             && packages.contains("x86_64-unknown-linux-musl")
             && packages.contains("embeddedRustToolchain")
             && packages.contains("./embedded-rust-toolchain.nix")
-            && packages.contains("pkgs.rust_1_91.packages.prebuilt.cargo")
-            && packages.contains("pkgs.rust_1_91.packages.prebuilt.rustc")
             && packages.contains("embeddedCargo = embeddedRustToolchain")
             && packages.contains("embeddedRustc = embeddedRustToolchain"),
         "host packages must use the pinned musl std Rust wrapper for real embedded host binaries"
@@ -555,17 +553,28 @@ fn embedded_rust_toolchain_pins_musl_std_components() {
         panic!("nix/packages/embedded-rust-toolchain.nix must be present: {e}")
     });
 
+    let flake = fs::read_to_string(nix_dir().join("flake.nix")).unwrap();
+    let lock: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(nix_dir().join("flake.lock")).unwrap()).unwrap();
+    let root_lock: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo_dir().join("flake.lock")).unwrap()).unwrap();
     assert!(
-        content.contains("rust-std-${version}-${target}.tar.gz")
-            && content.contains("sha256-W95G9gKLSyz+ogTZiIt93mYDG3eKuEtoXrUjQ1kpt7U=")
-            && content.contains("sha256-fcoP5fERdHCAB+tTVG6pWq2MN9/Ww8sGTF8cZS7WsPI="),
-        "embedded Rust toolchain must pin official musl std components for both supported host arches"
+        content.contains("version = \"1.97.1\"")
+            && content.contains("rust-bin.stable.${version}.minimal.override")
+            && content.contains("targets = [ target ];")
+            && flake.contains("rust-overlay ? null,")
+            && flake
+                .matches(".extend rust-overlay.overlays.default")
+                .count()
+                == 3
+            && lock["nodes"]["rust-overlay"] == root_lock["nodes"]["rust-overlay"]
+            && lock["nodes"]["root"]["inputs"]["rust-overlay"] == "rust-overlay",
+        "embedded Rust toolchain must use the locked Rust overlay with the matching musl target"
     );
-    assert!(
-        content.contains("--sysroot=$out")
-            && content.contains("--target ${target} --print target-libdir"),
-        "embedded Rust toolchain must wrap rustc with a target-aware sysroot and validate it"
-    );
+    for package in ["default.nix", "mvm-gpu-shims.nix", "mvm-sdk-cdylib.nix"] {
+        let package = fs::read_to_string(nix_dir().join("packages").join(package)).unwrap();
+        assert!(package.contains("./embedded-rust-toolchain.nix"));
+    }
 }
 
 #[test]

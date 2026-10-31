@@ -344,7 +344,7 @@ fn release_host_override_leaves_target_settings_and_profile_inheritance_intact()
     );
     assert_eq!(profiles["release-witness"]["strip"].as_bool(), Some(false));
     let pins = &manifest["workspace"]["metadata"]["mvm"]["toolchain"];
-    assert_eq!(pins["rust"].as_str(), Some("1.91.1"));
+    assert_eq!(pins["rust"].as_str(), Some("1.97.1"));
     assert_eq!(pins["zig"].as_str(), Some("0.13.0"));
     assert_eq!(pins["cargo-zigbuild"].as_str(), Some("0.23.0"));
     assert_eq!(
