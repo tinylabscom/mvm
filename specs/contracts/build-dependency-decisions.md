@@ -121,6 +121,53 @@ remain unchanged. The original plan stays as explicitly historical design.
 Any future privileged service needs its own demonstrated consumer and reviewed
 authority/deployment contract, not restoration of this unused prototype.
 
+## Dependency usage map (#4839 section 3)
+
+Measured at `8201aee9` on `aarch64-apple-darwin`, `--offline --locked`, unique
+`name version` entries with `(*)` and `(proc-macro)` markers stripped
+(`cargo tree -p <pkg> -e normal,build --prefix none | sed ... | sort -u | wc -l`).
+
+| Artifact | Closure |
+|---|---|
+| `mvmctl` | 350 |
+| `mvm-hostlib` (SDK library) | 337 |
+| `mvm-hostd` | 282 |
+| `mvm-host-services` (guest cdylib) | 102 |
+| `mvm-agentd` (guest agent) | 101 |
+| `mvm-builder-guest` (`aarch64-unknown-linux-musl`) | 87 |
+
+Workspace shape: 32 packages and 91 distinct non-`mvm` direct normal/build
+dependencies. The most widely declared are `serde` and `serde_json` (22
+packages each), `libc` (19), `anyhow`, `sha2` and `thiserror` (15 each), `hex`
+(14), `base64`, `ed25519-dalek`, `tempfile` and `tracing` (12 each). Those are
+the trust-boundary dependencies (serialization, hashing, signatures); they are
+kept on purpose and are not candidates for replacement.
+
+Duplicate versions inside the `mvmctl` closure (`cargo tree -p mvmctl -d`):
+`bitflags`, `block-buffer`, `const-oid`, `cpufeatures`, `crypto-common`,
+`digest`, `getrandom`, `rand`, `rand_core`, `ryu-js`, `sha2`, `signature` and
+`untrusted`. They come from the RustCrypto 0.10/0.11 generation split between
+`sigstore-verify` (behind `manifest-verify`) and the workspace's own
+primitives, plus `rand` 0.9 (see the #4561 decision); none is unifiable without
+forking or downgrading a signature dependency.
+
+Unused-declaration scan: `cargo machete` over the whole tree reports no unused
+dependency in any first-party crate except `mvm-conformance`'s `mvmctl`, which
+is kept (generated doc examples link the library facade). Its remaining
+findings are all in vendored `third_party/` crates (`gix`: `async-std`;
+`gix-object`: `gix-hashtable`; `sigstore-tsa`: `cmpv2`, `rustls-webpki`,
+`x509-tsp`; `sigstore-rekor`: `hex`, `sigstore-crypto`, `url`; `am-fs-ext4`:
+`am-fs-core`). Those are feature-gated optional dependencies the scanner cannot
+resolve, and editing vendored manifests would widen the patch against upstream
+for no closure change, so none is removed. The only workspace-level declaration
+with no consumer is the `mvm-hostlib` entry in `[workspace.dependencies]`;
+nothing depends on that crate, and deleting the entry removes no package.
+
+Result: no first-party dependency is provably unused after the #4663 sweep, so
+this slice removes nothing and the closures above are unchanged. Remaining
+reduction is in the retained-by-decision rows above, not in unused
+declarations.
+
 ## Owner decisions
 
 - 2026-10-24, #4663: patch the Sigstore Rekor and timestamp crates locally so
