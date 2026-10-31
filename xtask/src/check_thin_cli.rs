@@ -79,7 +79,6 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("env/builder_vm/shell_job.rs", RUNTIME),
     ("env/cleanup.rs", RUNTIME),
     ("env/setup.rs", RUNTIME),
-    ("env/sign.rs", RUNTIME),
     // Images and manifests.
     ("image/base_image.rs", RUNTIME),
     ("image/materialize.rs", RUNTIME),
@@ -99,10 +98,8 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("ops/reconcile.rs", RUNTIME),
     ("ops/secret.rs", HOSTD),
     ("ops/transcript.rs", HOSTD),
-    ("shared/resolve.rs", RUNTIME),
     ("storage/gc.rs", RUNTIME),
     ("storage/info.rs", RUNTIME),
-    ("trust/instructions.rs", HOSTD),
     // Runs, checkpoints, workspaces and the audit-chain readers behind them.
     ("vm/artifact.rs", RUNTIME),
     ("vm/audit_chain.rs", HOSTD),
@@ -115,7 +112,6 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("vm/checkpoint/vm_state.rs", RUNTIME),
     ("vm/console.rs", RUNTIME),
     ("vm/exec.rs", BOTH),
-    ("vm/host_signer.rs", HOSTD),
     ("vm/invoke.rs", BOTH),
     ("vm/outputs.rs", HOSTD),
     ("vm/phase_timing.rs", RUNTIME),
