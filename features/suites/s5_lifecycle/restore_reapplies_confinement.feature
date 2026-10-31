@@ -4,7 +4,7 @@ Feature: Restore reapplies confinement
   effective across warm restore.
 
   Scenario: a dry-run workload advertises its confinement profile
-    When I run mvmctl with "machine run --image alpine --dry-run -- echo hi"
+    When I run mvmctl with "machine run --image alpine --dry-run --profile standard -- echo hi"
     Then the command exits with code 0
     And the output contains "profile: standard"
     And the output contains "network: deny-all"
