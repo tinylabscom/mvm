@@ -384,13 +384,18 @@ jobs:
           hostlib_target="${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}"
           [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]] || hostlib_target="${BUILD_TARGET}"
           size_args=()
-          for f in target/"${BUILD_TARGET}"/release-min/mvmctl; do
+          for f in target/"${BUILD_TARGET}"/release-min/mvmctl target/"${BUILD_TARGET}"/release/mvm-hvf-supervisor; do
             [[ -f "$f" ]] && size_args+=(--asset "$f")
           done
+          hvf_build=()
+          if [[ "${BUILD_TARGET}" == *apple-darwin ]]; then
+            hvf_build=(--build "mvm-hvf-supervisor (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd --bin mvm-hvf-supervisor")
+          fi
           cargo run --package xtask -- report-compile-units \
             --build "mvmctl (release-min)=build --profile release-min --target ${BUILD_TARGET} --features ${MVMCTL_RELEASE_FEATURES}" \
             --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-gpu-endpoint" \
             --build "mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel" \
+            "${hvf_build[@]}" \
             "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Verify Linux release payloads are statically linked
