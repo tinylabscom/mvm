@@ -1,14 +1,11 @@
 //! `mvmctl storage gc` — reclaim unreferenced thin volumes.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args as ClapArgs;
-use std::sync::Arc;
+use mvm_client::storage::{self, GcOutcome};
 
 use super::Cli;
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::storage::{
-    DeviceMapperBackend, DmsetupBackend, MockBackend, PoolConfig, ThinPool, ThinPoolImpl,
-};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -28,90 +25,29 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let backend: Arc<dyn DeviceMapperBackend> = if args.mock {
-        Arc::new(MockBackend::new())
-    } else {
-        Arc::new(DmsetupBackend::new())
-    };
-    let pool = ThinPoolImpl::new(PoolConfig::default(), backend);
-
-    // Outcome of one `storage gc` attempt. Drives both the operator-
-    // facing printout and the audit `detail` field. Every `--apply`
-    // attempt emits one audit record regardless of
-    // outcome — pool-unavailable and empty-pool are no-op branches of
-    // the same commit path, not free passes out of audit.
-    enum Outcome {
-        Removed(Vec<String>),
-        Empty,
-        PoolUnavailable(String),
-    }
-
-    let outcome = match pool.list_volumes() {
-        Ok(volumes) => {
-            let candidates: Vec<String> = volumes
-                .into_iter()
-                .filter(|name| !args.keep_prefix.iter().any(|p| name.starts_with(p)))
-                .collect();
-            if !args.apply {
-                if candidates.is_empty() {
-                    println!("storage gc: no orphan volumes (dry-run)");
-                } else {
-                    println!(
-                        "storage gc: would remove {} volume(s) (dry-run):",
-                        candidates.len()
-                    );
-                    for name in &candidates {
-                        println!("  {name}");
-                    }
-                    println!("re-run with --apply to actually remove");
+    if !args.apply {
+        match storage::gc_candidates(args.mock, &args.keep_prefix) {
+            Err(e) => eprintln!("mvmctl storage gc: pool unavailable: {e}"),
+            Ok(c) if c.is_empty() => println!("storage gc: no orphan volumes (dry-run)"),
+            Ok(c) => {
+                println!("storage gc: would remove {} volume(s) (dry-run):", c.len());
+                for name in &c {
+                    println!("  {name}");
                 }
-                return Ok(());
-            }
-            if candidates.is_empty() {
-                Outcome::Empty
-            } else {
-                let removed = pool
-                    .gc(|name| !args.keep_prefix.iter().any(|p| name.starts_with(p)))
-                    .context("dmsetup gc failed")?;
-                Outcome::Removed(removed)
+                println!("re-run with --apply to actually remove");
             }
         }
-        Err(e) => {
-            eprintln!("mvmctl storage gc: pool unavailable: {e}");
-            if !args.apply {
-                // Dry-run with no reachable pool: report-only, no
-                // emit (dry-runs are read-only by contract).
-                return Ok(());
-            }
-            Outcome::PoolUnavailable(e.to_string())
-        }
-    };
-
-    // `--apply` reached. Route through the canonical `audit::emit`
-    // (state path) so `mvmctl trust audit tail` and the live drive-and-
-    // assert tests in `tests/audit_emissions_live.rs` see the same
-    // stream as every other state-changing verb. Earlier versions
-    // wrote to `<data_dir>/audit.log` (singular, no `/log/` subdir,
-    // `.log` suffix) which bypassed both readers.
-    let detail = match &outcome {
-        Outcome::Removed(removed) => {
+        return Ok(());
+    }
+    match storage::gc_apply(args.mock, &args.keep_prefix)? {
+        GcOutcome::Removed(removed) => {
             println!("storage gc: removed {} volume(s)", removed.len());
-            for name in removed {
+            for name in &removed {
                 println!("  {name}");
             }
-            if removed.len() <= 8 {
-                format!("removed=[{}]", removed.join(","))
-            } else {
-                format!("count={}", removed.len())
-            }
         }
-        Outcome::Empty => {
-            println!("storage gc: no orphan volumes");
-            "count=0".to_string()
-        }
-        Outcome::PoolUnavailable(err) => format!("pool_unavailable={err}"),
-    };
-    mvm_core::audit_emit!(StorageGc, "{detail}");
-
+        GcOutcome::Empty => println!("storage gc: no orphan volumes"),
+        GcOutcome::PoolUnavailable(e) => eprintln!("mvmctl storage gc: pool unavailable: {e}"),
+    }
     Ok(())
 }

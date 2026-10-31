@@ -9,7 +9,6 @@ use anyhow::Result;
 use clap::Args as ClapArgs;
 
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::vm::reconcile::{self, ConvergeOpts};
 
 use super::Cli;
 use crate::ui;
@@ -26,9 +25,7 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let report = reconcile::converge(&ConvergeOpts {
-        dry_run: args.dry_run,
-    });
+    let report = mvm_client::reconcile::converge(args.dry_run);
 
     if args.json {
         crate::json_out::emit_json(&report)?;

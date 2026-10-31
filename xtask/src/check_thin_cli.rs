@@ -95,11 +95,8 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("ops/audit/sessions.rs", HOSTD),
     ("ops/audit_posture.rs", HOSTD),
     ("ops/cache.rs", BOTH),
-    ("ops/reconcile.rs", RUNTIME),
     ("ops/secret.rs", HOSTD),
     ("ops/transcript.rs", HOSTD),
-    ("storage/gc.rs", RUNTIME),
-    ("storage/info.rs", RUNTIME),
     // Runs, checkpoints, workspaces and the audit-chain readers behind them.
     ("vm/artifact.rs", RUNTIME),
     ("vm/audit_chain.rs", HOSTD),
