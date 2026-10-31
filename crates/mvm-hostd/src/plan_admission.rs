@@ -6460,6 +6460,56 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn admit_and_start_refuses_a_grant_over_the_host_ceiling_and_boots_nothing() {
+        let (_env, _home) = host_with_ceiling(mvm_contract::grants::ceiling::GrantCeiling {
+            max_cpu_millicores: Some(2000),
+            ..Default::default()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let mut synthesis = fixture_input("vm-denied");
+        synthesis.grants = Some(cpu_share(64_000));
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-denied".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        let err = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &synthesis,
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                extension_ctx: None,
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: None,
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
+            },
+        )
+        .expect_err("a grant over the host ceiling must be refused at admission");
+        assert!(
+            err.chain().any(|e| e.to_string().contains("ceiling")),
+            "expected a ceiling refusal; got: {err:#}"
+        );
+        assert!(matches!(
+            backend.status(&VmId("vm-denied".into())),
+            Ok(mvm_core::vm_backend::VmStatus::Stopped)
+        ));
+        assert!(
+            !dir.path()
+                .join(crate::audit::host_keypair::SECRET_FILENAME)
+                .exists(),
+            "a refused launch must not be signed"
+        );
+    }
+
     /// Three points around the cap. The `>` → `==` mutant admits
     /// everything above the cap, which is the whole vector the cap closes;
     /// `>` → `>=` refuses a payload exactly at it. Only a boundary test
