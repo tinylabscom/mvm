@@ -30,7 +30,6 @@ use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::plan::{BundleResources, EnvironmentDescriptor};
 use mvm_core::security::AgentProfile;
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::vm::template::lifecycle as tmpl;
 
 use super::super::Cli;
 
@@ -230,7 +229,7 @@ pub(in crate::commands) fn stage_template(
     export: TemplateExport,
 ) -> Result<StagedBundle> {
     // ---- 1. Resolve the template's artifact paths ----
-    let (spec, vmlinux, initrd, rootfs, _rev) = tmpl::template_artifacts_dispatched(template)
+    let (spec, vmlinux, initrd, rootfs, _rev) = mvm_client::template_artifacts_dispatched(template)
         .with_context(|| {
             format!("loading template {template:?} — does it exist? Try `mvmctl manifest ls`")
         })?;
@@ -242,7 +241,7 @@ pub(in crate::commands) fn stage_template(
     // while still containing an aarch64 rootfs — and the label is what the
     // boot-time gate trusts. A slot built here has no manifest, so it takes
     // the host arch, which is correct for that case.
-    let installed_arch = match tmpl::installed_bundle_archive(template)? {
+    let installed_arch = match mvm_client::installed_bundle_archive(template)? {
         Some(archive) => {
             let verified = mvm_core::plan::bundle::verify_bundle_file(
                 &archive,
@@ -272,7 +271,7 @@ pub(in crate::commands) fn stage_template(
 
     // Verity sidecar lives next to the rootfs by convention; the
     // backend's probe is the source of truth.
-    let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
+    let (verity_path, roothash) = mvm_client::probe_verity_sidecar(&rootfs);
 
     let verity_bytes = match verity_path.as_deref() {
         Some(p) => {

@@ -10,8 +10,8 @@
 //! values are skipped: they carry a reference, never a raw value.
 
 use base64::Engine;
+use mvm_client::SecretsScanner;
 use mvm_contract::ir::EnvValue;
-use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
 use mvm_sdk::runtime::{RecordedOp, RuntimeRecording};
 use std::collections::BTreeMap;
 

@@ -176,7 +176,7 @@ pub(in crate::commands) fn load_recording(
         .with_context(|| format!("parsing runtime recording JSON from {}", path.display()))?;
     let secret_findings = crate::commands::build::trace_secret_scan::scan_recording_for_secrets(
         &recording,
-        &mvm_hostd::supervisor::secrets_scanner::SecretsScanner::with_default_rules(),
+        &mvm_client::SecretsScanner::with_default_rules(),
     );
     let CompiledRecording { workload, findings } = compile_recording(&recording)
         .map_err(|e| anyhow::anyhow!("{e}"))

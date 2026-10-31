@@ -52,7 +52,7 @@ pub(in crate::commands) fn run_builder_egress_supervisor(
     args: BuilderEgressSupervisorArgs,
     _cfg: &MvmConfig,
 ) -> Result<()> {
-    run_builder_egress_supervisor_inner(&args, mvm_hostd::parent_death::exit_when_orphaned)
+    run_builder_egress_supervisor_inner(&args, mvm_client::exit_when_orphaned)
 }
 
 fn run_builder_egress_supervisor_inner(
