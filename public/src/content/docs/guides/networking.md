@@ -3,6 +3,10 @@ title: Networking
 description: Network layout and connectivity in mvmctl microVMs.
 ---
 
+For every typed vsock service, message, field and framing rule, see the
+[Vsock message reference](/reference/vsock-messages/). It also identifies raw
+streams and protocols that are not exposed to workload guests.
+
 ## Network by Backend
 
 Networking differs by backend:

@@ -225,6 +225,7 @@ export const sidebar: SidebarGroup[] = [
       { label: "Platform Support", slug: "reference/platform-support" },
       { label: "Filesystem & Drives", slug: "reference/filesystem" },
       { label: "Guest Agent", slug: "reference/guest-agent" },
+      { label: "Vsock Messages", slug: "reference/vsock-messages" },
       { label: "Limits & Resources", slug: "reference/limits" },
       { label: "Launch Performance", slug: "reference/performance" },
       { label: "Releases & downloads", slug: "reference/releases" },

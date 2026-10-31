@@ -51,6 +51,10 @@ and version-pinned for the life of a running VM.
 
 ## Protocol
 
+The [Vsock message reference](/reference/vsock-messages/) contains every
+request, response and nested field, plus authentication, other typed services,
+builder protocols, raw channels and their availability restrictions.
+
 ### Guest telemetry
 
 Every workload boot carries telemetry from the guest to the host by default.
@@ -115,36 +119,40 @@ registration, active guest service binding, lifetime collection, bounded
 retention, and detached retrieval remain under implementation. Structural
 validation alone does not make workload text safe to retain.
 
-The agent communicates using a **binary protocol with length-prefixed JSON frames** over vsock on every supported microVM backend.
+The control agent uses **JSON payloads inside authenticated, encrypted binary
+frames**. Other vsock services have their own codecs; they are not all JSON.
 
 ### Frame Structure
 
-Each message consists of:
-
-1. **4-byte length header** (big-endian `u32`) - the size of the JSON payload in bytes
-2. **JSON payload** - a serialized request or response object
-
-```
-[4-byte length][JSON payload bytes...]
-```
+The shared session handshake uses a big-endian `u32` length followed by JSON.
+After authentication, each control frame is a big-endian `u32` length followed
+by a binary `SealedFrame`; its encrypted plaintext is the request/response
+JSON. See the [exact layouts](/reference/vsock-messages/#authenticated-session-framing).
 
 ### Connection Establishment
 
-1. Host writes `CONNECT 5252\n` to the socket
-2. Agent responds with `OK 5252\n`
-3. All subsequent communication uses length-prefixed frames
+1. On Firecracker's host mux, the host selects port 5252 with `CONNECT 5252\n`
+   and receives an `OK` line from the mux. Per-port/direct transports omit this
+   transport-specific prelude.
+2. The peers exchange `SessionHello`, `SessionHelloAck` and
+   `SessionHelloConfirm` to establish the authenticated session.
+3. `ProtocolHello` negotiates the guest-control version and capabilities before
+   capability-dependent dispatch. Activation/readiness remain separate states.
 
 ### Request/Response Flow
 
-Each request receives exactly one response:
-
-- **Requests** are serialized JSON objects with a `type` field indicating the verb (e.g., `{"ping": {}}`)
-- **Responses** are serialized JSON objects with a `type` field indicating the response type (e.g., `{"pong": {}}`)
+The enum is externally tagged: unit requests/replies are JSON strings such as
+`"Ping"` and `"Pong"`; payload variants use an object keyed by their exact
+variant name. There is no generic `type` field. Some requests are unary;
+others stream through a terminal event. `MediatedExec` also has a paused
+host-decision exchange. The [complete response contracts](/reference/vsock-messages/#request--response-contracts)
+identify each case and its universal refusals.
 
 ### Frame Size Limits
 
-- Maximum frame size: **256 KiB** (including length header + JSON payload)
-- User-content chunks: **15.5 KiB** maximum (for streaming operations)
+- Maximum JSON plaintext body: **256 KiB**.
+- Maximum encoded sealed-frame body: **264 KiB**, plus the 4-byte length prefix.
+- User-content chunks: **62 KiB** maximum, subject to narrower operation limits.
 
 ## Control plane and data plane
 
@@ -156,20 +164,23 @@ readiness, lifecycle, and cancellation requests. A saturated transfer cannot
 consume all control capacity.
 
 Every encoded request and response is capped symmetrically at 256 KiB before
-any bytes are written. User-content chunks are at most 15.5 KiB, leaving enough
+any bytes are written. User-content chunks are at most 62 KiB, leaving enough
 headroom for worst-case JSON encoding and the response envelope.
 
 That chunk size is derived from the 256 KiB cap rather than chosen. Content is
-encoded twice on its way to the wire: once as a `Vec<u8>` in the request or
-response body, and again as the sealed envelope's ciphertext, which is itself a
-`Vec<u8>`. Neither hop is base64, so the worst case — four characters per byte,
-`255,` — applies twice and the expansions multiply. The split is
-orthogonal to the agent profile gate: `Exec` is dev-only and data-plane;
-`Ping` is always available and control-plane.
+encoded as a JSON integer array in the request/response body; the sealed
+envelope is binary, so ciphertext is not JSON-encoded again. Reserving 8 KiB
+for overhead and allowing four characters per content byte gives
+`(256 KiB - 8 KiB) / 4 = 62 KiB`. Traffic-plane classification is independent
+of the profile/grant gate: `Exec` is dev-only and data-plane; `Ping` is
+control-plane.
 
 ### Control-plane verbs
 
-Small bounded JSON in and out, with no user process or file payload bytes.
+Selected control-class requests are listed below. Their payloads are bounded;
+classification reserves dispatch capacity independently of authorization.
+The [complete vocabulary and fields](/reference/vsock-messages/#guest-control-requests-responses-and-nested-payloads)
+also covers activation, extensions, drive, input and other omitted requests.
 
 | Verb                                                            | Response shape                                                             | Notes                                                                                                                                                                                     |
 | --------------------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -182,7 +193,7 @@ Small bounded JSON in and out, with no user process or file payload bytes.
 | `ProbeStatus`                                                   | `ProbeStatusReport { probes: Vec<ProbeResult> }`                           | One per declared probe.                                                                                                                                                                   |
 | `SleepPrep` / `Wake` / `PostRestore` / `CheckpointIntegrations` | Ack                                                                        | Snapshot lifecycle handshakes.                                                                                                                                                            |
 | `UpdateIdleTimeout`                                             | Ack with previous + new values                                             | Adjusts the idle-eviction window.                                                                                                                                                         |
-| `MountVolume` / `UnmountVolume`                                 | `MountVolumeResult` (closed enum)                                          | Volume metadata only — no file contents.                                                                                                                                                  |
+| `MountVolume` / `UnmountVolume`                                 | `VolumeMountResult` (closed enum)                                          | Volume metadata only — no file contents.                                                                                                                                                  |
 | `ProcStart` / `ProcSignal` / `ProcKill` / `ProcList`            | `ProcResult` (closed enum)                                                 | Process control. `ProcStart` accepts an `argv` up to capped length but does not echo it back.                                                                                             |
 | `FsStat` / `FsMkdir` / `FsRemove` / `FsMove`                    | `FsResult` (closed enum)                                                   | Bounded filesystem metadata and mutations.                                                                                                                                                |
 | `ConsoleOpen` / `ConsoleClose` / `ConsoleResize`                | `ConsoleOpened` / `ConsoleExited` / `ConsoleResized`                       | Opens a PTY session; the PTY itself runs on a different vsock port — that's the data plane. The session outlives its client; `ConsoleClose` hangs the shell up and returns its exit code. |
@@ -195,14 +206,15 @@ share the 48-request data admission budget.
 
 | Verb                                        | Flow                                          | Frame cap         | Chunk size                          | Terminal                                 | Backpressure                                                                   | Payload in audit?                               |
 | ------------------------------------------- | --------------------------------------------- | ----------------- | ----------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------- |
-| `RunEntrypoint`                             | Request → `EntrypointEvent` stream            | 256 KiB per event | 15.5 KiB stdout/stderr              | `Exit` / `Killed` / `TimedOut` / `Error` | Bounded process buffers.                                                       | No.                                             |
-| `ProcWait`                                  | Request → `ProcWaitEvent` stream              | 256 KiB per event | 15.5 KiB stdout/stderr              | `Exit` / `Killed` / `TimedOut` / `Error` | Typed non-terminal backpressure events.                                        | No.                                             |
-| `ProcSendInput`                             | Bounded request → ack                         | 256 KiB           | At most 15.5 KiB per protocol frame | `InputAccepted`                          | Caller retries subsequent chunks.                                              | No; byte count only.                            |
-| `FsRead` / `FsWrite`                        | Repeated offset requests → bounded responses  | 256 KiB           | 15.5 KiB                            | Each chunk response                      | Caller advances the offset; the first write truncates and later chunks do not. | No; offsets, sizes, and counts only.            |
+| `RunEntrypoint`                             | Request → `EntrypointEvent` stream            | 256 KiB plaintext per event | 62 KiB stdout/stderr              | `Exit` / `Error` | Bounded process buffers.                                                       | No.                                             |
+| `ProcWait`                                  | Request → `ProcWaitEvent` stream              | 256 KiB plaintext per event | 62 KiB stdout/stderr              | `Exit` / `Killed` / `TimedOut` / `Error` | Typed non-terminal backpressure events.                                        | No.                                             |
+| `ProcSendInput`                             | Bounded request → ack                         | 256 KiB plaintext | At most 62 KiB per protocol frame | `InputAccepted`                          | Caller retries subsequent chunks.                                              | No; byte count only.                            |
+| `FsRead` / `FsWrite`                        | Repeated offset requests → bounded responses  | 256 KiB plaintext | 62 KiB                            | Each chunk response                      | Caller advances the offset; the first write truncates and later chunks do not. | No; offsets, sizes, and counts only.            |
 | `FsList` / `FsDiff`                         | Request → bounded metadata response           | 256 KiB           | Protocol-bounded result             | Response itself                          | Result caps and frame cap fail closed.                                         | No file contents.                               |
-| `Exec` / `ExecBatch` / `RunCode` (dev-only) | One-shot request and capture                  | 256 KiB           | Protocol-bounded result             | Response itself                          | Oversized encoded responses fail closed.                                       | No.                                             |
+| `Exec` / `RunCode` (dev-only) | `ExecEvent` stream | 256 KiB plaintext per event | Bounded output chunks | `Exit` / `TimedOut` | Bounded capture; oversized frames fail closed. | No. |
+| `ExecBatch` (dev-only) | Buffered command outcomes | 256 KiB plaintext | Protocol-bounded result | Response itself | Oversized encoded responses fail closed. | No. |
 | Console PTY traffic                         | Raw bytes on a dedicated vsock port           | Raw transport     | TTY-shaped reads                    | Close or PTY exit                        | Kernel/socket backpressure; only the host CID may connect.                     | No.                                             |
-| Declared ingress                            | Authenticated FlowMux frames on `NetworkFlow` | 256 KiB per frame | Credit-bounded stream chunks        | Flow close/refusal                       | Shared per-VM FlowMux budget.                                                  | Metadata only; payload bytes never enter audit. |
+| Declared ingress                            | Authenticated FlowMux frames on `NetworkFlow` | 64 KiB payload plus FlowMux/session framing | Credit-bounded stream chunks | Flow close/refusal | Shared per-VM FlowMux budget. | Metadata only; payload bytes never enter audit. |
 
 Entrypoint capture bounds both pipe-reader and consumer handoffs. Queue offers
 do not wait for capacity; saturation discards old stdout/stderr and emits
