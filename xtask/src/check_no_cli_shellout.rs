@@ -24,6 +24,13 @@
 //!   spawns per-VM helpers from inside `mvm-client`, which is not scanned
 //!   here; the library itself declares the process a library embedder, so
 //!   any runtime path that would spawn `mvmctl` refuses.
+//!   Also the spawn forms that carry no `Command::new`: `tokio::process`,
+//!   `CommandExt`, and the `mvm_core::env_hygiene` constructors
+//!   (`helper_command*`, `scrub_command`), which hand back a ready `Command`.
+//! - The client (`crates/mvm-client/src`) legitimately spawns role helpers and
+//!   a password-manager adapter, so it is held only to the CLI rule: no
+//!   `Command::new`/`helper_command*` naming `mvmctl`, and no CLI-location
+//!   override or resolver.
 //! - Every surface: the CLI-location overrides `MVM_CLI_BIN` and
 //!   `MVM_MVM_BIN`, and the `resolve_cli_bin`/`resolveCliBin` helpers that
 //!   located the CLI to execute it.
@@ -60,6 +67,9 @@ struct Surface {
     root: &'static str,
     extensions: &'static [&'static str],
     lang: Lang,
+    /// Hold the tree only to the rule against running the CLI, not to the
+    /// ban on every process API.
+    cli_only: bool,
 }
 
 /// Every tree the rule holds for.
@@ -68,21 +78,31 @@ const SURFACES: &[Surface] = &[
         root: "crates/mvm-sdk/sdks/python/mvm",
         extensions: &["py"],
         lang: Lang::Python,
+        cli_only: false,
     },
     Surface {
         root: "crates/mvm-sdk/sdks/typescript/src",
         extensions: &["ts", "mts", "cts", "js", "mjs", "cjs"],
         lang: Lang::Script,
+        cli_only: false,
     },
     Surface {
         root: "crates/mvm-sdk/src",
         extensions: &["rs"],
         lang: Lang::Rust,
+        cli_only: false,
     },
     Surface {
         root: "crates/mvm-hostlib/src",
         extensions: &["rs"],
         lang: Lang::Rust,
+        cli_only: false,
+    },
+    Surface {
+        root: "crates/mvm-client/src",
+        extensions: &["rs"],
+        lang: Lang::Rust,
+        cli_only: true,
     },
 ];
 
@@ -170,10 +190,24 @@ const RUST: &[Needle] = &[
         why: "spawns a process",
     },
     Needle {
+        pattern: r"\btokio::process\b|\bCommandExt\b|\bprocess::\{[^}]*\bCommand\b",
+        why: "spawns a process",
+    },
+    Needle {
+        pattern: r"\bhelper_command\w*\b|\bscrub_command\b",
+        why: "builds a process command",
+    },
+    Needle {
         pattern: r"\blibc::(fork|vfork|execv\w*|execl\w*|posix_spawn\w*|system)\b",
         why: "spawns or replaces a process",
     },
 ];
+
+/// What the client is held to: it may spawn role helpers, never the CLI.
+const CLI_ONLY: &[Needle] = &[Needle {
+    pattern: r"\b(Command::new|helper_command\w*)\s*\(\s*[^)]*mvmctl",
+    why: "runs the CLI",
+}];
 
 fn needles_for(lang: Lang) -> &'static [Needle] {
     match lang {
@@ -184,26 +218,32 @@ fn needles_for(lang: Lang) -> &'static [Needle] {
 }
 
 /// The compiled patterns for `lang`, then the ones every surface shares.
-fn compiled(lang: Lang) -> &'static [(Regex, &'static str)] {
+fn compiled(lang: Lang, cli_only: bool) -> &'static [(Regex, &'static str)] {
+    static CLIENT: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
     static PY: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
     static TS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
     static RS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
     let cell = match lang {
+        _ if cli_only => &CLIENT,
         Lang::Python => &PY,
         Lang::Script => &TS,
         Lang::Rust => &RS,
     };
     cell.get_or_init(|| {
-        needles_for(lang)
-            .iter()
-            .chain(EVERY_SURFACE)
-            .map(|n| {
-                (
-                    Regex::new(n.pattern).expect("every needle is a valid pattern"),
-                    n.why,
-                )
-            })
-            .collect()
+        (if cli_only {
+            CLI_ONLY
+        } else {
+            needles_for(lang)
+        })
+        .iter()
+        .chain(EVERY_SURFACE)
+        .map(|n| {
+            (
+                Regex::new(n.pattern).expect("every needle is a valid pattern"),
+                n.why,
+            )
+        })
+        .collect()
     })
 }
 
@@ -272,7 +312,7 @@ fn scan_surface(workspace: &Path, surface: &Surface) -> Result<Vec<Finding>> {
     for path in files {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        findings.extend(scan_text(&path, &text, surface.lang));
+        findings.extend(scan_text(&path, &text, surface.lang, surface.cli_only));
     }
     Ok(findings)
 }
@@ -300,11 +340,11 @@ fn collect(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) -> Result<()
 }
 
 /// Every forbidden use in `text`, with comments removed first.
-fn scan_text(path: &Path, text: &str, lang: Lang) -> Vec<Finding> {
+fn scan_text(path: &Path, text: &str, lang: Lang, cli_only: bool) -> Vec<Finding> {
     let code = strip_comments(text, lang);
     let mut findings = Vec::new();
     for (index, line) in code.lines().enumerate() {
-        for (pattern, why) in compiled(lang) {
+        for (pattern, why) in compiled(lang, cli_only) {
             if let Some(m) = pattern.find(line) {
                 findings.push(Finding {
                     path: path.to_path_buf(),
@@ -455,6 +495,7 @@ mod tests {
             ),
             ("crates/mvm-sdk/src/lib.rs", "pub fn f() {}\n"),
             ("crates/mvm-hostlib/src/lib.rs", "pub fn g() {}\n"),
+            ("crates/mvm-client/src/lib.rs", "pub fn c() {}\n"),
         ];
         for (path, body) in files {
             write(tmp.path(), path, body);
@@ -580,6 +621,43 @@ mod tests {
         assert!(run(tmp.path()).is_err());
     }
 
+    #[test]
+    fn spawn_forms_without_command_new_are_flagged() {
+        for body in [
+            "let c = mvm_core::env_hygiene::helper_command(bin);\n",
+            "let c = helper_command_with(bin, &readmit);\n",
+            "scrub_command(&mut c, &r);\n",
+            "use tokio::process::Child;\n",
+            "use std::os::unix::process::CommandExt;\n",
+            "use std::process::{self, Command};\n",
+        ] {
+            let tmp = clean_workspace();
+            write(tmp.path(), "crates/mvm-hostlib/src/x.rs", body);
+            assert!(run(tmp.path()).is_err(), "not flagged: {body}");
+        }
+    }
+
+    #[test]
+    fn the_client_may_spawn_helpers_but_never_the_cli() {
+        let tmp = clean_workspace();
+        write(
+            tmp.path(),
+            "crates/mvm-client/src/secret.rs",
+            "fn f() { let _ = helper_command(\"op\"); Command::new(\"mkfifo\"); }\n",
+        );
+        run(tmp.path()).expect("a non-CLI helper is allowed in the client");
+        for body in [
+            "fn f() { Command::new(\"mvmctl\"); }\n",
+            "fn f() { Command::new(bin_dir.join(\"mvmctl\")); }\n",
+            "fn f() { helper_command(\"/usr/bin/mvmctl\"); }\n",
+            "const E: &str = \"MVM_CLI_BIN\";\n",
+        ] {
+            let tmp = clean_workspace();
+            write(tmp.path(), "crates/mvm-client/src/x.rs", body);
+            assert!(run(tmp.path()).is_err(), "not flagged: {body}");
+        }
+    }
+
     /// A comment may explain the rule; only code is held to it.
     #[test]
     fn comments_naming_the_forbidden_apis_pass() {
@@ -689,7 +767,7 @@ mod tests {
     #[test]
     fn findings_report_the_original_line_after_a_block_comment() {
         let text = "/* one\n two\n three */\nconst c = require('child_process');\n";
-        let findings = scan_text(Path::new("x.ts"), text, Lang::Script);
+        let findings = scan_text(Path::new("x.ts"), text, Lang::Script, false);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].line, 4);
     }
