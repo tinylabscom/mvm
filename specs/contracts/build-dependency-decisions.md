@@ -168,6 +168,65 @@ this slice removes nothing and the closures above are unchanged. Remaining
 reduction is in the retained-by-decision rows above, not in unused
 declarations.
 
+## Release-build compilation count (#4839 section 4)
+
+Measured at `4270e14d` on `aarch64-apple-darwin`, Rust 1.97.1, `--offline
+--locked`. Counts come from Cargo's unit graph, which is what a build would
+compile, so they do not depend on machine load:
+
+```sh
+RUSTC_BOOTSTRAP=1 cargo build --offline --locked --unit-graph -Z unstable-options <args> > graph.json
+```
+
+with `<args>` the arguments of each `cargo` invocation in `release.yml` for
+`aarch64-apple-darwin` (the three guest rows are the nested `cargo zigbuild`
+runs in `crates/mvm-cli/build.rs`, which share one nested target directory):
+
+| Graph | Arguments | Units | Unique packages |
+|---|---|---|---|
+| `mvmctl` | `--profile release-min --target aarch64-apple-darwin --features host,user,release-artifact-bootstrap,release-channel,embed-host-bins` | 498 | 377 |
+| daemons | `--release --target aarch64-apple-darwin -p mvm-hostd -p mvm-gpu` | 344 | 283 |
+| `mvm-hostlib` | `--release --target aarch64-apple-darwin -p mvm-hostlib --features mvm-client/release-channel` | 424 | 337 |
+| guest `mvm-host-vm-init` | `--release --target aarch64-unknown-linux-musl -p mvm-builder-guest --bin mvm-host-vm-init` | 118 | 87 |
+| guest `mvm-builderd` | same, `--bin mvm-builderd` | 118 | 87 |
+| guest `mvm-setpriv` | `-p mvm-setpriv --bin mvm-setpriv` | 5 | 2 |
+
+What the "~1,017 entries" are: units, not packages. Summing every graph gives
+1,507. Cargo shares a unit between invocations that hash identically, so the
+distinct count is 942 on the host side (1,266 listed) plus 123 on the guest
+side (241 listed), 1,065 together, over 384 unique packages (82 appear on both
+sides because the musl and Darwin targets are separate builds). The 1,017
+figure was not reproduced exactly; it falls inside the 942 to 1,065 range, and
+the earlier note's 545 + 374 crates counted something other than units.
+
+Where the repeated work is:
+
+- `mvm-hostd` and `mvm-hostlib` share 324 identical units, so they are built
+  once. Ten packages differ in resolved features (`mvm-client/release-channel`
+  pulls in more of `mvm-core`, `regex` and `jiff`).
+- `mvmctl` (`release-min`: opt-level `z`, `panic = "abort"`, fat LTO,
+  one codegen unit) and the two `--release` builds (opt-level 3, unwind, thin
+  LTO) share only 3 and 6 units (with the daemons and `mvm-hostlib`), so the target-side closure compiles twice. That is
+  the documented panic-strategy split in `release.yml`, not an accident.
+- Build scripts and proc-macros (host platform) are 110 distinct units, but 185
+  as hashed: 75 are compiled again only because they inherit `lto` from the
+  parent profile (`true` under `release-min`, `"thin"` under `release`).
+  Cargo rejects the obvious fix, `lto = false` under
+  `[profile.release.build-override]` (`lto` may not be specified in a
+  `build-override` profile), and aligning the two parent profiles' `lto` would
+  change the shipped binary size. No cheap fix exists, so none is made.
+- The nested guest builds do not repeat each other: three invocations list 241
+  units, 123 distinct.
+
+No-change rebuilds: `cargo build --release -v` prints `Fresh <pkg>` for each
+unit it reuses and `Dirty`/`Compiling` for each it rebuilds; on
+`-p mvm-setpriv` the second run printed only `Fresh` lines (2 units). The
+whole-tree no-change run, cold wall-clock times and final binary sizes were not
+taken: the host's load average was about 390 on 16 cores, which makes timings
+meaningless, and a full embedded cross build was not run. The embedded guest
+payload is restored from the content store at `~/.cache/mvm/embed` when its
+key matches, so a warm local build does not show the nested compile.
+
 ## Owner decisions
 
 - 2026-10-24, #4663: patch the Sigstore Rekor and timestamp crates locally so
