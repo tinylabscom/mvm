@@ -16,10 +16,10 @@
 //! is mechanical: a report row must name a build the release actually runs,
 //! and the three builds the report exists for must each be reported.
 //!
-//! The platform-conditional `mvm-hvf-supervisor` leg is deliberately outside
-//! the report: it is one extra bin target of `mvm-hostd` on one matrix leg,
-//! and mirroring it would resolve a graph on the Linux legs for a build that
-//! does not run there.
+//! The platform-conditional `mvm-hvf-supervisor` leg is reported too, but only
+//! on the Darwin legs: its row must sit under the same `*apple-darwin` test as
+//! the build, so no Linux leg resolves a graph for a build that does not run
+//! there.
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
@@ -39,6 +39,10 @@ impl BuildCommand {
     fn is_hostlib(&self) -> bool {
         self.packages.len() == 1 && self.packages.contains("mvm-hostlib")
     }
+
+    fn is_hvf_supervisor(&self) -> bool {
+        self.bins.len() == 1 && self.bins.contains("mvm-hvf-supervisor")
+    }
 }
 
 /// The report step derives `hostlib_target` as exactly the substitution the
@@ -54,7 +58,7 @@ const HOSTLIB_TARGET_ALIASES: [&str; 3] = [
 type BuildPredicate = fn(&BuildCommand) -> bool;
 
 /// The builds the report exists to attribute, by how to recognize them.
-const REPORTED_BUILDS: [(&str, BuildPredicate); 3] = [
+const REPORTED_BUILDS: [(&str, BuildPredicate); 4] = [
     ("the release mvmctl build", |cmd| {
         cmd.profile == "release-min" && cmd.packages.is_empty()
     }),
@@ -64,6 +68,10 @@ const REPORTED_BUILDS: [(&str, BuildPredicate); 3] = [
             && cmd.packages.contains("mvm-gpu")
     }),
     ("the mvm-hostlib build", BuildCommand::is_hostlib),
+    (
+        "the mvm-hvf-supervisor build",
+        BuildCommand::is_hvf_supervisor,
+    ),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {
@@ -122,6 +130,13 @@ fn check_release_workflow(src: &str) -> Vec<String> {
         }
     }
     let rows = report_rows(report);
+    if !hvf_row_is_darwin_only(report) {
+        problems.push(
+            "the report's `mvm-hvf-supervisor` row must sit under an `*apple-darwin` test — \
+             Linux legs do not build it"
+                .to_string(),
+        );
+    }
 
     let mut built = Vec::new();
     for step in ["Build release binary", "Build per-VM host binaries"] {
@@ -165,6 +180,19 @@ fn check_release_workflow(src: &str) -> Vec<String> {
         }
     }
     problems
+}
+
+/// Whether the `mvm-hvf-supervisor` row follows an `*apple-darwin` test, so it
+/// is only resolved on Darwin legs.
+fn hvf_row_is_darwin_only(report: &str) -> bool {
+    match (
+        report.find("*apple-darwin"),
+        report.find("--bin mvm-hvf-supervisor"),
+    ) {
+        (Some(guard), Some(row)) => guard < row,
+        (_, None) => true,
+        (None, Some(_)) => false,
+    }
 }
 
 /// The body of one `- name: <name>` step, up to the next sibling step.
@@ -305,10 +333,14 @@ mod tests {
 ";
 
     const REPORT_ROWS: &str = "\
+          if [[ \"${BUILD_TARGET}\" == *apple-darwin ]]; then
+            hvf_build=(--build \"mvm-hvf-supervisor (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd --bin mvm-hvf-supervisor\")
+          fi
           cargo run --package xtask -- report-compile-units \\
             --build \"mvmctl (release-min)=build --profile release-min --target ${BUILD_TARGET} --features ${MVMCTL_RELEASE_FEATURES}\" \\
             --build \"daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-signer-helper\" \\
             --build \"mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel\" \\
+            \"${hvf_build[@]}\" \\
             | tee -a \"${GITHUB_STEP_SUMMARY}\"
 ";
 
@@ -356,6 +388,25 @@ mod tests {
                 "the per-VM daemon build is not mirrored by any `--build` row of the report step"
                     .to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn an_unreported_or_unguarded_hvf_supervisor_row_is_named() {
+        let unguarded = REPORT_ROWS
+            .replace("if [[ \"${BUILD_TARGET}\" == *apple-darwin ]]; then\n", "")
+            .replace("          fi\n", "");
+        let problems = check_release_workflow(&workflow(&unguarded));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("*apple-darwin"), "{problems:?}");
+
+        let drifted = REPORT_ROWS.replace("--bin mvm-hvf-supervisor", "--bin other");
+        let problems = check_release_workflow(&workflow(&drifted));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("mvm-hvf-supervisor build")),
+            "{problems:?}"
         );
     }
 
