@@ -174,7 +174,7 @@ Feature: machine run request contract
   # writes are not thrown away, and foreground teardown flushes the guest before
   # the VMM releases the image.
   Scenario: machine run accepts a writable sized disk
-    When I run mvmctl with "machine run --image alpine --dry-run --mount /tmp/mvm-bdd-output.img:/data:64M:rw -- /bin/true" and an isolated mvm home
+    When I run mvmctl with "machine run --image alpine --dry-run --profile standard --mount /tmp/mvm-bdd-output.img:/data:64M:rw -- /bin/true" and an isolated mvm home
     Then the command exits with code 0
     And the output contains "no VM will be booted"
 
