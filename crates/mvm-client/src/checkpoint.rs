@@ -13,7 +13,13 @@ use mvm_runtime::checkpoint::checked_workspace_blob_name;
 pub mod fs_quick;
 
 // Types and the liveness probe commands need without naming the runtime.
-pub use mvm_runtime::checkpoint::{CheckpointStore, WorkspaceVolume, vm_is_running};
+pub use mvm_runtime::base::runtime_meta::{VmRuntimeMeta, read as read_runtime_meta};
+pub use mvm_runtime::checkpoint::{
+    CheckpointStore, WorkspaceVolume, checkpoint_ancestry, checkpoint_children, vm_is_running,
+};
+pub use mvm_runtime::image_lineage::{ImageStore, image_ancestry, image_children};
+pub use mvm_runtime::lineage::{Ancestry, VerifiedNode};
+pub use mvm_runtime::microvm::fc_pid_path;
 
 /// Access to the local checkpoint catalog, guarded removal and workspace images.
 pub struct Checkpoints {

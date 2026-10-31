@@ -15,11 +15,12 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+use mvm_client::checkpoint::{
+    Ancestry, CheckpointStore, ImageStore, VerifiedNode, checkpoint_ancestry, checkpoint_children,
+    image_ancestry, image_children,
+};
 use mvm_core::checkpoint::{CheckpointClass, CheckpointDigest, CheckpointMeta};
 use mvm_core::image_lineage::{ImageBuildIdentity, ImageNode};
-use mvm_runtime::checkpoint::{CheckpointStore, checkpoint_ancestry, checkpoint_children};
-use mvm_runtime::image_lineage::{ImageStore, image_ancestry, image_children};
-use mvm_runtime::lineage::{Ancestry, VerifiedNode};
 
 use super::SignedChainAnchor;
 use super::validated_checkpoint_id;
