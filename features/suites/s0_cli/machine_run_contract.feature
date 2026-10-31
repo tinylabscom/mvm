@@ -65,13 +65,13 @@ Feature: machine run request contract
   # DevOnly. With no argv, the image's Entrypoint/Cmd is the command, and the
   # production-safe RunEntrypoint verb carries it through the admitted path.
   Scenario: machine run accepts a production OCI image's baked entrypoint
-    When I run mvmctl with "machine run --image registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111 --prod --dry-run" and an isolated mvm home
+    When I run mvmctl with "machine run --image registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111 --prod --profile standard --dry-run" and an isolated mvm home
     Then the command exits with code 0
     And the output contains "no VM will be booted"
     And the output contains "profile: standard"
 
   Scenario: run accepts a production OCI image's baked entrypoint
-    When I run mvmctl with "run --image registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111 --prod --dry-run" and an isolated mvm home
+    When I run mvmctl with "run --image registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111 --prod --profile standard --dry-run" and an isolated mvm home
     Then the command exits with code 0
     And the output contains "no VM will be booted"
     And the output contains "profile: standard"
@@ -148,7 +148,7 @@ Feature: machine run request contract
   # at all is a separate question, recorded in the sprint notes.
   Scenario: machine run dry-run reports the plan and boots nothing
     Given an isolated mvm home
-    When I run mvmctl in the isolated mvm home with "machine run --image alpine --dry-run --name bdd-dry-run -- /bin/true"
+    When I run mvmctl in the isolated mvm home with "machine run --image alpine --dry-run --profile standard --name bdd-dry-run -- /bin/true"
     Then the command exits with code 0
     And the output contains "no VM will be booted"
     And the output contains "profile: standard"
@@ -183,7 +183,7 @@ Feature: machine run request contract
   # that named its image, or the convenience would be a policy bypass.
   Scenario: a detected runtime does not relax the run's posture
     Given an isolated mvm home
-    When I run mvmctl in the isolated mvm home with "run --dry-run --runtime node -- npm test"
+    When I run mvmctl in the isolated mvm home with "run --dry-run --profile standard --runtime node -- npm test"
     Then the command exits with code 0
     And the output contains "profile: standard"
     And the output contains "network: deny-all"

@@ -164,7 +164,7 @@ covered = [
     "mvmctl machine run --image alpine -- /bin/true",
     "mvmctl machine run --image alpine -- echo hi",
     "mvmctl machine run --image alpine -- uname -a",
-    "mvmctl machine run --image alpine --mount ./state.img:/data/state:1G:rw -- sh -c 'echo kept > /data/state/note'",
+    "mvmctl machine run --profile standard --image alpine --mount ./state.img:/data/state:1G:rw -- sh -c 'echo kept > /data/state/note'",
     "mvmctl machine run --image alpine --mount /tmp:/data/host -- cat /data/host/foo",
     "mvmctl machine run --image alpine --name devbox --port 8080:8080",
     "mvmctl machine run --image alpine -e DEBUG=1 -- sh -c 'env | grep DEBUG'",
