@@ -85,11 +85,7 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("image/pull_core.rs", RUNTIME),
     ("manifest/export_oci.rs", RUNTIME),
     // Machine lifecycle.
-    ("machine/checkpoint.rs", RUNTIME),
-    ("machine/input_journal.rs", RUNTIME),
     ("machine/mod.rs", RUNTIME),
-    ("machine/prewarm.rs", RUNTIME),
-    ("machine/runtime.rs", RUNTIME),
     // Audit, cache, secrets, storage and trust operations.
     ("ops/audit.rs", BOTH),
     ("ops/audit/sessions.rs", HOSTD),
