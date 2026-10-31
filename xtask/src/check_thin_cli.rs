@@ -60,19 +60,12 @@ const BOTH: &[Below] = &[Below::Hostd, Below::Runtime];
 const ALLOWLIST: &[(&str, &[Below])] = &[
     // Command dispatch and top-level verbs.
     ("agent_session.rs", BOTH),
-    ("bootstrap.rs", HOSTD),
-    ("builder_shell_job.rs", RUNTIME),
     ("cmd_audit.rs", HOSTD),
     ("mod.rs", BOTH),
     ("pool.rs", BOTH),
     // Builds, bundles and the builder VM.
     ("build/build.rs", RUNTIME),
     ("build/image_lineage.rs", BOTH),
-    ("build/persistent_builder.rs", RUNTIME),
-    ("build/sandbox_record.rs", HOSTD),
-    ("build/trace_secret_scan.rs", HOSTD),
-    ("build/validate.rs", RUNTIME),
-    ("bundle/export.rs", RUNTIME),
     ("env/builder_vm/default_microvm.rs", RUNTIME),
     ("env/builder_vm/kernel.rs", RUNTIME),
     ("env/builder_vm/local_pair.rs", RUNTIME),

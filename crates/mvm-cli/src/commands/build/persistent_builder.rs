@@ -382,19 +382,14 @@ fn ensure_persistent_host_bins() -> Result<PathBuf> {
 /// can outlive this command.
 fn start_hvf_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRecord> {
     let host_bin_dir = ensure_persistent_host_bins()?;
-    let image = mvm_runtime::builder_runner::resolve_driver_builder_image()
+    let image = mvm_client::resolve_driver_builder_image()
         .map_err(|e| anyhow::anyhow!(e))
         .context("resolving the hvf builder image for the persistent builder")?;
     let (kernel, rootfs, closure_nar) = (image.kernel, image.rootfs, image.closure_nar);
 
     let session_id = format!("{:x}", current_unix_secs());
-    let mut vm = mvm_runtime::builder_runner::HvfPersistentHostVm::new(
-        kernel,
-        rootfs,
-        &workspace,
-        host_bin_dir,
-    )
-    .with_resources(DEFAULT_PERSISTENT_VCPUS, memory_mib);
+    let mut vm = mvm_client::HvfPersistentHostVm::new(kernel, rootfs, &workspace, host_bin_dir)
+        .with_resources(DEFAULT_PERSISTENT_VCPUS, memory_mib);
     // A builder pack may ship a pre-fetched toolchain closure. It rides the
     // input disk, so it has to be known before the disk is packed.
     if let Some(nar) = closure_nar {

@@ -6,7 +6,6 @@ use anyhow::Result;
 use clap::Args as ClapArgs;
 
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::shell;
 
 use crate::ui;
 
@@ -43,7 +42,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
     if args.json {
         // Capture combined stdout+stderr so we can embed it in JSON.
-        let output = shell::run_in_vm_capture(&script);
+        let output = mvm_client::run_in_vm_capture(&script);
         match output {
             Ok(out) => {
                 let combined = format!(
@@ -68,7 +67,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
     } else {
         // Stream output directly so the user sees nix progress in real time.
-        match shell::run_in_vm_visible(&script) {
+        match mvm_client::run_in_vm_visible(&script) {
             Ok(()) => {
                 ui::success("Flake is valid.");
                 Ok(())
@@ -116,7 +115,7 @@ fn render_typed_verdict(
 /// tier yet. Fails closed with an actionable error instead of letting
 /// `run_in_vm` fail deep inside a doomed vsock call.
 fn ensure_guest_exec_available() -> Result<()> {
-    mvm_runtime::linux_env::require_guest_exec_available("running 'nix flake check'")
+    mvm_client::require_guest_exec_available("running 'nix flake check'")
 }
 
 #[cfg(test)]
