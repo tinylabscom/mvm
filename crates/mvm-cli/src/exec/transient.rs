@@ -338,35 +338,66 @@ pub(super) fn combine_run_and_flush<T>(run: Result<T>, flush: Result<()>) -> Res
     }
 }
 
+/// Failure evidence only: the backend did not establish that this run stopped.
+#[derive(Debug)]
+pub(crate) struct TransientStopFailure(anyhow::Error);
+
+impl std::fmt::Display for TransientStopFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "transient stop failed; state retained: {:#}", self.0)
+    }
+}
+
+impl std::error::Error for TransientStopFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+pub(crate) fn combine_run_and_stop<T>(
+    run: Result<T>,
+    stop: std::result::Result<(), TransientStopFailure>,
+) -> Result<T> {
+    match (run, stop) {
+        (run, Ok(())) => run,
+        (Ok(_), Err(stop)) => Err(anyhow::Error::new(stop)),
+        (Err(run), Err(stop)) => Err(run.context(stop)),
+    }
+}
+
 /// Tear down the transient VM after the guest command finishes (or fails to
-/// dispatch): stop the backend VM, top up the warm pool toward its target,
-/// and remove the host VM state directory (`~/.mvm/vms/<name>`), which includes
-/// backend files such as `hvf.pid` / `console.log`.
+/// dispatch). Stop failure retains both state directories and refuses completion.
 ///
 /// The caller invokes this unconditionally after capturing the guest
 /// command's `Result` in a local — there is no `?` between the backend
 /// start and this call, so teardown always runs on both the success and
 /// error paths.
-pub(super) fn teardown_transient_vm(
+pub(crate) fn teardown_transient_vm(
     backend: &AnyBackend,
     vm_name: &str,
     requested_vm_name: &str,
     exit_audit: Option<mvm_client::launch::TransientExitAudit<'_>>,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
-) {
+) -> std::result::Result<(), TransientStopFailure> {
     use crate::commands::vm::phase_timing::SubPhase;
 
     sub.start(SubPhase::StopTransient);
-    let (stop_error, stop_timing) = match backend.stop_transient(&VmId(vm_name.to_string())) {
-        Ok(timing) => (None, timing),
+    let stop_timing = match backend.stop_transient(&VmId(vm_name.to_string())) {
+        Ok(timing) => timing,
         Err(error) => {
-            let error = format!("{error:#}");
             tracing::warn!(
-                error = %error,
+                error = %format!("{error:#}"),
                 machine = vm_name,
-                "transient stop failed; refusing to seal a potentially live session"
+                "transient stop failed; retaining state without sealing the session"
             );
-            (Some(error), None)
+            sub.finish(SubPhase::StopTransient);
+            if let Some(exit_audit) = exit_audit {
+                mvm_client::launch::record_transient_stop_failure(
+                    exit_audit,
+                    &format!("{error:#}"),
+                );
+            }
+            return Err(TransientStopFailure(error));
         }
     };
     sub.finish(SubPhase::StopTransient);
@@ -376,12 +407,7 @@ pub(super) fn teardown_transient_vm(
     // recorded: either the seal, or the reason there is none. The audit calls
     // record their own failures.
     if let Some(exit_audit) = exit_audit {
-        match stop_error {
-            Some(error) => mvm_client::launch::record_transient_stop_failure(exit_audit, &error),
-            None => {
-                let _ = mvm_client::launch::record_transient_exit(exit_audit);
-            }
-        }
+        let _ = mvm_client::launch::record_transient_exit(exit_audit);
     }
 
     // Refilling the pool is not this VM's cleanup: it boots a standby parent
@@ -400,6 +426,7 @@ pub(super) fn teardown_transient_vm(
     let requested_state_dir = mvm_core::config::vm_state_dir(requested_vm_name);
     remove_transient_state_dirs(&state_dir, &requested_state_dir);
     sub.finish(SubPhase::StateRemove);
+    Ok(())
 }
 
 /// Remove both state directories involved in a transient launch. A warm-pool
@@ -481,6 +508,65 @@ pub(super) fn restore_via_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_failure_overrides_success_but_retains_the_primary_run_error() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new().with_failing_stop());
+        for run_failed in [false, true] {
+            let run = if run_failed {
+                Err(anyhow::Error::new(std::io::Error::other(
+                    "primary workload failure",
+                )))
+            } else {
+                Ok(7)
+            };
+            let stopped = teardown_transient_vm(
+                &backend,
+                "effective",
+                "requested",
+                None,
+                &mut crate::commands::vm::phase_timing::LaunchSubMarks::new(true),
+            );
+            let error =
+                combine_run_and_stop(run, stopped).expect_err("stop failure cannot succeed");
+            assert!(error.downcast_ref::<TransientStopFailure>().is_some());
+            let diagnostic = format!("{error:#}");
+            assert!(diagnostic.starts_with("transient stop failed; state retained: "));
+            let stop_position = diagnostic.find("forced stop failure").unwrap();
+            if run_failed {
+                let workload_position = diagnostic.find("primary workload failure").unwrap();
+                assert!(stop_position < workload_position);
+                assert_eq!(
+                    error.downcast_ref::<std::io::Error>().unwrap().to_string(),
+                    "primary workload failure"
+                );
+            }
+        }
+        assert_eq!(combine_run_and_stop(Ok(7), Ok(())).unwrap(), 7);
+        let error =
+            combine_run_and_stop::<()>(Err(anyhow::anyhow!("run failed")), Ok(())).unwrap_err();
+        assert_eq!(error.to_string(), "run failed");
+        assert!(error.downcast_ref::<TransientStopFailure>().is_none());
+    }
+
+    #[test]
+    fn successful_existing_stop_cleans_only_this_runs_state() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove("MVM_PRESERVE_TRANSIENT_STATE");
+        let dirs =
+            ["effective", "requested", "other-uncertain"].map(mvm_core::config::vm_state_dir);
+        for dir in &dirs {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("plan.json"), b"state").unwrap();
+        }
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new());
+        let mut marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+        teardown_transient_vm(&backend, "effective", "requested", None, &mut marks).unwrap();
+        assert!(!dirs[0].exists() && !dirs[1].exists());
+        assert_eq!(std::fs::read(dirs[2].join("plan.json")).unwrap(), b"state");
+        assert!(marks.recorded(crate::commands::vm::phase_timing::SubPhase::StateRemove));
+    }
 
     fn volume(materialized_image: Option<&str>, read_only: bool) -> VmVolume {
         VmVolume {
@@ -683,6 +769,36 @@ mod tests {
                 crate::commands::pool::ColdStartReason::StandbysDisabled
             )
         );
+    }
+
+    #[test]
+    fn failed_transient_stop_preserves_requested_and_effective_state() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove("MVM_PRESERVE_TRANSIENT_STATE");
+        let effective = mvm_core::config::vm_state_dir("retained-effective");
+        let requested = mvm_core::config::vm_state_dir("retained-requested");
+        for dir in [&effective, &requested] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("plan.json"), b"retained plan").unwrap();
+        }
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new().with_failing_stop());
+        let mut marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+        let error = teardown_transient_vm(
+            &backend,
+            "retained-effective",
+            "retained-requested",
+            None,
+            &mut marks,
+        )
+        .expect_err("failed backend stop must propagate");
+        assert!(error.to_string().contains("forced stop failure"));
+        for dir in [&effective, &requested] {
+            assert_eq!(
+                std::fs::read(dir.join("plan.json")).expect("uncertain stop must retain state"),
+                b"retained plan"
+            );
+        }
+        assert!(!marks.recorded(crate::commands::vm::phase_timing::SubPhase::StateRemove));
     }
 
     #[test]

@@ -47,11 +47,22 @@ struct PreparedOutput {
 
 /// The outputs one transient run grants, with their scratch images.
 ///
-/// Dropping this removes the scratch directory and every image in it, which
-/// is the only cleanup a collected or refused output needs.
+/// Drop removes scratch only when no uncertain backend stop was reported.
 pub(super) struct PreparedOutputs {
     outputs: Vec<PreparedOutput>,
     _scratch: Option<tempfile::TempDir>,
+    retain_scratch: std::cell::Cell<bool>,
+}
+
+impl Drop for PreparedOutputs {
+    fn drop(&mut self) {
+        if self.retain_scratch.get()
+            && let Some(scratch) = self._scratch.take()
+        {
+            let path = scratch.keep();
+            tracing::warn!(path = %path.display(), "retained output disks after uncertain stop");
+        }
+    }
 }
 
 impl PreparedOutputs {
@@ -64,6 +75,7 @@ impl PreparedOutputs {
             return Ok(Self {
                 outputs: Vec::new(),
                 _scratch: None,
+                retain_scratch: std::cell::Cell::new(false),
             });
         }
         let mount_guests = mounts
@@ -129,6 +141,7 @@ impl PreparedOutputs {
         Ok(Self {
             outputs,
             _scratch: Some(scratch),
+            retain_scratch: std::cell::Cell::new(false),
         })
     }
 
@@ -174,6 +187,14 @@ impl PreparedOutputs {
         posture: mvm_client::admission::BootPosture,
         result: Result<T>,
     ) -> Result<T> {
+        if result.as_ref().is_err_and(|error| {
+            error
+                .downcast_ref::<crate::exec::TransientStopFailure>()
+                .is_some()
+        }) {
+            self.retain_scratch.set(true);
+            return result;
+        }
         let admitted = admitted.borrow_mut().take();
         super::up::record_transient_outcome(admitted.as_ref(), backend, posture, &result);
         let collected = self.collect(admitted.as_ref(), result.is_ok());
@@ -291,6 +312,101 @@ fn record(admitted: &AdmissionContext, guest_path: &str, outcome: OutputOutcome<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncertain_stop_retains_scratch_after_close_and_drop_without_consuming_admission() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        for run_failed in [false, true] {
+            let scratch = tempfile::tempdir().unwrap();
+            let path = scratch.path().to_path_buf();
+            let image = path.join("output.img");
+            std::fs::write(&image, b"still potentially in use").unwrap();
+            let prepared = PreparedOutputs {
+                outputs: vec![PreparedOutput {
+                    grant: OutputGrant {
+                        guest_path: "/out".into(),
+                        host_path: path.join("result").display().to_string(),
+                        max_bytes: 1024,
+                        max_entries: 2,
+                    },
+                    image: image.clone(),
+                }],
+                _scratch: Some(scratch),
+                retain_scratch: std::cell::Cell::new(false),
+            };
+            let backend = mvm_runtime::backend::AnyBackend::Mock(
+                mvm_runtime::MockBackend::new().with_failing_stop(),
+            );
+            let stopped = crate::exec::teardown_transient_vm(
+                &backend,
+                "effective",
+                "requested",
+                None,
+                &mut crate::commands::vm::phase_timing::LaunchSubMarks::new(true),
+            );
+            let run = if run_failed {
+                Err(anyhow::Error::new(std::io::Error::other(
+                    "primary command failed",
+                )))
+            } else {
+                Ok(0)
+            };
+            let result = crate::exec::combine_run_and_stop(run, stopped)
+                .map_err(|error| error.context("outer run context"));
+            let admitted = std::cell::RefCell::new(None);
+            // Even borrowing/taking the context would panic while this read is held.
+            // The uncertain path must bypass outcome/seal/collection entirely.
+            let borrowed = admitted.borrow();
+            let error = prepared
+                .close_run(
+                    &admitted,
+                    "mock",
+                    mvm_client::admission::BootPosture::block(),
+                    result,
+                )
+                .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<crate::exec::TransientStopFailure>()
+                    .is_some()
+            );
+            if run_failed {
+                assert!(error.downcast_ref::<std::io::Error>().is_some());
+            }
+            drop(borrowed);
+            drop(prepared);
+            assert_eq!(std::fs::read(&image).unwrap(), b"still potentially in use");
+            assert!(!path.join("result").exists(), "no outputs were collected");
+            std::fs::remove_dir_all(&path).unwrap();
+        }
+    }
+
+    #[test]
+    fn ordinary_success_and_failure_still_remove_output_scratch_on_drop() {
+        for failed in [false, true] {
+            let scratch = tempfile::tempdir().unwrap();
+            let path = scratch.path().to_path_buf();
+            let prepared = PreparedOutputs {
+                outputs: vec![],
+                _scratch: Some(scratch),
+                retain_scratch: std::cell::Cell::new(false),
+            };
+            let result = if failed {
+                Err(anyhow::anyhow!("ordinary failure"))
+            } else {
+                Ok(0)
+            };
+            let closed = prepared.close_run(
+                &std::cell::RefCell::new(None),
+                "mock",
+                mvm_client::admission::BootPosture::block(),
+                result,
+            );
+            assert_eq!(closed.is_err(), failed);
+            drop(prepared);
+            assert!(!path.exists());
+        }
+    }
 
     #[test]
     fn disk_capacity_leaves_room_past_the_bound() {

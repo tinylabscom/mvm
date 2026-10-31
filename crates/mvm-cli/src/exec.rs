@@ -61,8 +61,9 @@ pub use session::{SessionVm, dispatch_in_session, wait_for_agent};
 use transient::{
     BootAttempt, LeaveAt, boot_transient_vm, combine_run_and_flush,
     flush_writable_disks_before_teardown, install_ctrlc_teardown, leave_standby_when,
-    standby_to_leave, start_mode, teardown_transient_vm,
+    standby_to_leave, start_mode,
 };
+pub(crate) use transient::{TransientStopFailure, combine_run_and_stop, teardown_transient_vm};
 
 pub const EXEC_TIMEOUT_EXIT_CODE: i32 = 124;
 
@@ -610,9 +611,9 @@ fn run_inner(
     let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
     let t_start = timing.then(std::time::Instant::now);
 
-    // Keep every writable disk image's sidecar lock alive until after the VM
-    // has flushed and stopped. Materializing during request construction used
-    // to drop these guards before `run_inner` was even called.
+    // Hold writable disk-image locks for this invocation, including flush and
+    // the stop attempt. They still drop on an uncertain-stop return: retaining
+    // state files does not extend exclusive volume custody beyond this call.
     let _disk_locks = req
         .disk_volumes
         .iter()
@@ -765,12 +766,8 @@ fn run_inner(
         .map(|error| format!("{error:#}"));
     let warm_first_command_memory = warm_memory_result.and_then(Result::ok);
 
-    // Reap state dirs a killed or crashed prior transient run left behind: a
-    // SIGKILL or a closed terminal skips teardown, so `~/.mvm/vms/<name>` leaks.
-    // Keep this broad orphan-only sweep off the launch path; transient names
-    // are unique and the current VM has already completed its command, so the
-    // maintenance pass cannot delay admission or the first guest operation.
-    let _ = mvm_runtime::vm::reconcile::reap_orphan_state_dirs(Some(vm_name.as_str()));
+    // Do not opportunistically reap other runs here: their missing PID is not
+    // evidence that retained uncertain-stop state is safe to remove.
 
     sub_marks.start(crate::commands::vm::phase_timing::SubPhase::CleanupHandoff);
     let exit_audit = start_config.plan_json.as_deref().map(|signed_plan_json| {
@@ -782,13 +779,16 @@ fn run_inner(
             completed: workload_completed,
         }
     });
-    teardown_transient_vm(
+    let stopped = teardown_transient_vm(
         &backend,
         &vm_name,
         &requested_vm_name,
         exit_audit,
         &mut sub_marks,
     );
+    if stopped.is_err() {
+        return combine_run_and_stop(result, stopped);
+    }
     sub_marks.finish(crate::commands::vm::phase_timing::SubPhase::CleanupHandoff);
     let t_torn_down = timing.then(std::time::Instant::now);
 
