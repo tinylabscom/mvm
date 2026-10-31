@@ -406,7 +406,7 @@ fn warn_registered_volumes_are_not_attached(name: Option<&str>) {
     if records.is_empty() {
         return;
     }
-    mvm_runtime::base::ui::warn(&transient_volume_warning(name, records.len()));
+    crate::ui::warn(&transient_volume_warning(name, records.len()));
 }
 
 pub(super) fn transient_volume_warning(name: &str, count: usize) -> String {

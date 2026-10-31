@@ -9,9 +9,9 @@
 //! `machine warm-restore`.
 
 use anyhow::{Context, Result, bail};
+use mvm_client::checkpoint::CheckpointStore;
 use mvm_core::checkpoint::CheckpointClass;
 use mvm_core::naming;
-use mvm_runtime::checkpoint::CheckpointStore;
 
 /// User-facing input to [`fork_machine`].
 pub(in crate::commands) struct ForkMachineInput {
