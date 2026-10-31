@@ -85,8 +85,6 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("image/materialize.rs", RUNTIME),
     ("image/pull_core.rs", RUNTIME),
     ("manifest/export_oci.rs", RUNTIME),
-    ("manifest/prune.rs", RUNTIME),
-    ("manifest/rm.rs", RUNTIME),
     // Machine lifecycle.
     ("machine/checkpoint.rs", RUNTIME),
     ("machine/input_journal.rs", RUNTIME),

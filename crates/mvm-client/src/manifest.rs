@@ -168,6 +168,85 @@ pub fn verify(request: &VerifyRequest) -> Result<VerifiedSlot> {
     })
 }
 
+/// Remove one built slot; `manifest_file` also deletes the source `mvm.toml`.
+#[derive(Debug, Clone, Default)]
+pub struct RemoveRequest {
+    pub path: Option<String>,
+    pub force: bool,
+    pub manifest_file: bool,
+}
+
+/// What `remove` deleted.
+#[derive(Debug, Clone)]
+pub struct RemovedSlot {
+    pub slot_hash: String,
+    pub manifest_path: PathBuf,
+    pub manifest_file_deleted: bool,
+}
+
+/// Delete a slot from the local registry and audit it.
+pub fn remove(request: &RemoveRequest) -> Result<RemovedSlot> {
+    let (canonical, slot_hash) = resolve(
+        request.path.as_deref(),
+        "No manifest found from cwd. Pass a path explicitly or `--force` if removing an orphaned slot by hash.",
+    )?;
+    tmpl::template_delete_slot(&slot_hash, request.force)?;
+    let manifest_file_deleted = request.manifest_file && canonical.exists();
+    if manifest_file_deleted {
+        std::fs::remove_file(&canonical)
+            .with_context(|| format!("Failed to delete manifest file {}", canonical.display()))?;
+    }
+    mvm_core::audit_emit!(
+        SlotRemove,
+        vm: slot_hash.clone(),
+        "manifest_path={} manifest_file_deleted={manifest_file_deleted}",
+        canonical.display(),
+    );
+    Ok(RemovedSlot {
+        slot_hash,
+        manifest_path: canonical,
+        manifest_file_deleted,
+    })
+}
+
+/// A slot whose source manifest is gone; `reason` is filled only by a dry run.
+#[derive(Debug, Clone, Serialize)]
+pub struct OrphanSlot {
+    pub slot_hash: String,
+    pub reason: Option<String>,
+}
+
+/// Remove orphaned slots, or with `dry_run` only report them with reasons.
+pub fn prune_orphans(dry_run: bool) -> Result<Vec<OrphanSlot>> {
+    if !dry_run {
+        let (count, removed) = tmpl::template_prune_orphan_slots()?;
+        mvm_core::audit_emit!(SlotPrune, "source=manifest_prune count={count}");
+        return Ok(removed
+            .into_iter()
+            .map(|slot_hash| OrphanSlot {
+                slot_hash,
+                reason: None,
+            })
+            .collect());
+    }
+    let mut orphans = Vec::new();
+    for slot_hash in tmpl::template_list_slot_hashes()? {
+        let dir = mvm_core::manifest::slot_dir(&slot_hash);
+        let reason = match PersistedManifest::read_from_slot(Path::new(&dir)) {
+            Ok(p) if !Path::new(&p.manifest_path).exists() => {
+                format!("manifest gone: {}", p.manifest_path)
+            }
+            Err(e) => format!("unreadable manifest.json: {e}"),
+            Ok(_) => continue,
+        };
+        orphans.push(OrphanSlot {
+            slot_hash,
+            reason: Some(reason),
+        });
+    }
+    Ok(orphans)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,5 +596,41 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.to_string().contains("invalid slot revision hash"));
+    }
+
+    #[test]
+    fn prune_reports_orphans_then_remove_deletes_slot_and_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(temp.path());
+        let (path, persisted) = fixture(&temp.path().join("project"), Some("demo"));
+        assert!(prune_orphans(true).unwrap().is_empty());
+
+        let removed = remove(&RemoveRequest {
+            path: Some(path.display().to_string()),
+            force: false,
+            manifest_file: true,
+        })
+        .unwrap();
+        assert_eq!(removed.slot_hash, persisted.manifest_hash);
+        assert!(removed.manifest_file_deleted);
+        assert!(!path.exists());
+        assert!(!Path::new(&mvm_core::manifest::slot_dir(&persisted.manifest_hash)).exists());
+
+        let (path, persisted) = fixture(&temp.path().join("again"), None);
+        std::fs::remove_file(&path).unwrap();
+        let dry = prune_orphans(true).unwrap();
+        assert_eq!(dry.len(), 1);
+        assert_eq!(dry[0].slot_hash, persisted.manifest_hash);
+        assert!(
+            dry[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .starts_with("manifest gone")
+        );
+        let real = prune_orphans(false).unwrap();
+        assert_eq!(real.len(), 1);
+        assert!(prune_orphans(true).unwrap().is_empty());
     }
 }
