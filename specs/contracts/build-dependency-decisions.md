@@ -243,3 +243,91 @@ key matches, so a warm local build does not show the nested compile.
   feature-resolved build.
 - The #4560 figures are for the musl target; the host-target closure is 149 unique crates.
 - No wall-clock measurement of the double compile was taken.
+
+
+## Rust line-count record
+
+[#4839](https://github.com/tinylabscom/mvm/issues/4839) asks for the Rust footprint under 1,000,000 lines on a declared, reproducible measurement. This section declares it and records the count at `f8aa6b12fa`. Nothing is excluded: every tracked `*.rs` file (`git ls-files '*.rs'`) is counted once, in the first category that matches.
+
+- **Physical lines** are `wc -l` style line counts of the file.
+- **SLOC** is physical lines minus blank lines and lines whose first token starts `//`. Block comments are not stripped, so it overstates executable code slightly; it is not a parser-grade figure.
+- **vendored**: under `third_party/`. **generated**: one of `@generated`, `do not edit`, `automatically generated`, `auto-generated` (any case) in the first 10 lines. **tests-benches**: under a `tests/` or `benches/` directory. **first-party**: everything else, and it *includes inline `#[cfg(test)]` modules*, which are not separable by path.
+
+| Category | Files | Physical lines | SLOC |
+|---|---:|---:|---:|
+| first-party | 2,247 | 1,066,996 | 833,993 |
+| tests-benches | 281 | 93,230 | 77,031 |
+| generated | 1 | 378 | 377 |
+| vendored | 285 | 76,259 | 55,629 |
+| total | 2,814 | 1,236,863 | 967,030 |
+
+Run from a clean checkout; the numbers move with every merge, so re-run rather than trust this table.
+
+```sh
+git ls-files '*.rs' | while IFS= read -r f; do
+  case "$f" in third_party/*) c=vendored;;
+    *) if head -n 10 "$f" | grep -qiE '@generated|do not edit|automatically generated|auto-generated'; then c=generated
+       elif printf '%s' "$f" | grep -qE '(^|/)(tests|benches)/'; then c=tests-benches
+       else c=first-party; fi;; esac
+  awk -v c="$c" -v f="$f" '{n++} NF && $1 !~ /^\/\//{s++} END{printf "%s\t%d\t%d\t%s\n", c, n, s, f}' "$f"
+done | awk -F'\t' '{k[$1]; files[$1]++; p[$1]+=$2; s[$1]+=$3; P+=$2; S+=$3; F++}
+  END{for(c in k) printf "%-14s files=%-5d physical=%-8d sloc=%d\n", c, files[c], p[c], s[c]; printf "%-14s files=%-5d physical=%-8d sloc=%d\n","total",F,P,S}' | sort
+```
+
+By area (same method, grouped by `crates/<name>`, `crates/deps/<name>`, `third_party/<name>` or top-level directory):
+
+| Area | Physical lines | SLOC |
+|---|---:|---:|
+| `crates/mvm-cli` | 164,384 | 132,527 |
+| `crates/mvm-hostd` | 163,938 | 127,841 |
+| `crates/mvm-core` | 132,150 | 103,644 |
+| `crates/mvm-runtime` | 91,060 | 70,707 |
+| `crates/mvm-client` | 86,341 | 71,130 |
+| `crates/mvm-build` | 85,571 | 66,535 |
+| `crates/mvm-agentd` | 79,352 | 59,796 |
+| `crates/mvm-contract` | 58,149 | 42,794 |
+| `crates/mvm-vmm` | 53,860 | 41,562 |
+| `xtask` | 46,941 | 37,606 |
+| `crates/mvm-fs` | 38,430 | 29,782 |
+| `third_party/gix-0.87.1` | 33,391 | 24,973 |
+| `tests` | 29,061 | 24,158 |
+| `crates/mvm-conformance` | 24,910 | 19,866 |
+| `third_party/am-fs-ext4` | 24,723 | 17,385 |
+| `crates/mvm-backends` | 23,114 | 17,807 |
+| `crates/mvm-builder-guest` | 19,299 | 13,571 |
+| `crates/mvm-compiler` | 13,978 | 11,685 |
+| `crates/mvm-hostlib` | 10,161 | 8,525 |
+| `crates/mvm-sdk` | 10,000 | 7,812 |
+| `third_party/gix-object-0.64.1` | 6,410 | 4,843 |
+| `crates/mvm-http` | 5,046 | 4,034 |
+| `crates/deps/libkrun-sys` | 4,146 | 2,815 |
+| `third_party/notify-8.2.0` | 4,125 | 2,943 |
+| `third_party/io-extras-0.19.0` | 4,079 | 3,070 |
+| `crates/mvm-gpu` | 4,042 | 3,433 |
+| `crates/mvm-bundler` | 3,386 | 2,926 |
+| `crates/mvm-capture` | 3,074 | 2,631 |
+| `crates/deps/mvm-macho-sign` | 1,594 | 1,525 |
+| `third_party/sigstore-tsa-0.11.0` | 1,535 | 1,045 |
+| `crates/mvm-gpu-shim-core` | 1,504 | 1,234 |
+| `third_party/sigstore-rekor-0.11.0` | 1,492 | 1,043 |
+| `web` | 1,451 | 1,196 |
+| `crates/mvm-gpu-cuda-shim` | 1,444 | 1,110 |
+| `crates/mvm-gpu-cudart-shim` | 854 | 676 |
+| `crates/mvm-host-services` | 780 | 566 |
+| `crates/mvm-setpriv` | 755 | 611 |
+| `crates/runmvm-client` | 617 | 562 |
+| `crates/mvm-net` | 575 | 347 |
+| `third_party/arrayref` | 504 | 327 |
+| `crates/mvm-gpu-nvml-shim` | 448 | 324 |
+| `src` | 169 | 54 |
+| `build.rs` | 17 | 6 |
+| `examples` | 3 | 3 |
+
+```sh
+git ls-files '*.rs' | while IFS= read -r f; do
+  a=$(printf '%s' "$f" | awk -F/ '$1=="crates"&&$2=="deps"{print $1"/"$2"/"$3;next} $1=="crates"||$1=="third_party"{print $1"/"$2;next} {print $1}')
+  awk -v a="$a" '{n++} NF && $1 !~ /^\/\//{s++} END{printf "%s\t%d\t%d\n", a, n, s}' "$f"
+done | awk -F'\t' '{p[$1]+=$2; s[$1]+=$3} END{for(a in p) printf "%-40s physical=%-8d sloc=%d\n", a, p[a], s[a]}' | sort -t= -k2 -rn
+```
+
+The total is 1,236,863 physical lines, so the strict under-1,000,000 target is still open; this record measures it and does not meet it.
