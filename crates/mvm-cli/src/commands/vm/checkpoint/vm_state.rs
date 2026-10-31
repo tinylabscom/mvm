@@ -59,7 +59,7 @@ pub(super) fn rootfs_from_mode_json(state_dir: &std::path::Path) -> Result<Optio
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let meta: mvm_runtime::base::runtime_meta::VmRuntimeMeta =
+    let meta: mvm_client::checkpoint::VmRuntimeMeta =
         serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
     Ok(meta.rootfs_path.map(PathBuf::from))
 }
@@ -72,7 +72,7 @@ pub(super) fn rootfs_from_mode_json(state_dir: &std::path::Path) -> Result<Optio
 /// hand-kept list here is how a live HVF VM used to read as stopped, and a
 /// root-owned Firecracker with it.
 pub(super) fn vm_is_running(name: &str) -> bool {
-    mvm_runtime::checkpoint::vm_is_running(name)
+    mvm_client::checkpoint::vm_is_running(name)
 }
 
 /// fs_quick clones the instance rootfs, so the guest must not be writing:
@@ -106,7 +106,7 @@ pub(super) fn hvf_pause_marker_present(name: &str) -> bool {
 pub(super) fn fc_pause_marker_matches_live_pid(name: &str) -> bool {
     let marker = std::fs::read_to_string(vm_state_dir(name).join("fc.paused")).ok();
     let live =
-        mvm_runtime::microvm::fc_pid_path(name).and_then(|p| std::fs::read_to_string(p).ok());
+        mvm_client::checkpoint::fc_pid_path(name).and_then(|p| std::fs::read_to_string(p).ok());
     matches!((marker, live), (Some(m), Some(l)) if !m.trim().is_empty() && m.trim() == l.trim())
 }
 
@@ -119,7 +119,8 @@ pub(super) fn supervisor_config_digest(state_dir: &std::path::Path) -> String {
 }
 
 pub(super) fn runtime_contract_for_checkpoint(name: &str) -> Result<Option<String>> {
-    Ok(mvm_runtime::base::runtime_meta::read(name)?.and_then(|meta| meta.runtime_overlay_version))
+    Ok(mvm_client::checkpoint::read_runtime_meta(name)?
+        .and_then(|meta| meta.runtime_overlay_version))
 }
 
 /// The backend that actually owns `name`, falling back to the host default for
