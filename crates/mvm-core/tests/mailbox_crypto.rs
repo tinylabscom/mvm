@@ -744,3 +744,16 @@ fn legacy_mvmd_v1_fixture_is_not_reinterpreted_as_the_canonical_envelope() {
         MailboxError::Decoding
     );
 }
+
+#[test]
+fn deeply_nested_frames_within_the_size_bound_are_refused_without_recursion() {
+    let depth = 500_000;
+    for (open, close) in [("[", "]"), ("{\"routing\":", "}")] {
+        let frame = format!("{}0{}", open.repeat(depth), close.repeat(depth));
+        assert!(frame.len() <= mvm_contract::protocol::mailbox::MAX_ENCODED_ENVELOPE_BYTES);
+        assert_eq!(
+            decode_envelope(frame.as_bytes()).expect_err("nesting must be refused"),
+            MailboxError::Decoding
+        );
+    }
+}
