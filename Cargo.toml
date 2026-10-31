@@ -313,7 +313,6 @@ mvm-agentd = { path = "crates/mvm-agentd", version = "0.26.0" }
 mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.26.0" }
 mvm-builder-guest = { path = "crates/mvm-builder-guest", version = "0.26.0" }
 mvm-host-services = { path = "crates/mvm-host-services", version = "0.26.0" }
-mvm-hostlib = { path = "crates/mvm-hostlib", version = "0.26.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.26.0", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.26.0", default-features = false }
 mvm-vmm = { path = "crates/mvm-vmm", version = "0.26.0" }
