@@ -1493,9 +1493,8 @@ mod connect_resilience_tests {
         );
     }
 
-    /// A caller that sets nothing still gets a bound. `None` used to mean
-    /// "wait forever", which is the shape that produced a half-hour hang with
-    /// no output.
+    /// A caller that sets nothing still gets a bound; an unbounded connect
+    /// can hang for half an hour with no output.
     #[test]
     fn the_default_connect_budget_is_bounded() {
         let inner = Client::builder()

@@ -395,8 +395,8 @@ fn dev_build_via_builder_vm_uncached(
         // `/work#<attr>` and the host reads the daemon-exported artifacts off
         // the `/job` share. No reachable daemon → `None`; a daemon build
         // failure or transport error → warn. Either falls through to the
-        // single-shot builder below — the safety net. The legacy in-VM
-        // shell-job dispatch was removed; typed is the only persistent path.
+        // single-shot builder below — the safety net. Typed is the only
+        // persistent path.
         match try_typed_persistent_build(env, &record, profile) {
             Some(Ok(result)) => return Ok(result),
             Some(Err(e)) => {
@@ -979,11 +979,10 @@ fn unique_dev_staging_dir() -> String {
 /// Removes a staging directory on drop unless [`Self::disarm`] was called
 /// first.
 ///
-/// `dev_build_with_builder_vm` used to leak `.staging-*` dirs under
-/// `dev_builds_dir()` on a mid-build failure: the cleanup was only reached
-/// on the success path, so a builder error or an unexpected artifact shape
-/// (`InstallVolume` for a flake build) returned early and left the staged
-/// files behind forever. Tying removal to `Drop` makes every exit path —
+/// `dev_build_with_builder_vm` must not leak `.staging-*` dirs under
+/// `dev_builds_dir()` on a mid-build failure (a builder error, or an
+/// unexpected artifact shape such as `InstallVolume` for a flake build).
+/// Tying removal to `Drop` makes every exit path —
 /// present and future — clean up structurally instead of needing a matching
 /// `remove_dir_all` at each `return`/`?`/`bail!`.
 struct StagingDirGuard {

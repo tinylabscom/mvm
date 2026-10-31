@@ -189,10 +189,8 @@ fn await_started_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Re
         )?;
     }
 
-    // The socket wait used to live in the launch script as
-    // `for i in $(seq 1 30); do [ -S sock ] && break; sleep 0.1; done`, which
-    // put a 100 ms floor under every launch — the socket normally appears in
-    // single-digit milliseconds and was rounded up to the tick. Waiting here
+    // A fixed-tick shell wait would put a 100 ms floor under every launch; the
+    // socket normally appears in single-digit milliseconds. Waiting here
     // lets it use the shared backoff, and keeps the shell to the one thing it
     // is needed for: becoming root to exec Firecracker.
     wait_for_api_socket(std::path::Path::new(abs_socket), API_SOCKET_TIMEOUT).map_err(|e| {

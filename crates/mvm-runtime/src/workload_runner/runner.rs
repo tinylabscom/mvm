@@ -2408,9 +2408,8 @@ mod tests {
             .expect("secret-bearing workload boots");
 
         // The placeholders reach the workload with each `RunEntrypoint`, from
-        // the host's environment synthesis. The kernel cmdline used to carry
-        // them hex-encoded for a shell `/init` that no booted guest runs; any
-        // guest process can read `/proc/cmdline`, so nothing of them rides it.
+        // the host's environment synthesis. Any guest process can read
+        // `/proc/cmdline`, so nothing of them rides the kernel cmdline.
         let specs = runner.driver.booted_specs();
         let cmdline = &specs[0].cmdline;
         assert!(!cmdline.contains("mvm.secret_env"), "{cmdline}");
@@ -2568,9 +2567,7 @@ mod tests {
         let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
 
-        // This used to be the fork that broke everything: no secrets picked
-        // raw TCP, secrets picked WireRequest, and the guest was never told
-        // which. There is one transport now, so carrying secrets changes what
+        // There is one transport, so carrying secrets changes what
         // the endpoint does with a flow -- not which protocol the guest speaks.
         let raw_runner = WorkloadRunner::new(
             MockDriver::default(),
