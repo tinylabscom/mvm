@@ -54,6 +54,7 @@ pub mod bundle;
 pub mod bundle_preview;
 pub mod caller_identity;
 pub mod checkpoint;
+pub mod codesign;
 pub mod connect;
 pub mod display_input;
 pub mod drive;
@@ -97,6 +98,9 @@ pub mod workspace_apply;
 
 /// The workload authoring surface: builders, constructors, IR emission.
 pub use mvm_sdk as authoring;
+
+/// The host signing keypair (`host-signer.ed25519`) every admission signs under.
+pub use mvm_hostd::audit::host_keypair;
 
 pub use mvm_contract::grants::{CpuGrant, EgressGrant, Grants, WallClockGrant};
 pub use mvm_contract::policy::approval;

@@ -141,6 +141,30 @@ pub fn info(request: &InfoRequest) -> Result<SlotInfo> {
     })
 }
 
+/// True when a `--manifest` argument (a path, or a built slot hash) selects an
+/// OCI image source rather than a flake or wasm module.
+pub fn uses_oci_image(arg: &str) -> Result<bool> {
+    use mvm_core::manifest::{Manifest, is_slot_hash_dirname};
+
+    let path = Path::new(arg);
+    if path.exists() {
+        let manifest_path = resolve_manifest_config_path(path)
+            .with_context(|| format!("Resolving --manifest {arg:?}"))?;
+        let manifest = Manifest::read_file(&manifest_path)
+            .with_context(|| format!("Reading manifest {}", manifest_path.display()))?;
+        return Ok(manifest.is_image_source());
+    }
+    if !is_slot_hash_dirname(arg) {
+        return Ok(false);
+    }
+    let Ok(persisted) = tmpl::template_load_slot(arg) else {
+        return Ok(false);
+    };
+    Ok(Manifest::read_file(Path::new(&persisted.manifest_path))
+        .map(|manifest| manifest.is_image_source())
+        .unwrap_or(false))
+}
+
 /// Verify checksums using the runtime verifier. Signature checking is refused,
 /// not silently downgraded to checksum-only verification.
 pub fn verify(request: &VerifyRequest) -> Result<VerifiedSlot> {
@@ -395,6 +419,17 @@ mod tests {
             .unwrap()
             .is_empty()
         );
+    }
+
+    #[test]
+    fn uses_oci_image_reads_a_path_and_treats_unknown_slots_as_not_oci() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(temp.path());
+        let (path, _) = fixture(&temp.path().join("project"), Some("demo"));
+        assert!(!uses_oci_image(path.to_str().unwrap()).unwrap());
+        assert!(!uses_oci_image("not-a-path-or-slot").unwrap());
+        assert!(!uses_oci_image(&"0".repeat(64)).unwrap());
     }
 
     #[test]

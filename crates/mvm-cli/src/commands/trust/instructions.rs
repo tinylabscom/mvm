@@ -133,7 +133,7 @@ fn init(args: InitArgs) -> Result<()> {
             templates::project_policy(enforcement),
         ),
         None => {
-            let signer = mvm_hostd::audit::host_keypair::load_or_init()
+            let signer = mvm_client::host_keypair::load_or_init()
                 .context("loading this host's signing key for the starter policy")?;
             (
                 mvm_core::config::instruction_trust_policy_path(),
@@ -210,7 +210,7 @@ fn files_to_sign(args: &SignArgs) -> Result<Vec<PathBuf>> {
 
 fn load_signing_key(path: Option<&Path>) -> Result<SigningKey> {
     let Some(path) = path else {
-        return Ok(mvm_hostd::audit::host_keypair::load_or_init()
+        return Ok(mvm_client::host_keypair::load_or_init()
             .context("loading this host's signing key")?
             .signing);
     };
