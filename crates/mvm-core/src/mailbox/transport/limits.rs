@@ -162,6 +162,13 @@ impl ResourceLedger {
         self.retries.remove(peer);
     }
 
+    /// Drop everything held for an abandoned `peer`, freeing its slot. Only an
+    /// adapter calls this; a live peer cannot reset its own budget by reconnecting.
+    pub fn forget_peer(&mut self, peer: &TransportIdentity) {
+        self.streams.remove(peer);
+        self.retries.remove(peer);
+    }
+
     /// Charge `bytes` to relay usage. Direct traffic is never charged.
     pub fn charge_relay(
         &mut self,
@@ -266,6 +273,29 @@ mod tests {
         );
         ledger.reset_retries(&peer(1));
         ledger.take_retry(&peer(1)).expect("restored");
+    }
+
+    #[test]
+    fn forgetting_exhausted_peers_frees_their_slots_for_new_peers() {
+        let mut ledger = ResourceLedger::new(small());
+        for n in [1, 2] {
+            ledger.open_stream(peer(n)).expect("stream");
+            ledger.take_retry(&peer(n)).expect("one");
+            ledger.take_retry(&peer(n)).expect("two");
+        }
+        assert_eq!(
+            ledger.take_retry(&peer(3)),
+            Err(ResourceLimitError::TooManyPeers)
+        );
+        ledger.forget_peer(&peer(1));
+        ledger.forget_peer(&peer(2));
+        ledger.take_retry(&peer(3)).expect("slot freed");
+        ledger.open_stream(peer(4)).expect("stream slot freed");
+        assert_eq!(
+            ledger.take_retry(&peer(1)),
+            Ok(()),
+            "a forgotten peer starts over"
+        );
     }
 
     #[test]
