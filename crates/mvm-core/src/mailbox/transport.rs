@@ -825,5 +825,8 @@ pub fn connect_with_fallback(
     Err(TransportError::AllRoutesFailed)
 }
 
+mod limits;
+pub use limits::{ResourceLedger, ResourceLimitError, ResourceLimits, ResourceLimitsBuilder};
+
 #[cfg(test)]
 mod tests;
