@@ -61,7 +61,7 @@ jobs:
             image: python:3.12-alpine
             python: python3
           - platform: darwin-arm64
-            runner: macos-14
+            runner: macos-15
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
