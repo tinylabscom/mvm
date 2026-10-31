@@ -112,6 +112,27 @@ pub enum TransportPath {
     PublicRelay,
 }
 
+/// Which path classes a caller admits. The default refuses public relays, so
+/// a public path is never a silent fallback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RelayPolicy {
+    DirectOnly,
+    #[default]
+    CustomerRelays,
+    PublicRelaysAllowed,
+}
+
+impl RelayPolicy {
+    #[must_use]
+    pub fn allows(self, path: TransportPath) -> bool {
+        match path {
+            TransportPath::Direct => true,
+            TransportPath::CustomerRelay => self >= Self::CustomerRelays,
+            TransportPath::PublicRelay => self == Self::PublicRelaysAllowed,
+        }
+    }
+}
+
 /// Confidentiality posture asserted by the signed transport binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -324,7 +345,7 @@ pub struct OverlayQuery {
     pub execution_epoch: ExecutionEpoch,
     pub policy_epoch: u64,
     pub now_unix_ms: i64,
-    pub allow_public_relays: bool,
+    pub relay_policy: RelayPolicy,
 }
 
 /// Route resolution is synchronous and bounded; concrete overlays may refresh
@@ -391,7 +412,7 @@ impl PeerOverlay for InMemoryPeerOverlay {
                     && claims.policy_epoch == query.policy_epoch
                     && claims.not_before_unix_ms <= query.now_unix_ms
                     && query.now_unix_ms < claims.expires_at_unix_ms
-                    && (query.allow_public_relays || claims.path != TransportPath::PublicRelay)
+                    && query.relay_policy.allows(claims.path)
             })
             .cloned()
             .collect();

@@ -243,7 +243,7 @@ fn overlay_orders_direct_then_customer_relay_and_requires_public_relay_opt_in() 
         execution_epoch: epoch(),
         policy_epoch: 12,
         now_unix_ms: NOW,
-        allow_public_relays: false,
+        relay_policy: RelayPolicy::default(),
     };
     assert_eq!(
         overlay.resolve(&query).expect("routes"),
@@ -251,11 +251,42 @@ fn overlay_orders_direct_then_customer_relay_and_requires_public_relay_opt_in() 
     );
     let routes = overlay
         .resolve(&OverlayQuery {
-            allow_public_relays: true,
+            relay_policy: RelayPolicy::PublicRelaysAllowed,
             ..query
         })
         .expect("routes");
     assert_eq!(routes.last(), Some(&public));
+}
+
+#[test]
+fn relay_policy_defaults_to_no_public_relay_and_orders_path_classes() {
+    use TransportPath::{CustomerRelay, Direct, PublicRelay};
+    assert_eq!(RelayPolicy::default(), RelayPolicy::CustomerRelays);
+    let admitted = |p: RelayPolicy| [Direct, CustomerRelay, PublicRelay].map(|t| p.allows(t));
+    assert_eq!(admitted(RelayPolicy::DirectOnly), [true, false, false]);
+    assert_eq!(admitted(RelayPolicy::CustomerRelays), [true, true, false]);
+    assert_eq!(
+        admitted(RelayPolicy::PublicRelaysAllowed),
+        [true, true, true]
+    );
+}
+
+#[test]
+fn direct_only_policy_drops_customer_relay_routes() {
+    let authority = SigningKey::from_bytes(&id(34));
+    let (_, direct) = signed_route(TransportPath::Direct, 35, &authority);
+    let (_, customer) = signed_route(TransportPath::CustomerRelay, 36, &authority);
+    let mut overlay = InMemoryPeerOverlay::default();
+    overlay.register(0, direct.clone()).expect("register");
+    overlay.register(1, customer).expect("register");
+    let query = OverlayQuery {
+        address: address(),
+        execution_epoch: epoch(),
+        policy_epoch: 12,
+        now_unix_ms: NOW,
+        relay_policy: RelayPolicy::DirectOnly,
+    };
+    assert_eq!(overlay.resolve(&query).expect("routes"), vec![direct]);
 }
 
 #[test]
@@ -265,7 +296,7 @@ fn overlay_partition_shutdown_and_refusal_are_distinct() {
         execution_epoch: epoch(),
         policy_epoch: 12,
         now_unix_ms: NOW,
-        allow_public_relays: false,
+        relay_policy: RelayPolicy::default(),
     };
     let mut overlay = InMemoryPeerOverlay::default();
     assert_eq!(
