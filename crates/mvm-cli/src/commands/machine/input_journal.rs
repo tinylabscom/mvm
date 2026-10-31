@@ -11,11 +11,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use mvm_client::replay_input::{ReplayInputBinding, ReplayInputRef, ReplayInputStore};
 use mvm_contract::protocol::agent_session::AgentSessionId;
 use mvm_core::util::atomic_io::FileLock;
-use mvm_runtime::agent_session::replay_input::{
-    ReplayInputBinding, ReplayInputRef, ReplayInputStore,
-};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

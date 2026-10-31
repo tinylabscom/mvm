@@ -7,13 +7,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use mvm_core::arch::GuestArch;
-use mvm_core::config;
-use mvm_core::vm_backend::WarmPrewarmSource;
-use mvm_runtime::{
+use mvm_client::{
     WarmArtifactBuildPlan, WarmArtifactKey, WarmArtifactPlanResolver, WarmArtifactStore,
     WarmArtifactWorker, WarmGoldenVmFactory,
 };
+use mvm_core::arch::GuestArch;
+use mvm_core::config;
+use mvm_core::vm_backend::WarmPrewarmSource;
 
 /// Resolve a host-path-free prewarm source into concrete boot inputs. The
 /// runtime worker still re-checks regular-file status and content digests
@@ -44,7 +44,7 @@ pub fn resolve_warm_artifact_plan(
         }
         WarmPrewarmSource::Template { template_id } => {
             let (_, kernel, _initramfs, rootfs, _) =
-                mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot(template_id)
+                mvm_client::template_artifacts_for_slot(template_id)
                     .with_context(|| format!("resolve prewarm template {template_id:?}"))?;
             Ok(WarmArtifactBuildPlan {
                 rootfs_path: PathBuf::from(rootfs),

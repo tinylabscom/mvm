@@ -145,7 +145,13 @@ pub use launch::{
     RemoveOptions,
 };
 pub use local::{LocalBackend, auto_selected_backend_name, default_vcpus};
+pub use mvm_runtime::agent_session::replay_input;
+pub use mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot;
 pub use mvm_runtime::workload_runner::StopTiming;
+pub use mvm_runtime::{
+    WarmArtifactBuildPlan, WarmArtifactKey, WarmArtifactPlanResolver, WarmArtifactStore,
+    WarmArtifactWorker, WarmGoldenVmFactory,
+};
 pub use oci_bundle::{
     MaterializedOciBundle, OciBundleRequest, OciBundleResult, export_materialized_oci_bundle,
     materialize_and_export_oci_bundle, materialize_oci_bundle,
