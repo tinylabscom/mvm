@@ -36,7 +36,6 @@ use ed25519_dalek::Signer;
 #[cfg(test)]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1323,11 +1322,7 @@ fn run_profile_name(profile: RunProfile) -> &'static str {
     profile.as_str()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
-}
+use mvm_contract::hash::sha256_hex;
 
 fn profile_allows_dev_init(profile: RunProfile) -> bool {
     profile.grants().dev_guest

@@ -434,11 +434,7 @@ fn gzip_deterministic(data: &[u8]) -> Result<Vec<u8>, InitramfsBuildError> {
     Ok(enc.finish()?)
 }
 
-/// Lowercase-hex SHA-256 of `data`.
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(data))
-}
+use mvm_contract::hash::sha256_hex;
 
 /// Install a prebuilt initramfs directory into the cache atomically.
 pub fn install_initramfs_into_cache(
