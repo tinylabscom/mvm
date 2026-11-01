@@ -30,13 +30,10 @@ pub(in crate::commands) struct Args {
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum ManifestAction {
     /// List built manifest slots (manifest path, optional name, last build)
-    #[command(alias = "list")]
     Ls(ls::Args),
     /// Print details for one slot (manifest, current revision, snapshot, provenance)
-    #[command(alias = "show")]
     Info(info::Args),
     /// Remove a slot's artifacts from the local registry
-    #[command(alias = "delete")]
     Rm(rm::Args),
     /// Cleanup orphaned slots (slots whose source manifest file is gone)
     Prune(prune::Args),

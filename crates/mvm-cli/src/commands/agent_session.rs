@@ -58,7 +58,6 @@ pub(in crate::commands) enum AgentSessionAction {
     /// Record a new durable agent session, resident from the start
     Open(OpenArgs),
     /// List every durable agent session recorded on this host
-    #[command(alias = "list")]
     Ls(LsArgs),
     /// Print one session's recorded state in full
     Show(ShowArgs),

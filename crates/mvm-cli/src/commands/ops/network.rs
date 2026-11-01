@@ -17,7 +17,6 @@ pub(in crate::commands) struct Args {
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum NetworkAction {
     /// Create a named dev network with its own bridge and subnet
-    #[command(alias = "new")]
     Create {
         /// Network name (lowercase alphanumeric + hyphens)
         name: String,
@@ -26,7 +25,6 @@ pub(in crate::commands) enum NetworkAction {
         subnet: Option<String>,
     },
     /// List all dev networks
-    #[command(alias = "ls")]
     List {
         /// Emit machine-readable JSON to stdout
         #[arg(long)]
@@ -41,7 +39,6 @@ pub(in crate::commands) enum NetworkAction {
         json: bool,
     },
     /// Remove a named network
-    #[command(alias = "rm")]
     Remove {
         /// Network name
         name: String,
