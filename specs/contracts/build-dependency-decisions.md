@@ -160,9 +160,47 @@ findings are all in vendored `third_party/` crates (`gix`: `async-std`;
 `x509-tsp`; `sigstore-rekor`: `hex`, `sigstore-crypto`, `url`; `am-fs-ext4`:
 `am-fs-core`). Those are feature-gated optional dependencies the scanner cannot
 resolve, and editing vendored manifests would widen the patch against upstream
-for no closure change, so none is removed. The only workspace-level declaration
-with no consumer is the `mvm-hostlib` entry in `[workspace.dependencies]`;
-nothing depends on that crate, and deleting the entry removes no package.
+for no closure change, so none is removed. The `mvm-hostlib` entry in
+`[workspace.dependencies]` had no consumer and has since been deleted, which
+removed no package.
+
+### Per-dependency detail: native code, features, API use
+
+Same commands and `8201aee9`-era lock as the closure table (`cargo tree ... -f
+'{p}|{f}'`, host target; the `mvm-builder-guest` row uses
+`--target aarch64-unknown-linux-musl`). "Files" counts source files that name
+the crate path, not call sites.
+
+Native code (a C or assembly build step) reaches only the host closures:
+
+| Crate | Pulled in by | Features on | API used in this tree |
+|---|---|---|---|
+| `ring` 0.17 | `rustls` (`ring` provider), `rcgen` | `alloc`, `dev_urandom_fallback` | none directly; via `rustls` (`mvm-hostd`, `mvm-http`, `mvm-cli`, `mvm-core`) and `rcgen` (`mvm-core`, `mvm-http`) |
+| `aws-lc-sys` 0.45 | `aws-lc-rs`, from `rustls-webpki` and `sigstore-crypto`/`sigstore-verify` | `prebuilt-nasm` | none directly; `sigstore_verify` is named in one `mvm-core` file (behind `manifest-verify`) |
+| `tree-sitter` 0.26 and the JavaScript, Python, TypeScript and Nix grammars | `mvm-compiler`, `mvm-sdk` | `std` | `tree_sitter` in 5 `mvm-compiler` files and 1 `mvm-sdk` file: the source analysis behind decorator compilation |
+| `blake3` 1.8 | `mvm-cli`, `mvm-runtime`, `mvm-sdk` | `default`, `std` | one file in each of those crates |
+
+The two guest closures that ship inside every VM, `mvm-host-services` (102) and
+`mvm-agentd` (101), contain none of these: their only crate with a build-time C
+interaction is `libc`. `mvm-builder-guest` (87) reaches `libc` and
+`mvm-core` and no C-compiling crate. `cc` and `cmake` appear only in the
+`mvmctl` closure, as build tools of the crates above.
+
+Feature sets worth a later look, recorded here rather than changed because no
+measurement shows a closure or time win yet:
+
+- `chrono` is declared with its default features, so `mvmctl` enables `oldtime`,
+  `wasmbind`, `winapi` and `iana-time-zone` alongside `serde` and `clock`. It is
+  the most widely used time type (about 215 `Utc`, 108 `Duration` and 64
+  `DateTime` uses across 10 crates), so any feature trim must keep `clock` and
+  `serde`; the `mvm-contract` entry already trims to `serde` and `alloc`.
+- `serde_json` gains `preserve_order` (and `indexmap`) in the `mvmctl` build
+  because the `tree-sitter` build script depends on it; that is why two
+  `serde_json` feature lines appear in the tree.
+- `tokio` in `mvmctl` carries `fs`, `process` and `signal` beyond the
+  workspace's `io-util`, `macros`, `net`, `rt`, `rt-multi-thread`, `sync` and
+  `time`: `process` and `signal` come from the `mvm-hostd` manifest, `fs` from
+  `mvm-runtime` and `mvm-contract`.
 
 Result: no first-party dependency is provably unused after the #4663 sweep, so
 this slice removes nothing and the closures above are unchanged. Remaining

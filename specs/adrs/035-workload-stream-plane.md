@@ -37,6 +37,10 @@ caller-owned `EdgeConnector` into the exact admitted input route. This does not
 promote claim 17. Its remaining `Preview` limits are properties of fingerprint
 scanning and shell-entrypoint classification, not missing reachability.
 
+Proposed ADR-046 would replace this plane's guest↔host transport, `StreamEdge`
+and stdio-as-protocol paths. It is not accepted and nothing implements it, so
+this ADR stays the governing design for them.
+
 ## Context
 
 A production microVM has no shell. Claim 4 removes `do_exec` from the agent

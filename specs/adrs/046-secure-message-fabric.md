@@ -11,9 +11,10 @@ ownership, delivery, durability, storage, host-blindness, and the `mvmd`
 boundary. The non-mailbox lanes and their migration remain proposed here.
 **Implemented by:** `specs/plans/2026-08-18-secure-message-fabric.md`  
 **Distributed counterpart:** a separately numbered `mvmd` ADR and plan consume the contracts and deterministic state machine defined here.  
-**Supersedes:** ADR-035 for guest↔host transport, inter-workload routing,
+**Would supersede, once accepted and implemented:** ADR-035 for guest↔host transport, inter-workload routing,
 `StreamEdge`, stdin as a workflow protocol, stdout/stderr as return protocols,
-and the raw VMM-console payload path. ADR-035 remains historical rationale for
+and the raw VMM-console payload path. Until then ADR-035's stream plane is the
+shipped and required design for those paths. ADR-035 also remains historical rationale for
 redaction, bounded telemetry retention, explicit gaps, hash chaining, sealed
 roots, fan-out, and operator debugging.  
 **Complements:** ADR-001, ADR-014, ADR-019, ADR-020, ADR-031, ADR-037,
