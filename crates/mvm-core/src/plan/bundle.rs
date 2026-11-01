@@ -536,6 +536,37 @@ impl BundleRegistry {
             .map(|(manifest, _)| Some(manifest))
     }
 
+    /// [`verified_manifest`](Self::verified_manifest) for a launch that may
+    /// boot a host-local build.
+    ///
+    /// This host's own key is trusted for its exact key_id only, and the
+    /// result is then classified with [`bundle_origin`]: a bundle is admitted
+    /// when `release` enrolls its signer, or when it carries the signed
+    /// local-build label and this host signed it. Anything else, including a
+    /// host-signed bundle without the label, refuses as an unknown key.
+    #[cfg(feature = "host-state")]
+    pub fn verified_manifest_with_host_key<T: TrustStore>(
+        &self,
+        bundle_sha256: &str,
+        release: T,
+        host_key: Option<VerifyingKey>,
+    ) -> Result<Option<BundleManifest>, BundleVerifyError> {
+        let Some(host_key) = host_key else {
+            return self.verified_manifest(bundle_sha256, &release);
+        };
+        let host_key_id = key_id_from_pubkey(&host_key);
+        let trust = LocalBundleTrustStore::new(release, host_key_id.clone(), host_key);
+        let Some(manifest) = self.verified_manifest(bundle_sha256, &trust)? else {
+            return Ok(None);
+        };
+        match bundle_origin(&manifest, &host_key_id, trust.release()) {
+            BundleOrigin::Untrusted => Err(BundleVerifyError::UnknownKey {
+                key_id: manifest.key_id.0.clone(),
+            }),
+            BundleOrigin::ReleaseVerified | BundleOrigin::LocalBuild => Ok(Some(manifest)),
+        }
+    }
+
     pub fn find(&self, bundle_sha256: &str) -> anyhow::Result<Option<InstalledBundle>> {
         let dir = self.install_dir(bundle_sha256);
         if !dir.exists() {
@@ -3969,5 +4000,119 @@ mod tests {
             registry.verified_manifest(&installed.sha256, &trust(&fresh_key())),
             Err(BundleVerifyError::UnknownKey { .. })
         ));
+    }
+
+    fn installed_with(
+        sk: &SigningKey,
+        labelled: bool,
+    ) -> (tempfile::TempDir, BundleRegistry, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let archive = hand_sealed_bundle_with(
+            sk,
+            |m| {
+                if labelled {
+                    mark_local_build(m);
+                }
+            },
+            |_| {},
+        );
+        let installed = registry.install(&archive, &trust(sk), false).unwrap();
+        (tmp, registry, installed.sha256)
+    }
+
+    fn no_release_keys() -> MapTrustStore {
+        MapTrustStore(HashMap::new())
+    }
+
+    #[test]
+    fn host_signed_local_build_admits_without_enrolling_the_host_key() {
+        let host = fresh_key();
+        let (_tmp, registry, sha) = installed_with(&host, true);
+        let manifest = registry
+            .verified_manifest_with_host_key(&sha, no_release_keys(), Some(host.verifying_key()))
+            .expect("verifies")
+            .expect("installed");
+        assert_eq!(manifest.key_id, key_id_from_pubkey(&host.verifying_key()));
+    }
+
+    #[test]
+    fn other_key_signed_bundle_is_refused_when_the_host_key_is_known() {
+        let (_tmp, registry, sha) = installed_with(&fresh_key(), true);
+        assert!(matches!(
+            registry.verified_manifest_with_host_key(
+                &sha,
+                no_release_keys(),
+                Some(fresh_key().verifying_key())
+            ),
+            Err(BundleVerifyError::UnknownKey { .. })
+        ));
+    }
+
+    #[test]
+    fn host_signed_bundle_without_the_local_label_is_refused() {
+        let host = fresh_key();
+        let (_tmp, registry, sha) = installed_with(&host, false);
+        assert!(matches!(
+            registry.verified_manifest_with_host_key(
+                &sha,
+                no_release_keys(),
+                Some(host.verifying_key())
+            ),
+            Err(BundleVerifyError::UnknownKey { .. })
+        ));
+    }
+
+    #[test]
+    fn tampered_host_signed_manifest_is_refused() {
+        let host = fresh_key();
+        let (_tmp, registry, sha) = installed_with(&host, true);
+        let path = registry.archive_path(&sha);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let needle = b"test-publisher";
+        let at = bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .unwrap();
+        bytes[at] = b'T';
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            registry.verified_manifest_with_host_key(
+                &sha,
+                no_release_keys(),
+                Some(host.verifying_key())
+            ),
+            Err(BundleVerifyError::SignatureInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn an_attacker_key_claiming_the_host_key_id_is_refused() {
+        let host = fresh_key();
+        let attacker = fresh_key();
+        let host_id = key_id_from_pubkey(&host.verifying_key());
+        let archive = hand_sealed_bundle_with(
+            &attacker,
+            |m| {
+                mark_local_build(m);
+                m.key_id = host_id;
+            },
+            |_| {},
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        // Install under the host-key trust to get the archive on disk; the
+        // forged signature must still fail at launch-time verification.
+        let installed = registry.install(&archive, &trust(&host), false);
+        let Ok(installed) = installed else { return };
+        assert!(
+            registry
+                .verified_manifest_with_host_key(
+                    &installed.sha256,
+                    no_release_keys(),
+                    Some(host.verifying_key())
+                )
+                .is_err()
+        );
     }
 }
