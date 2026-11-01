@@ -1,4 +1,4 @@
-//! Author-side machinery for composable attested addons (SDK port Phase 1b).
+//! Author-side machinery for composable attested addons.
 //!
 //! Everything an addon **author** needs:
 //!

@@ -1,6 +1,6 @@
 //! The Rust-owned declarative registry of SDK constructors.
 //!
-//! This is the artifact the WS-1 spike concluded was needed. The
+//! The
 //! constructors in [`crate::ctor`] cannot be the source of truth for the
 //! language SDKs: Rust discharges statically what Python and TypeScript
 //! must check at runtime, so `port: u16` carries no recoverable
@@ -404,8 +404,7 @@ pub const REGISTRY: &[Ctor] = &[
                 default: Some(Literal::Str("serial")),
                 kw_only: true,
                 // Rust takes `InProcessMode`, so this check cannot exist
-                // there and cannot be recovered from it — the WS-1 finding
-                // in miniature.
+                // there and cannot be recovered from it.
                 constraints: &[Constraint::EnumMember {
                     canonical: &["serial", "concurrent"],
                     aliases: &[],

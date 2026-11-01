@@ -1,5 +1,4 @@
 //! Runtime SDK — record mode for `Sandbox`-style imperative scripts.
-//! SDK port Phase 7.
 //!
 //! The decorator path (`@mvm.app(...)`) is static: the user's script
 //! is read but never executed; tree-sitter pulls the kwargs out of
