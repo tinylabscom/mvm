@@ -35,7 +35,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-11` | `build` | App-dep volumes are CVE-scanned and SBOM-enumerated when sealed, then hash-locked and reverified at admission | `fn:verify_sealed_volume`, `fn:apply_install_gate`, `ci:app-deps-audit` |
+| `MVM-SEC-11` | `build` | App-dep volumes are CVE-scanned and SBOM-enumerated when sealed, then hash-locked and reverified at admission | `fn:verify_sealed_volume`, `fn:verify_detects_tampered_content`, `fn:verify_detects_tampered_cve`, `fn:verify_detects_tampered_sbom`, `fn:apply_install_gate`, `fn:prod_rejects_high_cve_finding_pip_audit_shape`, `fn:prod_rejects_stub_sbom_as_missing_sbom`, `ci:app-deps-audit` |
 
 ## asset_identity
 
@@ -90,7 +90,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-02` | `build` | No guest binary can elevate to uid 0 | `fn:set_no_new_privs`, `fn:virtiofs_mount_flags_keep_workspace_read_only`, `ci:check-abi-layout` |
+| `MVM-SEC-02` | `build` | No guest binary can elevate to uid 0 | `fn:set_no_new_privs`, `fn:set_no_new_privs_actually_sets_the_kernel_bit`, `fn:virtiofs_mount_flags_keep_workspace_read_only`, `ci:check-abi-layout` |
 
 ## host_services
 

@@ -514,9 +514,11 @@ Firecracker, libkrun or HVF guest.
 
 One failure, outside the claim-20 witnesses:
 `update::tests::extract_and_install_uses_sudo_for_a_host_owned_install_dir`
-panics `the sudo arm must be invoked` (`crates/mvm-cli/src/update.rs:2603`). The
-hosts run as root, where the sudo arm is plausibly not taken, but this was not
-confirmed by running the test as an unprivileged user. Treat it as open.
+panicked `the sudo arm must be invoked`. Cause: the host ran as root, and root
+writes through a `0555` directory, so `is_writable` is true and the sudo arm is
+never selected. The test now probes `is_writable` after the chmod and returns
+early when the directory is still writable, so it asserts the sudo arm wherever
+that arm is reachable and does not depend on the euid.
 
 Witnesses cited by a production function rather than a test, so no run by name
 is possible: `acquire_from`, `admit_for_run`, `verify_audit_chain`,
@@ -555,10 +557,12 @@ By name that is 115 of 132.
 ### Verdicts after this run
 
 - Claims mapped to witnesses: **PARTIAL**, narrower. Every witness that is a
-  test ran and passed except the one failure above, and the ADR-001 `fn:` names
-  that are tests now ran by name. Not met: 17 cited names are not tests, so the
-  gate proves they exist and the module tests pass, not that they are meaningful
-  witnesses; the sudo-arm failure is undiagnosed.
+  test ran and passed except the one failure above (since fixed), and the
+  ADR-001 `fn:` names that are tests now ran by name. Not met: 17 cited names
+  are not tests, so the gate proves they exist and the module tests pass, not
+  that they are meaningful witnesses. Claims 2 and 11 now also cite the tests
+  that exercise the refusal (`set_no_new_privs_actually_sets_the_kernel_bit`,
+  the `verify_detects_tampered_*` and `prod_rejects_*` tests).
 - Backend and feature combinations including WASM: the feature-combination and
   WASM half is **MET** by the table above (this run plus the macOS run). The box
   as a whole stays **PARTIAL**: no HVF or libkrun native witness and no aarch64
@@ -568,7 +572,7 @@ By name that is 115 of 132.
 
 ### Not measured
 
-The 17 non-test names above; the sudo-arm test as an unprivileged user; the
+The 17 non-test names above; the
 spawn-ceiling witnesses against a real Firecracker, libkrun or HVF guest;
 anything on aarch64; `ebpf-telemetry` and `embed-host-bins` clippy (excluded by
 CI's own lane); Windows and WHP. Host B runs systemd 259, which the live KVM
