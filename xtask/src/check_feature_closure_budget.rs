@@ -36,7 +36,7 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 
 /// Max distinct crates reachable from any workspace member with **every**
 /// feature enabled, excluding dev-dependencies.
-const FEATURE_CLOSURE_BUDGET: usize = 534;
+const FEATURE_CLOSURE_BUDGET: usize = 533;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

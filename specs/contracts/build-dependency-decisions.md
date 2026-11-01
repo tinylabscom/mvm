@@ -360,6 +360,71 @@ in that row; `default` is shown only when it is the sole feature.
 | `xattr` | CLD | unsupported |
 | `zeroize` | CLDSAG | alloc, zeroize_derive |
 
+## Dependency reduction ranking (#4839 section 3)
+
+Measured at `152ed1cebf` (origin/main, 2026-10-31), `--offline`, default features,
+unique `name version` entries. Every candidate below is judged with the same
+commands; a candidate with no measured change is recorded as such and not applied.
+
+```sh
+cargo tree --offline -p <pkg> --target <triple> -e normal,build --prefix none \
+  | sed 's/ (\*)//;s/ (proc-macro)//;s/ (\/.*//' | sort -u | wc -l
+grep -c '^name = ' Cargo.lock
+```
+
+Baseline: `mvmctl` 350 (`aarch64-apple-darwin`) and 353 (`x86_64-unknown-linux-gnu`);
+`mvm-hostlib` 337; `mvm-hostd` 282; `mvm-agentd` 83, `mvm-host-services` 84 and
+`mvm-builder-guest` 87 on `aarch64-unknown-linux-musl`; `Cargo.lock` 728 packages.
+
+| Rank | Candidate | Measured | Risk | Effort | Status |
+|---|---|---|---|---|---|
+| 1 | `tracing-subscriber` without its default `tracing-log` feature | -1 on every host closure: `mvmctl` 350 to 349 and 353 to 352, `mvm-hostlib` 337 to 336, `mvm-hostd` 282 to 281; guests unchanged; lock 728 to 727 (`tracing-log` leaves) | Low. Records emitted through the `log` crate by third-party code (rustls, mio) are no longer forwarded to the tracing subscriber; no first-party crate uses `log::` macros | One line in `[workspace.dependencies]` plus the two closure budgets | Applied |
+| 2 | `chrono` without default features (`serde`, `clock`, `std` kept; `oldtime`, `wasmbind` dropped) | 0. Every closure above is identical. The only lock change is that `chrono` stops listing `js-sys` and `wasm-bindgen`, which stay for other packages. Needs the `mvm-contract` dev-dependency's own `chrono` row trimmed too, or the defaults return | Low | Two lines | Not applied: removes no package |
+| 3 | `serde_jcs` replaced by `serde_json_canonicalizer` | Host closures -2 (`serde_jcs`, `ryu-js` 0.2.2); guest closures swap two crates for two, so 0, because `serde_json_canonicalizer` is reached today only through `sigstore-verify`, which guests do not link | High: it produces signed canonical bytes for plans, audit entries and bundles; floating-point and escape handling must agree byte for byte | Four crates plus a differential test | Not applied: a signing-format change for 2 host crates |
+| 4 | `tokio` `signal` dropped from `mvm-hostd` | 0. No `mvm-hostd` source names `tokio::signal`, but its `process` feature already depends on `signal-hook-registry`, so the package stays | None | One word | Not applied: removes no package |
+| 5 | `serde_json` `preserve_order` | Not removable: enabled by the `tree-sitter` build script, and `indexmap` stays through `plist` and `toml_edit` | n/a | n/a | Retained |
+| 6 | `tempfile` out of the guest agent and host-services closures | Would remove `tempfile` and its otherwise unused `fastrand`/`getrandom` 0.4 edges from `mvm-agentd` and `mvm-host-services`, but `mvm-core::canonical_linux` (production, host-side) uses it and `protocol::vm_backend` and `plan::bundle` name that module ungated | Medium: gating a module reached from two ungated ones | A `host-state` gate plus the two callers | Not applied: not measured, the gate is a separate change |
+
+The 16 direct dependencies the closure map lists under "none" are not unused. Each
+is outside the six default closures for a stated reason, and `cargo machete` finds
+none of them unused:
+
+| Reason | Dependencies |
+|---|---|
+| Off-by-default feature | `aya` (`mvm-hostd`), `hickory-resolver` (`mvm-hostd`), `object_store` (`mvm-runtime`, `template-registry-s3`), `schemars` (six crates), `tokio-vsock` (`mvm-agentd`), `tss-esapi` (`mvm-core`, `attestation-tpm2`), `wasmtime` and `wasmtime-wasi` (`mvm-runtime`, `wasm-backend`), `notify` and `notify-debouncer-mini` (`mvm-cli`, `dev-watch`) |
+| Linux target only, present in the Linux `mvmctl` closure | `landlock`, `hickory-proto` (`mvm-hostd`) |
+| Tooling, not shipped | `clap_mangen`, `nextest-metadata`, `syn` (`xtask`) |
+| Separately installed client | `libloading` (`runmvm-client`, which `mvmctl` does not link) |
+
+No removal follows from them. The "CLDSA" letters the map gives `plist`,
+`security-framework` and `core-foundation` for the guest artifacts come from the
+`aarch64-apple-darwin` tree, which is not a guest target: on the musl guest targets
+all three are absent, because `mvm-core` declares them under
+`cfg(target_os = "macos")`.
+
+### Duplicate version pairs in the `mvmctl` closure
+
+Commands: `cargo tree --offline -p mvmctl --target aarch64-apple-darwin -e normal,build -d --prefix depth`
+for the names, then `cargo tree ... -i <name>@<version> --depth 1` for the parents of
+the older version. `hashbrown`, `memchr`, `serde`, `serde_core`, `serde_json` and
+`toml_edit` also print under `-d`; they differ in features, not version, so they are not pairs.
+
+| Name | Older version, pinned by | Newer version, used by | Compatible bump? |
+|---|---|---|---|
+| `bitflags` | 1.3.2: `vmm-sys-util` 0.15.0, from `virtio-queue` 0.18.0 (`mvm-vmm`) | 2.13.0: everything else | Not offline-verifiable; needs a rust-vmm release of `vmm-sys-util` on `bitflags` 2 |
+| `digest`, `block-buffer`, `crypto-common`, `cpufeatures` | 0.10.7, 0.10.4, 0.1.7, 0.2.17: `sha1` 0.10.6 (workspace pin `=0.10.6`, used by `mvm-build`, `mvm-macho-sign`, `gix`, `x509-cert`), `sha1-checked` (`gix`), `sha2` 0.10.9 and `sigstore-crypto` | 0.11.3, 0.12.1, 0.2.2, 0.3.0: `sha2` 0.11, `hmac` 0.13, `curve25519-dalek` 5, `ed25519-dalek` 3 | No. Dropping the generation needs `gix`, `x509-cert` and `sigstore-crypto` to move together; the workspace's own crates are already on the new one |
+| `sha2` | 0.10.9: `sigstore-crypto` only | 0.11.0: 14 workspace crates | No (signature-verification dependency) |
+| `signature` | 2.2.0: `sigstore-crypto`, `x509-cert` 0.2.5 | 3.0.0: `ed25519` 3, `ed25519-dalek` 3 | No |
+| `const-oid` | 0.9.6: `der` 0.7.10, `x509-cert`, `cms`, `sigstore-*` | 0.10.2: `digest` 0.11 | No (same RustCrypto formats generation) |
+| `rand`, `rand_core`, `getrandom` | `rand` 0.9.4 and `rand_core` 0.9.5: `sigstore-tsa`; `rand_core` 0.6.4: `signature` 2.2.0; `getrandom` 0.2.17: `ring` 0.17.14; 0.3.4: `rand_core` 0.9.5 | `rand` 0.10.2, `rand_core` 0.10.1, `getrandom` 0.4.1: workspace, `tempfile`, `uuid`, `gix-utils` | No; see the #4561 decision |
+| `ryu-js` | 0.2.2: `serde_jcs` 0.1.0 (direct: `mvm-build`, `mvm-client`, `mvm-core`, `mvm-hostd`) | 1.0.2: `serde_json_canonicalizer` 0.3.2 (`sigstore-verify`) | Only by swapping the canonicalizer; ranked 3 above |
+| `untrusted` | 0.7.1: `aws-lc-rs` 1.18.1 | 0.9.0: `ring` 0.17.14, `rustls-webpki` | No (native crypto crates) |
+
+Only two pins are first-party choices: `serde_jcs` (`ryu-js`) and the `sha1 =0.10.6`
+workspace pin, and the latter shares its generation with `gix` and `x509-cert`, so
+moving it alone removes nothing. The rest are held by `sigstore-*`, `x509-cert`,
+`gix`, `ring`/`aws-lc-rs` or `vmm-sys-util`.
+
 ## Release-build compilation count (#4839 section 4)
 
 Measured at `4270e14d` on `aarch64-apple-darwin`, Rust 1.97.1, `--offline

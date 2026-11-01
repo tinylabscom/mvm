@@ -276,7 +276,7 @@ percent-encoding = "2"
 keyring = "3"
 tempfile = "3"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "ansi", "smallvec", "json", "env-filter"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 which = "7"
 
