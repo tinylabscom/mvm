@@ -46,6 +46,9 @@ pub enum GuestAgentBuildError {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    CliSpawnRefused(#[from] mvm_vmm::host::aux_bin::CliSpawnRefused),
 }
 
 /// On-disk cache layout for one `(version, arch)` of the guest binaries.
@@ -930,6 +933,7 @@ pub fn build_guest_binaries(
     // Reaching here means a guest cross-compile is about to run. A launch
     // measurement that hides a multi-minute build behind a "prepared" label is
     // worthless, so it is recorded at the one site that starts one.
+    refuse_toolchain_spawn()?;
     mvm_core::launch_trace::record_image_build();
     let started = std::time::Instant::now();
     let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
@@ -1102,9 +1106,17 @@ fn hash_file(hasher: &mut Sha256, rel: &str, path: &Path) -> Result<(), GuestAge
     Ok(())
 }
 
+/// Refuse, for a library embedder, any step that runs the Rust toolchain or
+/// `curl`. The one choke point every guest-runtime spawn in this crate passes.
+pub(crate) fn refuse_toolchain_spawn() -> Result<(), mvm_vmm::host::aux_bin::CliSpawnRefused> {
+    mvm_vmm::host::aux_bin::HostProcess::current()
+        .refuse_cli_spawn(mvm_vmm::host::aux_bin::CliSpawn::GuestRuntimeToolchain)
+}
+
 fn zigbuild_tools(
     spec: &GuestAgentBuildSpec,
 ) -> Result<(PathBuf, Option<PathBuf>), GuestAgentBuildError> {
+    refuse_toolchain_spawn()?;
     if let Some(cargo) = &spec.cargo {
         return Ok((cargo.clone(), None));
     }

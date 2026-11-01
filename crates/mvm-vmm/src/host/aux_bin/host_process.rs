@@ -249,6 +249,9 @@ pub enum CliSpawn {
     /// `cargo zigbuild` of the Linux host binaries an `mvmctl` built without
     /// them produces from its source checkout.
     HostPayloadBuild,
+    /// Compiling or downloading the guest runtime with `cargo`, `rustup`,
+    /// `zig` or `curl` from a source checkout or a release.
+    GuestRuntimeToolchain,
     /// Running the current executable as the builder VM's egress supervisor.
     BuilderEgressSupervisor,
     /// Running `mvmctl machine restart` for a workload that failed its
@@ -275,6 +278,10 @@ impl CliSpawn {
                 "producing the Linux host binaries a builder VM needs would run `cargo zigbuild`"
                     .to_string()
             }
+            Self::GuestRuntimeToolchain => {
+                "preparing the guest runtime would run `cargo`, `rustup`, `zig` or `curl`"
+                    .to_string()
+            }
             Self::BuilderEgressSupervisor => {
                 "starting the builder VM's egress supervisor would run this process's executable \
                  as `mvmctl`"
@@ -296,6 +303,7 @@ impl CliSpawn {
         match self {
             Self::BuilderBootstrapHelper
             | Self::HostPayloadBuild
+            | Self::GuestRuntimeToolchain
             | Self::BuilderEgressSupervisor => {
                 "Bootstrap this host with `mvmctl bootstrap` first, then retry."
             }
