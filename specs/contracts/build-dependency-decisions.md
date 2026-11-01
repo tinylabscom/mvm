@@ -694,6 +694,36 @@ meaningless, and a full embedded cross build was not run. The embedded guest
 payload is restored from the content store at `~/.cache/mvm/embed` when its
 key matches, so a warm local build does not show the nested compile.
 
+## Unused-dependency and duplicate-version re-scan (#4839 section 3)
+
+Measured at `2d226a3b91` (origin/main, 2026-11-01). This pass removes nothing; the
+evidence is recorded so the next sweep does not repeat it.
+
+- `cargo machete` (workspace root): findings only in vendored `third_party/` crates
+  (`gix`: `async-std`; `gix-object`: `gix-hashtable`; `sigstore-tsa`: `cmpv2`,
+  `rustls-webpki`, `x509-tsp`; `sigstore-rekor`: `hex`, `sigstore-crypto`, `url`;
+  `am-fs-ext4`: `am-fs-core`). No first-party crate has a finding. These are the same
+  feature-gated optional declarations as above, so they stay. `cargo-udeps` is not
+  installed. `--with-metadata` cannot run here: it fails on the detached fixture and
+  `web/*` manifests and rewrites their `Cargo.lock` files, so it was not used.
+- Distinct versions of one name in `Cargo.lock`
+  (`awk '/^name = /{n=$3} /^version = /{print n,$3}' Cargo.lock`): 34 names. Thirteen are the
+  `mvmctl`-closure pairs already decided above. The rest are reached only through
+  optional or dev dependencies, each held by a third party:
+  `base64` 0.21 and `target-lexicon` 0.12 (`tss-esapi`), `core-foundation` 0.9
+  (`system-configuration`, `hickory-resolver`), `thiserror` 1, `object` 0.36,
+  `hashbrown` 0.15 and `foldhash` 0.1 (`aya`, `aya-obj`), `nom` 7 (`asn1-rs`,
+  `x509-parser`), `windows-sys` 0.52 and `io-lifetimes` 2 (`cap-primitives`,
+  `ring`), `itertools` 0.14 (`cucumber`, `wasmtime`), the `wasm*`/`wit-*`/`wast`
+  generations (`wasmtime`), `defmt`, `embedded-io`, `windows-core`
+  (`cargo tree --workspace --all-features --target all -e normal,build,dev -i <name>@<version> --depth 2`).
+- The one first-party choice among them is `criterion` 0.5.1 in `mvm-fs` (dev-dependency,
+  benches) which brings `itertools` 0.10.5. Tried `criterion = "0.8"` with
+  `cargo update -p criterion`: `itertools` moves 0.10.5 to 0.13.0, still a distinct
+  third version beside 0.14 and 0.15, so no duplicate is removed; it also drops
+  `hermit-abi` and `is-terminal` but adds `alloca` and `page_size` and needs Rust 1.86.
+  Not applied.
+
 ## Owner decisions
 
 - 2026-10-24, #4663: patch the Sigstore Rekor and timestamp crates locally so
