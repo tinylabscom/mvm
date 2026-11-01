@@ -56,7 +56,7 @@ use secrecy::{ExposeSecret, SecretBox};
 use zeroize::Zeroizing;
 
 use crate::crypto::keystore::validate_shell_id;
-use crate::crypto::snapshot_crypto;
+use crate::crypto::{aead, snapshot_crypto};
 
 /// Service name for OS-native keyring entries. Distinct from
 /// `crate::crypto::keystore::KEYRING_SERVICE` so per-tenant master
@@ -168,8 +168,12 @@ impl SecretStore for FileSecretStore {
         self.ensure_tenant_dir(tenant)?;
         let path = self.secret_path(tenant, name)?;
         let key = self.load_or_init_key()?;
-        let encoded = encrypt_file_secret(value.expose_secret().as_bytes(), key.expose_secret())
-            .context("encrypting secret for file store")?;
+        let encoded = encrypt_file_secret(
+            value.expose_secret().as_bytes(),
+            key.expose_secret(),
+            &record_aad(tenant, name),
+        )
+        .context("encrypting secret for file store")?;
         crate::atomic_io::write_private(&path, &encoded)
             .with_context(|| format!("writing secret {}", path.display()))?;
         Ok(())
@@ -190,7 +194,7 @@ impl SecretStore for FileSecretStore {
         let bytes =
             fs::read(&path).with_context(|| format!("reading secret {}", path.display()))?;
         let key = self.load_or_init_key()?;
-        let plaintext = decrypt_file_secret(&bytes, key.expose_secret())
+        let plaintext = decrypt_file_secret(&bytes, key.expose_secret(), &record_aad(tenant, name))
             .with_context(|| format!("decrypting secret {}", path.display()))?;
         let s = String::from_utf8(plaintext)
             .with_context(|| format!("secret {} is not valid UTF-8", path.display()))?;
@@ -305,21 +309,34 @@ fn validate_file_store_key_len(key: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn encrypt_file_secret(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>> {
-    let ciphertext = snapshot_crypto::encrypt(plaintext, key)?;
+/// Associated data binding a record to its tenant and name, so a file
+/// copied to another path fails authentication. Ids are validated shell ids
+/// and cannot contain NUL, so the join is unambiguous.
+fn record_aad(tenant: &str, name: &str) -> Vec<u8> {
+    format!("mvm-file-secret\0{tenant}\0{name}").into_bytes()
+}
+
+fn encrypt_file_secret(plaintext: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    let key = aead::Key::from_slice(key).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ciphertext = aead::seal(&key, plaintext, aad);
     let mut out = Vec::with_capacity(FILE_SECRET_MAGIC.len() + ciphertext.len());
     out.extend_from_slice(FILE_SECRET_MAGIC);
     out.extend_from_slice(&ciphertext);
     Ok(out)
 }
 
-fn decrypt_file_secret(encoded: &[u8], key: &[u8]) -> Result<Vec<u8>> {
+fn decrypt_file_secret(encoded: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
     let ciphertext = encoded.strip_prefix(FILE_SECRET_MAGIC).ok_or_else(|| {
         anyhow::anyhow!(
             "legacy plaintext or unknown secret-store record; replace it with `mvmctl secret put`"
         )
     })?;
-    snapshot_crypto::decrypt(ciphertext, key)
+    let key = aead::Key::from_slice(key).map_err(|e| anyhow::anyhow!("{e}"))?;
+    aead::open(&key, ciphertext, aad).map_err(|e| {
+        anyhow::anyhow!(
+            "authentication failed (wrong key, tampered record, or record moved from another tenant/name): {e}"
+        )
+    })
 }
 
 /// OS-native keystore backend. Each secret entry lives at
@@ -652,6 +669,24 @@ mod tests {
         fs::write(&path, raw).unwrap();
         let err = store.get("acme", "k").unwrap_err();
         assert!(err.to_string().contains("decrypting secret"), "got: {err}");
+    }
+
+    #[test]
+    fn file_get_rejects_record_copied_to_another_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::with_dir(tmp.path());
+        store.put("acme", "a", &mk_value("v")).unwrap();
+        store.put("other", "x", &mk_value("w")).unwrap();
+        fs::copy(tmp.path().join("acme/a"), tmp.path().join("acme/b")).unwrap();
+        fs::copy(tmp.path().join("acme/a"), tmp.path().join("other/a")).unwrap();
+        for (t, n) in [("acme", "b"), ("other", "a")] {
+            let err = store.get(t, n).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("moved from another tenant/name"),
+                "got: {err:#}"
+            );
+        }
+        assert_eq!(store.get("acme", "a").unwrap().expose_secret(), "v");
     }
 
     #[test]

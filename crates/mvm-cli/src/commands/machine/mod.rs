@@ -36,7 +36,6 @@ use ed25519_dalek::Signer;
 #[cfg(test)]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -45,7 +44,7 @@ use mvm_core::manifest::ManifestMachineWorkflow;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::{config, naming};
 
-use mvm_runtime::machine::persist::{
+use mvm_client::machine_spec::{
     MACHINE_SPEC_SCHEMA_VERSION, MachineSpec, ReconfigurePatch, SpecReconcile, apply_patch,
     list_machine_specs, load_machine_spec, machine_config_diff, overwrite_machine_spec,
     reconcile_machine_spec, save_machine_spec, validate_machine_memory,
@@ -1323,11 +1322,7 @@ fn run_profile_name(profile: RunProfile) -> &'static str {
     profile.as_str()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
-}
+use mvm_contract::hash::sha256_hex;
 
 fn profile_allows_dev_init(profile: RunProfile) -> bool {
     profile.grants().dev_guest
@@ -1445,7 +1440,7 @@ fn machine_exec_command(argv: &[String]) -> String {
 fn build_machine_volume_cfg(
     volume_specs: &[String],
 ) -> Result<(
-    Vec<mvm_runtime::image::RuntimeVolume>,
+    Vec<mvm_client::image::RuntimeVolume>,
     mvm_vmm::driver::prepared_disks::WritableVolumeImages,
 )> {
     let mut volume_cfg = Vec::with_capacity(volume_specs.len());
@@ -1470,7 +1465,7 @@ fn build_machine_volume_cfg(
         {
             images.push(image);
         }
-        volume_cfg.push(mvm_runtime::image::RuntimeVolume::from(&vmv));
+        volume_cfg.push(mvm_client::image::RuntimeVolume::from(&vmv));
     }
     Ok((volume_cfg, images))
 }

@@ -46,6 +46,7 @@ pub mod admission;
 pub mod agent_prompt;
 pub mod application_terminal;
 pub mod approval_broker;
+pub mod artifacts;
 pub mod attestation;
 pub mod audit;
 pub mod boot;
@@ -88,6 +89,7 @@ pub mod registry_application;
 pub mod registry_pack_local;
 pub mod replay;
 pub mod secret;
+pub mod session_store;
 pub mod snapshot;
 pub mod standby;
 pub mod storage;
@@ -101,6 +103,7 @@ pub mod tool_mediation;
 pub mod transcript;
 pub mod ui;
 pub mod volume;
+pub mod vsock_transport;
 pub mod workspace_apply;
 
 /// The workload authoring surface: builders, constructors, IR emission.
@@ -153,10 +156,12 @@ pub use local::{LocalBackend, auto_selected_backend_name, default_vcpus};
 pub use mvm_hostd::parent_death::exit_when_orphaned;
 pub use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
 pub use mvm_runtime::agent_session::replay_input;
+pub use mvm_runtime::build_env::default_build_env;
 pub use mvm_runtime::builder_runner::{
     DriverBuilderVm, HvfPersistentHostVm, resolve_driver_builder_image,
 };
 pub use mvm_runtime::linux_env::require_guest_exec_available;
+pub use mvm_runtime::machine::persist as machine_spec;
 pub use mvm_runtime::microvm::probe_verity_sidecar;
 pub use mvm_runtime::shell::{run_in_vm_capture, run_in_vm_visible};
 pub use mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot;
@@ -164,6 +169,7 @@ pub use mvm_runtime::vm::template::lifecycle::{
     installed_bundle_archive, template_artifacts_dispatched,
 };
 pub use mvm_runtime::workload_runner::StopTiming;
+pub use mvm_runtime::{AnyBackend, image};
 pub use mvm_runtime::{
     WarmArtifactBuildPlan, WarmArtifactKey, WarmArtifactPlanResolver, WarmArtifactStore,
     WarmArtifactWorker, WarmGoldenVmFactory,

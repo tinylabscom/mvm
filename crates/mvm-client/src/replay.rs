@@ -9,6 +9,10 @@ use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 
 use crate::checkpoint::Checkpoints;
 
+pub use mvm_runtime::agent_session::AgentSessionStore;
+pub use mvm_runtime::agent_session::replay::{ReplayPlan, prepare_replay, timeline_base};
+pub use mvm_runtime::agent_session::replay_input::ReplayInputStore;
+
 /// The source state and collision-free target selected for a replay.
 #[derive(Debug)]
 pub struct ReplaySource {

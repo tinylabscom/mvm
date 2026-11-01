@@ -170,9 +170,7 @@ pub enum GuestBinsError {
     Assembly(String),
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
+use mvm_contract::hash::sha256_hex;
 
 /// One member's archived mode and bytes.
 #[derive(Debug)]

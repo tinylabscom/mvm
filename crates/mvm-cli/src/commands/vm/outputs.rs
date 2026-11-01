@@ -14,9 +14,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use mvm_client::output_audit::{OutputOutcome, OutputRecord};
 use mvm_core::plan::OutputGrant;
 use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
-use mvm_hostd::audit::output_audit::{OutputOutcome, OutputRecord};
 
 use super::up::AdmissionContext;
 use crate::ui;

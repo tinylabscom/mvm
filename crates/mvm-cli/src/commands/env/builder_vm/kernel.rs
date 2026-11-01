@@ -192,7 +192,7 @@ pub(crate) fn build_kernel_via_stage0(
 
     // Live at every verbosity: the builder runner nests the in-guest nix
     // progress under this line, and `-v` adds the raw build log above it.
-    let phase = mvm_runtime::ui::activity::start(format_compile_start(variant.label(), arch));
+    let phase = mvm_client::ui::activity::start(format_compile_start(variant.label(), arch));
     request.run().context("Stage 0 kernel build")?;
     phase.finish();
 

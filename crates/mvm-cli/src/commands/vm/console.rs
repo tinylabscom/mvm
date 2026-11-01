@@ -7,12 +7,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm_core::naming::validate_vm_name;
-use mvm_core::user_config::MvmConfig;
-use mvm_runtime::vsock_transport::{
+use mvm_client::vsock_transport::{
     DevConsoleTransport, FirecrackerTransport, LibkrunTransport, VsockTransport,
     firecracker_transport_supported,
 };
+use mvm_core::naming::validate_vm_name;
+use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
@@ -62,7 +62,7 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
 /// links no Console capability). Missing/legacy metadata reads as accessible —
 /// the same backward-compat default `enforce_accessible_gate` uses.
 fn hvf_console_arm_enabled(name: &str) -> bool {
-    !matches!(mvm_runtime::vm::runtime_meta::read(name), Ok(Some(meta)) if !meta.accessible)
+    !matches!(mvm_client::checkpoint::read_runtime_meta(name), Ok(Some(meta)) if !meta.accessible)
 }
 
 /// How the interactive console's local escapes and disconnects behave. Shown
@@ -220,7 +220,7 @@ impl ConsoleSessionOptionsBuilder {
 /// production microVM).
 pub(in crate::commands) fn enforce_accessible_gate(name: &str, force: bool) -> Result<()> {
     let _ = force;
-    match mvm_runtime::vm::runtime_meta::read(name) {
+    match mvm_client::checkpoint::read_runtime_meta(name) {
         Ok(Some(meta)) if !meta.accessible => anyhow::bail!(
             "console refused: VM {name:?} was built from a sealed image (passthru.mvm.accessible = false). \
              Sealed images don't ship the dev agent surface. \

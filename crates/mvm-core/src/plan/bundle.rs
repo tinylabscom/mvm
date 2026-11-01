@@ -227,11 +227,7 @@ pub fn canonical_manifest_bytes(manifest: &BundleManifest) -> Result<Vec<u8>> {
     serde_json::to_vec(manifest).context("serialise BundleManifest to canonical JSON")
 }
 
-/// Compute lowercase-hex SHA-256 of arbitrary bytes. Mirrors the
-/// hex-digest pattern used in `mvm-core::manifest::canonical_key_for_path`.
-pub fn sha256_hex(data: &[u8]) -> String {
-    hex::encode(Sha256::digest(data))
-}
+pub use mvm_contract::hash::sha256_hex;
 
 // ---------------------------------------------------------------------------
 // BundleRegistry — content-addressed installed-bundle layout

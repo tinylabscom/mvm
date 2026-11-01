@@ -166,7 +166,9 @@ impl FlowMuxIdentityMaterial {
         Self::mint(session_id, &SigningKey::from_bytes(&seed))
     }
 
-    /// What the endpoint is told: the session id and both public halves.
+    /// Endpoint-only config: the session id, private host signing key, and guest
+    /// public verifying key. The secret remains in owned String/JSON copies;
+    /// Debug redaction does not zeroize or erase those copies.
     pub fn spawn_config(&self) -> &FlowMuxIdentitySpawnConfig {
         &self.spawn
     }

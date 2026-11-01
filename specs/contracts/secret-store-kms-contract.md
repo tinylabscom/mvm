@@ -25,11 +25,79 @@ substitution endpoint in `mvm-hostd` is the only other reader. No provider shell
 from the guest: workloads carry references, and the host-side endpoint resolves
 a value only while preparing an admitted outbound request.
 
-The local file format does not bind a record to its `(tenant, name)`: the AEAD
-associated data is empty, so a record copied to another name under the same
-store key decrypts there. That is acceptable for a single-host, single-key
-store whose directory is already the trust boundary. It is not acceptable for a
-shared remote provider, which is why the context rules below are mandatory.
+The local file format binds each record to its `(tenant, name)`: `put` and
+`get` seal and open with the AEAD associated data
+`mvm-file-secret\0{tenant}\0{name}` (`record_aad`), so a record copied to
+another tenant or name fails authentication with a clear error. The format has
+no version byte and there is no migration; a record written before the binding
+must be re-put. The key is still one per base directory, so the binding stops
+relocation of a record, not a reader who holds the base key. A shared remote
+provider needs more than this: the context rules below stay mandatory for it.
+
+## Dependencies
+
+The local providers add no remote or cloud dependency.
+
+- `FileSecretStore`: `aes-gcm` (AEAD), `zeroize` and `rand`, all unconditional
+  `mvm-core` dependencies.
+- `KeyringSecretStore`: the `keyring` crate, optional in `mvm-core` and enabled
+  only by the `os-keyring` feature, so the file provider and the guest closure
+  do not carry it.
+
+The associated-data change (#4928) touched only
+`crates/mvm-core/src/crypto/secret_store.rs`: it passes existing arguments to
+the AEAD calls and adds no crate to `Cargo.toml` or `Cargo.lock`.
+
+## Consumers and test coverage
+
+Production construction sites of `FileSecretStore`, and readers of the
+`SecretStore` trait:
+
+| Consumer | Use |
+| --- | --- |
+| `mvm-client::secret` | operator secret commands; builds the default store (`default_secret_store`) or an injected `Arc<dyn SecretStore>` |
+| `mvm-client::entrypoint::foreground_diagnostic` | reads the default store |
+| `mvm-hostd::supervisor::network_endpoint` | per-VM substitution endpoint; `FileSecretStore::with_dir` over the configured or default directory |
+| `mvm-hostd::keyholder::resolver` | resolves a reference to a value through `Arc<dyn SecretStore>` |
+| `mvm-hostd::jailer` | names the store key path (`file_store_key_path_for_base`) |
+
+`KeyringSecretStore` has no caller outside `mvm-core`; it is reached only
+through `default_secret_store`.
+
+Tests in `mvm-core` (`crypto::secret_store::tests`, run with
+`--features host-state`): the file provider is covered by
+`file_put_get_round_trips`, `file_put_stores_ciphertext_not_plaintext`,
+`file_get_rejects_tampered_ciphertext`,
+`file_get_rejects_record_copied_to_another_name` (tenant and name relocation),
+`file_get_rejects_legacy_plaintext_record`, `file_store_key_is_created_at_0600`,
+`file_store_key_with_loose_permissions_is_refused`,
+`file_put_overwrites_silently`, `file_get_returns_clear_error_when_missing`,
+`file_delete_removes_entry`, `file_delete_errors_on_missing`,
+`file_list_returns_sorted_names`, `file_list_returns_empty_for_unknown_tenant`,
+`file_rejects_unsafe_tenant_id`, `file_rejects_unsafe_secret_name`,
+`file_put_creates_tenant_dir_at_0700` and `file_put_creates_secret_at_0600`.
+The keyring and selection path is covered by
+`auto_store_reads_file_backed_secret_when_keyring_misses`,
+`auto_store_lists_file_backed_secret_when_keyring_index_is_empty`,
+`persistence_keyring_put_refuses_entry_local_storage`,
+`persistence_auto_put_survives_store_recreation`,
+`keyring_index_round_trips_through_save_load`,
+`keyring_index_is_empty_when_missing`, `keyring_entry_validates_tenant_and_name`
+and `default_secret_store_returns_some_impl`. The module's filtered run passed
+20 tests; that is a count of this module, not of the consumers.
+
+Consumers exercise the file provider through their own tests, which build
+`FileSecretStore::with_dir` over a temporary directory: `mvm-client`
+(`admission::secrets`, `admission::run_secrets`, `secret`, `launch`,
+`checkpoint::fs_quick`), `mvm-cli` (`commands::ops::secret`,
+`commands::vm::exec::application_source`), `mvm-hostd` (`keyholder::*`,
+`supervisor::network_endpoint*`, `supervisor::flowmux`, `supervisor::terminator`,
+and the `egress_secret_leak_gate`, `network_endpoint_bin` and
+`wasm_egress_witness` integration tests) and `mvm-conformance`
+(`steps/secrets_pii.rs`). These tests were not re-run for this document.
+
+No remote or KMS provider exists, and nothing here claims one has been run
+against AWS.
 
 ## Provider obligations
 

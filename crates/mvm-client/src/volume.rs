@@ -45,6 +45,8 @@ pub use dto::{
     UnlockPolicy, VolumeRecord, VolumeSourceKind,
 };
 pub use lease::LaunchLease;
+pub use mvm_runtime::image::RuntimeVolume;
+pub use mvm_runtime::machine::persist::load_machine_spec;
 pub use service::{
     DenyAllHostEncryptionProbe, HostEncryptionProbe, LaunchPreparation, LocalVolumeService,
     VolumeService, default_block_volume_root, probe_from_fn,

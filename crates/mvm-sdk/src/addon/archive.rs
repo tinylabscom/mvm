@@ -7,7 +7,6 @@
 //! files. The signature payload is over these bytes.
 
 use flate2::Compression;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -55,12 +54,7 @@ pub fn pack_addon_dir(dir: &Path) -> io::Result<AddonArchive> {
     Ok(AddonArchive { bytes: buf, sha256 })
 }
 
-/// Compute sha256 of arbitrary bytes (the canonical tarball or SBOM).
-/// Returned as 64 lowercase hex chars to match the IR field shape.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    hex::encode(digest)
-}
+pub use mvm_contract::hash::sha256_hex;
 
 #[derive(Debug)]
 struct Entry {
