@@ -631,8 +631,8 @@ pub fn prepare_startup(
 ) -> Result<Option<PreparedCallerStartup>> {
     let Some(registration) = cfg.caller_registration.as_ref() else {
         anyhow::ensure!(
-            cfg.kernel_fd.is_none() && cfg.boot_image_fds.is_none(),
-            "verified boot descriptors require actual consumed caller admission"
+            cfg.boot_image_fds.is_none(),
+            "verified boot images require actual consumed caller admission"
         );
         return Ok(None);
     };

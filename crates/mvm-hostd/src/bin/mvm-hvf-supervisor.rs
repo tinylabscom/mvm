@@ -226,8 +226,10 @@ enum StartupMode {
 fn startup_mode(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
 ) -> anyhow::Result<StartupMode> {
-    if cfg.boot_image_fds.is_some() || cfg.kernel_fd.is_some() || cfg.caller_registration.is_some()
-    {
+    // A kernel descriptor alone is a canonical-kernel legacy boot (a signed
+    // bundle with no frozen images or caller); images and a caller are a
+    // checked boot and must arrive together with the kernel.
+    if cfg.boot_image_fds.is_some() || cfg.caller_registration.is_some() {
         anyhow::ensure!(
             cfg.boot_image_fds.is_some()
                 && cfg.kernel_fd.is_some()
@@ -487,7 +489,10 @@ mod tests {
             super::StartupMode::Legacy
         ));
         cfg.kernel_fd = Some(9);
-        assert!(super::startup_mode(&cfg).is_err());
+        assert!(matches!(
+            super::startup_mode(&cfg).unwrap(),
+            super::StartupMode::Legacy
+        ));
         cfg.boot_image_fds = Some(mvm_vmm::host::hvf_supervisor::BootImageFds {
             rootfs: 10,
             verity: 11,

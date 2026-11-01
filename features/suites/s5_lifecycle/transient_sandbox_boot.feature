@@ -33,7 +33,9 @@ Feature: Transient sandbox boot
     When I run mvmctl in an isolated live home with "machine run --name bdd-nix-boot --flake examples/exit_code"
     Then the command exits with code 7
 
-  # Only a tier with no wall-clock mechanism refuses this. libkrun and HVF have
+  # Sealed means `--profile standard`: the CLI's default profile is dev, which
+  # warns about an unenforceable grant and admits it. Only a tier with no
+  # wall-clock mechanism refuses this. libkrun and HVF have
   # a per-VM supervisor of ours that outlives the launch and can hold the
   # deadline, so `negotiate_grants` finds no gap and admission accepts the
   # grant — the workload then runs and exits 7, which is correct there and is
@@ -46,7 +48,7 @@ Feature: Transient sandbox boot
   # gate is for.
   @live @unenforceable_wall_clock
   Scenario: a sealed flake refuses a timeout the backend cannot enforce
-    When I run mvmctl in an isolated live home with "machine run --name bdd-nix-timeout --flake examples/exit_code --timeout 120"
+    When I run mvmctl in an isolated live home with "machine run --name bdd-nix-timeout --profile standard --flake examples/exit_code --timeout 120"
     Then the command exits with code 1
     And the error output contains "cannot enforce every declared grant"
 

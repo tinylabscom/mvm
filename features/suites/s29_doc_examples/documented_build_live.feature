@@ -32,21 +32,21 @@ Feature: The documented flake build runs for real
     Then the command exits with code 7
 
   # The image a builder VM produced, sealed on the host that ran it and
-  # installed somewhere else. The builder is untrusted and never holds the
-  # signing key: the archive is signed on the host after the build is done,
-  # and a second home that trusts only the signer's public half verifies and
-  # installs the result without booting it. The manifest build registers the
+  # refused by a registry install elsewhere. The builder is untrusted and never
+  # holds the signing key: the archive is signed on the host after the build is
+  # done. It is labelled a local build, which runs by its path and is never
+  # installed into another home's registry. The manifest build registers the
   # template slot export consumes; --flake alone only builds the artifacts.
   # This scenario must work without another scenario first launching the flake.
   @live
-  Scenario: the documented flake build seals into a host-signed bundle another home installs
+  Scenario: the documented flake build seals into a host-signed bundle another home refuses to install
     When I run mvmctl in an isolated live home with "machine build --mvm-config examples/exit_code/mvm.toml --json"
     Then the command exits with code 0
     When I seal the live manifest build into a bundle
     Then the command exits with code 0
-    When I install the sealed bundle into a fresh home that trusts its builder
-    Then the command exits with code 0
-    And the install reports a bundle content address
+    When I try to install the sealed bundle into a fresh home
+    Then the command exits with code 1
+    And the error output contains "refusing to install a local build"
 
   # Locking is offline; building requires the builder VM, prepared guest
   # runtime and workload kernel, and network access to the pinned Nix inputs.
@@ -64,9 +64,9 @@ Feature: The documented flake build runs for real
     When I run mvmctl against the live pack fixture with "build pack.json --out build.mvmpkg"
     Then the command exits with code 0
     And the pack build reports a signed archive
-    When I install the sealed bundle into a fresh home that trusts its builder
-    Then the command exits with code 0
-    And the install reports a bundle content address
+    When I try to install the sealed bundle into a fresh home
+    Then the command exits with code 1
+    And the error output contains "refusing to install a local build"
 
   Scenario: a pack build refuses source drift before building or signing
     Given a local pack build fixture

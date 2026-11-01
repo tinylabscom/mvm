@@ -37,7 +37,7 @@
 
 #![cfg(unix)]
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -189,10 +189,7 @@ fn read_line_unbuffered<R: Read>(conn: &mut R, max: usize) -> io::Result<String>
 /// guest byte stream.
 fn connect_firecracker_vsock(uds_path: &Path, port: u32) -> io::Result<UnixStream> {
     let mut stream = UnixStream::connect(uds_path)?;
-    // Firecracker hybrid-vsock expects `CONNECT <port>\n` (writeln!
-    // appends exactly the `\n` terminator the protocol wants).
-    writeln!(stream, "CONNECT {port}")?;
-    stream.flush()?;
+    mvm_agentd::vsock::send_connect(&mut stream, port)?;
     let line = read_line_unbuffered(&mut stream, MAX_CONNECT_LINE_BYTES)?;
     // Firecracker answers "OK <assigned_host_port>" on success.
     if !line.starts_with("OK") {
