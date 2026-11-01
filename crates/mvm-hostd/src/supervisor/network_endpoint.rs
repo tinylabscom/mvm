@@ -156,7 +156,7 @@ impl std::fmt::Debug for TlsIntermediate {
 /// verifying key is the pinned anchor the endpoint accepts. Both are carried
 /// as base64 on the stdin wire so no raw bytes escape the spawn boundary in
 /// shell-unsafe form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowMuxIdentity {
     /// Unique session identifier, distinct per VM boot.
@@ -165,6 +165,19 @@ pub struct FlowMuxIdentity {
     pub host_signing_key_base64: String,
     /// Base64-encoded 32-byte Ed25519 guest verifying key.
     pub guest_verifying_key_base64: String,
+}
+
+impl std::fmt::Debug for FlowMuxIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowMuxIdentity")
+            .field("session_id", &self.session_id)
+            .field("host_signing_key_base64", &"[REDACTED]")
+            .field(
+                "guest_verifying_key_base64",
+                &self.guest_verifying_key_base64,
+            )
+            .finish()
+    }
 }
 
 /// Config the backend hands the `mvm-network-endpoint` subprocess on
@@ -719,6 +732,48 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
     use secrecy::SecretBox;
     use tempfile::tempdir;
+
+    #[test]
+    fn flowmux_identity_debug_redacts_root_secret() {
+        use base64::Engine;
+
+        let raw = "synthetic-root-secret-sentinel!!";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        let identity = FlowMuxIdentity {
+            session_id: "debug-session".into(),
+            host_signing_key_base64: encoded.clone(),
+            guest_verifying_key_base64: "public-guest-anchor".into(),
+        };
+        let error = Err::<(), _>(identity.clone());
+        for output in [
+            format!("{identity:?}"),
+            format!("{identity:#?}"),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert!(!output.contains(raw), "raw root secret leaked");
+            assert!(!output.contains(&encoded), "encoded root secret leaked");
+            assert!(output.contains("[REDACTED]"));
+            assert!(output.contains("debug-session"));
+            assert!(output.contains("public-guest-anchor"));
+        }
+        let mut config = vsock_cfg(vec![], std::path::Path::new("/unused"));
+        config.flowmux_identity = Some(identity.clone());
+        let error = Err::<(), _>(&config);
+        for output in [
+            format!("{config:?}"),
+            format!("{config:#?}"),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert!(!output.contains(raw), "raw root secret leaked");
+            assert!(!output.contains(&encoded), "encoded root secret leaked");
+        }
+        let wire = serde_json::to_value(&identity).unwrap();
+        assert!(wire["host_signing_key_base64"] == encoded);
+        let restored: FlowMuxIdentity = serde_json::from_value(wire).unwrap();
+        assert!(restored == identity);
+    }
 
     #[test]
     fn build_audit_recorder_attaches_when_signer_key_present() {
