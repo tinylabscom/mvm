@@ -451,19 +451,17 @@ impl QemuDriver {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        // Wire the whole channel set through the bridge. If the bridge can't
-        // come up, the already-daemonized qemu would be orphaned (a failed
-        // `boot` won't be followed by `stop`). Roll back: kill qemu + drop
-        // the pid/cid sidecars so a retry re-allocates a CID instead of
-        // pinning the (possibly conflicting) one this attempt wrote.
+        // Wire the whole channel set through the bridge. If it fails, use the
+        // same verified stop as an owned VM. The CID becomes reusable only
+        // after that stop; uncertain termination retains all recovery records.
         let bridge_spec = bridge_spec_for_vsock(cid, &state_dir, &spec.vsock);
         if let Err(e) = qemu_process::spawn_vsock_bridges(&spec.name, &state_dir, &bridge_spec) {
-            if let Some(pid) = qemu_process::read_pid(&pid_file) {
-                qemu_process::send_signal(pid, libc::SIGTERM);
-            }
-            let _ = std::fs::remove_file(&pid_file);
-            let _ = std::fs::remove_file(state_dir.join(qemu_process::QEMU_CID_FILE));
-            return Err(e);
+            let running = QemuRunningVm {
+                id: VmId(spec.name.clone()),
+                state_dir: state_dir.clone(),
+                pid_file: pid_file.clone(),
+            };
+            return Err(rollback_failed_bridge(&state_dir, e, || running.kill()));
         }
 
         Ok(Box::new(QemuRunningVm {
@@ -596,6 +594,20 @@ impl VmmDriver for QemuDriver {
     }
 }
 
+fn rollback_failed_bridge(
+    state_dir: &Path,
+    bridge_error: anyhow::Error,
+    verified_stop: impl FnOnce() -> Result<()>,
+) -> anyhow::Error {
+    if let Err(stop_error) = verified_stop() {
+        return bridge_error.context(format!(
+            "QEMU bridge rollback could not prove writer termination; preserving PID and CID records: {stop_error:#}"
+        ));
+    }
+    let _ = std::fs::remove_file(state_dir.join(qemu_process::QEMU_CID_FILE));
+    bridge_error
+}
+
 /// A live QEMU VM: the daemonized `qemu-system` process tracked by its PID
 /// file, with the workload's exit code persisted under its state dir and the
 /// detached bridge serving its vsock channels.
@@ -709,6 +721,28 @@ mod tests {
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
     use mvm_core::vm_backend::SnapshotCapability;
     use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VirtioFsShare};
+
+    #[test]
+    fn bridge_rollback_preserves_identity_until_writer_stop_is_verified() {
+        let state = tempfile::tempdir().unwrap();
+        let pid = state.path().join(qemu_process::QEMU_PID_FILE);
+        let cid = state.path().join(qemu_process::QEMU_CID_FILE);
+        std::fs::write(&pid, b"123").unwrap();
+        std::fs::write(&cid, b"7").unwrap();
+
+        let error = rollback_failed_bridge(state.path(), anyhow!("bridge failed"), || {
+            Err(anyhow!("writer still running"))
+        });
+        assert!(format!("{error:#}").contains("preserving PID and CID"));
+        assert!(pid.exists() && cid.exists());
+
+        rollback_failed_bridge(state.path(), anyhow!("bridge failed"), || Ok(()));
+        assert!(
+            pid.exists(),
+            "rollback delegates PID evidence to verified stop"
+        );
+        assert!(!cid.exists(), "CID is reusable only after verified stop");
+    }
 
     #[test]
     fn qemu_diagnostic_sinks_are_fresh_private_files_and_links_are_replaced() {

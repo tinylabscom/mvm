@@ -22,6 +22,67 @@ struct PreparedDisk {
 /// Original materialization resources before final slot binding.
 pub type WritableVolumeImages = Vec<(PathBuf, LockedWritableImage)>;
 
+#[cfg(target_os = "linux")]
+fn privileged_writer_descriptor_objects(
+    pid: u32,
+) -> Result<std::collections::BTreeMap<(u64, u64), usize>> {
+    let output = privileged_fd_inventory_command(pid)
+        .output()
+        .context("running privileged Firecracker descriptor inventory")?;
+    ensure!(
+        output.status.success(),
+        "privileged Firecracker descriptor inventory failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    parse_fd_inventory(&output.stdout)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn privileged_fd_inventory_command(pid: u32) -> std::process::Command {
+    let mut command = mvm_core::env_hygiene::helper_command("sudo");
+    command.args([
+        "--",
+        "/usr/bin/find",
+        &format!("/proc/{pid}/fd"),
+        "-mindepth",
+        "1",
+        "-maxdepth",
+        "1",
+        "-exec",
+        "/usr/bin/stat",
+        "-Lc",
+        "%d:%i",
+        "--",
+        "{}",
+        "+",
+    ]);
+    command
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_fd_inventory(bytes: &[u8]) -> Result<std::collections::BTreeMap<(u64, u64), usize>> {
+    const MAX_INVENTORY_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_INVENTORY_ENTRIES: usize = 65_536;
+    ensure!(
+        bytes.len() <= MAX_INVENTORY_BYTES,
+        "privileged descriptor inventory exceeds its byte bound"
+    );
+    let text = std::str::from_utf8(bytes).context("descriptor inventory is not UTF-8")?;
+    let mut actual = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        ensure!(
+            actual.len() < MAX_INVENTORY_ENTRIES,
+            "privileged descriptor inventory exceeds its entry bound"
+        );
+        let (dev, ino) = line
+            .split_once(':')
+            .with_context(|| format!("invalid privileged descriptor inventory line {line:?}"))?;
+        let identity = (dev.parse()?, ino.parse()?);
+        *actual.entry(identity).or_insert(0usize) += 1;
+    }
+    Ok(actual)
+}
+
 /// Bounded original file owners, assigned to the final spec's writable slots.
 #[must_use = "retain prepared files through original-writer handoff"]
 #[derive(Debug)]
@@ -46,7 +107,15 @@ impl SudoWritableHandoff {
     /// Require the live writer to retain every original backing and sidecar.
     #[cfg(target_os = "linux")]
     pub fn verify_writer_descriptors(&self, pid: u32) -> Result<()> {
-        self.verify_writer_descriptors_at(std::path::Path::new(&format!("/proc/{pid}/fd")))
+        // A sudo-launched Firecracker's /proc/<pid>/fd is not ordinarily
+        // readable by the invoking user. Inspect objects through the same
+        // privilege boundary as the writer; never treat EACCES as success.
+        if unsafe { libc::geteuid() } == 0 {
+            self.verify_writer_descriptors_at(std::path::Path::new(&format!("/proc/{pid}/fd")))
+        } else {
+            let actual = privileged_writer_descriptor_objects(pid)?;
+            self.verify_writer_descriptor_objects(&actual)
+        }
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -68,6 +137,14 @@ impl SudoWritableHandoff {
                 .entry((metadata.dev(), metadata.ino()))
                 .or_insert(0usize) += 1;
         }
+        self.verify_writer_descriptor_objects(&actual)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn verify_writer_descriptor_objects(
+        &self,
+        actual: &std::collections::BTreeMap<(u64, u64), usize>,
+    ) -> Result<()> {
         for (index, pair) in self._files.chunks_exact(2).enumerate() {
             for (role, file) in ["backing", "sidecar"].into_iter().zip(pair) {
                 let expected = file.metadata()?;
@@ -646,6 +723,40 @@ mod tests {
                 });
             }
         });
+    }
+
+    #[test]
+    fn non_root_writer_inventory_uses_bounded_privileged_object_inspection() {
+        let command = privileged_fd_inventory_command(4242);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        assert!(command.get_program().to_string_lossy().ends_with("sudo"));
+        assert_eq!(
+            args,
+            [
+                "--",
+                "/usr/bin/find",
+                "/proc/4242/fd",
+                "-mindepth",
+                "1",
+                "-maxdepth",
+                "1",
+                "-exec",
+                "/usr/bin/stat",
+                "-Lc",
+                "%d:%i",
+                "--",
+                "{}",
+                "+",
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg == "-c"));
+        let actual = parse_fd_inventory(b"7:11\n7:11\n7:12\n").unwrap();
+        assert_eq!(actual.get(&(7, 11)), Some(&2));
+        assert_eq!(actual.get(&(7, 12)), Some(&1));
+        assert!(parse_fd_inventory(b"not-an-object").is_err());
     }
 
     #[test]
