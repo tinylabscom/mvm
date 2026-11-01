@@ -280,17 +280,25 @@ fn check_inclusion(
 
 /// Derived for a tenant-scoped archive; otherwise the host's assertion.
 fn check_completeness(signed: &SignedEvidenceManifest) -> CompletenessResult {
+    let leaves = &signed.manifest.leaves;
+    let distinct: std::collections::BTreeSet<u64> = leaves.iter().map(|l| l.index).collect();
+    if distinct.len() != leaves.len() {
+        return CompletenessResult::Failed(
+            "a leaf is listed more than once; every in-scope entry is accounted for exactly once"
+                .to_string(),
+        );
+    }
     match signed.manifest.completeness {
         Completeness::Attested => CompletenessResult::Attested,
         Completeness::Derivable => {
-            let have = signed.manifest.leaves.len() as u64;
             let want = signed.manifest.audit_root.tree_size;
-            if have == want {
+            if distinct.iter().copied().eq(0..want) {
                 CompletenessResult::Derived
             } else {
                 CompletenessResult::Failed(format!(
-                    "archive claims derivable coverage but carries {have} leaves \
-                     for a tree of {want}"
+                    "archive claims derivable coverage but its {} leaves are not exactly \
+                     0..{want} of the tree",
+                    leaves.len()
                 ))
             }
         }
