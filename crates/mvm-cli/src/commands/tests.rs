@@ -3615,7 +3615,7 @@ fn test_network_inspect_help() {
 
 #[test]
 fn test_network_remove_help() {
-    let cli = Cli::try_parse_from(["mvmctl", "network", "rm", "mynet"]);
+    let cli = Cli::try_parse_from(["mvmctl", "network", "remove", "mynet"]);
     assert!(cli.is_ok());
 }
 
