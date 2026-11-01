@@ -215,7 +215,7 @@ Evidence: `check-no-vz` and `check-single-network-path` clean; WASM witnesses na
 feature-matrix run was done. WHP is future (ADR-009, #3553), not claimed.
 
 Verdict: **PARTIAL**. Remaining: `just check::gated` and a native-platform
-witness per backend. See "Evidence run 2026-11-01" for what was run since.
+witness per backend. See "Evidence run 2026-11-01" and "Linux evidence run 2026-11-01" for what was run since.
 
 ### Authenticated vsock and host-held secret custody
 
@@ -245,7 +245,8 @@ which `check-dormant-controls` pins.
 Verdict: **PARTIAL**. The map exists and is gated. The gate proves a witness
 exists, not that it is meaningful, and two controls are dormant by declaration.
 2026-11-01 run: 99 of 132 claim-witness pairs ran and passed; the rest did not
-run on this host (table below).
+run on this host (table below). The "Linux evidence run 2026-11-01" section
+below ran 16 of the 33 by name on Linux; 17 remain, none of them tests.
 
 ### Relocatable installation and no-host-Nix/no-Docker
 
@@ -455,3 +456,121 @@ Verdict: **MET**, with the two unwitnessed details above. Full box text
 (relocatable install, no host Nix/Docker, source-build prerequisites versus
 release UX, prepared/cache-only launch) is now MET. The remaining PARTIAL in
 "Streams" is #4794's proposal wording, which is a separate box.
+
+## Linux evidence run 2026-11-01
+
+Closes the Linux-only half of the two boxes the macOS run left PARTIAL
+(claims-to-witnesses map; backend/feature combinations including WASM). Tree:
+`d876633332dfc68c3fb4547dd81b9f3be3920543` (origin/main), fresh clone and
+box-local `MVM_HOME` and target dir per host, both removed afterwards. Every
+count below was read from the run's own output.
+
+| Host | OS / kernel | systemd | Toolchain | Used for |
+|---|---|---|---|---|
+| A (x86_64, `/dev/kvm`) | Debian 12, 6.1.0-53-amd64 | 252 | rustc 1.97.1, nextest, QEMU, Firecracker v1.17.0 | the Linux-gated witnesses |
+| B (x86_64, `/dev/kvm`) | Ubuntu 26.04, 7.0.0-22-generic | 259.5 | rustc 1.97.1, zig 0.13.0, cargo-zigbuild 0.23.0, wasmtime 46.0.1 | feature combinations, WASM, `just check::gated` |
+
+Both ran as root over SSH, so a permission-denial test is vacuous there. Host B
+needed `rustup target add` for `riscv32imac-unknown-none-elf` and
+`wasm32-unknown-unknown` on the 1.97.1 toolchain (removed again afterwards);
+`wasm32-wasip1` was already present. wasmtime was fetched from its release page
+at the version `scripts/ci-linux-coverage.sh` pins.
+
+### Witnesses that did not run on macOS (host A)
+
+All commands from the clone, `CARGO_TARGET_DIR` and `MVM_HOME` in the scratch
+directory.
+
+| Witness set | Command | Result |
+|---|---|---|
+| Claim 1 seccomp, 7 named tests | `cargo nextest run -p mvm-agentd --test seccomp_apply` | 13 run, 13 PASS (the CI `seccomp-functional` lane's command, under nextest) |
+| `seccomp_allows_listed_denies_unlisted` (`#[ignore]`) | `cargo test -p mvm-hostd --test seccomp_property -- --ignored` | 1 passed |
+| `set_no_new_privs` (a function) | `cargo nextest run -p mvm-agentd --bin mvm-seccomp-apply` | 1 PASS, `set_no_new_privs_actually_sets_the_kernel_bit` |
+| `virtiofs_mount_flags_keep_workspace_read_only` | `cargo nextest run -p mvm-builder-guest -E 'test(/virtiofs/)'` | 2 PASS |
+| Claim 18 spawn scope, 2 named | `cargo test -p mvm-core --test spawn_scope_live -- --ignored --test-threads=1` | 3 passed (the two named and `a_stopped_service_manager_fails_the_launch_at_the_deadline`), 21.5 s |
+| `an_unresponsive_manager_fails_the_launch_instead_of_hanging_it` | `cargo nextest run -p mvm-core --lib -E 'test(/spawn_scope/)'` | 54 run, 54 PASS |
+| `a_grant_that_fails_to_apply_refuses_the_cli_boot` | `cargo nextest run -p mvm-client --features test-support -E 'test(/grants_report/)'` | 6 PASS |
+| `a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited` | see below | 2 passed |
+| `a_real_release_bundle_verifies_under_its_tag`, `self_update_refuses_a_checksum_manifest_signed_for_another_tag` | `cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/update::/)'` | 58 PASS, 1 FAIL (below) |
+| Installer scenario behind `fresh_install_*` | `cargo test -p mvm-conformance --test conformance --features bdd -- --name "Baked release bootstraps"` after `cargo build --bin mvmctl` | 1 scenario, 6 steps, all passed |
+
+The live ceiling witness needs a VMM it can bound, so it was given QEMU with the
+host kernel as a stand-in guest that holds its RAM:
+
+```
+MVM_LIVE_GUEST_MIB=512 MVM_LIVE_VMM_ARGV="qemu-system-x86_64 -machine microvm,accel=kvm -m 512 \
+  -mem-prealloc -display none -serial null -nodefaults -kernel /boot/vmlinuz-6.1.0-53-amd64 \
+  -append console=ttyS0" cargo test -p mvm-hostd --test spawn_ceiling_audit_live -- --ignored --nocapture --test-threads 1
+```
+
+Output: `a_scoped_vmm_reads_back_guest_ram_plus_the_overhead` read back
+`memory: EnforcedCeiling { tier: Cgroup2MemoryMax, limit: Some(805306368) }` and
+`tasks: ... Cgroup2PidsMax, limit: Some(1024)` for a 512 MiB guest (512 MiB plus
+the 256 MiB margin), and `a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited`
+reported `VMM ended with signal: 9 (SIGKILL) after 661.557834ms`. Without those two
+variables the test panics on the missing variable (first attempt, exit 101), so it
+is a harness input, not a defect. This is a kernel-as-guest stand-in, not a
+Firecracker, libkrun or HVF guest.
+
+One failure, outside the claim-20 witnesses:
+`update::tests::extract_and_install_uses_sudo_for_a_host_owned_install_dir`
+panics `the sudo arm must be invoked` (`crates/mvm-cli/src/update.rs:2603`). The
+hosts run as root, where the sudo arm is plausibly not taken, but this was not
+confirmed by running the test as an unprivileged user. Treat it as open.
+
+Witnesses cited by a production function rather than a test, so no run by name
+is possible: `acquire_from`, `admit_for_run`, `verify_audit_chain`,
+`synthesize_plan`, `read_and_verify_bundle`, `verify_plan_bundle`,
+`assert_vsock_only_device_model`, `verify_sealed_volume`, `apply_install_gate`,
+`substitute_bound_credential`, `apply_base_image_gate`, `scan_inventory`,
+`inventory_rootfs`. The tests of the modules that define them ran instead and all
+passed (mvm-core `plan::synthesis|plan::bundle|deps_audit` 181; mvm-build
+`published_image_set|app_deps_gate|base_image_gate|base_image_scan` 97; mvm-hostd
+`plan_admission|audit_file|keyholder::substitution` 177; mvm-vmm `snapshot` 26;
+mvm-fs `os_inventory` 19). That shows the module's tests pass, not that any named
+test is the witness for the claim.
+
+Tally of the 33 not run on macOS: 16 now ran by name and passed (8 for claim 1,
+1 for claim 2, 5 for claim 18, 2 for claim 20), taking claims 1 and 18 to 16/16
+and 32/32 by name. 17 did not run by name: 13 production functions above,
+`set_no_new_privs` (its differently named test passed) and the three
+`fresh_install_*` names, which are step functions of the scenario that passed.
+By name that is 115 of 132.
+
+### Backend and feature combinations, including WASM (host B)
+
+| Step | Command | Result |
+|---|---|---|
+| no_std foundation, browser wasm | `cargo +1.97.1 build -p mvm-contract --target wasm32-unknown-unknown` | Finished (first attempt failed, target not installed; rerun after `rustup target add`) |
+| bare-metal no_std | `cargo +1.97.1 build -p mvm-contract --lib --target riscv32imac-unknown-none-elf` | exit 0 |
+| wasip1 under wasmtime 46.0.1 | `cargo +1.97.1 test -p mvm-contract --target wasm32-wasip1` | exit 0; lib 1239 passed, 0 failed, plus the integration targets |
+| Feature clippy | the `lint-feature-clippy` command from `ci.yml`, features read from `release.yml` (`embed-host-bins` omitted, as in CI) | exit 0, `-D warnings`, 3 m 28 s |
+| Release verifier absent | `cargo clippy --locked --all-targets -p mvm-core -p mvm-build -p mvm-client -- -D warnings` | exit 0 |
+| `mvm-sdk` no default features | `cargo clippy --locked --all-targets -p mvm-sdk --no-default-features -- -D warnings` | exit 0 |
+| wasmtime tier | `cargo test -p mvm-runtime --features wasm-backend wasm` | 61 passed, includes `a_fuel_only_grant_is_refused` and `an_unbounded_wall_clock_does_not_satisfy_a_fuel_grant` |
+| wasmtime egress seam | `cargo test -p mvm-hostd --features wasm-backend --test wasm_egress_witness` | 2 passed |
+| Release acquisition | `cargo check -p mvm-cli --features release-artifact-bootstrap[,manifest-verify] --lib`; `cargo test -p mvm-build --features release-channel --lib artifact_acquisition` | both checks exit 0; 4 passed |
+| Linux-gated and feature-gated targets | `cargo-zigbuild check --target x86_64-unknown-linux-gnu --workspace --all-targets`; `cargo check -p mvm-conformance --all-targets --features bdd` (the body of `just check::gated`) | both Finished, exit 0 |
+
+### Verdicts after this run
+
+- Claims mapped to witnesses: **PARTIAL**, narrower. Every witness that is a
+  test ran and passed except the one failure above, and the ADR-001 `fn:` names
+  that are tests now ran by name. Not met: 17 cited names are not tests, so the
+  gate proves they exist and the module tests pass, not that they are meaningful
+  witnesses; the sudo-arm failure is undiagnosed.
+- Backend and feature combinations including WASM: the feature-combination and
+  WASM half is **MET** by the table above (this run plus the macOS run). The box
+  as a whole stays **PARTIAL**: no HVF or libkrun native witness and no aarch64
+  Linux run was made here, and Firecracker was exercised by the separate live
+  KVM evidence (`live-kvm-acceptance-evidence-2026-11-01.md`), not by this run.
+  Windows and WHP are future (ADR-009, #3553) and not claimed.
+
+### Not measured
+
+The 17 non-test names above; the sudo-arm test as an unprivileged user; the
+spawn-ceiling witnesses against a real Firecracker, libkrun or HVF guest;
+anything on aarch64; `ebpf-telemetry` and `embed-host-bins` clippy (excluded by
+CI's own lane); Windows and WHP. Host B runs systemd 259, which the live KVM
+evidence found breaks the scoped Firecracker launch; no Firecracker boot was
+attempted on it here.
