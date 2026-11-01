@@ -1,8 +1,8 @@
 //! Framed `WireRequest`/`WireResponse` relay over an open stream.
 //!
 //! **Not a guest→host transport.** The in-guest egress path moved to the
-//! authenticated FlowMux session (`crate::flowmux_sync`), and the vsock dial
-//! that used to live here went with it — a guest reaches its host endpoint one
+//! authenticated FlowMux session (`crate::flowmux_sync`), and there is no vsock dial
+//! here — a guest reaches its host endpoint one
 //! way now, and `xtask check-one-guest-protocol` enforces that.
 //!
 //! What survives is the relay over an already-open stream, whose one caller is

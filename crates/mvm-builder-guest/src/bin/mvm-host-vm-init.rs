@@ -750,8 +750,8 @@ mod tests {
 
     #[test]
     fn a_store_the_kernel_flagged_is_reported_as_damaged() {
-        // EXT4_ERROR_FS. This is what an abruptly-killed builder VM left
-        // behind, and what previously surfaced as an unrelated chown failure.
+        // EXT4_ERROR_FS. This is what an abruptly-killed builder VM leaves
+        // behind; unreported, it surfaces as an unrelated chown failure.
         assert_eq!(
             parse_ext4_recorded_error_state(&sb_with_state(0x0002)),
             Some(true)
@@ -1541,7 +1541,7 @@ mod linux {
     /// vsock-only egress on the kernel cmdline, and refuse the boot if it never
     /// binds.
     ///
-    /// This used to be best-effort. It cannot be: the builder VM has no NIC, so
+    /// This cannot be best-effort: the builder VM has no NIC, so
     /// a guest that boots without this proxy has no network at all and every
     /// job it accepts fails on its first fetch, blaming the network rather than
     /// the missing proxy. Refusing here is the same posture as the
@@ -4780,13 +4780,11 @@ mod linux {
             assert!(nix_store_needs_seed(base.path()));
         }
 
-        /// Regression: `mount_nix_overlay` pre-creates `upper/` and
-        /// `work/` before attempting the overlay mount. If that mount
-        /// fails, the fallback path used to see the volume as "already
-        /// seeded" (any non-`lost+found` entry counted) and skip the
-        /// copy, leaving `/nix` empty after bind-mount. The corrected
-        /// check looks at `store/` instead, so overlay scaffolding
-        /// does not confuse the seeder.
+        /// `mount_nix_overlay` pre-creates `upper/` and `work/` before
+        /// attempting the overlay mount. If that mount fails, the fallback
+        /// must not treat the volume as "already seeded" (that would skip the
+        /// copy and leave `/nix` empty after bind-mount), so the check looks
+        /// at `store/`, not at any non-`lost+found` entry.
         #[test]
         fn nix_store_needs_seed_when_only_overlay_scaffolding_present() {
             let base = tempfile::tempdir().expect("tempdir");

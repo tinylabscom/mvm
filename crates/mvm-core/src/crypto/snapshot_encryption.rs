@@ -493,9 +493,8 @@ mod tests {
     #[test]
     fn round_trip_exactly_chunk_size_boundary() {
         // File whose size is an exact multiple of chunk_size — the
-        // last chunk is "full". The encryptor used to have a bug
-        // where it would write an empty trailing chunk; this test
-        // pins the correct behavior.
+        // last chunk is "full". The encryptor must not write an empty
+        // trailing chunk.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("aligned.bin");
         let plaintext = vec![0x11u8; 64 * 2];

@@ -674,11 +674,11 @@ fn ensure_volume_mount_roots(unpacked_root: &Path) -> Result<()> {
 /// Seal an already-materialized `rootfs_ext4`, writing its dm-verity sidecars
 /// (`rootfs.verity` + `rootfs.roothash`).
 ///
-/// There is no longer a sibling `rootfs.initrd` to keep in step: the universal
-/// initramfs is the only initramfs, it is attached from the shared cache rather
-/// than assembled per rootfs, and the guest agent it boots sets up the
-/// dm-verity target itself before pivoting. So this is a plain seal, with none
-/// of the write-first/roll-back ordering the paired artifacts used to need.
+/// There is no sibling `rootfs.initrd` to keep in step: the universal
+/// initramfs is attached from the shared cache rather than assembled per
+/// rootfs, and the guest agent it boots sets up the dm-verity target itself
+/// before pivoting. So this is a plain seal with no write-first/roll-back
+/// ordering.
 fn seal_rootfs_for_run(rootfs_ext4: &Path) -> Result<()> {
     seal_run_rootfs_for_runtime(rootfs_ext4)
         .with_context(|| format!("dm-verity seal {}", rootfs_ext4.display()))
@@ -1982,9 +1982,9 @@ mod tests {
     #[test]
     fn sealing_emits_both_verity_sidecars() {
         // The load-bearing `--prod` invariant: a sealed rootfs carries both
-        // dm-verity sidecars. There is no longer a paired `rootfs.initrd` to
-        // land with them — the universal initramfs is attached from the shared
-        // cache and its agent sets the dm-verity target up itself.
+        // dm-verity sidecars. No paired `rootfs.initrd` lands with them — the
+        // universal initramfs is attached from the shared cache and its agent
+        // sets the dm-verity target up itself.
         // Skips cleanly when `veritysetup` (cryptsetup) is not installed.
         if which::which("veritysetup").is_err() {
             eprintln!("skipped: veritysetup not on $PATH (install cryptsetup)");

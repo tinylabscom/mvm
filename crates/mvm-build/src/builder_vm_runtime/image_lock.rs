@@ -800,12 +800,8 @@ mod tests {
     use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
 
     // -----------------------------------------------------------------
-    // Tests migrated from libkrun_builder.rs alongside NixStoreImageLock
-    // and acquire_nix_store_image_lock. The new signature takes the
-    // cache dir as a &Path arg,
-    // so the cache-env override hack from the old tests is gone — each
-    // test passes a fresh TempDir path directly and runs without
-    // process-wide env mutation.
+    // The cache dir is a &Path argument, so each test passes a fresh TempDir
+    // and runs without process-wide env mutation.
     // -----------------------------------------------------------------
 
     #[test]

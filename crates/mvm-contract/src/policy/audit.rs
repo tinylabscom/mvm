@@ -240,8 +240,8 @@ pub enum LocalAuditKind {
     VmVolumeAdd,
     VmVolumeRemove,
     // --- retired resource-metering compatibility ---
-    /// Legacy resource-metering event kind retained so persisted audit logs
-    /// remain readable after the unused producer and bucket model were removed.
+    /// Resource-metering event kind with no producer, retained so persisted
+    /// audit logs stay readable.
     MeteringEpoch,
     // --- bundle trust store mutations ---
     //

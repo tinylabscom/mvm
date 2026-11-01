@@ -301,11 +301,7 @@ pub(super) fn install_shutdown_handler(_krun: &sys::Context) -> Result<(), Error
     extern "C" fn handle_sigterm(_sig: libc::c_int) {
         // Status 143 = 128 + SIGTERM, the shell convention for "killed by
         // SIGTERM". `_exit` is async-signal-safe (signal-safety(7)).
-        //
-        // This used to reap a gateway child first, because tearing the
-        // supervisor down otherwise orphaned it onto init where it kept an
-        // inherited fd open. There is no gateway child now: the guest has no
-        // NIC, so no process sits between it and the host to leak.
+        // There is no child process to reap: the guest has no NIC.
         unsafe {
             libc::_exit(143);
         }
