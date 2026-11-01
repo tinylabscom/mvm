@@ -1,6 +1,6 @@
-//! In-guest lifecycle-hook runner. SDK port Phase 10c.
+//! In-guest lifecycle-hook runner.
 //!
-//! Phase 10b's Nix factory bakes one shell script per phase into the
+//! The Nix factory bakes one shell script per phase into the
 //! rootfs at `/etc/mvm/hooks/<phase>.sh` (`before_start.sh`,
 //! `after_start.sh`, `before_stop.sh`, …). The bootscript already
 //! runs `before_start.sh` synchronously before dispatch. This module
@@ -20,8 +20,8 @@
 //! Both functions take an absolute script path so the caller can
 //! point them at any path (production: the baked-in
 //! `/etc/mvm/hooks/<phase>.sh`; tests: a tempdir fixture). No
-//! dependency on the IR `HookCmd` enum — Phase 10b already lowered
-//! those to shell scripts on disk, so this layer just runs files.
+//! dependency on the IR `HookCmd` enum — the hooks are already lowered
+//! to shell scripts on disk, so this layer just runs files.
 
 use std::io;
 use std::path::{Path, PathBuf};

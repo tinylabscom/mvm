@@ -380,14 +380,11 @@ mod tests {
     /// The property is that eviction stops at its target instead of filtering
     /// the queue: fifty times the queue must not cost fifty times the work.
     ///
-    /// This was previously timed — `long <= short * 8 + 50ms` over two 50,000
-    /// eviction runs. That could not fail for the reason it named. With every
-    /// event on one stream the walk pops exactly `count` from the front, so
-    /// the cost is already independent of length by construction, and what the
-    /// clock actually compared was cache locality on a 50k deque against a 1k
-    /// one. On a machine where the larger deque falls out of cache it failed
-    /// deterministically — observed red on `main`, on hardware that had
-    /// nothing to do with the change under test.
+    /// Deliberately not timed. With every event on one stream the walk pops
+    /// exactly `count` from the front, so the cost is independent of length by
+    /// construction, and a clock comparison would measure cache locality of a
+    /// 50k deque against a 1k one instead. The assertion counts the steps the
+    /// walk takes.
     #[test]
     fn evicting_one_event_costs_the_same_on_a_long_queue_as_on_a_short_one() {
         let short = eviction_work(1_000);
