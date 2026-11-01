@@ -44,7 +44,7 @@ pub use mvm_contract::protocol::signed_config::{SignedConfigEnvelope, SignedConf
 pub fn key_id_for(verifying_key: &VerifyingKey) -> String {
     let bytes = verifying_key.to_bytes();
     let hash = Sha256::digest(bytes);
-    hex_encode(&hash)
+    hex::encode(hash)
 }
 
 // ============================================================================
@@ -140,15 +140,6 @@ pub fn verify_envelope(
 // ============================================================================
 // Helpers
 // ============================================================================
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(out, "{:02x}", b);
-    }
-    out
-}
 
 // ============================================================================
 // Tests

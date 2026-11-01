@@ -27,10 +27,7 @@ const FIXTURE_VERSION: &str = "1.2.3";
 /// the downloader's focused release-fixture regression.
 const SCENARIO_LIBC: GuestLibc = GuestLibc::Glibc;
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(bytes))
-}
+use mvm_contract::hash::sha256_hex;
 
 /// A sidecar ext4 carrying the one path the SDKs load, built with the in-repo
 /// pure-Rust writer so the fixture needs no `mkfs`.

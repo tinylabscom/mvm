@@ -35,10 +35,7 @@ fn newc_names(cpio: &[u8]) -> Vec<String> {
     }
 }
 
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(data))
-}
+use mvm_contract::hash::sha256_hex;
 
 /// Env selector pinning the overlay/initrd acquisition ladder to the
 /// published-artifact mode, so a scenario running inside a source checkout

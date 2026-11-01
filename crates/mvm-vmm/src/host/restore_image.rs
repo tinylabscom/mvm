@@ -840,9 +840,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn sha256_hex(bytes: &[u8]) -> String {
-        mvm_core::crypto::image_verify::sha256_reader(bytes).unwrap()
-    }
+    use mvm_contract::hash::sha256_hex;
 
     /// A private directory and a saved-state file inside a second directory,
     /// the shape a restore sees: the checkpoint copy in the state dir, the

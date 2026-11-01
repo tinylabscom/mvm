@@ -385,7 +385,6 @@ mod sdk_sidecar_host_resolution_tests {
     use mvm_fs::sdk_sidecar::{
         SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
     };
-    use sha2::{Digest, Sha256};
 
     /// Record that this version adopted a release guest runtime for `arch`,
     /// as a release bootstrap does once it has assembled every piece.
@@ -403,9 +402,7 @@ mod sdk_sidecar_host_resolution_tests {
         ServiceId::parse(raw).expect("fixture service id")
     }
 
-    fn sha256_hex(bytes: &[u8]) -> String {
-        hex::encode(Sha256::digest(bytes))
-    }
+    use mvm_contract::hash::sha256_hex;
 
     #[test]
     fn stale_sidecar_guidance_names_the_current_owner_and_completion_signal() {
@@ -864,7 +861,6 @@ mod runtime_overlay_attach_tests {
     use mvm_core::vm_backend::VmStartConfig;
     use mvm_fs::ext4::{Node, Owner};
     use mvm_fs::overlay::RuntimeOverlayResolver;
-    use sha2::{Digest, Sha256};
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -938,10 +934,7 @@ mod runtime_overlay_attach_tests {
         .unwrap();
     }
 
-    fn sha256_hex(bytes: &[u8]) -> String {
-        let digest = Sha256::digest(bytes);
-        hex::encode(digest)
-    }
+    use mvm_contract::hash::sha256_hex;
 
     #[test]
     fn layout_only_cache_does_not_supply_runtime_authority() {

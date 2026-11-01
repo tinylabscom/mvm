@@ -6,8 +6,6 @@
 //! can have — a pin map, or a refusal — so these tests pin down everything the
 //! fetch does with them.
 
-use sha2::{Digest, Sha256};
-
 use super::stage0_cache::{
     BuilderVmArtifactNames, BuilderVmImageRelease, BuilderVmReleaseSource, fetch_builder_vm_image,
     fetched_builder_vm_image_line, validate_builder_vm_stage0_artifacts,
@@ -30,9 +28,7 @@ fn release() -> BuilderVmImageRelease<'static> {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
+use mvm_contract::hash::sha256_hex;
 
 fn other_arch(arch: &str) -> &'static str {
     if arch == "aarch64" {

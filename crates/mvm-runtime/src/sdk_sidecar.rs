@@ -130,15 +130,12 @@ mod tests {
     use mvm_fs::sdk_sidecar::{
         SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
     };
-    use sha2::{Digest, Sha256};
 
     fn svc(raw: &str) -> ServiceId {
         ServiceId::parse(raw).expect("fixture service id")
     }
 
-    fn sha256_hex(bytes: &[u8]) -> String {
-        hex::encode(Sha256::digest(bytes))
-    }
+    use mvm_contract::hash::sha256_hex;
 
     /// A valid sidecar ext4 fixture carrying the cdylib the SDKs load, built
     /// with the in-repo pure-Rust writer (no `mkfs`).

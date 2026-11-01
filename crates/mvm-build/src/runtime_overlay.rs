@@ -2839,12 +2839,7 @@ mod tests {
         std::fs::write(dir.join(name), bytes).expect("write fixture");
     }
 
-    fn sha256_hex(bytes: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(bytes);
-        hex::encode(h.finalize())
-    }
+    use mvm_contract::hash::sha256_hex;
 
     /// The overlay's per-file mode is copied from the staged file, masked
     /// to the permission bits. Nothing asserted that, and the mutants it

@@ -9,17 +9,6 @@
 
 use core::fmt;
 
-const HEX: &[u8; 16] = b"0123456789abcdef";
-
-fn to_hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    s
-}
-
 fn hex_nibble(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
@@ -53,7 +42,7 @@ pub struct SpanId(pub [u8; 8]);
 
 impl TraceId {
     pub fn to_hex(self) -> String {
-        to_hex(&self.0)
+        hex::encode(self.0)
     }
     fn is_valid(self) -> bool {
         self.0 != [0u8; 16]
@@ -62,7 +51,7 @@ impl TraceId {
 
 impl SpanId {
     pub fn to_hex(self) -> String {
-        to_hex(&self.0)
+        hex::encode(self.0)
     }
     fn is_valid(self) -> bool {
         self.0 != [0u8; 8]
