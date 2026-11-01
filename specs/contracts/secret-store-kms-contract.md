@@ -20,8 +20,8 @@ Two local providers implement it.
 - `KeyringSecretStore` (`os-keyring` feature): OS keystore entry per secret,
   with a name index beside it.
 
-Every consumer, the CLI, Studio and the hostlib among them, reaches the store
-through `mvm-client`. No provider shells out, and no provider receives a value
+Operator commands reach the store through `mvm-client`; the host-side
+substitution endpoint in `mvm-hostd` is the only other reader. No provider shells out, and no provider receives a value
 from the guest: workloads carry references, and the host-side endpoint resolves
 a value only while preparing an admitted outbound request.
 
