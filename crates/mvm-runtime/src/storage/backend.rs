@@ -107,11 +107,9 @@ impl DeviceMapperBackend for DmsetupBackend {
     #[cfg(target_os = "linux")]
     fn create_pool(&self, _name: &str, _size_bytes: u64, _block_size: u32) -> Result<()> {
         dmsetup_linux::check_available()?;
-        // Phase 1 deferral: the actual `dmsetup create` invocation
-        // (with sparse-file backing + `thin-pool` target) lands in
-        // Phase 2 alongside the instance-create migration. The
-        // backend trait is what's stable here; the impl can fail
-        // closed until Phase 2 ships the real invocation.
+        // The `dmsetup create` invocation (sparse-file backing + `thin-pool`
+        // target) is not implemented; the trait is the stable surface, so this
+        // fails closed.
         Err(StorageError::BackendUnavailable(
             "DmsetupBackend::create_pool is phase-2 work — use MockBackend for now".to_string(),
         ))

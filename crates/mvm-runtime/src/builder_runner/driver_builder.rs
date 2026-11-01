@@ -302,10 +302,7 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
         mounts: &BuilderMounts,
     ) -> Result<BuilderArtifacts, BuilderVmError> {
         // Not wired on *this* backend. libkrun and qemu both serve the Install
-        // arm; the comment here used to say "isn't wired for any backend yet",
-        // which stopped being true and went unrevisited because nothing forced
-        // a second look. `capabilities()` below is the checked version of this
-        // sentence.
+        // arm; `capabilities()` below is the checked version of this sentence.
         if matches!(job, BuilderJob::Install { .. }) {
             return Err(BuilderVmError::VmmUnavailable {
                 requested: format!("{}-dependency-install", self.driver.name()),
