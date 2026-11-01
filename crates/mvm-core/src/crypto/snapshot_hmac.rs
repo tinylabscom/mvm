@@ -317,7 +317,7 @@ pub fn compute_tag(params: &SnapshotIntegrityParams<'_>) -> Result<(IntegritySid
         epoch,
         mvmctl_version: mvmctl_version.to_string(),
         runtime_launch_binding: runtime.cloned(),
-        tag_hex: hex_encode(&tag_arr),
+        tag_hex: hex::encode(tag_arr),
     };
     Ok((sidecar, tag_arr))
 }
@@ -536,23 +536,6 @@ impl EpochStore {
 // Helpers
 // ============================================================================
 
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push(hex_nibble(b >> 4));
-        s.push(hex_nibble(b & 0x0f));
-    }
-    s
-}
-
-fn hex_nibble(n: u8) -> char {
-    match n {
-        0..=9 => (b'0' + n) as char,
-        10..=15 => (b'a' + n - 10) as char,
-        _ => '?',
-    }
-}
-
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -624,7 +607,7 @@ mod tests {
         let (sidecar, tag) = compute_tag(&params).unwrap();
         // Fixed vector from the original schema/epoch/files/version encoding.
         let expected = "8edf814973be917c187e5fae6a9f7bd6a2b8c9b4ed96d9febd34b2400c15c647";
-        assert_eq!(hex_encode(&tag), expected);
+        assert_eq!(hex::encode(tag), expected);
         assert_eq!(sidecar.tag_hex, expected);
         assert!(sidecar.runtime_launch_binding.is_none());
         assert_eq!(seal(dir.path(), &params).unwrap().tag_hex, expected);

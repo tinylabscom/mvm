@@ -576,7 +576,6 @@ fn seed_from_default_cache(
 pub(crate) mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
-    use sha2::{Digest, Sha256};
 
     const FIXTURE_VERSION: &str = "9.9.9";
 
@@ -731,9 +730,7 @@ pub(crate) mod tests {
         ));
     }
 
-    fn sha256_hex(bytes: &[u8]) -> String {
-        hex::encode(Sha256::digest(bytes))
-    }
+    use mvm_contract::hash::sha256_hex;
 
     /// A minimal sidecar ext4 carrying the one path the resolver proves present,
     /// built with the in-repo pure-Rust writer so the fixture needs no `mkfs`.

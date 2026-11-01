@@ -180,8 +180,8 @@ pub fn sign_manifest(
     let signature = signing_key.sign(&signed_manifest_message(manifest_digest));
     let sidecar = ManifestSignature {
         manifest_digest: manifest_digest.to_owned(),
-        signature: hex_encode(&signature.to_bytes()),
-        pubkey: hex_encode(signing_key.verifying_key().as_bytes()),
+        signature: hex::encode(signature.to_bytes()),
+        pubkey: hex::encode(signing_key.verifying_key().as_bytes()),
     };
     write_manifest_atomic(snapshot_dir, &sidecar)?;
     Ok(sidecar)
@@ -235,10 +235,10 @@ pub fn sign(
         .with_context(|| format!("hashing snapshot files in {}", snap_dir.display()))?;
     let sig = signing_key.sign(&signed_message(&content_hash, epoch));
     let sidecar = SnapshotSignature {
-        sha256: hex_encode(&content_hash),
+        sha256: hex::encode(content_hash),
         epoch,
-        signature: hex_encode(&sig.to_bytes()),
-        pubkey: hex_encode(signing_key.verifying_key().as_bytes()),
+        signature: hex::encode(sig.to_bytes()),
+        pubkey: hex::encode(signing_key.verifying_key().as_bytes()),
     };
     write_sig_atomic(snap_dir, &sidecar)?;
     Ok(sidecar)
@@ -327,15 +327,6 @@ fn decode_signature(hex: &str) -> std::result::Result<Signature, SnapshotSigErro
         .try_into()
         .map_err(|_| SnapshotSigError::BadHex { field: "signature" })?;
     Ok(Signature::from_bytes(&arr))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
-    }
-    s
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
@@ -456,7 +447,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&sig_path).unwrap()).unwrap();
         let mut sig_bytes = hex_decode(&v.signature).unwrap();
         sig_bytes[0] ^= 0x01;
-        v.signature = hex_encode(&sig_bytes);
+        v.signature = hex::encode(sig_bytes);
         std::fs::write(&sig_path, serde_json::to_vec(&v).unwrap()).unwrap();
 
         let err = verify_signature(tmp.path(), &files, 1, &[signer.verifying_key()]).unwrap_err();
@@ -523,7 +514,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let mut signature = hex_decode(&stored.signature).unwrap();
         signature[0] ^= 1;
-        stored.signature = hex_encode(&signature);
+        stored.signature = hex::encode(signature);
         std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
 
         let signature_error =

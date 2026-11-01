@@ -201,8 +201,25 @@ fn installed_bundle_verified_manifest(
     let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
     let trust = mvm_core::plan::FsTrustStore::default_path()?;
     registry
-        .verified_manifest(id_or_slot, &trust)
+        .verified_launch_manifest(id_or_slot, trust, host_verifying_key()?)
         .map_err(|e| anyhow::anyhow!("installed bundle {id_or_slot}: {e}"))
+}
+
+/// This host's bundle-signing public key, or `None` when no host key exists
+/// yet. Read-only: checking a bundle must not mint a host identity.
+fn host_verifying_key() -> Result<Option<ed25519_dalek::VerifyingKey>> {
+    let path = mvm_core::config::mvm_keys_dir().join("host-signer.pub");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{} is not a 32-byte Ed25519 public key", path.display()))?;
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        .map(Some)
+        .with_context(|| format!("parsing {}", path.display()))
 }
 
 /// The signed security posture of the installed bundle `id_or_slot` names.

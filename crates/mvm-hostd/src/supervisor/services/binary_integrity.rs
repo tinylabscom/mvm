@@ -132,7 +132,7 @@ impl BinarySignature {
     pub fn key_id_for(verifying_key: &VerifyingKey) -> String {
         let bytes = verifying_key.to_bytes();
         let hash = Sha256::digest(bytes);
-        hex_encode(&hash)
+        hex::encode(hash)
     }
 
     /// Path of the sidecar for a given binary (`<binary>.sig`).
@@ -283,15 +283,6 @@ impl IntegrityChecker for SignedBinaryChecker {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write;
-        let _ = write!(out, "{:02x}", b);
-    }
-    out
-}
 
 /// Keep [`File`] around as a no-op import so `cargo doc --no-deps`
 /// renders without an unused-import warning (we'll wire it in

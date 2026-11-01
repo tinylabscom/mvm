@@ -77,7 +77,7 @@ impl ChildGrantIssuer for HostChildGrantIssuer {
 pub fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
     let bytes =
         std::fs::read(kernel).with_context(|| format!("read kernel {}", kernel.display()))?;
-    Ok(hex_lower(&Sha256::digest(&bytes)))
+    Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
 /// 32 random bytes as lowercase hex — the per-spawn binding nonce.
@@ -85,7 +85,7 @@ pub fn fresh_binding_nonce() -> String {
     use rand::Rng;
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
-    hex_lower(&buf)
+    hex::encode(buf)
 }
 
 /// The compat-key kernel identity, computed identically at claim **and** replenish time:
@@ -1136,16 +1136,6 @@ pub fn reap_stale_standbys_best_effort() {
     }
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1153,7 +1143,7 @@ mod tests {
     use mvm_core::vm_backend::{StandbyHandle, StandbyState, VmStartConfig};
 
     fn sha256_hex_of(bytes: &[u8]) -> String {
-        hex_lower(&Sha256::digest(bytes))
+        hex::encode(Sha256::digest(bytes))
     }
 
     #[test]
