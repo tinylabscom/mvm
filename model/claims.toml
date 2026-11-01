@@ -142,7 +142,7 @@ id = "MVM-SEC-07"
 level = "some-true"
 witness_kinds = ["ci"]
 suite = "supply_chain"
-statement = "Cargo deps are audited on every PR"
+statement = "Cargo deps are audited nightly and on release tags"
 witnesses = [
     "ci:cargo-deny",
     "ci:cargo-audit",
