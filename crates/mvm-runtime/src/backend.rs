@@ -389,6 +389,7 @@ impl AnyBackend {
     /// - `"mock"` outside a `test-support` build (a real, documented selector
     ///   that would silently run the wrong backend).
     /// - `"docker"` everywhere (there is no Docker backend).
+    /// - any name the catalog does not recognise (a typo must not run Firecracker).
     ///
     /// Call this before [`Self::from_hypervisor`] at any user-facing
     /// `--hypervisor` entry point.
@@ -400,6 +401,11 @@ impl AnyBackend {
         }
         if name == "mock" && !cfg!(feature = "test-support") {
             anyhow::bail!("the mock backend is only available in test-support builds");
+        }
+        if catalog::descriptor_for_selector(name).is_none() {
+            anyhow::bail!(
+                "unknown hypervisor `{name}`; expected one of firecracker, libkrun, hvf, qemu, apple-container"
+            );
         }
         Ok(())
     }
@@ -1314,13 +1320,9 @@ mod tests {
 
     #[test]
     fn test_any_backend_from_hypervisor_libkrun() {
-        // Both `libkrun` and `krun` aliases route to the same backend
-        // — `krun` is the libkrun project's preferred short name and
-        // appears in some user docs.
-        for name in ["libkrun", "krun"] {
-            let backend = AnyBackend::from_hypervisor(name);
-            assert_eq!(backend.name(), "libkrun");
-        }
+        let backend = AnyBackend::from_hypervisor("libkrun");
+        assert_eq!(backend.name(), "libkrun");
+        assert_ne!(AnyBackend::from_hypervisor("krun").name(), "libkrun");
     }
 
     #[test]
@@ -1388,6 +1390,16 @@ mod tests {
     }
 
     #[test]
+    fn require_hypervisor_selectable_refuses_an_unrecognised_name() {
+        for name in ["not-a-hypervisor", "", "virtualization"] {
+            let err = AnyBackend::require_hypervisor_selectable(name)
+                .expect_err("an unknown selector must be refused, not defaulted");
+            assert!(err.to_string().contains("unknown hypervisor"), "{err}");
+        }
+        assert!(AnyBackend::require_hypervisor_selectable("libkrun").is_ok());
+    }
+
+    #[test]
     fn require_hypervisor_selectable_refuses_mock_without_test_support() {
         let result = AnyBackend::require_hypervisor_selectable("mock");
         if cfg!(feature = "test-support") {
@@ -1413,14 +1425,14 @@ mod tests {
     }
 
     #[test]
-    fn require_hypervisor_selectable_allows_every_other_name() {
+    fn require_hypervisor_selectable_allows_every_catalogued_name() {
         for name in [
             "firecracker",
             "libkrun",
             "qemu",
             "hvf",
             "apple-container",
-            "unknown-typo",
+            "container",
         ] {
             assert!(
                 AnyBackend::require_hypervisor_selectable(name).is_ok(),
@@ -1431,14 +1443,12 @@ mod tests {
 
     #[test]
     fn test_any_backend_from_hypervisor_hvf() {
-        // `--hypervisor hvf` (and the `hypervisor` alias) resolve to the HVF
-        // workload runner (the sole `Hvf` variant), whose name delegates to the
-        // hvf driver ("hvf") and whose kind is `BackendKind::Hvf`.
-        for sel in ["hvf", "hypervisor"] {
-            let backend = AnyBackend::from_hypervisor(sel);
-            assert!(matches!(backend, AnyBackend::Hvf(_)), "selector {sel}");
-            assert_eq!(backend.name(), "hvf");
-        }
+        // `--hypervisor hvf` resolves to the HVF workload runner (the sole
+        // `Hvf` variant), whose name delegates to the hvf driver ("hvf") and
+        // whose kind is `BackendKind::Hvf`.
+        let backend = AnyBackend::from_hypervisor("hvf");
+        assert!(matches!(backend, AnyBackend::Hvf(_)));
+        assert_eq!(backend.name(), "hvf");
         assert_eq!(
             AnyBackend::from_hypervisor("hvf").kind(),
             catalog::BackendKind::Hvf
@@ -1650,7 +1660,7 @@ mod tests {
                 ),
                 (
                     "libkrun",
-                    vec!["krun"],
+                    Vec::new(),
                     BackendTier::Tier2,
                     Some("libkrun.pid"),
                     Some(2),
@@ -1680,7 +1690,7 @@ mod tests {
                 ),
                 (
                     "hvf",
-                    vec!["hypervisor"],
+                    Vec::new(),
                     BackendTier::Tier2,
                     Some("hvf.pid"),
                     Some(5),

@@ -490,9 +490,12 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    is not an image-set member. It is a CLI release asset,
    verified under claim 20, so this claim says nothing about it.
 
-7. **Cargo deps are audited on every PR.** `deny.toml` + the `deny`
-   and `audit` jobs in CI. Reproducibility double-build catches
-   non-determinism that could mask injection.
+7. **Cargo deps are audited nightly and on release tags.** `deny.toml` + the
+   `cargo-deny` and `cargo-audit` jobs in `security.yml`, which has no
+   `pull_request` trigger: a dependency advisory is caught by the next nightly
+   run, not by the PR that introduces it. Nothing at PR time runs either tool.
+   Reproducibility double-build (same workflow) catches non-determinism that
+   could mask injection.
 8. **Every workload runs from a signed, audited `ExecutionPlan`.**
    `mvmctl machine run` synthesizes a typed `ExecutionPlan`, signs it under
    the host's Ed25519 keypair at `~/.mvm/keys/host-signer.ed25519`
