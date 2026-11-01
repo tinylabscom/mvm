@@ -215,7 +215,7 @@ Evidence: `check-no-vz` and `check-single-network-path` clean; WASM witnesses na
 feature-matrix run was done. WHP is future (ADR-009, #3553), not claimed.
 
 Verdict: **PARTIAL**. Remaining: `just check::gated` and a native-platform
-witness per backend.
+witness per backend. See "Evidence run 2026-11-01" for what was run since.
 
 ### Authenticated vsock and host-held secret custody
 
@@ -228,8 +228,8 @@ channel, one workload socket owner); `check-sdk-transport-free` clean;
 `relay_config_disables_the_guest_nic` (libkrun driver), `qemu_has_no_guest_nic`,
 `ssh_flow_is_refused_even_when_listed`.
 
-Verdict: **PARTIAL**. Structural gates are clean; the negative tests need a run
-on the affected paths.
+Verdict: **MET** as of the 2026-11-01 evidence run below: the named negative
+tests ran and passed on the affected crates and the structural gates are clean.
 
 ## Security posture and installation
 
@@ -244,6 +244,8 @@ which `check-dormant-controls` pins.
 
 Verdict: **PARTIAL**. The map exists and is gated. The gate proves a witness
 exists, not that it is meaningful, and two controls are dormant by declaration.
+2026-11-01 run: 99 of 132 claim-witness pairs ran and passed; the rest did not
+run on this host (table below).
 
 ### Relocatable installation and no-host-Nix/no-Docker
 
@@ -252,8 +254,10 @@ clean; README Install section separates the release binary from the source
 build. `tests/install_sh.rs` and `tests/smoke_fresh_install.rs` exist but were
 not run; prepared/cache-only launch is owned by #4794 (OPEN).
 
-Verdict: **PARTIAL**. Remaining: run the install tests; a relocation witness
-on an installed release is a live-host check.
+Verdict: **MET** as of the 2026-11-01 evidence run below: `install_sh`,
+`smoke_fresh_install` and `pin_installer_default` pass (121 tests), including
+running an unpublished archive beside the binaries it ships, and no host
+`nix`/`docker` spawn exists.
 
 ## Image and application trust
 
@@ -313,3 +317,104 @@ Evidence: `check-image-reproducibility` clean (local); no published artifact
 exists to admit and boot. The box itself says local checks are not a substitute.
 
 Verdict: **BLOCKED (publication authority; mvm-images release)**.
+
+## Evidence run 2026-11-01
+
+Tree: `9168754adca89a00dbaf4bee109bd1966b2081bf` (origin/main), worktree build,
+macOS arm64 (Darwin 27.0.0), `~/.cargo/bin/cargo`, nextest 0.9.143,
+`CARGO_BUILD_JOBS=6`. Load average at start 37 (below the 40 gate; it was 60+
+for the preceding half hour and rose again to 90-180 during the run because of
+other sessions on the host). Only default-feature test builds were run.
+
+### Gates (`cargo run -p xtask -- <gate>`), all exit clean
+
+| Gate | Result |
+|---|---|
+| `check-claim-catalog` | clean (21 claims, 153 witnesses verified) |
+| `check-claim-witness-freshness` | clean (3 witness workflows resolved; run history reserved for scheduled reporting) |
+| `check-single-network-path` | clean |
+| `check-no-cli-shellout` | clean |
+| `check-no-display-on-secret-types` | clean |
+| `check-no-host-nix` | clean |
+| `check-no-vz` | clean |
+| `check-witness-citations` | clean (329 citations) |
+| `check-asserted-absence` | clean (13 names, 4 regions) |
+
+### Box: authenticated vsock and host-held secret custody (MET)
+
+`cargo nextest run -p <crate> -E 'test(<name>)'`, all PASS:
+`handed_placeholders_never_contain_the_secret_value`,
+`endpoint_bin_serves_substitution_and_refuses_unbound_destination`,
+`network_endpoint_refuses_unbound_destination`, `audit_chain_carries_no_secret_value`
+(mvm-hostd); `unbound_service_returns_not_bound` (mvm-hostd);
+`service_call_rejects_unknown_envelope_fields`, `policy_default_is_deny_all`
+(mvm-contract); `run_net_default_is_deny_all` (mvm-client);
+`start_workload_puts_no_secret_environment_on_the_kernel_cmdline`,
+`qemu_has_no_guest_nic` (mvm-runtime); `relay_config_disables_the_guest_nic`
+(mvm-backends); `ssh_flow_is_refused_even_when_listed` (mvm-vmm). Claims 12, 13,
+16 and 17 witnesses are 2/2, 2/3, 4/4 and 9/9 PASS (the one claim-13 miss is a
+function name, `substitute_bound_credential`, that matched no test). Fuzz
+targets (claim 5) were not run locally (cargo-fuzz needs nightly); the last
+scheduled `security.yml` run 41272659459 (2026-11-01, success) carries its job
+`Fuzz - parsers (vsock + OCI)` green.
+
+### Box: backend/feature combinations including WASM (PARTIAL)
+
+- `cargo build -p mvm-contract --target wasm32-unknown-unknown`: Finished.
+- `cargo build -p mvm-contract --lib --target riscv32imac-unknown-none-elf`:
+  fails to compile `core` consumers because the target is not installed here
+  (`rustup target list --installed` has no riscv32imac). Unavailable, not a code failure.
+- Not run: `wasm32-wasip1` test (CI needs wasmtime), `just check::gated`
+  (needs zig and cargo-zigbuild for Linux), the `ci.yml` all-features clippy
+  with the release feature set (cold whole-workspace build on a saturated host),
+  the `mvm-runtime/wasm-backend` and `mvm-hostd/wasm-backend` builds.
+- Unavailable witnesses on this host: KVM/Firecracker (macOS), Windows and WHP
+  (future per ADR-009, #3553, not claimed), native Linux `cfg(target_os)` tests.
+
+### Box: shipped claims mapped to witnesses (PARTIAL)
+
+Every `fn:` witness in the ADR-001 table (rows 1-21) was resolved to its crate and
+run by name with nextest. 99 of 132 claim-witness pairs ran and PASSed with no
+failure. The 33 that did not run matched no test in a default-feature run on
+macOS: Linux-gated tests (seccomp, cgroup scope, no_new_privs), names that are
+plain functions rather than tests, or feature-gated tests. They were not
+individually diagnosed.
+
+| Claim | fn witnesses run PASS | fn witnesses not run (see note) |
+|---|---|---|
+| 1 | 8/16 | `seccomp_allows_listed_denies_unlisted`, `a_started_process_under_the_admitted_standard_tier_cannot_open_a_socket`, `a_warm_claimed_child_under_standard_cannot_open_a_socket`, `a_warm_claimed_childs_workload_reports_a_seccomp_filter`, `an_exec_child_reports_a_seccomp_filter_and_no_new_privs`, `an_exec_under_the_admitted_standard_tier_cannot_open_a_socket`, `standard_tier_denies_an_af_vsock_socket_with_eperm`, `vsock_tier_allows_an_af_vsock_socket_and_denies_af_inet` |
+| 2 | 0/2 | `set_no_new_privs`, `virtiofs_mount_flags_keep_workspace_read_only` |
+| 3 | 2/2 | - |
+| 4 | 1/1 | - |
+| 6 | 2/3 | `acquire_from` |
+| 8 | 9/12 | `admit_for_run`, `verify_audit_chain`, `synthesize_plan` |
+| 9 | 2/4 | `read_and_verify_bundle`, `verify_plan_bundle` |
+| 10 | 12/13 | `assert_vsock_only_device_model` |
+| 11 | 0/2 | `verify_sealed_volume`, `apply_install_gate` |
+| 12 | 2/2 | - |
+| 13 | 2/3 | `substitute_bound_credential` |
+| 14 | 2/2 | - |
+| 15 | 2/2 | - |
+| 16 | 4/4 | - |
+| 17 | 9/9 | - |
+| 18 | 27/32 | `a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited`, `a_granted_cpu_share_binds_a_real_spawn_to_its_quota`, `a_spawn_past_its_memory_ceiling_is_killed_and_the_kill_is_recorded`, `an_unresponsive_manager_fails_the_launch_instead_of_hanging_it`, `a_grant_that_fails_to_apply_refuses_the_cli_boot` |
+| 19 | 5/5 | - |
+| 20 | 8/13 | `a_real_release_bundle_verifies_under_its_tag`, `self_update_refuses_a_checksum_manifest_signed_for_another_tag`, `fresh_install_has_no_unsigned_fallback`, `fresh_install_requires_tag_pinned_bundle`, `fresh_install_trust_precedes_verifier_execution` |
+| 21 | 2/5 | `apply_base_image_gate`, `scan_inventory`, `inventory_rootfs` |
+
+`ci:` witnesses: scheduled `security.yml` run 41272659459 (2026-11-01, success)
+has green jobs for cargo-deny, cargo-audit, reproducibility, verified boot
+artifacts, guest-agent runtime boundary, seccomp functional denial, hash-verify,
+app-deps-audit, fuzz parsers and the OCI hardening matrix. The `ci-main.yml` push run
+41286801836 on this SHA is success. Claim 20 is not proven by CI: the most
+recent `release.yml` run (41279625530, tag v0.26.0) failed, and its
+`verify-release` job was skipped. A scheduled security run on 2026-10-31
+(41168068368) failed.
+
+### Box: relocatable installation and no host Nix/Docker (MET)
+
+`cargo nextest run -p mvmctl --test install_sh --test smoke_fresh_install --test pin_installer_default`:
+121 tests run, 121 passed (43.8 s). `rg` for `Command::new("nix"|"nix-build"|
+"nix-shell"|"nix-store"|"docker"|"podman")` outside tests finds only a doc comment
+in `xtask/src/check_no_host_nix.rs`; `check-no-host-nix` is clean; the string
+`"docker"` appears only in tests and in a backend-name refusal.
