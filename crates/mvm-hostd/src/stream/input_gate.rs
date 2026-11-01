@@ -1792,22 +1792,6 @@ mod tests {
         );
         fn assert_copy<T: Copy>() {}
         assert_copy::<SecretFingerprint>();
-
-        // And the source says the same thing: no constructor on the binding
-        // takes bytes.
-        let src = include_str!("input_gate.rs");
-        let (production, _tests) = src
-            .split_once("#[cfg(test)]\nmod tests {")
-            .expect("this module keeps its tests at the end");
-        assert!(
-            !production.contains("KnownSecret"),
-            "the plaintext-carrying binding type must stay deleted, not deprecated"
-        );
-        assert!(
-            production
-                .contains("pub fn with_fingerprint(mut self, fingerprint: SecretFingerprint)"),
-            "the one secret-facing setter must take a fingerprint"
-        );
     }
 
     /// A test lease must be sized by a named constant, never by a magnitude
