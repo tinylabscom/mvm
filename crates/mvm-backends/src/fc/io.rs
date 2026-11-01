@@ -163,7 +163,7 @@ impl FirecrackerIO {
         &self,
         dir: &Path,
         fork: Option<&super::ForkDevices>,
-    ) -> Result<mvm_vmm::driver::prepared_disks::SudoWritableHandoff> {
+    ) -> Result<Option<mvm_vmm::driver::prepared_disks::SudoWritableHandoff>> {
         #[derive(serde::Deserialize)]
         struct Config {
             drives: Vec<Drive>,
@@ -243,6 +243,9 @@ impl FirecrackerIO {
                 })
                 .collect(),
         )?;
+        if disks.is_empty() {
+            return Ok(None);
+        }
         mvm_vmm::host::runtime_meta::record_writable_disk_sources(
             &vm_dir
                 .file_name()
@@ -250,7 +253,7 @@ impl FirecrackerIO {
                 .to_string_lossy(),
             disks.original_sources(),
         )?;
-        disks.into_sudo_handoff(&spec)
+        Ok(Some(disks.into_sudo_handoff(&spec)?))
     }
 
     /// Load a sealed snapshot into a fresh VMM, leaving vCPUs paused.
@@ -285,7 +288,7 @@ impl FirecrackerIO {
             &vm_dir.to_string_lossy(),
             &socket_str,
             &scope,
-            Some(&handoff),
+            handoff.as_ref(),
         )
         .with_context(|| "starting fresh Firecracker for snapshot restore")?;
         // Firecracker runs through `sudo` and binds its API socket as root. Take
