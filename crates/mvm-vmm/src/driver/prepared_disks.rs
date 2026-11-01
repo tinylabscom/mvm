@@ -138,33 +138,45 @@ impl PreparedWritableDisks {
             !self.disks.is_empty(),
             "sudo handoff requires persistent writable resources"
         );
-        let mut files = Vec::new();
         let projected = spec.clone();
-        let mut first = None;
-        let mut next = 1000;
-        for disk in self.disks {
-            for file in [disk.image.backing(), disk.image.sidecar()] {
-                // SAFETY: duplicates the live descriptor with CLOEXEC and returns a
-                // new owned File only after fcntl reports success.
-                let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, next) };
-                anyhow::ensure!(fd >= 0, "duplicating writable handoff descriptor");
-                if fd as u32 != next {
-                    // SAFETY: this unexpected descriptor is not part of the handoff.
-                    unsafe { libc::close(fd) };
-                    anyhow::bail!("writable handoff descriptor range is not contiguous");
+        let mut minimum = 1000;
+        loop {
+            let mut files = Vec::new();
+            let mut first = None;
+            let mut next = minimum;
+            let mut restart = None;
+            'disks: for disk in &self.disks {
+                for file in [disk.image.backing(), disk.image.sidecar()] {
+                    // SAFETY: duplicates the live descriptor with CLOEXEC and
+                    // returns a new owned File only after fcntl reports success.
+                    let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, next) };
+                    anyhow::ensure!(fd >= 0, "duplicating writable handoff descriptor");
+                    if fd as u32 != next {
+                        // Another thread took part of the candidate range. Drop
+                        // this attempt and restart at the descriptor the kernel
+                        // actually returned instead of failing a valid launch.
+                        // SAFETY: this unexpected descriptor is not yet owned.
+                        unsafe { libc::close(fd) };
+                        restart = Some(fd as u32);
+                        break 'disks;
+                    }
+                    first.get_or_insert(fd as u32);
+                    next = fd as u32 + 1;
+                    // SAFETY: `fd` is a fresh descriptor owned by this attempt.
+                    files.push(unsafe { std::fs::File::from_raw_fd(fd) });
                 }
-                first.get_or_insert(fd as u32);
-                next = fd as u32 + 1;
-                // SAFETY: `fd` is a fresh descriptor owned by this handoff.
-                files.push(unsafe { std::fs::File::from_raw_fd(fd) });
             }
+            if let Some(returned) = restart {
+                minimum = returned;
+                continue;
+            }
+            return Ok(SudoWritableHandoff {
+                _files: files,
+                first: first.context("writable handoff has no descriptors")?,
+                last: next - 1,
+                projected,
+            });
         }
-        Ok(SudoWritableHandoff {
-            _files: files,
-            first: first.context("writable handoff has no descriptors")?,
-            last: next - 1,
-            projected,
-        })
     }
 
     /// Bind already-locked images to every persistent writable disk in `spec`.
@@ -608,6 +620,32 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn concurrent_sudo_handoffs_always_acquire_contiguous_ranges() {
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..16 {
+                        let tmp = tempfile::tempdir().unwrap();
+                        let path = tmp.path().join("image");
+                        let sidecar = tmp.path().join("image.lock");
+                        let held =
+                            LockedWritableImage::acquire(writable(&path), writable(&sidecar))
+                                .unwrap();
+                        let spec = spec(vec![block(&path, 0)]);
+                        let handoff = PreparedWritableDisks::bind(&spec, vec![(0, held)])
+                            .unwrap()
+                            .into_sudo_handoff(&spec)
+                            .unwrap();
+                        assert_eq!(handoff.first + 1, handoff.last);
+                        assert_eq!(handoff._files[0].as_raw_fd() as u32, handoff.first);
+                        assert_eq!(handoff._files[1].as_raw_fd() as u32, handoff.last);
+                    }
+                });
+            }
+        });
     }
 
     #[test]
