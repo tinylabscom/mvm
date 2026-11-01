@@ -45,10 +45,10 @@ const BUDGETS: &[ClosureBudget] = &[
 ];
 
 /// macOS omits the Linux-only confinement and networking dependencies.
-const MACOS_CLOSURE_BUDGET: usize = 350;
+const MACOS_CLOSURE_BUDGET: usize = 349;
 
 /// Maximum distinct packages in the default Linux closure.
-pub(crate) const CLOSURE_BUDGET: usize = 353;
+pub(crate) const CLOSURE_BUDGET: usize = 352;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {
