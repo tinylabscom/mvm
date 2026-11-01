@@ -461,7 +461,9 @@ impl QemuDriver {
                 state_dir: state_dir.clone(),
                 pid_file: pid_file.clone(),
             };
-            return Err(rollback_failed_bridge(&state_dir, e, || running.kill()));
+            return Err(rollback_failed_bridge(&state_dir, e, || {
+                running.kill_after_bridge_failure()
+            }));
         }
 
         Ok(Box::new(QemuRunningVm {
@@ -617,6 +619,61 @@ struct QemuRunningVm {
     pid_file: PathBuf,
 }
 
+impl QemuRunningVm {
+    fn stop_bridge(&self) {
+        if let Some(bridge_pid) =
+            qemu_process::read_pid(&self.state_dir.join(qemu_process::BRIDGE_PID_FILE))
+            && qemu_process::pid_alive(bridge_pid)
+        {
+            qemu_process::send_signal(bridge_pid, libc::SIGTERM);
+        }
+        let _ = std::fs::remove_file(self.state_dir.join(qemu_process::BRIDGE_PID_FILE));
+        qemu_process::cleanup_vsock_bridge_sockets(&self.state_dir);
+    }
+
+    /// A daemonized launch was observed, so absent or malformed identity is
+    /// uncertain custody rather than an already-stopped VM.
+    fn kill_after_bridge_failure(&self) -> Result<()> {
+        self.stop_bridge();
+        let recorded = std::fs::read_to_string(&self.pid_file)
+            .with_context(|| format!("reading daemonized QEMU pid {}", self.pid_file.display()))?;
+        let pid = recorded
+            .trim()
+            .parse::<libc::pid_t>()
+            .with_context(|| format!("parsing daemonized QEMU pid {}", self.pid_file.display()))?;
+        anyhow::ensure!(pid > 0, "daemonized QEMU pid must be positive");
+        if qemu_process::pid_alive(pid) {
+            terminate_qemu_pid(pid, &self.pid_file)?;
+        }
+        let _ = std::fs::remove_file(&self.pid_file);
+        Ok(())
+    }
+}
+
+fn terminate_qemu_pid(pid: libc::pid_t, pid_file: &Path) -> Result<()> {
+    let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
+    qemu_process::send_signal(pid, libc::SIGTERM);
+    let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
+        pid,
+        Instant::now() + qemu_process::STOP_TIMEOUT,
+        observer.as_ref(),
+    );
+    if !exited {
+        qemu_process::send_signal(pid, libc::SIGKILL);
+        if !mvm_vmm::host::process_exit::wait_for_pid_exit(
+            pid,
+            Instant::now() + Duration::from_millis(500),
+            observer.as_ref(),
+        ) {
+            return Err(anyhow!(
+                "QEMU PID {pid} could not be proven dead after SIGKILL; preserving {}",
+                pid_file.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl RunningVm for QemuRunningVm {
     fn id(&self) -> &VmId {
         &self.id
@@ -629,46 +686,11 @@ impl RunningVm for QemuRunningVm {
     }
 
     fn kill(&self) -> Result<()> {
-        // Reap the bridge first so it can't keep serving a half-dead VM.
-        // Guard on liveness so a stale pidfile (crash without cleanup) whose
-        // PID the OS has since recycled isn't signalled by mistake.
-        if let Some(bridge_pid) =
-            qemu_process::read_pid(&self.state_dir.join(qemu_process::BRIDGE_PID_FILE))
-            && qemu_process::pid_alive(bridge_pid)
-        {
-            qemu_process::send_signal(bridge_pid, libc::SIGTERM);
-        }
-        let _ = std::fs::remove_file(self.state_dir.join(qemu_process::BRIDGE_PID_FILE));
-        qemu_process::cleanup_vsock_bridge_sockets(&self.state_dir);
-
-        // Arm before SIGTERM so a short-lived QEMU process cannot exit between
-        // signal delivery and observer registration.
+        self.stop_bridge();
         if let Some(pid) = qemu_process::read_pid(&self.pid_file)
             && qemu_process::pid_alive(pid)
         {
-            let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
-            // SIGTERM gives QEMU a chance to close its virtio-blk file
-            // descriptors, then SIGKILL if it ignores us within the grace
-            // window.
-            qemu_process::send_signal(pid, libc::SIGTERM);
-            let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
-                pid,
-                Instant::now() + qemu_process::STOP_TIMEOUT,
-                observer.as_ref(),
-            );
-            if !exited {
-                qemu_process::send_signal(pid, libc::SIGKILL);
-                if !mvm_vmm::host::process_exit::wait_for_pid_exit(
-                    pid,
-                    Instant::now() + Duration::from_millis(500),
-                    observer.as_ref(),
-                ) {
-                    return Err(anyhow!(
-                        "QEMU PID {pid} could not be proven dead after SIGKILL; preserving {}",
-                        self.pid_file.display()
-                    ));
-                }
-            }
+            terminate_qemu_pid(pid, &self.pid_file)?;
         }
         let _ = std::fs::remove_file(&self.pid_file);
         Ok(())
@@ -742,6 +764,30 @@ mod tests {
             "rollback delegates PID evidence to verified stop"
         );
         assert!(!cid.exists(), "CID is reusable only after verified stop");
+    }
+
+    #[test]
+    fn strict_bridge_rollback_rejects_missing_and_malformed_writer_identity() {
+        for recorded in [None, Some("not-a-pid")] {
+            let state = tempfile::tempdir().unwrap();
+            let pid = state.path().join(qemu_process::QEMU_PID_FILE);
+            let cid = state.path().join(qemu_process::QEMU_CID_FILE);
+            if let Some(recorded) = recorded {
+                std::fs::write(&pid, recorded).unwrap();
+            }
+            std::fs::write(&cid, b"7").unwrap();
+            let running = QemuRunningVm {
+                id: VmId("rollback".into()),
+                state_dir: state.path().to_path_buf(),
+                pid_file: pid.clone(),
+            };
+            let error = rollback_failed_bridge(state.path(), anyhow!("bridge failed"), || {
+                running.kill_after_bridge_failure()
+            });
+            assert!(format!("{error:#}").contains("preserving PID and CID"));
+            assert!(cid.exists());
+            assert_eq!(pid.exists(), recorded.is_some());
+        }
     }
 
     #[test]
