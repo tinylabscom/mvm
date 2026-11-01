@@ -78,6 +78,16 @@ impl BootImageFds {
     }
 }
 
+/// Inherited backing and sidecar for one persistent writable disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HvfWritableDiskFds {
+    /// Index in the supervisor's slot-ordered disk table.
+    pub disk: usize,
+    pub backing: i32,
+    pub sidecar: i32,
+}
+
 /// Syntactic claims only. The consumed caller must authenticate their bytes.
 pub struct BootImageClaims<'a> {
     cmdline: &'a str,
@@ -228,6 +238,10 @@ pub struct HvfSupervisorConfig {
     /// Untrusted cold-boot locators; the child authenticates the adopted files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_image_fds: Option<BootImageFds>,
+    /// Original locked files for every persistent writable disk. Paths in the
+    /// disk table remain diagnostic; the writer consumes these exact objects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_disk_fds: Vec<HvfWritableDiskFds>,
     /// Full kernel cmdline. `None` ⇒ the supervisor's built-in default (workload
     /// contract: `init=/init`). Set it to boot an image whose PID 1 differs — e.g.
     /// the builder rootfs, which boots the static `/sbin/mvm-host-vm-init`. The
@@ -410,7 +424,7 @@ pub struct HvfSupervisorConfig {
     #[serde(default)]
     pub handoff_verify_key: Option<String>,
     /// CPU share to enforce via the in-process HVF quota scheduler.
-    /// `None` ⇒ no quota (the pre-Plan-327 path).
+    /// `None` ⇒ no quota.
     #[serde(default)]
     pub cpu_millicores: Option<u32>,
     /// Where the supervisor should write the measured quota record on exit.
@@ -590,6 +604,7 @@ mod tests {
             kernel: "/k/Image".into(),
             kernel_fd: None,
             boot_image_fds: None,
+            writable_disk_fds: Vec::new(),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
             memory_mib: 8192,
             vcpus: 1,
@@ -764,6 +779,7 @@ mod tests {
             kernel: "/k/Image".into(),
             kernel_fd: None,
             boot_image_fds: None,
+            writable_disk_fds: Vec::new(),
             cmdline: None,
             memory_mib: 0,
             vcpus: 1,

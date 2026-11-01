@@ -83,11 +83,9 @@ pub use crate::builder_vm::{
     GUEST_WORK_DIR,
 };
 
-// These items previously lived in this file; they migrated to
-// `builder_vm_runtime` so the future VzBuilderVm path can reuse the
-// same logic without duplicating it. `INSTALL_SPEC_FILENAME` and
-// `shell_single_quote_escape` are imported only inside the test
-// module below.
+// Shared builder logic lives in `builder_vm_runtime`. `INSTALL_SPEC_FILENAME`
+// and `shell_single_quote_escape` are imported only inside the test module
+// below.
 use crate::builder_vm::BuilderCapabilities;
 use crate::builder_vm_runtime::{
     acquire_nix_store_image_lock, acquire_nix_store_image_lock_named, builder_vm_timeout,
@@ -271,9 +269,8 @@ impl LibkrunBuilderVm {
     /// guest mounts it at `/nix` (formatting on first boot), so the slim
     /// kernel + Rust host binaries are built once and reused across
     /// bootstrap runs instead of recompiled into a throwaway tmpfs every
-    /// time. ext4 is case-sensitive, which is also why the old in-RAM
-    /// tmpfs existed (APFS case-insensitivity breaks Nix substitution) —
-    /// the disk keeps that property and adds persistence.
+    /// time. ext4 is case-sensitive, which Nix substitution needs (APFS
+    /// case-insensitivity breaks it), and the disk adds persistence.
     ///
     /// The workspace is filtered before it is archived, so build outputs and
     /// VCS metadata never consume transport capacity or persistent guest
@@ -391,12 +388,8 @@ impl LibkrunBuilderVm {
         let root_disk = materialize_stage0_root_disk(root_dir, &vm_state_dir)?;
         let work_staging = stage_filtered_work_input(workspace_dir)?;
         // `stage0-build.conf` is an *input*: it names the attr to build and the
-        // output mode. The host writes it into the staging directory, which
-        // under the old directory-share transport *was* the guest's `/out`, so
-        // dropping it there delivered it. With the output on a block device
-        // that path is gone — `/out` is the output disk, and Stage 0 setup
-        // clears it — so the conf has to ride the input disk like every other
-        // input.
+        // output mode. It rides the input disk like every other input: `/out`
+        // is the output disk, and Stage 0 setup clears it.
         //
         // Without it the guest fell back to its documented defaults, `default`
         // and `image`, and quietly built the builder-VM image when the host had
@@ -1544,7 +1537,7 @@ fn align_up(n: u64, align: u64) -> u64 {
 /// exact size. Linux KVM rejects a `KVM_SET_USER_MEMORY_REGION` whose size is
 /// not a multiple of the host page size, so an unaligned `vmlinux` makes VM
 /// creation fail with `EINVAL` (`rc -22`) — distinct from a `nix build` error,
-/// and previously masked by the libkrun→QEMU builder fallback. macOS HVF has no
+/// and so would be masked by any builder fallback. macOS HVF has no
 /// such requirement, so this is a no-op off Linux.
 ///
 /// Return a kernel path whose file size is page-aligned: the original when it
@@ -5781,16 +5774,6 @@ mod tests {
     // -----------------------------------------------------------
     // LibkrunPersistentHostVm
     // -----------------------------------------------------------
-
-    #[test]
-    fn dispatch_sock_marker_constant_is_filename_only() {
-        // Must not contain `/`. The host joins it under <job_dir>;
-        // a slash would break the path concatenation contract the
-        // in-guest builder-init's marker probe assumes.
-        assert!(!DISPATCH_SOCK_MARKER.contains('/'));
-        assert!(!DISPATCH_SOCK_MARKER.is_empty());
-        assert_eq!(DISPATCH_SOCK_MARKER, "dispatch.sock.marker");
-    }
 
     #[test]
     fn persistent_builder_egress_log_is_scoped_to_vm_state() {

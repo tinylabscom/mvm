@@ -1,4 +1,4 @@
-//! Phase 7f — Node auto-exec end-to-end test.
+//! Node auto-exec end-to-end test.
 //!
 //! Mirrors `auto_exec_python_record.rs`: spawns a stand-alone JS
 //! script that emits a wire-shape recording to

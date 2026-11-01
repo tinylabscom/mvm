@@ -53,11 +53,8 @@ use crate::stream::redact::{self, ClearOutcome, ClearedChunk, StreamRedaction};
 
 /// Default budget for the durable transcript one broker writes into.
 ///
-/// The chunk cap used to be an inode cap in disguise — one chunk was one file,
-/// so it had to sit low enough that under a second of log output exhausted it.
-/// Chunks now share segments, so file count tracks bytes rather than pushes
-/// and the cap is free to sit where it actually belongs: at the point where
-/// the sealed manifest's own size starts to matter. One `ChunkRecord`
+/// Chunks share segments, so file count tracks bytes rather than pushes and
+/// the chunk cap sits where the sealed manifest's own size starts to matter. One `ChunkRecord`
 /// serialises to roughly 250 bytes, so 64 Ki records is a manifest in the tens
 /// of megabytes — big, bounded, and written once at seal.
 ///

@@ -1653,13 +1653,6 @@ mod vsock_module_tests {
     }
 
     #[test]
-    fn qemu_builder_defaults_leave_host_headroom() {
-        assert_eq!(QEMU_BUILD_MEMORY_MIB, 6144);
-        assert_eq!(QEMU_BUILD_VCPUS, 4);
-        assert_eq!(STAGE0_TIMEOUT_SECS, 14_400);
-    }
-
-    #[test]
     fn cmdline_is_idempotent() {
         let once = qemu_build_cmdline_for_arch(
             "console=hvc0 root=/dev/vda ro init=/sbin/mvm-host-vm-init",

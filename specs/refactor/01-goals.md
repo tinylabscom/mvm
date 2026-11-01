@@ -42,6 +42,6 @@ Two capabilities the restructure treats as **core goals**, not by-products of si
 - Workload stdout/stderr + exit code flow over vsock; the builder VM runs the same single guest binary.
 - `just bdd` green; every security claim and top-level CLI verb has a passing Gherkin scenario; `just ci` runs the BDD suite.
 - Root is ~8 dirs (see [02-architecture.md](02-architecture.md) §Top-level layout), SDKs live under `crates/`.
-- SDK usage (decorator + runtime) unchanged; ADRs consolidated but intact; website docs current; only #1637 open (see [09-closeout.md](09-closeout.md)).
+- SDK usage (decorator + runtime) unchanged; ADRs consolidated but intact; website docs current; only #1637 open (see the retired close-out ledger).
 
-See [06-execution-plan.md](06-execution-plan.md) for the workstreams that get us there and [07-progress-and-decisions.md](07-progress-and-decisions.md) for where we are against this bar today.
+See [06-execution-plan.md](06-execution-plan.md) for the workstreams that get us there and the retired progress ledger for where we are against this bar today.

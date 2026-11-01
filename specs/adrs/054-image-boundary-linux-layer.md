@@ -15,9 +15,12 @@ reach a guest. Supersedes the consumer half of
 dated note that corrects its acquisition text against today's code and points
 here for where the overlay and sidecar are going.
 
-This records a decision, not a delivery. The code still follows the old
-boundary until the workstreams listed at the end land; "Where the code is
-today" below says exactly what runs now. The design detail lives in
+This records a decision. This repository's side has landed in source:
+`mvmctl` assembles the guest runtime from its own release asset and no longer
+reads it from the image set. What has not landed is mvm-images' side (it still
+builds and publishes the retired pieces) and release-publication and boot
+evidence for the new asset; "Where the code is today" below says exactly what
+runs now. The design detail lives in
 `specs/plans/2026-10-05-image-boundary-linux-layer.md`.
 
 ## Context
@@ -299,8 +302,9 @@ builder image sets (#4107), and the workload-author guide is updated with it.
   tree join it.
 - A fix to the guest agent now needs a CLI release; there is no image-only
   path for it. Kernel and package fixes still ship as image sets without one.
-- During the transition the image set and the CLI both carry guest pieces,
-  and `mvmctl` keeps reading the image-set roles until #4105 lands.
+- During the transition the published image set still lists guest pieces
+  until mvm-images drops its `mvm` input; `mvmctl` parses them as retired
+  roles and ignores them (#4105).
 
 ## Workstreams
 

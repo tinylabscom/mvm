@@ -134,7 +134,8 @@ for `/bin/sh -lc` in development only.
 
 Process execution, shell, process control, filesystem access and copies fail
 closed with `SandboxDevOnly` before any request leaves the process when the
-machine is not a development build; the guest agent refuses them on a
+machine is not a development build (a launch under any profile other
+than the default `dev`, such as `--profile standard`, resolves to one); the guest agent refuses them on a
 production build too. Dynamic port forwarding is refused: declare ingress
 with `network=` before boot. SSH is not part of the SDK or runtime contract.
 

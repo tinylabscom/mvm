@@ -1,4 +1,4 @@
-//! Plan-0011 Phase 1a: builder smoke tests. Asserts the public
+//! Builder smoke tests. Asserts the public
 //! builders produce the expected `Workload` struct and that obvious
 //! misuse (empty workload, missing required fields) is rejected.
 

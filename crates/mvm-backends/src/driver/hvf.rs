@@ -98,7 +98,11 @@ impl HvfDriver {
             None,
             None,
             SupervisorLaunchPolicy::cold(),
-            BootInputFiles { kernel, images },
+            BootInputFiles {
+                kernel,
+                images,
+                writable: None,
+            },
         )
         .map(ColdHvfOwner::from_fresh)
     }
@@ -320,6 +324,7 @@ fn relay_supervisor_config_with_handoff(
         kernel,
         kernel_fd: None,
         boot_image_fds: None,
+        writable_disk_fds: Vec::new(),
         cmdline,
         memory_mib: spec.memory_mib,
         vcpus: spec.vcpus,
@@ -524,6 +529,7 @@ fn boot_with_handoff(
         BootInputFiles {
             kernel,
             images: None,
+            writable: None,
         },
     )
     .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
@@ -563,7 +569,7 @@ fn boot_retaining_child(
     crate::run_sidecars::clear_prior_run(&paths.state_dir);
     let mut cfg =
         relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
-    files.project(&mut cfg)?;
+    files.project(spec, &mut cfg)?;
     (policy.validate_config)(&cfg)?;
     let config_path = paths.state_dir.join("supervisor.json");
     mvm_core::atomic_io::atomic_write_new(
@@ -577,7 +583,7 @@ fn boot_retaining_child(
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
     // Diagnostics are optional evidence, never a launch or readiness gate.
     let mut diagnostics = StartupDiagnostics::new().ok();
-    let mut command = if cfg.kernel_fd.is_some() {
+    let mut command = if cfg.kernel_fd.is_some() || !cfg.writable_disk_fds.is_empty() {
         let mut command = mvm_core::env_hygiene::helper_command(&supervisor);
         (policy.configure_environment)(&mut command);
         StartupDiagnostics::configure(&mut command, diagnostics.as_ref());
@@ -591,7 +597,7 @@ fn boot_retaining_child(
                 .with_cpu_grant(spec.cpu_grant),
         );
         if bound.unit().is_some() {
-            bail!("spawn scope cannot carry the verified kernel descriptor; refusing boot");
+            bail!("spawn scope cannot carry native boot descriptors; refusing boot");
         }
         bound
     } else {
@@ -838,6 +844,10 @@ impl VmmDriver for HvfDriver {
         fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
     )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            spec.trusted_builder || !spec.has_persistent_writable(),
+            "persistent writable HVF disks require prepared descriptor custody"
+        );
         boot_with_handoff(spec, None, None, None)
     }
 
@@ -846,7 +856,34 @@ impl VmmDriver for HvfDriver {
         spec: &VmmSpec,
         kernel: &mvm_vmm::host::restore_image::VerifiedRestoreFile,
     ) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            spec.trusted_builder || !spec.has_persistent_writable(),
+            "persistent writable HVF disks require prepared descriptor custody"
+        );
         boot_with_handoff(spec, None, None, Some(kernel))
+    }
+
+    #[cfg(unix)]
+    fn boot_custodied(
+        &self,
+        spec: &VmmSpec,
+        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+    ) -> Result<Box<dyn RunningVm>> {
+        disks.validate_spec(spec)?;
+        boot_with_custody(
+            spec,
+            None,
+            None,
+            SupervisorLaunchPolicy::legacy(),
+            BootInputFiles {
+                kernel,
+                images: None,
+                writable: Some(&disks),
+            },
+        )
+        .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
+        .map_err(anyhow::Error::new)
     }
 
     fn spawn_standby_parent(
@@ -1948,6 +1985,22 @@ mod tests {
             trusted_builder: false,
             plan_binding: None,
         }
+    }
+
+    #[test]
+    fn direct_boot_refuses_unprepared_persistent_writable_disks() {
+        let spec = spec_with(
+            KernelImage::Bundled,
+            vec![],
+            vec![BlockDev {
+                source: "/volume".into(),
+                read_only: false,
+                ephemeral: false,
+                slot: 0,
+            }],
+        );
+        let error = HvfDriver::new().boot(&spec).err().expect("custody refusal");
+        assert!(error.to_string().contains("prepared descriptor custody"));
     }
 
     #[test]

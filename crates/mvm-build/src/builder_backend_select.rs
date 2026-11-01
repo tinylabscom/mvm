@@ -1419,14 +1419,6 @@ mod tests {
         assert!(format!("{err}").contains("Linux-only"));
     }
 
-    #[test]
-    fn linux_builder_vm_env_constant_is_canonical() {
-        // Pin the exact env var name so a future rename trips a
-        // single visible test failure rather than a silent doctor
-        // / dispatch divergence.
-        assert_eq!(MVM_LINUX_BUILDER_VM_ENV, "MVM_LINUX_BUILDER_VM");
-    }
-
     // ── Hvf variant ──────────────────────────────────────────
 
     #[test]

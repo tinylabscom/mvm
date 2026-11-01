@@ -714,8 +714,8 @@ mod tests {
     fn test_run_entrypoint_response_stream_terminates_on_exit() {
         // Simulate a v1 response stream and assert the host's read
         // loop discipline: read events until is_terminal returns
-        // true. This is the contract W2's agent handler must
-        // satisfy and W3's CLI consumes.
+        // true. This is the contract the agent handler must
+        // satisfy and the CLI consumes.
         let stream = vec![
             EntrypointEvent::Stdout {
                 chunk: b"out".to_vec(),

@@ -1,7 +1,7 @@
 //! Shared helpers for the SDK record-mode auto-exec path.
 //!
-//! Both `mvmctl dev compile <Sandbox-script>` (Phase 7e/7f) and
-//! `mvmctl run --mode plan <Sandbox-script>` (Followup H plan half)
+//! Both `mvmctl dev compile <Sandbox-script>` and
+//! `mvmctl run --mode plan <Sandbox-script>`
 //! need to: spawn the user's script under
 //! `MVM_SDK_MODE=record + MVM_SDK_OUT_PATH=<tmp>`, then lower the
 //! atexit-hook-emitted recording into a `Workload`. Pulling the

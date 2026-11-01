@@ -125,8 +125,8 @@ pub const WORKLOAD_EXIT_PORT: u32 = 5251;
 /// egress chokepoint. The in-guest egress client connects here; the host's per-VM
 /// gateway makes the claim-10 allow/deny decision and proxies the flow, and for a
 /// bound-secret destination performs the claims-12/13 credential substitution (a
-/// *behavior* of this one gateway, not a separate channel — this port was always
-/// host-mediated egress, formerly named `EGRESS_PORT`). Each microVM has its
+/// *behavior* of this one gateway, not a separate channel — this port is always
+/// host-mediated egress). Each microVM has its
 /// own vsock; this is a fixed well-known service number reused per VM, not a secret.
 /// NOTE: exposing it end-to-end needs the host-side proxy port-allowlist to admit it.
 pub const EGRESS_PORT: u32 = mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT;

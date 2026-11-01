@@ -1,0 +1,841 @@
+//! Live writable image resources bound to a final physical disk recipe.
+//!
+//! This carries cooperating writer exclusion, not admission or native ownership
+//! proof. Nothing here is serializable or recoverable from a pathname or VM name.
+
+use std::collections::BTreeSet;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::fs::MetadataExt;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, ensure};
+use mvm_core::util::writable_image::LockedWritableImage;
+
+use super::spec::{BlockDev, VmmSpec};
+
+#[derive(Debug)]
+struct PreparedDisk {
+    block: BlockDev,
+    image: LockedWritableImage,
+}
+
+/// Original materialization resources before final slot binding.
+pub type WritableVolumeImages = Vec<(PathBuf, LockedWritableImage)>;
+
+#[cfg(target_os = "linux")]
+fn privileged_writer_descriptor_objects(
+    pid: u32,
+) -> Result<std::collections::BTreeMap<(u64, u64), usize>> {
+    let output = privileged_fd_inventory_command(pid)
+        .output()
+        .context("running privileged Firecracker descriptor inventory")?;
+    ensure!(
+        output.status.success(),
+        "privileged Firecracker descriptor inventory failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    parse_fd_inventory(&output.stdout)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn privileged_fd_inventory_command(pid: u32) -> std::process::Command {
+    let mut command = mvm_core::env_hygiene::helper_command("sudo");
+    command.args([
+        "--",
+        "/usr/bin/find",
+        &format!("/proc/{pid}/fd"),
+        "-mindepth",
+        "1",
+        "-maxdepth",
+        "1",
+        "-exec",
+        "/usr/bin/stat",
+        "-Lc",
+        "%d:%i",
+        "--",
+        "{}",
+        "+",
+    ]);
+    command
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_fd_inventory(bytes: &[u8]) -> Result<std::collections::BTreeMap<(u64, u64), usize>> {
+    const MAX_INVENTORY_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_INVENTORY_ENTRIES: usize = 65_536;
+    ensure!(
+        bytes.len() <= MAX_INVENTORY_BYTES,
+        "privileged descriptor inventory exceeds its byte bound"
+    );
+    let text = std::str::from_utf8(bytes).context("descriptor inventory is not UTF-8")?;
+    let mut actual = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        ensure!(
+            actual.len() < MAX_INVENTORY_ENTRIES,
+            "privileged descriptor inventory exceeds its entry bound"
+        );
+        let (dev, ino) = line
+            .split_once(':')
+            .with_context(|| format!("invalid privileged descriptor inventory line {line:?}"))?;
+        let identity = (dev.parse()?, ino.parse()?);
+        *actual.entry(identity).or_insert(0usize) += 1;
+    }
+    Ok(actual)
+}
+
+/// Bounded original file owners, assigned to the final spec's writable slots.
+#[must_use = "retain prepared files through original-writer handoff"]
+#[derive(Debug)]
+pub struct PreparedWritableDisks {
+    disks: Vec<PreparedDisk>,
+}
+
+/// Original descriptions compacted for a sudo-launched Firecracker.
+#[derive(Debug)]
+pub struct SudoWritableHandoff {
+    _files: Vec<std::fs::File>,
+    first: u32,
+    last: u32,
+    projected: VmmSpec,
+}
+
+impl SudoWritableHandoff {
+    pub fn first(&self) -> u32 {
+        self.first
+    }
+
+    /// Require the live writer to retain every original backing and sidecar.
+    #[cfg(target_os = "linux")]
+    pub fn verify_writer_descriptors(&self, pid: u32) -> Result<()> {
+        // A sudo-launched Firecracker's /proc/<pid>/fd is not ordinarily
+        // readable by the invoking user. Inspect objects through the same
+        // privilege boundary as the writer; never treat EACCES as success.
+        if unsafe { libc::geteuid() } == 0 {
+            self.verify_writer_descriptors_at(std::path::Path::new(&format!("/proc/{pid}/fd")))
+        } else {
+            let actual = privileged_writer_descriptor_objects(pid)?;
+            self.verify_writer_descriptor_objects(&actual)
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn verify_writer_descriptors_at(&self, fd_dir: &std::path::Path) -> Result<()> {
+        let mut actual = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(fd_dir)
+            .with_context(|| format!("reading actual writer descriptors at {}", fd_dir.display()))?
+        {
+            let entry = entry?;
+            // proc fd entries are magic symlinks. metadata follows them to the
+            // open object; a pathname match would not detect ABA substitution.
+            let metadata = std::fs::metadata(entry.path()).with_context(|| {
+                format!(
+                    "inspecting actual writer descriptor {}",
+                    entry.path().display()
+                )
+            })?;
+            *actual
+                .entry((metadata.dev(), metadata.ino()))
+                .or_insert(0usize) += 1;
+        }
+        self.verify_writer_descriptor_objects(&actual)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn verify_writer_descriptor_objects(
+        &self,
+        actual: &std::collections::BTreeMap<(u64, u64), usize>,
+    ) -> Result<()> {
+        for (index, pair) in self._files.chunks_exact(2).enumerate() {
+            for (role, file) in ["backing", "sidecar"].into_iter().zip(pair) {
+                let expected = file.metadata()?;
+                // Firecracker opens the original drive path in addition to
+                // inheriting custody. One inherited backing plus a replacement
+                // drive must not satisfy this check after an ABA path swap.
+                let required = if role == "backing" { 2 } else { 1 };
+                ensure!(
+                    actual
+                        .get(&(expected.dev(), expected.ino()))
+                        .copied()
+                        .unwrap_or(0)
+                        >= required,
+                    "actual writer is missing original writable {role} object for slot {}",
+                    self.projected
+                        .blocks
+                        .iter()
+                        .filter(|block| !block.read_only && !block.ephemeral)
+                        .nth(index)
+                        .map_or_else(|| "unknown".into(), |block| block.slot.to_string())
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn last(&self) -> u32 {
+        self.last
+    }
+
+    pub fn projected(&self) -> &VmmSpec {
+        &self.projected
+    }
+}
+
+impl PreparedWritableDisks {
+    /// No supplied resources: preserves the driver's existing boot contract.
+    pub fn empty() -> Self {
+        Self { disks: Vec::new() }
+    }
+
+    /// Bind original materialization resources by their exact declared paths.
+    pub fn bind_sources(spec: &VmmSpec, mut images: WritableVolumeImages) -> Result<Self> {
+        let bound = spec
+            .blocks
+            .iter()
+            .filter(|block| !block.read_only && !block.ephemeral)
+            .map(|block| {
+                let index = images
+                    .iter()
+                    .position(|(path, _)| path == &block.source)
+                    .with_context(|| {
+                        format!(
+                            "no original materialization resource for {}",
+                            block.source.display()
+                        )
+                    })?;
+                Ok((block.slot, images.remove(index).1))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::bind(spec, bound)
+    }
+
+    /// Duplicate original descriptions for the actual sudo-launched writer.
+    pub fn into_sudo_handoff(self, spec: &VmmSpec) -> Result<SudoWritableHandoff> {
+        self.validate_spec(spec)?;
+        anyhow::ensure!(
+            !self.disks.is_empty(),
+            "sudo handoff requires persistent writable resources"
+        );
+        let projected = spec.clone();
+        let mut minimum = 1000;
+        loop {
+            let mut files = Vec::new();
+            let mut first = None;
+            let mut next = minimum;
+            let mut restart = None;
+            'disks: for disk in &self.disks {
+                for file in [disk.image.backing(), disk.image.sidecar()] {
+                    // SAFETY: duplicates the live descriptor with CLOEXEC and
+                    // returns a new owned File only after fcntl reports success.
+                    let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, next) };
+                    anyhow::ensure!(fd >= 0, "duplicating writable handoff descriptor");
+                    if fd as u32 != next {
+                        // Another thread took part of the candidate range. Drop
+                        // this attempt and restart at the descriptor the kernel
+                        // actually returned instead of failing a valid launch.
+                        // SAFETY: this unexpected descriptor is not yet owned.
+                        unsafe { libc::close(fd) };
+                        restart = Some(fd as u32);
+                        break 'disks;
+                    }
+                    first.get_or_insert(fd as u32);
+                    next = fd as u32 + 1;
+                    // SAFETY: `fd` is a fresh descriptor owned by this attempt.
+                    files.push(unsafe { std::fs::File::from_raw_fd(fd) });
+                }
+            }
+            if let Some(returned) = restart {
+                minimum = returned;
+                continue;
+            }
+            return Ok(SudoWritableHandoff {
+                _files: files,
+                first: first.context("writable handoff has no descriptors")?,
+                last: next - 1,
+                projected,
+            });
+        }
+    }
+
+    /// Bind already-locked images to every persistent writable disk in `spec`.
+    ///
+    /// The selected paths are inspected once to check object correspondence.
+    /// Actual I/O and handoff keep using the supplied files, never those paths.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing/duplicate slots, wrong access or ephemeral disks, object
+    /// aliases across any backing/sidecar roles, and a source that does not name
+    /// the exact held backing. No file is written or native child started.
+    pub fn bind(spec: &VmmSpec, images: Vec<(u8, LockedWritableImage)>) -> Result<Self> {
+        ensure!(
+            spec.blocks.len() <= usize::from(u8::MAX) + 1,
+            "physical disk count exceeds slot namespace"
+        );
+        let mut slots = BTreeSet::new();
+        ensure!(
+            spec.blocks.iter().all(|block| slots.insert(block.slot)),
+            "physical spec contains duplicate disk slots"
+        );
+        let expected = spec
+            .blocks
+            .iter()
+            .filter(|block| !block.read_only && !block.ephemeral)
+            .count();
+        ensure!(
+            images.len() == expected,
+            "prepared resources do not cover the final writable disk set"
+        );
+        let mut supplied_slots = BTreeSet::new();
+        let mut objects = BTreeSet::new();
+        let mut disks = Vec::with_capacity(images.len());
+        for (slot, image) in images {
+            ensure!(
+                supplied_slots.insert(slot),
+                "duplicate prepared writable slot"
+            );
+            let block = spec
+                .blocks
+                .iter()
+                .find(|block| block.slot == slot)
+                .context("prepared writable slot is absent from final spec")?;
+            ensure!(
+                !block.read_only && !block.ephemeral,
+                "prepared writable slot does not describe a persistent writable disk"
+            );
+            let selected = std::fs::symlink_metadata(&block.source)
+                .context("inspecting final writable disk source")?;
+            let held = image.backing().metadata()?;
+            ensure!(
+                selected.is_file() && (selected.dev(), selected.ino()) == (held.dev(), held.ino()),
+                "final writable source differs from the held backing object"
+            );
+            for file in [image.backing(), image.sidecar()] {
+                let metadata = file.metadata()?;
+                ensure!(
+                    objects.insert((metadata.dev(), metadata.ino())),
+                    "prepared disk descriptors alias another backing or sidecar"
+                );
+            }
+            disks.push(PreparedDisk {
+                block: block.clone(),
+                image,
+            });
+        }
+        disks.sort_by_key(|disk| disk.block.slot);
+        Ok(Self { disks })
+    }
+
+    /// Whether the caller supplied no writable resources.
+    pub fn is_empty(&self) -> bool {
+        self.disks.is_empty()
+    }
+
+    /// Borrow the original owners in final physical-slot order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (u8, &LockedWritableImage)> {
+        self.disks.iter().map(|disk| (disk.block.slot, &disk.image))
+    }
+
+    /// Project writable backings through descriptors inherited by the writer.
+    pub fn project_for_inherited_writer(&self, spec: &VmmSpec) -> Result<VmmSpec> {
+        self.validate_spec(spec)?;
+        let mut projected = spec.clone();
+        for disk in &self.disks {
+            let block = projected
+                .blocks
+                .iter_mut()
+                .find(|block| block.slot == disk.block.slot)
+                .context("projected writable slot missing")?;
+            block.source = format!(
+                "/dev/fd/{}",
+                std::os::fd::AsRawFd::as_raw_fd(disk.image.backing())
+            )
+            .into();
+        }
+        Ok(projected)
+    }
+
+    /// Original backing and sidecar descriptors for an actual writer.
+    pub fn inherited_descriptors(&self) -> Vec<std::os::fd::RawFd> {
+        self.disks
+            .iter()
+            .flat_map(|disk| {
+                [
+                    std::os::fd::AsRawFd::as_raw_fd(disk.image.backing()),
+                    std::os::fd::AsRawFd::as_raw_fd(disk.image.sidecar()),
+                ]
+            })
+            .collect()
+    }
+
+    /// Refuse substitution of the physical recipe after resources were bound.
+    ///
+    /// Empty resources preserve legacy dispatch. Nonempty resources must still
+    /// cover the exact writable recipe; this never reopens a diagnostic path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the final writable slot set or recipe changed.
+    pub fn validate_spec(&self, spec: &VmmSpec) -> Result<()> {
+        let mut slots = BTreeSet::new();
+        ensure!(
+            spec.blocks.len() <= usize::from(u8::MAX) + 1
+                && spec.blocks.iter().all(|block| slots.insert(block.slot)),
+            "invalid physical disk slot set"
+        );
+        let writable: Vec<_> = spec
+            .blocks
+            .iter()
+            .filter(|block| !block.read_only && !block.ephemeral)
+            .collect();
+        ensure!(
+            writable.len() == self.disks.len()
+                && self
+                    .disks
+                    .iter()
+                    .all(|disk| writable.contains(&&disk.block)),
+            "physical writable recipe changed after resource binding"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::traits::{RunningVm, VmmDriver};
+    use crate::host::restore_image::VerifiedRestoreFile;
+    use mvm_core::vm_backend::{
+        BackendKind, BackendSecurityProfile, GuestChannelInfo, VmCapabilities, VmId,
+    };
+    use std::fs::{File, OpenOptions};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct DispatchRecorder {
+        ordinary: AtomicUsize,
+        verified: AtomicUsize,
+    }
+
+    impl VmmDriver for DispatchRecorder {
+        fn name(&self) -> &str {
+            "dispatch-recorder"
+        }
+
+        fn kind(&self) -> BackendKind {
+            BackendKind::Hvf
+        }
+
+        fn is_available(&self) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn capabilities(&self) -> VmCapabilities {
+            VmCapabilities::default()
+        }
+
+        fn security_profile(&self) -> BackendSecurityProfile {
+            panic!("dispatch-only test must not ask for a security profile")
+        }
+
+        fn boot(&self, _: &VmmSpec) -> Result<Box<dyn RunningVm>> {
+            self.ordinary.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("ordinary dispatch witness")
+        }
+
+        fn boot_verified_kernel(
+            &self,
+            _: &VmmSpec,
+            _: &VerifiedRestoreFile,
+        ) -> Result<Box<dyn RunningVm>> {
+            self.verified.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("verified dispatch witness")
+        }
+
+        fn workload_base_bootargs(&self, _: bool) -> String {
+            panic!("dispatch-only test must not build boot arguments")
+        }
+
+        fn attach(&self, _: &VmId) -> Result<Box<dyn RunningVm>> {
+            anyhow::bail!("dispatch-only test cannot attach")
+        }
+
+        fn guest_channel_info(&self, _: &VmId) -> Result<GuestChannelInfo> {
+            anyhow::bail!("dispatch-only test has no guest")
+        }
+    }
+
+    fn writable(path: &Path) -> File {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)
+            .unwrap()
+    }
+
+    fn kernel(root: &Path, bytes: &[u8]) -> VerifiedRestoreFile {
+        let private = root.join("private");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = private.join("kernel");
+        std::fs::write(&source, bytes).unwrap();
+        VerifiedRestoreFile::prepare(
+            &source,
+            &private,
+            &mvm_core::plan::bundle::sha256_hex(bytes),
+        )
+        .unwrap()
+    }
+
+    fn spec(blocks: Vec<BlockDev>) -> VmmSpec {
+        VmmSpec {
+            name: "prepared-test".into(),
+            kernel: super::super::spec::KernelImage::Bundled,
+            initramfs: None,
+            cmdline: String::new(),
+            vcpus: 1,
+            cpu_grant: None,
+            memory_mib: 64,
+            mem_initial_mib: None,
+            blocks,
+            vsock: Vec::new(),
+            console: super::super::spec::ConsoleCapture {
+                log_path: "/unused".into(),
+            },
+            shares: Vec::new(),
+            trusted_builder: false,
+            builder_egress_endpoint: None,
+            plan_binding: None,
+        }
+    }
+
+    fn block(path: &Path, slot: u8) -> BlockDev {
+        BlockDev {
+            source: path.to_owned(),
+            read_only: false,
+            ephemeral: false,
+            slot,
+        }
+    }
+
+    #[test]
+    fn binding_retains_the_actual_file_when_its_path_is_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("image");
+        let image =
+            LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
+                .unwrap();
+        let original = image.backing().metadata().unwrap();
+        let spec = spec(vec![block(&path, 3)]);
+        let disks = PreparedWritableDisks::bind(&spec, vec![(3, image)]).unwrap();
+        std::fs::rename(&path, tmp.path().join("renamed")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+
+        disks.validate_spec(&spec).unwrap();
+        let (slot, held) = disks.iter().next().unwrap();
+        assert_eq!(slot, 3);
+        assert_eq!(held.backing().metadata().unwrap().ino(), original.ino());
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), original.ino());
+    }
+
+    #[test]
+    fn wrong_object_or_changed_final_recipe_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("image");
+        let other = tmp.path().join("other");
+        let image =
+            LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
+                .unwrap();
+        writable(&other);
+        let error = PreparedWritableDisks::bind(&spec(vec![block(&other, 1)]), vec![(1, image)])
+            .expect_err("wrong backing object must refuse");
+        drop(error);
+        let image =
+            LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock-2")))
+                .unwrap();
+        let mut spec = spec(vec![block(&path, 1)]);
+        let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
+        spec.blocks[0].source = other;
+        assert!(disks.validate_spec(&spec).is_err());
+        spec.blocks[0].read_only = true;
+        assert!(disks.validate_spec(&spec).is_err());
+    }
+
+    #[test]
+    fn aliased_backings_with_distinct_descriptors_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("image");
+        let first =
+            LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock-a")))
+                .unwrap();
+        let second = LockedWritableImage::acquire(
+            first.backing().try_clone().unwrap(),
+            writable(&tmp.path().join("lock-b")),
+        )
+        .unwrap();
+        assert!(
+            PreparedWritableDisks::bind(
+                &spec(vec![block(&path, 1), block(&path, 2)]),
+                vec![(1, first), (2, second)],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn exec_child_retains_lock_custody_after_parent_drops_originals() {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("image");
+        let sidecar = tmp.path().join("image.lock");
+        let held = LockedWritableImage::acquire(writable(&path), writable(&sidecar)).unwrap();
+        let fds = vec![held.backing().as_raw_fd(), held.sidecar().as_raw_fd()];
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "printf x; exec sleep 30"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        crate::host::restore_image::inherit_descriptors(&mut command, fds);
+        let mut child = command.spawn().unwrap();
+        drop(held);
+        let mut ready = [0_u8; 1];
+        child
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut ready)
+            .unwrap();
+        assert_eq!(
+            LockedWritableImage::open(&path, &sidecar)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let _restarted = LockedWritableImage::open(&path, &sidecar).unwrap();
+    }
+
+    #[test]
+    fn inherited_projection_preserves_read_only_paths_and_original_descriptors() {
+        use std::os::fd::AsRawFd;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("image");
+        let readonly = tmp.path().join("readonly");
+        let image =
+            LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
+                .unwrap();
+        let expected_fd = image.backing().as_raw_fd();
+        let expected_sidecar = image.sidecar().as_raw_fd();
+        let mut readonly_block = block(&readonly, 2);
+        readonly_block.read_only = true;
+        let spec = spec(vec![block(&path, 1), readonly_block]);
+        let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
+
+        let inherited = disks.project_for_inherited_writer(&spec).unwrap();
+        assert_eq!(
+            inherited.blocks[0].source,
+            std::path::PathBuf::from(format!("/dev/fd/{expected_fd}"))
+        );
+        assert_eq!(inherited.blocks[1].source, readonly);
+        assert_eq!(
+            disks.inherited_descriptors(),
+            vec![expected_fd, expected_sidecar]
+        );
+    }
+
+    #[test]
+    fn read_only_specs_need_no_sidecar_or_backing_descriptor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut readonly = block(&tmp.path().join("missing-read-only"), 0);
+        readonly.read_only = true;
+        let spec = spec(vec![readonly]);
+        assert!(
+            PreparedWritableDisks::bind_sources(&spec, Vec::new())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn sudo_handoff_duplicates_original_descriptors_into_one_cloexec_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("image");
+        let sidecar = tmp.path().join("image.lock");
+        let held = LockedWritableImage::acquire(writable(&path), writable(&sidecar)).unwrap();
+        let original_backing = held.backing().as_raw_fd();
+        let original_sidecar = held.sidecar().as_raw_fd();
+        let expected_backing = held.backing().metadata().unwrap().ino();
+        let expected_sidecar = held.sidecar().metadata().unwrap().ino();
+        let disks =
+            PreparedWritableDisks::bind(&spec(vec![block(&path, 0)]), vec![(0, held)]).unwrap();
+
+        let handoff = disks
+            .into_sudo_handoff(&spec(vec![block(&path, 0)]))
+            .unwrap();
+        assert_eq!(handoff._files.len(), 2);
+        assert_eq!(handoff.first + 1, handoff.last);
+        assert_eq!(handoff.projected.blocks[0].source, path);
+        for (index, file) in handoff._files.iter().enumerate() {
+            assert_ne!(
+                file.as_raw_fd(),
+                [original_backing, original_sidecar][index]
+            );
+            assert_eq!(
+                file.metadata().unwrap().ino(),
+                [expected_backing, expected_sidecar][index]
+            );
+            assert_ne!(
+                unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_sudo_handoffs_always_acquire_contiguous_ranges() {
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..16 {
+                        let tmp = tempfile::tempdir().unwrap();
+                        let path = tmp.path().join("image");
+                        let sidecar = tmp.path().join("image.lock");
+                        let held =
+                            LockedWritableImage::acquire(writable(&path), writable(&sidecar))
+                                .unwrap();
+                        let spec = spec(vec![block(&path, 0)]);
+                        let handoff = PreparedWritableDisks::bind(&spec, vec![(0, held)])
+                            .unwrap()
+                            .into_sudo_handoff(&spec)
+                            .unwrap();
+                        assert_eq!(handoff.first + 1, handoff.last);
+                        assert_eq!(handoff._files[0].as_raw_fd() as u32, handoff.first);
+                        assert_eq!(handoff._files[1].as_raw_fd() as u32, handoff.last);
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn non_root_writer_inventory_uses_bounded_privileged_object_inspection() {
+        let command = privileged_fd_inventory_command(4242);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        assert!(command.get_program().to_string_lossy().ends_with("sudo"));
+        assert_eq!(
+            args,
+            [
+                "--",
+                "/usr/bin/find",
+                "/proc/4242/fd",
+                "-mindepth",
+                "1",
+                "-maxdepth",
+                "1",
+                "-exec",
+                "/usr/bin/stat",
+                "-Lc",
+                "%d:%i",
+                "--",
+                "{}",
+                "+",
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg == "-c"));
+        let actual = parse_fd_inventory(b"7:11\n7:11\n7:12\n").unwrap();
+        assert_eq!(actual.get(&(7, 11)), Some(&2));
+        assert_eq!(actual.get(&(7, 12)), Some(&1));
+        assert!(parse_fd_inventory(b"not-an-object").is_err());
+    }
+
+    #[test]
+    fn sudo_writer_verification_requires_original_objects_not_alias_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("image");
+        let sidecar = tmp.path().join("image.lock");
+        let held = LockedWritableImage::acquire(writable(&path), writable(&sidecar)).unwrap();
+        let spec = spec(vec![block(&path, 0)]);
+        let handoff = PreparedWritableDisks::bind(&spec, vec![(0, held)])
+            .unwrap()
+            .into_sudo_handoff(&spec)
+            .unwrap();
+        let fds = tmp.path().join("writer-fds");
+        std::fs::create_dir(&fds).unwrap();
+        std::os::unix::fs::symlink(&path, fds.join("1000")).unwrap();
+        std::os::unix::fs::symlink(&path, fds.join("1002")).unwrap();
+        std::os::unix::fs::symlink(&sidecar, fds.join("1001")).unwrap();
+        handoff.verify_writer_descriptors_at(&fds).unwrap();
+
+        std::fs::remove_file(fds.join("1001")).unwrap();
+        assert!(handoff.verify_writer_descriptors_at(&fds).is_err());
+        std::os::unix::fs::symlink(&path, fds.join("1001")).unwrap();
+        let error = handoff.verify_writer_descriptors_at(&fds).unwrap_err();
+        assert!(format!("{error:#}").contains("sidecar"));
+
+        let replacement = tmp.path().join("replacement");
+        let _replacement = writable(&replacement);
+        std::fs::remove_file(fds.join("1001")).unwrap();
+        std::os::unix::fs::symlink(&replacement, fds.join("1001")).unwrap();
+        assert!(handoff.verify_writer_descriptors_at(&fds).is_err());
+    }
+
+    #[test]
+    fn empty_resources_preserve_the_exact_kernel_dispatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = kernel(tmp.path(), b"dispatch fixture, not a bootable kernel");
+        let driver = DispatchRecorder::default();
+        let spec = spec(Vec::new());
+        let disks = PreparedWritableDisks::empty();
+
+        let error = driver
+            .boot_custodied(&spec, Some(&kernel), disks)
+            .err()
+            .expect("recorded verified route");
+        assert_eq!(error.to_string(), "verified dispatch witness");
+        assert_eq!(driver.verified.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.ordinary.load(Ordering::SeqCst), 0);
+
+        let error = driver
+            .boot_custodied(&spec, None, PreparedWritableDisks::empty())
+            .err()
+            .expect("recorded ordinary route");
+        assert_eq!(error.to_string(), "ordinary dispatch witness");
+        assert_eq!(driver.verified.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.ordinary.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unsupported_nonempty_handoff_never_calls_either_boot_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("image");
+        let spec = spec(vec![block(&path, 1)]);
+        let driver = DispatchRecorder::default();
+        let kernel = kernel(tmp.path(), b"unsupported handoff fixture");
+
+        for kernel in [None, Some(&kernel)] {
+            let image =
+                LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
+                    .unwrap();
+            let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
+            let error = driver
+                .boot_custodied(&spec, kernel, disks)
+                .err()
+                .expect("unsupported handoff");
+            assert!(error.to_string().contains("prepared writable descriptor"));
+        }
+        assert_eq!(driver.ordinary.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.verified.load(Ordering::SeqCst), 0);
+        let _reacquired = LockedWritableImage::open(&path, &tmp.path().join("lock")).unwrap();
+    }
+}

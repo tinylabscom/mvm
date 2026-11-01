@@ -1,7 +1,7 @@
 //! `L7EgressProxy` — the real `SupervisorEgressProxy` impl that wires the
 //! inspector chain into outbound HTTP traffic.
 //!
-//! ## Phase 1 scope (this module)
+//! ## Scope
 //!
 //! - Pure inspection logic in [`L7EgressProxy::evaluate`]: takes
 //!   (host, port, body) and a mockable `DnsResolver`, runs the
@@ -17,12 +17,12 @@
 //! - TCP listener loop in [`L7EgressProxy::serve`].
 //! - Audit emission via `AuditSigner` for every request.
 //!
-//! ## Out of scope (later)
+//! ## Out of scope
 //!
-//! - TLS MITM (Phase 2).
+//! - TLS MITM.
 //! - HTTP/2 / HTTP/3, connection pooling, bandwidth caps.
-//! - Plain-HTTP request body inspection — Phase 1 ships HTTPS
-//!   CONNECT only, plain HTTP is gated on `EgressPolicy::allow_plain_http`
+//! - Plain-HTTP request body inspection — only HTTPS
+//!   CONNECT is handled, plain HTTP is gated on `EgressPolicy::allow_plain_http`
 //!   which the supervisor refuses to honour for `Variant::Prod`.
 
 use std::net::{IpAddr, SocketAddr};
@@ -172,8 +172,8 @@ impl EgressAuditSink for NoopEgressAuditSink {
     }
 }
 
-/// Parsed `CONNECT host:port HTTP/1.x` request line. Phase 1 only
-/// handles CONNECT; plain-HTTP request parsing lands later.
+/// Parsed `CONNECT host:port HTTP/1.x` request line. Only
+/// CONNECT is handled; plain-HTTP requests are not parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectRequest {
     pub host: String,
@@ -200,7 +200,7 @@ pub enum ConnectParseError {
 /// HTTP-version field (we only require it starts with `HTTP/1.`),
 /// strict about the method and authority shape.
 ///
-/// Phase 1 only consumes the request line — full header parsing
+/// Only the request line is consumed — full header parsing
 /// isn't needed because we're either (a) accepting the CONNECT
 /// (in which case bytes after the empty line are the client's TLS
 /// payload, opaque to us) or (b) refusing it (we reply with 403
@@ -912,8 +912,8 @@ mod tests {
 
     #[test]
     fn parse_connect_handles_ipv6_literal_via_brackets_unsupported_for_now() {
-        // IPv6 in CONNECT uses bracketed form: `[::1]:443`. Phase 1
-        // accepts it via rsplit_once(':') which keeps the brackets
+        // IPv6 in CONNECT uses bracketed form: `[::1]:443`. It is
+        // accepted via rsplit_once(':') which keeps the brackets
         // in the host slot — downstream IP parsing in `evaluate`
         // would then fail since `[::1]` isn't a valid IpAddr. Document
         // the limitation explicitly via this test until proper

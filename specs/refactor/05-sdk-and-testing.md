@@ -35,4 +35,4 @@ Every user-facing behavior and every security claim begins as a Gherkin `.featur
 - The claims catalog becomes executable: each numbered security claim maps to a scenario, complementing (not replacing) the existing machine-checked witnesses described in [04-security.md](04-security.md).
 - `just bdd` runs the suite; it is folded into `just ci` / the full local gate, so a BDD regression blocks the same way a unit-test regression does.
 
-See [06-execution-plan.md](06-execution-plan.md) WS0.6 (harness bring-up) and WS1g (SDK crate restructure) for the workstream detail, and [07-progress-and-decisions.md](07-progress-and-decisions.md) for what's landed so far.
+See [06-execution-plan.md](06-execution-plan.md) WS0.6 (harness bring-up) and WS1g (SDK crate restructure) for the workstream detail, and the retired progress ledger for what's landed so far.

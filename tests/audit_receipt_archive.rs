@@ -566,6 +566,32 @@ fn a_derivable_archive_missing_a_leaf_fails_completeness() {
 }
 
 #[test]
+fn a_leaf_listed_twice_in_place_of_another_fails_completeness_despite_equal_count() {
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
+
+    let swapped = rewrite(&bytes, |m| {
+        let raw = m
+            .iter()
+            .find(|(n, _)| n == "manifest.json")
+            .unwrap()
+            .1
+            .clone();
+        let mut v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let leaves = v["manifest"]["leaves"].as_array_mut().unwrap();
+        let first = leaves[0].clone();
+        *leaves.last_mut().unwrap() = first;
+        set_member(m, "manifest.json", serde_json::to_vec_pretty(&v).unwrap());
+    });
+
+    let report = verify_archive(&swapped).expect("verify runs to completion");
+    assert!(
+        matches!(&report.completeness, CompletenessResult::Failed(why) if why.contains("more than once")),
+        "{report:?}"
+    );
+}
+
+#[test]
 fn a_foreign_host_key_fails_integrity() {
     let dir = TempDir::new().unwrap();
     let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);

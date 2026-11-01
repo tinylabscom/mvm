@@ -5,17 +5,20 @@ use std::path::{Path, PathBuf};
 
 use crate::builder_vm::BuilderVmError;
 use crate::builder_vm_runtime::{
-    LockWait, acquire_sidecar_lock_within, sidecar_lock_path, sparse_create_image,
+    LockWait, acquire_sidecar_lock_within, sidecar_lock_path, sparse_create_locked_image,
 };
 
 /// Host-side guard for a custom persistent disk-image volume.
 ///
-/// A read-write volume holds a sidecar `<image>.lock` flock so concurrent
-/// materialization cannot corrupt the image. Read-only volumes hold no lock.
-/// The image itself stays closed so the hypervisor can open it exclusively.
+/// A read-write volume holds both its original backing and `<image>.lock`
+/// sidecar so concurrent materialization cannot corrupt the image, including
+/// through a hardlink alias. Read-only volumes hold no lock.
 #[derive(Debug)]
 pub struct VolumeImageLock {
     path: PathBuf,
+    #[cfg(unix)]
+    _lock: Option<mvm_core::util::writable_image::LockedWritableImage>,
+    #[cfg(not(unix))]
     _lock: Option<std::fs::File>,
 }
 
@@ -24,16 +27,24 @@ impl VolumeImageLock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Transfer the original materialization resources to the final writer.
+    #[cfg(unix)]
+    pub fn into_image(
+        self,
+    ) -> Option<(PathBuf, mvm_core::util::writable_image::LockedWritableImage)> {
+        self._lock.map(|image| (self.path, image))
+    }
 }
 
-/// Materialize and validate a persistent ext4 image, returning its sidecar lock.
+/// Materialize and validate a persistent ext4 image, returning its writer locks.
 ///
 /// Missing or empty read-write files are sparse-created and formatted in-process.
 /// Read-only files must already exist and are never created or modified. Existing
 /// files are never resized or reformatted, and are refused unless their ext4
 /// superblock magic is valid.
-/// Read-write callers acquire the sidecar lock before inspecting or mutating the
-/// image, so a refused contender cannot create, resize or format it.
+/// Read-write callers acquire the sidecar before creation/admission and lock the
+/// original backing before inspecting, resizing, formatting or validating it.
 pub fn ensure_persistent_volume_image(
     host_path: &Path,
     size_bytes: u64,
@@ -60,31 +71,59 @@ pub(crate) fn ensure_persistent_volume_image_within(
     }
 
     prepare_private_parent(host_path)?;
-    let lock = Some(acquire_sidecar_lock_within(
-        &sidecar_lock_path(host_path),
-        wait,
-    )?);
+    let lock = acquire_sidecar_lock_within(&sidecar_lock_path(host_path), wait)?;
     create_or_admit_private_image(host_path)?;
 
-    let needs_format = match std::fs::metadata(host_path) {
-        Ok(metadata) => metadata.len() == 0,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-        Err(error) => {
+    #[cfg(unix)]
+    let lock = {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let backing = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(host_path)
+            .map_err(io_error(host_path))?;
+        let image = mvm_core::util::writable_image::LockedWritableImage::acquire(backing, lock)
+            .map_err(io_error(host_path))?;
+        let needs_format = image
+            .backing()
+            .metadata()
+            .map_err(io_error(host_path))?
+            .len()
+            == 0;
+        sparse_create_locked_image(image.backing(), host_path, size_bytes)?;
+        if needs_format {
+            let mut backing = image.backing().try_clone().map_err(io_error(host_path))?;
+            format_new_ext4_file(host_path, &mut backing)?;
+        }
+        let mut backing = image.backing().try_clone().map_err(io_error(host_path))?;
+        validate_ext4_file(host_path, &mut backing)?;
+        let selected = std::fs::symlink_metadata(host_path).map_err(io_error(host_path))?;
+        let held = image.backing().metadata().map_err(io_error(host_path))?;
+        if !selected.is_file() || (selected.dev(), selected.ino()) != (held.dev(), held.ino()) {
             return Err(BuilderVmError::ExtractionFailed(format!(
-                "metadata {}: {error}",
+                "writable disk image {} changed during materialization",
                 host_path.display()
             )));
         }
+        image
     };
-    sparse_create_image(host_path, size_bytes)?;
-    if needs_format {
-        format_new_ext4(host_path)?;
+
+    #[cfg(not(unix))]
+    {
+        let needs_format = std::fs::metadata(host_path)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true);
+        sparse_create_image(host_path, size_bytes)?;
+        if needs_format {
+            format_new_ext4(host_path)?;
+        }
+        validate_ext4(host_path)?;
     }
-    validate_ext4(host_path)?;
 
     Ok(VolumeImageLock {
         path: host_path.to_path_buf(),
-        _lock: lock,
+        _lock: Some(lock),
     })
 }
 
@@ -171,6 +210,10 @@ fn io_error(path: &Path) -> impl Fn(std::io::Error) -> BuilderVmError + '_ {
     move |error| BuilderVmError::ExtractionFailed(format!("{}: {error}", path.display()))
 }
 
+#[cfg(not(unix))]
+use crate::builder_vm_runtime::sparse_create_image;
+
+#[cfg(any(not(unix), test))]
 fn format_new_ext4(host_path: &Path) -> Result<(), BuilderVmError> {
     let mut image = std::fs::OpenOptions::new()
         .read(true)
@@ -182,6 +225,10 @@ fn format_new_ext4(host_path: &Path) -> Result<(), BuilderVmError> {
                 host_path.display()
             ))
         })?;
+    format_new_ext4_file(host_path, &mut image)
+}
+
+fn format_new_ext4_file(host_path: &Path, image: &mut std::fs::File) -> Result<(), BuilderVmError> {
     let image_bytes = image
         .metadata()
         .map_err(|error| {
@@ -191,7 +238,7 @@ fn format_new_ext4(host_path: &Path) -> Result<(), BuilderVmError> {
             ))
         })?
         .len();
-    mvm_fs::ext4::mkfs::format_empty_ext4(&mut image, image_bytes).map_err(|error| {
+    mvm_fs::ext4::mkfs::format_empty_ext4(image, image_bytes).map_err(|error| {
         BuilderVmError::ExtractionFailed(format!(
             "format new persistent volume {} as ext4: {error}",
             host_path.display()
@@ -212,6 +259,10 @@ fn validate_ext4(host_path: &Path) -> Result<(), BuilderVmError> {
             host_path.display()
         ))
     })?;
+    validate_ext4_file(host_path, &mut image)
+}
+
+fn validate_ext4_file(host_path: &Path, image: &mut std::fs::File) -> Result<(), BuilderVmError> {
     let magic = image
         .seek(std::io::SeekFrom::Start(1024 + 56))
         .and_then(|_| {
@@ -272,6 +323,29 @@ mod tests {
     }
 
     #[test]
+    fn a_hardlink_alias_backing_lock_refuses_before_resizing_or_formatting() {
+        let scratch = tempfile::tempdir().unwrap();
+        let image = scratch.path().join("data.img");
+        let alias = scratch.path().join("alias.img");
+        std::fs::write(&image, []).unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&image, &alias).unwrap();
+        let backing = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&alias)
+            .unwrap();
+        let sidecar =
+            acquire_sidecar_lock_within(&sidecar_lock_path(&alias), LockWait::none()).unwrap();
+        let _alias_owner =
+            mvm_core::util::writable_image::LockedWritableImage::acquire(backing, sidecar).unwrap();
+
+        rw(&image).expect_err("the alias owner still locks the original backing inode");
+        assert_eq!(std::fs::metadata(&image).unwrap().len(), 0);
+        assert!(std::fs::read(&image).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_contended_volume_lock_refuses_before_creating_the_image() {
         let scratch = tempfile::tempdir().unwrap();
         let image = scratch.path().join("data.img");
@@ -303,7 +377,13 @@ mod tests {
         rw(&image).expect_err("contender observes an unfinished image under another lock");
 
         // The owner finishes initialization before allowing a contender to retry.
-        sparse_create_image(&image, SIZE).unwrap();
+        let backing = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&image)
+            .unwrap();
+        sparse_create_locked_image(&backing, &image, SIZE).unwrap();
+        drop(backing);
         format_new_ext4(&image).unwrap();
         let mut writer = std::fs::OpenOptions::new()
             .write(true)
@@ -395,6 +475,29 @@ mod tests {
         let message = rw(&link).unwrap_err().to_string();
         assert!(message.contains("must be a regular file"), "{message}");
         assert_eq!(std::fs::metadata(&target).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn materialized_guard_transfers_original_resources_without_reacquisition() {
+        use std::os::fd::AsRawFd;
+
+        let scratch = tempfile::tempdir().unwrap();
+        let image = scratch.path().join("data.img");
+        let held = rw(&image).unwrap();
+        let original_fd = held._lock.as_ref().unwrap().backing().as_raw_fd();
+        let (path, image) = held.into_image().unwrap();
+        assert_eq!(path, scratch.path().join("data.img"));
+        assert_eq!(image.backing().as_raw_fd(), original_fd);
+        assert!(
+            mvm_core::util::writable_image::LockedWritableImage::open(
+                &path,
+                &sidecar_lock_path(&path),
+            )
+            .is_err(),
+            "the original writer resource remains locked after transfer"
+        );
+        drop(image);
+        let _restarted = rw(&path).unwrap();
     }
 
     #[test]

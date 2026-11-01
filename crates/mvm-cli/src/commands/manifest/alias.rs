@@ -1,6 +1,5 @@
 //! `mvmctl manifest alias <template> {set,rm,ls}` — manage movable
-//! `alias → revision_hash` pointers on a built template. W1 / A6
-//! of the filesystem-volumes plan.
+//! `alias → revision_hash` pointers on a built template.
 //!
 //! Aliases let `mvmctl machine run --manifest <template>@<alias>` resolve
 //! to the revision the alias currently points at. `set` is

@@ -351,6 +351,129 @@ fn bridge_spec_for_vsock(cid: u32, state_dir: &Path, channels: &[VsockPort]) -> 
     }
 }
 
+impl QemuDriver {
+    #[tracing::instrument(
+        name = "qemu.boot",
+        skip_all,
+        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
+    )]
+    fn boot_with_handoff(
+        &self,
+        spec: &VmmSpec,
+        disks: Option<&mvm_vmm::driver::prepared_disks::PreparedWritableDisks>,
+    ) -> Result<Box<dyn RunningVm>> {
+        // Refuse rather than ignore. Every workload spec has carried no shares
+        // since the granted directory became a materialized block image, so
+        // this arm was already unreachable — but a driver that silently drops a
+        // share it was asked to serve would hand the guest a VM missing a
+        // filesystem it expected. Firecracker has refused on the same grounds
+        // from the start; this makes QEMU match.
+        if !spec.shares.is_empty() {
+            bail!(
+                "the QEMU backend does not support virtio-fs shares ({} requested); \
+                 a granted host directory is materialized into a block image instead",
+                spec.shares.len()
+            );
+        }
+        anyhow::ensure!(
+            disks.is_some() || spec.trusted_builder || !spec.has_persistent_writable(),
+            "persistent writable QEMU disks require prepared descriptor custody"
+        );
+        // QEMU has no bundled kernel: a `Bundled` spec takes the same cached
+        // builder-kernel fallback the raw path uses for a kernel-less
+        // workload rootfs.
+        let kernel = match &spec.kernel {
+            KernelImage::Path(p) => p.clone(),
+            KernelImage::Bundled => qemu_process::resolve_workload_kernel_path(&spec.name, None)?,
+        };
+        // `qemu-system-<host-arch>` is the emulator `locate_qemu` picks, so the
+        // guest is the host's architecture. Refusing here names the kernel and
+        // the fix instead of leaving the caller a QEMU log tail.
+        mvm_core::kernel_format::check_direct_boot_loadable(
+            BackendKind::Qemu,
+            mvm_core::arch::GuestArch::host(),
+            &kernel,
+        )?;
+        let qemu_bin = qemu_process::locate_qemu()?;
+
+        let state_dir = vm_state_dir(&spec.name);
+        prepare_qemu_sinks(&state_dir, &spec.console.log_path)?;
+
+        let kvm = qemu_process::kvm_available();
+        if !kvm {
+            // Loud Tier-3 banner for the unaccelerated TCG fallback — the
+            // same runtime-tier signal the raw path emits.
+            ui::warn(&format!(
+                "QEMU workload '{}' is running UNACCELERATED (TCG — no /dev/kvm). \
+                 This is a Tier-3 dev/test fallback: slow, and unaudited vs the \
+                 production security posture. For production use a /dev/kvm host \
+                 (Firecracker).",
+                spec.name
+            ));
+        }
+
+        let cid = qemu_process::allocate_cid(&spec.name)?;
+        let pid_file = state_dir.join(QEMU_PID_FILE);
+        let _ = std::fs::remove_file(&pid_file);
+
+        let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file, self.machine_type);
+        tracing::debug!(qemu_bin = %qemu_bin, argv = ?argv, "launching qemu-system");
+        let mut command = bounded_qemu_command(&qemu_bin, &argv, spec, &state_dir);
+        mvm_vmm::host::restore_image::inherit_descriptors(
+            command.as_command_mut(),
+            disks.map_or_else(Vec::new, |disks| disks.inherited_descriptors()),
+        );
+        let status = command
+            .status()
+            .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e:#}"))?;
+        if !status.success() {
+            let log_path = state_dir.join(QEMU_LOG_FILE);
+            bail!(
+                "qemu-system exited {} before daemonizing workload '{}'; {} tail:\n{}",
+                status.code().unwrap_or(-1),
+                spec.name,
+                log_path.display(),
+                qemu_log_tail(&log_path, 40)
+            );
+        }
+
+        // `-daemonize` returns only after the pidfile is written, but poll
+        // defensively so a slow fork doesn't race the bridge spawn below.
+        let deadline = Instant::now() + qemu_process::PID_FILE_TIMEOUT;
+        while !pid_file.exists() {
+            if Instant::now() >= deadline {
+                bail!(
+                    "qemu did not write pidfile {} within {:?}",
+                    pid_file.display(),
+                    qemu_process::PID_FILE_TIMEOUT
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // Wire the whole channel set through the bridge. If it fails, use the
+        // same verified stop as an owned VM. The CID becomes reusable only
+        // after that stop; uncertain termination retains all recovery records.
+        let bridge_spec = bridge_spec_for_vsock(cid, &state_dir, &spec.vsock);
+        if let Err(e) = qemu_process::spawn_vsock_bridges(&spec.name, &state_dir, &bridge_spec) {
+            let running = QemuRunningVm {
+                id: VmId(spec.name.clone()),
+                state_dir: state_dir.clone(),
+                pid_file: pid_file.clone(),
+            };
+            return Err(rollback_failed_bridge(&state_dir, e, || {
+                running.kill_after_bridge_failure()
+            }));
+        }
+
+        Ok(Box::new(QemuRunningVm {
+            id: VmId(spec.name.clone()),
+            state_dir,
+            pid_file,
+        }))
+    }
+}
+
 impl VmmDriver for QemuDriver {
     fn name(&self) -> &str {
         "qemu"
@@ -429,112 +552,23 @@ impl VmmDriver for QemuDriver {
         qemu_base_bootargs(has_disk)
     }
 
-    #[tracing::instrument(
-        name = "qemu.boot",
-        skip_all,
-        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
-    )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
-        // Refuse rather than ignore. Every workload spec has carried no shares
-        // since the granted directory became a materialized block image, so
-        // this arm was already unreachable — but a driver that silently drops a
-        // share it was asked to serve would hand the guest a VM missing a
-        // filesystem it expected. Firecracker has refused on the same grounds
-        // from the start; this makes QEMU match.
-        if !spec.shares.is_empty() {
-            bail!(
-                "the QEMU backend does not support virtio-fs shares ({} requested); \
-                 a granted host directory is materialized into a block image instead",
-                spec.shares.len()
-            );
-        }
-        // QEMU has no bundled kernel: a `Bundled` spec takes the same cached
-        // builder-kernel fallback the raw path uses for a kernel-less
-        // workload rootfs.
-        let kernel = match &spec.kernel {
-            KernelImage::Path(p) => p.clone(),
-            KernelImage::Bundled => qemu_process::resolve_workload_kernel_path(&spec.name, None)?,
-        };
-        // `qemu-system-<host-arch>` is the emulator `locate_qemu` picks, so the
-        // guest is the host's architecture. Refusing here names the kernel and
-        // the fix instead of leaving the caller a QEMU log tail.
-        mvm_core::kernel_format::check_direct_boot_loadable(
-            BackendKind::Qemu,
-            mvm_core::arch::GuestArch::host(),
-            &kernel,
-        )?;
-        let qemu_bin = qemu_process::locate_qemu()?;
+        self.boot_with_handoff(spec, None)
+    }
 
-        let state_dir = vm_state_dir(&spec.name);
-        prepare_qemu_sinks(&state_dir, &spec.console.log_path)?;
-
-        let kvm = qemu_process::kvm_available();
-        if !kvm {
-            // Loud Tier-3 banner for the unaccelerated TCG fallback — the
-            // same runtime-tier signal the raw path emits.
-            ui::warn(&format!(
-                "QEMU workload '{}' is running UNACCELERATED (TCG — no /dev/kvm). \
-                 This is a Tier-3 dev/test fallback: slow, and unaudited vs the \
-                 production security posture. For production use a /dev/kvm host \
-                 (Firecracker).",
-                spec.name
-            ));
-        }
-
-        let cid = qemu_process::allocate_cid(&spec.name)?;
-        let pid_file = state_dir.join(QEMU_PID_FILE);
-        let _ = std::fs::remove_file(&pid_file);
-
-        let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file, self.machine_type);
-        tracing::debug!(qemu_bin = %qemu_bin, argv = ?argv, "launching qemu-system");
-        let status = bounded_qemu_command(&qemu_bin, &argv, spec, &state_dir)
-            .status()
-            .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e:#}"))?;
-        if !status.success() {
-            let log_path = state_dir.join(QEMU_LOG_FILE);
-            bail!(
-                "qemu-system exited {} before daemonizing workload '{}'; {} tail:\n{}",
-                status.code().unwrap_or(-1),
-                spec.name,
-                log_path.display(),
-                qemu_log_tail(&log_path, 40)
-            );
-        }
-
-        // `-daemonize` returns only after the pidfile is written, but poll
-        // defensively so a slow fork doesn't race the bridge spawn below.
-        let deadline = Instant::now() + qemu_process::PID_FILE_TIMEOUT;
-        while !pid_file.exists() {
-            if Instant::now() >= deadline {
-                bail!(
-                    "qemu did not write pidfile {} within {:?}",
-                    pid_file.display(),
-                    qemu_process::PID_FILE_TIMEOUT
-                );
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        // Wire the whole channel set through the bridge. If the bridge can't
-        // come up, the already-daemonized qemu would be orphaned (a failed
-        // `boot` won't be followed by `stop`). Roll back: kill qemu + drop
-        // the pid/cid sidecars so a retry re-allocates a CID instead of
-        // pinning the (possibly conflicting) one this attempt wrote.
-        let bridge_spec = bridge_spec_for_vsock(cid, &state_dir, &spec.vsock);
-        if let Err(e) = qemu_process::spawn_vsock_bridges(&spec.name, &state_dir, &bridge_spec) {
-            if let Some(pid) = qemu_process::read_pid(&pid_file) {
-                qemu_process::send_signal(pid, libc::SIGTERM);
-            }
-            let _ = std::fs::remove_file(&pid_file);
-            let _ = std::fs::remove_file(state_dir.join(qemu_process::QEMU_CID_FILE));
-            return Err(e);
-        }
-
-        Ok(Box::new(QemuRunningVm {
-            id: VmId(spec.name.clone()),
-            state_dir,
-            pid_file,
-        }))
+    #[cfg(unix)]
+    fn boot_custodied(
+        &self,
+        spec: &VmmSpec,
+        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+    ) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            kernel.is_none(),
+            "QEMU does not support verified kernel descriptor handoff"
+        );
+        disks.validate_spec(spec)?;
+        self.boot_with_handoff(&disks.project_for_inherited_writer(spec)?, Some(&disks))
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
@@ -562,6 +596,20 @@ impl VmmDriver for QemuDriver {
     }
 }
 
+fn rollback_failed_bridge(
+    state_dir: &Path,
+    bridge_error: anyhow::Error,
+    verified_stop: impl FnOnce() -> Result<()>,
+) -> anyhow::Error {
+    if let Err(stop_error) = verified_stop() {
+        return bridge_error.context(format!(
+            "QEMU bridge rollback could not prove writer termination; preserving PID and CID records: {stop_error:#}"
+        ));
+    }
+    let _ = std::fs::remove_file(state_dir.join(qemu_process::QEMU_CID_FILE));
+    bridge_error
+}
+
 /// A live QEMU VM: the daemonized `qemu-system` process tracked by its PID
 /// file, with the workload's exit code persisted under its state dir and the
 /// detached bridge serving its vsock channels.
@@ -569,6 +617,61 @@ struct QemuRunningVm {
     id: VmId,
     state_dir: PathBuf,
     pid_file: PathBuf,
+}
+
+impl QemuRunningVm {
+    fn stop_bridge(&self) {
+        if let Some(bridge_pid) =
+            qemu_process::read_pid(&self.state_dir.join(qemu_process::BRIDGE_PID_FILE))
+            && qemu_process::pid_alive(bridge_pid)
+        {
+            qemu_process::send_signal(bridge_pid, libc::SIGTERM);
+        }
+        let _ = std::fs::remove_file(self.state_dir.join(qemu_process::BRIDGE_PID_FILE));
+        qemu_process::cleanup_vsock_bridge_sockets(&self.state_dir);
+    }
+
+    /// A daemonized launch was observed, so absent or malformed identity is
+    /// uncertain custody rather than an already-stopped VM.
+    fn kill_after_bridge_failure(&self) -> Result<()> {
+        self.stop_bridge();
+        let recorded = std::fs::read_to_string(&self.pid_file)
+            .with_context(|| format!("reading daemonized QEMU pid {}", self.pid_file.display()))?;
+        let pid = recorded
+            .trim()
+            .parse::<libc::pid_t>()
+            .with_context(|| format!("parsing daemonized QEMU pid {}", self.pid_file.display()))?;
+        anyhow::ensure!(pid > 0, "daemonized QEMU pid must be positive");
+        if qemu_process::pid_alive(pid) {
+            terminate_qemu_pid(pid, &self.pid_file)?;
+        }
+        let _ = std::fs::remove_file(&self.pid_file);
+        Ok(())
+    }
+}
+
+fn terminate_qemu_pid(pid: libc::pid_t, pid_file: &Path) -> Result<()> {
+    let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
+    qemu_process::send_signal(pid, libc::SIGTERM);
+    let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
+        pid,
+        Instant::now() + qemu_process::STOP_TIMEOUT,
+        observer.as_ref(),
+    );
+    if !exited {
+        qemu_process::send_signal(pid, libc::SIGKILL);
+        if !mvm_vmm::host::process_exit::wait_for_pid_exit(
+            pid,
+            Instant::now() + Duration::from_millis(500),
+            observer.as_ref(),
+        ) {
+            return Err(anyhow!(
+                "QEMU PID {pid} could not be proven dead after SIGKILL; preserving {}",
+                pid_file.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl RunningVm for QemuRunningVm {
@@ -583,46 +686,11 @@ impl RunningVm for QemuRunningVm {
     }
 
     fn kill(&self) -> Result<()> {
-        // Reap the bridge first so it can't keep serving a half-dead VM.
-        // Guard on liveness so a stale pidfile (crash without cleanup) whose
-        // PID the OS has since recycled isn't signalled by mistake.
-        if let Some(bridge_pid) =
-            qemu_process::read_pid(&self.state_dir.join(qemu_process::BRIDGE_PID_FILE))
-            && qemu_process::pid_alive(bridge_pid)
-        {
-            qemu_process::send_signal(bridge_pid, libc::SIGTERM);
-        }
-        let _ = std::fs::remove_file(self.state_dir.join(qemu_process::BRIDGE_PID_FILE));
-        qemu_process::cleanup_vsock_bridge_sockets(&self.state_dir);
-
-        // Arm before SIGTERM so a short-lived QEMU process cannot exit between
-        // signal delivery and observer registration.
+        self.stop_bridge();
         if let Some(pid) = qemu_process::read_pid(&self.pid_file)
             && qemu_process::pid_alive(pid)
         {
-            let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
-            // SIGTERM gives QEMU a chance to close its virtio-blk file
-            // descriptors, then SIGKILL if it ignores us within the grace
-            // window.
-            qemu_process::send_signal(pid, libc::SIGTERM);
-            let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
-                pid,
-                Instant::now() + qemu_process::STOP_TIMEOUT,
-                observer.as_ref(),
-            );
-            if !exited {
-                qemu_process::send_signal(pid, libc::SIGKILL);
-                if !mvm_vmm::host::process_exit::wait_for_pid_exit(
-                    pid,
-                    Instant::now() + Duration::from_millis(500),
-                    observer.as_ref(),
-                ) {
-                    return Err(anyhow!(
-                        "QEMU PID {pid} could not be proven dead after SIGKILL; preserving {}",
-                        self.pid_file.display()
-                    ));
-                }
-            }
+            terminate_qemu_pid(pid, &self.pid_file)?;
         }
         let _ = std::fs::remove_file(&self.pid_file);
         Ok(())
@@ -675,6 +743,52 @@ mod tests {
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
     use mvm_core::vm_backend::SnapshotCapability;
     use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VirtioFsShare};
+
+    #[test]
+    fn bridge_rollback_preserves_identity_until_writer_stop_is_verified() {
+        let state = tempfile::tempdir().unwrap();
+        let pid = state.path().join(qemu_process::QEMU_PID_FILE);
+        let cid = state.path().join(qemu_process::QEMU_CID_FILE);
+        std::fs::write(&pid, b"123").unwrap();
+        std::fs::write(&cid, b"7").unwrap();
+
+        let error = rollback_failed_bridge(state.path(), anyhow!("bridge failed"), || {
+            Err(anyhow!("writer still running"))
+        });
+        assert!(format!("{error:#}").contains("preserving PID and CID"));
+        assert!(pid.exists() && cid.exists());
+
+        rollback_failed_bridge(state.path(), anyhow!("bridge failed"), || Ok(()));
+        assert!(
+            pid.exists(),
+            "rollback delegates PID evidence to verified stop"
+        );
+        assert!(!cid.exists(), "CID is reusable only after verified stop");
+    }
+
+    #[test]
+    fn strict_bridge_rollback_rejects_missing_and_malformed_writer_identity() {
+        for recorded in [None, Some("not-a-pid")] {
+            let state = tempfile::tempdir().unwrap();
+            let pid = state.path().join(qemu_process::QEMU_PID_FILE);
+            let cid = state.path().join(qemu_process::QEMU_CID_FILE);
+            if let Some(recorded) = recorded {
+                std::fs::write(&pid, recorded).unwrap();
+            }
+            std::fs::write(&cid, b"7").unwrap();
+            let running = QemuRunningVm {
+                id: VmId("rollback".into()),
+                state_dir: state.path().to_path_buf(),
+                pid_file: pid.clone(),
+            };
+            let error = rollback_failed_bridge(state.path(), anyhow!("bridge failed"), || {
+                running.kill_after_bridge_failure()
+            });
+            assert!(format!("{error:#}").contains("preserving PID and CID"));
+            assert!(cid.exists());
+            assert_eq!(pid.exists(), recorded.is_some());
+        }
+    }
 
     #[test]
     fn qemu_diagnostic_sinks_are_fresh_private_files_and_links_are_replaced() {
@@ -762,6 +876,20 @@ mod tests {
             ephemeral: false,
             slot,
         }
+    }
+
+    #[test]
+    fn direct_boot_refuses_unprepared_persistent_writable_disks() {
+        let spec = spec_with(
+            KernelImage::Bundled,
+            vec![],
+            vec![block("/dev/fd/3", false, 0)],
+        );
+        let error = QemuDriver::new()
+            .boot(&spec)
+            .err()
+            .expect("custody refusal");
+        assert!(error.to_string().contains("prepared descriptor custody"));
     }
 
     fn argvalue<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {

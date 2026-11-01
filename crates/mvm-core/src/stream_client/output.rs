@@ -251,7 +251,7 @@ impl StreamAvailability {
 
 /// What the durable half contributed, as far as the tail resolution cares.
 ///
-/// Three states rather than the `bool` this used to be, because "a transcript
+/// Three states rather than a `bool`, because "a transcript
 /// answered" and "a transcript answered *for the whole run*" are different
 /// questions and only the second one licenses dropping the console.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

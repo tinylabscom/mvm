@@ -111,7 +111,7 @@ The `schema` feature (schemars codegen) and `--test` builds drop `no_std`
 deliberately; the shipped wasm library surface stays no_std.
 
 The heavy lifting is **already done**. Increment 3 of the protocol/core split
-(`specs/refactor/07-progress-and-decisions.md`, `10-increment3-...`) is COMPLETE:
+(the retired progress ledger, `10-increment3-...`) is COMPLETE:
 the entire claim-8 signed `ExecutionPlan` (46/46 fields byte-identical), the
 wire/policy/audit DTOs, and the `Workload` IR now live in `mvm-contract` and
 compile on wasm32. This is the documented WS11 "wasm-container capable" core goal

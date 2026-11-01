@@ -38,6 +38,8 @@ pub use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
 /// naming `builder_vm_runtime::acquire_nix_store_image_lock`.
 mod image_lock;
 
+#[cfg(not(unix))]
+pub(crate) use image_lock::sparse_create_image;
 pub use image_lock::{
     DEFAULT_LOCK_WAIT, HeldImageLock, LOCK_WAIT_ENV, LockSubject, LockWait, LockWaitError,
     NixStoreImageLock, UnlockedStoreImage, acquire_lock_waiting, acquire_nix_store_image_lock,
@@ -45,7 +47,7 @@ pub use image_lock::{
     nix_store_image_is_contended,
 };
 pub(crate) use image_lock::{
-    acquire_sidecar_lock_within, pid_alive, sidecar_lock_path, sparse_create_image,
+    acquire_sidecar_lock_within, pid_alive, sidecar_lock_path, sparse_create_locked_image,
 };
 
 /// Wall-clock timeout for a builder VM run when the operator hasn't

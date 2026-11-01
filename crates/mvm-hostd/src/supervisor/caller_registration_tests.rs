@@ -45,6 +45,159 @@ fn startup_preflight_refuses_collisions_aliases_linked_and_writable_without_clos
 }
 
 #[test]
+fn startup_without_image_table_rejects_namespace_collisions_before_adoption() {
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kernel");
+    std::fs::write(&path, b"untrusted kernel fixture").unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let pin = file.try_clone().unwrap();
+    let identity = descriptor_identity(file.as_raw_fd());
+    let fd = file.into_raw_fd();
+    let cfg = serde_json::from_value(serde_json::json!({
+        "console_capture":"encrypted", "vm_name":"fd-collision", "kernel":"/unused",
+        "timeout_secs":0, "kernel_fd":fd,
+        "restore_ram":"/unused-ram", "restore_frame":"/unused-frame",
+        "restore_fds":{"ram":fd,"frame":fd},
+        "console_log":"/unused", "pid_file":"/unused", "workload_exit":"/unused"
+    }))
+    .unwrap();
+
+    let result = adopt_startup_files(&cfg);
+
+    if result.is_err() {
+        assert_eq!(
+            descriptor_identity(fd),
+            identity,
+            "namespace refusal must not adopt or close any input"
+        );
+        // SAFETY: a refused preflight leaves the sole transferred descriptor
+        // unadopted; its original live object was checked above and remains pinned.
+        drop(unsafe { std::fs::File::from_raw_fd(fd) });
+    }
+    assert!(
+        result.is_err(),
+        "absence of a read-only image table must not bypass namespace preflight"
+    );
+    assert!(pin.metadata().is_ok());
+}
+
+#[test]
+fn writable_startup_adopts_the_original_locked_object_and_retains_its_sidecar() {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("image");
+    std::fs::write(&image_path, b"original").unwrap();
+    std::fs::write(dir.path().join("image.lock"), []).unwrap();
+    let held = mvm_core::util::writable_image::LockedWritableImage::open(
+        &image_path,
+        &dir.path().join("image.lock"),
+    )
+    .unwrap();
+    let original = held.backing().metadata().unwrap();
+    let (backing, sidecar) = held.into_files();
+    let backing_fd = backing.as_raw_fd();
+    let sidecar_fd = sidecar.as_raw_fd();
+    let _backing = backing.into_raw_fd();
+    let _sidecar = sidecar.into_raw_fd();
+    std::fs::rename(&image_path, dir.path().join("renamed")).unwrap();
+    std::fs::write(&image_path, b"replacement").unwrap();
+    let cfg = serde_json::from_value(serde_json::json!({
+        "console_capture":"encrypted", "vm_name":"writable-fd", "kernel":"/unused",
+        "timeout_secs":0,
+        "disks":[{"path":image_path,"read_only":false,"ephemeral":false}],
+        "writable_disk_fds":[{"disk":0,"backing":backing_fd,"sidecar":sidecar_fd}],
+        "console_log":"/unused", "pid_file":"/unused", "workload_exit":"/unused"
+    }))
+    .unwrap();
+
+    let mut adopted = adopt_startup_files(&cfg).unwrap();
+    for fd in [backing_fd, sidecar_fd] {
+        // SAFETY: descriptor flags are inspected after the production adoption.
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+    }
+    let mut writable = adopted.take_writable();
+    let backing = writable.take_disk(0).unwrap().unwrap();
+    let metadata = backing.metadata().unwrap();
+    assert_eq!(
+        (metadata.dev(), metadata.ino()),
+        (original.dev(), original.ino())
+    );
+    assert_ne!(
+        std::fs::metadata(&image_path).unwrap().ino(),
+        original.ino(),
+        "the replacement is a different object"
+    );
+    drop(backing);
+    assert!(
+        mvm_core::util::writable_image::LockedWritableImage::open(
+            &dir.path().join("renamed"),
+            &dir.path().join("image.lock"),
+        )
+        .is_err(),
+        "the inherited sidecar must retain lock custody after the disk takes its backing"
+    );
+}
+
+#[test]
+fn incomplete_writable_table_is_refused_before_adoption() {
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("image");
+    std::fs::write(&image_path, b"original").unwrap();
+    std::fs::write(dir.path().join("image.lock"), []).unwrap();
+    let backing = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&image_path)
+        .unwrap();
+    let sidecar = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.path().join("image.lock"))
+        .unwrap();
+    let backing_fd = backing.as_raw_fd();
+    let sidecar_fd = sidecar.as_raw_fd();
+    let _backing = backing.into_raw_fd();
+    let _sidecar = sidecar.into_raw_fd();
+    let cfg = serde_json::from_value(serde_json::json!({
+        "console_capture":"encrypted", "vm_name":"writable-fd", "kernel":"/unused",
+        "timeout_secs":0,
+        "disks":[{"path":image_path,"read_only":false,"ephemeral":false}],
+        "writable_disk_fds":[{"disk":1,"backing":backing_fd,"sidecar":sidecar_fd}],
+        "console_log":"/unused", "pid_file":"/unused", "workload_exit":"/unused"
+    }))
+    .unwrap();
+    assert!(adopt_startup_files(&cfg).is_err());
+    for fd in [backing_fd, sidecar_fd] {
+        // SAFETY: preflight refusal must not close or adopt either input.
+        assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
+        // SAFETY: the test transfers the still-unadopted descriptor back exactly once.
+        drop(unsafe { std::fs::File::from_raw_fd(fd) });
+    }
+}
+
+#[test]
+fn trusted_builder_sidecar_protocol_does_not_require_volume_descriptors() {
+    let cfg = serde_json::from_value(serde_json::json!({
+        "console_capture":"encrypted", "vm_name":"builder", "kernel":"/unused",
+        "timeout_secs":0, "trusted_builder_egress":true,
+        "disks":[{"path":"/store","read_only":false,"ephemeral":false}],
+        "console_log":"/unused", "pid_file":"/unused", "workload_exit":"/unused"
+    }))
+    .unwrap();
+    validate_writable_disk_table(&cfg).unwrap();
+}
+
+#[test]
 fn startup_reader_is_zero_origin_and_preserves_shared_cursor() {
     use std::io::{Read, Seek, SeekFrom};
     let dir = tempfile::tempdir().unwrap();

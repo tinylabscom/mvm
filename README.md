@@ -24,7 +24,8 @@ There is no SSH server in any guest.
 ## Install
 
 ```bash
-# Release binary: macOS 13+ Apple Silicon (libkrun preview on 13–25), or Linux x86_64/aarch64 with /dev/kvm
+# Release binary: macOS 26+ Apple Silicon (HVF), macOS 13–25 (libkrun tier packaged in the archive;
+# live hardware witness still open), or Linux x86_64/aarch64 with /dev/kvm
 curl -fsSL https://runmvm.com/install.sh | sh
 
 # From source (run ./target/release/mvmctl from the checkout)
@@ -36,7 +37,9 @@ pip install mvm
 npm install @runmvm/mvm
 ```
 
-Nothing else is required: no Docker, no host Nix, no Homebrew packages.
+Nothing else is required for a release install: no Docker, no host Nix, no
+Homebrew packages. A source build on macOS 13–25 still needs the Homebrew
+libkrun packages.
 `mvmctl doctor` checks the host and says what is missing. Source builds have a
 few extra steps, covered in
 [Building from source](public/src/content/docs/guides/building-from-source.md).
@@ -199,7 +202,8 @@ mvmctl run --mode plan ./script.py
 
 `--mode plan` signs and admits the script's plan without booting anything.
 `exec`, `commands.start` and the console are available only under the dev
-profile, and fail with `SandboxDevOnly` otherwise.
+profile, which is the default for `mvmctl run`; under any other profile
+(for example `--profile standard`) or `--prod` they fail with `SandboxDevOnly`.
 
 From Rust, use the `mvm-client` crate:
 

@@ -465,9 +465,8 @@ impl FileAuditSigner {
     /// section.
     ///
     /// Deliberately a file *beside* the chain rather than the chain itself.
-    /// The lock used to be taken on the data file, which was correct while
-    /// that file was immortal — but rotation renames it, and a `flock` follows
-    /// the inode. A second process opening `<tenant>.jsonl` immediately after
+    /// A lock on the data file would not work: rotation renames it, and a
+    /// `flock` follows the inode. A second process opening `<tenant>.jsonl` immediately after
     /// the rename would create a brand-new inode, take an uncontended lock on
     /// it, and append concurrently with the rotation still in progress. The
     /// lock file is never renamed, so it stays the one thing both writers

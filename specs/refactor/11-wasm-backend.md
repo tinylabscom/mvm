@@ -210,7 +210,7 @@ no touching the 2972-line proxy.
    chain. **Cross-backend follow-up:** the microVM backends do not yet run this
    *same* chain-verifying witness as a shared CI lane; wiring it across all
    workload backends (so wasm and the microVMs pass one witness) is tracked in
-   [07-progress-and-decisions.md](07-progress-and-decisions.md) §"Not started".
+   the retired progress ledger §"Not started".
 
 **Deferred to P3b:** the endpoint's full TLS-terminating substitution (per-VM
 egress-CA intermediate the guest trusts) is heavier than the UDS-framed

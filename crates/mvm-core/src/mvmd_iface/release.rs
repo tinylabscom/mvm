@@ -1,6 +1,6 @@
 //! Release-promotion wire types driven by `mvmd`, executed by `mvm`.
 //!
-//! Plan-37 §11. `mvmd` decides *when* a release advances and what the
+//! `mvmd` decides *when* a release advances and what the
 //! rollout strategy is; `mvm`'s supervisor verifies the signed envelope,
 //! checks the workload's `ReleasePin`, and performs the local
 //! stop/start/snapshot dance. This module declares the contract.

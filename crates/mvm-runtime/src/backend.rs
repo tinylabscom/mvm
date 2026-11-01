@@ -388,7 +388,7 @@ impl AnyBackend {
     /// Refused selectors:
     /// - `"mock"` outside a `test-support` build (a real, documented selector
     ///   that would silently run the wrong backend).
-    /// - `"docker"` everywhere (the Docker dev-tier backend was removed).
+    /// - `"docker"` everywhere (there is no Docker backend).
     ///
     /// Call this before [`Self::from_hypervisor`] at any user-facing
     /// `--hypervisor` entry point.
@@ -841,6 +841,37 @@ impl AnyBackend {
             config.wait_for_admission_durability()?;
         }
         self.inner().start(config)
+    }
+
+    /// Start with original writable-image custody transferred to the final writer.
+    #[cfg(unix)]
+    pub fn start_custodied(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+    ) -> Result<VmId> {
+        if images.is_empty() {
+            return self.start(config);
+        }
+        if !self.activation_waits_for_admission() {
+            config.wait_for_admission_durability()?;
+        }
+        match self {
+            Self::Firecracker(runner) => runner.start_custodied(config, images),
+            Self::Libkrun(runner) => runner.start_custodied(config, images),
+            Self::Qemu(runner) => runner.start_custodied(config, images),
+            Self::Hvf(runner) => runner.start_custodied(config, images),
+            #[cfg(feature = "test-support")]
+            Self::Mock(backend) => {
+                // The hermetic writer has no real descriptors to inherit, but
+                // it still exercises the same ownership and admission path.
+                let images = images;
+                let id = backend.start(config)?;
+                drop(images);
+                Ok(id)
+            }
+            _ => anyhow::bail!("backend does not support writable descriptor handoff"),
+        }
     }
 
     /// Prepare native custody without creating a child. The caller must keep
@@ -1449,8 +1480,7 @@ mod tests {
     fn test_any_backend_capabilities() {
         // The default backend is the converged Firecracker runner: NIC-less,
         // vsock-only egress. It advertises the vsock control channel and no
-        // routable guest NIC, not the raw TAP the entangled Firecracker path
-        // used to carry.
+        // routable guest NIC, not a raw TAP.
         let backend = AnyBackend::default_backend();
         let caps = backend.capabilities();
         assert!(caps.vsock);

@@ -1,11 +1,11 @@
-//! Phase 7e — auto-exec end-to-end test.
+//! Python auto-exec end-to-end test.
 //!
 //! Spawns a stand-alone Python script that mimics what the
 //! `mvm` SDK's atexit hook would do: writes a recording JSON to
 //! `$MVM_SDK_OUT_PATH`. This keeps the test self-contained (no
 //! `pip install -e crates/mvm-sdk/sdks/python` required, no dependence on the
 //! Python SDK being importable on the test runner). The wiring
-//! the test exercises is the *CLI* side of Phase 7e — `python3`
+//! the test exercises is the *CLI* side: `python3`
 //! discovery, env var plumbing, recording load, lowering — which
 //! is exactly the surface that would regress under a refactor.
 //!
@@ -18,7 +18,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 /// Heredoc-style Python that emits a valid recording JSON to
-/// `MVM_SDK_OUT_PATH`. Matches the wire shape Phase 7a's
+/// `MVM_SDK_OUT_PATH`. Matches the wire shape
 /// `RuntimeRecording` consumes. Embedded as a literal so the
 /// test stands alone.
 const FAKE_SDK_SCRIPT: &str = r#"

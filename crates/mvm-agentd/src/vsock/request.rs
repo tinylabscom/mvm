@@ -1336,8 +1336,8 @@ mod tests {
 
     #[test]
     fn test_run_entrypoint_request_well_formed_accepted() {
-        // Sanity: the W1 wire types must continue to parse cleanly
-        // with `deny_unknown_fields` applied.
+        // Sanity: the wire types must parse cleanly with
+        // `deny_unknown_fields` applied.
         let json = r#"{"RunEntrypoint":{"stdin":[],"timeout_secs":15}}"#;
         let req: GuestRequest = serde_json::from_str(json).expect("deserialize");
         assert!(matches!(

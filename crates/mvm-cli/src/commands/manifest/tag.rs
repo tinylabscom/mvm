@@ -1,6 +1,5 @@
 //! `mvmctl manifest tag <template> {add,rm,ls}` — manage the
-//! free-form tag set on a built template / manifest. W1 / A6 of
-//! the filesystem-volumes plan.
+//! free-form tag set on a built template / manifest.
 //!
 //! Tags are persisted at `~/.mvm/templates/<template>/tags.json`
 //! via `mvm_core::domain::template_tags`. They're tenant-controlled

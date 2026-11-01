@@ -9,6 +9,94 @@ use mvm_vmm::host::ui;
 
 use super::{firecracker_vsock_uds_path, resolve_running_vm_dir};
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(serde::Deserialize)]
+struct WriterConfig {
+    drives: Vec<WriterDrive>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(serde::Deserialize)]
+struct WriterDrive {
+    drive_id: String,
+    path_on_host: std::path::PathBuf,
+    is_read_only: bool,
+}
+
+/// Authenticate the configured writable drives against the original objects
+/// still held by this launch, not against pathnames that could be replaced.
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_writable_writer(
+    abs_dir: &str,
+    abs_socket: &str,
+    handoff: &mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+) -> Result<()> {
+    let config: WriterConfig = serde_json::from_str(&super::call(
+        std::path::Path::new(abs_socket),
+        "GET",
+        "/vm/config",
+        None,
+    )?)
+    .context("parsing actual Firecracker writable drive configuration")?;
+    validate_writer_config(&config, handoff.projected())?;
+    let pid = read_firecracker_pid(abs_dir)?;
+    handoff
+        .verify_writer_descriptors(pid)
+        .with_context(|| format!("verifying original writable custody in Firecracker pid {pid}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn verify_writable_writer(
+    _abs_dir: &str,
+    _abs_socket: &str,
+    _handoff: &mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+) -> Result<()> {
+    anyhow::bail!("Firecracker descriptor custody requires the native Linux writer")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn validate_writer_config(
+    config: &WriterConfig,
+    spec: &mvm_vmm::driver::spec::VmmSpec,
+) -> Result<()> {
+    use std::collections::BTreeSet;
+    anyhow::ensure!(
+        config.drives.len() == spec.blocks.len(),
+        "actual writer drive count differs from the prepared recipe"
+    );
+    let mut seen = BTreeSet::new();
+    for drive in &config.drives {
+        let block = spec
+            .blocks
+            .iter()
+            .find(|block| format!("blk{}", block.slot) == drive.drive_id)
+            .with_context(|| format!("actual writer has unknown drive {}", drive.drive_id))?;
+        anyhow::ensure!(
+            seen.insert(block.slot),
+            "actual writer repeats drive slot {}",
+            block.slot
+        );
+        anyhow::ensure!(
+            drive.is_read_only == block.read_only,
+            "actual drive {} changed its read-only role",
+            drive.drive_id
+        );
+        anyhow::ensure!(
+            drive.path_on_host == block.source,
+            "actual drive {} differs from its prepared source",
+            drive.drive_id
+        );
+    }
+    for block in &spec.blocks {
+        anyhow::ensure!(
+            seen.contains(&block.slot),
+            "actual writer is missing configured drive slot {}",
+            block.slot
+        );
+    }
+    Ok(())
+}
+
 /// Resolve the path to the per-VM serial console log file.
 ///
 /// The host-side netinit-audit emitter
@@ -29,7 +117,7 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
 pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
     ensure_api_socket_fits(abs_socket)?;
     secure_socket_dir(abs_dir)?;
-    start_vm_firecracker_inner(abs_dir, abs_socket, "", None)
+    start_vm_firecracker_inner(abs_dir, abs_socket, "", None, None)
 }
 
 /// Start a Firecracker daemon inside a scope carrying its guest's memory and
@@ -47,12 +135,13 @@ pub fn start_vm_firecracker_bounded(
     machine_id: &str,
     bounds: &mvm_core::spawn_scope::SpawnBounds,
     guard: &mut super::FirecrackerGuard,
+    handoff: Option<&mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
 ) -> Result<()> {
     validate_required_scope(machine_id, bounds)?;
     ensure_api_socket_fits(abs_socket)?;
     secure_socket_dir(abs_dir)?;
     let prefix = spawn_scope_prefix(machine_id, std::path::Path::new(abs_dir), bounds)?;
-    start_vm_firecracker_inner(abs_dir, abs_socket, &prefix, Some(guard))
+    start_vm_firecracker_inner(abs_dir, abs_socket, &prefix, Some(guard), handoff)
 }
 
 /// Start Firecracker for a snapshot load, inside a scope prefix the caller has
@@ -62,10 +151,12 @@ pub fn start_vm_firecracker_bounded(
 /// that ends up on the launch line has to be the one a test can read back: an
 /// unwrapped Firecracker loads the snapshot and runs the restored guest exactly
 /// as well, and is simply unbounded.
-pub(crate) fn start_vm_firecracker_scoped(
+/// Start a replacement writer with original locked descriptions.
+pub(crate) fn start_vm_firecracker_scoped_with_handoff(
     abs_dir: &str,
     abs_socket: &str,
     scope: &str,
+    handoff: Option<&mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
 ) -> Result<()> {
     anyhow::ensure!(
         !scope.trim().is_empty(),
@@ -73,7 +164,7 @@ pub(crate) fn start_vm_firecracker_scoped(
     );
     ensure_api_socket_fits(abs_socket)?;
     secure_socket_dir(abs_dir)?;
-    start_vm_firecracker_inner(abs_dir, abs_socket, scope, None)
+    start_vm_firecracker_inner(abs_dir, abs_socket, scope, None, handoff)
 }
 
 /// The required legacy `systemd-run` scope prefix, or a pre-launch refusal.
@@ -128,6 +219,7 @@ fn start_vm_firecracker_inner(
     abs_socket: &str,
     scope: &str,
     guard: Option<&mut super::FirecrackerGuard>,
+    handoff: Option<&mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
 ) -> Result<()> {
     ui::info("Starting Firecracker...");
     if let Some(guard) = guard {
@@ -138,7 +230,14 @@ fn start_vm_firecracker_inner(
     // A process started here serves the socket its own command line names, so
     // any record that this dir's VMM came from the idle pool is now stale.
     super::idle_pool::forget_claim_origin(std::path::Path::new(abs_dir));
-    run_in_vm_visible(&firecracker_launch_script(abs_dir, abs_socket, scope))?;
+    if let Some(handoff) = handoff {
+        run_with_writable_handoff(
+            firecracker_launch_script(abs_dir, abs_socket, scope),
+            handoff,
+        )?;
+    } else {
+        run_in_vm_visible(&firecracker_launch_script(abs_dir, abs_socket, scope))?;
+    }
     await_started_firecracker(abs_dir, abs_socket, scope)?;
     // Every launch, not only a cold boot: the snapshot-restore path starts its
     // own fresh VMM through this same function and then speaks to the socket
@@ -148,6 +247,64 @@ fn start_vm_firecracker_inner(
         .context("adopting the Firecracker API socket for the invoking user")?;
     ui::info("Firecracker started.");
     Ok(())
+}
+
+/// Preserve exactly the original writable descriptors through bash and sudo.
+#[cfg(target_os = "linux")]
+fn run_with_writable_handoff(
+    mut script: String,
+    handoff: &mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    if effective_user_id() != 0 {
+        let marker = "sudo setsid";
+        let replacement = format!("sudo -C {} setsid", handoff.last() + 1);
+        anyhow::ensure!(script.contains(marker), "sudo handoff launch shape changed");
+        script = script.replace(marker, &replacement);
+    }
+    let first = handoff.first();
+    let last = handoff.last();
+    let mut command = mvm_core::env_hygiene::helper_command("bash");
+    command
+        .args(["-c", &script])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    // SAFETY: only integer syscalls run between fork and exec. Unrelated
+    // descriptors close; exactly the original handoff range loses CLOEXEC.
+    unsafe {
+        command.pre_exec(move || {
+            for (low, high) in [(3, first - 1), (last + 1, u32::MAX)] {
+                if low > high {
+                    continue;
+                }
+                if libc::syscall(libc::SYS_close_range, low, high, 0u32) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            for fd in first..=last {
+                if libc::fcntl(fd as libc::c_int, libc::F_SETFD, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let status = command.status()?;
+    anyhow::ensure!(
+        status.success(),
+        "Firecracker descriptor handoff failed: {status}"
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_with_writable_handoff(
+    _script: String,
+    _handoff: &mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+) -> Result<()> {
+    anyhow::bail!("Firecracker descriptor custody requires the native Linux writer")
 }
 
 /// Start an idle Firecracker for the pool: the same launch line as a VM's,
@@ -607,6 +764,51 @@ pub fn read_firecracker_pid(abs_dir: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_writer_config_must_match_every_original_writable_source() {
+        use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec};
+        let spec = VmmSpec {
+            name: "writer".into(),
+            kernel: KernelImage::Bundled,
+            initramfs: None,
+            cmdline: String::new(),
+            vcpus: 1,
+            memory_mib: 512,
+            mem_initial_mib: None,
+            cpu_grant: None,
+            blocks: vec![BlockDev {
+                source: "/original/volume".into(),
+                read_only: false,
+                ephemeral: false,
+                slot: 3,
+            }],
+            shares: Vec::new(),
+            vsock: Default::default(),
+            console: mvm_vmm::driver::spec::ConsoleCapture {
+                log_path: "/unused".into(),
+            },
+            trusted_builder: false,
+            builder_egress_endpoint: None,
+            plan_binding: None,
+        };
+        let matching: WriterConfig = serde_json::from_str(
+            r#"{"drives":[{"drive_id":"blk3","path_on_host":"/original/volume","is_read_only":false}]}"#,
+        )
+        .unwrap();
+        validate_writer_config(&matching, &spec).unwrap();
+        let mut read_only_spec = spec.clone();
+        read_only_spec.blocks[0].read_only = true;
+        assert!(validate_writer_config(&matching, &read_only_spec).is_err());
+        for body in [
+            r#"{"drives":[]}"#,
+            r#"{"drives":[{"drive_id":"blk3","path_on_host":"/replacement","is_read_only":false}]}"#,
+            r#"{"drives":[{"drive_id":"blk4","path_on_host":"/original/volume","is_read_only":false}]}"#,
+        ] {
+            let changed: WriterConfig = serde_json::from_str(body).unwrap();
+            assert!(validate_writer_config(&changed, &spec).is_err(), "{body}");
+        }
+    }
 
     /// An idle process records its own pid and start time before it execs
     /// Firecracker; a VM launch line records neither.
@@ -1180,12 +1382,16 @@ mod tests {
                     "invalid-bounds",
                     &bounds,
                     &mut super::super::FirecrackerGuard::pending(),
+                    None,
                 )
                 .is_err()
             );
         }
         for scope in ["", " \t"] {
-            assert!(start_vm_firecracker_scoped("/unused", "/unused/socket", scope).is_err());
+            assert!(
+                start_vm_firecracker_scoped_with_handoff("/unused", "/unused/socket", scope, None)
+                    .is_err()
+            );
             assert!(start_idle_firecracker("/unused", "/unused/socket", scope).is_err());
         }
         assert!(
@@ -1217,6 +1423,7 @@ mod tests {
             "required-bounds",
             &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(512),
             &mut super::super::FirecrackerGuard::pending(),
+            None,
         )
         .expect_err("missing scope must refuse");
         assert!(format!("{error:#}").contains("scope"), "{error:#}");

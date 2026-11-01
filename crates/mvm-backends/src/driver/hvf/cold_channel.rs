@@ -13,10 +13,11 @@ use super::{
 pub(super) struct BootInputFiles<'a> {
     pub(super) kernel: Option<&'a mvm_vmm::host::restore_image::VerifiedRestoreFile>,
     pub(super) images: Option<&'a mvm_vmm::host::boot_images::FrozenBootImageBytes>,
+    pub(super) writable: Option<&'a mvm_vmm::driver::prepared_disks::PreparedWritableDisks>,
 }
 
 impl BootInputFiles<'_> {
-    pub(super) fn project(&self, cfg: &mut HvfSupervisorConfig) -> Result<()> {
+    pub(super) fn project(&self, spec: &VmmSpec, cfg: &mut HvfSupervisorConfig) -> Result<()> {
         use std::os::fd::AsRawFd;
         cfg.kernel_fd = self.kernel.map(|kernel| kernel.file().as_raw_fd());
         cfg.boot_image_fds = self.images.map(|images| {
@@ -39,6 +40,24 @@ impl BootInputFiles<'_> {
                 "projected command differs from original frozen image hash"
             );
         }
+        if let Some(writable) = self.writable {
+            let mut ordered = spec.blocks.iter().collect::<Vec<_>>();
+            ordered.sort_by_key(|block| block.slot);
+            cfg.writable_disk_fds = writable
+                .iter()
+                .map(|(slot, image)| {
+                    let disk = ordered
+                        .iter()
+                        .position(|block| block.slot == slot)
+                        .context("prepared writable slot missing from HVF spec")?;
+                    Ok(mvm_vmm::host::hvf_supervisor::HvfWritableDiskFds {
+                        disk,
+                        backing: image.backing().as_raw_fd(),
+                        sidecar: image.sidecar().as_raw_fd(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+        }
         Ok(())
     }
 
@@ -46,6 +65,9 @@ impl BootInputFiles<'_> {
         let mut inherited = cfg.kernel_fd.into_iter().collect::<Vec<_>>();
         if let Some(images) = cfg.boot_image_fds {
             inherited.extend(images.descriptors());
+        }
+        for disk in &cfg.writable_disk_fds {
+            inherited.extend([disk.backing, disk.sidecar]);
         }
         anyhow::ensure!(
             inherited.iter().all(|fd| *fd > 2)
@@ -143,6 +165,7 @@ pub(super) fn require_cold_config(config: &HvfSupervisorConfig) -> Result<()> {
             && config.builder_egress_endpoint.is_none()
             && !config.trusted_builder_egress
             && config.exclusive_image_lock.is_none()
+            && config.writable_disk_fds.is_empty()
             && config.builder_control_sockets.is_empty(),
         "cold HVF channel refuses restore, fork, handoff and builder configurations"
     );
