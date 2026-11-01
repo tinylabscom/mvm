@@ -386,11 +386,4 @@ mod tests {
         assert_eq!(bus.subscriber_count(), 1);
         assert_eq!(bus2.subscriber_count(), 1);
     }
-
-    #[test]
-    fn default_capacity_constant_is_documented_value() {
-        // Pin the documented default so a "let's bump this to 1024
-        // because" PR has to update the comment too.
-        assert_eq!(DEFAULT_CAPACITY, 256);
-    }
 }

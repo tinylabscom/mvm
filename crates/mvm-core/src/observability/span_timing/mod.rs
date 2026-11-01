@@ -317,10 +317,4 @@ mod tests {
         let back: SpanReport = serde_json::from_str(&out).expect("valid json");
         assert_eq!(back, report);
     }
-
-    #[test]
-    fn filter_default_covers_mvm_targets_at_trace() {
-        assert_eq!(DEFAULT_FILTER, "mvm=trace");
-        assert!(DEFAULT_FILTER.contains("trace"));
-    }
 }

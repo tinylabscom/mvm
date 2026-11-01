@@ -2589,6 +2589,11 @@ mod tests {
         let current_exe = install_dir.join("mvmctl");
         std::fs::write(&current_exe, b"#!/bin/sh\necho 'mvmctl 0.1.0'\n").unwrap();
         std::fs::set_permissions(&install_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if is_writable(&install_dir) {
+            // A privileged euid writes through 0555, so the sudo arm cannot be selected here.
+            eprintln!("skipped: a 0555 directory is still writable for this user");
+            return;
+        }
 
         let marker = tmp.path().join("sudo-called");
         let mut env = TestEnv::new();

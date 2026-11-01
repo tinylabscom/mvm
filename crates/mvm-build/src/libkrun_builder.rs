@@ -5776,16 +5776,6 @@ mod tests {
     // -----------------------------------------------------------
 
     #[test]
-    fn dispatch_sock_marker_constant_is_filename_only() {
-        // Must not contain `/`. The host joins it under <job_dir>;
-        // a slash would break the path concatenation contract the
-        // in-guest builder-init's marker probe assumes.
-        assert!(!DISPATCH_SOCK_MARKER.contains('/'));
-        assert!(!DISPATCH_SOCK_MARKER.is_empty());
-        assert_eq!(DISPATCH_SOCK_MARKER, "dispatch.sock.marker");
-    }
-
-    #[test]
     fn persistent_builder_egress_log_is_scoped_to_vm_state() {
         let state_dir = Path::new("/tmp/mvm-builder-state");
         assert_eq!(

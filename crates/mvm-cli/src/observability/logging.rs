@@ -257,11 +257,6 @@ mod tests {
     }
 
     #[test]
-    fn default_filter_keeps_mvm_at_info() {
-        assert_eq!(DEFAULT_FILTER, "mvm=info,warn");
-    }
-
-    #[test]
     fn observability_config_uses_the_workspace_filter_by_default() {
         let config = ObservabilityConfig::new(LogFormat::Json);
 

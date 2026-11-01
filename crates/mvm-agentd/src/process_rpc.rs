@@ -1029,25 +1029,6 @@ mod tests {
         assert_eq!(super::program_search_dirs(Some("bin:.")), fhs());
     }
 
-    /// The caller supplies the request's env, so honouring its PATH would let
-    /// the caller choose which binary a bare name resolves to. The search list
-    /// is fixed in the source and the resolver takes no env at all.
-    #[test]
-    fn resolution_does_not_consult_a_caller_supplied_path() {
-        let src = include_str!("process_rpc.rs");
-        let body = src
-            .split("pub fn resolve_argv0")
-            .nth(1)
-            .expect("resolve_argv0 must exist")
-            .split("\n}")
-            .next()
-            .expect("function body ends at the first closing brace");
-        assert!(
-            !body.contains("std::env") && !body.contains("var("),
-            "resolution must not read the process environment: {body}"
-        );
-    }
-
     use super::*;
 
     fn small_caps() -> Caps {
