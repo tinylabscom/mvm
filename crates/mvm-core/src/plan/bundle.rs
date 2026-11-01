@@ -545,7 +545,7 @@ impl BundleRegistry {
     /// local-build label and this host signed it. Anything else, including a
     /// host-signed bundle without the label, refuses as an unknown key.
     #[cfg(feature = "host-state")]
-    pub fn verified_manifest_with_host_key<T: TrustStore>(
+    pub fn verified_launch_manifest<T: TrustStore>(
         &self,
         bundle_sha256: &str,
         release: T,
@@ -4030,7 +4030,7 @@ mod tests {
         let host = fresh_key();
         let (_tmp, registry, sha) = installed_with(&host, true);
         let manifest = registry
-            .verified_manifest_with_host_key(&sha, no_release_keys(), Some(host.verifying_key()))
+            .verified_launch_manifest(&sha, no_release_keys(), Some(host.verifying_key()))
             .expect("verifies")
             .expect("installed");
         assert_eq!(manifest.key_id, key_id_from_pubkey(&host.verifying_key()));
@@ -4040,7 +4040,7 @@ mod tests {
     fn other_key_signed_bundle_is_refused_when_the_host_key_is_known() {
         let (_tmp, registry, sha) = installed_with(&fresh_key(), true);
         assert!(matches!(
-            registry.verified_manifest_with_host_key(
+            registry.verified_launch_manifest(
                 &sha,
                 no_release_keys(),
                 Some(fresh_key().verifying_key())
@@ -4054,11 +4054,7 @@ mod tests {
         let host = fresh_key();
         let (_tmp, registry, sha) = installed_with(&host, false);
         assert!(matches!(
-            registry.verified_manifest_with_host_key(
-                &sha,
-                no_release_keys(),
-                Some(host.verifying_key())
-            ),
+            registry.verified_launch_manifest(&sha, no_release_keys(), Some(host.verifying_key())),
             Err(BundleVerifyError::UnknownKey { .. })
         ));
     }
@@ -4077,11 +4073,7 @@ mod tests {
         bytes[at] = b'T';
         std::fs::write(&path, bytes).unwrap();
         assert!(matches!(
-            registry.verified_manifest_with_host_key(
-                &sha,
-                no_release_keys(),
-                Some(host.verifying_key())
-            ),
+            registry.verified_launch_manifest(&sha, no_release_keys(), Some(host.verifying_key())),
             Err(BundleVerifyError::SignatureInvalid { .. })
         ));
     }
@@ -4115,11 +4107,7 @@ mod tests {
         let sha = hex::encode(Sha256::digest(&archive));
         std::fs::write(registry.archive_path(&sha), &archive).unwrap();
         assert!(matches!(
-            registry.verified_manifest_with_host_key(
-                &sha,
-                no_release_keys(),
-                Some(host.verifying_key())
-            ),
+            registry.verified_launch_manifest(&sha, no_release_keys(), Some(host.verifying_key())),
             Err(BundleVerifyError::SignatureInvalid { .. })
         ));
     }

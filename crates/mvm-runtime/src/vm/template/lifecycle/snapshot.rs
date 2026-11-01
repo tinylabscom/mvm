@@ -201,7 +201,7 @@ fn installed_bundle_verified_manifest(
     let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
     let trust = mvm_core::plan::FsTrustStore::default_path()?;
     registry
-        .verified_manifest_with_host_key(id_or_slot, trust, host_verifying_key()?)
+        .verified_launch_manifest(id_or_slot, trust, host_verifying_key()?)
         .map_err(|e| anyhow::anyhow!("installed bundle {id_or_slot}: {e}"))
 }
 
