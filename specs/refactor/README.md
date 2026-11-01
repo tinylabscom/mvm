@@ -21,9 +21,7 @@ Two capabilities are **core goals** in their own right, not by-products of simpl
 | [04-security.md](04-security.md) | Security and data-governance model: secrets substitution, PII redaction, verified boot, signed plans, audit chain |
 | [05-sdk-and-testing.md](05-sdk-and-testing.md) | SDK pipeline (tree-sitter → IR → nix template), `PackageType` trait, BDD-first testing model |
 | [06-execution-plan.md](06-execution-plan.md) | The full workstream list (Phase 0 → Phase 4) with acceptance gates, and the phase sequencing |
-| [07-progress-and-decisions.md](07-progress-and-decisions.md) | Execution reality: what's done, what's deviated from plan and why, what's left |
 | [08-adr-consolidation.md](08-adr-consolidation.md) | The ADR consolidation: 92 legacy ADRs → 30 contiguous, and the cluster mapping |
-| [09-closeout.md](09-closeout.md) | Issue/PR disposition table and the biggest confirmed code removals |
 | [10-increment3-protocol-core-split.md](10-increment3-protocol-core-split.md) | The `mvm-core` → `mvm-contract` wire/policy DTO split — per-module cut, extraction order, byte-identity invariant (design of record for the Phase 1a long pole) |
 | [11-wasm-backend.md](11-wasm-backend.md) | The `WasmBackend` seam (WS11 core goal) — scoped as the claim-free portability tier, the three resolved open questions, the seam + WASI egress transport, the POC gate, and the P1–P4 plan |
 | [12-workload-address-pilot.md](12-workload-address-pilot.md) | Decision-ready pilot: a UOR-ADDR-compatible `WorkloadAddress` (JCS+SHA-256) for the Workload IR — additive host-side, zero new deps, the security boundary it must not cross, and the deferred `uor-addr`-crate/browser (WS11 P4) decision |

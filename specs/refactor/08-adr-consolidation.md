@@ -29,4 +29,4 @@ The cluster table below is the map used to do the merge — which legacy ADR num
 
 Note: the legacy numbers in this table refer to the pre-consolidation ADR numbering, not the current `001..030` set — they're historical references, not links into the current tree.
 
-See [07-progress-and-decisions.md](07-progress-and-decisions.md) for the commit-level record of when this landed, and [04-security.md](04-security.md) for how the resulting security model (claims, verified boot, secrets) is described in this document set.
+See the retired progress ledger for the commit-level record of when this landed, and [04-security.md](04-security.md) for how the resulting security model (claims, verified boot, secrets) is described in this document set.
