@@ -49,7 +49,7 @@ pub use api::{
 pub use connection::{
     HOST_CID, connect_host_vsock, connect_to, connect_to_port, connect_to_port_before,
     connect_to_port_once, connect_unix_before, open_peer_authenticated_session,
-    run_with_stream_deadline, send_request, send_request_stream, vsock_uds_path,
+    run_with_stream_deadline, send_connect, send_request, send_request_stream, vsock_uds_path,
 };
 pub use framing::{
     AuthenticatedSession, handshake_as_guest, handshake_as_host, read_frame, write_frame,
