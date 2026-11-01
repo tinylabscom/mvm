@@ -861,6 +861,15 @@ impl AnyBackend {
             Self::Libkrun(runner) => runner.start_with_images(config, images),
             Self::Qemu(runner) => runner.start_with_images(config, images),
             Self::Hvf(runner) => runner.start_with_images(config, images),
+            #[cfg(feature = "test-support")]
+            Self::Mock(backend) => {
+                // The hermetic writer has no real descriptors to inherit, but
+                // it still exercises the same ownership and admission path.
+                let images = images;
+                let id = backend.start(config)?;
+                drop(images);
+                Ok(id)
+            }
             _ => anyhow::bail!("backend does not support writable descriptor handoff"),
         }
     }
