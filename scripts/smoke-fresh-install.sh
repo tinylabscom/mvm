@@ -227,6 +227,8 @@ in_fresh_home() {
     LANG=C \
     TMPDIR="$ROOT/tmp" \
     PATH="$PATH_FOR_USER" \
+    ${XDG_RUNTIME_DIR:+XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR"} \
+    ${DBUS_SESSION_BUS_ADDRESS:+DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS"} \
     "$@"
 }
 
@@ -257,6 +259,8 @@ bounded() {
     LANG=C \
     TMPDIR="$ROOT/tmp" \
     PATH="$PATH_FOR_USER" \
+    ${XDG_RUNTIME_DIR:+XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR"} \
+    ${DBUS_SESSION_BUS_ADDRESS:+DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS"} \
     sh -c 'err="$1"; shift; exec "$@" 2>>"$err"' sh "$bounded_stderr" "$@" \
     </dev/null >/dev/null 2>>"$bounded_stderr"
   bounded_status=$?
