@@ -1,4 +1,4 @@
-//! End-to-end test for the Phase 7d runtime record-mode pipeline:
+//! End-to-end test for the runtime record-mode pipeline:
 //! a `RuntimeRecording` JSON → `compile_recording` lowering →
 //! `compile` flake render. Pairs with the unit tests in
 //! `src/runtime.rs` — those test the lowering in isolation; this
