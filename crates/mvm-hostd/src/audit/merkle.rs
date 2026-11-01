@@ -97,15 +97,14 @@ fn read_leaves_from_genesis(
 ) -> Result<Vec<String>> {
     // Spans the whole segment set, oldest first, not just the active segment.
     //
-    // A root over the active segment alone would be a root that silently
-    // attests less than it used to the first time a host rotates — the same
-    // tree_size arithmetic, a quietly smaller log underneath it, and every
-    // previously issued inclusion proof pointing at leaf indices that no longer
-    // mean what they meant. Spanning the set keeps leaf indices globally
-    // ordered across rotations, which is the property those proofs rest on.
+    // A root over the active segment alone would silently attest less after
+    // the first rotation, and every previously issued inclusion proof would
+    // point at leaf indices that no longer mean what they meant. Spanning the
+    // set keeps leaf indices globally ordered across rotations, which is the
+    // property those proofs rest on.
     //
     // `read_verified_set` verifies each segment *and* the handoffs between
-    // them, from the same buffers it returns, so the fail-closed policy now
+    // them, from the same buffers it returns, so the fail-closed policy
     // covers "a segment was removed" as well as "a line was edited".
     match crate::supervisor::audit_set::read_verified_set(audit_dir, tenant, vk) {
         Ok(segments) => Ok(segments

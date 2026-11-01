@@ -120,11 +120,8 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 /// Production forwarder: a hardened client (TLS 1.3 floor, no redirects) makes
 /// the real request through the shared SSRF-filtering resolver.
 ///
-/// This used to resolve and SSRF-filter the host by hand and pin the safe
-/// addresses on the URL's real port, because the shared resolver hardcoded 443
-/// — reqwest's `Resolve` never saw the port, and an `http` forward would have
-/// gone to the HTTPS port. `mvm_http::Resolve` receives `(host, port)`, so the
-/// shared resolver handles it and the hand-rolled path is gone.
+/// The shared resolver receives `(host, port)`, so the host is SSRF-filtered
+/// and pinned on the URL's real port without a hand-rolled resolve step.
 pub struct HardenedForwarder {
     timeout_secs: u64,
     proxy: Option<mvm_http::ProxyConfig>,
