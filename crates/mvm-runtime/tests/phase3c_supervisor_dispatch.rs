@@ -56,7 +56,7 @@ fn supervisor_path() -> std::path::PathBuf {
 #[test]
 #[ignore]
 fn supervisor_takes_bridge_path_when_tenant_id_some() {
-    // Build a populated VmStartConfig and run it through Phase 3c's
+    // Build a populated VmStartConfig and run it through the
     // shared substrate helper.
     let substrate =
         mvm_vmm::host::audit_substrate::compute_audit_substrate("phase3c-smoke", Some("smoke"))

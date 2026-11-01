@@ -211,8 +211,8 @@ pub use mvm_vmm::host::network_endpoint_spawn::{EndpointHandshake, record_secret
 
 /// Spawn/reap the per-VM substitution-endpoint moat, its params, and the
 /// remote-resolver spawn config — re-exported at the crate root so fleet
-/// callers outside this crate (mvmd's tenant-secrets vault, Phase 1 egress
-/// broker / D8 spawn-wiring, reaching them via `mvmctl::backend`) can drive the
+/// callers outside this crate (mvmd's tenant-secrets vault and egress
+/// broker, reaching them via `mvmctl::backend`) can drive the
 /// same per-VM endpoint the libkrun/HVF/Firecracker backends use, instead of
 /// duplicating the subprocess spawn/handshake/PID-file logic. The
 /// `network_endpoint_spawn` module is also re-exported above; these root aliases

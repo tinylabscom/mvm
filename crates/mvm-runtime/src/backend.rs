@@ -388,7 +388,7 @@ impl AnyBackend {
     /// Refused selectors:
     /// - `"mock"` outside a `test-support` build (a real, documented selector
     ///   that would silently run the wrong backend).
-    /// - `"docker"` everywhere (the Docker dev-tier backend was removed).
+    /// - `"docker"` everywhere (there is no Docker backend).
     ///
     /// Call this before [`Self::from_hypervisor`] at any user-facing
     /// `--hypervisor` entry point.
@@ -1449,8 +1449,7 @@ mod tests {
     fn test_any_backend_capabilities() {
         // The default backend is the converged Firecracker runner: NIC-less,
         // vsock-only egress. It advertises the vsock control channel and no
-        // routable guest NIC, not the raw TAP the entangled Firecracker path
-        // used to carry.
+        // routable guest NIC, not a raw TAP.
         let backend = AnyBackend::default_backend();
         let caps = backend.capabilities();
         assert!(caps.vsock);

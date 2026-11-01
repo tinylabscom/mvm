@@ -318,7 +318,7 @@ pub struct KernelBootUntilParams<'a> {
     paused: &'static AtomicBool,
     channels: HostChannels,
     /// CPU share to enforce via the in-process vCPU quota scheduler.
-    /// `None` ⇒ no quota (the pre-Plan-327 path).
+    /// `None` ⇒ no quota.
     cpu_millicores: Option<u32>,
     /// Where to write the measured quota record on exit.
     /// `None` ⇒ no record is written.
