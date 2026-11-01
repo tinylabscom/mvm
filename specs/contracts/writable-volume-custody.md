@@ -10,13 +10,16 @@ binds them to the exact final disk slot and object identity. Hardlink aliases
 therefore contend even when they use different sidecar paths. Read-only and
 ephemeral disks do not acquire these resources.
 
-HVF inherits the backing and sidecar into its supervisor. The supervisor adopts
-them through the same complete startup-descriptor preflight as the verified
-kernel, consumes the backing as the virtio disk, and retains the sidecar until
-after the disk's final flush and destruction. Firecracker opens the launcher's
-original backing through procfs during synchronous configuration. QEMU and
-libkrun inherit the original backing and open it through `/dev/fd`. In every
-case the actual writer's open file description retains the backing lock through
+Materialization transfers the original locked backing and sidecar through launch
+preparation; the runtime never reacquires against its own guard. HVF inherits
+both into its supervisor. The supervisor adopts them through the same complete
+startup-descriptor preflight as the verified kernel, consumes the backing as the
+virtio disk, and retains the sidecar until after the disk's final flush and
+destruction. Firecracker inherits the original descriptions through its bounded
+sudo launch, keeps original disk paths for checkpoint compatibility, and checks
+the configured object identities before `InstanceStart`. QEMU and libkrun
+inherit the original backing and sidecar and open the backing through `/dev/fd`.
+In every case the actual writer retains the original lock descriptions through
 early-error recovery and uncertain stop; a caller dropping its duplicate is not
 a release event. Direct path-based user-writable boots are refused rather than
 silently bypassing custody. Trusted-builder protocols and read-only behavior are

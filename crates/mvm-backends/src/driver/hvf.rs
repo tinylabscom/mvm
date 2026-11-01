@@ -868,7 +868,7 @@ impl VmmDriver for HvfDriver {
         &self,
         spec: &VmmSpec,
         kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: &mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
     ) -> Result<Box<dyn RunningVm>> {
         disks.validate_spec(spec)?;
         boot_with_custody(
@@ -879,7 +879,7 @@ impl VmmDriver for HvfDriver {
             BootInputFiles {
                 kernel,
                 images: None,
-                writable: Some(disks),
+                writable: Some(&disks),
             },
         )
         .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
@@ -2407,7 +2407,6 @@ mod tests {
             runtime_launch_binding: None,
             observability_target: None,
             restored_device_anchors: None,
-            writable_disk_sources: std::collections::BTreeMap::new(),
         };
         mvm_vmm::host::runtime_meta::write("anchor-vm", &meta).unwrap();
 

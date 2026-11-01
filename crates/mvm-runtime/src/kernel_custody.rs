@@ -155,7 +155,7 @@ impl KernelBoundLaunch {
         &self,
         driver: &dyn mvm_vmm::driver::traits::VmmDriver,
         spec: &VmmSpec,
-        disks: &mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
     ) -> Result<Box<dyn RunningVm>> {
         self.before_boot(spec)?;
         disks.validate_spec(spec)?;
@@ -523,7 +523,7 @@ mod tests {
             .boot_with_prepared_disks(
                 &driver,
                 &spec,
-                &mvm_vmm::driver::prepared_disks::PreparedWritableDisks::empty(),
+                mvm_vmm::driver::prepared_disks::PreparedWritableDisks::empty(),
             )
             .err()
             .expect("changed kernel must refuse before driver dispatch");

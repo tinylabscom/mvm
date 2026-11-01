@@ -85,6 +85,9 @@ pub struct LaunchPreparation {
     /// Registered host-directory snapshot images whose guest-visible contents
     /// must pass the instruction gate before launch.
     pub instruction_images: Vec<PathBuf>,
+    /// Original materialization custody, separate from catalog attachment leases.
+    #[cfg(unix)]
+    pub writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
     lease: LaunchLease,
 }
 
@@ -93,6 +96,14 @@ impl LaunchPreparation {
     /// owner's stop path releases them later.
     pub fn commit(&mut self) {
         self.lease.commit();
+    }
+
+    /// Move original image custody out for the one actual backend start.
+    #[cfg(unix)]
+    pub fn take_writable_images(
+        &mut self,
+    ) -> mvm_vmm::driver::prepared_disks::WritableVolumeImages {
+        std::mem::take(&mut self.writable_images)
     }
 }
 
@@ -446,6 +457,8 @@ impl VolumeService for LocalVolumeService {
             return Ok(LaunchPreparation {
                 volumes: request.explicit.clone(),
                 instruction_images: Vec::new(),
+                #[cfg(unix)]
+                writable_images: Vec::new(),
                 lease,
             });
         }
@@ -559,6 +572,8 @@ impl VolumeService for LocalVolumeService {
             Ok(LaunchPreparation {
                 volumes,
                 instruction_images,
+                #[cfg(unix)]
+                writable_images: Vec::new(),
                 lease,
             })
         })();

@@ -193,7 +193,7 @@ pub trait VmmDriver: Send + Sync {
         &self,
         spec: &VmmSpec,
         kernel: Option<&crate::host::restore_image::VerifiedRestoreFile>,
-        disks: &crate::driver::prepared_disks::PreparedWritableDisks,
+        disks: crate::driver::prepared_disks::PreparedWritableDisks,
     ) -> Result<Box<dyn RunningVm>> {
         anyhow::ensure!(
             disks.is_empty(),

@@ -17,11 +17,12 @@ pub(super) struct BootAttempt<'a> {
     /// The caller named this VM. A named run has an identity a shared standby
     /// cannot take on, so it keeps its cold path instead of requiring a claim.
     pub(super) user_named: bool,
+    pub(super) writable_images: &'a mut mvm_vmm::driver::prepared_disks::WritableVolumeImages,
 }
 
 /// Claim a warm standby for this attempt, or learn why it boots cold.
 fn claim_warm_standby(
-    attempt: &BootAttempt<'_>,
+    attempt: &mut BootAttempt<'_>,
 ) -> Result<crate::commands::pool::WarmClaimOutcome> {
     crate::commands::pool::try_warm_claim(attempt.backend, attempt.start_config, attempt.user_named)
 }
@@ -49,7 +50,7 @@ pub(super) struct BootedVm {
 pub(super) fn boot_transient_vm(
     vm_name: String,
     use_snapshot: bool,
-    attempt: &BootAttempt<'_>,
+    attempt: &mut BootAttempt<'_>,
     mut warm_claim_marks: Option<&mut crate::commands::vm::phase_timing::WarmClaimMarks>,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<BootedVm> {
@@ -177,7 +178,10 @@ pub(super) fn boot_transient_vm(
             attempt.backend.name()
         ));
         sub.start(SubPhase::VmmCreate);
-        if let Err(e) = attempt.backend.start(attempt.start_config) {
+        if let Err(e) = attempt.backend.start_with_images(
+            attempt.start_config,
+            std::mem::take(attempt.writable_images),
+        ) {
             drop(phase);
             emit_guest_console_diagnostic(&vm_name);
             remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
@@ -702,14 +706,16 @@ mod tests {
         let backend = AnyBackend::from_hypervisor("firecracker");
         let start_config = claimable_config_without_a_pool();
         let resolved = resolved_image();
-        let attempt = BootAttempt {
+        let mut images = Vec::new();
+        let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
             resolved: &resolved,
             user_named: true,
+            writable_images: &mut images,
         };
         assert_eq!(
-            claim_warm_standby(&attempt).unwrap(),
+            claim_warm_standby(&mut attempt).unwrap(),
             crate::commands::pool::WarmClaimOutcome::Cold(
                 crate::commands::pool::ColdStartReason::Named
             )
@@ -738,14 +744,16 @@ mod tests {
             ..claimable_config_without_a_pool()
         };
         let resolved = resolved_image();
-        let attempt = BootAttempt {
+        let mut images = Vec::new();
+        let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
             resolved: &resolved,
             user_named: false,
+            writable_images: &mut images,
         };
         assert_eq!(
-            claim_warm_standby(&attempt).unwrap(),
+            claim_warm_standby(&mut attempt).unwrap(),
             crate::commands::pool::WarmClaimOutcome::Cold(
                 crate::commands::pool::ColdStartReason::NoStandbyReady
             )
@@ -757,14 +765,16 @@ mod tests {
         let backend = AnyBackend::from_hypervisor("firecracker");
         let start_config = claimable_config_without_a_pool();
         let resolved = resolved_image();
-        let attempt = BootAttempt {
+        let mut images = Vec::new();
+        let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
             resolved: &resolved,
             user_named: false,
+            writable_images: &mut images,
         };
         assert_eq!(
-            claim_warm_standby(&attempt).unwrap(),
+            claim_warm_standby(&mut attempt).unwrap(),
             crate::commands::pool::WarmClaimOutcome::Cold(
                 crate::commands::pool::ColdStartReason::StandbysDisabled
             )
@@ -854,14 +864,16 @@ mod tests {
             ..claimable_config_without_a_pool()
         };
         let resolved = snapshot_resolved_image();
-        let attempt = BootAttempt {
+        let mut images = Vec::new();
+        let mut attempt = BootAttempt {
             backend: &backend,
             start_config: &start_config,
             resolved: &resolved,
             user_named: false,
+            writable_images: &mut images,
         };
         let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::default();
-        let booted = boot_transient_vm("vm-snap".to_string(), true, &attempt, None, &mut sub)
+        let booted = boot_transient_vm("vm-snap".to_string(), true, &mut attempt, None, &mut sub)
             .expect("a failed restore must degrade to a cold boot, not fail the launch");
 
         assert_eq!(booted.name, "vm-snap");

@@ -503,6 +503,32 @@ fn prepare_persistent_boot(
     })
 }
 
+#[cfg(unix)]
+fn complete_writable_images(
+    config: &mvm_core::vm_backend::VmStartConfig,
+    images: &mut mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+) -> Result<()> {
+    for volume in &config.volumes {
+        if volume.read_only {
+            continue;
+        }
+        let source = std::path::Path::new(volume.block_source());
+        if images.iter().any(|(path, _)| path == source) {
+            continue;
+        }
+        let size_mib = mvm_core::util::parse_human_size(&volume.size)?;
+        let lock = mvm_build::builder_vm_runtime::ensure_persistent_volume_image(
+            source,
+            u64::from(size_mib) * 1024 * 1024,
+            false,
+        )?;
+        if let Some(image) = lock.into_image() {
+            images.push(image);
+        }
+    }
+    Ok(())
+}
+
 fn finish_legacy_persistent(
     backend: mvm_runtime::backend::AnyBackend,
     start_config: mvm_core::vm_backend::VmStartConfig,
@@ -513,6 +539,24 @@ fn finish_legacy_persistent(
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
     // VMM selection + workload-support check + start move behind the facade; the
     // admission gate (above) and the launched/failed emits stay here.
+    #[cfg(unix)]
+    let started = match (|| -> Result<_> {
+        let mut images = prepared_volumes.take_writable_images();
+        complete_writable_images(&start_config, &mut images)?;
+        Ok(crate::boot::start_prepared_with_images(
+            backend,
+            &start_config,
+            images,
+        )?)
+    })() {
+        Ok(started) => started,
+        Err(err) => {
+            let err = anyhow::anyhow!("{err}");
+            emit_failed(&admission, "backend-start", &err);
+            return Err(err);
+        }
+    };
+    #[cfg(not(unix))]
     let started = match crate::start_prepared(backend, &start_config) {
         Ok(started) => started,
         Err(err) => {

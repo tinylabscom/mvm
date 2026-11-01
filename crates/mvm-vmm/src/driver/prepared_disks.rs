@@ -4,7 +4,9 @@
 //! proof. Nothing here is serializable or recoverable from a pathname or VM name.
 
 use std::collections::BTreeSet;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, ensure};
 use mvm_core::util::writable_image::LockedWritableImage;
@@ -17,11 +19,37 @@ struct PreparedDisk {
     image: LockedWritableImage,
 }
 
+/// Original materialization resources before final slot binding.
+pub type WritableVolumeImages = Vec<(PathBuf, LockedWritableImage)>;
+
 /// Bounded original file owners, assigned to the final spec's writable slots.
 #[must_use = "retain prepared files through original-writer handoff"]
 #[derive(Debug)]
 pub struct PreparedWritableDisks {
     disks: Vec<PreparedDisk>,
+}
+
+/// Original descriptions compacted for a sudo-launched Firecracker.
+#[derive(Debug)]
+pub struct SudoWritableHandoff {
+    _files: Vec<std::fs::File>,
+    first: u32,
+    last: u32,
+    expected: std::collections::BTreeMap<u8, (u64, u64)>,
+}
+
+impl SudoWritableHandoff {
+    pub fn first(&self) -> u32 {
+        self.first
+    }
+
+    pub fn last(&self) -> u32 {
+        self.last
+    }
+
+    pub fn expected(&self) -> &std::collections::BTreeMap<u8, (u64, u64)> {
+        &self.expected
+    }
 }
 
 impl PreparedWritableDisks {
@@ -30,22 +58,58 @@ impl PreparedWritableDisks {
         Self { disks: Vec::new() }
     }
 
-    /// Open and lock every persistent writable disk in the final physical spec.
-    pub fn open(spec: &VmmSpec) -> Result<Self> {
-        let images = spec
+    /// Bind original materialization resources by their exact declared paths.
+    pub fn bind_sources(spec: &VmmSpec, mut images: WritableVolumeImages) -> Result<Self> {
+        let bound = spec
             .blocks
             .iter()
             .filter(|block| !block.read_only && !block.ephemeral)
             .map(|block| {
-                LockedWritableImage::open(
-                    &block.source,
-                    &mvm_core::util::writable_image::sidecar_lock_path(&block.source),
-                )
-                .map(|image| (block.slot, image))
-                .with_context(|| format!("preparing writable disk {}", block.source.display()))
+                let index = images
+                    .iter()
+                    .position(|(path, _)| path == &block.source)
+                    .with_context(|| {
+                        format!(
+                            "no original materialization resource for {}",
+                            block.source.display()
+                        )
+                    })?;
+                Ok((block.slot, images.remove(index).1))
             })
             .collect::<Result<Vec<_>>>()?;
-        Self::bind(spec, images)
+        Self::bind(spec, bound)
+    }
+
+    /// Duplicate original descriptions for the actual sudo-launched writer.
+    pub fn into_sudo_handoff(self) -> Result<SudoWritableHandoff> {
+        anyhow::ensure!(
+            !self.disks.is_empty(),
+            "sudo handoff requires persistent writable resources"
+        );
+        let mut files = Vec::new();
+        let mut expected = std::collections::BTreeMap::new();
+        let mut first = None;
+        let mut next = 1000;
+        for disk in self.disks {
+            let metadata = disk.image.backing().metadata()?;
+            expected.insert(disk.block.slot, (metadata.dev(), metadata.ino()));
+            for file in [disk.image.backing(), disk.image.sidecar()] {
+                // SAFETY: duplicates the live descriptor with CLOEXEC and returns a
+                // new owned File only after fcntl reports success.
+                let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, next) };
+                anyhow::ensure!(fd >= 0, "duplicating writable handoff descriptor");
+                first.get_or_insert(fd as u32);
+                next = fd as u32 + 1;
+                // SAFETY: `fd` is a fresh descriptor owned by this handoff.
+                files.push(unsafe { std::fs::File::from_raw_fd(fd) });
+            }
+        }
+        Ok(SudoWritableHandoff {
+            _files: files,
+            first: first.context("writable handoff has no descriptors")?,
+            last: next - 1,
+            expected,
+        })
     }
 
     /// Bind already-locked images to every persistent writable disk in `spec`.
@@ -127,35 +191,6 @@ impl PreparedWritableDisks {
         self.disks.iter().map(|disk| (disk.block.slot, &disk.image))
     }
 
-    /// Original diagnostic paths by final slot, never the transport projections.
-    pub fn original_sources(&self) -> std::collections::BTreeMap<u8, std::path::PathBuf> {
-        self.disks
-            .iter()
-            .map(|disk| (disk.block.slot, disk.block.source.clone()))
-            .collect()
-    }
-
-    /// Project writable backings through the launching process's procfs entries.
-    /// The caller retains `self` until the synchronous open/configuration returns.
-    pub fn project_for_proc_opener(&self, spec: &VmmSpec) -> Result<VmmSpec> {
-        self.validate_spec(spec)?;
-        let mut projected = spec.clone();
-        for disk in &self.disks {
-            let block = projected
-                .blocks
-                .iter_mut()
-                .find(|block| block.slot == disk.block.slot)
-                .context("projected writable slot missing")?;
-            block.source = format!(
-                "/proc/{}/fd/{}",
-                std::process::id(),
-                std::os::fd::AsRawFd::as_raw_fd(disk.image.backing())
-            )
-            .into();
-        }
-        Ok(projected)
-    }
-
     /// Project writable backings through descriptors inherited by the writer.
     pub fn project_for_inherited_writer(&self, spec: &VmmSpec) -> Result<VmmSpec> {
         self.validate_spec(spec)?;
@@ -175,35 +210,17 @@ impl PreparedWritableDisks {
         Ok(projected)
     }
 
-    /// Descriptor numbers the projected writer must inherit under the same names.
-    pub fn inherited_descriptors(spec: &VmmSpec) -> Result<Vec<std::os::fd::RawFd>> {
-        let mut descriptors = Vec::new();
-        for block in spec
-            .blocks
+    /// Original backing and sidecar descriptors for an actual writer.
+    pub fn inherited_descriptors(&self) -> Vec<std::os::fd::RawFd> {
+        self.disks
             .iter()
-            .filter(|block| !block.read_only && !block.ephemeral)
-        {
-            let text = block
-                .source
-                .to_str()
-                .context("inherited writable descriptor path is not UTF-8")?;
-            let Some(descriptor) = text.strip_prefix("/dev/fd/") else {
-                anyhow::ensure!(
-                    spec.trusted_builder,
-                    "persistent writable disk lacks inherited descriptor projection"
-                );
-                continue;
-            };
-            let fd = descriptor.parse::<std::os::fd::RawFd>()?;
-            anyhow::ensure!(fd > 2, "reserved writable descriptor");
-            descriptors.push(fd);
-        }
-        let unique = descriptors.iter().collect::<BTreeSet<_>>();
-        anyhow::ensure!(
-            unique.len() == descriptors.len(),
-            "duplicate inherited writable descriptors"
-        );
-        Ok(descriptors)
+            .flat_map(|disk| {
+                [
+                    std::os::fd::AsRawFd::as_raw_fd(disk.image.backing()),
+                    std::os::fd::AsRawFd::as_raw_fd(disk.image.sidecar()),
+                ]
+            })
+            .collect()
     }
 
     /// Refuse substitution of the physical recipe after resources were bound.
@@ -215,9 +232,6 @@ impl PreparedWritableDisks {
     ///
     /// Returns an error when the final writable slot set or recipe changed.
     pub fn validate_spec(&self, spec: &VmmSpec) -> Result<()> {
-        if self.is_empty() {
-            return Ok(());
-        }
         let mut slots = BTreeSet::new();
         ensure!(
             spec.blocks.len() <= usize::from(u8::MAX) + 1
@@ -397,7 +411,7 @@ mod tests {
             PreparedWritableDisks::bind(&spec(vec![block(&other, 1)]), vec![(1, image)]).is_err()
         );
         let image =
-            LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
+            LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock-2")))
                 .unwrap();
         let mut spec = spec(vec![block(&path, 1)]);
         let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
@@ -465,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_preserves_read_only_paths_and_exact_backing_descriptors() {
+    fn inherited_projection_preserves_read_only_paths_and_original_descriptors() {
         use std::os::fd::AsRawFd;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -475,6 +489,7 @@ mod tests {
             LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
                 .unwrap();
         let expected_fd = image.backing().as_raw_fd();
+        let expected_sidecar = image.sidecar().as_raw_fd();
         let mut readonly_block = block(&readonly, 2);
         readonly_block.read_only = true;
         let spec = spec(vec![block(&path, 1), readonly_block]);
@@ -487,15 +502,9 @@ mod tests {
         );
         assert_eq!(inherited.blocks[1].source, readonly);
         assert_eq!(
-            PreparedWritableDisks::inherited_descriptors(&inherited).unwrap(),
-            vec![expected_fd]
+            disks.inherited_descriptors(),
+            vec![expected_fd, expected_sidecar]
         );
-        let proc = disks.project_for_proc_opener(&spec).unwrap();
-        assert_eq!(
-            proc.blocks[0].source,
-            std::path::PathBuf::from(format!("/proc/{}/fd/{expected_fd}", std::process::id()))
-        );
-        assert_eq!(proc.blocks[1].source, readonly);
     }
 
     #[test]
@@ -504,7 +513,48 @@ mod tests {
         let mut readonly = block(&tmp.path().join("missing-read-only"), 0);
         readonly.read_only = true;
         let spec = spec(vec![readonly]);
-        assert!(PreparedWritableDisks::open(&spec).unwrap().is_empty());
+        assert!(
+            PreparedWritableDisks::bind_sources(&spec, Vec::new())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn sudo_handoff_duplicates_original_descriptors_into_one_cloexec_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("image");
+        let sidecar = tmp.path().join("image.lock");
+        let held = LockedWritableImage::acquire(writable(&path), writable(&sidecar)).unwrap();
+        let original_backing = held.backing().as_raw_fd();
+        let original_sidecar = held.sidecar().as_raw_fd();
+        let expected_backing = held.backing().metadata().unwrap().ino();
+        let expected_sidecar = held.sidecar().metadata().unwrap().ino();
+        let expected_metadata = held.backing().metadata().unwrap();
+        let disks =
+            PreparedWritableDisks::bind(&spec(vec![block(&path, 0)]), vec![(0, held)]).unwrap();
+
+        let handoff = disks.into_sudo_handoff().unwrap();
+        assert_eq!(handoff._files.len(), 2);
+        assert_eq!(handoff.first + 1, handoff.last);
+        assert_eq!(
+            handoff.expected[&0],
+            (expected_metadata.dev(), expected_metadata.ino())
+        );
+        for (index, file) in handoff._files.iter().enumerate() {
+            assert_ne!(
+                file.as_raw_fd(),
+                [original_backing, original_sidecar][index]
+            );
+            assert_eq!(
+                file.metadata().unwrap().ino(),
+                [expected_backing, expected_sidecar][index]
+            );
+            assert_ne!(
+                unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+                0
+            );
+        }
     }
 
     #[test]
@@ -516,7 +566,7 @@ mod tests {
         let disks = PreparedWritableDisks::empty();
 
         let error = driver
-            .boot_with_prepared_disks(&spec, Some(&kernel), &disks)
+            .boot_with_prepared_disks(&spec, Some(&kernel), disks)
             .err()
             .expect("recorded verified route");
         assert_eq!(error.to_string(), "verified dispatch witness");
@@ -524,7 +574,7 @@ mod tests {
         assert_eq!(driver.ordinary.load(Ordering::SeqCst), 0);
 
         let error = driver
-            .boot_with_prepared_disks(&spec, None, &disks)
+            .boot_with_prepared_disks(&spec, None, PreparedWritableDisks::empty())
             .err()
             .expect("recorded ordinary route");
         assert_eq!(error.to_string(), "ordinary dispatch witness");
@@ -536,26 +586,23 @@ mod tests {
     fn unsupported_nonempty_handoff_never_calls_either_boot_route() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("image");
-        let image =
-            LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
-                .unwrap();
         let spec = spec(vec![block(&path, 1)]);
-        let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
         let driver = DispatchRecorder::default();
         let kernel = kernel(tmp.path(), b"unsupported handoff fixture");
 
         for kernel in [None, Some(&kernel)] {
+            let image =
+                LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
+                    .unwrap();
+            let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
             let error = driver
-                .boot_with_prepared_disks(&spec, kernel, &disks)
+                .boot_with_prepared_disks(&spec, kernel, disks)
                 .err()
                 .expect("unsupported handoff");
             assert!(error.to_string().contains("prepared writable descriptor"));
         }
         assert_eq!(driver.ordinary.load(Ordering::SeqCst), 0);
         assert_eq!(driver.verified.load(Ordering::SeqCst), 0);
-        assert!(
-            writable(&path).try_lock().is_err(),
-            "refusal must not unlock caller-owned preparation"
-        );
+        let _reacquired = LockedWritableImage::open(&path, &tmp.path().join("lock")).unwrap();
     }
 }

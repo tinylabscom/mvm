@@ -347,6 +347,15 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// secret-free deny-all workload has no egress capability and therefore
     /// carries no endpoint process or guest egress channel.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
+        self.start_workload_with_images(inputs, Vec::new())
+    }
+
+    /// Start with original writable-image custody, consumed only at final binding.
+    pub fn start_workload_with_images(
+        &self,
+        inputs: &WorkloadLaunchInputs<'_>,
+        writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+    ) -> Result<Box<dyn RunningVm>> {
         self.require_caller_registration_shape(inputs.config)?;
         let lifecycle =
             crate::runtime_evidence::RuntimeLifecycleLease::acquire(&inputs.config.name)?;
@@ -380,7 +389,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             network_policy: inputs.network_policy,
             cmdline: bound_cmdline,
         };
-        let result = self.boot_bound_workload_guarded(inputs, Some(&kernel_binding));
+        let result =
+            self.boot_bound_workload_guarded(inputs, Some(&kernel_binding), writable_images);
         result.map_err(|error| {
             cold_hvf_channel::retain_boot_error(error, (lifecycle, kernel_binding))
         })
@@ -390,7 +400,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// callers must hold the lifecycle lease and pass the verifier's paths.
     #[cfg(test)]
     fn boot_bound_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
-        self.boot_bound_workload_guarded(inputs, None)
+        self.boot_bound_workload_guarded(inputs, None, Vec::new())
     }
 
     fn require_caller_registration_shape(&self, config: &VmStartConfig) -> Result<()> {
@@ -504,6 +514,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         &self,
         inputs: &WorkloadLaunchInputs<'_>,
         kernel: Option<&crate::kernel_custody::KernelBoundLaunch>,
+        writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
     ) -> Result<Box<dyn RunningVm>> {
         anyhow::ensure!(
             (inputs.config.canonical_kernel.is_none()
@@ -542,23 +553,19 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         }
         let streamer = Arc::clone(&self.console_streamer);
         #[cfg(unix)]
-        let disks = mvm_vmm::driver::prepared_disks::PreparedWritableDisks::open(&spec)?;
-        #[cfg(unix)]
-        mvm_vmm::host::runtime_meta::record_writable_disk_sources(
-            &inputs.config.name,
-            disks.original_sources(),
+        let disks = mvm_vmm::driver::prepared_disks::PreparedWritableDisks::bind_sources(
+            &spec,
+            writable_images,
         )?;
         let boot = console_boot::boot_while_starting_console(
             || {
                 #[cfg(unix)]
                 {
                     match kernel {
-                        Some(kernel) => {
-                            kernel.boot_with_prepared_disks(&self.driver, &spec, &disks)
-                        }
+                        Some(kernel) => kernel.boot_with_prepared_disks(&self.driver, &spec, disks),
                         None => {
                             disks.validate_spec(&spec)?;
-                            self.driver.boot_with_prepared_disks(&spec, None, &disks)
+                            self.driver.boot_with_prepared_disks(&spec, None, disks)
                         }
                     }
                 }

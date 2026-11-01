@@ -29,7 +29,7 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
 pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
     ensure_api_socket_fits(abs_socket)?;
     secure_socket_dir(abs_dir)?;
-    start_vm_firecracker_inner(abs_dir, abs_socket, "", None)
+    start_vm_firecracker_inner(abs_dir, abs_socket, "", None, None)
 }
 
 /// Start a Firecracker daemon inside a scope carrying its guest's memory and
@@ -47,12 +47,13 @@ pub fn start_vm_firecracker_bounded(
     machine_id: &str,
     bounds: &mvm_core::spawn_scope::SpawnBounds,
     guard: &mut super::FirecrackerGuard,
+    handoff: Option<&mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
 ) -> Result<()> {
     validate_required_scope(machine_id, bounds)?;
     ensure_api_socket_fits(abs_socket)?;
     secure_socket_dir(abs_dir)?;
     let prefix = spawn_scope_prefix(machine_id, std::path::Path::new(abs_dir), bounds)?;
-    start_vm_firecracker_inner(abs_dir, abs_socket, &prefix, Some(guard))
+    start_vm_firecracker_inner(abs_dir, abs_socket, &prefix, Some(guard), handoff)
 }
 
 /// Start Firecracker for a snapshot load, inside a scope prefix the caller has
@@ -73,7 +74,7 @@ pub(crate) fn start_vm_firecracker_scoped(
     );
     ensure_api_socket_fits(abs_socket)?;
     secure_socket_dir(abs_dir)?;
-    start_vm_firecracker_inner(abs_dir, abs_socket, scope, None)
+    start_vm_firecracker_inner(abs_dir, abs_socket, scope, None, None)
 }
 
 /// The required legacy `systemd-run` scope prefix, or a pre-launch refusal.
@@ -128,6 +129,7 @@ fn start_vm_firecracker_inner(
     abs_socket: &str,
     scope: &str,
     guard: Option<&mut super::FirecrackerGuard>,
+    handoff: Option<&mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
 ) -> Result<()> {
     ui::info("Starting Firecracker...");
     if let Some(guard) = guard {
@@ -138,7 +140,14 @@ fn start_vm_firecracker_inner(
     // A process started here serves the socket its own command line names, so
     // any record that this dir's VMM came from the idle pool is now stale.
     super::idle_pool::forget_claim_origin(std::path::Path::new(abs_dir));
-    run_in_vm_visible(&firecracker_launch_script(abs_dir, abs_socket, scope))?;
+    if let Some(handoff) = handoff {
+        run_with_writable_handoff(
+            firecracker_launch_script(abs_dir, abs_socket, scope),
+            handoff,
+        )?;
+    } else {
+        run_in_vm_visible(&firecracker_launch_script(abs_dir, abs_socket, scope))?;
+    }
     await_started_firecracker(abs_dir, abs_socket, scope)?;
     // Every launch, not only a cold boot: the snapshot-restore path starts its
     // own fresh VMM through this same function and then speaks to the socket
@@ -148,6 +157,64 @@ fn start_vm_firecracker_inner(
         .context("adopting the Firecracker API socket for the invoking user")?;
     ui::info("Firecracker started.");
     Ok(())
+}
+
+/// Preserve exactly the original writable descriptors through bash and sudo.
+#[cfg(target_os = "linux")]
+fn run_with_writable_handoff(
+    mut script: String,
+    handoff: &mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    if effective_user_id() != 0 {
+        let marker = "sudo setsid";
+        let replacement = format!("sudo -C {} setsid", handoff.last() + 1);
+        anyhow::ensure!(script.contains(marker), "sudo handoff launch shape changed");
+        script = script.replace(marker, &replacement);
+    }
+    let first = handoff.first();
+    let last = handoff.last();
+    let mut command = mvm_core::env_hygiene::helper_command("bash");
+    command
+        .args(["-c", &script])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    // SAFETY: only integer syscalls run between fork and exec. Unrelated
+    // descriptors close; exactly the original handoff range loses CLOEXEC.
+    unsafe {
+        command.pre_exec(move || {
+            for (low, high) in [(3, first - 1), (last + 1, u32::MAX)] {
+                if low > high {
+                    continue;
+                }
+                if libc::syscall(libc::SYS_close_range, low, high, 0u32) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            for fd in first..=last {
+                if libc::fcntl(fd as libc::c_int, libc::F_SETFD, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let status = command.status()?;
+    anyhow::ensure!(
+        status.success(),
+        "Firecracker descriptor handoff failed: {status}"
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_with_writable_handoff(
+    _script: String,
+    _handoff: &mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+) -> Result<()> {
+    anyhow::bail!("Firecracker descriptor custody requires the native Linux writer")
 }
 
 /// Start an idle Firecracker for the pool: the same launch line as a VM's,
@@ -1161,6 +1228,7 @@ mod tests {
                     "invalid-bounds",
                     &bounds,
                     &mut super::super::FirecrackerGuard::pending(),
+                    None,
                 )
                 .is_err()
             );
@@ -1198,6 +1266,7 @@ mod tests {
             "required-bounds",
             &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(512),
             &mut super::super::FirecrackerGuard::pending(),
+            None,
         )
         .expect_err("missing scope must refuse");
         assert!(format!("{error:#}").contains("scope"), "{error:#}");

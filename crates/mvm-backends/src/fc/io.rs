@@ -276,7 +276,7 @@ fn snapshot_memory_mib_from_bytes(bytes: u64) -> Result<u32> {
 impl SnapshotIO for FirecrackerIO {
     fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
         self.ensure_socket()?;
-        super::runtime_artifacts::query(&self.socket_path, None)
+        super::runtime_artifacts::query(&self.socket_path)
     }
 
     fn create_snapshot(&self, dir: &Path) -> Result<()> {

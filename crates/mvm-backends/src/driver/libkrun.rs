@@ -261,6 +261,133 @@ fn bounded_supervisor_command(
     )
 }
 
+impl LibkrunDriver {
+    #[tracing::instrument(
+        name = "libkrun.boot",
+        skip_all,
+        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
+    )]
+    fn boot_with_handoff(
+        &self,
+        spec: &VmmSpec,
+        disks: Option<&mvm_vmm::driver::prepared_disks::PreparedWritableDisks>,
+    ) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            spec.trusted_builder || !spec.has_persistent_writable(),
+            "persistent writable libkrun disks require prepared descriptor custody"
+        );
+        let state_dir = vm_state_dir(&spec.name);
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
+        let console_log = state_dir.join("console.log");
+        // Clear any prior run's captured exit code and usage record so `wait`
+        // and the exit report read only this launch's, and the console capture
+        // so a stale panic isn't mistaken for this boot's.
+        crate::run_sidecars::clear_prior_run(&state_dir);
+        let _ = mvm_vmm::host::console_capture::open_console_capture(&console_log);
+
+        let cfg = relay_libkrun_supervisor_config(spec, &state_dir)?;
+
+        let pid_file = vm_libkrun_pid(&spec.name);
+        // Remove any stale PID file so the poll below detects this launch's.
+        let _ = std::fs::remove_file(&pid_file);
+
+        let json = serde_json::to_string(&cfg)
+            .map_err(|e| anyhow!("serialize libkrun SupervisorConfig: {e}"))?;
+
+        let supervisor = crate::driver::libkrun_process::resolve_supervisor_path_verified()?;
+        let stdout = mvm_vmm::host::console_capture::open_console_capture(&console_log)
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::null());
+        let stderr = mvm_vmm::host::console_capture::supervisor_stderr(&state_dir);
+        let mut command = bounded_supervisor_command(&supervisor, spec, &state_dir);
+        mvm_vmm::host::restore_image::inherit_descriptors(
+            command.as_command_mut(),
+            disks.map_or_else(Vec::new, |disks| disks.inherited_descriptors()),
+        );
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()
+            .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
+            .write_all(json.as_bytes())
+            .map_err(|e| anyhow!("pipe libkrun SupervisorConfig to supervisor stdin: {e}"))?;
+
+        // Poll for the PID file (boot confirmed). If the supervisor exits first,
+        // surface that — its console capture carries the actionable detail.
+        let deadline = Instant::now() + crate::driver::libkrun_process::PID_FILE_TIMEOUT;
+        loop {
+            if pid_file.exists() {
+                break;
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| anyhow!("poll supervisor: {e}"))?
+            {
+                bail!(
+                    "libkrun supervisor exited before writing its PID file (status: {status}); see {}{}",
+                    console_log.display(),
+                    mvm_vmm::host::console_capture::supervisor_stderr_detail(&state_dir)
+                );
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                bail!(
+                    "libkrun supervisor did not confirm boot within {:?}; see {}{}",
+                    crate::driver::libkrun_process::PID_FILE_TIMEOUT,
+                    console_log.display(),
+                    mvm_vmm::host::console_capture::supervisor_stderr_detail(&state_dir)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // The PID file means the supervisor is up, but it binds the per-port
+        // vsock listener a beat later. Wait for the agent socket so a console
+        // attach / shell_exec that immediately follows doesn't race a
+        // not-yet-bound socket and report the VM "not running".
+        let agent_socket = vm_vsock_port_socket_at(&state_dir, GUEST_AGENT_PORT);
+        let sock_deadline = Instant::now() + crate::driver::libkrun_process::VSOCK_SOCKET_TIMEOUT;
+        while !agent_socket.exists() {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| anyhow!("poll supervisor: {e}"))?
+            {
+                bail!(
+                    "libkrun supervisor exited before binding vsock socket {} (status: {status}); see {}",
+                    agent_socket.display(),
+                    console_log.display()
+                );
+            }
+            if Instant::now() >= sock_deadline {
+                let _ = child.kill();
+                bail!(
+                    "libkrun supervisor did not bind vsock socket {} within {:?}; killed; see {}",
+                    agent_socket.display(),
+                    crate::driver::libkrun_process::VSOCK_SOCKET_TIMEOUT,
+                    console_log.display()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // Detach: dropping the `Child` does not kill it, so the supervisor
+        // outlives this call (reaped via its PID file by `kill`).
+        drop(child);
+
+        Ok(Box::new(LibkrunRunningVm {
+            id: VmId(spec.name.clone()),
+            state_dir,
+            pid_file,
+        }))
+    }
+}
+
 impl VmmDriver for LibkrunDriver {
     fn name(&self) -> &str {
         "libkrun"
@@ -374,129 +501,8 @@ impl VmmDriver for LibkrunDriver {
         libkrun_base_bootargs(has_disk)
     }
 
-    #[tracing::instrument(
-        name = "libkrun.boot",
-        skip_all,
-        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
-    )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
-        anyhow::ensure!(
-            spec.trusted_builder
-                || !spec.has_persistent_writable()
-                || spec.blocks.iter().all(|block| {
-                    block.read_only || block.ephemeral || block.source.starts_with("/dev/fd/")
-                }),
-            "persistent writable libkrun disks require prepared descriptor custody"
-        );
-        let state_dir = vm_state_dir(&spec.name);
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
-        let console_log = state_dir.join("console.log");
-        // Clear any prior run's captured exit code and usage record so `wait`
-        // and the exit report read only this launch's, and the console capture
-        // so a stale panic isn't mistaken for this boot's.
-        crate::run_sidecars::clear_prior_run(&state_dir);
-        let _ = mvm_vmm::host::console_capture::open_console_capture(&console_log);
-
-        let cfg = relay_libkrun_supervisor_config(spec, &state_dir)?;
-
-        let pid_file = vm_libkrun_pid(&spec.name);
-        // Remove any stale PID file so the poll below detects this launch's.
-        let _ = std::fs::remove_file(&pid_file);
-
-        let json = serde_json::to_string(&cfg)
-            .map_err(|e| anyhow!("serialize libkrun SupervisorConfig: {e}"))?;
-
-        let supervisor = crate::driver::libkrun_process::resolve_supervisor_path_verified()?;
-        let stdout = mvm_vmm::host::console_capture::open_console_capture(&console_log)
-            .map(Stdio::from)
-            .unwrap_or_else(|_| Stdio::null());
-        let stderr = mvm_vmm::host::console_capture::supervisor_stderr(&state_dir);
-        let mut command = bounded_supervisor_command(&supervisor, spec, &state_dir);
-        mvm_vmm::host::restore_image::inherit_descriptors(
-            command.as_command_mut(),
-            mvm_vmm::driver::prepared_disks::PreparedWritableDisks::inherited_descriptors(spec)?,
-        );
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(stdout)
-            .stderr(stderr)
-            .spawn()
-            .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
-            .write_all(json.as_bytes())
-            .map_err(|e| anyhow!("pipe libkrun SupervisorConfig to supervisor stdin: {e}"))?;
-
-        // Poll for the PID file (boot confirmed). If the supervisor exits first,
-        // surface that — its console capture carries the actionable detail.
-        let deadline = Instant::now() + crate::driver::libkrun_process::PID_FILE_TIMEOUT;
-        loop {
-            if pid_file.exists() {
-                break;
-            }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|e| anyhow!("poll supervisor: {e}"))?
-            {
-                bail!(
-                    "libkrun supervisor exited before writing its PID file (status: {status}); see {}{}",
-                    console_log.display(),
-                    mvm_vmm::host::console_capture::supervisor_stderr_detail(&state_dir)
-                );
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                bail!(
-                    "libkrun supervisor did not confirm boot within {:?}; see {}{}",
-                    crate::driver::libkrun_process::PID_FILE_TIMEOUT,
-                    console_log.display(),
-                    mvm_vmm::host::console_capture::supervisor_stderr_detail(&state_dir)
-                );
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        // The PID file means the supervisor is up, but it binds the per-port
-        // vsock listener a beat later. Wait for the agent socket so a console
-        // attach / shell_exec that immediately follows doesn't race a
-        // not-yet-bound socket and report the VM "not running".
-        let agent_socket = vm_vsock_port_socket_at(&state_dir, GUEST_AGENT_PORT);
-        let sock_deadline = Instant::now() + crate::driver::libkrun_process::VSOCK_SOCKET_TIMEOUT;
-        while !agent_socket.exists() {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|e| anyhow!("poll supervisor: {e}"))?
-            {
-                bail!(
-                    "libkrun supervisor exited before binding vsock socket {} (status: {status}); see {}",
-                    agent_socket.display(),
-                    console_log.display()
-                );
-            }
-            if Instant::now() >= sock_deadline {
-                let _ = child.kill();
-                bail!(
-                    "libkrun supervisor did not bind vsock socket {} within {:?}; killed; see {}",
-                    agent_socket.display(),
-                    crate::driver::libkrun_process::VSOCK_SOCKET_TIMEOUT,
-                    console_log.display()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        // Detach: dropping the `Child` does not kill it, so the supervisor
-        // outlives this call (reaped via its PID file by `kill`).
-        drop(child);
-
-        Ok(Box::new(LibkrunRunningVm {
-            id: VmId(spec.name.clone()),
-            state_dir,
-            pid_file,
-        }))
+        self.boot_with_handoff(spec, None)
     }
 
     #[cfg(unix)]
@@ -504,13 +510,14 @@ impl VmmDriver for LibkrunDriver {
         &self,
         spec: &VmmSpec,
         kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: &mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
     ) -> Result<Box<dyn RunningVm>> {
         anyhow::ensure!(
             kernel.is_none(),
             "libkrun does not support verified kernel descriptor handoff"
         );
-        self.boot(&disks.project_for_inherited_writer(spec)?)
+        disks.validate_spec(spec)?;
+        self.boot_with_handoff(&disks.project_for_inherited_writer(spec)?, Some(&disks))
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
@@ -727,7 +734,7 @@ mod tests {
             KernelImage::Bundled,
             vec![],
             vec![BlockDev {
-                source: "/volume".into(),
+                source: "/dev/fd/3".into(),
                 read_only: false,
                 ephemeral: false,
                 slot: 0,

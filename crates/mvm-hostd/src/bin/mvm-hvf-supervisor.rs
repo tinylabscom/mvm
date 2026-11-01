@@ -312,7 +312,26 @@ fn record_signed_marker(exe: &std::path::Path) {
 /// serializes concurrent launches (codesign --force rewrites the shared binary
 /// in place). Mirrors the libkrun supervisor's `ensure_self_signed`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn ensure_self_signed(diagnostics: &mut mvm_vmm::host::hvf_supervisor::StartupReporter) {
+fn set_writable_cloexec(
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    for disk in &cfg.writable_disk_fds {
+        for fd in [disk.backing, disk.sidecar] {
+            // SAFETY: preflight established these exact live descriptors. Only
+            // their close-on-exec flag changes; ownership stays with the caller.
+            let result = unsafe { libc::fcntl(fd, libc::F_SETFD, i32::from(enabled)) };
+            anyhow::ensure!(result >= 0, "updating writable descriptor inheritance");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn ensure_self_signed(
+    diagnostics: &mut mvm_vmm::host::hvf_supervisor::StartupReporter,
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+) {
     use mvm_vmm::host::hvf_supervisor::StartupStage;
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -383,6 +402,10 @@ fn ensure_self_signed(diagnostics: &mut mvm_vmm::host::hvf_supervisor::StartupRe
         .args(std::env::args_os().skip(1))
         .env("MVM_HVF_SIGNED", "1");
     diagnostics.configure_reexec(&mut command);
+    if let Err(error) = set_writable_cloexec(cfg, false) {
+        eprintln!("mvm-hvf-supervisor: retaining writable descriptors failed: {error}");
+        std::process::exit(1);
+    }
     let err = command.exec();
     eprintln!("mvm-hvf-supervisor: re-exec after signing failed: {err}");
     std::process::exit(1);
@@ -610,8 +633,10 @@ fn run() -> anyhow::Result<()> {
             }
             // SAFETY: unchanged legacy launcher diagnostics ownership contract.
             diagnostics = unsafe { StartupReporter::inherited() };
-            // Body unchanged: only legacy can sign/reexec with RAM-backed FD0.
-            ensure_self_signed(&mut diagnostics);
+            // Unrelated signing helpers must not inherit writable custody. The
+            // reexec itself retains it explicitly immediately before exec.
+            set_writable_cloexec(&cfg, true)?;
+            ensure_self_signed(&mut diagnostics, &cfg);
             mvm_hostd::supervisor::caller_registration::adopt_startup_files(&cfg)?
         }
     };

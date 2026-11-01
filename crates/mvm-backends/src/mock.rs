@@ -445,7 +445,7 @@ impl VmmDriver for MockDriver {
         &self,
         spec: &VmmSpec,
         kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: &mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
     ) -> Result<Box<dyn RunningVm>> {
         anyhow::ensure!(
             kernel.is_none(),

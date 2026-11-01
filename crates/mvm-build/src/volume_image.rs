@@ -16,6 +16,9 @@ use crate::builder_vm_runtime::{
 #[derive(Debug)]
 pub struct VolumeImageLock {
     path: PathBuf,
+    #[cfg(unix)]
+    _lock: Option<mvm_core::util::writable_image::LockedWritableImage>,
+    #[cfg(not(unix))]
     _lock: Option<std::fs::File>,
 }
 
@@ -23,6 +26,14 @@ impl VolumeImageLock {
     /// Path handed to the hypervisor as a virtio block-device backing file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Transfer the original materialization resources to the final writer.
+    #[cfg(unix)]
+    pub fn into_image(
+        self,
+    ) -> Option<(PathBuf, mvm_core::util::writable_image::LockedWritableImage)> {
+        self._lock.map(|image| (self.path, image))
     }
 }
 
@@ -60,10 +71,7 @@ pub(crate) fn ensure_persistent_volume_image_within(
     }
 
     prepare_private_parent(host_path)?;
-    let lock = Some(acquire_sidecar_lock_within(
-        &sidecar_lock_path(host_path),
-        wait,
-    )?);
+    let lock = acquire_sidecar_lock_within(&sidecar_lock_path(host_path), wait)?;
     create_or_admit_private_image(host_path)?;
 
     let needs_format = match std::fs::metadata(host_path) {
@@ -82,9 +90,31 @@ pub(crate) fn ensure_persistent_volume_image_within(
     }
     validate_ext4(host_path)?;
 
+    #[cfg(unix)]
+    let lock = {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let backing = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(host_path)
+            .map_err(io_error(host_path))?;
+        let image = mvm_core::util::writable_image::LockedWritableImage::acquire(backing, lock)
+            .map_err(io_error(host_path))?;
+        let selected = std::fs::symlink_metadata(host_path).map_err(io_error(host_path))?;
+        let held = image.backing().metadata().map_err(io_error(host_path))?;
+        if !selected.is_file() || (selected.dev(), selected.ino()) != (held.dev(), held.ino()) {
+            return Err(BuilderVmError::ExtractionFailed(format!(
+                "writable disk image {} changed during materialization",
+                host_path.display()
+            )));
+        }
+        image
+    };
+
     Ok(VolumeImageLock {
         path: host_path.to_path_buf(),
-        _lock: lock,
+        _lock: Some(lock),
     })
 }
 
@@ -395,6 +425,29 @@ mod tests {
         let message = rw(&link).unwrap_err().to_string();
         assert!(message.contains("must be a regular file"), "{message}");
         assert_eq!(std::fs::metadata(&target).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn materialized_guard_transfers_original_resources_without_reacquisition() {
+        use std::os::fd::AsRawFd;
+
+        let scratch = tempfile::tempdir().unwrap();
+        let image = scratch.path().join("data.img");
+        let held = rw(&image).unwrap();
+        let original_fd = held._lock.as_ref().unwrap().backing().as_raw_fd();
+        let (path, image) = held.into_image().unwrap();
+        assert_eq!(path, scratch.path().join("data.img"));
+        assert_eq!(image.backing().as_raw_fd(), original_fd);
+        assert!(
+            mvm_core::util::writable_image::LockedWritableImage::open(
+                &path,
+                &sidecar_lock_path(&path),
+            )
+            .is_err(),
+            "the original writer resource remains locked after transfer"
+        );
+        drop(image);
+        let _restarted = rw(&path).unwrap();
     }
 
     #[test]

@@ -213,6 +213,60 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
 /// disk-backed under the per-VM `vm_state_dir`, so a stateless CLI invocation
 /// reconstructs a handle by id.
 impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
+    WorkloadRunner<D, S, B>
+{
+    /// Start through this concrete runner with original writable-image custody.
+    pub fn start_with_images(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+    ) -> Result<VmId> {
+        let state_dir = vm_state_dir(&config.name);
+        std::fs::create_dir_all(&state_dir)
+            .with_context(|| format!("create state dir {}", state_dir.display()))?;
+
+        // A cold boot's rootfs *is* its image, so the gate reads the dir it
+        // already boots from.
+        ClaimGuards::new(&self.spawner)
+            .admit_overlay_contract(std::path::Path::new(&config.rootfs_path))?;
+        refuse_rootfs_needing_journal_replay(&config.rootfs_path)?;
+
+        let default_redaction = RedactionPolicy::default();
+        let decoded = decode_plan_secrets_from_state(&state_dir)?;
+        let (secrets, redaction, tenant): (&[SecretBinding], &RedactionPolicy, &str) =
+            match &decoded {
+                Some((s, r, t)) => (s.as_slice(), r, t.as_str()),
+                None => (
+                    &[],
+                    &default_redaction,
+                    config.tenant_id.as_deref().unwrap_or("local"),
+                ),
+            };
+
+        let cmdline = cmdline::runner_cmdline(config, &state_dir, |has_disk| {
+            self.driver.workload_base_bootargs(has_disk)
+        });
+        if let Some(problem) = cmdline::cmdline_overflow(&cmdline) {
+            anyhow::bail!("refusing to start VM {}: {problem}", config.name);
+        }
+        tracing::debug!(vm = %config.name, %cmdline, "assembled workload kernel cmdline");
+
+        let inputs = WorkloadLaunchInputs {
+            config,
+            tenant,
+            secrets,
+            redaction,
+            network_policy: &config.network_policy,
+            cmdline,
+        };
+        match self.start_workload_with_images(&inputs, images) {
+            Ok(_vm) => Ok(VmId(config.name.clone())),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
     VmBackend for WorkloadRunner<D, S, B>
 {
     fn name(&self) -> &str {
@@ -265,48 +319,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
-        let state_dir = vm_state_dir(&config.name);
-        std::fs::create_dir_all(&state_dir)
-            .with_context(|| format!("create state dir {}", state_dir.display()))?;
-
-        // A cold boot's rootfs *is* its image, so the gate reads the dir it
-        // already boots from.
-        ClaimGuards::new(&self.spawner)
-            .admit_overlay_contract(std::path::Path::new(&config.rootfs_path))?;
-        refuse_rootfs_needing_journal_replay(&config.rootfs_path)?;
-
-        let default_redaction = RedactionPolicy::default();
-        let decoded = decode_plan_secrets_from_state(&state_dir)?;
-        let (secrets, redaction, tenant): (&[SecretBinding], &RedactionPolicy, &str) =
-            match &decoded {
-                Some((s, r, t)) => (s.as_slice(), r, t.as_str()),
-                None => (
-                    &[],
-                    &default_redaction,
-                    config.tenant_id.as_deref().unwrap_or("local"),
-                ),
-            };
-
-        let cmdline = cmdline::runner_cmdline(config, &state_dir, |has_disk| {
-            self.driver.workload_base_bootargs(has_disk)
-        });
-        if let Some(problem) = cmdline::cmdline_overflow(&cmdline) {
-            anyhow::bail!("refusing to start VM {}: {problem}", config.name);
-        }
-        tracing::debug!(vm = %config.name, %cmdline, "assembled workload kernel cmdline");
-
-        let inputs = WorkloadLaunchInputs {
-            config,
-            tenant,
-            secrets,
-            redaction,
-            network_policy: &config.network_policy,
-            cmdline,
-        };
-        match self.start_workload(&inputs) {
-            Ok(_vm) => Ok(VmId(config.name.clone())),
-            Err(e) => Err(e),
-        }
+        self.start_with_images(config, Vec::new())
     }
 
     fn host_process_id(&self, id: &VmId) -> Result<Option<u32>> {
