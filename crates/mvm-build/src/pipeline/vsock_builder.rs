@@ -29,8 +29,7 @@ pub fn build_via_vsock(
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
     // Firecracker UDS CONNECT handshake.
-    writeln!(stream, "CONNECT {}", builder_agent_port())?;
-    stream.flush()?;
+    mvm_agentd::vsock::send_connect(&mut stream, builder_agent_port())?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -137,8 +136,7 @@ fn ping_once(vsock_uds: &str) -> Result<()> {
         .with_context(|| format!("failed to connect vsock UDS {}", vsock_uds))?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-    writeln!(stream, "CONNECT {}", builder_agent_port())?;
-    stream.flush()?;
+    mvm_agentd::vsock::send_connect(&mut stream, builder_agent_port())?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();

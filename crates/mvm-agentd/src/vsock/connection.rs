@@ -103,6 +103,33 @@ fn is_transient_connect_error(err: &std::io::Error) -> bool {
 }
 
 #[cfg(test)]
+mod send_connect_tests {
+    use super::send_connect;
+
+    #[derive(Default)]
+    struct CountingWriter {
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.push(buf.to_vec());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_connect_line_reaches_the_stream_in_one_write() {
+        let mut sink = CountingWriter::default();
+        send_connect(&mut sink, 5252).unwrap();
+        assert_eq!(sink.writes, vec![b"CONNECT 5252\n".to_vec()]);
+    }
+}
+
+#[cfg(test)]
 mod transient_connect_error_tests {
     use super::is_transient_connect_error;
     use std::io::{Error, ErrorKind};
@@ -205,6 +232,17 @@ fn parse_connect_ack(line: &str) -> Result<u32, ConnectAckError> {
         .map_err(|_| ConnectAckError::PortOverflow)
 }
 
+/// Send the Firecracker `CONNECT <port>\n` handshake line in one `write`.
+///
+/// `writeln!` on an unbuffered stream issues one `write` per format piece.
+/// Firecracker reads the line the moment the first bytes arrive and closes the
+/// connection when it finds the line incomplete, so a host descheduled between
+/// pieces sees `EPIPE` on the next one. A single `write_all` leaves no gap.
+pub fn send_connect(stream: &mut impl Write, port: u32) -> std::io::Result<()> {
+    stream.write_all(format!("CONNECT {port}\n").as_bytes())?;
+    stream.flush()
+}
+
 /// Make one connection attempt and perform the Firecracker CONNECT handshake.
 ///
 /// Callers that already own a bounded readiness loop use this entry point so
@@ -239,8 +277,7 @@ pub fn connect_to_port_once(uds_path: &str, port: u32, timeout_secs: u64) -> Res
     stream.set_write_timeout(Some(timeout))?;
 
     let mut stream = stream;
-    writeln!(stream, "CONNECT {}", port).with_context(|| "Failed to send CONNECT")?;
-    stream.flush()?;
+    send_connect(&mut stream, port).with_context(|| "Failed to send CONNECT")?;
 
     // Read response line: "OK <port>\n"
     let response_line = read_connect_response_line(&mut stream).map_err(|e| {
@@ -336,8 +373,7 @@ pub fn connect_to_port_before(uds_path: &str, port: u32, deadline: Instant) -> R
         let result: Result<UnixStream> = (|| {
             let mut stream = connect_unix_before(path, deadline)?;
             run_with_stream_deadline(&mut stream, deadline, |stream| {
-                writeln!(stream, "CONNECT {port}").context("Failed to send CONNECT")?;
-                stream.flush().context("flush CONNECT")?;
+                send_connect(stream, port).context("Failed to send CONNECT")?;
                 let response = read_connect_response_line(stream)
                     .context("Failed to read CONNECT response")?;
                 parse_connect_ack(&response).map_err(|reason| {
