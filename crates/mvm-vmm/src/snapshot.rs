@@ -17,9 +17,8 @@ use mvm_core::crypto::snapshot_hmac::{MEM_FILENAME, VMSTATE_FILENAME};
 /// Production wires `FirecrackerIO`; tests use `CannedIO` which
 /// just writes canned bytes into the snapshot files.
 ///
-/// `load_snapshot` used to load the bytes AND resume vCPUs in one call. It is
-/// split into [`load_snapshot_paused`](Self::load_snapshot_paused) and
-/// [`resume`](Self::resume) so the device-model guard
+/// Loading and resuming are separate steps ([`load_snapshot_paused`](Self::load_snapshot_paused)
+/// then [`resume`](Self::resume)) so the device-model guard
 /// (`assert_vsock_only_device_model`) can run against the restored VMM's
 /// config in the gap between the two — after the snapshot's devices exist to
 /// inspect, but before vCPUs execute a single instruction. A restored VMM

@@ -410,7 +410,7 @@ pub struct HvfSupervisorConfig {
     #[serde(default)]
     pub handoff_verify_key: Option<String>,
     /// CPU share to enforce via the in-process HVF quota scheduler.
-    /// `None` ⇒ no quota (the pre-Plan-327 path).
+    /// `None` ⇒ no quota.
     #[serde(default)]
     pub cpu_millicores: Option<u32>,
     /// Where the supervisor should write the measured quota record on exit.

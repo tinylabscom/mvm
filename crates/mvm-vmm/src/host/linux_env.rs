@@ -121,13 +121,9 @@ fn connect_dev_vsock(vm_id: &str, port: u32) -> std::io::Result<std::os::unix::n
     std::os::unix::net::UnixStream::connect(sock)
 }
 
-/// Auto-starting the dev daemon used to re-exec this binary as `<exe> dev
-/// up`. That command was removed along with the interactive dev-VM
-/// surface, so there is no subprocess left to spawn here. This macOS
-/// `run_in_vm` shell-ops path still needs a way to bring the Linux
-/// execution environment up on demand, but that now has to go through the
-/// headless builder VM instead of a dev-VM re-exec, and that wiring
-/// doesn't exist yet — so fail closed with an explicit message instead of
+/// There is no dev-VM subprocess to spawn. This macOS `run_in_vm` shell-ops
+/// path would have to bring the Linux execution environment up through the
+/// headless builder VM, and that wiring doesn't exist — so fail closed with an explicit message instead of
 /// attempting a spawn that can only fail.
 fn start_dev_daemon(vm_id: &str) -> Result<()> {
     anyhow::bail!(

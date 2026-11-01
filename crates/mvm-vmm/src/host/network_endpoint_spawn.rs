@@ -1031,7 +1031,7 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     let bin = resolve_network_endpoint_path()?;
 
     // Keep endpoint diagnostics inside the VM state directory. The file is
-    // truncated each run; stderr was previously /dev/null.
+    // truncated each run.
     let stderr_log = endpoint_stderr_log_path(state_dir);
     let log_file = open_endpoint_stderr_log(state_dir)?;
 

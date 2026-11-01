@@ -547,9 +547,9 @@ mod tests {
         // The hvf (HVF / WorkloadRunner) agent bridge binds
         // `<state_dir>/hvf-agent.sock`. With only that socket present the picker
         // must select the hvf transport — the regression for the
-        // non-interactive `machine run` reachability gap (the picker previously
-        // knew only libkrun/hvf-vsock/firecracker, so it fell through to the
-        // firecracker error and the agent-RPC path timed out after 30s).
+        // non-interactive `machine run` reachability gap (a picker that knew only
+        // libkrun/hvf-vsock/firecracker fell through to the firecracker error
+        // and the agent-RPC path timed out after 30s).
         let _lock = crate::test_support::ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

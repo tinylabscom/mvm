@@ -175,9 +175,7 @@ fn workload_cmdline_for_hostname(
         && !verity_is_enabled
     {
         // Nothing mvm-specific to say and no initramfs boot: let the driver
-        // fall back to its own default base cmdline. (This used to also require
-        // a rootfs-only runtime-source policy; with the overlay as the single
-        // source that conjunct was always true and said nothing.)
+        // fall back to its own default base cmdline.
         return None;
     }
     let mut cmdline = if verity_is_enabled {
