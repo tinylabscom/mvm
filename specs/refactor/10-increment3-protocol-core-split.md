@@ -22,7 +22,7 @@ mechanical and de-risked — it does not touch code.
 Increments 1–2 already landed (`mvm-contract` = audit verifier + Workload IR
 + entrypoint, wasm-clean). Increment 3 is the third and largest: it inverts a
 meaningful fraction of `mvm-core`'s foundation. Read
-[07-progress-and-decisions.md](07-progress-and-decisions.md) for why 1a-protocol
+the retired progress ledger for why 1a-protocol
 and 1b are one designed pass, and [02-architecture.md](02-architecture.md)
 §Crate map for the target dependency direction (`mvm-contract` sits *under*
 `mvm-core`).

@@ -1,6 +1,6 @@
 # Execution Plan — Workstreams & Sequencing
 
-The master task list: every workstream, Phase 0 through Phase 4, with its acceptance gate, plus the phase sequencing. Checkbox state here mirrors `specs/SPRINT.md` as of this writing — SPRINT.md is where checkboxes get ticked as work lands; this doc's job is to hold the complete, organized list. For a narrative account of what's actually landed (including facts not captured by checkboxes — commit shas, deviations), see [07-progress-and-decisions.md](07-progress-and-decisions.md).
+The master task list: every workstream, Phase 0 through Phase 4, with its acceptance gate, plus the phase sequencing. Checkbox state here mirrors `specs/SPRINT.md` as of this writing — SPRINT.md is where checkboxes get ticked as work lands; this doc's job is to hold the complete, organized list.
 
 Checkbox legend: `- [ ]` todo, `- [x]` done. Execution is subagent-driven (fresh task + two-stage review per WS); `cargo nextest run --workspace` + `cargo clippy --workspace -- -D warnings` + `cargo fmt --all --check` green before any WS is marked done.
 
@@ -13,7 +13,7 @@ Checkbox legend: `- [ ]` todo, `- [x]` done. Execution is subagent-driven (fresh
 - [ ] Merge the 13 clusters (see [08-adr-consolidation.md](08-adr-consolidation.md)) into ~15 canonical ADRs; **renumber to a clean `0001..NN` sequence** (updating every cross-reference, the claim witnesses, and CLAUDE.md/AGENTS.md); delete merged files (no decision lost); fix the dup 008/010 titles + the 012 mismatch. Keep ADR-002's content as the security SoT; no mega-ADRs.
 - Gate: ADR set ~15 files, cleanly numbered; `check-claim-catalog` + `check-adr-coverage` green.
 
-Note: by the time of writing, this WS has run further than "~15" — the ADR set landed at 30 contiguous ADRs (001–030), not ~15; see [07-progress-and-decisions.md](07-progress-and-decisions.md) and [08-adr-consolidation.md](08-adr-consolidation.md) for the as-landed count and mapping.
+Note: by the time of writing, this WS has run further than "~15" — the ADR set landed at 30 contiguous ADRs (001–030), not ~15; see the retired progress ledger and [08-adr-consolidation.md](08-adr-consolidation.md) for the as-landed count and mapping.
 
 **WS0.3 — top-level directory compression** (target layout in [02-architecture.md](02-architecture.md) §Top-level layout)
 
@@ -64,7 +64,7 @@ Note: by the time of writing, this WS has run further than "~15" — the ADR set
 - [x] `mvm-storage`→`mvm-runtime` `crate::storage::volume` (nested under the pre-existing dm-thin `crate::storage` to dodge a `backend.rs`/`mod.rs` collision; its temporary `storage-s3` feature was later removed because production providers are fleet-owned)
 - [x] Full `nextest --workspace` + `clippy` + nightly `fmt --all` + xtask gates (the real 1a gate, beyond per-move `cargo check`). _(GREEN at `8232beb5d`: 7508/7508 nextest + doctests + workspace clippy `-D warnings` + nightly fmt + spec-refs/backend-dispatch/claim-catalog/core-runtime-free xtask gates. Included unbreaking nextest listing — the cucumber conformance [[test]] target now sits behind an opt-in `bdd` feature.)_
 
-Full narrative on this progress, including why `mvm-contract` needs to be a designed pass rather than a mechanical move: [07-progress-and-decisions.md](07-progress-and-decisions.md).
+Full narrative on this progress, including why `mvm-contract` needs to be a designed pass rather than a mechanical move: the retired progress ledger.
 
 **WS4 — single `~/.mvm`** (can land alongside 1b)
 
@@ -165,7 +165,7 @@ limited to tracked follow-ups in Plan 258 and the F5 design note.
 - [ ] Sweep stale `specs/{claims,compliance,threat-models,references,contracts,runbooks}` path references out of `SECURITY.md`, `README.md`, `ops/`, other ADRs, and `public/src/content/docs/**` (flagged by WS0.2a — they now live in ADR-002/050/067/090).
 - Gate: docs match the shipped CLI + architecture; no dangling `specs/` paths; `#1637` (one-command microVM) becomes accurate.
 
-**WS13 — issue/PR close-out** (all but #1637 — see [09-closeout.md](09-closeout.md))
+**WS13 — issue/PR close-out** (all but #1637 — see the retired close-out ledger)
 
 - [ ] Fold each still-relevant intent into its WS; close the 8 issues + 4 PRs with a pointer to the superseding WS. Keep **#1637** open.
 - Gate: only #1637 remains open.
@@ -196,4 +196,4 @@ Phase 4 (docs, close-out, wasm-backend seam, mvmd)  ─   last
 
 WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS-NET depends on `mvm-net` (1d). WS2 depends on the guest/host crate merges (1e/1h). WS10's de-tokio depends on WS2's single-binary shape. **WS11 is a core goal, not a Phase-4 stretch: its `no_std` core lands _with_ `mvm-contract` (1a/1b) and is CI-gated from then on; only the `WasmBackend` seam itself is sequenced late (once the protocol crate is wasm-clean).**
 
-Current position in this sequence: Phase 0 complete, Phase 1a (the `WS1 execution progress` list above) 6 of 7 done — see [07-progress-and-decisions.md](07-progress-and-decisions.md) for the full status and the reasoning behind what's still open.
+Current position in this sequence: Phase 0 complete, Phase 1a (the `WS1 execution progress` list above) 6 of 7 done — see the retired progress ledger for the full status and the reasoning behind what's still open.

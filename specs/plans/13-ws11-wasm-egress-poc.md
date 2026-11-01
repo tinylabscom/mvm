@@ -249,7 +249,7 @@ Expected: all clean. `check-claim-catalog` must still be green — the witness a
 
 - [ ] **Step 2: Update the ledger.** In `specs/SPRINT.md`, tick the WS11 `P3b.2` box with the commit shas + "witness passes (allow+deny+substitution+audit); NetworkingNotSupported gate relaxed to governed egress"; in `specs/refactor/11-wasm-backend.md`, mark the P3 POC acceptance gate met. Commit `docs(sprint): WS11 P3b.2 done — governed-egress data-governance witness passes`.
 
-- [ ] **Step 3: Consider the "same witness across all workload backends" promise.** The specs (04/06) say the data-governance witness is a CI witness across *all* workload backends. This plan lands the *wasm* leg. If the microVM backends don't yet have an equivalent chain-verifying witness, note it in `07-progress-and-decisions.md` as a follow-up (do not scope-creep it here).
+- [ ] **Step 3: Consider the "same witness across all workload backends" promise.** The specs (04/06) say the data-governance witness is a CI witness across *all* workload backends. This plan lands the *wasm* leg. If the microVM backends don't yet have an equivalent chain-verifying witness, note it in the retired progress ledger as a follow-up (do not scope-creep it here).
 
 ---
 
