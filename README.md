@@ -237,7 +237,7 @@ disappears. The shipped claims:
 4. **A production-safe run cannot call DevOnly guest-agent verbs.**
 5. **The vsock framing, FlowMux decoder and supervisor config are fuzzed.**
 6. **The prebuilt dev image is hash-verified** against a signed image-set root.
-7. **Cargo dependencies are audited on every PR**, with a reproducibility double build.
+7. **Cargo dependencies are audited nightly and on release tags**, with a reproducibility double build.
 8. **Every workload runs from a signed, audited execution plan.**
 9. **Every published bundle is content-addressed** and re-verified at fetch and admission.
 10. **No untrusted workload reaches the network** unless policy admits it.
