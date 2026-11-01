@@ -199,7 +199,8 @@ mvmctl run --mode plan ./script.py
 
 `--mode plan` signs and admits the script's plan without booting anything.
 `exec`, `commands.start` and the console are available only under the dev
-profile, and fail with `SandboxDevOnly` otherwise.
+profile, which is the default for `mvmctl run`; under any other profile
+(for example `--profile standard`) or `--prod` they fail with `SandboxDevOnly`.
 
 From Rust, use the `mvm-client` crate:
 
