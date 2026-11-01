@@ -45,7 +45,7 @@ use mvm_core::manifest::ManifestMachineWorkflow;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::{config, naming};
 
-use mvm_runtime::machine::persist::{
+use mvm_client::machine_spec::{
     MACHINE_SPEC_SCHEMA_VERSION, MachineSpec, ReconfigurePatch, SpecReconcile, apply_patch,
     list_machine_specs, load_machine_spec, machine_config_diff, overwrite_machine_spec,
     reconcile_machine_spec, save_machine_spec, validate_machine_memory,
@@ -1444,7 +1444,7 @@ fn machine_exec_command(argv: &[String]) -> String {
 
 fn build_machine_volume_cfg(
     volume_specs: &[String],
-) -> Result<Vec<mvm_runtime::image::RuntimeVolume>> {
+) -> Result<Vec<mvm_client::image::RuntimeVolume>> {
     let mut volume_cfg = Vec::with_capacity(volume_specs.len());
     for volume in volume_specs {
         let spec = super::shared::parse_volume_spec(volume)?;
@@ -1462,7 +1462,7 @@ fn build_machine_volume_cfg(
             .with_context(|| format!("volume {volume:?}"))?;
         super::shared::materialize_disk_volume(&vmv)
             .with_context(|| format!("volume {volume:?}"))?;
-        volume_cfg.push(mvm_runtime::image::RuntimeVolume::from(&vmv));
+        volume_cfg.push(mvm_client::image::RuntimeVolume::from(&vmv));
     }
     Ok(volume_cfg)
 }

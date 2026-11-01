@@ -81,7 +81,7 @@ pub(crate) fn ensure_pair_built(
     // Answered from the local image cache when the pair is unchanged, which is
     // quick enough never to be announced; a changed pair builds in a builder
     // VM, whose own line nests under this one.
-    let phase = mvm_runtime::ui::activity::start(format!(
+    let phase = mvm_client::ui::activity::start(format!(
         "Preparing {target_label} from the local image checkout"
     ));
     let built = build_target_for_pair(

@@ -319,7 +319,7 @@ pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
 }
 
 fn download_workload_kernel(arch: &str, dest: &std::path::Path) -> Result<()> {
-    let phase = mvm_runtime::ui::activity::start(format!(
+    let phase = mvm_client::ui::activity::start(format!(
         "Downloading the published workload kernel ({arch})"
     ));
     crate::update::download_kernel(arch, "workload", dest)?;

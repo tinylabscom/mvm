@@ -47,6 +47,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
+use mvm_client::audit::chain::emitter::AuditEmitter;
+use mvm_client::audit::chain::host_keypair::load_or_init;
+use mvm_client::checkpoint::{ImageChainAnchor, ImageStore};
 use mvm_core::checkpoint::{CheckpointDigest, ContentBlob};
 use mvm_core::crypto::image_verify::sha256_file_cached;
 use mvm_core::image_lineage::{
@@ -55,9 +58,6 @@ use mvm_core::image_lineage::{
 use mvm_core::manifest::{PersistedManifest, slot_revision_dir};
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::template::TemplateRevision;
-use mvm_hostd::audit::emitter::AuditEmitter;
-use mvm_hostd::audit::host_keypair::load_or_init;
-use mvm_runtime::image_lineage::{ImageChainAnchor, ImageStore};
 
 use crate::commands::vm::checkpoint::SignedChainAnchor;
 use crate::ui;
