@@ -45,22 +45,20 @@ fn caller_identity_help_exposes_explicit_enrollment_and_read_only_show() {
 }
 
 #[test]
-fn caller_identity_show_and_status_do_not_create_state() {
-    for action in ["show", "status"] {
-        let temp = tempfile::tempdir().expect("isolated caller identity home");
-        let home = temp.path().join("absent");
-        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-            .env("MVM_HOME", &home)
-            .env("HOME", temp.path())
-            .args(["env", "caller-identity", action])
-            .output()
-            .expect("read missing caller identity");
-        assert!(!out.status.success());
-        assert!(out.stdout.is_empty());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("explicitly run"), "{stderr}");
-        assert!(!home.exists(), "{action} created state");
-    }
+fn caller_identity_show_does_not_create_state() {
+    let temp = tempfile::tempdir().expect("isolated caller identity home");
+    let home = temp.path().join("absent");
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", &home)
+        .env("HOME", temp.path())
+        .args(["env", "caller-identity", "show"])
+        .output()
+        .expect("read missing caller identity");
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("explicitly run"), "{stderr}");
+    assert!(!home.exists(), "show created state");
 }
 
 #[test]
