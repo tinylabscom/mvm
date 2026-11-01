@@ -122,6 +122,43 @@ remain unchanged. The original plan stays as explicitly historical design.
 Any future privileged service needs its own demonstrated consumer and reviewed
 authority/deployment contract, not restoration of this unused prototype.
 
+## Duplicate hashing and hex helpers (#4839 section 2)
+
+`mvm_contract::hash::sha256_hex` is the shared sha256-to-lowercase-hex helper, and
+the `hex` crate is the shared byte encoder. The premise that `mvm-fs`, `mvm-client`,
+`mvm-runtime` and `mvm-vmm` do not depend on `mvm-contract` does not hold:
+`cargo metadata --offline --no-deps` shows a direct `mvm-contract` edge from
+`mvm-build`, `mvm-cli`, `mvm-client`, `mvm-compiler`, `mvm-core`, `mvm-fs`,
+`mvm-hostd`, `mvm-runtime` and `mvm-vmm`, and a dev-dependency edge from
+`mvm-conformance` and the root `mvmctl` package. The workspace packages with none
+are `mvm-builder-guest`, `mvm-bundler`, `mvm-host-services`, `mvm-http`,
+`mvm-macho-sign`, `mvm-setpriv`, `runmvm-client`, `libkrun-sys` and `xtask`.
+
+Deleted onto `mvm_contract::hash::sha256_hex` (test-module copies, each crate
+already depends on it): `mvm-fs` `sdk_sidecar`, `mvm-client` `launch::runtime_source`
+(two), `mvm-runtime` `sdk_sidecar`, `mvm-vmm` `host::restore_image`, `mvm-build` `sdk_sidecar`, `initramfs` (which
+already imported it in production code) and `runtime_overlay`, `mvm-cli`
+`published_fetch_tests`, `mvm-conformance` `steps/{sdk_sidecar,initramfs}` and the root
+`tests/install_sh.rs`.
+
+Deleted onto `hex::encode` (the crate already depends on `hex`): `mvm-core`
+`snapshot_hmac` (with its `hex_nibble`), `snapshot_sign`, `signed_config`,
+`attestation::header` and `trace_context`; `mvm-hostd` `binary_integrity`; `mvm-cli`
+`commands::pool`. All emit lowercase hex, which is what `hex::encode` emits.
+
+Kept, with the reason:
+
+| Copy | Why it stays |
+|---|---|
+| `mvm-builder-guest` `builder_boot::payload::sha256_hex` | Cannot without adding a dependency edge: the crate has no `mvm-contract` edge, and `mvm-core` does not re-export the helper. The edge would add a crate to the musl guest closure's direct dependencies for a three-line function. |
+| `mvm-fs` `ext4::verity::to_hex` | Takes a fixed-size verity digest and is public API of the ext4 writer; `mvm-build`, `mvm-client` tests and `mvm-conformance` call it. Not a sha256 helper. |
+| `mvm-runtime` `vm::template::lifecycle::artifacts::sha256_hex(path)` and `mvm-vmm` `restore_image::sha256_of` | Hash a file by streaming it, not a byte slice, and return typed errors. A different contract. |
+| `mvm-cli/build.rs` `sha256_hex(path)` | A build script; it cannot use the crate's own dependencies. |
+| `mvm-compiler` `pack::python::sha256_hex(&str)` and `mvm-cli` `image::cache::sha256_hex(&str)` | Parse a `sha256:` reference, not hash bytes; the name is a coincidence. |
+| `mvm-hostd` `reversible_replacement::digest_hex` | An HMAC, not a plain digest. |
+| About 170 inline `hex::encode(Sha256::digest(..))` expressions in 80 files (`grep -rnE 'hex::encode\((sha2::)?Sha256::digest' crates src tests xtask`) | Not a helper but the idiom itself, one expression each, with streaming and domain-prefixed variants mixed in. Folding them onto `sha256_hex` is a mechanical sweep with no closure effect and is not done here. |
+| `mvm-build/examples/mvm-app-deps-fixture-tool.rs` | An example binary with its own minimal dependency set. |
+
 ## Dependency usage map (#4839 section 3)
 
 Measured at `8201aee9` on `aarch64-apple-darwin`, `--offline --locked`, unique

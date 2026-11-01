@@ -73,11 +73,7 @@ fn host_uses_libkrun_tier() -> bool {
             .is_some_and(|major| major < 26)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let d: [u8; 32] = Sha256::digest(bytes).into();
-    d.iter().map(|b| format!("{:02x}", b)).collect()
-}
+use mvm_contract::hash::sha256_hex;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

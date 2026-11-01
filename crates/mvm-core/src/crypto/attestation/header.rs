@@ -90,8 +90,8 @@ impl AttestationBody {
         Self {
             schema_version: SCHEMA_VERSION,
             boot_measurement: boot_measurement.into(),
-            identity_pubkey_hex: hex_lower(&identity.to_bytes()),
-            nonce_hex: hex_lower(&nonce),
+            identity_pubkey_hex: hex::encode(identity.to_bytes()),
+            nonce_hex: hex::encode(nonce),
             hw_measurement,
         }
     }
@@ -170,7 +170,7 @@ pub fn verify_report(
     // controls the body's `identity_pubkey_hex` could mislead a
     // downstream tool into believing a different identity signed
     // the report.
-    if body.identity_pubkey_hex.to_ascii_lowercase() != hex_lower(&key.to_bytes()) {
+    if body.identity_pubkey_hex.to_ascii_lowercase() != hex::encode(key.to_bytes()) {
         return Err(AttestationError::SignatureInvalid(
             "identity_pubkey_hex in body does not match the trusted key for this signer_id"
                 .to_string(),
@@ -178,14 +178,6 @@ pub fn verify_report(
     }
 
     Ok(body)
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 #[cfg(test)]
@@ -355,7 +347,7 @@ mod tests {
         let key = fresh_key();
         let other = fresh_key();
         let mut body = fresh_body(&key.verifying_key());
-        body.identity_pubkey_hex = hex_lower(&other.verifying_key().to_bytes());
+        body.identity_pubkey_hex = hex::encode(other.verifying_key().to_bytes());
         let report = sign_report(&body, &key, "attest:host-a");
         let trusted = [("attest:host-a", &key.verifying_key())];
         let err = verify_report(&report, &trusted).expect_err("mismatch");

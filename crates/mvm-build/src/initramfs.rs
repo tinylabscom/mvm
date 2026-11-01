@@ -1522,11 +1522,6 @@ mod tests {
         )
     }
 
-    fn sha256_hex(bytes: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        hex::encode(Sha256::digest(bytes))
-    }
-
     /// The three sidecar values the nix build emits for a cpio payload: a real
     /// gzip stream, the SHA-256 of the *uncompressed* payload, and the length
     /// of the *compressed* file. Fixtures have to match that shape or they

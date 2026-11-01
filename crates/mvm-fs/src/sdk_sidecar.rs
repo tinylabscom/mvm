@@ -513,12 +513,7 @@ mod tests {
         crate::ext4::build_image(nodes, &Default::default()).expect("build sidecar ext4 fixture")
     }
 
-    fn sha256_hex(bytes: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(bytes);
-        hex::encode(h.finalize())
-    }
+    use mvm_contract::hash::sha256_hex;
 
     struct Fixture {
         _root: tempfile::TempDir,
