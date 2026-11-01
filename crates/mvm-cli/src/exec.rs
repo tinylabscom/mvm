@@ -607,9 +607,9 @@ fn run_inner(
     let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
     let t_start = timing.then(std::time::Instant::now);
 
-    // Hold writable disk-image locks for this invocation, including flush and
-    // the stop attempt. They still drop on an uncertain-stop return: retaining
-    // state files does not extend exclusive volume custody beyond this call.
+    // Serialize materialization for this invocation. The runtime transfers
+    // writer custody to the actual backend, so an uncertain-stop return does
+    // not rely on these caller-side guards remaining alive.
     let _disk_locks = req
         .disk_volumes
         .iter()

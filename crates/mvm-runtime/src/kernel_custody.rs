@@ -140,17 +140,26 @@ impl KernelBoundLaunch {
         self.kernel.as_ref()
     }
 
+    #[cfg(not(unix))]
     pub(crate) fn boot(
         &self,
         driver: &dyn mvm_vmm::driver::traits::VmmDriver,
         spec: &VmmSpec,
     ) -> Result<Box<dyn RunningVm>> {
         self.before_boot(spec)?;
-        #[cfg(unix)]
-        if let Some(kernel) = &self.kernel {
-            return driver.boot_verified_kernel(spec, kernel);
-        }
         driver.boot(spec)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn boot_with_prepared_disks(
+        &self,
+        driver: &dyn mvm_vmm::driver::traits::VmmDriver,
+        spec: &VmmSpec,
+        disks: &mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+    ) -> Result<Box<dyn RunningVm>> {
+        self.before_boot(spec)?;
+        disks.validate_spec(spec)?;
+        driver.boot_with_prepared_disks(spec, self.kernel.as_ref(), disks)
     }
 
     /// Validate the physical recipe passed to the driver, not a reconstructed
@@ -509,6 +518,17 @@ mod tests {
         assert_eq!(bytes, original);
         spec.kernel = KernelImage::Path(home.path().join("other"));
         assert!(bound.before_boot(&spec).is_err());
+        let driver = crate::driver::MockDriver::default();
+        let error = bound
+            .boot_with_prepared_disks(
+                &driver,
+                &spec,
+                &mvm_vmm::driver::prepared_disks::PreparedWritableDisks::empty(),
+            )
+            .err()
+            .expect("changed kernel must refuse before driver dispatch");
+        assert!(error.to_string().contains("physical VMM recipe"));
+        assert!(driver.booted_specs().is_empty());
         assert!(
             !has_retained_kernel(&lease).unwrap(),
             "a continuity digest must not mint canonical bundle authority"

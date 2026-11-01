@@ -541,10 +541,34 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             kernel.before_boot(&spec)?;
         }
         let streamer = Arc::clone(&self.console_streamer);
+        #[cfg(unix)]
+        let disks = mvm_vmm::driver::prepared_disks::PreparedWritableDisks::open(&spec)?;
+        #[cfg(unix)]
+        mvm_vmm::host::runtime_meta::record_writable_disk_sources(
+            &inputs.config.name,
+            disks.original_sources(),
+        )?;
         let boot = console_boot::boot_while_starting_console(
-            || match kernel {
-                Some(kernel) => kernel.boot(&self.driver, &spec),
-                None => self.driver.boot(&spec),
+            || {
+                #[cfg(unix)]
+                {
+                    match kernel {
+                        Some(kernel) => {
+                            kernel.boot_with_prepared_disks(&self.driver, &spec, &disks)
+                        }
+                        None => {
+                            disks.validate_spec(&spec)?;
+                            self.driver.boot_with_prepared_disks(&spec, None, &disks)
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    match kernel {
+                        Some(kernel) => kernel.boot(&self.driver, &spec),
+                        None => self.driver.boot(&spec),
+                    }
+                }
             },
             || streamer.start(&capture),
             || trace.mark("driver_boot"),

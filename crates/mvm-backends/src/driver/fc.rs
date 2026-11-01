@@ -1129,6 +1129,18 @@ impl VmmDriver for FcDriver {
                 spec.shares.len()
             );
         }
+        anyhow::ensure!(
+            spec.trusted_builder
+                || !spec.has_persistent_writable()
+                || spec.blocks.iter().all(|block| {
+                    block.read_only
+                        || block.ephemeral
+                        || block
+                            .source
+                            .starts_with(format!("/proc/{}/fd/", std::process::id()))
+                }),
+            "persistent writable Firecracker disks require prepared descriptor custody"
+        );
         let bounds = mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
             .with_cpu_grant(spec.cpu_grant);
         crate::fc::validate_required_scope(&spec.name, &bounds)?;
@@ -1334,6 +1346,20 @@ impl VmmDriver for FcDriver {
         kernel: &mvm_vmm::host::restore_image::VerifiedRestoreFile,
     ) -> Result<Box<dyn RunningVm>> {
         kernel::boot_descriptor(self, spec, kernel)
+    }
+
+    #[cfg(unix)]
+    fn boot_with_prepared_disks(
+        &self,
+        spec: &VmmSpec,
+        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+        disks: &mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+    ) -> Result<Box<dyn RunningVm>> {
+        let projected = disks.project_for_proc_opener(spec)?;
+        match kernel {
+            Some(kernel) => self.boot_verified_kernel(&projected, kernel),
+            None => self.boot(&projected),
+        }
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
@@ -1568,6 +1594,22 @@ mod tests {
             builder_egress_endpoint: None,
             plan_binding: None,
         }
+    }
+
+    #[test]
+    fn direct_boot_refuses_unprepared_persistent_writable_disks() {
+        let spec = spec_with(
+            KernelImage::Bundled,
+            vec![],
+            vec![BlockDev {
+                source: "/volume".into(),
+                read_only: false,
+                ephemeral: false,
+                slot: 0,
+            }],
+        );
+        let error = FcDriver::new().boot(&spec).err().expect("custody refusal");
+        assert!(error.to_string().contains("prepared descriptor custody"));
     }
 
     fn ro_block(source: &str, slot: u8) -> BlockDev {

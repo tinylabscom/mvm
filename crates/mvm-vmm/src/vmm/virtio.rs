@@ -218,6 +218,31 @@ impl DiskImage {
         })
     }
 
+    /// Consume the exact locked writable backing without reopening its path.
+    pub fn writable_file(file: File) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl inspects the live, owned file descriptor.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        let metadata = file.metadata()?;
+        if flags < 0
+            || flags & libc::O_ACCMODE != libc::O_RDWR
+            || flags & libc::O_APPEND != 0
+            || !metadata.is_file()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "writable backing requires a non-append read-write regular file",
+            ));
+        }
+        Ok(Self::File {
+            file,
+            len: metadata.len(),
+            read_only: false,
+            sync: HOST_SYNC,
+            dirty: false,
+        })
+    }
+
     fn open_with_sync(path: &Path, read_only: bool, sync: DiskSync) -> std::io::Result<Self> {
         let file = OpenOptions::new().read(true).write(!read_only).open(path)?;
         let len = file.metadata()?.len();
@@ -819,6 +844,43 @@ impl SnapshotDeviceState for VirtioBlk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writable_file_retains_the_original_object_after_path_replacement() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image");
+        std::fs::write(&path, b"original").unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let original = file.metadata().unwrap().ino();
+        std::fs::rename(&path, dir.path().join("renamed")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        let disk = DiskImage::writable_file(file).unwrap();
+        let DiskImage::File { file, .. } = &disk else {
+            panic!("writable constructor returned memory backing")
+        };
+        assert_eq!(file.metadata().unwrap().ino(), original);
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), original);
+    }
+
+    #[test]
+    fn writable_file_refuses_read_only_and_append_descriptors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image");
+        std::fs::write(&path, b"original").unwrap();
+        assert!(DiskImage::writable_file(File::open(&path).unwrap()).is_err());
+        let append = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        assert!(DiskImage::writable_file(append).is_err());
+    }
 
     #[test]
     fn readonly_backing_consumes_original_file_not_replacement_path() {

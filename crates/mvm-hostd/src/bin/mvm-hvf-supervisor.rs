@@ -579,8 +579,11 @@ fn run() -> anyhow::Result<()> {
     let cfg: HvfSupervisorConfig =
         serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
     let mode = startup_mode(&cfg)?;
+    // The entire startup namespace is validated before diagnostics, replay,
+    // signing re-exec, or any descriptor ownership conversion.
+    mvm_hostd::supervisor::caller_registration::preflight_startup_files(&cfg)?;
     let mut diagnostics;
-    let files = match mode {
+    let mut files = match mode {
         StartupMode::Checked => {
             // Complete preflight precedes FIRST ownership conversion.
             let files = mvm_hostd::supervisor::caller_registration::adopt_startup_files(&cfg)?;
@@ -631,6 +634,9 @@ fn run() -> anyhow::Result<()> {
     diagnostics.stage(StartupStage::ConfigRead);
     diagnostics.stage(StartupStage::ConfigParse);
     let registered_startup = mvm_hostd::supervisor::caller_registration::prepare_startup(&cfg)?;
+    // Declared before the disk devices so reverse drop order flushes and destroys
+    // every disk before either lock description can be released.
+    let mut writable_files = files.take_writable();
     let (held_kernel, mut checked_images, registered_startup) = match mode {
         StartupMode::Checked => {
             let startup =
@@ -736,9 +742,19 @@ fn run() -> anyhow::Result<()> {
             let bytes = std::fs::read(&d.path)
                 .with_context(|| format!("read ephemeral disk {}", d.path.display()))?;
             mvm_runtime::backends::hvf::DiskImage::mem(bytes)
-        } else {
+        } else if cfg.writable_disk_fds.is_empty()
+            && (cfg.exclusive_image_lock.is_some() || cfg.trusted_builder_egress)
+        {
+            // The persistent builder's pre-existing supervisor-owned sidecar
+            // protocol is separate from user-volume descriptor custody.
             mvm_runtime::backends::hvf::DiskImage::open(&d.path, false)
                 .with_context(|| format!("open read-write disk {}", d.path.display()))?
+        } else {
+            let backing = writable_files.take_disk(index)?.context(
+                "persistent writable disk has no inherited original backing; refusing path fallback",
+            )?;
+            mvm_runtime::backends::hvf::DiskImage::writable_file(backing)
+                .with_context(|| format!("adopt read-write disk {}", d.path.display()))?
         };
         if let Some(artifact) =
             mvm_vmm::runtime_artifacts::RuntimeArtifact::disk(d.path.clone(), &img)?

@@ -5,6 +5,8 @@
 //! downstream crate without a dependency cycle with the workload lifecycle
 //! orchestration in `mvm-runtime`.
 
+#[cfg(unix)]
+pub mod prepared_disks;
 pub mod spec;
 pub mod traits;
 

@@ -380,6 +380,14 @@ impl VmmDriver for LibkrunDriver {
         fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
     )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            spec.trusted_builder
+                || !spec.has_persistent_writable()
+                || spec.blocks.iter().all(|block| {
+                    block.read_only || block.ephemeral || block.source.starts_with("/dev/fd/")
+                }),
+            "persistent writable libkrun disks require prepared descriptor custody"
+        );
         let state_dir = vm_state_dir(&spec.name);
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
@@ -404,7 +412,12 @@ impl VmmDriver for LibkrunDriver {
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
         let stderr = mvm_vmm::host::console_capture::supervisor_stderr(&state_dir);
-        let mut child = bounded_supervisor_command(&supervisor, spec, &state_dir)
+        let mut command = bounded_supervisor_command(&supervisor, spec, &state_dir);
+        mvm_vmm::host::restore_image::inherit_descriptors(
+            command.as_command_mut(),
+            mvm_vmm::driver::prepared_disks::PreparedWritableDisks::inherited_descriptors(spec)?,
+        );
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(stdout)
             .stderr(stderr)
@@ -484,6 +497,20 @@ impl VmmDriver for LibkrunDriver {
             state_dir,
             pid_file,
         }))
+    }
+
+    #[cfg(unix)]
+    fn boot_with_prepared_disks(
+        &self,
+        spec: &VmmSpec,
+        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+        disks: &mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+    ) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            kernel.is_none(),
+            "libkrun does not support verified kernel descriptor handoff"
+        );
+        self.boot(&disks.project_for_inherited_writer(spec)?)
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
@@ -692,6 +719,25 @@ mod tests {
             builder_egress_endpoint: None,
             plan_binding: None,
         }
+    }
+
+    #[test]
+    fn direct_boot_refuses_unprepared_persistent_writable_disks() {
+        let spec = spec_with(
+            KernelImage::Bundled,
+            vec![],
+            vec![BlockDev {
+                source: "/volume".into(),
+                read_only: false,
+                ephemeral: false,
+                slot: 0,
+            }],
+        );
+        let error = LibkrunDriver::new()
+            .boot(&spec)
+            .err()
+            .expect("custody refusal");
+        assert!(error.to_string().contains("prepared descriptor custody"));
     }
 
     fn running_vm_at(dir: &Path) -> LibkrunRunningVm {

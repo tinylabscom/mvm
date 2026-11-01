@@ -377,11 +377,9 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
 /// hypervisor can attach it. The image is created at its declared size if
 /// absent; an existing image is left intact so its data survives.
 ///
-/// The sidecar-lock guard from `ensure_persistent_volume_image` is
-/// released immediately: the hypervisor (HVF) takes its own exclusive lock
-/// on a RW disk at start, and a daemon-launched workload can't hold a host-side
-/// guard for the VM's lifetime anyway. The guard's value is serializing
-/// concurrent *creation*, which this still does.
+/// The returned guard covers materialization. Before boot, the shared runtime
+/// reacquires the backing and sidecar and transfers those exact descriptors to
+/// the writer; no caller-side lexical guard is treated as native custody.
 /// Materialize a disk volume's backing image and **return its sidecar lock**.
 ///
 /// The lock is the caller's to hold. Dropping it immediately — which this

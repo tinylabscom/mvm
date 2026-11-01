@@ -440,6 +440,23 @@ impl VmmDriver for MockDriver {
         Ok(())
     }
 
+    #[cfg(unix)]
+    fn boot_with_prepared_disks(
+        &self,
+        spec: &VmmSpec,
+        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+        disks: &mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+    ) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            kernel.is_none(),
+            "mock verified kernel handoff is unsupported"
+        );
+        disks.validate_spec(spec)?;
+        // The mock has no writer process or file I/O; preparation still validates
+        // the exact recipe and real lock contention before this no-op dispatch.
+        self.boot(spec)
+    }
+
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
         if self.refuse_attach {
             bail!("no such vm {}", id.0);

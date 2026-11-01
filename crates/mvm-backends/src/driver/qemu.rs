@@ -448,6 +448,14 @@ impl VmmDriver for QemuDriver {
                 spec.shares.len()
             );
         }
+        anyhow::ensure!(
+            spec.trusted_builder
+                || !spec.has_persistent_writable()
+                || spec.blocks.iter().all(|block| {
+                    block.read_only || block.ephemeral || block.source.starts_with("/dev/fd/")
+                }),
+            "persistent writable QEMU disks require prepared descriptor custody"
+        );
         // QEMU has no bundled kernel: a `Bundled` spec takes the same cached
         // builder-kernel fallback the raw path uses for a kernel-less
         // workload rootfs.
@@ -487,7 +495,12 @@ impl VmmDriver for QemuDriver {
 
         let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file, self.machine_type);
         tracing::debug!(qemu_bin = %qemu_bin, argv = ?argv, "launching qemu-system");
-        let status = bounded_qemu_command(&qemu_bin, &argv, spec, &state_dir)
+        let mut command = bounded_qemu_command(&qemu_bin, &argv, spec, &state_dir);
+        mvm_vmm::host::restore_image::inherit_descriptors(
+            command.as_command_mut(),
+            mvm_vmm::driver::prepared_disks::PreparedWritableDisks::inherited_descriptors(spec)?,
+        );
+        let status = command
             .status()
             .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e:#}"))?;
         if !status.success() {
@@ -535,6 +548,20 @@ impl VmmDriver for QemuDriver {
             state_dir,
             pid_file,
         }))
+    }
+
+    #[cfg(unix)]
+    fn boot_with_prepared_disks(
+        &self,
+        spec: &VmmSpec,
+        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+        disks: &mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+    ) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            kernel.is_none(),
+            "QEMU does not support verified kernel descriptor handoff"
+        );
+        self.boot(&disks.project_for_inherited_writer(spec)?)
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
@@ -762,6 +789,20 @@ mod tests {
             ephemeral: false,
             slot,
         }
+    }
+
+    #[test]
+    fn direct_boot_refuses_unprepared_persistent_writable_disks() {
+        let spec = spec_with(
+            KernelImage::Bundled,
+            vec![],
+            vec![block("/volume", false, 0)],
+        );
+        let error = QemuDriver::new()
+            .boot(&spec)
+            .err()
+            .expect("custody refusal");
+        assert!(error.to_string().contains("prepared descriptor custody"));
     }
 
     fn argvalue<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {

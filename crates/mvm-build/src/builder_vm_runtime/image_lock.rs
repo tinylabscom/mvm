@@ -84,9 +84,7 @@ impl Drop for HeldImageLock {
 /// extension swap, so `foo.img` → `foo.img.lock`). Ends in `.lock` so
 /// it never matches `cache info`'s `nix-store-*.img` glob.
 pub(crate) fn sidecar_lock_path(image: &Path) -> PathBuf {
-    let mut s = image.as_os_str().to_os_string();
-    s.push(".lock");
-    PathBuf::from(s)
+    mvm_core::util::writable_image::sidecar_lock_path(image)
 }
 
 /// Sparse-allocate `path` to `size_bytes` minus the libkrun tail reserve if

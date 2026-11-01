@@ -103,6 +103,11 @@ pub struct VmRuntimeMeta {
     /// it describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored_device_anchors: Option<mvm_core::checkpoint::DeviceAnchors>,
+
+    /// Original writable-disk paths by final slot. Descriptor projections are
+    /// launch transport only and must never become checkpoint device metadata.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub writable_disk_sources: std::collections::BTreeMap<u8, PathBuf>,
 }
 
 fn default_accessible() -> bool {
@@ -185,6 +190,20 @@ pub fn write(name: &str, meta: &VmRuntimeMeta) -> Result<()> {
     Ok(())
 }
 
+/// Record original writable-disk paths beside a launch's other metadata.
+/// Checkpoint observation requires this mapping whenever a driver uses an FD path.
+pub fn record_writable_disk_sources(
+    name: &str,
+    sources: std::collections::BTreeMap<u8, PathBuf>,
+) -> Result<()> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let mut meta = read(name)?.unwrap_or_else(|| dev_attached(StartMode::Detached));
+    meta.writable_disk_sources = sources;
+    write(name, &meta)
+}
+
 /// Update just the `observability_target` field of an existing metadata file.
 ///
 /// Best-effort: logs a warning and returns `Ok(())` if the file cannot be
@@ -238,6 +257,7 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
         runtime_launch_binding: None,
         observability_target: None,
         restored_device_anchors: None,
+        writable_disk_sources: std::collections::BTreeMap::new(),
     }
 }
 
@@ -339,6 +359,7 @@ pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmR
         runtime_launch_binding: None,
         observability_target: None,
         restored_device_anchors: None,
+        writable_disk_sources: std::collections::BTreeMap::new(),
     })
 }
 
@@ -543,6 +564,7 @@ mod tests {
                 runtime_launch_binding: None,
                 observability_target: None,
                 restored_device_anchors: None,
+                writable_disk_sources: std::collections::BTreeMap::new(),
             };
             write("rt-test-1", &meta).expect("write");
             let read_back = read("rt-test-1").expect("read").expect("present");
@@ -561,6 +583,7 @@ mod tests {
                 runtime_launch_binding: None,
                 observability_target: None,
                 restored_device_anchors: None,
+                writable_disk_sources: std::collections::BTreeMap::new(),
             };
             write("rt-test-2", &meta).expect("write");
             let read_back = read("rt-test-2").expect("read").expect("present");
@@ -774,6 +797,7 @@ mod tests {
                 runtime_launch_binding: None,
                 observability_target: None,
                 restored_device_anchors: None,
+                writable_disk_sources: std::collections::BTreeMap::new(),
             };
             write("rp-with", &with_path).expect("write");
             let back = read("rp-with").expect("read").expect("present");
@@ -788,6 +812,7 @@ mod tests {
                 runtime_launch_binding: None,
                 observability_target: None,
                 restored_device_anchors: None,
+                writable_disk_sources: std::collections::BTreeMap::new(),
             };
             write("rp-without", &without_path).expect("write");
             let back2 = read("rp-without").expect("read").expect("present");

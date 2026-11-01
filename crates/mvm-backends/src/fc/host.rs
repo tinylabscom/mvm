@@ -630,7 +630,8 @@ impl FcVmFullControl {
 impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
     fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
         let dir = super::resolve_running_vm_dir(&self.vm_name)?;
-        super::runtime_artifacts::query(Path::new(&super::fc_api_socket_path(&dir)))
+        let sources = self.runtime_meta()?.writable_disk_sources;
+        super::runtime_artifacts::query(Path::new(&super::fc_api_socket_path(&dir)), Some(&sources))
     }
 
     fn pause(&self) -> Result<()> {
