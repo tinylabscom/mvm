@@ -74,19 +74,12 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("machine/mod.rs", RUNTIME),
     // Audit, cache, secrets, storage and trust operations.
     // Runs, checkpoints, workspaces and the audit-chain readers behind them.
-    ("vm/artifact.rs", RUNTIME),
-    ("vm/audit_chain.rs", HOSTD),
     ("vm/checkpoint.rs", BOTH),
     ("vm/checkpoint/fork_vm_full.rs", BOTH),
-    ("vm/console.rs", RUNTIME),
     ("vm/exec.rs", BOTH),
     ("vm/invoke.rs", BOTH),
-    ("vm/outputs.rs", HOSTD),
-    ("vm/plan_persist.rs", HOSTD),
-    ("vm/prompt_replay.rs", RUNTIME),
     ("vm/run_plan.rs", HOSTD),
     ("vm/session.rs", RUNTIME),
-    ("vm/volume.rs", RUNTIME),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

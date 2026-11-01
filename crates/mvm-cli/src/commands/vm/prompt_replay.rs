@@ -18,11 +18,11 @@
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use mvm_client::agent_prompt::DEFAULT_PROMPT_TIMEOUT_SECS;
+use mvm_client::checkpoint::CheckpointStore;
+use mvm_client::replay::{
+    AgentSessionStore, ReplayInputStore, ReplayPlan, prepare_replay, timeline_base,
+};
 use mvm_contract::protocol::agent_session::AgentSessionId;
-use mvm_runtime::agent_session::AgentSessionStore;
-use mvm_runtime::agent_session::replay::{ReplayPlan, prepare_replay, timeline_base};
-use mvm_runtime::agent_session::replay_input::ReplayInputStore;
-use mvm_runtime::checkpoint::CheckpointStore;
 
 use super::checkpoint::{self, SignedChainAnchor, validated_checkpoint_id};
 use crate::ui;

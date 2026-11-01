@@ -445,7 +445,7 @@ fn registration_profile(vm_name: &str) -> Result<AdmittedProfile> {
     if !mvm_core::config::machine_spec_path(vm_name).exists() {
         return Ok(RunProfile::Dev.into());
     }
-    let spec = mvm_runtime::machine::persist::load_machine_spec(vm_name)
+    let spec = mvm_client::volume::load_machine_spec(vm_name)
         .with_context(|| format!("reading the stored profile of machine {vm_name:?}"))?;
     Ok(AdmittedProfile::from_profile_name(&spec.profile))
 }
@@ -517,7 +517,7 @@ pub(crate) fn list_registered_attachments(
 
 pub(in crate::commands) fn merge_registered_volumes_for_launch(
     vm_name: &str,
-    explicit: &[mvm_runtime::image::RuntimeVolume],
+    explicit: &[mvm_client::volume::RuntimeVolume],
     profile: AdmittedProfile,
 ) -> Result<PreparedLaunchVolumes> {
     merge_registered_volumes_with_service(&service(), vm_name, explicit, profile)
@@ -526,7 +526,7 @@ pub(in crate::commands) fn merge_registered_volumes_for_launch(
 fn merge_registered_volumes_with_service(
     volume_service: &LocalVolumeService,
     vm_name: &str,
-    explicit: &[mvm_runtime::image::RuntimeVolume],
+    explicit: &[mvm_client::volume::RuntimeVolume],
     profile: AdmittedProfile,
 ) -> Result<PreparedLaunchVolumes> {
     refresh_registered_host_snapshots_with_service(volume_service, vm_name)?;
