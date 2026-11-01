@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn the_rewrite_keeps_the_lock_comments_and_legacy_entry() {
+    fn the_rewrite_keeps_the_lock_comments() {
         let original = checked_in_lock();
 
         let text = repin(&original, &next_root()).unwrap();
@@ -494,12 +494,6 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(comments(&text), comments(&original));
-        let before = ImageTrainLock::parse(&original).unwrap();
-        let after = ImageTrainLock::parse(&text).unwrap();
-        assert_eq!(
-            after.legacy, before.legacy,
-            "the legacy entry is not a pin to advance"
-        );
     }
 
     #[test]

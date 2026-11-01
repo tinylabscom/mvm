@@ -54,7 +54,7 @@ pub(crate) use train_lock::image_train_lock_sha256;
 #[cfg(feature = "host-state")]
 pub use train_lock::{
     BootImagePin, IMAGE_TRAIN_LOCK_SCHEMA_VERSION, ImageTrainLock, ImageTrainLockError,
-    LegacyImageTrain, PinnedArtifact, Stage0KernelPin, image_train_lock,
+    PinnedArtifact, Stage0KernelPin, image_train_lock,
 };
 pub use trust_tier::ImageTrustTier;
 pub use validate::{
