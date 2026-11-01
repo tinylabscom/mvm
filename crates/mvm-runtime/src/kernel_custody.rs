@@ -151,7 +151,7 @@ impl KernelBoundLaunch {
     }
 
     #[cfg(unix)]
-    pub(crate) fn boot_with_prepared_disks(
+    pub(crate) fn boot_custodied(
         &self,
         driver: &dyn mvm_vmm::driver::traits::VmmDriver,
         spec: &VmmSpec,
@@ -159,7 +159,7 @@ impl KernelBoundLaunch {
     ) -> Result<Box<dyn RunningVm>> {
         self.before_boot(spec)?;
         disks.validate_spec(spec)?;
-        driver.boot_with_prepared_disks(spec, self.kernel.as_ref(), disks)
+        driver.boot_custodied(spec, self.kernel.as_ref(), disks)
     }
 
     /// Validate the physical recipe passed to the driver, not a reconstructed
@@ -520,7 +520,7 @@ mod tests {
         assert!(bound.before_boot(&spec).is_err());
         let driver = crate::driver::MockDriver::default();
         let error = bound
-            .boot_with_prepared_disks(
+            .boot_custodied(
                 &driver,
                 &spec,
                 mvm_vmm::driver::prepared_disks::PreparedWritableDisks::empty(),

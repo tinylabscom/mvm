@@ -347,11 +347,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// secret-free deny-all workload has no egress capability and therefore
     /// carries no endpoint process or guest egress channel.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
-        self.start_workload_with_images(inputs, Vec::new())
+        self.start_workload_custodied(inputs, Vec::new())
     }
 
     /// Start with original writable-image custody, consumed only at final binding.
-    pub fn start_workload_with_images(
+    pub fn start_workload_custodied(
         &self,
         inputs: &WorkloadLaunchInputs<'_>,
         writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
@@ -562,10 +562,10 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 #[cfg(unix)]
                 {
                     match kernel {
-                        Some(kernel) => kernel.boot_with_prepared_disks(&self.driver, &spec, disks),
+                        Some(kernel) => kernel.boot_custodied(&self.driver, &spec, disks),
                         None => {
                             disks.validate_spec(&spec)?;
-                            self.driver.boot_with_prepared_disks(&spec, None, disks)
+                            self.driver.boot_custodied(&spec, None, disks)
                         }
                     }
                 }

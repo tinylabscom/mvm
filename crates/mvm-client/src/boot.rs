@@ -188,12 +188,12 @@ pub fn start_prepared(
     backend: mvm_runtime::backend::AnyBackend,
     config: &mvm_core::vm_backend::VmStartConfig,
 ) -> Result<StartedVm> {
-    start_prepared_with_images(backend, config, Vec::new())
+    start_prepared_custodied(backend, config, Vec::new())
 }
 
 /// Start with original writable-image custody transferred to the final writer.
 #[cfg(unix)]
-pub fn start_prepared_with_images(
+pub fn start_prepared_custodied(
     backend: mvm_runtime::backend::AnyBackend,
     config: &mvm_core::vm_backend::VmStartConfig,
     images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
@@ -204,7 +204,7 @@ pub fn start_prepared_with_images(
         }
     })?;
     let vm_id = backend
-        .start_with_images(config, images)
+        .start_custodied(config, images)
         .map_err(|e| MvmError::Backend {
             reason: format!("{e:#}"),
         })?;

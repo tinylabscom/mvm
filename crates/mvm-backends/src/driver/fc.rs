@@ -35,18 +35,20 @@ use crate::fc::{
     firecracker_vsock_uds_path, read_firecracker_pid, start_vm_firecracker_bounded,
 };
 #[cfg(test)]
-use mvm_vmm::driver::spec::KernelImage;
-use mvm_vmm::driver::spec::{BlockDev, VmmSpec, VsockDirection, VsockPort};
+use mvm_vmm::driver::spec::{BlockDev, KernelImage};
+use mvm_vmm::driver::spec::{VmmSpec, VsockDirection, VsockPort};
 use mvm_vmm::driver::traits::{
     ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
     StandbyParentSpawn, VmmDriver,
 };
 use mvm_vmm::host::boot_config::{
-    FcDrive, balloon_body, boot_source_body, logger_body, machine_config_body, vsock_body,
+    balloon_body, boot_source_body, logger_body, machine_config_body, vsock_body,
 };
 
+mod config;
 mod kernel;
 mod stop;
+use config::{FcApiPut, fc_drive_puts};
 #[cfg(all(test, unix))]
 use kernel::fc_descriptor_recipe;
 use kernel::resolve_fc_kernel_path;
@@ -193,51 +195,6 @@ fn fc_base_bootargs(has_disk: bool) -> String {
         // so only the serial-console base is emitted here.
         console.to_string()
     }
-}
-
-/// One Firecracker API configuration call: an HTTP PUT of `body` to `path` on
-/// the per-VM API socket. Kept as data so the whole NIC-less config sequence is
-/// a pure, testable value the driver replays through `api_put_socket`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FcApiPut {
-    pub path: String,
-    pub body: String,
-}
-
-/// Map slot-ordered blocks to `/drives/*` PUTs in the order Firecracker assigns
-/// device letters (first PUT → `/dev/vda`, next → `/dev/vdb`, …), so the guest
-/// device nodes line up with the verity slot model the cmdline names
-/// (`mvm.data=/dev/vda mvm.hash=/dev/vdb …`). The lowest-slot block is the root
-/// device; every block carries its own read-only policy verbatim.
-///
-/// Every writable block offers the guest discard when the running Firecracker
-/// supports it, so a guest trim releases host blocks. That grants a guest
-/// nothing it lacked: a drive it can write is one it could already zero, and a
-/// punched hole is zeroes that cost no disk.
-fn fc_drive_puts(blocks: &[BlockDev], caps: FcCapabilities) -> Vec<FcApiPut> {
-    let mut ordered: Vec<&BlockDev> = blocks.iter().collect();
-    ordered.sort_by_key(|b| b.slot);
-    ordered
-        .iter()
-        .enumerate()
-        .map(|(index, block)| {
-            let drive_id = format!("blk{}", block.slot);
-            // The lowest-slot block (first PUT) is the root device; each block
-            // keeps its own read-only policy. Body shape shared with the raw path.
-            let body = FcDrive {
-                drive_id: &drive_id,
-                path_on_host: &block.source.to_string_lossy(),
-                is_root_device: index == 0,
-                is_read_only: block.read_only,
-                discard: caps.block_discard,
-            }
-            .body();
-            FcApiPut {
-                path: format!("/drives/{drive_id}"),
-                body,
-            }
-        })
-        .collect()
 }
 
 /// Assemble the full NIC-less Firecracker API config sequence for a spec:
@@ -1357,7 +1314,7 @@ impl VmmDriver for FcDriver {
     }
 
     #[cfg(unix)]
-    fn boot_with_prepared_disks(
+    fn boot_custodied(
         &self,
         spec: &VmmSpec,
         kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
@@ -1373,7 +1330,7 @@ impl VmmDriver for FcDriver {
         let handoff = disks.into_sudo_handoff(spec)?;
         let projected = handoff.projected().clone();
         match kernel {
-            Some(kernel) => kernel::boot_descriptor_with_handoff(self, &projected, kernel, handoff),
+            Some(kernel) => kernel::boot_descriptor_custodied(self, &projected, kernel, handoff),
             None => self.boot_with_handoff(&projected, Some(handoff)),
         }
     }

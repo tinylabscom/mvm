@@ -506,7 +506,7 @@ impl VmmDriver for LibkrunDriver {
     }
 
     #[cfg(unix)]
-    fn boot_with_prepared_disks(
+    fn boot_custodied(
         &self,
         spec: &VmmSpec,
         kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,

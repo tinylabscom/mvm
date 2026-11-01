@@ -56,7 +56,7 @@ pub(super) fn fc_descriptor_recipe(
 }
 
 #[cfg(unix)]
-pub(super) fn boot_descriptor_with_handoff(
+pub(super) fn boot_descriptor_custodied(
     driver: &super::FcDriver,
     spec: &VmmSpec,
     kernel: &mvm_vmm::host::restore_image::VerifiedRestoreFile,

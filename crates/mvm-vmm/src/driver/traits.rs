@@ -189,7 +189,7 @@ pub trait VmmDriver: Send + Sync {
     /// A driver must explicitly implement nonempty handoff; the default refuses
     /// before either boot method rather than discarding files or reopening paths.
     #[cfg(unix)]
-    fn boot_with_prepared_disks(
+    fn boot_custodied(
         &self,
         spec: &VmmSpec,
         kernel: Option<&crate::host::restore_image::VerifiedRestoreFile>,

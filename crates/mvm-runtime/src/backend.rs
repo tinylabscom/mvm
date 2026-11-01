@@ -845,7 +845,7 @@ impl AnyBackend {
 
     /// Start with original writable-image custody transferred to the final writer.
     #[cfg(unix)]
-    pub fn start_with_images(
+    pub fn start_custodied(
         &self,
         config: &VmStartConfig,
         images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
@@ -857,10 +857,10 @@ impl AnyBackend {
             config.wait_for_admission_durability()?;
         }
         match self {
-            Self::Firecracker(runner) => runner.start_with_images(config, images),
-            Self::Libkrun(runner) => runner.start_with_images(config, images),
-            Self::Qemu(runner) => runner.start_with_images(config, images),
-            Self::Hvf(runner) => runner.start_with_images(config, images),
+            Self::Firecracker(runner) => runner.start_custodied(config, images),
+            Self::Libkrun(runner) => runner.start_custodied(config, images),
+            Self::Qemu(runner) => runner.start_custodied(config, images),
+            Self::Hvf(runner) => runner.start_custodied(config, images),
             #[cfg(feature = "test-support")]
             Self::Mock(backend) => {
                 // The hermetic writer has no real descriptors to inherit, but

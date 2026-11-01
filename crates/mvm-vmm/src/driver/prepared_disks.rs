@@ -799,7 +799,7 @@ mod tests {
         let disks = PreparedWritableDisks::empty();
 
         let error = driver
-            .boot_with_prepared_disks(&spec, Some(&kernel), disks)
+            .boot_custodied(&spec, Some(&kernel), disks)
             .err()
             .expect("recorded verified route");
         assert_eq!(error.to_string(), "verified dispatch witness");
@@ -807,7 +807,7 @@ mod tests {
         assert_eq!(driver.ordinary.load(Ordering::SeqCst), 0);
 
         let error = driver
-            .boot_with_prepared_disks(&spec, None, PreparedWritableDisks::empty())
+            .boot_custodied(&spec, None, PreparedWritableDisks::empty())
             .err()
             .expect("recorded ordinary route");
         assert_eq!(error.to_string(), "ordinary dispatch witness");
@@ -829,7 +829,7 @@ mod tests {
                     .unwrap();
             let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
             let error = driver
-                .boot_with_prepared_disks(&spec, kernel, disks)
+                .boot_custodied(&spec, kernel, disks)
                 .err()
                 .expect("unsupported handoff");
             assert!(error.to_string().contains("prepared writable descriptor"));

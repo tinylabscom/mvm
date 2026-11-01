@@ -178,7 +178,7 @@ pub(super) fn boot_transient_vm(
             attempt.backend.name()
         ));
         sub.start(SubPhase::VmmCreate);
-        if let Err(e) = attempt.backend.start_with_images(
+        if let Err(e) = attempt.backend.start_custodied(
             attempt.start_config,
             std::mem::take(attempt.writable_images),
         ) {

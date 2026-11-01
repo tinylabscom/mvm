@@ -216,7 +216,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
     WorkloadRunner<D, S, B>
 {
     /// Start through this concrete runner with original writable-image custody.
-    pub fn start_with_images(
+    pub fn start_custodied(
         &self,
         config: &VmStartConfig,
         images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
@@ -259,7 +259,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
             network_policy: &config.network_policy,
             cmdline,
         };
-        match self.start_workload_with_images(&inputs, images) {
+        match self.start_workload_custodied(&inputs, images) {
             Ok(_vm) => Ok(VmId(config.name.clone())),
             Err(e) => Err(e),
         }
@@ -319,7 +319,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
-        self.start_with_images(config, Vec::new())
+        self.start_custodied(config, Vec::new())
     }
 
     fn host_process_id(&self, id: &VmId) -> Result<Option<u32>> {
