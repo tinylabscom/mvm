@@ -21,7 +21,7 @@ pub use mvm_runtime::checkpoint::{
     vm_is_running,
 };
 pub use mvm_runtime::image_lineage::{
-    ImageStore, image_ancestry, image_children, verify_image_lineage,
+    ImageChainAnchor, ImageStore, image_ancestry, image_children, verify_image_lineage,
 };
 pub use mvm_runtime::lineage::{Ancestry, VerifiedNode};
 pub use mvm_runtime::microvm::fc_pid_path;

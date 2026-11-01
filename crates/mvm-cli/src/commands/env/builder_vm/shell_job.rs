@@ -31,9 +31,9 @@ impl ShellJobBuilder {
     pub(crate) fn run(self, job: &mvm_build::builder_vm::BuilderShellJob) -> Result<()> {
         match self {
             Self::Hvf => {
-                let image = mvm_runtime::builder_runner::resolve_driver_builder_image()
+                let image = mvm_client::resolve_driver_builder_image()
                     .map_err(|error| anyhow::anyhow!("resolving HVF builder image: {error}"))?;
-                mvm_runtime::builder_runner::DriverBuilderVm::new(
+                mvm_client::DriverBuilderVm::new(
                     mvm_backends::driver::hvf::HvfDriver::new(),
                     image.kernel,
                     image.rootfs,
@@ -43,10 +43,10 @@ impl ShellJobBuilder {
                 .map_err(|error| anyhow::anyhow!("HVF builder shell job: {error}"))?;
             }
             Self::Firecracker => {
-                let image = mvm_runtime::builder_runner::resolve_driver_builder_image().map_err(
-                    |error| anyhow::anyhow!("resolving Firecracker builder image: {error}"),
-                )?;
-                mvm_runtime::builder_runner::DriverBuilderVm::new(
+                let image = mvm_client::resolve_driver_builder_image().map_err(|error| {
+                    anyhow::anyhow!("resolving Firecracker builder image: {error}")
+                })?;
+                mvm_client::DriverBuilderVm::new(
                     mvm_backends::driver::fc::FcDriver::new(),
                     image.kernel,
                     image.rootfs,

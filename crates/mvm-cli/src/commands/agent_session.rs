@@ -14,21 +14,18 @@
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
+use mvm_client::checkpoint::CheckpointStore;
+use mvm_client::session_store::{
+    AdmittedPlan, AgentSessionRecord, AgentSessionStore, BootedSession, GenerationFence,
+    InMemoryNonceLedger, ParkInput, ParkReason, RenewRequest, ResumeOutcome, ResumePlanMaterial,
+    ResumeRequest, RetentionStatus, SandboxResidency, StorageTier, SystemClock, TransitionResult,
+    resume_session,
+};
 use mvm_client::{ResumeBootLocalRequest, resume_and_boot_local};
 use mvm_contract::protocol::agent_session::AgentSessionId;
 use mvm_core::checkpoint::{ApprovalHead, CheckpointDigest};
 use mvm_core::plan::PlanId;
 use mvm_core::user_config::MvmConfig;
-use mvm_hostd::plan_admission::AdmittedPlan;
-use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
-use mvm_hostd::session_resume::{
-    BootedSession, ResumeOutcome, ResumePlanMaterial, ResumeRequest, resume_session,
-};
-use mvm_runtime::agent_session::{
-    AgentSessionRecord, AgentSessionStore, GenerationFence, ParkInput, ParkReason, RenewRequest,
-    RetentionStatus, SandboxResidency, StorageTier, TransitionResult,
-};
-use mvm_runtime::checkpoint::CheckpointStore;
 use serde::Serialize;
 
 use super::Cli;
@@ -606,7 +603,7 @@ fn member_plan(record: &AgentSessionRecord) -> Result<mvm_core::plan::ExecutionP
             record.session_id.as_str()
         )
     })?;
-    mvm_hostd::audit::plan_persist::read_plan(member)
+    mvm_client::audit::chain::plan_persist::read_plan(member)
         .with_context(|| format!("reading the admitted plan of member sandbox '{member}'"))
 }
 

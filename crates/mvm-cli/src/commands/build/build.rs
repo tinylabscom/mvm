@@ -6,6 +6,8 @@ use serde::Serialize;
 
 use crate::ui;
 
+use mvm_client::image;
+use mvm_client::template as tmpl;
 #[cfg(test)]
 use mvm_core::manifest::key_for_manifest_identity;
 use mvm_core::manifest::{
@@ -13,8 +15,6 @@ use mvm_core::manifest::{
 };
 use mvm_core::naming::validate_flake_ref;
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::image;
-use mvm_runtime::vm::template::lifecycle as tmpl;
 
 use super::Cli;
 use super::shared::{PhaseEvent, clap_flake_ref, resolve_flake_ref};
@@ -228,9 +228,7 @@ fn build_manifest(
     // template_persist_slot call refreshes updated_at/provenance and
     // preserves created_at via touch(); the synthesized created_at here
     // is only used for first-build slots.
-    let backend = mvm_runtime::backend::AnyBackend::auto_select()
-        .name()
-        .to_string();
+    let backend = mvm_client::AnyBackend::auto_select().name().to_string();
     // Override flake_ref to the resolved (absolute) path so the slot's
     // record matches what dev_build actually saw.
     let mut persisted =
@@ -352,9 +350,7 @@ fn build_manifest_from_image(
         );
     }
 
-    let backend = mvm_runtime::backend::AnyBackend::auto_select()
-        .name()
-        .to_string();
+    let backend = mvm_client::AnyBackend::auto_select().name().to_string();
     let persisted =
         PersistedManifest::from_manifest(manifest, canonical, &backend, Provenance::current())?;
 
@@ -372,9 +368,9 @@ fn build_manifest_from_image(
         ))
         .with_context(|| format!("materializing {image_ref}"))?;
 
-    let revision = match mvm_runtime::vm::template::lifecycle::template_build_from_image(
+    let revision = match tmpl::template_build_from_image(
         &persisted,
-        &mvm_runtime::vm::template::lifecycle::ImageBuildSources {
+        &tmpl::ImageBuildSources {
             rootfs,
             kernel: std::path::PathBuf::from(&kernel),
             image_ref: image_ref.to_string(),
@@ -474,7 +470,7 @@ fn build_flake(
     validate_flake_ref(flake_ref)
         .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
 
-    let build_env = mvm_runtime::build_env::default_build_env();
+    let build_env = mvm_client::default_build_env();
     let env = build_env.as_ref();
 
     prepare_builder_vm_image_for_build()
@@ -883,9 +879,7 @@ fn build_flake_slot(
         crate::commands::env::builder_vm::ensure_workload_kernel()
             .context("resolving the dm-verity-capable workload kernel for flake slot")?;
     }
-    let backend = mvm_runtime::backend::AnyBackend::auto_select()
-        .name()
-        .to_string();
+    let backend = mvm_client::AnyBackend::auto_select().name().to_string();
     let mode = mvm_build::pipeline::BuildMode::Dev;
 
     // Synthesize a manifest so we can use the slot-registration machinery.

@@ -59,19 +59,11 @@ const BOTH: &[Below] = &[Below::Hostd, Below::Runtime];
 /// logic moves into `mvm-client`.
 const ALLOWLIST: &[(&str, &[Below])] = &[
     // Command dispatch and top-level verbs.
-    ("agent_session.rs", BOTH),
     ("mod.rs", BOTH),
     ("pool.rs", BOTH),
     // Builds, bundles and the builder VM.
-    ("build/build.rs", RUNTIME),
-    ("build/image_lineage.rs", BOTH),
-    ("env/builder_vm/default_microvm.rs", RUNTIME),
-    ("env/builder_vm/kernel.rs", RUNTIME),
-    ("env/builder_vm/local_pair.rs", RUNTIME),
-    ("env/builder_vm/shell_job.rs", RUNTIME),
     // Images and manifests.
     // Machine lifecycle.
-    ("machine/mod.rs", RUNTIME),
     // Audit, cache, secrets, storage and trust operations.
     // Runs, checkpoints, workspaces and the audit-chain readers behind them.
     ("vm/artifact.rs", RUNTIME),
