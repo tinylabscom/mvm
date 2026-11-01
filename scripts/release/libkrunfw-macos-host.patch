@@ -2,7 +2,7 @@
 +++ b/Makefile
 @@ -1,4 +1,4 @@
 -KERNEL_VERSION = linux-6.12.109
-+KERNEL_VERSION = linux-6.12.114
++KERNEL_VERSION = linux-6.12.115
  KERNEL_REMOTE = https://cdn.kernel.org/pub/linux/kernel/v6.x/$(KERNEL_VERSION).tar.xz
  KERNEL_TARBALL = tarballs/$(KERNEL_VERSION).tar.xz
  KERNEL_SOURCES = $(KERNEL_VERSION)
