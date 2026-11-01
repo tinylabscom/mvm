@@ -419,8 +419,7 @@ pub fn dispatch_nix_build(
     };
     // When the host asked for an export dir (a path under the `/job` share),
     // copy the image's host-facing artifacts (kernel + rootfs) out of the nix
-    // store so the host can read them — the typed equivalent of the legacy
-    // cmd.sh `cp -L "$NIX_OUT/..." /out/...` block. The reported `artifact_path`
+    // store so the host can read them. The reported `artifact_path`
     // then points at the host-readable dir; `store_path` stays the in-store
     // path for provenance.
     match (&outcome, output_dir) {
@@ -449,9 +448,8 @@ pub fn dispatch_nix_build(
 
 /// Copy a built guest image's host-facing artifacts out of the nix store into
 /// `output_dir` (a directory on a host-shared mount), so the host can read
-/// `vmlinux` + `rootfs.ext4` without reaching into the builder's store. Mirrors
-/// the legacy `render_flake_cmd_sh` copy block: an out-path that is itself a
-/// file is the rootfs; an out-path that is a directory carries the kernel under
+/// `vmlinux` + `rootfs.ext4` without reaching into the builder's store. An
+/// out-path that is itself a file is the rootfs; an out-path that is a directory carries the kernel under
 /// `vmlinux`/`Image`/`bzImage` plus `rootfs.ext4`.
 ///
 /// Before the rootfs is copied to `output_dir`, a writable copy is mounted and

@@ -182,13 +182,8 @@ pub fn mvm_home_strict() -> std::io::Result<std::path::PathBuf> {
 // it; 0700 on the whole tree is the project's privacy boundary, and one of
 // the numbered security claims states exactly that.
 //
-// This used to be `ensure_home_dir` and `ensure_cache_dir`, one per root.
-// Both were correct and neither was ever called — two `pub fn`s asserting an
-// invariant that no code path established, while a comment elsewhere
-// described the repair as something that happened on the next command. What
-// replaced them is a single helper called at the seam where directories are
-// actually made, because that is also the only place the *ancestors* can be
-// got right.
+// One helper, called at the seam where directories are actually made, because
+// that is the only place the *ancestors* can be got right.
 
 /// Create a directory under the mvm home, with every component from the
 /// home root down to the leaf at mode `0700`.

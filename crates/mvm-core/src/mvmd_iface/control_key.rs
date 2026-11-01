@@ -3,9 +3,6 @@
 //! `mvmd` mints control-plane envelopes signed with a `ControlKey`. `mvm`
 //! verifies the signature against the key registered for that `kid` and
 //! refuses to act on expired or unknown keys.
-//!
-//! Plan-37 §12.1. Rotation lives in plan
-//! `what-do-we-need-deep-dolphin` Track L+ (K4 / control-key rotation).
 
 use serde::{Deserialize, Serialize};
 

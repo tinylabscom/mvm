@@ -40,9 +40,8 @@
 
 // The whole point of this crate is a C ABI, so the workspace's unsafe_code lint
 // is allowed here and nowhere else in it. Confining the exception to the crate
-// that exists to hold `extern "C"` is what the split buys: it used to be an
-// `#[allow]` on one module of `mvm-sdk`, sitting alongside the decorator parser
-// and the deploy record.
+// that exists to hold `extern "C"` keeps the exception from spreading to
+// unrelated code.
 #![allow(unsafe_code)]
 
 use std::os::unix::net::UnixStream;

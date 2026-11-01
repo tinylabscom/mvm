@@ -1110,13 +1110,9 @@ mod tests {
 
     /// The digest of a grant-less record, pinned so it cannot move by accident.
     ///
-    /// It last moved deliberately when `runtime_source_policy` was removed from
-    /// the meta: the overlay became the single runtime source, so the field had
-    /// no remaining values to distinguish. Checkpoints captured before that
-    /// change read as `meta_digest drift` — schema-stale, not tampered — which
-    /// is the accepted cost of the no-back-compat rule on local state. Anything
-    /// that moves this literal without a matching schema change in the same
-    /// commit is a silent digest break.
+    /// Anything that moves this literal without a matching schema change in the
+    /// same commit is a silent digest break. A schema change makes older
+    /// checkpoints read as `meta_digest drift` (schema-stale, not tampered).
     #[test]
     fn sealing_no_grant_leaves_a_records_digest_where_it_was() {
         let m = digest_fixture_meta(vec![blob("rootfs.ext4", "aa")]);

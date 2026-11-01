@@ -1619,10 +1619,9 @@ mod tests {
             "builder failure path must not fall back to host-side Nix: {exec_log:?}"
         );
 
-        // The regression this guards: a builder error used to return before
-        // the staging dir (created just before `run_build` is invoked) was
-        // ever cleaned up, leaking a `.staging-*` dir under the builds dir
-        // on every failed build.
+        // A builder error must still clean up the staging dir (created just
+        // before `run_build` is invoked), not leak a `.staging-*` dir under
+        // the builds dir on every failed build.
         let leaked_staging = std::fs::read_dir(dev_builds_dir())
             .map(|entries| {
                 entries

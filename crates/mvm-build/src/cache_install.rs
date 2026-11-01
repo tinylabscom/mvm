@@ -2,7 +2,7 @@
 //!
 //! Two conventions live here because both are shared by every cached
 //! artifact (the builder VM image, the runtime overlay, the universal
-//! initramfs) and both were previously reimplemented per artifact:
+//! initramfs), so neither is reimplemented per artifact:
 //!
 //! 1. **The cross-root seed.** An isolated session (a worktree pointing
 //!    `MVM_HOME` at a tempdir) can populate its own cache root from the
