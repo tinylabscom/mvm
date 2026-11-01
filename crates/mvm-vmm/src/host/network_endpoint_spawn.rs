@@ -504,7 +504,7 @@ pub struct RemoteResolverSpawnConfig<'a> {
 /// Mirrors `mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity` field-for-
 /// field so the JSON on stdin is identical, without creating a dependency cycle
 /// (mvm-hostd depends on mvm-vmm, never the reverse).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FlowMuxIdentitySpawnConfig {
     /// Unique session identifier, distinct per VM boot.
     pub session_id: String,
@@ -512,6 +512,19 @@ pub struct FlowMuxIdentitySpawnConfig {
     pub host_signing_key_base64: String,
     /// Base64-encoded 32-byte Ed25519 guest verifying key.
     pub guest_verifying_key_base64: String,
+}
+
+impl std::fmt::Debug for FlowMuxIdentitySpawnConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowMuxIdentitySpawnConfig")
+            .field("session_id", &self.session_id)
+            .field("host_signing_key_base64", &"[REDACTED]")
+            .field(
+                "guest_verifying_key_base64",
+                &self.guest_verifying_key_base64,
+            )
+            .finish()
+    }
 }
 
 /// Inputs to [`spawn_network_endpoint`]. Grouped into a struct (rather
@@ -1589,6 +1602,34 @@ mod tests {
         assert_eq!(params.binding_store_dir, Some(dir.path()));
         assert_eq!(params.flowmux_identity, Some(identity));
         assert_eq!(params.egress_proxy, Some(proxy));
+    }
+
+    #[test]
+    fn flowmux_identity_debug_redacts_root_secret() {
+        use base64::Engine;
+
+        let raw = "synthetic-root-secret-sentinel!!";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        let identity = FlowMuxIdentitySpawnConfig {
+            session_id: "debug-session".into(),
+            host_signing_key_base64: encoded.clone(),
+            guest_verifying_key_base64: "public-guest-anchor".into(),
+        };
+        let error = Err::<(), _>(identity.clone());
+        for output in [
+            format!("{identity:?}"),
+            format!("{identity:#?}"),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert!(!output.contains(raw), "raw root secret leaked");
+            assert!(!output.contains(&encoded), "encoded root secret leaked");
+            assert!(output.contains("[REDACTED]"));
+            assert!(output.contains("debug-session"));
+            assert!(output.contains("public-guest-anchor"));
+        }
+        let wire = endpoint_config_for_identity(Some(identity));
+        assert!(wire["flowmux_identity"]["host_signing_key_base64"] == encoded);
     }
 
     #[test]
