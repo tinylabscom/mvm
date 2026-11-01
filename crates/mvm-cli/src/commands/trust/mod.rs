@@ -38,11 +38,9 @@ pub(in crate::commands) enum TrustAction {
     /// `~/.mvm/trusted-publishers/<key_id>.pub` (mode 0644).
     Add(add::Args),
     /// List currently-trusted publisher key_ids.
-    #[command(alias = "ls")]
     List(list::Args),
     /// Remove a publisher by `key_id`. The file is unlinked but
     /// not zeroed — pubkeys aren't secrets, just lookup tokens.
-    #[command(alias = "rm")]
     Remove(remove::Args),
     /// Sign and verify agent instruction files (CLAUDE.md, AGENTS.md, SKILL.md, …)
     Instructions(instructions::Args),

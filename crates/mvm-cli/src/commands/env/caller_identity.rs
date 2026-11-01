@@ -18,7 +18,6 @@ pub(in crate::commands) enum Action {
     /// Explicitly enroll a new dedicated native caller identity (macOS only)
     Enroll,
     /// Read public enrollment metadata without accessing native custody
-    #[command(alias = "status")]
     Show,
 }
 
