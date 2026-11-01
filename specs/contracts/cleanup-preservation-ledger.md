@@ -252,12 +252,13 @@ run on this host (table below).
 Evidence: `check-no-host-nix` clean; `check-guest-images-no-builder-tools`
 clean; README Install section separates the release binary from the source
 build. `tests/install_sh.rs` and `tests/smoke_fresh_install.rs` exist but were
-not run; prepared/cache-only launch is owned by #4794 (OPEN).
+not run (they were run in the 2026-11-01 evidence run below).
 
 Verdict: **MET** as of the 2026-11-01 evidence run below: `install_sh`,
 `smoke_fresh_install` and `pin_installer_default` pass (121 tests), including
 running an unpublished archive beside the binaries it ships, and no host
-`nix`/`docker` spawn exists.
+`nix`/`docker` spawn exists. Prepared/cache-only launch semantics (the box's
+last sentence) are also witnessed; see "Box: prepared/cache-only launch".
 
 ## Image and application trust
 
@@ -418,3 +419,39 @@ recent `release.yml` run (41279625530, tag v0.26.0) failed, and its
 "nix-shell"|"nix-store"|"docker"|"podman")` outside tests finds only a doc comment
 in `xtask/src/check_no_host_nix.rs`; `check-no-host-nix` is clean; the string
 `"docker"` appears only in tests and in a backend-name refusal.
+
+### Box: prepared/cache-only launch (MET)
+
+Tree `d876633332` (origin/main), macOS arm64, `~/.cargo/bin/cargo`.
+`cargo nextest run -p mvm-client -p mvm-runtime -p mvm-cli --lib -E '<23 names>'`:
+23 tests run, 23 passed, 5596 skipped. No new test was needed.
+
+(a) A launch resolves only prepared pieces. Each miss refuses naming
+`mvmctl bootstrap`, with the download mirror pointed at an empty/nonexistent
+`file://` location and nothing cached afterwards:
+`a_download_mode_host_refuses_an_unprepared_sidecar` (sidecar; asserts no
+artifact dir is created), `required_overlay_cache_miss_names_explicit_bootstrap`
+(overlay; asserts no overlay attached and no cache layout written),
+`launch_refuses_an_unprepared_published_runtime_without_acquiring_it` (OCI guest
+runtime; refusal under 300 ms), `a_library_launch_without_a_prepared_runtime_names_the_preparation_verb`
+(library embedder), `a_required_but_missing_sidecar_fails_closed_with_an_actionable_message`
+(mvm-runtime). Not separately witnessed: the initramfs piece has no
+miss-refusal test of its own, and "no network attempt" is shown by an
+unreachable mirror plus an empty cache rather than a socket assertion.
+
+(b) Measured startup excludes download/build work. The cold-launch bench
+reports acquisition as its own lane (`ArtifactMiss`, `MountMiss`) and rejects a
+contaminated prepared sample: `prepared_cold_rejects_an_image_pull`,
+`prepared_cold_rejects_a_build`, `prepared_cold_rejects_mount_materialization`,
+`prepared_cold_rejects_a_warm_claim_by_flag_and_by_mode`,
+`prepared_cold_rejects_a_launch_that_re_hashed_a_cached_artifact`,
+`prepared_cold_reports_every_contaminating_kind`,
+`prepared_lanes_refuse_an_archive_launch`,
+`every_prepared_lane_is_held_to_the_ceiling_from_invocation`,
+`acquisition_lanes_do_not_claim_the_prepared_boot_requirement`. `mvmctl doctor`
+is a diagnostic report, not a timing path, and is not part of measured startup.
+
+Verdict: **MET**, with the two unwitnessed details above. Full box text
+(relocatable install, no host Nix/Docker, source-build prerequisites versus
+release UX, prepared/cache-only launch) is now MET. The remaining PARTIAL in
+"Streams" is #4794's proposal wording, which is a separate box.
