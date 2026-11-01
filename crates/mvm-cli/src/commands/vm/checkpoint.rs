@@ -39,7 +39,7 @@ mod revert;
 mod timeline;
 mod vm_state;
 pub(in crate::commands) use fork_vm_full::{ForkVmFullArmParams, fork_vm_full_arm};
-pub(in crate::commands) use lineage::{ClaimChainAnchor, SignedChainAnchor};
+pub(in crate::commands) use mvm_client::checkpoint::anchor::{ClaimChainAnchor, SignedChainAnchor};
 pub(in crate::commands) use revert::{
     AdvanceArgs, RevertArgs, RevertImageSource, RevertOutcome, RevertRunImage, run_advance,
     run_revert, run_rewind,

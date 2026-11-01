@@ -10,16 +10,22 @@ use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::client::MvmError;
 use mvm_runtime::checkpoint::checked_workspace_blob_name;
 
+pub mod anchor;
 pub mod fs_quick;
 
 // Types and the liveness probe commands need without naming the runtime.
+pub use mvm_hostd::audit::bind::bind_checkpoint_restored;
 pub use mvm_runtime::base::runtime_meta::{VmRuntimeMeta, read as read_runtime_meta};
 pub use mvm_runtime::checkpoint::{
-    CheckpointStore, WorkspaceVolume, checkpoint_ancestry, checkpoint_children, vm_is_running,
+    CheckpointStore, WorkspaceVolume, checkpoint_ancestry, checkpoint_children, verify_lineage,
+    vm_is_running,
 };
-pub use mvm_runtime::image_lineage::{ImageStore, image_ancestry, image_children};
+pub use mvm_runtime::image_lineage::{
+    ImageStore, image_ancestry, image_children, verify_image_lineage,
+};
 pub use mvm_runtime::lineage::{Ancestry, VerifiedNode};
 pub use mvm_runtime::microvm::fc_pid_path;
+pub use mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision;
 
 /// Access to the local checkpoint catalog, guarded removal and workspace images.
 pub struct Checkpoints {

@@ -78,8 +78,6 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("vm/audit_chain.rs", HOSTD),
     ("vm/checkpoint.rs", BOTH),
     ("vm/checkpoint/fork_vm_full.rs", BOTH),
-    ("vm/checkpoint/lineage.rs", BOTH),
-    ("vm/checkpoint/revert.rs", BOTH),
     ("vm/console.rs", RUNTIME),
     ("vm/exec.rs", BOTH),
     ("vm/invoke.rs", BOTH),
