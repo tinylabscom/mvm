@@ -182,6 +182,9 @@ jobs:
           fi
           sudo chmod 666 /dev/kvm
 
+      - name: Start a systemd user session for the Firecracker scope
+        uses: ./.github/actions/user-session
+
       - name: Fetch the exact release runtime candidate
         id: candidate
         if: ${{ inputs.runtime_candidate_artifact_id != '' || inputs.runtime_candidate_artifact_digest != '' || inputs.runtime_archive_sha256 != '' || inputs.runtime_checksum_sha256 != '' || inputs.runtime_archive_bundle_sha256 != '' || inputs.runtime_checksum_bundle_sha256 != '' }}

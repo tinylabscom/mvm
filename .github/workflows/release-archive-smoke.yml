@@ -123,6 +123,9 @@ jobs:
           fi
           sudo chmod 666 /dev/kvm
 
+      - name: Start a systemd user session for the Firecracker scope
+        uses: ./.github/actions/user-session
+
       # A called workflow sees its caller's event, so a dispatched release dry
       # run reads as `workflow_dispatch` here too. Which run built the archive
       # is decided by the input alone.
