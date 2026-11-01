@@ -89,6 +89,10 @@ pub enum RuntimeOverlayError {
     #[error("download failed for {url}: {reason}")]
     DownloadFailed { url: String, reason: String },
 
+    /// A library embedder was asked to run `curl`.
+    #[error(transparent)]
+    CliSpawnRefused(#[from] mvm_vmm::host::aux_bin::CliSpawnRefused),
+
     /// A downloaded artifact's sha256 didn't match the entry in the
     /// per-release `checksums-sha256.txt`. The mismatched file is removed
     /// before this error is returned so a partial install can't be reused
@@ -1316,6 +1320,7 @@ fn verify_file_sha256_strict(
 /// expectations stay uniform across the three downloaders
 /// (dev image, builder VM image, runtime overlay).
 pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlayError> {
+    crate::guest_agent_build::refuse_toolchain_spawn()?;
     let output = mvm_core::env_hygiene::helper_command("curl")
         .args(["-fSL", "--silent", "--show-error"])
         .args(mvm_core::util::curl::curl_transport_args(url))
