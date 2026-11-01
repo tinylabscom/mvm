@@ -473,7 +473,7 @@ fn actual_startup_wire_uses_canonical_root_and_refuses_warm_without_state_change
 }
 
 #[test]
-fn canonical_descriptor_cannot_substitute_for_consumed_caller_admission() {
+fn frozen_images_cannot_substitute_for_consumed_caller_admission() {
     let (_env, _home) = isolate();
     let vm = "canonical-caller-unit";
     let admitted = admit_fixture(vm, 7);
@@ -483,7 +483,17 @@ fn canonical_descriptor_cannot_substitute_for_consumed_caller_admission() {
     cfg.kernel_fd = Some(123);
     std::fs::remove_file(&cfg.kernel).unwrap();
     cfg.caller_registration = None;
+    // A kernel descriptor alone is a canonical-kernel boot with no caller (a
+    // signed bundle run directly); frozen images still need a consumed caller.
+    assert!(prepare_startup(&cfg).unwrap().is_none());
+    cfg.boot_image_fds = Some(mvm_vmm::host::hvf_supervisor::BootImageFds {
+        rootfs: 124,
+        verity: 125,
+        metadata: 126,
+        root_hash: 127,
+    });
     assert!(prepare_startup(&cfg).is_err());
+    cfg.boot_image_fds = None;
     cfg.caller_registration = Some(registration);
     assert!(prepare_startup(&cfg).unwrap().is_some());
     assert!(
