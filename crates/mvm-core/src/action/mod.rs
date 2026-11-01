@@ -1,8 +1,7 @@
 //! Content-addressed build-action cache records.
 //!
-//! A dev build cache entry used to be a bare `<revision>` marker: its presence
-//! meant "trust whatever is on disk under this name." `ActionCacheRecord`
-//! replaces that with a typed record naming the action's fingerprint and the
+//! A cache entry must not mean "trust whatever is on disk under this name."
+//! `ActionCacheRecord` is a typed record naming the action's fingerprint and the
 //! recorded digest + size of every artifact it produced, so a cache hit can be
 //! verified against the actual bytes on disk before reuse rather than assumed.
 
@@ -57,7 +56,7 @@ pub struct ArtifactDigest {
 }
 
 /// The typed record for one build action's output set — what a cache entry
-/// stores in place of the old plaintext `<revision>` marker.
+/// stores.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionCacheRecord {

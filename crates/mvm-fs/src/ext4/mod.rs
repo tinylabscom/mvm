@@ -3,9 +3,9 @@
 //!
 //! # Why this exists
 //!
-//! Materializing an OCI rootfs used to boot a builder VM and shell
-//! `mkfs.ext4 + cp` inside it. This crate builds the ext4 image in-process, in
-//! pure safe Rust, so the run path never shells out. Its output feeds dm-verity
+//! This crate builds the ext4 image in-process, in pure safe Rust, so
+//! materializing an OCI rootfs never boots a builder VM or shells out to
+//! `mkfs.ext4`. Its output feeds dm-verity
 //! (integrity, claim 3), so it is **deterministic by construction** (fixed inode
 //! order, zeroed timestamps, sequential allocation) and **memory-safe by
 //! construction** (`#![forbid(unsafe_code)]` — a bug is at worst a returned

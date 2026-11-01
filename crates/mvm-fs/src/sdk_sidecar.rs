@@ -899,10 +899,9 @@ mod tests {
         assert!(!rendered.contains("ELF"), "{rendered}");
     }
 
-    /// The failure the explicit sidecar verb used to surface as a bare
-    /// "No such file or directory": the directory it was handed held the
-    /// sidecar under other names, so the manifest read found nothing. The
-    /// error must say what it was reading and where.
+    /// A directory holding the sidecar under other names makes the manifest
+    /// read find nothing; the error must say what it was reading and where,
+    /// not a bare "No such file or directory".
     #[test]
     fn a_missing_checksum_manifest_names_its_path() {
         let dir = tempfile::tempdir().unwrap();

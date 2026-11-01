@@ -536,9 +536,8 @@ mod tests {
 
     #[test]
     fn resolve_cached_when_present_and_pinned() {
-        // This test previously staged a kernel with no pin and asserted a hit,
-        // which is exactly the behaviour being removed: existence is not
-        // evidence. A hit now requires a recorded digest that matches.
+        // Existence is not evidence: a hit requires a recorded digest that
+        // matches.
         let dir = tempfile::tempdir().unwrap();
         let p = cached_kernel_path(dir.path(), "aarch64", "workload");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();

@@ -3,7 +3,7 @@
 //!
 //! They live here, in the crate the guest binaries are built from, so the
 //! musl build that embeds those binaries compiles only what they run. The host
-//! crate re-exports each item from where it used to be defined.
+//! crate re-exports each item.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -12,12 +12,11 @@ use anyhow::{Context, Result, bail};
 
 /// ext4 volume label on the persistent Stage 0 Nix store image.
 ///
-/// The store used to be located by device letter, which couples it to how many
-/// block devices the backend happens to attach ahead of it. Adding one drive —
-/// the FlowMux identity disk — shifted every device behind it, so the guest
-/// mounted a 32 KiB identity image as its Nix store, failed, and silently fell
-/// back to a RAM-backed tmpfs that cannot hold a kernel source tree. The build
-/// then died thousands of lines later on `No space left on device`.
+/// The store is located by label, not device letter: a letter depends on how
+/// many block devices the backend attaches ahead of it, and a wrong guess
+/// mounts the wrong image, fails, and silently falls back to a RAM-backed
+/// tmpfs that cannot hold a kernel source tree (the build then dies much later
+/// on `No space left on device`).
 pub const STAGE0_NIX_STORE_EXT4_LABEL: &str = "mvm-nix-store";
 
 /// Scratch payload baked into the tightly packed Stage 0 ext4 root and removed

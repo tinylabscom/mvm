@@ -185,7 +185,7 @@ pub mod stage0;
 /// Host-side Stage 0 pieces that belong to no particular VMM.
 ///
 /// It materializes the seed root through the pure ext4 writer and re-exports
-/// the persistent-store helpers formerly housed in `libkrun_builder`.
+/// the persistent-store helpers.
 #[cfg(unix)]
 pub mod stage0_host;
 /// The one kernel Stage 0 can neither build nor resolve by the ordinary policy.
