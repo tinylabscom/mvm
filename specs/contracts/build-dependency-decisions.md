@@ -207,6 +207,159 @@ this slice removes nothing and the closures above are unchanged. Remaining
 reduction is in the retained-by-decision rows above, not in unused
 declarations.
 
+## Dependency closure map: build scripts, proc-macros, native code, direct dependencies (#4839 section 3)
+
+Measured at `c77e696350` (origin/main, 2026-10-31), `--offline --locked`, default
+features, `-e normal,build`; target `aarch64-apple-darwin` for every artifact
+except `mvm-builder-guest`, which is `aarch64-unknown-linux-musl`. Counts are
+unique `name version` entries. This section supersedes the earlier "91 distinct
+direct dependencies" figure: under the definition below the workspace has 90
+(the old figure was not reproducible).
+
+Rerun (a `cargo tree` per artifact, joined to `cargo metadata`; no tool beyond cargo):
+
+```sh
+cargo metadata --offline --locked --format-version 1        # targets[].kind, dependencies[].kind, workspace_members
+cargo tree --offline --locked -p <pkg> --target <triple> -e normal,build --prefix depth -f '{p}|{f}'
+cargo tree --offline --locked -p <pkg> --target <triple> -e normal,build -d --prefix depth   # depth-0 lines = duplicates
+```
+
+Definitions. **Build-script package**: has a `custom-build` target (first-party
+included). **Proc-macro package**: has a `proc-macro` target. **Native-code
+package**: in the closure and has a build-dependency on `cc`, `cmake`, `bindgen`
+or `nasm-rs` that is itself in the closure. **Duplicate**: one package name at
+more than one version. **Direct dependency**: a normal or build dependency of a
+workspace member, excluding workspace members and vendored `third_party/` crates.
+
+| Artifact | Target | Closure | Build-script pkgs | Proc-macro pkgs | Native-code pkgs | Duplicate names |
+|---|---|---:|---:|---:|---:|---:|
+| `mvmctl` | `aarch64-apple-darwin` | 350 | 38 | 15 | 8 | 13 |
+| `mvm-hostlib` | `aarch64-apple-darwin` | 337 | 35 | 14 | 8 | 13 |
+| `mvm-hostd` | `aarch64-apple-darwin` | 282 | 26 | 12 | 2 | 6 |
+| `mvm-host-services` | `aarch64-apple-darwin` | 102 | 14 | 4 | 0 | 4 |
+| `mvm-agentd` | `aarch64-apple-darwin` | 101 | 14 | 4 | 0 | 4 |
+| `mvm-builder-guest` | `aarch64-unknown-linux-musl` | 87 | 15 | 4 | 0 | 0 |
+
+`mvm-hostlib` has the same 13 duplicates as `mvmctl`.
+
+| Artifact | Native-code packages | Proc-macro packages | Duplicate names |
+|---|---|---|---|
+| `mvmctl` | aws-lc-sys, blake3, ring, tree-sitter, tree-sitter-javascript, tree-sitter-nix, tree-sitter-python, tree-sitter-typescript | async-trait, clap_derive, der_derive, displaydoc, gix-macros, rustversion, serde_derive, thiserror-impl, tls_codec_derive, tokio-macros, tracing-attributes, yoke-derive, zerofrom-derive, zeroize_derive, zerovec-derive | bitflags, block-buffer, const-oid, cpufeatures, crypto-common, digest, getrandom, rand, rand_core, ryu-js, sha2, signature, untrusted |
+| `mvm-hostlib` | aws-lc-sys, blake3, ring, tree-sitter, tree-sitter-javascript, tree-sitter-nix, tree-sitter-python, tree-sitter-typescript | async-trait, der_derive, displaydoc, gix-macros, rustversion, serde_derive, thiserror-impl, tls_codec_derive, tokio-macros, tracing-attributes, yoke-derive, zerofrom-derive, zeroize_derive, zerovec-derive | as `mvmctl` |
+| `mvm-hostd` | blake3, ring | async-trait, displaydoc, gix-macros, rustversion, serde_derive, thiserror-impl, tokio-macros, tracing-attributes, yoke-derive, zerofrom-derive, zeroize_derive, zerovec-derive | bitflags, block-buffer, cpufeatures, crypto-common, digest, getrandom |
+| `mvm-host-services` | none | serde_derive, thiserror-impl, tracing-attributes, zeroize_derive | block-buffer, cpufeatures, crypto-common, digest |
+| `mvm-agentd` | none | serde_derive, thiserror-impl, tracing-attributes, zeroize_derive | block-buffer, cpufeatures, crypto-common, digest |
+| `mvm-builder-guest` | none | serde_derive, thiserror-impl, tracing-attributes, zeroize_derive | none |
+
+Build-script packages, by artifact:
+
+- `mvmctl`: anyhow, aws-lc-rs, aws-lc-sys, blake3, crc32fast, curve25519-dalek, faster-hex, generic-array, getrandom, heapless, httparse, icu_normalizer_data, icu_properties_data, libc, libkrun-sys, mvm-cli, mvmctl, num-traits, objc2, parking_lot_core, proc-macro2, quote, ring, rustix, rustls, rustversion, serde, serde_core, serde_json, thiserror, tree-sitter, tree-sitter-javascript, tree-sitter-language, tree-sitter-nix, tree-sitter-python, tree-sitter-typescript, zerocopy, zmij
+- `mvm-hostlib`: anyhow, aws-lc-rs, aws-lc-sys, blake3, crc32fast, curve25519-dalek, faster-hex, generic-array, getrandom, heapless, httparse, icu_normalizer_data, icu_properties_data, libc, libkrun-sys, num-traits, parking_lot_core, proc-macro2, quote, ring, rustix, rustls, rustversion, serde, serde_core, serde_json, thiserror, tree-sitter, tree-sitter-javascript, tree-sitter-language, tree-sitter-nix, tree-sitter-python, tree-sitter-typescript, zerocopy, zmij
+- `mvm-hostd`: anyhow, blake3, crc32fast, curve25519-dalek, faster-hex, generic-array, getrandom, heapless, httparse, icu_normalizer_data, icu_properties_data, libc, libkrun-sys, num-traits, parking_lot_core, proc-macro2, quote, ring, rustix, rustls, rustversion, serde, serde_core, serde_json, thiserror, zmij
+- `mvm-host-services`: anyhow, curve25519-dalek, generic-array, getrandom, libc, num-traits, proc-macro2, quote, rustix, serde, serde_core, serde_json, thiserror, zmij
+- `mvm-agentd`: anyhow, curve25519-dalek, generic-array, getrandom, libc, num-traits, proc-macro2, quote, rustix, serde, serde_core, serde_json, thiserror, zmij
+- `mvm-builder-guest`: anyhow, curve25519-dalek, getrandom, libc, memoffset, nix, num-traits, proc-macro2, quote, rustix, serde, serde_core, serde_json, thiserror, zmij
+
+All 90 direct dependencies. Artifact letters: C `mvmctl`, L `mvm-hostlib`, D
+`mvm-hostd`, S `mvm-host-services`, A `mvm-agentd`, G `mvm-builder-guest`;
+"none" means no workspace crate in those six closures at these targets and
+flags uses it (target-specific, feature-gated or tooling-only). Features are the
+cargo-resolved set as enabled on the dependency node, unioned over the artifacts
+in that row; `default` is shown only when it is the sole feature.
+
+| Direct dependency | In closure of | Enabled features |
+|---|---|---|
+| `aes-gcm` | CLDSAG | aes, alloc, getrandom |
+| `aho-corasick` | CLD | perf-literal, std |
+| `anyhow` | CLDSAG | std |
+| `async-trait` | CLD | - |
+| `aya` | none | - |
+| `base64` | CLDSAG | alloc, std |
+| `blake3` | CLD | std |
+| `bs58` | CLD | alloc, std |
+| `bytes` | CLDSAG | std |
+| `chrono` | CLDSAG | alloc, clock, iana-time-zone, js-sys, now, oldtime, serde, std, wasm-bindgen, wasmbind, winapi, windows-link |
+| `clap` | C | derive, error-context, help, std, usage |
+| `clap_mangen` | none | - |
+| `core-foundation` | CLDSA | link |
+| `ed25519-dalek` | CLDSAG | fast, rand_core, signature, zeroize |
+| `ext4-view` | CLD | std |
+| `flate2` | CLD | any_impl, miniz_oxide, rust_backend |
+| `gix` | CLD | attributes, command, excludes, index, sha1 |
+| `globset` | CL | log |
+| `hex` | CLDSAG | alloc, std |
+| `hickory-proto` | none | - |
+| `hickory-resolver` | none | - |
+| `hmac` | CLDSAG | - |
+| `http` | CLD | std |
+| `httparse` | CLD | std |
+| `ipnet` | CLDSAG | serde, std |
+| `keyring` | CLD | - |
+| `landlock` | none | - |
+| `leakguard` | CLD | - |
+| `libc` | CLDSAG | extra_traits, std |
+| `libloading` | none | - |
+| `lzma-rs` | CLD | - |
+| `mio` | CLD | log, net, os-ext, os-poll |
+| `nextest-metadata` | none | - |
+| `nix` | G | fs, ioctl, memoffset, mount, process, reboot, signal, socket, uio |
+| `notify` | none | - |
+| `notify-debouncer-mini` | none | - |
+| `objc2-foundation` | C | FoundationErrors, FoundationLegacySwiftCompatibility, NSAffineTransform, NSAppleEventDescriptor, NSAppleEventManager, NSAppleScript, NSArchiver, NSArray, NSAttributedString, NSAutoreleasePool, NSBackgroundActivityScheduler, NSBundle, NSByteCountFormatter, NSByteOrder, NSCache, NSCalendar, NSCalendarDate, NSCharacterSet, NSClassDescription, NSCoder, NSComparisonPredicate, NSCompoundPredicate, NSConnection, NSData, NSDate, NSDateComponentsFormatter, NSDateFormatter, NSDateInterval, NSDateIntervalFormatter, NSDebug, NSDecimal, NSDecimalNumber, NSDictionary, NSDistantObject, NSDistributedLock, NSDistributedNotificationCenter, NSEnergyFormatter, NSEnumerator, NSError, NSException, NSExpression, NSExtensionContext, NSExtensionItem, NSExtensionRequestHandling, NSFileCoordinator, NSFileHandle, NSFileManager, NSFilePresenter, NSFileVersion, NSFileWrapper, NSFormatter, NSGarbageCollector, NSGeometry, NSHFSFileTypes, NSHTTPCookie, NSHTTPCookieStorage, NSHashTable, NSHost, NSISO8601DateFormatter, NSIndexPath, NSIndexSet, NSInflectionRule, NSInvocation, NSItemProvider, NSJSONSerialization, NSKeyValueCoding, NSKeyValueObserving, NSKeyValueSharedObservers, NSKeyedArchiver, NSLengthFormatter, NSLinguisticTagger, NSListFormatter, NSLocale, NSLocalizedNumberFormatRule, NSLock, NSMapTable, NSMassFormatter, NSMeasurement, NSMeasurementFormatter, NSMetadata, NSMetadataAttributes, NSMethodSignature, NSMorphology, NSNetServices, NSNotification, NSNotificationQueue, NSNull, NSNumberFormatter, NSObjCRuntime, NSObject, NSObjectScripting, NSOperation, NSOrderedCollectionChange, NSOrderedCollectionDifference, NSOrderedSet, NSOrthography, NSPathUtilities, NSPersonNameComponents, NSPersonNameComponentsFormatter, NSPointerArray, NSPointerFunctions, NSPort, NSPortCoder, NSPortMessage, NSPortNameServer, NSPredicate, NSProcessInfo, NSProgress, NSPropertyList, NSProtocolChecker, NSProxy, NSRange, NSRegularExpression, NSRelativeDateTimeFormatter, NSRunLoop, NSScanner, NSScriptClassDescription, NSScriptCoercionHandler, NSScriptCommand, NSScriptCommandDescription, NSScriptExecutionContext, NSScriptKeyValueCoding, NSScriptObjectSpecifiers, NSScriptStandardSuiteCommands, NSScriptSuiteRegistry, NSScriptWhoseTests, NSSet, NSSortDescriptor, NSSpellServer, NSStream, NSString, NSTask, NSTermOfAddress, NSTextCheckingResult, NSThread, NSTimeZone, NSTimer, NSURL, NSURLAuthenticationChallenge, NSURLCache, NSURLConnection, NSURLCredential, NSURLCredentialStorage, NSURLDownload, NSURLError, NSURLHandle, NSURLProtectionSpace, NSURLProtocol, NSURLRequest, NSURLResponse, NSURLSession, NSUUID, NSUbiquitousKeyValueStore, NSUndoManager, NSUnit, NSUserActivity, NSUserDefaults, NSUserNotification, NSUserScriptTask, NSValue, NSValueTransformer, NSXMLDTD, NSXMLDTDNode, NSXMLDocument, NSXMLElement, NSXMLNode, NSXMLNodeOptions, NSXMLParser, NSXPCConnection, NSZone, alloc, bitflags, block2, libc, objc2-core-foundation, std |
+| `object_store` | none | - |
+| `percent-encoding` | C | alloc, std |
+| `plist` | CLDSA | serde |
+| `rand` | CLDSAG | alloc, std, std_rng, sys_rng, thread_rng |
+| `rcgen` | CLD | crypto, pem, ring |
+| `regex` | CLD | perf, perf-backtrack, perf-cache, perf-dfa, perf-inline, perf-literal, perf-onepass, std, unicode, unicode-age, unicode-bool, unicode-case, unicode-gencat, unicode-perl, unicode-script, unicode-segment |
+| `rustix` | CLDSAG | alloc, event, fs, process, std |
+| `rustls` | CLD | ring, std, tls12 |
+| `rustls-pki-types` | CLD | alloc, std |
+| `rustls-platform-verifier` | CLD | - |
+| `schemars` | none | - |
+| `seccompiler` | G | - |
+| `secrecy` | CLDSAG | serde |
+| `security-framework` | CLDSA | OSX_10_14, alpn, session-tickets |
+| `serde` | CLDSAG | alloc, derive, serde_derive, std |
+| `serde_jcs` | CLDSAG | - |
+| `serde_json` | CLDSAG | alloc, float_roundtrip, std |
+| `sha1` | CLDSA | compress, std |
+| `sha2` | CLDSAG | alloc, oid |
+| `sigstore-trust-root` | CL | - |
+| `sigstore-types` | CL | - |
+| `sigstore-verify` | CL | - |
+| `socket2` | CLDSAG | all |
+| `syn` | none | - |
+| `sysinfo` | CLD | - |
+| `tar` | CLDG | xattr |
+| `tempfile` | CLDSAG | getrandom |
+| `thiserror` | CLDSAG | std |
+| `tokio` | CLD | bytes, fs, io-util, libc, macros, mio, net, process, rt, rt-multi-thread, signal, signal-hook-registry, socket2, sync, time, tokio-macros |
+| `tokio-rustls` | CLD | ring |
+| `tokio-vsock` | none | - |
+| `toml` | CLD | display, parse |
+| `toml_edit` | C | display, parse, serde |
+| `tracing` | CLDSAG | attributes, std, tracing-attributes |
+| `tracing-subscriber` | CLD | alloc, ansi, env-filter, fmt, json, matchers, nu-ansi-term, once_cell, registry, serde, serde_json, sharded-slab, smallvec, std, thread_local, tracing, tracing-log, tracing-serde |
+| `tree-sitter` | CL | std |
+| `tree-sitter-javascript` | CL | - |
+| `tree-sitter-nix` | CL | - |
+| `tree-sitter-python` | CL | - |
+| `tree-sitter-typescript` | CL | - |
+| `tss-esapi` | none | - |
+| `unicode-normalization` | CLD | std |
+| `url` | CLD | std |
+| `uuid` | CLDSAG | rng, serde, sha1, std, v4, v5 |
+| `virtio-queue` | CLD | - |
+| `virtio-vsock` | CLD | - |
+| `vm-memory` | CLD | backend-mmap, rawfd |
+| `wasmtime` | none | - |
+| `wasmtime-wasi` | none | - |
+| `which` | CLD | - |
+| `x25519-dalek` | CLDSAG | precomputed-tables, static_secrets, zeroize |
+| `xattr` | CLD | unsupported |
+| `zeroize` | CLDSAG | alloc, zeroize_derive |
+
 ## Release-build compilation count (#4839 section 4)
 
 Measured at `4270e14d` on `aarch64-apple-darwin`, Rust 1.97.1, `--offline
