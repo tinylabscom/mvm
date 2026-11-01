@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 
+use mvm_client::artifacts::manifest::ArtifactManifest;
+use mvm_client::artifacts::traits::{ArtifactError, ArtifactValidator, BackendConfigWriter};
+use mvm_client::artifacts::{FirecrackerConfigWriter, StaticValidator};
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::artifacts::manifest::ArtifactManifest;
-use mvm_runtime::artifacts::traits::{ArtifactError, ArtifactValidator, BackendConfigWriter};
-use mvm_runtime::artifacts::{FirecrackerConfigWriter, StaticValidator};
 
 use super::Cli;
 
@@ -267,15 +267,15 @@ fn run_model_build(_args: ModelBuildArgs) -> Result<()> {
     Ok(())
 }
 
-/// Reconstruct a [`mvm_runtime::artifacts::artifact::MicrovmArtifact`] from an
+/// Reconstruct a [`mvm_client::artifacts::artifact::MicrovmArtifact`] from an
 /// `ArtifactManifest` for validation and config-writing.
 ///
 /// Paths stored in the manifest are relative to the artifact directory.
 fn manifest_to_artifact(
     m: &ArtifactManifest,
     dir: &Path,
-) -> mvm_runtime::artifacts::artifact::MicrovmArtifact {
-    use mvm_runtime::artifacts::artifact::{KernelArtifact, MicrovmArtifact, RootfsArtifact};
+) -> mvm_client::artifacts::artifact::MicrovmArtifact {
+    use mvm_client::artifacts::artifact::{KernelArtifact, MicrovmArtifact, RootfsArtifact};
 
     MicrovmArtifact {
         id: m.artifact_id,
@@ -309,7 +309,7 @@ fn manifest_to_artifact(
         // Check 6 becomes meaningful only when boot_args is recorded in the
         // manifest from the real cmdline at build time (the compat-seeded
         // path is then absent and the manifest carries the actual args used).
-        boot_args: mvm_runtime::compat::compat(m.backend)
+        boot_args: mvm_client::artifacts::compat(m.backend)
             .required_boot_args
             .iter()
             .map(|s| s.to_string())

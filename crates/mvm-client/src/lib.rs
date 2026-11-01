@@ -46,6 +46,7 @@ pub mod admission;
 pub mod agent_prompt;
 pub mod application_terminal;
 pub mod approval_broker;
+pub mod artifacts;
 pub mod attestation;
 pub mod audit;
 pub mod boot;
@@ -101,6 +102,7 @@ pub mod tool_mediation;
 pub mod transcript;
 pub mod ui;
 pub mod volume;
+pub mod vsock_transport;
 pub mod workspace_apply;
 
 /// The workload authoring surface: builders, constructors, IR emission.
