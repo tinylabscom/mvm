@@ -15,12 +15,15 @@ preparation; the runtime never reacquires against its own guard. HVF inherits
 both into its supervisor. The supervisor adopts them through the same complete
 startup-descriptor preflight as the verified kernel, consumes the backing as the
 virtio disk, and retains the sidecar until after the disk's final flush and
-destruction. Firecracker inherits the original descriptions through its bounded
-sudo launch and opens them through `/proc/self/fd`. Strict per-launch source
-metadata restores original paths in snapshots and observations; replacement
-writers prepare new locks only after the old writer's confirmed stop. QEMU and
-libkrun inherit the original backing and sidecar and open the backing through
-`/dev/fd`.
+destruction. Firecracker inherits compact duplicates of the original backing
+and sidecar through its bounded sudo launch while its drive recipe and snapshots
+keep the original paths. After drive configuration, launch refuses unless the
+live `/vm/config` matches that recipe and the actual writer's `/proc/<pid>/fd`
+objects include every original locked backing and sidecar. Restore reads drive
+roles from the old VMM's live `/vm/config`, positively stops that writer, and
+only then prepares replacement locks; it never parses snapshot bitcode or
+rewrites snapshot source metadata. QEMU and libkrun inherit the original backing
+and sidecar and open the backing through `/dev/fd`.
 In every case the actual writer retains the original lock descriptions through
 early-error recovery and uncertain stop; a caller dropping its duplicate is not
 a release event. Direct path-based user-writable boots are refused rather than

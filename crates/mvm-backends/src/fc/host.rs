@@ -653,18 +653,14 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
             .parent()
             .ok_or_else(|| anyhow::anyhow!("memory_path has no parent dir"))?
             .join(FC_VMSTATE_FILENAME);
-        super::create_snapshot_files(&self.vm_name, &vmstate_path, memory_path).with_context(
-            || {
-                format!(
-                    "creating Firecracker snapshot for VM '{}' (vmstate={}, mem={})",
-                    self.vm_name,
-                    vmstate_path.display(),
-                    memory_path.display(),
-                )
-            },
-        )?;
-        super::runtime_artifacts::restore_original_paths_in_file(&vmstate_path)
-            .context("restoring original writable source paths in Firecracker snapshot")
+        super::create_snapshot_files(&self.vm_name, &vmstate_path, memory_path).with_context(|| {
+            format!(
+                "creating Firecracker snapshot for VM '{}' (vmstate={}, mem={})",
+                self.vm_name,
+                vmstate_path.display(),
+                memory_path.display(),
+            )
+        })
     }
 
     fn rootfs_path(&self) -> Result<PathBuf> {

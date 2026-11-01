@@ -901,6 +901,10 @@ impl FcDriver {
             api_put_session(&mut session, &put.path, &put.body)
                 .with_context(|| format!("Firecracker API PUT {}", put.path))?;
         }
+        if let Some(handoff) = handoff.as_ref() {
+            crate::fc::io::FirecrackerIO::new(PathBuf::from(&socket))
+                .verify_writable_writer(handoff)?;
+        }
         crate::fc::secure_vsock_socket_for_caller(&vsock_uds)
             .context("restrict Firecracker vsock socket to the invoking user")?;
 

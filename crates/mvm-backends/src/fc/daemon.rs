@@ -9,6 +9,92 @@ use mvm_vmm::host::ui;
 
 use super::{firecracker_vsock_uds_path, resolve_running_vm_dir};
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(serde::Deserialize)]
+struct WriterConfig {
+    drives: Vec<WriterDrive>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(serde::Deserialize)]
+struct WriterDrive {
+    drive_id: String,
+    path_on_host: std::path::PathBuf,
+    is_read_only: bool,
+}
+
+/// Authenticate the configured writable drives against the original objects
+/// still held by this launch, not against pathnames that could be replaced.
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_writable_writer(
+    abs_dir: &str,
+    abs_socket: &str,
+    handoff: &mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+) -> Result<()> {
+    let config: WriterConfig = serde_json::from_str(&super::call(
+        std::path::Path::new(abs_socket),
+        "GET",
+        "/vm/config",
+        None,
+    )?)
+    .context("parsing actual Firecracker writable drive configuration")?;
+    validate_writer_config(&config, handoff.projected())?;
+    let pid = read_firecracker_pid(abs_dir)?;
+    handoff
+        .verify_writer_descriptors(pid)
+        .with_context(|| format!("verifying original writable custody in Firecracker pid {pid}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn verify_writable_writer(
+    _abs_dir: &str,
+    _abs_socket: &str,
+    _handoff: &mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+) -> Result<()> {
+    anyhow::bail!("Firecracker descriptor custody requires the native Linux writer")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn validate_writer_config(
+    config: &WriterConfig,
+    spec: &mvm_vmm::driver::spec::VmmSpec,
+) -> Result<()> {
+    use std::collections::BTreeSet;
+    let mut seen = BTreeSet::new();
+    for drive in config.drives.iter().filter(|drive| !drive.is_read_only) {
+        let block = spec
+            .blocks
+            .iter()
+            .find(|block| format!("blk{}", block.slot) == drive.drive_id)
+            .with_context(|| {
+                format!(
+                    "actual writer has unknown writable drive {}",
+                    drive.drive_id
+                )
+            })?;
+        anyhow::ensure!(
+            seen.insert(block.slot),
+            "actual writer repeats writable slot {}",
+            block.slot
+        );
+        if !block.ephemeral {
+            anyhow::ensure!(
+                drive.path_on_host == block.source,
+                "actual writable drive {} differs from its original locked source",
+                drive.drive_id
+            );
+        }
+    }
+    for block in spec.blocks.iter().filter(|block| !block.read_only) {
+        anyhow::ensure!(
+            seen.contains(&block.slot),
+            "actual writer is missing configured writable slot {}",
+            block.slot
+        );
+    }
+    Ok(())
+}
+
 /// Resolve the path to the per-VM serial console log file.
 ///
 /// The host-side netinit-audit emitter
@@ -676,6 +762,48 @@ pub fn read_firecracker_pid(abs_dir: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_writer_config_must_match_every_original_writable_source() {
+        use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec};
+        let spec = VmmSpec {
+            name: "writer".into(),
+            kernel: KernelImage::Bundled,
+            initramfs: None,
+            cmdline: String::new(),
+            vcpus: 1,
+            memory_mib: 512,
+            mem_initial_mib: None,
+            cpu_grant: None,
+            blocks: vec![BlockDev {
+                source: "/original/volume".into(),
+                read_only: false,
+                ephemeral: false,
+                slot: 3,
+            }],
+            shares: Vec::new(),
+            vsock: Default::default(),
+            console: mvm_vmm::driver::spec::ConsoleCapture {
+                log_path: "/unused".into(),
+            },
+            trusted_builder: false,
+            builder_egress_endpoint: None,
+            plan_binding: None,
+        };
+        let matching: WriterConfig = serde_json::from_str(
+            r#"{"drives":[{"drive_id":"blk3","path_on_host":"/original/volume","is_read_only":false}]}"#,
+        )
+        .unwrap();
+        validate_writer_config(&matching, &spec).unwrap();
+        for body in [
+            r#"{"drives":[]}"#,
+            r#"{"drives":[{"drive_id":"blk3","path_on_host":"/replacement","is_read_only":false}]}"#,
+            r#"{"drives":[{"drive_id":"blk4","path_on_host":"/original/volume","is_read_only":false}]}"#,
+        ] {
+            let changed: WriterConfig = serde_json::from_str(body).unwrap();
+            assert!(validate_writer_config(&changed, &spec).is_err(), "{body}");
+        }
+    }
 
     /// An idle process records its own pid and start time before it execs
     /// Firecracker; a VM launch line records neither.

@@ -43,6 +43,57 @@ impl SudoWritableHandoff {
         self.first
     }
 
+    /// Require the live writer to retain every original backing and sidecar.
+    #[cfg(target_os = "linux")]
+    pub fn verify_writer_descriptors(&self, pid: u32) -> Result<()> {
+        self.verify_writer_descriptors_at(std::path::Path::new(&format!("/proc/{pid}/fd")))
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn verify_writer_descriptors_at(&self, fd_dir: &std::path::Path) -> Result<()> {
+        let mut actual = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(fd_dir)
+            .with_context(|| format!("reading actual writer descriptors at {}", fd_dir.display()))?
+        {
+            let entry = entry?;
+            // proc fd entries are magic symlinks. metadata follows them to the
+            // open object; a pathname match would not detect ABA substitution.
+            let metadata = std::fs::metadata(entry.path()).with_context(|| {
+                format!(
+                    "inspecting actual writer descriptor {}",
+                    entry.path().display()
+                )
+            })?;
+            *actual
+                .entry((metadata.dev(), metadata.ino()))
+                .or_insert(0usize) += 1;
+        }
+        for (index, pair) in self._files.chunks_exact(2).enumerate() {
+            for (role, file) in ["backing", "sidecar"].into_iter().zip(pair) {
+                let expected = file.metadata()?;
+                // Firecracker opens the original drive path in addition to
+                // inheriting custody. One inherited backing plus a replacement
+                // drive must not satisfy this check after an ABA path swap.
+                let required = if role == "backing" { 2 } else { 1 };
+                ensure!(
+                    actual
+                        .get(&(expected.dev(), expected.ino()))
+                        .copied()
+                        .unwrap_or(0)
+                        >= required,
+                    "actual writer is missing original writable {role} object for slot {}",
+                    self.projected
+                        .blocks
+                        .iter()
+                        .filter(|block| !block.read_only && !block.ephemeral)
+                        .nth(index)
+                        .map_or_else(|| "unknown".into(), |block| block.slot.to_string())
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn last(&self) -> u32 {
         self.last
     }
@@ -88,15 +139,10 @@ impl PreparedWritableDisks {
             "sudo handoff requires persistent writable resources"
         );
         let mut files = Vec::new();
-        let mut projected = spec.clone();
+        let projected = spec.clone();
         let mut first = None;
         let mut next = 1000;
         for disk in self.disks {
-            let block = projected
-                .blocks
-                .iter_mut()
-                .find(|block| block.slot == disk.block.slot)
-                .context("projected writable slot missing")?;
             for file in [disk.image.backing(), disk.image.sidecar()] {
                 // SAFETY: duplicates the live descriptor with CLOEXEC and returns a
                 // new owned File only after fcntl reports success.
@@ -109,9 +155,6 @@ impl PreparedWritableDisks {
                 }
                 first.get_or_insert(fd as u32);
                 next = fd as u32 + 1;
-                if std::ptr::eq(file, disk.image.backing()) {
-                    block.source = format!("/proc/self/fd/{fd}").into();
-                }
                 // SAFETY: `fd` is a fresh descriptor owned by this handoff.
                 files.push(unsafe { std::fs::File::from_raw_fd(fd) });
             }
@@ -201,14 +244,6 @@ impl PreparedWritableDisks {
     /// Borrow the original owners in final physical-slot order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (u8, &LockedWritableImage)> {
         self.disks.iter().map(|disk| (disk.block.slot, &disk.image))
-    }
-
-    /// Original diagnostic paths by final slot, never transport projections.
-    pub fn original_sources(&self) -> std::collections::BTreeMap<u8, PathBuf> {
-        self.disks
-            .iter()
-            .map(|disk| (disk.block.slot, disk.block.source.clone()))
-            .collect()
     }
 
     /// Project writable backings through descriptors inherited by the writer.
@@ -558,10 +593,7 @@ mod tests {
             .unwrap();
         assert_eq!(handoff._files.len(), 2);
         assert_eq!(handoff.first + 1, handoff.last);
-        assert_eq!(
-            handoff.projected.blocks[0].source,
-            std::path::PathBuf::from(format!("/proc/self/fd/{}", handoff._files[0].as_raw_fd()))
-        );
+        assert_eq!(handoff.projected.blocks[0].source, path);
         for (index, file) in handoff._files.iter().enumerate() {
             assert_ne!(
                 file.as_raw_fd(),
@@ -576,6 +608,37 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn sudo_writer_verification_requires_original_objects_not_alias_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("image");
+        let sidecar = tmp.path().join("image.lock");
+        let held = LockedWritableImage::acquire(writable(&path), writable(&sidecar)).unwrap();
+        let spec = spec(vec![block(&path, 0)]);
+        let handoff = PreparedWritableDisks::bind(&spec, vec![(0, held)])
+            .unwrap()
+            .into_sudo_handoff(&spec)
+            .unwrap();
+        let fds = tmp.path().join("writer-fds");
+        std::fs::create_dir(&fds).unwrap();
+        std::os::unix::fs::symlink(&path, fds.join("1000")).unwrap();
+        std::os::unix::fs::symlink(&path, fds.join("1002")).unwrap();
+        std::os::unix::fs::symlink(&sidecar, fds.join("1001")).unwrap();
+        handoff.verify_writer_descriptors_at(&fds).unwrap();
+
+        std::fs::remove_file(fds.join("1001")).unwrap();
+        assert!(handoff.verify_writer_descriptors_at(&fds).is_err());
+        std::os::unix::fs::symlink(&path, fds.join("1001")).unwrap();
+        let error = handoff.verify_writer_descriptors_at(&fds).unwrap_err();
+        assert!(format!("{error:#}").contains("sidecar"));
+
+        let replacement = tmp.path().join("replacement");
+        let _replacement = writable(&replacement);
+        std::fs::remove_file(fds.join("1001")).unwrap();
+        std::os::unix::fs::symlink(&replacement, fds.join("1001")).unwrap();
+        assert!(handoff.verify_writer_descriptors_at(&fds).is_err());
     }
 
     #[test]
