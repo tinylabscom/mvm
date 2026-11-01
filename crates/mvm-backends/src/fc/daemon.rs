@@ -375,36 +375,55 @@ fn launch_script(
                 return 1
             fi
         }"#;
-    let payload = match identity_file {
-        None => format!(
-            "'{write_marker}; write_marker \"$0\" \"$$\" \"{marker_mode}\" && exec firecracker --api-sock \"$1\"' {q_pid} {q_socket}"
+    // The body lives in a script file and the `systemd-run` line carries only
+    // its path: some systemd releases rewrite `$` inside the command line, and
+    // the file keeps every `$` out of it.
+    let script_path = format!("{abs_dir}/launch.sh");
+    let q_script = shell_quote(&script_path);
+    let (body, args) = match identity_file {
+        None => (
+            format!(
+                "{write_marker}\nwrite_marker \"$1\" \"$$\" \"{marker_mode}\" && exec firecracker --api-sock \"$2\"\n"
+            ),
+            format!("{q_pid} {q_socket}"),
         ),
         Some(identity) => {
             // A root caller can read owner-only files; a sudo-elevated
             // process must leave its records readable to the invoking user,
             // inside the pool's owner-only directory.
-            let umask = if euid == 0 { "umask 077; " } else { "" };
-            format!(
-                "'{umask}{write_marker}; s=$(sed \"s/^.*) //\" /proc/$$/stat | cut -d\" \" -f20); \
-                 write_marker \"$2\" \"$$ $s\" \"{marker_mode}\" && \
-                 write_marker \"$0\" \"$$\" \"{marker_mode}\" && \
-                 exec firecracker --api-sock \"$1\"' {q_pid} {q_socket} {q_identity}",
-                q_identity = shell_quote(identity),
+            let umask = if euid == 0 { "umask 077\n" } else { "" };
+            (
+                format!(
+                    "{umask}{write_marker}\ns=$(sed \"s/^.*) //\" /proc/$$/stat | cut -d\" \" -f20)\n\
+                     write_marker \"$3\" \"$$ $s\" \"{marker_mode}\" && \\\n\
+                     write_marker \"$1\" \"$$\" \"{marker_mode}\" && \\\n\
+                     exec firecracker --api-sock \"$2\"\n"
+                ),
+                format!(
+                    "{q_pid} {q_socket} {q_identity}",
+                    q_identity = shell_quote(identity)
+                ),
             )
         }
     };
+    let payload = format!("{q_script} {args}");
     format!(
         r#"
         mkdir -p {q_dir} {q_socket_dir}
         {sudo}rm -f {q_socket}
         {vsock_cleanup}
         (umask 077 && rm -f {q_dir}/console.log {q_dir}/firecracker.log && touch {q_dir}/console.log {q_dir}/firecracker.log)
-        {scope}{sudo}setsid nohup sh -c {payload} \
+        (umask 077 && cat > {q_script} <<'MVM_LAUNCH_SCRIPT_EOF'
+{body}MVM_LAUNCH_SCRIPT_EOF
+        )
+        {scope}{sudo}setsid nohup sh {payload} \
             </dev/null >{q_dir}/console.log 2>{q_dir}/firecracker.log &
         {record_launcher}
         "#,
         q_dir = q_dir,
         payload = payload,
+        body = body,
+        q_script = q_script,
         q_socket_dir = q_socket_dir,
         vsock_cleanup = vsock_cleanup,
         scope = scope,
@@ -600,7 +619,7 @@ mod tests {
             0,
             Some("/p/idle-1/fc.identity"),
         );
-        assert!(idle.contains(r#"write_marker "$2" "$$ $s""#), "{idle}");
+        assert!(idle.contains(r#"write_marker "$3" "$$ $s""#), "{idle}");
         assert!(idle.contains("/proc/$$/stat"), "{idle}");
         assert!(idle.contains("'/p/idle-1/fc.identity'"), "{idle}");
         assert!(
@@ -610,16 +629,16 @@ mod tests {
         // Every launch line creates its log files owner-only; only root's
         // payload also narrows the identity record it writes under sudo.
         let as_user = launch_script("/p/i", "/p/i/fc.socket", "", 1000, Some("/p/i/id"));
-        assert!(idle.contains("umask 077; write_marker() {"), "{idle}");
+        assert!(idle.contains("umask 077\nwrite_marker() {"), "{idle}");
         assert!(
-            !as_user.contains("umask 077; write_marker() {"),
+            !as_user.contains("umask 077\nwrite_marker() {"),
             "{as_user}"
         );
         assert!(as_user.contains("(umask 077 && rm -f"), "{as_user}");
         let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 0);
         assert!(!vm.contains("/proc/$$/stat"), "{vm}");
         assert!(
-            vm.contains(r#"write_marker "$0" "$$" "600" && exec firecracker --api-sock "$1""#),
+            vm.contains(r#"write_marker "$1" "$$" "600" && exec firecracker --api-sock "$2""#),
             "{vm}"
         );
     }
@@ -966,7 +985,7 @@ mod tests {
         // has to be born inside the scope.
         let scope_at = script.find("systemd-run").expect("prefix present");
         let launch_at = script
-            .find("sudo setsid nohup sh -c")
+            .find("sudo setsid nohup sh ")
             .expect("launch present");
         assert!(scope_at < launch_at, "{script}");
         // And the launcher is recorded after it is backgrounded, so a manager
@@ -1001,7 +1020,7 @@ mod tests {
         let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
         assert!(!script.contains("systemd-run"), "{script}");
         assert!(!script.contains("scope-launcher.pid"), "{script}");
-        assert!(script.contains("sudo setsid nohup sh -c"), "{script}");
+        assert!(script.contains("sudo setsid nohup sh "), "{script}");
         assert!(
             script.contains("exec firecracker"),
             "the shell must exec Firecracker, never leave one behind: {script}"
@@ -1033,14 +1052,14 @@ mod tests {
             "$! does not survive a forking sudo/setsid: {script}"
         );
         assert!(
-            script.contains(r#"write_marker "$0" "$$" "644""#),
+            script.contains(r#"write_marker "$1" "$$" "644""#),
             "the pid must come from the process that becomes Firecracker: {script}"
         );
 
         // Written before the exec, so the marker is in place by the time the
         // API socket exists and the caller starts probing liveness.
         let write_at = script
-            .find(r#"write_marker "$0" "$$" "644""#)
+            .find(r#"write_marker "$1" "$$" "644""#)
             .expect("pid write present");
         let exec_at = script.find("exec firecracker").expect("exec present");
         assert!(write_at < exec_at, "{script}");
@@ -1232,7 +1251,7 @@ mod sudo_elision_tests {
     fn a_non_root_launch_still_elevates() {
         assert_eq!(sudo_prefix_for_euid(1000), "sudo ");
         let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
-        assert!(script.contains("sudo setsid nohup sh -c"), "{script}");
+        assert!(script.contains("sudo setsid nohup sh "), "{script}");
         assert!(script.contains("sudo rm -f"), "{script}");
     }
 
@@ -1256,17 +1275,14 @@ mod sudo_elision_tests {
         for euid in [0, 1000] {
             let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", euid);
             assert!(
-                script.contains(r#"write_marker "$0" "$$""#),
+                script.contains(r#"write_marker "$1" "$$""#),
                 "euid {euid} must write the pid from inside: {script}"
             );
             assert!(
                 script.contains("exec firecracker"),
                 "euid {euid} must exec so the pid names Firecracker: {script}"
             );
-            assert!(
-                script.contains("setsid nohup sh -c"),
-                "euid {euid}: {script}"
-            );
+            assert!(script.contains("setsid nohup sh "), "euid {euid}: {script}");
         }
     }
 
@@ -1281,8 +1297,87 @@ mod sudo_elision_tests {
                 euid,
             );
             let scope_at = script.find("systemd-run").expect("scope present");
-            let launch_at = script.find("setsid nohup sh -c").expect("launch present");
+            let launch_at = script.find("setsid nohup sh ").expect("launch present");
             assert!(scope_at < launch_at, "euid {euid}: {script}");
         }
+    }
+
+    /// Nothing on the scope's command line may contain `$`: some systemd
+    /// releases rewrite `$$` there, so the body is kept in a script file.
+    #[test]
+    fn the_scoped_command_line_carries_no_dollar() {
+        let script = launch_script(
+            "/tmp/vm",
+            "/tmp/vm/fc.socket",
+            "systemd-run --scope ",
+            1000,
+            Some("/tmp/vm/id"),
+        );
+        let line = script
+            .lines()
+            .find(|l| l.contains("systemd-run"))
+            .expect("scoped launch line");
+        assert!(!line.contains('$'), "{line}");
+    }
+
+    /// A stand-in `systemd-run` that collapses `$$` to `$` in its arguments
+    /// (systemd 259 behaviour) must still leave a numeric pid marker.
+    #[cfg(unix)]
+    #[test]
+    fn a_systemd_that_rewrites_dollars_still_yields_a_numeric_pid() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("root");
+        let bin = root.path().join("bin");
+        let vm_dir = root.path().join("vm");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::create_dir_all(&vm_dir).expect("vm");
+        let make = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, body).expect("write stub");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod stub");
+        };
+        make(
+            "systemd-run",
+            "#!/bin/sh\nshift\nfor a; do set -- \"$@\" \"$(printf '%s' \"$a\" | sed 's/\\$\\$/$/g')\"; shift; done\nexec \"$@\"\n",
+        );
+        make("setsid", "#!/bin/sh\nexec \"$@\"\n");
+        make("nohup", "#!/bin/sh\nexec \"$@\"\n");
+        let invoked = root.path().join("invoked");
+        make(
+            "firecracker",
+            "#!/bin/sh\n: > \"$MVM_TEST_FIRECRACKER_INVOKED\"\n",
+        );
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH is set"),
+        )))
+        .expect("PATH");
+        let dir = vm_dir.to_string_lossy();
+        let socket = vm_dir.join("fc.socket");
+        let script = launch_script(
+            &dir,
+            &socket.to_string_lossy(),
+            "systemd-run --scope ",
+            0,
+            None,
+        );
+        let out = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("PATH", path)
+            .env("MVM_TEST_FIRECRACKER_INVOKED", &invoked)
+            .output()
+            .expect("run launch");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !invoked.exists() {
+            assert!(std::time::Instant::now() < deadline, "firecracker not run");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        read_firecracker_pid(&dir).expect("numeric pid marker");
     }
 }
