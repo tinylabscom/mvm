@@ -30,6 +30,9 @@ Feature: the README's SDK entry points reach the same launch path
   # SandboxDevOnly when the run needs DevOnly verbs but admission offers only
   # the restricted ProdSafe grant — no silent fallback."
   #
+  # The CLI default profile is `dev`, so the restricted grant is asked for
+  # explicitly with `--profile standard`.
+  #
   # The script does boot a real guest — `Sandbox.create` returns — and is then
   # refused at the SDK's own gate, which is where the README says the refusal
   # happens. It used to get past that gate (the envelope reported the image's
@@ -38,7 +41,7 @@ Feature: the README's SDK entry points reach the same launch path
   # documented behaviour a caller can program against.
   @live
   Scenario: a runtime-SDK script is refused DevOnly surfaces under a ProdSafe grant
-    When I launch "run --mode live crates/mvm-conformance/fixtures/e2e/sandbox_script.py"
+    When I launch "run --mode live --profile standard crates/mvm-conformance/fixtures/e2e/sandbox_script.py"
     Then the launch fails
     And the output mentions "SandboxDevOnly"
     And the output mentions "build_mode='prod'"
