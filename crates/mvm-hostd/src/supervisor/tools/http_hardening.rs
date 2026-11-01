@@ -24,12 +24,8 @@
 //!   Every targeted upstream supports it, so pinning the floor closes a
 //!   downgrade vector without breaking an operator workflow.
 //!
-//! One resolver serves every caller. That was not previously possible: reqwest
-//! connects on the resolver's port rather than the URL's, and its `Resolve`
-//! trait is never handed the port, so the filtering resolver had to hardcode
-//! 443 and any caller forwarding to another port needed a second builder with
-//! no resolver plus a manual resolve-and-pin. `mvm_http::Resolve` receives
-//! `(host, port)`.
+//! One resolver serves every caller: `mvm_http::Resolve` receives
+//! `(host, port)`, so the filtering resolver is correct for any port.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -50,13 +46,9 @@ pub const MIN_TLS_VERSION: mvm_http::TlsVersion = mvm_http::TlsVersion::Tls13;
 /// before `.build()`. Redirects are not a setting: `mvm-http` never follows
 /// them.
 ///
-/// There is one builder now. There used to be two, because reqwest connects on
-/// the *resolver's* port rather than the URL's and its `Resolve` trait is never
-/// handed the port — so an SSRF-filtering resolver had to hardcode 443, and
-/// anything forwarding to another port needed a second, resolver-less builder
-/// plus a manual resolve-and-pin dance. `mvm_http::Resolve` receives
-/// `(host, port)`, so the filtering resolver is port-correct and the split is
-/// gone.
+/// One builder serves every port: `mvm_http::Resolve` receives `(host, port)`,
+/// so the filtering resolver is port-correct and no caller needs a
+/// resolver-less client with a manual resolve-and-pin.
 pub fn hardened_client_builder(timeout_secs: u64) -> mvm_http::ClientBuilder {
     mvm_http::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
