@@ -2,10 +2,7 @@
 //!
 //! [`ImageLock`](super::ImageLock) pins the signed root manifest. The small
 //! train-shaped fields remain because Stage 0 needs a compile-time seed digest
-//! before it can build anything, while the legacy entry deliberately preserves
-//! the previous producer through the compatibility window. New consumers use
-//! `image_set`; the legacy entry is evidence of accepted historical trust, not
-//! a fallback that may be selected implicitly.
+//! before it can build anything.
 //!
 //! The pins are read from `mvm-core`'s own `images.lock`, parsed once, and
 //! shared. `include_str!` rather than a build script: the file is checked in, a
@@ -19,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::identity::{ArtifactName, ReleaseTag, RepositorySlug};
-use super::{ImageLock, ImageSetCompatibility, SigningIdentity};
+use super::{ImageLock, ImageSetCompatibility};
 use crate::arch::GuestArch;
 use crate::packs::Sha256Hex;
 
@@ -59,17 +56,6 @@ pub struct ImageTrainLock {
     pub compatibility: ImageSetCompatibility,
     pub boot_image: BootImagePin,
     pub stage0_kernel: Stage0KernelPin,
-    /// The previous producer retained only for the declared support window.
-    pub legacy: LegacyImageTrain,
-}
-
-/// Previous image producer accepted during the old-plus-new trust window.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyImageTrain {
-    pub repository: RepositorySlug,
-    pub release_tag: ReleaseTag,
-    pub signing_identity: SigningIdentity,
 }
 
 /// The boot image release the CLI expects.
@@ -225,14 +211,6 @@ release_tag = "image-set/v1.2.3"
 [stage0_kernel.artifact.aarch64]
 name = "stage0-vmlinux-aarch64"
 sha256 = "b53be06555a144433369708a57e9e1d278dbad7d26cb31a5fe9167eb7a90f6c1"
-
-[legacy]
-repository = "tinylabscom/mvm"
-release_tag = "boot-image/v1.2.0"
-
-[legacy.signing_identity]
-workflow = ".github/workflows/release-boot-image.yml"
-tag_ref = "refs/tags/boot-image/v1.2.0"
 "#;
 
     #[test]
@@ -278,12 +256,10 @@ tag_ref = "refs/tags/boot-image/v1.2.0"
     }
 
     #[test]
-    fn the_current_and_legacy_trains_are_pinned_separately() {
+    fn the_current_train_pins_boot_image_and_stage0_kernel() {
         let lock = ImageTrainLock::parse(MINIMAL).expect("the fixture parses");
         assert_eq!(lock.boot_image.release_tag.as_str(), "image-set/v1.2.3");
         assert_eq!(lock.stage0_kernel.release_tag.as_str(), "image-set/v1.2.3");
-        assert_eq!(lock.legacy.repository.as_str(), "tinylabscom/mvm");
-        assert_eq!(lock.legacy.release_tag.as_str(), "boot-image/v1.2.0");
     }
 
     #[test]

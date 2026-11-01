@@ -81,14 +81,3 @@ sha256 = "b7fd5cb8b564dd4b21e2deb5d6a7a8785b9a50853cea13d0334b8fe99cc52693"
 [stage0_kernel.artifact.x86_64]
 name = "stage0-vmlinux-x86_64"
 sha256 = "17d3246661c3fdee72d9a8949ac16736d9d1857f4849ad75cd57fc10c789ea46"
-
-# The previous producer remains explicit throughout the compatibility window.
-# New consumers never select it implicitly; W7 owns mirroring and W8 owns its
-# eventual removal after supported old CLIs have aged out.
-[legacy]
-repository = "tinylabscom/mvm"
-release_tag = "boot-image/v0.1.5"
-
-[legacy.signing_identity]
-workflow = ".github/workflows/release-boot-image.yml"
-tag_ref = "refs/tags/boot-image/v0.1.5"
