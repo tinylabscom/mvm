@@ -48,7 +48,8 @@ use mvm_vmm::host::boot_config::{
 mod config;
 mod kernel;
 mod stop;
-use config::{FcApiPut, fc_drive_puts};
+pub use config::FcApiPut;
+use config::fc_drive_puts;
 #[cfg(all(test, unix))]
 use kernel::fc_descriptor_recipe;
 use kernel::resolve_fc_kernel_path;
