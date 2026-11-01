@@ -811,7 +811,7 @@ impl FcDriver {
             );
         }
         anyhow::ensure!(
-            spec.trusted_builder || !spec.has_persistent_writable(),
+            handoff.is_some() || spec.trusted_builder || !spec.has_persistent_writable(),
             "persistent writable Firecracker disks require prepared descriptor custody"
         );
         let bounds = mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
@@ -900,12 +900,6 @@ impl FcDriver {
         for put in &puts {
             api_put_session(&mut session, &put.path, &put.body)
                 .with_context(|| format!("Firecracker API PUT {}", put.path))?;
-        }
-        if let Some(handoff) = &handoff {
-            crate::fc::runtime_artifacts::verify_writable_backings(
-                std::path::Path::new(&socket),
-                handoff.expected(),
-            )?;
         }
         crate::fc::secure_vsock_socket_for_caller(&vsock_uds)
             .context("restrict Firecracker vsock socket to the invoking user")?;
@@ -1366,10 +1360,14 @@ impl VmmDriver for FcDriver {
         disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
     ) -> Result<Box<dyn RunningVm>> {
         disks.validate_spec(spec)?;
-        let handoff = disks.into_sudo_handoff()?;
+        if disks.is_empty() {
+            return self.boot_with_handoff(spec, None);
+        }
+        let handoff = disks.into_sudo_handoff(spec)?;
+        let projected = handoff.projected().clone();
         match kernel {
-            Some(kernel) => kernel::boot_descriptor_with_handoff(self, spec, kernel, handoff),
-            None => self.boot_with_handoff(spec, Some(handoff)),
+            Some(kernel) => kernel::boot_descriptor_with_handoff(self, &projected, kernel, handoff),
+            None => self.boot_with_handoff(&projected, Some(handoff)),
         }
     }
 

@@ -557,6 +557,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             &spec,
             writable_images,
         )?;
+        #[cfg(unix)]
+        mvm_vmm::host::runtime_meta::record_writable_disk_sources(
+            &inputs.config.name,
+            disks.original_sources(),
+        )?;
         let boot = console_boot::boot_while_starting_console(
             || {
                 #[cfg(unix)]

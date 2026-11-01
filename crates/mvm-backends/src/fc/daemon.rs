@@ -63,10 +63,12 @@ pub fn start_vm_firecracker_bounded(
 /// that ends up on the launch line has to be the one a test can read back: an
 /// unwrapped Firecracker loads the snapshot and runs the restored guest exactly
 /// as well, and is simply unbounded.
-pub(crate) fn start_vm_firecracker_scoped(
+/// Start a replacement writer with original locked descriptions.
+pub(crate) fn start_vm_firecracker_scoped_with_handoff(
     abs_dir: &str,
     abs_socket: &str,
     scope: &str,
+    handoff: Option<&mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
 ) -> Result<()> {
     anyhow::ensure!(
         !scope.trim().is_empty(),
@@ -74,7 +76,7 @@ pub(crate) fn start_vm_firecracker_scoped(
     );
     ensure_api_socket_fits(abs_socket)?;
     secure_socket_dir(abs_dir)?;
-    start_vm_firecracker_inner(abs_dir, abs_socket, scope, None, None)
+    start_vm_firecracker_inner(abs_dir, abs_socket, scope, None, handoff)
 }
 
 /// The required legacy `systemd-run` scope prefix, or a pre-launch refusal.
@@ -1253,7 +1255,10 @@ mod tests {
             );
         }
         for scope in ["", " \t"] {
-            assert!(start_vm_firecracker_scoped("/unused", "/unused/socket", scope).is_err());
+            assert!(
+                start_vm_firecracker_scoped_with_handoff("/unused", "/unused/socket", scope, None)
+                    .is_err()
+            );
             assert!(start_idle_firecracker("/unused", "/unused/socket", scope).is_err());
         }
         assert!(

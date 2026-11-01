@@ -16,9 +16,11 @@ both into its supervisor. The supervisor adopts them through the same complete
 startup-descriptor preflight as the verified kernel, consumes the backing as the
 virtio disk, and retains the sidecar until after the disk's final flush and
 destruction. Firecracker inherits the original descriptions through its bounded
-sudo launch, keeps original disk paths for checkpoint compatibility, and checks
-the configured object identities before `InstanceStart`. QEMU and libkrun
-inherit the original backing and sidecar and open the backing through `/dev/fd`.
+sudo launch and opens them through `/proc/self/fd`. Strict per-launch source
+metadata restores original paths in snapshots and observations; replacement
+writers prepare new locks only after the old writer's confirmed stop. QEMU and
+libkrun inherit the original backing and sidecar and open the backing through
+`/dev/fd`.
 In every case the actual writer retains the original lock descriptions through
 early-error recovery and uncertain stop; a caller dropping its duplicate is not
 a release event. Direct path-based user-writable boots are refused rather than

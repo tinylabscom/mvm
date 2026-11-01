@@ -35,7 +35,7 @@ pub struct SudoWritableHandoff {
     _files: Vec<std::fs::File>,
     first: u32,
     last: u32,
-    expected: std::collections::BTreeMap<u8, (u64, u64)>,
+    projected: VmmSpec,
 }
 
 impl SudoWritableHandoff {
@@ -47,8 +47,8 @@ impl SudoWritableHandoff {
         self.last
     }
 
-    pub fn expected(&self) -> &std::collections::BTreeMap<u8, (u64, u64)> {
-        &self.expected
+    pub fn projected(&self) -> &VmmSpec {
+        &self.projected
     }
 }
 
@@ -81,25 +81,37 @@ impl PreparedWritableDisks {
     }
 
     /// Duplicate original descriptions for the actual sudo-launched writer.
-    pub fn into_sudo_handoff(self) -> Result<SudoWritableHandoff> {
+    pub fn into_sudo_handoff(self, spec: &VmmSpec) -> Result<SudoWritableHandoff> {
+        self.validate_spec(spec)?;
         anyhow::ensure!(
             !self.disks.is_empty(),
             "sudo handoff requires persistent writable resources"
         );
         let mut files = Vec::new();
-        let mut expected = std::collections::BTreeMap::new();
+        let mut projected = spec.clone();
         let mut first = None;
         let mut next = 1000;
         for disk in self.disks {
-            let metadata = disk.image.backing().metadata()?;
-            expected.insert(disk.block.slot, (metadata.dev(), metadata.ino()));
+            let block = projected
+                .blocks
+                .iter_mut()
+                .find(|block| block.slot == disk.block.slot)
+                .context("projected writable slot missing")?;
             for file in [disk.image.backing(), disk.image.sidecar()] {
                 // SAFETY: duplicates the live descriptor with CLOEXEC and returns a
                 // new owned File only after fcntl reports success.
                 let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, next) };
                 anyhow::ensure!(fd >= 0, "duplicating writable handoff descriptor");
+                if fd as u32 != next {
+                    // SAFETY: this unexpected descriptor is not part of the handoff.
+                    unsafe { libc::close(fd) };
+                    anyhow::bail!("writable handoff descriptor range is not contiguous");
+                }
                 first.get_or_insert(fd as u32);
                 next = fd as u32 + 1;
+                if std::ptr::eq(file, disk.image.backing()) {
+                    block.source = format!("/proc/self/fd/{fd}").into();
+                }
                 // SAFETY: `fd` is a fresh descriptor owned by this handoff.
                 files.push(unsafe { std::fs::File::from_raw_fd(fd) });
             }
@@ -108,7 +120,7 @@ impl PreparedWritableDisks {
             _files: files,
             first: first.context("writable handoff has no descriptors")?,
             last: next - 1,
-            expected,
+            projected,
         })
     }
 
@@ -189,6 +201,14 @@ impl PreparedWritableDisks {
     /// Borrow the original owners in final physical-slot order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (u8, &LockedWritableImage)> {
         self.disks.iter().map(|disk| (disk.block.slot, &disk.image))
+    }
+
+    /// Original diagnostic paths by final slot, never transport projections.
+    pub fn original_sources(&self) -> std::collections::BTreeMap<u8, PathBuf> {
+        self.disks
+            .iter()
+            .map(|disk| (disk.block.slot, disk.block.source.clone()))
+            .collect()
     }
 
     /// Project writable backings through descriptors inherited by the writer.
@@ -407,9 +427,9 @@ mod tests {
             LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
                 .unwrap();
         writable(&other);
-        assert!(
-            PreparedWritableDisks::bind(&spec(vec![block(&other, 1)]), vec![(1, image)]).is_err()
-        );
+        let error = PreparedWritableDisks::bind(&spec(vec![block(&other, 1)]), vec![(1, image)])
+            .expect_err("wrong backing object must refuse");
+        drop(error);
         let image =
             LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock-2")))
                 .unwrap();
@@ -530,16 +550,17 @@ mod tests {
         let original_sidecar = held.sidecar().as_raw_fd();
         let expected_backing = held.backing().metadata().unwrap().ino();
         let expected_sidecar = held.sidecar().metadata().unwrap().ino();
-        let expected_metadata = held.backing().metadata().unwrap();
         let disks =
             PreparedWritableDisks::bind(&spec(vec![block(&path, 0)]), vec![(0, held)]).unwrap();
 
-        let handoff = disks.into_sudo_handoff().unwrap();
+        let handoff = disks
+            .into_sudo_handoff(&spec(vec![block(&path, 0)]))
+            .unwrap();
         assert_eq!(handoff._files.len(), 2);
         assert_eq!(handoff.first + 1, handoff.last);
         assert_eq!(
-            handoff.expected[&0],
-            (expected_metadata.dev(), expected_metadata.ino())
+            handoff.projected.blocks[0].source,
+            std::path::PathBuf::from(format!("/proc/self/fd/{}", handoff._files[0].as_raw_fd()))
         );
         for (index, file) in handoff._files.iter().enumerate() {
             assert_ne!(

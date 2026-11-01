@@ -159,6 +159,100 @@ impl FirecrackerIO {
         Ok(())
     }
 
+    fn prepare_restore_handoff(
+        &self,
+        dir: &Path,
+        fork: Option<&super::ForkDevices>,
+    ) -> Result<mvm_vmm::driver::prepared_disks::SudoWritableHandoff> {
+        #[derive(serde::Deserialize)]
+        struct Config {
+            drives: Vec<Drive>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Drive {
+            drive_id: String,
+            path_on_host: PathBuf,
+            is_read_only: bool,
+        }
+
+        let config: Config =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(VMSTATE_FILENAME))?)?;
+        let vm_dir = self
+            .socket_path
+            .parent()
+            .context("Firecracker socket has no parent directory")?;
+        let mut images = Vec::new();
+        let mut blocks = Vec::new();
+        for drive in config.drives {
+            let slot = drive
+                .drive_id
+                .strip_prefix("blk")
+                .context("restored drive lacks managed slot")?
+                .parse::<u8>()?;
+            let source = fork
+                .and_then(|devices| devices.child_path_for(&drive.path_on_host))
+                .unwrap_or(drive.path_on_host);
+            blocks.push(mvm_vmm::driver::spec::BlockDev {
+                source: source.clone(),
+                read_only: drive.is_read_only,
+                ephemeral: false,
+                slot,
+            });
+            if !drive.is_read_only {
+                images.push((
+                    slot,
+                    mvm_core::util::writable_image::LockedWritableImage::open(
+                        &source,
+                        &mvm_core::util::writable_image::sidecar_lock_path(&source),
+                    )?,
+                ));
+            }
+        }
+        let spec = mvm_vmm::driver::spec::VmmSpec {
+            name: "restore".into(),
+            kernel: mvm_vmm::driver::spec::KernelImage::Bundled,
+            initramfs: None,
+            cmdline: String::new(),
+            vcpus: 1,
+            cpu_grant: None,
+            memory_mib: 64,
+            mem_initial_mib: None,
+            blocks,
+            vsock: Vec::new(),
+            console: mvm_vmm::driver::spec::ConsoleCapture {
+                log_path: "/unused".into(),
+            },
+            shares: Vec::new(),
+            trusted_builder: false,
+            builder_egress_endpoint: None,
+            plan_binding: None,
+        };
+        let disks = mvm_vmm::driver::prepared_disks::PreparedWritableDisks::bind_sources(
+            &spec,
+            images
+                .into_iter()
+                .map(|(slot, image)| {
+                    let source = spec
+                        .blocks
+                        .iter()
+                        .find(|block| block.slot == slot)
+                        .expect("bound slot")
+                        .source
+                        .clone();
+                    (source, image)
+                })
+                .collect(),
+        )?;
+        mvm_vmm::host::runtime_meta::record_writable_disk_sources(
+            &vm_dir
+                .file_name()
+                .context("restore VM name missing")?
+                .to_string_lossy(),
+            disks.original_sources(),
+        )?;
+        disks.into_sudo_handoff(&spec)
+    }
+
     /// Load a sealed snapshot into a fresh VMM, leaving vCPUs paused.
     ///
     /// `fork` carries a forked child's own devices: the load binds the
@@ -186,8 +280,14 @@ impl FirecrackerIO {
         // this VM's own Firecracker is ever signalled: a pid left from before
         // a reboot may name another process now.
         let scope = self.scope_after_stop(vm_dir, memory_mib, || self.stop_own_vmm(vm_dir))?;
-        super::start_vm_firecracker_scoped(&vm_dir.to_string_lossy(), &socket_str, &scope)
-            .with_context(|| "starting fresh Firecracker for snapshot restore")?;
+        let handoff = self.prepare_restore_handoff(dir, fork)?;
+        super::start_vm_firecracker_scoped_with_handoff(
+            &vm_dir.to_string_lossy(),
+            &socket_str,
+            &scope,
+            Some(&handoff),
+        )
+        .with_context(|| "starting fresh Firecracker for snapshot restore")?;
         // Firecracker runs through `sudo` and binds its API socket as root. Take
         // it over before the first call, as the cold boot does, or a caller
         // that is not root cannot dial it.

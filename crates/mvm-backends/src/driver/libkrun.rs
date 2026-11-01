@@ -273,7 +273,7 @@ impl LibkrunDriver {
         disks: Option<&mvm_vmm::driver::prepared_disks::PreparedWritableDisks>,
     ) -> Result<Box<dyn RunningVm>> {
         anyhow::ensure!(
-            spec.trusted_builder || !spec.has_persistent_writable(),
+            disks.is_some() || spec.trusted_builder || !spec.has_persistent_writable(),
             "persistent writable libkrun disks require prepared descriptor custody"
         );
         let state_dir = vm_state_dir(&spec.name);

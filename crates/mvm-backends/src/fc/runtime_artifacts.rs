@@ -4,72 +4,33 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use mvm_vmm::runtime_artifacts::{FirecrackerDrive, RuntimeArtifact, RuntimeArtifacts};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct InstanceInfo {
     state: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct VmConfig {
     #[serde(rename = "boot-source")]
     boot_source: BootSource,
     drives: Vec<Drive>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct BootSource {
     kernel_image_path: PathBuf,
     initrd_path: Option<PathBuf>,
     boot_args: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Drive {
     drive_id: String,
     is_root_device: bool,
     path_on_host: PathBuf,
     is_read_only: bool,
-}
-
-/// Verify configured writable backings against the original held objects after
-/// Firecracker opened their paths and before the guest may start.
-pub(crate) fn verify_writable_backings(
-    socket: &Path,
-    expected: &std::collections::BTreeMap<u8, (u64, u64)>,
-) -> Result<()> {
-    let config = super::call(socket, "GET", "/vm/config", None)
-        .context("querying Firecracker's writable backing configuration")?;
-    verify_config_backings(&config, expected)
-}
-
-fn verify_config_backings(
-    json: &str,
-    expected: &std::collections::BTreeMap<u8, (u64, u64)>,
-) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
-    let config: VmConfig = serde_json::from_str(json)
-        .context("parsing Firecracker's writable backing configuration")?;
-    let mut seen = std::collections::BTreeSet::new();
-    for drive in config.drives.iter().filter(|drive| !drive.is_read_only) {
-        let slot = u8::try_from(canonical_slot(&drive.drive_id)?)?;
-        let identity = expected
-            .get(&slot)
-            .context("configured writable disk was not prepared")?;
-        let selected = std::fs::symlink_metadata(&drive.path_on_host)?;
-        ensure!(
-            selected.is_file() && (selected.dev(), selected.ino()) == *identity,
-            "Firecracker writable backing differs from the original held object"
-        );
-        seen.insert(slot);
-    }
-    ensure!(
-        seen == expected.keys().copied().collect(),
-        "Firecracker writable backing set differs from the prepared set"
-    );
-    Ok(())
 }
 
 pub(super) fn query(socket: &Path) -> Result<RuntimeArtifacts> {
@@ -80,7 +41,54 @@ pub(super) fn query(socket: &Path) -> Result<RuntimeArtifacts> {
     );
     let config = super::call(socket, "GET", "/vm/config", None)
         .context("querying Firecracker's actual runtime configuration")?;
+    let config = restore_original_paths_in_config(socket, &config)?;
     from_config(&config)
+}
+
+/// Restore original source paths after snapshot creation, before the artifact
+/// is authenticated or consumed by a later restore.
+pub(crate) fn restore_original_paths_in_file(path: &Path) -> Result<()> {
+    let json = std::fs::read_to_string(path)?;
+    let restored = restore_original_paths_in_config(path, &json)?;
+    if restored != json {
+        mvm_core::util::atomic_io::atomic_write(path, restored.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn restore_original_paths_in_config(location: &Path, json: &str) -> Result<String> {
+    let mut config: VmConfig = serde_json::from_str(json)
+        .context("parsing Firecracker's projected runtime configuration")?;
+    let projected = config
+        .drives
+        .iter()
+        .any(|drive| is_projection(&drive.path_on_host));
+    if !projected {
+        return Ok(json.to_owned());
+    }
+    let state_dir = if location.is_dir() {
+        location
+    } else {
+        location
+            .parent()
+            .context("projected Firecracker config has no state directory")?
+    };
+    let sources = mvm_vmm::host::runtime_meta::read_writable_disk_sources(state_dir)?;
+    for drive in &mut config.drives {
+        if is_projection(&drive.path_on_host) {
+            let slot = u8::try_from(canonical_slot(&drive.drive_id)?)?;
+            drive.path_on_host = sources
+                .get(&slot)
+                .cloned()
+                .context("projected Firecracker disk lacks its original source mapping")?;
+        }
+    }
+    serde_json::to_string(&config).context("serializing restored Firecracker source paths")
+}
+
+fn is_projection(path: &Path) -> bool {
+    path.starts_with("/dev/fd")
+        || (path.starts_with("/proc") && path.components().any(|part| part.as_os_str() == "fd"))
 }
 
 fn from_config(json: &str) -> Result<RuntimeArtifacts> {
@@ -394,38 +402,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_writable_backings_must_match_the_original_objects() {
-        use std::os::unix::fs::MetadataExt;
-
+    fn projected_snapshot_paths_restore_original_sources_or_fail_closed() {
         let dir = tempfile::tempdir().unwrap();
-        let original = dir.path().join("original");
-        std::fs::write(&original, b"original").unwrap();
-        let identity = {
-            let metadata = std::fs::metadata(&original).unwrap();
-            (metadata.dev(), metadata.ino())
-        };
-        let expected = std::collections::BTreeMap::from([(0, identity)]);
-        let config = |path| {
-            serde_json::json!({
-                "boot-source": {"kernel_image_path": "/kernel", "initrd_path": null},
-                "drives": [
-                    {"drive_id":"blk0", "is_root_device":true, "path_on_host": path, "is_read_only": false}
-                ]
-            })
-            .to_string()
-        };
-        verify_config_backings(&config(&original), &expected).unwrap();
-        std::fs::rename(&original, dir.path().join("renamed")).unwrap();
-        std::fs::write(&original, b"replacement").unwrap();
-        assert!(verify_config_backings(&config(&original), &expected).is_err());
-        assert!(verify_config_backings(&config(&dir.path().join("renamed")), &expected).is_ok());
-        assert!(
-            verify_config_backings(
-                &serde_json::json!({"boot-source": {"kernel_image_path": "/kernel"}, "drives": []})
-                    .to_string(),
-                &expected,
-            )
-            .is_err()
+        let original = dir.path().join("volume");
+        std::fs::write(&original, b"volume").unwrap();
+        std::fs::write(
+            dir.path().join("writable-sources.json"),
+            serde_json::to_vec(&std::collections::BTreeMap::from([(3, original.clone())])).unwrap(),
+        )
+        .unwrap();
+        let json = serde_json::json!({
+            "boot-source": {"kernel_image_path": "/kernel", "initrd_path": null},
+            "drives": [
+                {"drive_id":"blk3", "is_root_device":true, "path_on_host": "/proc/self/fd/9", "is_read_only": false}
+            ]
+        })
+        .to_string();
+        let restored = restore_original_paths_in_config(dir.path(), &json).unwrap();
+        let config: VmConfig = serde_json::from_str(&restored).unwrap();
+        assert_eq!(config.drives[0].path_on_host, original);
+        std::fs::write(dir.path().join("writable-sources.json"), b"{}").unwrap();
+        assert!(restore_original_paths_in_config(dir.path(), &json).is_err());
+        let legacy = serde_json::json!({
+            "boot-source": {"kernel_image_path": "/kernel", "initrd_path": null},
+            "drives": []
+        })
+        .to_string();
+        assert_eq!(
+            restore_original_paths_in_config(dir.path(), &legacy).unwrap(),
+            legacy
         );
     }
 

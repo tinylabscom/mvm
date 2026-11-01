@@ -185,6 +185,38 @@ pub fn write(name: &str, meta: &VmRuntimeMeta) -> Result<()> {
     Ok(())
 }
 
+const WRITABLE_SOURCES_FILE: &str = "writable-sources.json";
+
+/// Persist original writable paths with a read-back before writer activation.
+pub fn record_writable_disk_sources(
+    name: &str,
+    sources: std::collections::BTreeMap<u8, PathBuf>,
+) -> Result<()> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let path = mvm_core::config::vm_state_dir(name).join(WRITABLE_SOURCES_FILE);
+    let bytes = serde_json::to_vec(&sources)?;
+    mvm_core::util::atomic_io::atomic_write(&path, &bytes)?;
+    let verified = read_writable_disk_sources(&mvm_core::config::vm_state_dir(name))?;
+    anyhow::ensure!(
+        verified == sources,
+        "writable source metadata read-back differs from the launch recipe"
+    );
+    Ok(())
+}
+
+/// Read strict original paths for snapshot/capture path restoration.
+pub fn read_writable_disk_sources(
+    state_dir: &Path,
+) -> Result<std::collections::BTreeMap<u8, PathBuf>> {
+    let path = state_dir.join(WRITABLE_SOURCES_FILE);
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read original writable disk sources {}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse original writable disk sources {}", path.display()))
+}
+
 /// Update just the `observability_target` field of an existing metadata file.
 ///
 /// Best-effort: logs a warning and returns `Ok(())` if the file cannot be
@@ -530,6 +562,16 @@ mod tests {
         // if a sibling test (under the same lock) leaked its own override.
         env.set("MVM_HOME", tmp.path());
         f(tmp.path());
+    }
+
+    #[test]
+    fn writable_source_record_is_strict_and_read_back() {
+        with_home_temp(|home| {
+            let sources = std::collections::BTreeMap::from([(2, home.join("volume"))]);
+            record_writable_disk_sources("vm", sources.clone()).unwrap();
+            let read = read_writable_disk_sources(&mvm_core::config::vm_state_dir("vm")).unwrap();
+            assert_eq!(read, sources);
+        });
     }
 
     #[test]

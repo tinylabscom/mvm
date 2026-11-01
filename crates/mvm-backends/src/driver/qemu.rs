@@ -376,7 +376,7 @@ impl QemuDriver {
             );
         }
         anyhow::ensure!(
-            spec.trusted_builder || !spec.has_persistent_writable(),
+            disks.is_some() || spec.trusted_builder || !spec.has_persistent_writable(),
             "persistent writable QEMU disks require prepared descriptor custody"
         );
         // QEMU has no bundled kernel: a `Bundled` spec takes the same cached
