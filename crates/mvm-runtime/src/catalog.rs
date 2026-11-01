@@ -158,7 +158,7 @@ backend_catalog![
     {
         kind: Libkrun,
         selector: "libkrun",
-        aliases: ["krun"],
+        aliases: [],
         constructor: AnyBackend::Libkrun(crate::backend::libkrun_runner()),
         tier: Tier2,
         marker_file: Some("libkrun.pid"),
@@ -202,7 +202,7 @@ backend_catalog![
     {
         kind: Hvf,
         selector: "hvf",
-        aliases: ["hypervisor"],
+        aliases: [],
         constructor: AnyBackend::Hvf(crate::backend::hvf_runner()),
         tier: Tier2,
         marker_file: Some("hvf.pid"),
