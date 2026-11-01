@@ -156,10 +156,10 @@ fn seal_live_artifact(world: &mut CliWorld, image: String) {
     super::cli::run_mvmctl_isolated_live_home_argv(
         world,
         vec![
-            "bundle".into(),
             "build".into(),
-            "--image".into(),
             image.clone(),
+            "--from".into(),
+            "image".into(),
             "--out".into(),
             out.display().to_string(),
         ],

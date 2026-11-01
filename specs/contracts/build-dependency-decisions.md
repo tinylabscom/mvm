@@ -397,6 +397,244 @@ in that row; `default` is shown only when it is the sole feature.
 | `xattr` | CLD | unsupported |
 | `zeroize` | CLDSAG | alloc, zeroize_derive |
 
+## Dependency reduction ranking (#4839 section 3)
+
+Measured at `152ed1cebf` (origin/main, 2026-10-31), `--offline`, default features,
+unique `name version` entries. Every candidate below is judged with the same
+commands; a candidate with no measured change is recorded as such and not applied.
+
+```sh
+cargo tree --offline -p <pkg> --target <triple> -e normal,build --prefix none \
+  | sed 's/ (\*)//;s/ (proc-macro)//;s/ (\/.*//' | sort -u | wc -l
+grep -c '^name = ' Cargo.lock
+```
+
+Baseline: `mvmctl` 350 (`aarch64-apple-darwin`) and 353 (`x86_64-unknown-linux-gnu`);
+`mvm-hostlib` 337; `mvm-hostd` 282; `mvm-agentd` 83, `mvm-host-services` 84 and
+`mvm-builder-guest` 87 on `aarch64-unknown-linux-musl`; `Cargo.lock` 728 packages.
+
+| Rank | Candidate | Measured | Risk | Effort | Status |
+|---|---|---|---|---|---|
+| 1 | `tracing-subscriber` without its default `tracing-log` feature | -1 on every host closure: `mvmctl` 350 to 349 and 353 to 352, `mvm-hostlib` 337 to 336, `mvm-hostd` 282 to 281; guests unchanged; lock 728 to 727 (`tracing-log` leaves) | Low. Records emitted through the `log` crate by third-party code (rustls, mio) are no longer forwarded to the tracing subscriber; no first-party crate uses `log::` macros | One line in `[workspace.dependencies]` plus the two closure budgets | Applied |
+| 2 | `chrono` without default features (`serde`, `clock`, `std` kept; `oldtime`, `wasmbind` dropped) | 0. Every closure above is identical. The only lock change is that `chrono` stops listing `js-sys` and `wasm-bindgen`, which stay for other packages. Needs the `mvm-contract` dev-dependency's own `chrono` row trimmed too, or the defaults return | Low | Two lines | Not applied: removes no package |
+| 3 | `serde_jcs` replaced by `serde_json_canonicalizer` | Host closures -2 (`serde_jcs`, `ryu-js` 0.2.2); guest closures swap two crates for two, so 0, because `serde_json_canonicalizer` is reached today only through `sigstore-verify`, which guests do not link | High: it produces signed canonical bytes for plans, audit entries and bundles; floating-point and escape handling must agree byte for byte | Four crates plus a differential test | Not applied: a signing-format change for 2 host crates |
+| 4 | `tokio` `signal` dropped from `mvm-hostd` | 0. No `mvm-hostd` source names `tokio::signal`, but its `process` feature already depends on `signal-hook-registry`, so the package stays | None | One word | Not applied: removes no package |
+| 5 | `serde_json` `preserve_order` | Not removable: enabled by the `tree-sitter` build script, and `indexmap` stays through `plist` and `toml_edit` | n/a | n/a | Retained |
+| 6 | `tempfile` out of the guest agent and host-services closures | Would remove `tempfile` and its otherwise unused `fastrand`/`getrandom` 0.4 edges from `mvm-agentd` and `mvm-host-services`, but `mvm-core::canonical_linux` (production, host-side) uses it and `protocol::vm_backend` and `plan::bundle` name that module ungated | Medium: gating a module reached from two ungated ones | A `host-state` gate plus the two callers | Not applied: not measured, the gate is a separate change |
+
+The 16 direct dependencies the closure map lists under "none" are not unused. Each
+is outside the six default closures for a stated reason, and `cargo machete` finds
+none of them unused:
+
+| Reason | Dependencies |
+|---|---|
+| Off-by-default feature | `aya` (`mvm-hostd`), `hickory-resolver` (`mvm-hostd`), `object_store` (`mvm-runtime`, `template-registry-s3`), `schemars` (six crates), `tokio-vsock` (`mvm-agentd`), `tss-esapi` (`mvm-core`, `attestation-tpm2`), `wasmtime` and `wasmtime-wasi` (`mvm-runtime`, `wasm-backend`), `notify` and `notify-debouncer-mini` (`mvm-cli`, `dev-watch`) |
+| Linux target only, present in the Linux `mvmctl` closure | `landlock`, `hickory-proto` (`mvm-hostd`) |
+| Tooling, not shipped | `clap_mangen`, `nextest-metadata`, `syn` (`xtask`) |
+| Separately installed client | `libloading` (`runmvm-client`, which `mvmctl` does not link) |
+
+No removal follows from them. The "CLDSA" letters the map gives `plist`,
+`security-framework` and `core-foundation` for the guest artifacts come from the
+`aarch64-apple-darwin` tree, which is not a guest target: on the musl guest targets
+all three are absent, because `mvm-core` declares them under
+`cfg(target_os = "macos")`.
+
+### Duplicate version pairs in the `mvmctl` closure
+
+Commands: `cargo tree --offline -p mvmctl --target aarch64-apple-darwin -e normal,build -d --prefix depth`
+for the names, then `cargo tree ... -i <name>@<version> --depth 1` for the parents of
+the older version. `hashbrown`, `memchr`, `serde`, `serde_core`, `serde_json` and
+`toml_edit` also print under `-d`; they differ in features, not version, so they are not pairs.
+
+| Name | Older version, pinned by | Newer version, used by | Compatible bump? |
+|---|---|---|---|
+| `bitflags` | 1.3.2: `vmm-sys-util` 0.15.0, from `virtio-queue` 0.18.0 (`mvm-vmm`) | 2.13.0: everything else | Not offline-verifiable; needs a rust-vmm release of `vmm-sys-util` on `bitflags` 2 |
+| `digest`, `block-buffer`, `crypto-common`, `cpufeatures` | 0.10.7, 0.10.4, 0.1.7, 0.2.17: `sha1` 0.10.6 (workspace pin `=0.10.6`, used by `mvm-build`, `mvm-macho-sign`, `gix`, `x509-cert`), `sha1-checked` (`gix`), `sha2` 0.10.9 and `sigstore-crypto` | 0.11.3, 0.12.1, 0.2.2, 0.3.0: `sha2` 0.11, `hmac` 0.13, `curve25519-dalek` 5, `ed25519-dalek` 3 | No. Dropping the generation needs `gix`, `x509-cert` and `sigstore-crypto` to move together; the workspace's own crates are already on the new one |
+| `sha2` | 0.10.9: `sigstore-crypto` only | 0.11.0: 14 workspace crates | No (signature-verification dependency) |
+| `signature` | 2.2.0: `sigstore-crypto`, `x509-cert` 0.2.5 | 3.0.0: `ed25519` 3, `ed25519-dalek` 3 | No |
+| `const-oid` | 0.9.6: `der` 0.7.10, `x509-cert`, `cms`, `sigstore-*` | 0.10.2: `digest` 0.11 | No (same RustCrypto formats generation) |
+| `rand`, `rand_core`, `getrandom` | `rand` 0.9.4 and `rand_core` 0.9.5: `sigstore-tsa`; `rand_core` 0.6.4: `signature` 2.2.0; `getrandom` 0.2.17: `ring` 0.17.14; 0.3.4: `rand_core` 0.9.5 | `rand` 0.10.2, `rand_core` 0.10.1, `getrandom` 0.4.1: workspace, `tempfile`, `uuid`, `gix-utils` | No; see the #4561 decision |
+| `ryu-js` | 0.2.2: `serde_jcs` 0.1.0 (direct: `mvm-build`, `mvm-client`, `mvm-core`, `mvm-hostd`) | 1.0.2: `serde_json_canonicalizer` 0.3.2 (`sigstore-verify`) | Only by swapping the canonicalizer; ranked 3 above |
+| `untrusted` | 0.7.1: `aws-lc-rs` 1.18.1 | 0.9.0: `ring` 0.17.14, `rustls-webpki` | No (native crypto crates) |
+
+Only two pins are first-party choices: `serde_jcs` (`ryu-js`) and the `sha1 =0.10.6`
+workspace pin, and the latter shares its generation with `gix` and `x509-cert`, so
+moving it alone removes nothing. The rest are held by `sigstore-*`, `x509-cert`,
+`gix`, `ring`/`aws-lc-rs` or `vmm-sys-util`.
+
+## Dependency evidence matrix (#4839 section 3)
+
+Measured at `80a11312e3` (origin/main, 2026-11-01), `--offline`, on a host with a load average of about 58 (`uptime`),
+which is why nothing below is a timing. Section 3 asks for the candidates to be ranked on
+supply-chain exposure, trust boundary, API usage, maintenance, advisory and licence
+evidence, closure, build cost and binary contribution. The ranking above covers closure,
+risk and effort; this section supplies the rest, for the six ranked candidates and for
+all 90 direct dependencies (definition in the closure map).
+
+### What each column is, and how it was produced
+
+| Column | Source | Limits |
+|---|---|---|
+| Exposure, trust boundary | Read from each crate's role and the closure map's artifact letters; groups A to F below | A classification by role, not an audit. `cargo geiger` is not installed, so unsafe-block counts were not measured |
+| API usage | `rg -l '\bname(::|\s*;)|use name\b|extern crate name' crates src xtask tests` over `*.rs`, excluding `third_party/` and `target/`: files / distinct top-level directories | Counts files that mention the crate, tests and benches included, not call expressions. A re-export or a macro-only use can be undercounted |
+| Latest release, releases in 12 months | `https://crates.io/api/v1/crates/<name>` (public, no credentials), `max_stable_version`, the newest `created_at` over all versions, and the number with `created_at >= 2025-10-31` | Publish cadence only. It says nothing about whether the maintainer answers security reports |
+| Advisories | `cargo audit --no-fetch --db ~/.cargo/advisory-dbs/advisory-db-3157b0e258782691` (cargo-audit 0.22.2; RustSec database commit `2295466c`, 2026-10-30, 1,395 advisories, 727 lock entries) and `cargo deny --offline check advisories` (cargo-deny 0.19.4, `deny.toml` `db-path` database commit `a78282a1`, 2026-10-26) | Both scan `Cargo.lock`, so the 10 off-by-default dependencies that are not in the lock (`aya`, `clap_mangen`, `hickory-resolver`, `notify`, `notify-debouncer-mini`, `object_store`, `schemars`, `tss-esapi`, `wasmtime`, `wasmtime-wasi`) are unscanned. The two databases are four days apart |
+| Licence | `cargo deny --offline check licenses` and the `license` field of `cargo metadata --offline` | SPDX expression as published, not a legal review |
+| Units | Cargo's unit graph for the `mvmctl` release command in the section below (`--profile release-min --target aarch64-apple-darwin`): 497 units at this commit (498 at `4270e14d`; the difference is `tracing-log`, ranked 1). `own` is units of that package; `excl` is units that disappear from the graph when every unit of the package is removed, so it counts the dependency's private subtree | One host target and one feature set. Guests and `mvm-hostd` have their own graphs. `own` and `excl` are unit counts, not seconds |
+| Binary contribution | The only measurement is whole-binary: 19,206,160 bytes for `mvmctl` `release-min` on `aarch64-apple-darwin` (2026-08-20, `public/docs/investigations/binary-size-baseline.md`, budget 25,165,824) | Per-dependency contribution is **not measured: needs a quiet host** and a release build with `cargo bloat --crates` (`cargo-bloat` is installed). It was not run at load 58 |
+| Build cost in seconds | `cargo build --timings` | **Not measured: needs a quiet host**; the unit counts stand in for it |
+
+### Advisory and licence results (exact)
+
+- `cargo deny --offline check advisories` printed `advisories ok`. `cargo deny --offline check licenses` printed
+  `licenses ok` with one warning, `Unicode-DFS-2016` allowed but unmatched (an unused allowance in `deny.toml`).
+  `cargo deny --offline check bans sources` printed `bans ok, sources ok`.
+- `cargo audit` (newer database) reported no vulnerability and one allowed warning:
+  `proc-macro-error2` 2.0.1, RUSTSEC-2026-0173, unmaintained (2026-06-07). It is a `Cargo.lock` entry reached only
+  through `defmt-macros` (optional `defmt` feature of `jiff`); `cargo tree --offline -i proc-macro-error2 --target all -e all`
+  prints nothing, so no build in any closure compiles it. `deny` did not flag it; why was not investigated (the entry is in no resolved graph). It is the one unresolved evidence item: the lock entry is
+  inert but not removed.
+- Last green CI run of the gating jobs (`deny`, `audit`) was not looked up; the results above are local runs.
+
+### Groups
+
+| Group | Members | Exposure | Trust boundary | Units when the whole group is removed (of 497) | Closure artifacts |
+|---|---:|---|---|---:|---|
+| A: Signing, verification, crypto | 17 | Parses signatures, certificates and trust roots; holds key material; sigstore-verify, rcgen and keyring touch certificates and the OS keychain. No network in the verify path (Rekor and TSA clients are off for `mvm`, 2026-10-24 decision). Native code: blake3. | Signing and verification path: the host key, plan, audit chain, bundle and release-artifact checks (claims 8, 9, 20), plus guest-side envelope crypto | 95 | ACDGLS |
+| B: Network, TLS, async runtime | 17 | Opens sockets or parses wire input (httparse, http, url, hickory-proto). rustls pulls ring and aws-lc-sys (native). tokio and mio carry unsafe OS polling. | Host-only; the guest closures carry only socket2, bytes, ipnet and tokio-free subsets. Egress policy is enforced by the host endpoint (claim 10) | 74 | ACDGLS |
+| C: Parsers and formatters for external input | 26 | Parse untrusted bytes: tar, flate2, lzma-rs and ext4-view (image and layer content), gix (repository content), toml/serde_json/plist (config and wire), tree-sitter (source, native C grammars), wasmtime (guest code, off by default). | Host-side for archives, images, source; serde, serde_json, chrono, uuid, base64, hex are in every closure including the guests (wire and plan DTOs) | 156 | ACDGLS |
+| D: OS, FFI and unsafe-heavy | 17 | Direct syscalls and FFI: libc, rustix, nix, objc2-foundation, core-foundation, security-framework, landlock, seccompiler, xattr, libloading, aya (eBPF), tss-esapi (TPM, native). Mostly unsafe by construction. | Host and guest. nix and seccompiler are guest-only (`mvm-builder-guest`); landlock and seccompiler are confinement controls, so a defect weakens a claim-1 mechanism | 27 | ACDGLS |
+| E: VMM device model | 3 | Parse guest-controlled virtqueue and vsock descriptors from guest memory (the untrusted side of the device boundary); vm-memory is unsafe mmap access. | Host-only; the guest-to-host device boundary (`mvm-vmm`) | 6 | CDL |
+| F: Error handling, logging, CLI, tooling | 10 | No network or untrusted parsing. proc-macro and build-time code (async-trait, thiserror, clap derive, syn). tracing-subscriber formats log output only. | Host and guest (logging and errors); clap/clap_mangen/syn/nextest-metadata/schemars are CLI or tooling | 25 | ACDGLS |
+
+Units removed counts packages in the `mvmctl` graph that vanish with the whole group, so a group
+that other groups depend on (tokio under rustls users, `serde` under everything) is
+understated or overlaps another. Binary contribution for every group: not measured, needs a quiet host.
+
+### Ranked candidates against the same columns
+
+| Rank | Candidate | Exposure and boundary | API usage (files / dirs) | Maintenance | Advisory, licence | Closure delta | Units own / excl | Binary |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `tracing-subscriber` | Formats logs only; host and `mvm-hostd`, not in guest closures; `tracing-log` forwards third-party `log` records, no parsing of untrusted input | 20 / 5 | 0.3.23, 2026-03-13, 3 releases in 12 months | No advisory in either run; MIT | -1 (applied) | 1 / 7 | Not measured |
+| 2 | `chrono` | Parses and formats timestamps, including audit and plan validity windows (claims 8, 9); all six closures | 192 / 11 | 0.4.45, 2026-06-04, 3 | No advisory; MIT/Apache-2.0 | 0 | 1 / 2 | Not measured |
+| 3 | `serde_jcs` | Produces the canonical bytes that are signed (plans, audit entries, bundles); signing path; all six closures | 15 / 4 | Locked 0.1.0; crates.io latest 0.2.0 on 2026-03-25, 1 release in 12 months | No advisory; MIT/Apache-2.0 | -2 host, 0 guest | 1 / 2 | Not measured |
+| 4 | `tokio` `signal` | Async runtime, signal handling; host only | 222 / 13 | 1.54.1, 2026-10-21, 24 (locked 1.53.3) | No advisory; MIT | 0 | 1 / 3 | Not measured |
+| 5 | `serde_json` `preserve_order` | Parses every wire and config document, untrusted input in the guest agent and host; all six closures | 940 / 25 | 1.0.154, 2026-10-11, 9 (locked 1.0.151) | No advisory; MIT/Apache-2.0 | n/a, retained | 6 / 13 | Not measured |
+| 6 | `tempfile` | Creates files under `/tmp`, unsafe-free API over `rustix`; host and guest | 942 / 22 | 3.27.0, 2026-03-11, 4 | No advisory; MIT/Apache-2.0 | Not measured | 1 / 1 | Not measured |
+
+The evidence changes nothing in the ranking: no candidate has an advisory, a licence concern or a stale
+maintainer, so the order stays decided by closure delta and risk. Two observations the earlier
+columns could not show. `serde_jcs` is the only ranked candidate with a signing-path role and a
+newer release (0.2.0) than the one locked, which supports leaving it alone until a
+differential test exists rather than replacing it. `tempfile` and `serde_json` are used in
+more than 900 files, so a removal there is a workspace-wide change whatever the closure says.
+
+### All 90 direct dependencies
+
+Group letters are those above. Column "Latest, 12 mo" is the newest crates.io release, its date, and the
+number of releases since 2025-10-31. "Files / dirs" is the API-usage count. "Units" is own/excl.
+Advisory result for every row in the lock: none in either database run; the 10 rows marked `not in Cargo.lock` were not scanned.
+
+| Dependency | Grp | Closure of | Locked | Licence | Latest, 12 mo | Files / dirs | Units |
+|---|---|---|---|---|---|---|---|
+| `aes-gcm` | A | CLDSAG | 0.11.1 | Apache/MIT | 0.11.1 on 2026-08-21, 5 | 2 / 1 | 1/10 |
+| `aho-corasick` | C | CLD | 1.1.4 | Unlicense/MIT | 1.1.5 on 2026-08-03, 1 | 2 / 1 | 1/1 |
+| `anyhow` | F | CLDSAG | 1.0.103 | MIT/Apache | 1.0.104 on 2026-07-18, 4 | 910 / 17 | 3/3 |
+| `async-trait` | F | CLD | 0.1.89 | MIT/Apache | 0.1.92 on 2026-08-08, 3 | 52 / 6 | 1/1 |
+| `aya` | D | none | - | not in Cargo.lock | 0.16.0 on 2026-10-28, 4 | 1 / 1 | not in graph |
+| `base64` | C | CLDSAG | 0.22.1 | MIT/Apache | 0.23.1 on 2026-08-04, 2 | 91 / 13 | 1/1 |
+| `blake3` | A | CLD | 1.8.5 | CC0-1.0/Apache/Apache+LLVM | 1.8.7 on 2026-08-20, 5 | 4 / 4 | 3/6 |
+| `bs58` | C | CLD | 0.5.1 | MIT/Apache | 0.5.1 on 2024-03-19, 0 | 1 / 1 | 1/1 |
+| `bytes` | B | CLDSAG | 1.12.0 | MIT | 1.12.1 on 2026-07-08, 4 | 109 / 19 | 1/1 |
+| `chrono` | C | CLDSAG | 0.4.45 | MIT/Apache | 0.4.45 on 2026-06-04, 3 | 192 / 11 | 1/2 |
+| `clap` | F | C | 4.6.1 | MIT/Apache | 4.6.7 on 2026-09-14, 18 | 153 / 5 | 1/6 |
+| `clap_mangen` | F | none | - | not in Cargo.lock | 0.3.3 on 2026-08-12, 6 | 1 / 1 | not in graph |
+| `core-foundation` | D | CLDSA | 0.10.1 | MIT/Apache | 0.10.1 on 2025-05-26, 0 | 4 / 3 | 2/2 |
+| `ed25519-dalek` | A | CLDSAG | 3.0.0 | BSD-3-Clause | 3.0.0 on 2026-07-06, 9 | 252 / 14 | 1/3 |
+| `ext4-view` | C | CLD | 0.9.3 | MIT/Apache | 1.0.0 on 2026-09-14, 2 | 15 / 5 | 1/1 |
+| `flate2` | C | CLD | 1.1.9 | MIT/Apache | 1.1.10 on 2026-08-28, 5 | 27 / 10 | 1/4 |
+| `gix` | C | CLD | 0.87.1 | MIT/Apache | 0.90.0 on 2026-10-22, 17 | 3 / 1 | 1/66 |
+| `globset` | C | CL | 0.4.18 | Unlicense/MIT | 0.4.21 on 2026-10-27, 3 | 2 / 2 | 1/1 |
+| `hex` | C | CLDSAG | 0.4.3 | MIT/Apache | 0.4.3 on 2021-03-03, 0 | 203 / 16 | 2/2 |
+| `hickory-proto` | B | none | 0.26.1 | MIT/Apache | 0.26.3 on 2026-09-10, 8 | 2 / 2 | 1/2 |
+| `hickory-resolver` | B | none | - | not in Cargo.lock | 0.26.3 on 2026-09-10, 8 | 1 / 1 | 1/27 |
+| `hmac` | A | CLDSAG | 0.13.0 | MIT/Apache | 0.13.0 on 2026-03-29, 5 | 6 / 3 | 1/1 |
+| `http` | B | CLD | 1.4.2 | MIT/Apache | 1.5.0 on 2026-07-29, 4 | 9 / 2 | 1/1 |
+| `httparse` | B | CLD | 1.10.1 | MIT/Apache | 1.10.1 on 2025-03-03, 0 | 2 / 2 | 3/3 |
+| `ipnet` | B | CLDSAG | 2.12.0 | MIT/Apache | 2.12.2 on 2026-09-06, 3 | 9 / 4 | 1/1 |
+| `keyring` | A | CLD | 3.6.3 | MIT/Apache | 4.2.0 on 2026-08-29, 17 | 3 / 2 | 1/1 |
+| `landlock` | D | none | 0.4.5 | MIT/Apache | 0.4.7 on 2026-07-27, 4 | 3 / 1 | not in graph |
+| `leakguard` | A | CLD | 0.8.0 | MIT/Apache | 1.0.0 on 2026-10-06, 15 | 1 / 1 | 1/1 |
+| `libc` | D | CLDSAG | 0.2.186 | MIT/Apache | 0.2.191 on 2026-10-16, 18 | 218 / 21 | 5/5 |
+| `libloading` | D | none | 0.8.9 | ISC | 0.9.0 on 2025-11-05, 1 | 2 / 1 | not in graph |
+| `lzma-rs` | C | CLD | 0.3.0 | MIT | 0.3.0 on 2023-01-04, 0 | 1 / 1 | 1/1 |
+| `mio` | B | CLD | 1.2.1 | MIT | 1.2.4 on 2026-10-03, 6 | 4 / 2 | 1/1 |
+| `nextest-metadata` | F | none | 0.14.1 | MIT/Apache | 0.15.0 on 2026-08-04, 7 | 1 / 1 | not in graph |
+| `nix` | D | G | 0.29.0 | MIT | 0.31.3 on 2026-05-11, 4 | 21 / 9 | not in graph |
+| `notify` | D | none | - | not in Cargo.lock | 8.2.1 on 2026-10-27, 8 | 2 / 1 | 1/2 |
+| `notify-debouncer-mini` | D | none | - | not in Cargo.lock | 0.7.0 on 2025-08-03, 0 | 2 / 1 | 1/1 |
+| `objc2-foundation` | D | C | 0.3.2 | MIT | 0.3.2 on 2025-10-04, 0 | 1 / 1 | 1/7 |
+| `object_store` | B | none | - | not in Cargo.lock | 0.14.2 on 2026-09-15, 7 | 1 / 1 | not in graph |
+| `percent-encoding` | B | C | 2.3.2 | MIT/Apache | 2.3.2 on 2025-08-21, 0 | 1 / 1 | 1/1 |
+| `plist` | C | CLDSA | 1.10.0 | MIT | 1.10.3 on 2026-10-21, 5 | 7 / 3 | 1/2 |
+| `rand` | A | CLDSAG | 0.9.4/0.10.2 | MIT/Apache | 0.10.3 on 2026-09-20, 16 | 93 / 8 | 2/8 |
+| `rcgen` | A | CLD | 0.14.7 | MIT/Apache | 0.14.10 on 2026-08-28, 5 | 2 / 2 | 1/2 |
+| `regex` | C | CLD | 1.12.4 | MIT/Apache | 1.13.1 on 2026-07-15, 4 | 24 / 3 | 1/1 |
+| `rustix` | D | CLDSAG | 1.1.4 | Apache+LLVM/Apache/MIT | 1.1.6 on 2026-10-27, 4 | 21 / 4 | 3/3 |
+| `rustls` | B | CLD | 0.23.46 | Apache/ISC/MIT | 0.23.46 on 2026-10-14, 15 | 17 / 4 | 3/3 |
+| `rustls-pki-types` | B | CLD | 1.15.0 | MIT/Apache | 1.15.1 on 2026-07-23, 7 | 2 / 1 | 1/1 |
+| `rustls-platform-verifier` | B | CLD | 0.7.0 | MIT/Apache | 0.7.1 on 2026-09-24, 2 | 1 / 1 | 1/1 |
+| `schemars` | F | none | - | not in Cargo.lock | 1.2.3 on 2026-10-12, 6 | 87 / 6 | not in graph |
+| `seccompiler` | D | G | 0.5.0 | Apache/BSD-3-Clause | 0.5.0 on 2025-03-07, 0 | 3 / 2 | not in graph |
+| `secrecy` | A | CLDSAG | 0.10.3 | Apache/MIT | 0.10.3 on 2024-10-09, 0 | 41 / 8 | 1/1 |
+| `security-framework` | D | CLDSA | 3.7.0 | MIT/Apache | 3.7.0 on 2026-02-20, 2 | 3 / 3 | 1/1 |
+| `serde` | C | CLDSAG | 1.0.228 | MIT/Apache | 1.0.229 on 2026-07-18, 1 | 528 / 23 | 6/7 |
+| `serde_jcs` | A | CLDSAG | 0.1.0 | MIT/Apache | 0.2.0 on 2026-03-25, 1 | 15 / 4 | 1/2 |
+| `serde_json` | C | CLDSAG | 1.0.151 | MIT/Apache | 1.0.154 on 2026-10-11, 9 | 940 / 25 | 6/13 |
+| `sha1` | A | CLDSA | 0.10.6 | MIT/Apache | 0.11.0 on 2026-07-10, 5 | 5 / 2 | 1/1 |
+| `sha2` | A | CLDSAG | 0.10.9/0.11.0 | MIT/Apache | 0.11.1 on 2026-10-12, 5 | 193 / 16 | 3/11 |
+| `sigstore-trust-root` | A | CL | 0.11.0 | Apache | 0.15.1 on 2026-10-23, 23 | 1 / 1 | 1/1 |
+| `sigstore-types` | A | CL | 0.11.0 | Apache | 0.15.1 on 2026-10-23, 23 | 1 / 1 | 1/1 |
+| `sigstore-verify` | A | CL | 0.11.0 | Apache | 0.15.1 on 2026-10-23, 22 | 1 / 1 | 1/17 |
+| `socket2` | B | CLDSAG | 0.6.4 | MIT/Apache | 0.6.5 on 2026-07-13, 4 | 2 / 2 | 1/1 |
+| `syn` | F | none | 2.0.118 | MIT/Apache | 3.0.9 on 2026-10-12, 21 | 3 / 1 | 1/1 |
+| `sysinfo` | D | CLD | 0.30.13 | MIT | 0.40.1 on 2026-10-30, 14 | 3 / 1 | 1/1 |
+| `tar` | C | CLDG | 0.4.46 | MIT/Apache | 0.4.46 on 2026-05-18, 2 | 48 / 12 | 1/1 |
+| `tempfile` | D | CLDSAG | 3.27.0 | MIT/Apache | 3.27.0 on 2026-03-11, 4 | 942 / 22 | 1/1 |
+| `thiserror` | F | CLDSAG | 2.0.18 | MIT/Apache | 2.0.21 on 2026-09-23, 4 | 284 / 15 | 3/4 |
+| `tokio` | B | CLD | 1.53.3 | MIT | 1.54.1 on 2026-10-21, 24 | 222 / 13 | 1/3 |
+| `tokio-rustls` | B | CLD | 0.26.4 | MIT/Apache | 0.26.6 on 2026-09-28, 2 | 3 / 1 | 1/1 |
+| `tokio-vsock` | B | none | 0.7.2 | Apache | 0.7.2 on 2025-08-16, 0 | 1 / 1 | not in graph |
+| `toml` | C | CLD | 0.8.23 | MIT/Apache | 1.1.8+spec-1.1.0 on 2026-10-09, 21 | 52 / 11 | 2/10 |
+| `toml_edit` | C | C | 0.22.27 | MIT/Apache | 0.25.17+spec-1.1.0 on 2026-10-09, 23 | 1 / 1 | 2/6 |
+| `tracing` | F | CLDSAG | 0.1.44 | MIT | 0.1.44 on 2025-12-18, 3 | 282 / 14 | 1/2 |
+| `tracing-subscriber` | F | CLD | 0.3.23 | MIT | 0.3.23 on 2026-03-13, 3 | 20 / 5 | 1/7 |
+| `tree-sitter` | C | CL | 0.26.10 | MIT | 0.27.1 on 2026-10-08, 13 | 6 / 2 | 3/11 |
+| `tree-sitter-javascript` | C | CL | 0.25.0 | MIT | 0.25.0 on 2025-09-01, 0 | 2 / 1 | 3/3 |
+| `tree-sitter-nix` | C | CL | 0.0.2 | MIT | 0.3.0 on 2025-07-18, 0 | 1 / 1 | 3/3 |
+| `tree-sitter-python` | C | CL | 0.25.0 | MIT | 0.25.0 on 2025-09-11, 0 | 4 / 1 | 3/3 |
+| `tree-sitter-typescript` | C | CL | 0.23.2 | MIT | 0.23.2 on 2024-11-11, 0 | 4 / 1 | 3/3 |
+| `tss-esapi` | D | none | - | not in Cargo.lock | 7.7.0 on 2026-10-09, 4 | 1 / 1 | not in graph |
+| `unicode-normalization` | C | CLD | 0.1.25 | MIT/Apache | 0.1.26 on 2026-10-16, 1 | 1 / 1 | 1/1 |
+| `url` | B | CLD | 2.5.8 | MIT/Apache | 2.5.8 on 2026-01-05, 1 | 15 / 4 | 1/2 |
+| `uuid` | C | CLDSAG | 1.21.0 | Apache/MIT | 1.29.0 on 2026-10-23, 18 | 35 / 8 | 1/2 |
+| `virtio-queue` | E | CLD | 0.18.0 | Apache AND BSD-3-Clause | 0.18.0 on 2026-07-07, 2 | 5 / 1 | 1/3 |
+| `virtio-vsock` | E | CLD | 0.12.0 | Apache/BSD-3-Clause | 0.12.0 on 2026-07-09, 2 | 1 / 1 | 1/1 |
+| `vm-memory` | E | CLD | 0.18.0 | Apache/BSD-3-Clause | 0.18.0 on 2025-12-11, 2 | 1 / 1 | 1/1 |
+| `wasmtime` | C | none | - | not in Cargo.lock | 50.0.1 on 2026-10-29, 84 | 1 / 1 | not in graph |
+| `wasmtime-wasi` | C | none | - | not in Cargo.lock | 50.0.1 on 2026-10-29, 84 | 1 / 1 | not in graph |
+| `which` | D | CLD | 7.0.3 | MIT | 8.0.6 on 2026-08-26, 6 | 23 / 5 | 1/2 |
+| `x25519-dalek` | A | CLDSAG | 3.0.0 | BSD-3-Clause | 3.0.0 on 2026-07-06, 8 | 2 / 2 | 1/1 |
+| `xattr` | D | CLD | 1.6.1 | MIT/Apache | 1.7.0 on 2026-10-28, 1 | 7 / 2 | 1/1 |
+| `zeroize` | A | CLDSAG | 1.9.0 | Apache/MIT | 1.9.1 on 2026-10-06, 2 | 49 / 6 | 1/2 |
+
+### Does this meet the section 3 box?
+
+Met: exposure, trust boundary, API usage, maintenance (publish cadence), advisory, licence, closure delta
+and build cost as unit counts, each with its source. Not met: **binary contribution per dependency**
+(needs `cargo bloat --crates` on a release build) and **build cost in seconds** (needs `cargo build --timings`
+on a host with a load below 8); unsafe-block counts (`cargo geiger`) are not installed or run.
+
 ## Release-build compilation count (#4839 section 4)
 
 Measured at `4270e14d` on `aarch64-apple-darwin`, Rust 1.97.1, `--offline

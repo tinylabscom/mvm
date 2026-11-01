@@ -1,0 +1,24 @@
+name: Systemd user session
+description: >
+  Start the runner user's systemd user manager and export its session bus, so a
+  Firecracker launch can create the resource-bound scope it refuses to run
+  without.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        uid="$(id -u)"
+        sudo loginctl enable-linger "$USER"
+        sudo systemctl start "user@${uid}.service"
+        for _ in $(seq 1 30); do
+          [ -S "/run/user/${uid}/bus" ] && break
+          sleep 1
+        done
+        if [ ! -S "/run/user/${uid}/bus" ]; then
+          echo "::error::no systemd user session bus at /run/user/${uid}/bus after 30s; Firecracker's required scope cannot be created." >&2
+          exit 1
+        fi
+        echo "XDG_RUNTIME_DIR=/run/user/${uid}" >> "$GITHUB_ENV"
+        echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" >> "$GITHUB_ENV"

@@ -120,6 +120,7 @@ pub fn run(
     addr: &ListenAddr,
     make_backend: impl Fn() -> io::Result<Box<dyn GpuBackend>> + Send + 'static,
     stop: &'static AtomicBool,
+    on_bound: impl FnOnce(),
 ) -> std::io::Result<()> {
     match addr {
         ListenAddr::Unix(path) => {
@@ -128,14 +129,16 @@ pub fn run(
                 std::fs::create_dir_all(dir)?;
             }
             let listener = UnixListener::bind(path)?;
+            on_bound();
             accept_loop(&listener, make_backend, stop, UnixListener::accept)
         }
         ListenAddr::Tcp(host_port) => {
             let listener = TcpListener::bind(host_port)?;
+            on_bound();
             accept_loop(&listener, make_backend, stop, TcpListener::accept)
         }
         #[cfg(target_os = "linux")]
-        ListenAddr::Vsock(port) => run_vsock(*port, make_backend, stop),
+        ListenAddr::Vsock(port) => run_vsock(*port, make_backend, stop, on_bound),
     }
 }
 
@@ -179,8 +182,10 @@ fn run_vsock(
     port: u32,
     make_backend: impl Fn() -> io::Result<Box<dyn GpuBackend>> + Send + 'static,
     stop: &'static AtomicBool,
+    on_bound: impl FnOnce(),
 ) -> std::io::Result<()> {
     let listener = vsock::VsockListener::bind(port)?;
+    on_bound();
     accept_loop(&listener, make_backend, stop, vsock::VsockListener::accept)
 }
 

@@ -61,6 +61,10 @@ jobs:
           fi
           sudo chmod 666 /dev/kvm
 
+      - name: Start a systemd user session for the Firecracker scope
+        uses: ./.github/actions/user-session
+        if: runner.os == 'Linux'
+
       - name: Set up uv
         if: runner.os == 'macOS'
         uses: astral-sh/setup-uv@v8.2.0
