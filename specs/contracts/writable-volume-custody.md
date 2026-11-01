@@ -4,7 +4,9 @@
 
 A persistent writable volume has two cooperating-writer locks: its backing inode
 and the stable `<image>.lock` sidecar. Materialization takes the sidecar before
-inspecting or changing image bytes. Boot preparation opens the final physical
+creation/admission, then locks the original backing before inspecting, resizing,
+formatting or validating its bytes; all mutation uses that held object. Boot
+preparation opens the final physical
 backing and sidecar without following a final symlink, takes both locks, and
 binds them to the exact final disk slot and object identity. Hardlink aliases
 therefore contend even when they use different sidecar paths. Read-only and
@@ -21,8 +23,12 @@ keep the original paths. After drive configuration, launch refuses unless the
 live `/vm/config` matches that recipe and the actual writer's `/proc/<pid>/fd`
 objects include every original locked backing and sidecar. Restore reads drive
 roles from the old VMM's live `/vm/config`, positively stops that writer, and
-only then prepares replacement locks; it never parses snapshot bitcode or
-rewrites snapshot source metadata. QEMU and libkrun inherit the original backing
+only then prepares replacement locks. A fresh or blank-outgoing restore may use
+an unresumed paused VMM to capture the restored recipe, but writable roles then
+require another verified stop, lock acquisition and paused reload before resume.
+Missing or mismatched writer identity after capture blocks replacement and
+cleanup. Restore never parses snapshot bitcode or rewrites snapshot source
+metadata. QEMU and libkrun inherit the original backing
 and sidecar and open the backing through `/dev/fd`.
 In every case the actual writer retains the original lock descriptions through
 early-error recovery and uncertain stop; a caller dropping its duplicate is not

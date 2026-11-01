@@ -1365,7 +1365,10 @@ impl VmmDriver for FcDriver {
     ) -> Result<Box<dyn RunningVm>> {
         disks.validate_spec(spec)?;
         if disks.is_empty() {
-            return self.boot_with_handoff(spec, None);
+            return match kernel {
+                Some(kernel) => kernel::boot_descriptor(self, spec, kernel),
+                None => self.boot_with_handoff(spec, None),
+            };
         }
         let handoff = disks.into_sudo_handoff(spec)?;
         let projected = handoff.projected().clone();

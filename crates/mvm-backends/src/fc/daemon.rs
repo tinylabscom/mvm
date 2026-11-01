@@ -60,35 +60,37 @@ fn validate_writer_config(
     spec: &mvm_vmm::driver::spec::VmmSpec,
 ) -> Result<()> {
     use std::collections::BTreeSet;
+    anyhow::ensure!(
+        config.drives.len() == spec.blocks.len(),
+        "actual writer drive count differs from the prepared recipe"
+    );
     let mut seen = BTreeSet::new();
-    for drive in config.drives.iter().filter(|drive| !drive.is_read_only) {
+    for drive in &config.drives {
         let block = spec
             .blocks
             .iter()
             .find(|block| format!("blk{}", block.slot) == drive.drive_id)
-            .with_context(|| {
-                format!(
-                    "actual writer has unknown writable drive {}",
-                    drive.drive_id
-                )
-            })?;
+            .with_context(|| format!("actual writer has unknown drive {}", drive.drive_id))?;
         anyhow::ensure!(
             seen.insert(block.slot),
-            "actual writer repeats writable slot {}",
+            "actual writer repeats drive slot {}",
             block.slot
         );
-        if !block.ephemeral {
-            anyhow::ensure!(
-                drive.path_on_host == block.source,
-                "actual writable drive {} differs from its original locked source",
-                drive.drive_id
-            );
-        }
+        anyhow::ensure!(
+            drive.is_read_only == block.read_only,
+            "actual drive {} changed its read-only role",
+            drive.drive_id
+        );
+        anyhow::ensure!(
+            drive.path_on_host == block.source,
+            "actual drive {} differs from its prepared source",
+            drive.drive_id
+        );
     }
-    for block in spec.blocks.iter().filter(|block| !block.read_only) {
+    for block in &spec.blocks {
         anyhow::ensure!(
             seen.contains(&block.slot),
-            "actual writer is missing configured writable slot {}",
+            "actual writer is missing configured drive slot {}",
             block.slot
         );
     }
@@ -795,6 +797,9 @@ mod tests {
         )
         .unwrap();
         validate_writer_config(&matching, &spec).unwrap();
+        let mut read_only_spec = spec.clone();
+        read_only_spec.blocks[0].read_only = true;
+        assert!(validate_writer_config(&matching, &read_only_spec).is_err());
         for body in [
             r#"{"drives":[]}"#,
             r#"{"drives":[{"drive_id":"blk3","path_on_host":"/replacement","is_read_only":false}]}"#,
