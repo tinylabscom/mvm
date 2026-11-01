@@ -58,10 +58,6 @@ alone opt out would let a careless or compromised workload definition export
 raw PII into another workload with no human involved, and between two workloads
 those are different trust domains. Never set it in CI.
 
-(Design notes describe this as "shaped after `MVM_ACK_UNRESTRICTED_NETWORK`".
-That variable is aspirational: it is read nowhere in the workspace, so there is
-no unrestricted-egress acknowledgement to be modelled on yet.)
-
 :::note[`raw` is not servable yet]
 Redaction runs *before* hashing, so a record that reaches a reader has already
 crossed the seam and no unmasked copy survives. A `raw` edge is therefore
