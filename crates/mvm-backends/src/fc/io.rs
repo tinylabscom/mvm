@@ -20,6 +20,8 @@ use mvm_vmm::snapshot::SnapshotIO;
 pub struct FirecrackerIO {
     /// Absolute path to the live Firecracker control socket.
     pub socket_path: PathBuf,
+    /// A captured/started writer requires verified termination on every exit.
+    verified_stop_required: std::cell::Cell<bool>,
     /// Who the *fresh* VMM a snapshot load starts is scoped as, and the CPU
     /// share it is born under. `None` on a handle that only talks to an
     /// already-running Firecracker, and on a same-identity restore, which
@@ -42,10 +44,27 @@ pub struct RestoreBound {
     pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
 }
 
+#[derive(serde::Deserialize)]
+struct RestoreConfig {
+    drives: Vec<RestoreDrive>,
+}
+
+#[derive(serde::Deserialize)]
+struct RestoreDrive {
+    drive_id: String,
+    path_on_host: PathBuf,
+    is_read_only: bool,
+}
+
+fn paused_capture_needs_relock(handoff_present: bool, config: &RestoreConfig) -> bool {
+    !handoff_present && config.drives.iter().any(|drive| !drive.is_read_only)
+}
+
 impl FirecrackerIO {
     pub fn new(socket_path: PathBuf) -> Self {
         Self {
             socket_path,
+            verified_stop_required: std::cell::Cell::new(false),
             restore_bound: None,
             fork_devices: None,
         }
@@ -68,6 +87,22 @@ impl FirecrackerIO {
     pub fn bounded_by(mut self, bound: RestoreBound) -> Self {
         self.restore_bound = Some(bound);
         self
+    }
+
+    /// Verify the live writer against this launch's original locked objects.
+    pub fn verify_writable_writer(
+        &self,
+        handoff: &mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+    ) -> Result<()> {
+        let vm_dir = self
+            .socket_path
+            .parent()
+            .context("Firecracker socket path has no VM directory")?;
+        super::daemon::verify_writable_writer(
+            &vm_dir.to_string_lossy(),
+            &self.socket_path.to_string_lossy(),
+            handoff,
+        )
     }
 
     /// Point the drive `drive_id` of a paused VMM at `path`.
@@ -149,6 +184,22 @@ impl FirecrackerIO {
         )
     }
 
+    /// Once a live config was captured, missing or mismatched pid identity is
+    /// not evidence that the authenticated writer stopped.
+    fn stop_own_vmm_after_live_config(&self, vm_dir: &Path) -> Result<()> {
+        self.verified_stop_required.set(true);
+        let name = vm_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| vm_dir.display().to_string());
+        stop_restored_vmm_strict(
+            &name,
+            &vm_dir.join("fc.pid"),
+            |pid| super::is_firecracker_for_socket(pid, &self.socket_path),
+            crate::driver::fc::terminate_firecracker_pid,
+        )
+    }
+
     fn ensure_socket(&self) -> Result<()> {
         if !self.socket_path.exists() {
             bail!(
@@ -157,6 +208,81 @@ impl FirecrackerIO {
             );
         }
         Ok(())
+    }
+
+    fn prepare_restore_handoff(
+        &self,
+        live_config: &str,
+        fork: Option<&super::ForkDevices>,
+    ) -> Result<Option<mvm_vmm::driver::prepared_disks::SudoWritableHandoff>> {
+        let config: RestoreConfig = serde_json::from_str(live_config)
+            .context("parsing the stopped writer's authenticated live configuration")?;
+        let mut images = Vec::new();
+        let mut blocks = Vec::new();
+        for drive in config.drives {
+            let slot = drive
+                .drive_id
+                .strip_prefix("blk")
+                .context("restored drive lacks managed slot")?
+                .parse::<u8>()?;
+            let source = fork
+                .and_then(|devices| devices.child_path_for(&drive.path_on_host))
+                .unwrap_or(drive.path_on_host);
+            blocks.push(mvm_vmm::driver::spec::BlockDev {
+                source: source.clone(),
+                read_only: drive.is_read_only,
+                ephemeral: false,
+                slot,
+            });
+            if !drive.is_read_only {
+                images.push((
+                    slot,
+                    mvm_core::util::writable_image::LockedWritableImage::open(
+                        &source,
+                        &mvm_core::util::writable_image::sidecar_lock_path(&source),
+                    )?,
+                ));
+            }
+        }
+        let spec = mvm_vmm::driver::spec::VmmSpec {
+            name: "restore".into(),
+            kernel: mvm_vmm::driver::spec::KernelImage::Bundled,
+            initramfs: None,
+            cmdline: String::new(),
+            vcpus: 1,
+            cpu_grant: None,
+            memory_mib: 64,
+            mem_initial_mib: None,
+            blocks,
+            vsock: Vec::new(),
+            console: mvm_vmm::driver::spec::ConsoleCapture {
+                log_path: "/unused".into(),
+            },
+            shares: Vec::new(),
+            trusted_builder: false,
+            builder_egress_endpoint: None,
+            plan_binding: None,
+        };
+        let disks = mvm_vmm::driver::prepared_disks::PreparedWritableDisks::bind_sources(
+            &spec,
+            images
+                .into_iter()
+                .map(|(slot, image)| {
+                    let source = spec
+                        .blocks
+                        .iter()
+                        .find(|block| block.slot == slot)
+                        .expect("bound slot")
+                        .source
+                        .clone();
+                    (source, image)
+                })
+                .collect(),
+        )?;
+        if disks.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(disks.into_sudo_handoff(&spec)?))
     }
 
     /// Load a sealed snapshot into a fresh VMM, leaving vCPUs paused.
@@ -169,7 +295,6 @@ impl FirecrackerIO {
             .socket_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Firecracker socket path has no parent directory"))?;
-        let socket_str = self.socket_path.to_string_lossy();
         let memory_mib = snapshot_guest_memory_mib(dir)?;
         let (machine_id, bounds) = self.restore_scope_inputs(vm_dir, memory_mib);
         super::daemon::validate_required_scope(&machine_id, &bounds)?;
@@ -179,24 +304,75 @@ impl FirecrackerIO {
                 .context("preparing the parent's recorded drive paths for a fork load")?;
         }
 
-        // Firecracker refuses `/snapshot/load` on a VMM that has already
-        // started a microVM. If a previous pause left the process alive, stop
-        // it; if it already exited, just start a fresh blank VMM. Either way
-        // resume from the sealed snapshot rather than assuming a live API. Only
-        // this VM's own Firecracker is ever signalled: a pid left from before
-        // a reboot may name another process now.
-        let scope = self.scope_after_stop(vm_dir, memory_mib, || self.stop_own_vmm(vm_dir))?;
-        super::start_vm_firecracker_scoped(&vm_dir.to_string_lossy(), &socket_str, &scope)
-            .with_context(|| "starting fresh Firecracker for snapshot restore")?;
-        // Firecracker runs through `sudo` and binds its API socket as root. Take
-        // it over before the first call, as the cold boot does, or a caller
-        // that is not root cannot dial it.
+        // A live old VMM authenticates its recipe before a strict stop. With
+        // no VMM at all, only a genuinely fresh restore may use the paused
+        // capture/relock sequence below; an unexplained pid marker fails closed.
+        let live_config = if self.socket_path.exists() {
+            Some(
+                super::call(&self.socket_path, "GET", "/vm/config", None)
+                    .context("reading the old writer's live drive configuration")?,
+            )
+        } else {
+            anyhow::ensure!(
+                !vm_dir.join("fc.pid").exists(),
+                "Firecracker pid marker exists without a live API; refusing to infer quiescence"
+            );
+            None
+        };
+        let scope = if live_config.is_some() {
+            self.scope_after_stop(vm_dir, memory_mib, || {
+                self.stop_own_vmm_after_live_config(vm_dir)
+            })?
+        } else {
+            self.restore_scope_prefix(vm_dir, memory_mib)?
+        };
+        let handoff = live_config
+            .as_deref()
+            .map(|config| self.prepare_restore_handoff(config, fork))
+            .transpose()?
+            .flatten();
+        self.load_paused_with_handoff(dir, fork, &scope, handoff.as_ref())?;
+
+        if handoff.is_none() {
+            // A blank/unconfigured outgoing VMM cannot attest the snapshot's
+            // roles. Capture the paused restored recipe, positively stop that
+            // temporary VMM, then lock and reload before anything can resume.
+            let restored = super::call(&self.socket_path, "GET", "/vm/config", None)
+                .context("capturing the paused restored drive configuration")?;
+            let config: RestoreConfig = serde_json::from_str(&restored)?;
+            if paused_capture_needs_relock(handoff.is_some(), &config) {
+                self.stop_own_vmm_after_live_config(vm_dir)?;
+                let handoff = self.prepare_restore_handoff(&restored, None)?;
+                self.load_paused_with_handoff(dir, fork, &scope, handoff.as_ref())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn load_paused_with_handoff(
+        &self,
+        dir: &Path,
+        fork: Option<&super::ForkDevices>,
+        scope: &str,
+        handoff: Option<&mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
+    ) -> Result<()> {
+        let vm_dir = self
+            .socket_path
+            .parent()
+            .context("Firecracker socket path has no parent directory")?;
+        let socket_str = self.socket_path.to_string_lossy();
+        self.verified_stop_required.set(true);
+        super::start_vm_firecracker_scoped_with_handoff(
+            &vm_dir.to_string_lossy(),
+            &socket_str,
+            scope,
+            handoff,
+        )
+        .with_context(|| "starting fresh Firecracker for snapshot restore")?;
         super::adopt_api_socket(&socket_str)
             .context("adopting the restored Firecracker's API socket for the invoking user")?;
 
-        // `resume_vm: false` — vCPUs stay paused so the device-model guard in
-        // `verify_and_resume_from_dir` can inspect `GET /vm/config` before
-        // anything executes.
+        // `resume_vm: false` — vCPUs stay paused throughout custody capture.
         let mut body = serde_json::json!({
             "snapshot_path": format!("{}/{}", dir.display(), VMSTATE_FILENAME),
             "mem_backend": {
@@ -212,8 +388,6 @@ impl FirecrackerIO {
         }
         if let Err(e) = super::api_put_socket(&socket_str, "/snapshot/load", &body.to_string()) {
             let state_file = dir.join(VMSTATE_FILENAME);
-            // Firecracker has already refused before any guest code ran; this
-            // only names the refusal when the state itself could not be decoded.
             if let Some(undecodable) =
                 super::snapshot_decode::explain_load_failure(&e, &self.socket_path, &state_file)
             {
@@ -224,8 +398,9 @@ impl FirecrackerIO {
         if let Some(devices) = fork {
             self.retarget_fork_drives(devices)?;
         }
-        // The load bound the vsock socket as the VMM's own user; the claim
-        // dials it as the invoking one.
+        if let Some(handoff) = handoff {
+            self.verify_writable_writer(handoff)?;
+        }
         let vsock_uds = match fork {
             Some(devices) => devices.child_vsock_uds().to_path_buf(),
             None => PathBuf::from(super::firecracker_vsock_uds_path(&vm_dir.to_string_lossy())),
@@ -347,7 +522,12 @@ impl SnapshotIO for FirecrackerIO {
             .socket_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Firecracker socket path has no parent directory"))?;
-        self.stop_own_vmm(vm_dir)?;
+        if self.verified_stop_required.get() {
+            self.stop_own_vmm_after_live_config(vm_dir)?;
+        } else {
+            self.stop_own_vmm(vm_dir)?;
+        }
+        self.verified_stop_required.set(false);
         // The API socket is dead with its process; the next restore starts a
         // fresh VMM that binds a new one.
         let _ = std::fs::remove_file(&self.socket_path);
@@ -370,9 +550,34 @@ fn stop_restored_vmm(
     is_ours: impl FnOnce(u32) -> Result<bool>,
     terminate: impl FnOnce(&str, u32, &Path) -> Result<()>,
 ) -> Result<()> {
+    stop_restored_vmm_inner(name, pid_file, false, is_ours, terminate)
+}
+
+fn stop_restored_vmm_strict(
+    name: &str,
+    pid_file: &Path,
+    is_ours: impl FnOnce(u32) -> Result<bool>,
+    terminate: impl FnOnce(&str, u32, &Path) -> Result<()>,
+) -> Result<()> {
+    stop_restored_vmm_inner(name, pid_file, true, is_ours, terminate)
+}
+
+fn stop_restored_vmm_inner(
+    name: &str,
+    pid_file: &Path,
+    live_config_captured: bool,
+    is_ours: impl FnOnce(u32) -> Result<bool>,
+    terminate: impl FnOnce(&str, u32, &Path) -> Result<()>,
+) -> Result<()> {
     let recorded = match std::fs::read_to_string(pid_file) {
         Ok(recorded) => recorded,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !live_config_captured => {
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(error)
+                .context("live Firecracker config was captured but its pid is missing");
+        }
         Err(error) => {
             return Err(error).with_context(|| format!("reading {}", pid_file.display()));
         }
@@ -384,6 +589,10 @@ fn stop_restored_vmm(
     if !is_ours(pid)
         .with_context(|| format!("checking whether pid {pid} is still this VM's Firecracker"))?
     {
+        anyhow::ensure!(
+            !live_config_captured,
+            "live Firecracker config was captured but pid {pid} is not this socket's writer"
+        );
         let _ = std::fs::remove_file(pid_file);
         return Ok(());
     }
@@ -458,7 +667,8 @@ mod tests {
 
     #[test]
     fn failed_old_stop_preserves_scope_record_and_never_launches_replacement() {
-        let scratch = tempfile::tempdir().unwrap();
+        use std::io::{Read, Write};
+        let scratch = crate::driver::socket_tempdir();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
         let vm = scratch.path().join("vm");
@@ -469,12 +679,29 @@ mod tests {
         let snapshot = scratch.path().join("snapshot");
         std::fs::create_dir(&snapshot).unwrap();
         std::fs::write(snapshot.join(MEM_FILENAME), b"x").unwrap();
-        let io = FirecrackerIO::new(vm.join("fc.socket"));
+        let socket = vm.join("fc.socket");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let old_config = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = conn.read(&mut request);
+            let body = r#"{"drives":[]}"#;
+            conn.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        });
+        let io = FirecrackerIO::new(socket);
         let _guard = mvm_vmm::host::shell::mock::install_handler(|_| {
             panic!("failed old stop must not launch a replacement")
         });
 
         let error = io.load_snapshot_inner(&snapshot, None).unwrap_err();
+        old_config.join().unwrap();
         assert!(
             format!("{error:#}").contains("stopping paused Firecracker"),
             "{error:#}"
@@ -487,6 +714,62 @@ mod tests {
             std::fs::read(vm.join("fc.pid")).unwrap(),
             b"invalid-old-pid"
         );
+    }
+
+    #[test]
+    fn live_config_never_legalizes_missing_or_mismatched_writer_identity() {
+        let scratch = tempfile::tempdir().unwrap();
+        let marker = scratch.path().join("fc.pid");
+        let error = stop_restored_vmm_strict(
+            "vm",
+            &marker,
+            |_| Ok(true),
+            |_, _, _| panic!("missing writer identity must not terminate or succeed"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("pid is missing"));
+
+        std::fs::write(&marker, "123").unwrap();
+        let error = stop_restored_vmm_strict(
+            "vm",
+            &marker,
+            |_| Ok(false),
+            |_, _, _| panic!("mismatched writer identity must not terminate or succeed"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("not this socket's writer"));
+        assert_eq!(std::fs::read(&marker).unwrap(), b"123");
+    }
+
+    #[test]
+    fn teardown_does_not_clear_a_live_writer_with_missing_identity() {
+        let scratch = tempfile::tempdir().unwrap();
+        let socket = scratch.path().join("fc.socket");
+        std::fs::write(&socket, b"live API placeholder").unwrap();
+        let io = FirecrackerIO::new(socket.clone());
+        io.verified_stop_required.set(true);
+        assert!(io.teardown_paused().is_err());
+        assert!(socket.exists());
+    }
+
+    #[test]
+    fn read_only_live_restore_config_needs_no_writable_handoff() {
+        let scratch = tempfile::tempdir().unwrap();
+        let io = FirecrackerIO::new(scratch.path().join("fc.socket"));
+        let config = r#"{"drives":[{"drive_id":"blk0","path_on_host":"/missing/read-only","is_read_only":true}]}"#;
+        assert!(io.prepare_restore_handoff(config, None).unwrap().is_none());
+        let restored: RestoreConfig = serde_json::from_str(config).unwrap();
+        assert!(!paused_capture_needs_relock(false, &restored));
+        assert!(!paused_capture_needs_relock(true, &restored));
+
+        let blank = r#"{"drives":[]}"#;
+        assert!(io.prepare_restore_handoff(blank, None).unwrap().is_none());
+        let writable: RestoreConfig = serde_json::from_str(
+            r#"{"drives":[{"drive_id":"blk0","path_on_host":"/volume","is_read_only":false}]}"#,
+        )
+        .unwrap();
+        assert!(paused_capture_needs_relock(false, &writable));
+        assert!(!paused_capture_needs_relock(true, &writable));
     }
 
     #[test]

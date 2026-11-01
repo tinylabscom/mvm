@@ -312,7 +312,26 @@ fn record_signed_marker(exe: &std::path::Path) {
 /// serializes concurrent launches (codesign --force rewrites the shared binary
 /// in place). Mirrors the libkrun supervisor's `ensure_self_signed`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn ensure_self_signed(diagnostics: &mut mvm_vmm::host::hvf_supervisor::StartupReporter) {
+fn set_writable_cloexec(
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    for disk in &cfg.writable_disk_fds {
+        for fd in [disk.backing, disk.sidecar] {
+            // SAFETY: preflight established these exact live descriptors. Only
+            // their close-on-exec flag changes; ownership stays with the caller.
+            let result = unsafe { libc::fcntl(fd, libc::F_SETFD, i32::from(enabled)) };
+            anyhow::ensure!(result >= 0, "updating writable descriptor inheritance");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn ensure_self_signed(
+    diagnostics: &mut mvm_vmm::host::hvf_supervisor::StartupReporter,
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+) {
     use mvm_vmm::host::hvf_supervisor::StartupStage;
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -383,6 +402,10 @@ fn ensure_self_signed(diagnostics: &mut mvm_vmm::host::hvf_supervisor::StartupRe
         .args(std::env::args_os().skip(1))
         .env("MVM_HVF_SIGNED", "1");
     diagnostics.configure_reexec(&mut command);
+    if let Err(error) = set_writable_cloexec(cfg, false) {
+        eprintln!("mvm-hvf-supervisor: retaining writable descriptors failed: {error}");
+        std::process::exit(1);
+    }
     let err = command.exec();
     eprintln!("mvm-hvf-supervisor: re-exec after signing failed: {err}");
     std::process::exit(1);
@@ -579,8 +602,11 @@ fn run() -> anyhow::Result<()> {
     let cfg: HvfSupervisorConfig =
         serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
     let mode = startup_mode(&cfg)?;
+    // The entire startup namespace is validated before diagnostics, replay,
+    // signing re-exec, or any descriptor ownership conversion.
+    mvm_hostd::supervisor::caller_registration::preflight_startup_files(&cfg)?;
     let mut diagnostics;
-    let files = match mode {
+    let mut files = match mode {
         StartupMode::Checked => {
             // Complete preflight precedes FIRST ownership conversion.
             let files = mvm_hostd::supervisor::caller_registration::adopt_startup_files(&cfg)?;
@@ -607,8 +633,10 @@ fn run() -> anyhow::Result<()> {
             }
             // SAFETY: unchanged legacy launcher diagnostics ownership contract.
             diagnostics = unsafe { StartupReporter::inherited() };
-            // Body unchanged: only legacy can sign/reexec with RAM-backed FD0.
-            ensure_self_signed(&mut diagnostics);
+            // Unrelated signing helpers must not inherit writable custody. The
+            // reexec itself retains it explicitly immediately before exec.
+            set_writable_cloexec(&cfg, true)?;
+            ensure_self_signed(&mut diagnostics, &cfg);
             mvm_hostd::supervisor::caller_registration::adopt_startup_files(&cfg)?
         }
     };
@@ -631,6 +659,9 @@ fn run() -> anyhow::Result<()> {
     diagnostics.stage(StartupStage::ConfigRead);
     diagnostics.stage(StartupStage::ConfigParse);
     let registered_startup = mvm_hostd::supervisor::caller_registration::prepare_startup(&cfg)?;
+    // Declared before the disk devices so reverse drop order flushes and destroys
+    // every disk before either lock description can be released.
+    let mut writable_files = files.take_writable();
     let (held_kernel, mut checked_images, registered_startup) = match mode {
         StartupMode::Checked => {
             let startup =
@@ -736,9 +767,19 @@ fn run() -> anyhow::Result<()> {
             let bytes = std::fs::read(&d.path)
                 .with_context(|| format!("read ephemeral disk {}", d.path.display()))?;
             mvm_runtime::backends::hvf::DiskImage::mem(bytes)
-        } else {
+        } else if cfg.writable_disk_fds.is_empty()
+            && (cfg.exclusive_image_lock.is_some() || cfg.trusted_builder_egress)
+        {
+            // The persistent builder's pre-existing supervisor-owned sidecar
+            // protocol is separate from user-volume descriptor custody.
             mvm_runtime::backends::hvf::DiskImage::open(&d.path, false)
                 .with_context(|| format!("open read-write disk {}", d.path.display()))?
+        } else {
+            let backing = writable_files.take_disk(index)?.context(
+                "persistent writable disk has no inherited original backing; refusing path fallback",
+            )?;
+            mvm_runtime::backends::hvf::DiskImage::writable_file(backing)
+                .with_context(|| format!("adopt read-write disk {}", d.path.display()))?
         };
         if let Some(artifact) =
             mvm_vmm::runtime_artifacts::RuntimeArtifact::disk(d.path.clone(), &img)?

@@ -560,6 +560,12 @@ impl BoundCommand {
         &self.command
     }
 
+    /// Configure process resources, such as explicit descriptor inheritance,
+    /// before the scope wrapper seals and launches this command.
+    pub fn as_command_mut(&mut self) -> &mut Command {
+        &mut self.command
+    }
+
     /// Shorten the creation deadline, so the timeout path is testable without
     /// a ten-second wait.
     #[cfg(any(test, feature = "test-support"))]

@@ -65,6 +65,32 @@ pub struct PreparedCallerStartup {
 pub struct StartupFiles {
     kernel: Option<std::fs::File>,
     images: Option<[std::fs::File; 4]>,
+    writable: Vec<(usize, mvm_core::util::writable_image::LockedWritableImage)>,
+}
+
+/// Sidecars stay here after their backings move into the actual disk devices.
+pub struct WritableStartupFiles {
+    disks: Vec<WritableStartupDisk>,
+}
+
+struct WritableStartupDisk {
+    disk: usize,
+    backing: Option<std::fs::File>,
+    _sidecar: std::fs::File,
+}
+
+impl WritableStartupFiles {
+    /// Consume a backing only for its declared persistent-writable table slot.
+    pub fn take_disk(&mut self, disk: usize) -> Result<Option<std::fs::File>> {
+        let Some(entry) = self.disks.iter_mut().find(|entry| entry.disk == disk) else {
+            return Ok(None);
+        };
+        entry
+            .backing
+            .take()
+            .map(Some)
+            .context("writable backing already consumed")
+    }
 }
 
 /// Original caller, original kernel and authenticated image files, still owned.
@@ -120,48 +146,88 @@ impl BoundCallerBoot {
     }
 }
 
-/// Validate the COMPLETE locator set before the first ownership conversion.
-/// No opens occur between this preflight and adoption of the checked group.
+/// Validate the COMPLETE locator set without adopting or closing any input.
+pub fn preflight_startup_files(
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+) -> Result<()> {
+    let mut readonly = cfg.kernel_fd.into_iter().collect::<Vec<_>>();
+    if let Some(table) = cfg.boot_image_fds {
+        anyhow::ensure!(
+            cfg.kernel_fd.is_some(),
+            "image table requires original kernel descriptor"
+        );
+        readonly.extend(table.descriptors());
+    }
+    if let Some(restore) = cfg.restore_fds {
+        readonly.extend([restore.ram, restore.frame]);
+    }
+    let writable = cfg
+        .writable_disk_fds
+        .iter()
+        .flat_map(|disk| [disk.backing, disk.sidecar])
+        .collect::<Vec<_>>();
+    let all = readonly
+        .iter()
+        .chain(&writable)
+        .copied()
+        .collect::<Vec<_>>();
+    validate_descriptor_namespace(&all)?;
+    validate_startup_descriptors(&readonly)?;
+    validate_writable_descriptors(&writable)?;
+    validate_writable_disk_table(cfg)?;
+    validate_diagnostics_descriptor(
+        &all,
+        std::env::var_os("MVM_HVF_STARTUP_DIAGNOSTICS_FD").as_deref(),
+    )?;
+    if cfg.boot_image_fds.is_some() {
+        anyhow::ensure!(
+            cfg.restore_fds.is_none() && cfg.restore_ram.is_none() && cfg.restore_frame.is_none(),
+            "checked boot images cannot enter restore"
+        );
+        cfg.boot_image_claims().map_err(anyhow::Error::msg)?;
+        mvm_vmm::host::hvf_supervisor::refuse_bootarg_overrides()?;
+    }
+    Ok(())
+}
+
+/// Preflight the complete set again, then adopt each descriptor exactly once.
 pub fn adopt_startup_files(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
 ) -> Result<StartupFiles> {
     use mvm_vmm::host::restore_image::adopt_inherited;
-    let Some(table) = cfg.boot_image_fds else {
-        return Ok(StartupFiles {
-            kernel: cfg.kernel_fd.map(adopt_inherited).transpose()?,
-            images: None,
-        });
-    };
-    let kernel = cfg
-        .kernel_fd
-        .context("image table requires original kernel descriptor")?;
-    let mut fds = vec![kernel];
-    fds.extend(table.descriptors());
-    if let Some(restore) = cfg.restore_fds {
-        fds.extend([restore.ram, restore.frame]);
-    }
-    validate_startup_descriptors(&fds)?;
-    validate_diagnostics_descriptor(
-        &fds,
-        std::env::var_os("MVM_HVF_STARTUP_DIAGNOSTICS_FD").as_deref(),
-    )?;
-    anyhow::ensure!(
-        cfg.restore_fds.is_none() && cfg.restore_ram.is_none() && cfg.restore_frame.is_none(),
-        "checked boot images cannot enter restore"
-    );
-    cfg.boot_image_claims().map_err(anyhow::Error::msg)?;
-    mvm_vmm::host::hvf_supervisor::refuse_bootarg_overrides()?;
-    let kernel = adopt_inherited(kernel)?;
-    let [rootfs, verity, metadata, hash] = table.descriptors();
-    let images = [
-        adopt_inherited(rootfs)?,
-        adopt_inherited(verity)?,
-        adopt_inherited(metadata)?,
-        adopt_inherited(hash)?,
-    ];
+
+    preflight_startup_files(cfg)?;
+    let kernel = cfg.kernel_fd.map(adopt_inherited).transpose()?;
+    let images = cfg
+        .boot_image_fds
+        .map(|table| {
+            let [rootfs, verity, metadata, hash] = table.descriptors();
+            Ok::<_, anyhow::Error>([
+                adopt_inherited(rootfs)?,
+                adopt_inherited(verity)?,
+                adopt_inherited(metadata)?,
+                adopt_inherited(hash)?,
+            ])
+        })
+        .transpose()?;
+    let writable = cfg
+        .writable_disk_fds
+        .iter()
+        .map(|disk| {
+            // SAFETY: the complete preflight established live, distinct descriptors
+            // assigned to this startup; no other owner adopts these numbers.
+            let backing = unsafe { std::os::fd::FromRawFd::from_raw_fd(disk.backing) };
+            // SAFETY: same single-adoption contract as `backing` above.
+            let sidecar = unsafe { std::os::fd::FromRawFd::from_raw_fd(disk.sidecar) };
+            let image =
+                mvm_core::util::writable_image::LockedWritableImage::acquire(backing, sidecar)?;
+            Ok((disk.disk, image))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(StartupFiles {
-        kernel: Some(kernel),
-        images: Some(images),
+        kernel,
+        images,
+        writable,
     })
 }
 
@@ -196,7 +262,7 @@ fn validate_diagnostics_descriptor(fds: &[i32], value: Option<&std::ffi::OsStr>)
     Ok(())
 }
 
-fn validate_startup_descriptors(fds: &[i32]) -> Result<()> {
+fn validate_descriptor_namespace(fds: &[i32]) -> Result<()> {
     let mut numbers = std::collections::BTreeSet::new();
     let mut inodes = std::collections::BTreeSet::new();
     for fd in fds {
@@ -207,22 +273,84 @@ fn validate_startup_descriptors(fds: &[i32]) -> Result<()> {
         // SAFETY: fstat initializes this plain data; it is read only on success.
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: only descriptor metadata is inspected, without taking ownership.
-        let status = unsafe {
-            if libc::fstat(*fd, &mut stat) != 0 {
-                -1
-            } else {
-                libc::fcntl(*fd, libc::F_GETFL)
-            }
-        };
+        anyhow::ensure!(
+            unsafe { libc::fstat(*fd, &mut stat) } == 0
+                && inodes.insert((stat.st_dev, stat.st_ino)),
+            "startup descriptors alias an underlying object"
+        );
+    }
+    Ok(())
+}
+
+fn descriptor_role(fd: i32) -> Result<(libc::stat, i32)> {
+    // SAFETY: fstat initializes this plain data; it is read only on success.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: only descriptor metadata is inspected, without taking ownership.
+    let status = unsafe {
+        if libc::fstat(fd, &mut stat) != 0 {
+            -1
+        } else {
+            libc::fcntl(fd, libc::F_GETFL)
+        }
+    };
+    Ok((stat, status))
+}
+
+fn validate_startup_descriptors(fds: &[i32]) -> Result<()> {
+    validate_descriptor_namespace(fds)?;
+    for fd in fds {
+        let (stat, status) = descriptor_role(*fd)?;
         anyhow::ensure!(
             status >= 0
                 && (status & libc::O_ACCMODE) == libc::O_RDONLY
                 && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
-                && stat.st_nlink == 0
-                && inodes.insert((stat.st_dev, stat.st_ino)),
+                && stat.st_nlink == 0,
             "startup descriptor is not a distinct private read-only file"
         );
     }
+    Ok(())
+}
+
+fn validate_writable_descriptors(fds: &[i32]) -> Result<()> {
+    validate_descriptor_namespace(fds)?;
+    for fd in fds {
+        let (stat, status) = descriptor_role(*fd)?;
+        anyhow::ensure!(
+            status >= 0
+                && (status & libc::O_ACCMODE) == libc::O_RDWR
+                && status & libc::O_APPEND == 0
+                && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+                && stat.st_nlink > 0,
+            "writable startup descriptor is not a linked non-append read-write file"
+        );
+    }
+    Ok(())
+}
+
+fn validate_writable_disk_table(
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+) -> Result<()> {
+    if cfg.writable_disk_fds.is_empty()
+        && (cfg.exclusive_image_lock.is_some() || cfg.trusted_builder_egress)
+    {
+        return Ok(());
+    }
+    let expected = cfg
+        .disks
+        .iter()
+        .enumerate()
+        .filter(|(_, disk)| !disk.read_only && !disk.ephemeral)
+        .map(|(index, _)| index)
+        .collect::<std::collections::BTreeSet<_>>();
+    let supplied = cfg
+        .writable_disk_fds
+        .iter()
+        .map(|disk| disk.disk)
+        .collect::<std::collections::BTreeSet<_>>();
+    anyhow::ensure!(
+        supplied.len() == cfg.writable_disk_fds.len() && supplied == expected,
+        "writable descriptor table does not cover the exact persistent disk set"
+    );
     Ok(())
 }
 
@@ -244,6 +372,23 @@ impl std::io::Read for BootReader<'_> {
 }
 
 impl StartupFiles {
+    /// Split writer custody from kernel/caller consumption without reopening anything.
+    pub fn take_writable(&mut self) -> WritableStartupFiles {
+        WritableStartupFiles {
+            disks: std::mem::take(&mut self.writable)
+                .into_iter()
+                .map(|(disk, image)| {
+                    let (backing, sidecar) = image.into_files();
+                    WritableStartupDisk {
+                        disk,
+                        backing: Some(backing),
+                        _sidecar: sidecar,
+                    }
+                })
+                .collect(),
+        }
+    }
+
     pub fn into_legacy_kernel(self) -> Result<Option<std::fs::File>> {
         anyhow::ensure!(
             self.images.is_none(),

@@ -843,6 +843,37 @@ impl AnyBackend {
         self.inner().start(config)
     }
 
+    /// Start with original writable-image custody transferred to the final writer.
+    #[cfg(unix)]
+    pub fn start_custodied(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+    ) -> Result<VmId> {
+        if images.is_empty() {
+            return self.start(config);
+        }
+        if !self.activation_waits_for_admission() {
+            config.wait_for_admission_durability()?;
+        }
+        match self {
+            Self::Firecracker(runner) => runner.start_custodied(config, images),
+            Self::Libkrun(runner) => runner.start_custodied(config, images),
+            Self::Qemu(runner) => runner.start_custodied(config, images),
+            Self::Hvf(runner) => runner.start_custodied(config, images),
+            #[cfg(feature = "test-support")]
+            Self::Mock(backend) => {
+                // The hermetic writer has no real descriptors to inherit, but
+                // it still exercises the same ownership and admission path.
+                let images = images;
+                let id = backend.start(config)?;
+                drop(images);
+                Ok(id)
+            }
+            _ => anyhow::bail!("backend does not support writable descriptor handoff"),
+        }
+    }
+
     /// Prepare native custody without creating a child. The caller must keep
     /// this return through activation, dispatch, flush and terminal stop.
     pub fn prepare_owned_launch(

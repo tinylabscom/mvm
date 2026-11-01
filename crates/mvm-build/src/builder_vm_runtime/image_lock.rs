@@ -84,9 +84,7 @@ impl Drop for HeldImageLock {
 /// extension swap, so `foo.img` → `foo.img.lock`). Ends in `.lock` so
 /// it never matches `cache info`'s `nix-store-*.img` glob.
 pub(crate) fn sidecar_lock_path(image: &Path) -> PathBuf {
-    let mut s = image.as_os_str().to_os_string();
-    s.push(".lock");
-    PathBuf::from(s)
+    mvm_core::util::writable_image::sidecar_lock_path(image)
 }
 
 /// Sparse-allocate `path` to `size_bytes` minus the libkrun tail reserve if
@@ -101,8 +99,18 @@ pub(crate) fn sidecar_lock_path(image: &Path) -> PathBuf {
 /// The fd is dropped before returning — deliberately. The host must
 /// hold no open handle on the image so the hypervisor (HVF) can
 /// open it exclusively; serialisation lives on the sidecar lock.
+#[cfg(not(unix))]
 pub(crate) fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), BuilderVmError> {
     sparse_ensure_image(path, size_bytes, ExistingImageSize::Preserve)
+}
+
+/// Resize the already locked object, never a pathname that could be replaced.
+pub(crate) fn sparse_create_locked_image(
+    file: &std::fs::File,
+    path: &Path,
+    size_bytes: u64,
+) -> Result<(), BuilderVmError> {
+    sparse_ensure_open_image(file, path, size_bytes, ExistingImageSize::Preserve, true)
 }
 
 /// Create an empty sparse image or restore an undersized existing image to its
@@ -137,6 +145,16 @@ fn sparse_ensure_image(
         .open(path)
         .map_err(|e| BuilderVmError::ExtractionFailed(format!("open {}: {e}", path.display())))?;
 
+    sparse_ensure_open_image(&file, path, size_bytes, existing_size, existed_before_open)
+}
+
+fn sparse_ensure_open_image(
+    file: &std::fs::File,
+    path: &Path,
+    size_bytes: u64,
+    existing_size: ExistingImageSize,
+    existed_before_open: bool,
+) -> Result<(), BuilderVmError> {
     let image_bytes = size_bytes
         .checked_sub(LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES)
         .ok_or_else(|| {

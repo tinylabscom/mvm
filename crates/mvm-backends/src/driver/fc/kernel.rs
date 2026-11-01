@@ -56,6 +56,25 @@ pub(super) fn fc_descriptor_recipe(
 }
 
 #[cfg(unix)]
+pub(super) fn boot_descriptor_custodied(
+    driver: &super::FcDriver,
+    spec: &VmmSpec,
+    kernel: &mvm_vmm::host::restore_image::VerifiedRestoreFile,
+    handoff: mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+) -> Result<Box<dyn mvm_vmm::driver::traits::RunningVm>> {
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    {
+        let recipe = fc_descriptor_recipe(spec, kernel)?;
+        driver.boot_with_handoff(&recipe, Some(handoff))
+    }
+    #[cfg(not(any(target_os = "linux", all(test, unix))))]
+    {
+        let _ = (driver, spec, kernel, handoff);
+        bail!("Firecracker descriptor startup requires the same Linux host")
+    }
+}
+
+#[cfg(unix)]
 pub(super) fn boot_descriptor(
     driver: &super::FcDriver,
     spec: &VmmSpec,

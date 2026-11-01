@@ -1439,8 +1439,12 @@ fn machine_exec_command(argv: &[String]) -> String {
 
 fn build_machine_volume_cfg(
     volume_specs: &[String],
-) -> Result<Vec<mvm_client::image::RuntimeVolume>> {
+) -> Result<(
+    Vec<mvm_client::image::RuntimeVolume>,
+    mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+)> {
     let mut volume_cfg = Vec::with_capacity(volume_specs.len());
+    let mut images = Vec::new();
     for volume in volume_specs {
         let spec = super::shared::parse_volume_spec(volume)?;
         // The spec-time gate refuses this too; a spec saved before it existed
@@ -1455,11 +1459,15 @@ fn build_machine_volume_cfg(
         }
         let vmv = super::shared::vm_volume_from_spec_validated(&spec)
             .with_context(|| format!("volume {volume:?}"))?;
-        super::shared::materialize_disk_volume(&vmv)
-            .with_context(|| format!("volume {volume:?}"))?;
+        if let Some(image) = super::shared::materialize_disk_volume(&vmv)
+            .with_context(|| format!("volume {volume:?}"))?
+            .and_then(mvm_build::volume_image::VolumeImageLock::into_image)
+        {
+            images.push(image);
+        }
         volume_cfg.push(mvm_client::image::RuntimeVolume::from(&vmv));
     }
-    Ok(volume_cfg)
+    Ok((volume_cfg, images))
 }
 
 fn run_machine_init_commands(name: &str, commands: &[String]) -> Result<()> {

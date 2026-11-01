@@ -276,12 +276,14 @@ impl mvm_client::launch::machine_start::StartHost for CliStartHost {
         name: &str,
         volume_specs: &[String],
     ) -> Result<mvm_client::volume::LaunchPreparation> {
-        let volume_cfg = build_machine_volume_cfg(volume_specs)?;
-        crate::commands::vm::volume::merge_registered_volumes_for_launch(
+        let (volume_cfg, images) = build_machine_volume_cfg(volume_specs)?;
+        let mut preparation = crate::commands::vm::volume::merge_registered_volumes_for_launch(
             name,
             &volume_cfg,
             self.profile,
-        )
+        )?;
+        preparation.writable_images = images;
+        Ok(preparation)
     }
 }
 

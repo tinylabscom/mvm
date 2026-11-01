@@ -157,6 +157,13 @@ pub struct PlanBinding {
 }
 
 impl VmmSpec {
+    /// Whether any block persists guest writes to its host backing.
+    pub fn has_persistent_writable(&self) -> bool {
+        self.blocks
+            .iter()
+            .any(|block| !block.read_only && !block.ephemeral)
+    }
+
     /// Does this guest run `mvm-agentd`, i.e. is there an agent for the host to
     /// wait on after starting the VM?
     ///

@@ -607,14 +607,17 @@ fn run_inner(
     let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
     let t_start = timing.then(std::time::Instant::now);
 
-    // Hold writable disk-image locks for this invocation, including flush and
-    // the stop attempt. They still drop on an uncertain-stop return: retaining
-    // state files does not extend exclusive volume custody beyond this call.
-    let _disk_locks = req
+    // Serialize materialization for this invocation. The runtime transfers
+    // writer custody to the actual backend, so an uncertain-stop return does
+    // not rely on these caller-side guards remaining alive.
+    let mut disk_images = req
         .disk_volumes
         .iter()
         .map(crate::commands::shared::materialize_disk_volume)
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter_map(|lock| lock.and_then(mvm_build::volume_image::VolumeImageLock::into_image))
+        .collect::<Vec<_>>();
 
     // Everything from backend selection through admission and the runtime
     // overlay attach. It yields a bootable config without booting, which is
@@ -660,16 +663,17 @@ fn run_inner(
     if let Some(runtime) = &_built_runtime {
         runtime.verify_config(&start_config)?;
     }
-    let boot_attempt = BootAttempt {
+    let mut boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
         resolved: &resolved,
         user_named: req.name.is_some(),
+        writable_images: &mut disk_images,
     };
     let booted = boot_transient_vm(
         vm_name,
         use_snapshot,
-        &boot_attempt,
+        &mut boot_attempt,
         timing.then_some(&mut warm_claim_marks),
         &mut sub_marks,
     )?;

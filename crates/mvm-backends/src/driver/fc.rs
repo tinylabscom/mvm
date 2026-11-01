@@ -35,18 +35,21 @@ use crate::fc::{
     firecracker_vsock_uds_path, read_firecracker_pid, start_vm_firecracker_bounded,
 };
 #[cfg(test)]
-use mvm_vmm::driver::spec::KernelImage;
-use mvm_vmm::driver::spec::{BlockDev, VmmSpec, VsockDirection, VsockPort};
+use mvm_vmm::driver::spec::{BlockDev, KernelImage};
+use mvm_vmm::driver::spec::{VmmSpec, VsockDirection, VsockPort};
 use mvm_vmm::driver::traits::{
     ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
     StandbyParentSpawn, VmmDriver,
 };
 use mvm_vmm::host::boot_config::{
-    FcDrive, balloon_body, boot_source_body, logger_body, machine_config_body, vsock_body,
+    balloon_body, boot_source_body, logger_body, machine_config_body, vsock_body,
 };
 
+mod config;
 mod kernel;
 mod stop;
+pub use config::FcApiPut;
+use config::fc_drive_puts;
 #[cfg(all(test, unix))]
 use kernel::fc_descriptor_recipe;
 use kernel::resolve_fc_kernel_path;
@@ -193,51 +196,6 @@ fn fc_base_bootargs(has_disk: bool) -> String {
         // so only the serial-console base is emitted here.
         console.to_string()
     }
-}
-
-/// One Firecracker API configuration call: an HTTP PUT of `body` to `path` on
-/// the per-VM API socket. Kept as data so the whole NIC-less config sequence is
-/// a pure, testable value the driver replays through `api_put_socket`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FcApiPut {
-    pub path: String,
-    pub body: String,
-}
-
-/// Map slot-ordered blocks to `/drives/*` PUTs in the order Firecracker assigns
-/// device letters (first PUT → `/dev/vda`, next → `/dev/vdb`, …), so the guest
-/// device nodes line up with the verity slot model the cmdline names
-/// (`mvm.data=/dev/vda mvm.hash=/dev/vdb …`). The lowest-slot block is the root
-/// device; every block carries its own read-only policy verbatim.
-///
-/// Every writable block offers the guest discard when the running Firecracker
-/// supports it, so a guest trim releases host blocks. That grants a guest
-/// nothing it lacked: a drive it can write is one it could already zero, and a
-/// punched hole is zeroes that cost no disk.
-fn fc_drive_puts(blocks: &[BlockDev], caps: FcCapabilities) -> Vec<FcApiPut> {
-    let mut ordered: Vec<&BlockDev> = blocks.iter().collect();
-    ordered.sort_by_key(|b| b.slot);
-    ordered
-        .iter()
-        .enumerate()
-        .map(|(index, block)| {
-            let drive_id = format!("blk{}", block.slot);
-            // The lowest-slot block (first PUT) is the root device; each block
-            // keeps its own read-only policy. Body shape shared with the raw path.
-            let body = FcDrive {
-                drive_id: &drive_id,
-                path_on_host: &block.source.to_string_lossy(),
-                is_root_device: index == 0,
-                is_read_only: block.read_only,
-                discard: caps.block_discard,
-            }
-            .body();
-            FcApiPut {
-                path: format!("/drives/{drive_id}"),
-                body,
-            }
-        })
-        .collect()
 }
 
 /// Assemble the full NIC-less Firecracker API config sequence for a spec:
@@ -651,6 +609,7 @@ fn start_or_claim_firecracker(
     state_dir: &Path,
     socket: &str,
     idle_shape: Option<crate::fc::idle_pool::IdleShape>,
+    handoff: Option<&mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
 ) -> Result<(FirecrackerGuard, bool)> {
     let mut guard = FirecrackerGuard::pending();
     let claimed = match idle_shape {
@@ -667,6 +626,7 @@ fn start_or_claim_firecracker(
             &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
                 .with_cpu_grant(spec.cpu_grant),
             &mut guard,
+            handoff,
         )?;
     }
     Ok((guard, claimed))
@@ -788,6 +748,230 @@ fn firecracker_status_with(
         Ok(VmStatus::Running)
     } else {
         Ok(VmStatus::Stopped)
+    }
+}
+
+impl FcDriver {
+    #[tracing::instrument(
+        name = "fc.boot",
+        skip_all,
+        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
+    )]
+    fn boot_with_handoff(
+        &self,
+        spec: &VmmSpec,
+        handoff: Option<mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
+    ) -> Result<Box<dyn RunningVm>> {
+        if !spec.shares.is_empty() {
+            bail!(
+                "Firecracker does not support virtio-fs shares ({} requested);                  use the HVF or libkrun backend",
+                spec.shares.len()
+            );
+        }
+        anyhow::ensure!(
+            handoff.is_some() || spec.trusted_builder || !spec.has_persistent_writable(),
+            "persistent writable Firecracker disks require prepared descriptor custody"
+        );
+        let bounds = mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+            .with_cpu_grant(spec.cpu_grant);
+        crate::fc::validate_required_scope(&spec.name, &bounds)?;
+        let kernel_path = resolve_fc_kernel_path(spec)?;
+
+        let state_dir = vm_state_dir(&spec.name);
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
+        let mut trace = LaunchTraceRecorder::new("fc");
+        let pid_file = fc_pid_path(&spec.name)
+            .ok_or_else(|| anyhow!("resolve Firecracker pid path for '{}'", spec.name))?;
+        // Keep even stale marker bytes until this attempt has passed all
+        // preparation and actually starts replacing the old state.
+        let pid_file_str = pid_file.to_string_lossy().into_owned();
+        for marker in [&pid_file, &state_dir.join(".fc-pid")] {
+            validate_pid_marker_for_start(marker, || {
+                crate::fc::is_vm_running(&marker.to_string_lossy())
+            })?;
+        }
+
+        let abs_dir = state_dir.to_string_lossy().into_owned();
+        // Under the state dir unless that is too deep for a Unix socket, in
+        // which case the API socket, the vsock mux and every guest-dialed
+        // socket move together to the short fallback namespace.
+        let runtime_dir = crate::fc::fc_vsock_runtime_dir(&abs_dir);
+        std::fs::create_dir_all(&runtime_dir)
+            .map_err(|e| anyhow!("create runtime dir {}: {e}", runtime_dir.display()))?;
+
+        // Convert the workload kernel to an FC-loadable image (x86_64 bzImage →
+        // extracted ELF; aarch64 Image passthrough), reusing the same helper the
+        // raw path calls so the driver never diverges from host kernel-prep.
+        let kernel_for_boot = mvm_vmm::host::fc_kernel::ensure_fc_loadable_kernel(&kernel_path)
+            .with_context(|| {
+                format!(
+                    "preparing FC-loadable kernel from {}",
+                    kernel_path.display()
+                )
+            })?;
+
+        // Four spans inside this boot, emitted at debug. `driver_boot` is one
+        // opaque number to the launch sample, and on this backend it covers
+        // both VMM start and guest boot — the two things a cold-start budget
+        // most needs told apart. A trace-level split is not the sidecar the
+        // launch sample uses; it is the cheapest thing that makes the residual
+        // attributable without widening the driver trait for a diagnostic.
+        let boot_started = Instant::now();
+
+        // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
+        let socket = crate::fc::fc_api_socket_path(&abs_dir);
+        // A workload whose scope limits an idle process already carries takes
+        // that process instead of starting one; anything else starts its own.
+        let idle_shape = crate::fc::idle_pool::IdleShape::for_launch(spec)
+            .filter(|_| handoff.is_none() && crate::fc::idle_pool::enabled());
+        let (mut firecracker_guard, claimed) =
+            start_or_claim_firecracker(spec, &state_dir, &socket, idle_shape, handoff.as_ref())?;
+        let spawned_at = Instant::now();
+        tracing::debug!(
+            vm = %spec.name,
+            ms = boot_started.elapsed().as_secs_f64() * 1000.0,
+            claimed,
+            "fc boot: process spawn + API socket"
+        );
+
+        // The launcher handed the API socket to the invoking user, so the
+        // config sequence below speaks to it in-process. Firecracker was
+        // launched through `sudo` and created the socket as root; without that
+        // hand-off every call would need its own `sudo curl`.
+
+        // Drive the NIC-less API config sequence, asking only for what the
+        // Firecracker behind this socket supports. All PUTs share one
+        // connection: Firecracker answers keep-alive, so reusing it saves
+        // ~10 connect round trips.
+        let caps = running_fc_capabilities(&socket);
+        let vsock_uds = firecracker_vsock_uds_path(&abs_dir);
+        let puts = fc_config_api_puts(
+            spec,
+            &kernel_for_boot.to_string_lossy(),
+            &vsock_uds,
+            &abs_dir,
+            caps,
+        );
+        let mut session =
+            api_session(&socket).context("opening Firecracker API session for boot config")?;
+        for put in &puts {
+            api_put_session(&mut session, &put.path, &put.body)
+                .with_context(|| format!("Firecracker API PUT {}", put.path))?;
+        }
+        if let Some(handoff) = handoff.as_ref() {
+            crate::fc::io::FirecrackerIO::new(PathBuf::from(&socket))
+                .verify_writable_writer(handoff)?;
+        }
+        crate::fc::secure_vsock_socket_for_caller(&vsock_uds)
+            .context("restrict Firecracker vsock socket to the invoking user")?;
+
+        trace.mark("vmm_start");
+
+        // Wire the guest-dial egress/broker bridges and bind the workload-exit
+        // capture — the whole host channel set must be in place before the guest
+        // boots and dials out.
+        arm_host_channels(&spec.vsock, &state_dir, &runtime_dir)?;
+
+        let configured_at = Instant::now();
+        tracing::debug!(
+            vm = %spec.name,
+            ms = (configured_at - spawned_at).as_secs_f64() * 1000.0,
+            "fc boot: API config sequence"
+        );
+
+        // Boot the configured instance (same session).
+        api_put_session(
+            &mut session,
+            "/actions",
+            r#"{"action_type": "InstanceStart"}"#,
+        )
+        .context("Firecracker API PUT /actions InstanceStart")?;
+        drop(session);
+        let started_at = Instant::now();
+        tracing::debug!(
+            vm = %spec.name,
+            ms = (started_at - configured_at).as_secs_f64() * 1000.0,
+            "fc boot: InstanceStart"
+        );
+
+        // Confirm the guest is up: a successful agent CONNECT over the vsock mux
+        // means userspace booted and the agent is listening. Bounded so a guest
+        // that never comes up fails closed rather than hanging forever.
+        // Backoff, not a tick. This was a flat 200 ms sleep, which put a 200 ms
+        // floor under every Firecracker launch: the driver confirms boot before
+        // returning, so this wait sits inside the span the cold-launch budget
+        // is measured against, and a guest that answered in 20 ms was reported
+        // as taking a full tick to do it.
+        // ...when there is an agent to confirm. A Stage 0 guest is the Nix
+        // seed's `stage0-init`, which serves no agent port, so waiting for one
+        // would burn the whole deadline and then report a guest-agent timeout
+        // for a guest that was never going to have an agent. Its liveness is
+        // the console + the run-to-completion poll the builder runner owns.
+        // `while` rather than `loop`, and the condition is loop-invariant: it
+        // is a skip-the-whole-wait guard, not a per-iteration test.
+        let deadline = Instant::now() + AGENT_READY_TIMEOUT;
+        let mut attempt = 0u32;
+        while spec.serves_guest_agent() {
+            // Fail fast if Firecracker itself died on boot (kernel panic,
+            // rejected config) rather than waiting out the full agent deadline.
+            // The console log carries the actionable detail. Probed ownership-
+            // independently since a sudo-launched FC runs as root.
+            if !crate::fc::is_vm_running(&pid_file_str)? {
+                bail!(
+                    "Firecracker process for '{}' exited before its guest agent came up; see {}/console.log",
+                    spec.name,
+                    abs_dir
+                );
+            }
+            // This loop already owns the deadline and backoff. A normal RPC
+            // connection retries transient races internally, starting with a
+            // 100 ms delay; nesting that cadence here charged every fast boot
+            // whose first probe was early an extra 100 ms. Firecracker exposes
+            // no stable host event for "the guest bound this vsock port", so
+            // retain this bounded compatibility poll with one CONNECT attempt
+            // per probe and verify VMM identity on every pass above.
+            if connect_to_port_once(&vsock_uds, GUEST_AGENT_PORT, AGENT_READY_PROBE_TIMEOUT_SECS)
+                .is_ok()
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "Firecracker guest agent did not answer within {AGENT_READY_TIMEOUT:?}; see {}/console.log",
+                    abs_dir
+                );
+            }
+            std::thread::sleep(guest_ready_poll_delay(attempt));
+            attempt = attempt.saturating_add(1);
+        }
+
+        tracing::debug!(
+            vm = %spec.name,
+            ms = started_at.elapsed().as_secs_f64() * 1000.0,
+            "fc boot: guest boot to serving agent"
+        );
+
+        trace.mark("guest_boot");
+        trace.write_driver_to(&state_dir);
+        // The guest is up; prepare the next launch's process while this one
+        // runs its workload.
+        if let Some(shape) = idle_shape {
+            crate::fc::idle_pool::refill_in_background(shape);
+        }
+
+        let vm = Box::new(FcRunningVm {
+            id: VmId(spec.name.clone()),
+            state_dir,
+            pid_file,
+            pid: Some(read_firecracker_pid(&abs_dir).with_context(|| {
+                format!("capture Firecracker pid for '{}' after boot", spec.name)
+            })?),
+            vsock_uds,
+            flush_via_agent: spec.serves_guest_agent(),
+        });
+        firecracker_guard.defuse();
+        Ok(vm)
     }
 }
 
@@ -1117,214 +1301,8 @@ impl VmmDriver for FcDriver {
         Ok(())
     }
 
-    #[tracing::instrument(
-        name = "fc.boot",
-        skip_all,
-        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
-    )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
-        if !spec.shares.is_empty() {
-            bail!(
-                "Firecracker does not support virtio-fs shares ({} requested);                  use the HVF or libkrun backend",
-                spec.shares.len()
-            );
-        }
-        let bounds = mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
-            .with_cpu_grant(spec.cpu_grant);
-        crate::fc::validate_required_scope(&spec.name, &bounds)?;
-        let kernel_path = resolve_fc_kernel_path(spec)?;
-
-        let state_dir = vm_state_dir(&spec.name);
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
-        let mut trace = LaunchTraceRecorder::new("fc");
-        let pid_file = fc_pid_path(&spec.name)
-            .ok_or_else(|| anyhow!("resolve Firecracker pid path for '{}'", spec.name))?;
-        // Keep even stale marker bytes until this attempt has passed all
-        // preparation and actually starts replacing the old state.
-        let pid_file_str = pid_file.to_string_lossy().into_owned();
-        for marker in [&pid_file, &state_dir.join(".fc-pid")] {
-            validate_pid_marker_for_start(marker, || {
-                crate::fc::is_vm_running(&marker.to_string_lossy())
-            })?;
-        }
-
-        let abs_dir = state_dir.to_string_lossy().into_owned();
-        // Under the state dir unless that is too deep for a Unix socket, in
-        // which case the API socket, the vsock mux and every guest-dialed
-        // socket move together to the short fallback namespace.
-        let runtime_dir = crate::fc::fc_vsock_runtime_dir(&abs_dir);
-        std::fs::create_dir_all(&runtime_dir)
-            .map_err(|e| anyhow!("create runtime dir {}: {e}", runtime_dir.display()))?;
-
-        // Convert the workload kernel to an FC-loadable image (x86_64 bzImage →
-        // extracted ELF; aarch64 Image passthrough), reusing the same helper the
-        // raw path calls so the driver never diverges from host kernel-prep.
-        let kernel_for_boot = mvm_vmm::host::fc_kernel::ensure_fc_loadable_kernel(&kernel_path)
-            .with_context(|| {
-                format!(
-                    "preparing FC-loadable kernel from {}",
-                    kernel_path.display()
-                )
-            })?;
-
-        // Four spans inside this boot, emitted at debug. `driver_boot` is one
-        // opaque number to the launch sample, and on this backend it covers
-        // both VMM start and guest boot — the two things a cold-start budget
-        // most needs told apart. A trace-level split is not the sidecar the
-        // launch sample uses; it is the cheapest thing that makes the residual
-        // attributable without widening the driver trait for a diagnostic.
-        let boot_started = Instant::now();
-
-        // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
-        let socket = crate::fc::fc_api_socket_path(&abs_dir);
-        // A workload whose scope limits an idle process already carries takes
-        // that process instead of starting one; anything else starts its own.
-        let idle_shape = crate::fc::idle_pool::IdleShape::for_launch(spec)
-            .filter(|_| crate::fc::idle_pool::enabled());
-        let (mut firecracker_guard, claimed) =
-            start_or_claim_firecracker(spec, &state_dir, &socket, idle_shape)?;
-        let spawned_at = Instant::now();
-        tracing::debug!(
-            vm = %spec.name,
-            ms = boot_started.elapsed().as_secs_f64() * 1000.0,
-            claimed,
-            "fc boot: process spawn + API socket"
-        );
-
-        // The launcher handed the API socket to the invoking user, so the
-        // config sequence below speaks to it in-process. Firecracker was
-        // launched through `sudo` and created the socket as root; without that
-        // hand-off every call would need its own `sudo curl`.
-
-        // Drive the NIC-less API config sequence, asking only for what the
-        // Firecracker behind this socket supports. All PUTs share one
-        // connection: Firecracker answers keep-alive, so reusing it saves
-        // ~10 connect round trips.
-        let caps = running_fc_capabilities(&socket);
-        let vsock_uds = firecracker_vsock_uds_path(&abs_dir);
-        let puts = fc_config_api_puts(
-            spec,
-            &kernel_for_boot.to_string_lossy(),
-            &vsock_uds,
-            &abs_dir,
-            caps,
-        );
-        let mut session =
-            api_session(&socket).context("opening Firecracker API session for boot config")?;
-        for put in &puts {
-            api_put_session(&mut session, &put.path, &put.body)
-                .with_context(|| format!("Firecracker API PUT {}", put.path))?;
-        }
-        crate::fc::secure_vsock_socket_for_caller(&vsock_uds)
-            .context("restrict Firecracker vsock socket to the invoking user")?;
-
-        trace.mark("vmm_start");
-
-        // Wire the guest-dial egress/broker bridges and bind the workload-exit
-        // capture — the whole host channel set must be in place before the guest
-        // boots and dials out.
-        arm_host_channels(&spec.vsock, &state_dir, &runtime_dir)?;
-
-        let configured_at = Instant::now();
-        tracing::debug!(
-            vm = %spec.name,
-            ms = (configured_at - spawned_at).as_secs_f64() * 1000.0,
-            "fc boot: API config sequence"
-        );
-
-        // Boot the configured instance (same session).
-        api_put_session(
-            &mut session,
-            "/actions",
-            r#"{"action_type": "InstanceStart"}"#,
-        )
-        .context("Firecracker API PUT /actions InstanceStart")?;
-        drop(session);
-        let started_at = Instant::now();
-        tracing::debug!(
-            vm = %spec.name,
-            ms = (started_at - configured_at).as_secs_f64() * 1000.0,
-            "fc boot: InstanceStart"
-        );
-
-        // Confirm the guest is up: a successful agent CONNECT over the vsock mux
-        // means userspace booted and the agent is listening. Bounded so a guest
-        // that never comes up fails closed rather than hanging forever.
-        // Backoff, not a tick. This was a flat 200 ms sleep, which put a 200 ms
-        // floor under every Firecracker launch: the driver confirms boot before
-        // returning, so this wait sits inside the span the cold-launch budget
-        // is measured against, and a guest that answered in 20 ms was reported
-        // as taking a full tick to do it.
-        // ...when there is an agent to confirm. A Stage 0 guest is the Nix
-        // seed's `stage0-init`, which serves no agent port, so waiting for one
-        // would burn the whole deadline and then report a guest-agent timeout
-        // for a guest that was never going to have an agent. Its liveness is
-        // the console + the run-to-completion poll the builder runner owns.
-        // `while` rather than `loop`, and the condition is loop-invariant: it
-        // is a skip-the-whole-wait guard, not a per-iteration test.
-        let deadline = Instant::now() + AGENT_READY_TIMEOUT;
-        let mut attempt = 0u32;
-        while spec.serves_guest_agent() {
-            // Fail fast if Firecracker itself died on boot (kernel panic,
-            // rejected config) rather than waiting out the full agent deadline.
-            // The console log carries the actionable detail. Probed ownership-
-            // independently since a sudo-launched FC runs as root.
-            if !crate::fc::is_vm_running(&pid_file_str)? {
-                bail!(
-                    "Firecracker process for '{}' exited before its guest agent came up; see {}/console.log",
-                    spec.name,
-                    abs_dir
-                );
-            }
-            // This loop already owns the deadline and backoff. A normal RPC
-            // connection retries transient races internally, starting with a
-            // 100 ms delay; nesting that cadence here charged every fast boot
-            // whose first probe was early an extra 100 ms. Firecracker exposes
-            // no stable host event for "the guest bound this vsock port", so
-            // retain this bounded compatibility poll with one CONNECT attempt
-            // per probe and verify VMM identity on every pass above.
-            if connect_to_port_once(&vsock_uds, GUEST_AGENT_PORT, AGENT_READY_PROBE_TIMEOUT_SECS)
-                .is_ok()
-            {
-                break;
-            }
-            if Instant::now() >= deadline {
-                bail!(
-                    "Firecracker guest agent did not answer within {AGENT_READY_TIMEOUT:?}; see {}/console.log",
-                    abs_dir
-                );
-            }
-            std::thread::sleep(guest_ready_poll_delay(attempt));
-            attempt = attempt.saturating_add(1);
-        }
-
-        tracing::debug!(
-            vm = %spec.name,
-            ms = started_at.elapsed().as_secs_f64() * 1000.0,
-            "fc boot: guest boot to serving agent"
-        );
-
-        trace.mark("guest_boot");
-        trace.write_driver_to(&state_dir);
-        // The guest is up; prepare the next launch's process while this one
-        // runs its workload.
-        if let Some(shape) = idle_shape {
-            crate::fc::idle_pool::refill_in_background(shape);
-        }
-
-        let vm = Box::new(FcRunningVm {
-            id: VmId(spec.name.clone()),
-            state_dir,
-            pid_file,
-            pid: Some(read_firecracker_pid(&abs_dir).with_context(|| {
-                format!("capture Firecracker pid for '{}' after boot", spec.name)
-            })?),
-            vsock_uds,
-            flush_via_agent: spec.serves_guest_agent(),
-        });
-        firecracker_guard.defuse();
-        Ok(vm)
+        self.boot_with_handoff(spec, None)
     }
 
     #[cfg(unix)]
@@ -1334,6 +1312,28 @@ impl VmmDriver for FcDriver {
         kernel: &mvm_vmm::host::restore_image::VerifiedRestoreFile,
     ) -> Result<Box<dyn RunningVm>> {
         kernel::boot_descriptor(self, spec, kernel)
+    }
+
+    #[cfg(unix)]
+    fn boot_custodied(
+        &self,
+        spec: &VmmSpec,
+        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+    ) -> Result<Box<dyn RunningVm>> {
+        disks.validate_spec(spec)?;
+        if disks.is_empty() {
+            return match kernel {
+                Some(kernel) => kernel::boot_descriptor(self, spec, kernel),
+                None => self.boot_with_handoff(spec, None),
+            };
+        }
+        let handoff = disks.into_sudo_handoff(spec)?;
+        let projected = handoff.projected().clone();
+        match kernel {
+            Some(kernel) => kernel::boot_descriptor_custodied(self, &projected, kernel, handoff),
+            None => self.boot_with_handoff(&projected, Some(handoff)),
+        }
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
@@ -1570,6 +1570,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn direct_boot_refuses_unprepared_persistent_writable_disks() {
+        let spec = spec_with(
+            KernelImage::Bundled,
+            vec![],
+            vec![BlockDev {
+                source: "/proc/1/fd/3".into(),
+                read_only: false,
+                ephemeral: false,
+                slot: 0,
+            }],
+        );
+        let error = FcDriver::new().boot(&spec).err().expect("custody refusal");
+        assert!(error.to_string().contains("prepared descriptor custody"));
+    }
+
     fn ro_block(source: &str, slot: u8) -> BlockDev {
         BlockDev {
             source: source.into(),
@@ -1629,7 +1645,7 @@ mod tests {
         });
         let socket = scratch.path().join("fc.socket");
         assert!(
-            start_or_claim_firecracker(&spec, scratch.path(), socket.to_str().unwrap(), None)
+            start_or_claim_firecracker(&spec, scratch.path(), socket.to_str().unwrap(), None, None)
                 .is_err()
         );
         for name in ["fc.pid", ".fc-pid", "spawn-scope", "fc.socket"] {
@@ -1655,6 +1671,7 @@ mod tests {
             &spec,
             scratch.path(),
             scratch.path().join("fc.socket").to_str().unwrap(),
+            None,
             None,
         )
         .err()
@@ -1708,6 +1725,7 @@ mod tests {
                     &spec,
                     scratch.path(),
                     scratch.path().join("fc.socket").to_str().unwrap(),
+                    None,
                     None,
                 )
                 .is_err()
