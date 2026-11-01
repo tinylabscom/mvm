@@ -2,8 +2,8 @@
 //! RPC path the in-guest shims use, with the stub backend standing in for a
 //! GPU and a unix socket standing in for vsock.
 
-use std::process::{Child, Command};
-use std::time::Duration;
+use std::io::{BufRead, BufReader};
+use std::process::{Child, ChildStderr, Command, Stdio};
 
 use mvm_contract::protocol::gpu::{GpuRequest, GpuResponse};
 
@@ -50,6 +50,8 @@ fn the_binary_answers_the_host_helper_contract_probe() {
 struct EndpointProcess {
     child: Child,
     socket: std::path::PathBuf,
+    // Held open so the endpoint's later log lines never hit a closed pipe.
+    _stderr: BufReader<ChildStderr>,
 }
 
 impl EndpointProcess {
@@ -67,23 +69,34 @@ impl EndpointProcess {
         if let Some(ordinal) = device_ordinal {
             command.arg("--device").arg(ordinal.to_string());
         }
-        let mut child = command.spawn().expect("spawn mvm-gpu-endpoint");
-        // Wait until the socket actually accepts a connection: the file
-        // appearing proves bind() ran, not that listen() has, and a dial in
-        // that window is ECONNREFUSED.
-        for _ in 0..500 {
-            if socket.exists() && std::os::unix::net::UnixStream::connect(socket).is_ok() {
-                return Self {
-                    child,
-                    socket: socket.to_path_buf(),
-                };
+        let mut child = command
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn mvm-gpu-endpoint");
+        // The endpoint logs `listening on` only after bind() succeeded, so
+        // the first matching line is an explicit readiness signal. EOF means
+        // it exited before binding.
+        let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match stderr.read_line(&mut line) {
+                Ok(n) if n > 0 => {
+                    if line.contains("listening on") {
+                        return Self {
+                            child,
+                            socket: socket.to_path_buf(),
+                            _stderr: stderr,
+                        };
+                    }
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("endpoint exited before binding {}", socket.display());
+                }
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
-        // Reap before failing so the panic never leaves the child behind.
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("endpoint never bound {}", socket.display());
     }
 }
 

@@ -125,13 +125,14 @@ fn main() {
     }
 
     let vm = vm_name.as_deref().unwrap_or("<unnamed>");
-    eprintln!("mvm-gpu-endpoint: vm={vm} backend={backend_mode} listening on {addr}");
-
     // SIGTERM/SIGINT flip the stop flag: the runner reaps this process
     // with the VM, and the flag unblocks the accept loop for a clean exit.
     stop_flag::arm();
 
-    if let Err(e) = run(&addr, move || make_backend(), stop_flag::flag()) {
+    // Logged once the socket is bound, so the line doubles as a readiness signal.
+    let announce =
+        || eprintln!("mvm-gpu-endpoint: vm={vm} backend={backend_mode} listening on {addr}");
+    if let Err(e) = run(&addr, move || make_backend(), stop_flag::flag(), announce) {
         eprintln!("mvm-gpu-endpoint: serve {addr}: {e}");
         exit(1);
     }
