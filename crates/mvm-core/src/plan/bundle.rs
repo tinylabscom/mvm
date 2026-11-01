@@ -4095,24 +4095,32 @@ mod tests {
             &attacker,
             |m| {
                 mark_local_build(m);
-                m.key_id = host_id;
+                m.key_id = host_id.clone();
             },
             |_| {},
         );
         let tmp = tempfile::tempdir().unwrap();
         let registry = BundleRegistry::new(tmp.path());
-        // Install under the host-key trust to get the archive on disk; the
-        // forged signature must still fail at launch-time verification.
-        let installed = registry.install(&archive, &trust(&host), false);
-        let Ok(installed) = installed else { return };
+        // Install itself refuses the forgery: the host key_id does not derive
+        // from the attacker's key.
+        let mut forged_store = HashMap::new();
+        forged_store.insert(host_id, attacker.verifying_key());
         assert!(
             registry
-                .verified_manifest_with_host_key(
-                    &installed.sha256,
-                    no_release_keys(),
-                    Some(host.verifying_key())
-                )
+                .install(&archive, &MapTrustStore(forged_store), false)
                 .is_err()
         );
+        // A forged archive planted straight into the registry is refused at
+        // launch: the host's real key does not verify the attacker's signature.
+        let sha = hex::encode(Sha256::digest(&archive));
+        std::fs::write(registry.archive_path(&sha), &archive).unwrap();
+        assert!(matches!(
+            registry.verified_manifest_with_host_key(
+                &sha,
+                no_release_keys(),
+                Some(host.verifying_key())
+            ),
+            Err(BundleVerifyError::SignatureInvalid { .. })
+        ));
     }
 }
