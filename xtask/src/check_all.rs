@@ -230,6 +230,7 @@ pub const GATES: &[Gate] = &[
         crate::check_guest_entropy_seed::run,
     ),
     ("check-file-size", crate::check_file_size::run),
+    ("check-rust-footprint", crate::check_rust_footprint::run),
     ("check-stubs", stubs_match_schemas),
     ("check-ir-parity", ir_fixtures_match_schemas),
     // Not in the lint lane before this table existed, and in no other
