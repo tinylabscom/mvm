@@ -64,22 +64,19 @@ pub fn parse_typescript(
 
     let mut sites: Vec<DecorationSite> = Vec::new();
     collect_decoration_sites(root, source, &mut sites);
-    match sites.len() {
-        0 => {
-            return Err(ParseError::NoDecoratedFunction {
-                path: path.to_path_buf(),
-            });
-        }
-        1 => {}
-        _ => {
-            return Err(ParseError::MultipleDecoratedFunctions {
-                path: path.to_path_buf(),
-                first_line: sites[0].line,
-                second_line: sites[1].line,
-            });
-        }
+    let mut sites = sites.into_iter();
+    let Some(site) = sites.next() else {
+        return Err(ParseError::NoDecoratedFunction {
+            path: path.to_path_buf(),
+        });
+    };
+    if let Some(second) = sites.next() {
+        return Err(ParseError::MultipleDecoratedFunctions {
+            path: path.to_path_buf(),
+            first_line: site.line,
+            second_line: second.line,
+        });
     }
-    let site = sites.into_iter().next().unwrap();
 
     let kwargs = extract_object_kwargs(site.options_object, source, path)?;
     let module = module_stem(path);

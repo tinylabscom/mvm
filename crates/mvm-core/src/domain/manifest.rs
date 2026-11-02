@@ -272,8 +272,8 @@ impl Manifest {
         let flake = self.flake.as_deref();
         let wasm = self.wasm.as_deref();
         match (image, flake, wasm) {
-            (Some(_), None, None) => {
-                validate_image_ref(image.unwrap())
+            (Some(reference), None, None) => {
+                validate_image_ref(reference)
                     .with_context(|| format!("invalid `image` field: {image:?}"))?;
             }
             (None, Some(_), None) => {

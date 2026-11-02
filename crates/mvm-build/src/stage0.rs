@@ -470,18 +470,17 @@ fn dir_is_empty(dir: &Path) -> Result<bool> {
 /// top-level component (the Nix tarball's `nix-<ver>-<arch>-linux/`).
 /// Fails closed if `dir` doesn't contain exactly one directory entry.
 fn lift_single_top_level(dir: &Path) -> Result<()> {
-    let mut top_levels: Vec<PathBuf> = std::fs::read_dir(dir)
+    let top_levels: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
         .map(|e| e.map(|e| e.path()))
         .collect::<std::io::Result<_>>()?;
-    if top_levels.len() != 1 {
+    let count = top_levels.len();
+    let Ok([wrapper]) = <[PathBuf; 1]>::try_from(top_levels) else {
         bail!(
-            "expected one top-level dir in the nix seed, found {} under {}",
-            top_levels.len(),
+            "expected one top-level dir in the nix seed, found {count} under {}",
             dir.display()
         );
-    }
-    let wrapper = top_levels.pop().unwrap();
+    };
     if !wrapper.is_dir() {
         bail!(
             "nix seed top-level entry {} is not a directory",
