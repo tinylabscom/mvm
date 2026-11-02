@@ -839,8 +839,7 @@ mod tests {
     //
     // The property that makes the cost small is asserted structurally instead,
     // by the test below: the gate resolves without reading the artifacts at
-    // all. The measured figure is recorded in
-    // `specs/sprint/delivery/artifact-derived-runtime-identity.md`.
+    // all.
 
     /// The steady-state gate must not read the artifacts either.
     ///

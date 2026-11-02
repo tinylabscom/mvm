@@ -23,6 +23,13 @@ sources. The briefing is disposable output, never another work ledger.
 
 ## What belongs here
 
+`check-spec-hygiene` fails on any tracked path under `specs/` that is not
+listed below or on the shrinking transitional list in
+`xtask/src/specs_transitional.txt`. Nothing may be added to that list.
+
+- `prd.md` is the product requirements document: what mvm is, what is always
+  important, and the requirements it is measured against. It states
+  requirements, not status; the ADR-001 ledger and GitHub issues own status.
 - `adrs/` contains durable architectural decisions. Supersede an ADR rather
   than rewriting the history of a decision.
 - `contracts/` contains stable behavioral or protocol contracts that are not
