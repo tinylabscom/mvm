@@ -53,7 +53,8 @@ on:
         description: >-
           Allow unreleased main coverage to report portable-creation
           scenarios as named skips when no signed runtime candidate is supplied.
-          Release workflows must leave this false.
+          Tag-driven release runs must leave this false; manual validation
+          runs pass true because they cannot mint a tag-bound candidate.
         type: boolean
         required: false
         default: false

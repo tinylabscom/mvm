@@ -54,6 +54,11 @@ jobs:
       runtime_checksum_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_sha256 }}
       runtime_archive_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_bundle_sha256 }}
       runtime_checksum_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_bundle_sha256 }}
+      # Manual validation runs cannot mint a tag-bound candidate (the producer
+      # gate stays tag-only), so they must tolerate the portable-creation
+      # scenarios skipping; a real tag push keeps this false and fails on the
+      # skip instead.
+      allow_runtime_candidate_skip: ${{ github.event_name == 'workflow_dispatch' }}
       # Stated rather than inherited: a macOS host that cannot boot a guest
       # fails this workflow, so promotion never goes ahead without live macOS
       # evidence.
