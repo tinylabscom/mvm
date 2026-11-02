@@ -16,6 +16,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use mvm_client::entrypoint::ShownChunk;
 use mvm_client::entrypoint::call::OwnedTransientResult;
 use mvm_client::entrypoint::dispatch::{
     CallObserver, CallOutcome, CallStdin, CallTerminal, RecordedDivergence, error_label,
@@ -26,7 +27,6 @@ use mvm_client::entrypoint::{
     CallLifecycle, EntrypointAdmission, EntrypointVm, SessionVmName, WorkloadSource,
 };
 pub(crate) use mvm_client::entrypoint::{DispatchStdin, EntrypointDispatch};
-use mvm_hostd::stream::ShownChunk;
 
 use super::denial_review::{ReviewOffer, ReviewSource};
 use crate::ui;
@@ -288,8 +288,7 @@ fn boot_entrypoint_with_application(
         .transpose()?
         .into_iter()
         .collect();
-    let bundle_posture =
-        mvm_runtime::vm::template::lifecycle::installed_bundle_posture(&call.source)?;
+    let bundle_posture = mvm_client::installed_bundle_posture(&call.source)?;
     let lifecycle_label = if call.keep_alive {
         "warm session"
     } else {
@@ -650,8 +649,8 @@ pub(in crate::commands) fn prompt_machine(
 /// The fork does not grant prompts, or a delivery or its audit entry failed.
 pub(in crate::commands) fn replay_prompts(
     vm_name: &str,
-    plan: &mvm_runtime::agent_session::replay::ReplayPlan,
-    inputs: &mvm_runtime::agent_session::replay_input::ReplayInputStore,
+    plan: &mvm_client::replay::ReplayPlan,
+    inputs: &mvm_client::replay_input::ReplayInputStore,
     timeout_secs: u64,
 ) -> Result<mvm_client::agent_prompt::replay::ReplayedPrompts> {
     let mut out = CallOutput::inherited();
@@ -1063,7 +1062,7 @@ fn report_streamed_stdin(vm_name: &str, out: &mut CallOutput<'_>, report: Stream
 #[cfg(test)]
 fn write_entrypoint_event(
     event: &mvm_agentd::vsock::EntrypointEvent,
-    capture: &mut mvm_hostd::stream::EntrypointSink,
+    capture: &mut mvm_client::entrypoint::EntrypointSink,
     out: &mut CallOutput<'_>,
 ) {
     let CallOutput {

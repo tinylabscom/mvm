@@ -158,17 +158,25 @@ pub use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
 pub use mvm_runtime::agent_session::replay_input;
 pub use mvm_runtime::build_env::default_build_env;
 pub use mvm_runtime::builder_runner::{
-    DriverBuilderVm, HvfPersistentHostVm, resolve_driver_builder_image,
+    DriverBuilderVm, HvfPersistentHostVm, register_driver_backed_builders,
+    resolve_driver_builder_image,
 };
+pub use mvm_runtime::catalog;
+pub use mvm_runtime::interrupt_cleanup;
 pub use mvm_runtime::linux_env::require_guest_exec_available;
 pub use mvm_runtime::machine::persist as machine_spec;
 pub use mvm_runtime::microvm::probe_verity_sidecar;
 pub use mvm_runtime::shell::{run_in_vm_capture, run_in_vm_visible};
+pub use mvm_runtime::vm::name_registry;
 pub use mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot;
 pub use mvm_runtime::vm::template::lifecycle::{
-    installed_bundle_archive, template_artifacts_dispatched,
+    installed_bundle_archive, installed_bundle_posture, template_artifacts_dispatched,
 };
 pub use mvm_runtime::workload_runner::StopTiming;
+pub use mvm_runtime::workload_runner::claim;
+pub use mvm_runtime::workload_runner::{
+    ChildGrantIssuer, ClaimContext, PreloadContext, SpawnContext,
+};
 pub use mvm_runtime::{AnyBackend, image};
 pub use mvm_runtime::{
     WarmArtifactBuildPlan, WarmArtifactKey, WarmArtifactPlanResolver, WarmArtifactStore,

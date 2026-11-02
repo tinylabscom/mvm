@@ -65,8 +65,8 @@ use super::managed_secrets::lower_app_secrets;
 use crate::commands::build::sandbox_record::{
     LoadedRecording, auto_exec_record_script, script_language_from_path,
 };
+use mvm_client::admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 use mvm_core::plan::{IngressMapping, IngressProtocol, IngressTransform, SynthesisInput};
-use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 
 use super::exec::{RunArgs, RunMode};
 
@@ -249,7 +249,7 @@ fn run_plan_mode(args: &RunArgs, sdk: &super::exec::SdkTransportArgs) -> Result<
             &ledger,
             None,
             None,
-            mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
+            mvm_client::admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         ) {
             Ok(admitted) => {
                 admitted_count += 1;

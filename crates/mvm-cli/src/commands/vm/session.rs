@@ -557,7 +557,7 @@ fn dispatch_run_code(
         bail!("guest agent did not become reachable within 30s");
     }
 
-    let transport = mvm_runtime::vsock_transport::for_vm(&record.vm_name)
+    let transport = mvm_client::vsock_transport::for_vm(&record.vm_name)
         .with_context(|| format!("Picking transport for guest agent on {:?}", record.vm_name))?;
     let mut stream = transport
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
