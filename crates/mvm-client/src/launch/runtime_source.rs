@@ -590,7 +590,8 @@ mod sdk_sidecar_host_resolution_tests {
     #[test]
     fn a_download_mode_host_refuses_an_unprepared_sidecar() {
         let dir = tempfile::tempdir().unwrap();
-        let mirror = tempfile::tempdir().unwrap();
+        let mirror = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        mirror.set_nonblocking(true).unwrap();
         let version = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();
 
@@ -602,7 +603,7 @@ mod sdk_sidecar_host_resolution_tests {
         );
         env.set(
             "MVM_UPDATE_DOWNLOAD_URL",
-            format!("file://{}", mirror.path().display()),
+            format!("http://{}", mirror.local_addr().unwrap()),
         );
 
         let err = resolve_sdk_sidecar_attachment_for_host(
@@ -621,6 +622,11 @@ mod sdk_sidecar_host_resolution_tests {
             mvm_contract::guest_libc::GuestLibc::Glibc,
         );
         assert!(!layout.artifact_dir.exists(), "nothing may be cached");
+        assert_eq!(
+            mirror.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the refusal must not open a connection"
+        );
     }
 
     /// An unknown guest libc cannot select one of the two host-packed
