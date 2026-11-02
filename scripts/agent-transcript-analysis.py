@@ -7,7 +7,7 @@ tool-call volume, tool failure rate, back-to-back duplicate-call retry
 loops, session sizes, and per-session command repetition.
 
 Read-only: never writes outside stdout. Used to baseline and re-measure
-the agent-efficiency plan (specs/plans/2026-09-28-agent-efficiency-overhaul.md).
+the agent-efficiency work.
 
 Usage: python3 agent-transcript-analysis.py [N]   (default N=40)
 """

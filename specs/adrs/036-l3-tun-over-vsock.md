@@ -10,7 +10,7 @@ measurements, threat analysis, and compatibility-wall reasoning below remain
 accurate history, and are why ADR-042 states an explicit compatibility
 ceiling rather than pretending the wall does not exist. Nothing below
 describes a live production transport. The staged removal is
-`specs/plans/316-single-flow-vsock-networking.md`.**
+specs/plans/316-single-flow-vsock-networking.md (retired; recover from tag specs-archive-2026-11-02).**
 **Supersedes: nothing. Complements ADR-003 (cross-platform backends),
 ADR-014 (signed/audited execution plans), ADR-020 (host-services broker),
 ADR-023 (secrets subsystem / egress substitution), plan 278 (transparent

@@ -25,22 +25,6 @@ test("CLI reference documents local deploy without denying it", () => {
   );
 });
 
-test("durable session plan describes its delivered and unfinished work", () => {
-  const plan = readFileSync(
-    path.join(repo, "specs/plans/2026-08-18-durable-agent-sessions.md"),
-    "utf8",
-  );
-
-  assert.equal(plan.includes("**Status:** Design. Not implemented."), false, "header must reflect shipped work");
-  assert.equal(
-    plan.includes("**Status:** Partially implemented."),
-    true,
-    "header must preserve unfinished work",
-  );
-  assert.equal(plan.includes("- [x] **WS6 — CLI."), true, "CLI workstream is delivered");
-  assert.equal(plan.includes("- [ ] **WS8 — Tests + BDD**"), true, "BDD workstream remains open");
-});
-
 test("lineage recovery has a navigable capability guide with its safety boundary", () => {
   const guide = readFileSync(
     path.join(repo, "public/src/content/docs/guides/lineage-recovery.md"),

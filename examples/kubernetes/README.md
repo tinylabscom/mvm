@@ -23,7 +23,7 @@ the guest kernel.
 | Writable cluster state | Sized `:rw` ext4 disk volume attached at `/data`; k3s `--data-dir=/data/k3s`. The rootfs stays read-only. |
 | No nested runtime work | k3s embeds containerd; containers run against the guest kernel. |
 
-Plan: `specs/plans/2026-09-20-kubernetes-in-microvm.md`. The guest template
+The guest template
 is tracked in the template registry (`tinylabscom/mvm-packs#1`) and the
 workload-kernel audit in the image train (`tinylabscom/mvm-images#9`);
 runtime tracking is `tinylabscom/mvm#3554`.

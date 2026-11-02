@@ -389,7 +389,7 @@ one and a half thresholds of the last keystroke.
 Exact live-prefix precision *within* a burst is still available without the
 oracle — anchoring the carry to a delimiter no bound secret contains, or moving
 the scan into the process that holds the plaintext. Both are costed in
-`specs/plans/293-stream-plane-followups.md`; neither is needed for the shapes
+specs/plans/293-stream-plane-followups.md (retired; recover from tag specs-archive-2026-11-02); neither is needed for the shapes
 the plane serves today.
 
 **And a match is not an identity.** Two byte sequences of the same length can
@@ -576,7 +576,7 @@ token, so two processes can never interleave one transcript.
 
 ## References
 
-- `specs/plans/295-workload-stream-plane.md` — the design and its
+- specs/plans/295-workload-stream-plane.md (retired; recover from tag specs-archive-2026-11-02) — the design and its
   implementation sequence.
 - ADR-001 — threat model, per-backend tier matrix, and the claims ledger table
   this ADR's security section refers to.
