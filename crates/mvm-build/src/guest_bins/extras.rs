@@ -207,8 +207,9 @@ pub(crate) fn extra_builds(arch: GuestArch) -> Result<Vec<ExtraBuild>, GuestAgen
 /// fingerprints it folds in.
 pub(crate) const EXTRAS_SOURCE_INPUTS: &[&str] = &[
     ".cargo/config.toml",
-    "crates/mvm-gpu-shim-core/Cargo.toml",
-    "crates/mvm-gpu-shim-core/src",
+    "crates/mvm-gpu/Cargo.toml",
+    "crates/mvm-gpu/src/shim.rs",
+    "crates/mvm-gpu/src/shim",
     "crates/mvm-gpu-cuda-shim/Cargo.toml",
     "crates/mvm-gpu-cuda-shim/build.rs",
     "crates/mvm-gpu-cuda-shim/src",

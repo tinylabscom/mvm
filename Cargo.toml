@@ -34,10 +34,9 @@ members = [
     # the mvm-gpu-*-shim cdylibs + mvm-contract::protocol::gpu.
     "crates/mvm-gpu",
     # Guest GPU shim libraries (drop-in libcuda/libcudart/libnvidia-ml
-    # replacements forwarding over vsock) and their shared client core.
+    # replacements forwarding over vsock) using mvm-gpu's shared client module.
     # cdylibs linked into the guest runtime overlay; mvm-images composes
     # them into the overlay image.
-    "crates/mvm-gpu-shim-core",
     "crates/mvm-gpu-cuda-shim",
     "crates/mvm-gpu-cudart-shim",
     "crates/mvm-gpu-nvml-shim",

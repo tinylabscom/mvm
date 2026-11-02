@@ -29,10 +29,6 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-# The guest shim client core: the endpoint's integration test drives the
-# very RPC path the in-guest shims use, over a unix socket standing in
-# for vsock.
-mvm-gpu-shim-core = { path = "../mvm-gpu-shim-core" }
 
 [lints]
 workspace = true

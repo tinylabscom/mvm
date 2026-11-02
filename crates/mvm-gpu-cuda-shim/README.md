@@ -7,7 +7,7 @@ It implements a focused CUDA Driver API surface without loading a guest driver.
 
 Exported C ABI functions validate their pointer and scalar arguments.
 They translate supported operations into `mvm-contract` GPU requests.
-`mvm-gpu-shim-core` sends those requests to the host endpoint over vsock.
+`mvm-gpu::shim` sends those requests to the host endpoint over vsock.
 CUDA result codes and output buffers are returned to the calling workload.
 
 Contexts, allocations, modules, and functions are represented by opaque handles.
