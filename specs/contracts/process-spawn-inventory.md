@@ -1,7 +1,7 @@
 # Production process-spawn inventory
 
 Backing: preview
-Validation: none — a generated inventory with a drift check (`--check`); no xtask gate enforces it yet. The raw-constructor half of the picture is enforced separately by `xtask check-helper-env-hygiene`, and the SDK/client/hostlib CLI-shellout rule by `xtask check-no-cli-shellout`.
+Validation: the `Process-spawn inventory is current` step of the `lint-core` job in `ci.yml` runs the drift check (`--check`), which fails on a stale table or an unannotated spawn file. The raw-constructor half of the picture is enforced separately by `xtask check-helper-env-hygiene`, and the SDK/client/hostlib CLI-shellout rule by `xtask check-no-cli-shellout`.
 
 Scope: the umbrella audit box "audit the full reachable production call graph, not just literal `Command::new` sites". This records every production place `mvm` creates an OS process, why, who can reach it, and what guards it. Test-only processes are excluded and counted, not listed.
 
