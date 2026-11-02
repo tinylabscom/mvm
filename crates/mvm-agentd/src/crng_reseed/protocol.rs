@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 use mvm_core::crypto::vmgenid::GENID_BYTES;
 
 /// Request: the id as a little-endian `u64`, then the generation token.
-pub const REQUEST_BYTES: usize = 8 + GENID_BYTES;
+pub(crate) const REQUEST_BYTES: usize = 8 + GENID_BYTES;
 /// Reply: the echoed id, one status byte, then the errno as a little-endian
 /// `i32`.
-pub const REPLY_BYTES: usize = 8 + 1 + 4;
+pub(crate) const REPLY_BYTES: usize = 8 + 1 + 4;
 
 const STATUS_OK: u8 = 0;
 const STATUS_ADD_ENTROPY_FAILED: u8 = 1;
@@ -26,7 +26,7 @@ const STATUS_RESEED_FAILED: u8 = 2;
 /// generator. Crediting it is what makes the forced reseed take effect on
 /// kernels before 5.18, which skip a reseed when fewer than 128 bits are
 /// credited.
-pub const TOKEN_CREDITED_BITS: u32 = (GENID_BYTES * 8) as u32;
+pub(crate) const TOKEN_CREDITED_BITS: u32 = (GENID_BYTES * 8) as u32;
 
 /// The two kernel operations a reseed is made of, behind a trait so the
 /// protocol can be exercised without a Linux guest.
@@ -57,7 +57,7 @@ impl std::fmt::Display for ReseedStep {
 
 /// A decoded reply.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Reply {
+pub(crate) struct Reply {
     /// The id of the request this answers.
     pub id: u64,
     /// `Ok`, or the step that failed and its errno.
@@ -80,7 +80,7 @@ pub fn reseed_with(
 }
 
 /// Frame one request.
-pub fn encode_request(id: u64, token: &[u8; GENID_BYTES]) -> [u8; REQUEST_BYTES] {
+pub(crate) fn encode_request(id: u64, token: &[u8; GENID_BYTES]) -> [u8; REQUEST_BYTES] {
     let mut frame = [0u8; REQUEST_BYTES];
     frame[..8].copy_from_slice(&id.to_le_bytes());
     frame[8..].copy_from_slice(token);
@@ -96,7 +96,10 @@ fn decode_request(frame: &[u8; REQUEST_BYTES]) -> (u64, [u8; GENID_BYTES]) {
 }
 
 /// Frame one reply.
-pub fn encode_reply(id: u64, result: &Result<(), (ReseedStep, io::Error)>) -> [u8; REPLY_BYTES] {
+pub(crate) fn encode_reply(
+    id: u64,
+    result: &Result<(), (ReseedStep, io::Error)>,
+) -> [u8; REPLY_BYTES] {
     let (status, errno) = match result {
         Ok(()) => (STATUS_OK, 0),
         Err((step, error)) => (
@@ -115,7 +118,7 @@ pub fn encode_reply(id: u64, result: &Result<(), (ReseedStep, io::Error)>) -> [u
 }
 
 /// Decode one reply frame, or `None` if it is not a well-formed reply.
-pub fn decode_reply(frame: &[u8; REPLY_BYTES]) -> Option<Reply> {
+pub(crate) fn decode_reply(frame: &[u8; REPLY_BYTES]) -> Option<Reply> {
     let mut id = [0u8; 8];
     id.copy_from_slice(&frame[..8]);
     let errno = i32::from_le_bytes([frame[9], frame[10], frame[11], frame[12]]);

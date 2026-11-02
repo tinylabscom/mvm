@@ -66,7 +66,7 @@ pub(crate) struct AgentBridge {
 }
 
 impl AgentBridge {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             listener: None,
             conns: HashMap::new(),
@@ -92,13 +92,13 @@ impl AgentBridge {
 
     /// Drain the conn ids the host closed since the last call. The device sends
     /// each an `OP_RST` to the guest so the guest frees its half of the stream.
-    pub fn take_host_closed(&mut self) -> Vec<u32> {
+    pub(crate) fn take_host_closed(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.host_closed)
     }
 
     /// Create the host agent listener at `path` (replacing any stale socket).
     /// Non-blocking so [`Self::accept_new`] never stalls the run loop.
-    pub fn bind(&mut self, path: &Path) -> std::io::Result<()> {
+    pub(crate) fn bind(&mut self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -111,18 +111,18 @@ impl AgentBridge {
     }
 
     /// Share the open-connection counter with the run loop heartbeat.
-    pub fn set_activity(&mut self, counter: Arc<AtomicUsize>) {
+    pub(crate) fn set_activity(&mut self, counter: Arc<AtomicUsize>) {
         self.active = Some(counter);
     }
 
-    pub fn has_binding(&self) -> bool {
+    pub(crate) fn has_binding(&self) -> bool {
         self.listener.is_some()
     }
 
     /// Fds the host-I/O thread should watch: the listener plus any established
     /// host streams. Unestablished streams are excluded so buffered pre-accept
     /// bytes do not keep the readiness loop hot before the guest accepts them.
-    pub fn poll_fds(&self) -> Vec<RawFd> {
+    pub(crate) fn poll_fds(&self) -> Vec<RawFd> {
         let mut fds = Vec::new();
         if let Some(listener) = &self.listener {
             fds.push(listener.as_raw_fd());
@@ -138,7 +138,7 @@ impl AgentBridge {
 
     /// Is `conn_id` a host-initiated agent stream (so guest packets addressed to it
     /// route here, not to the workload-exit / egress / capture paths)?
-    pub fn is_agent_stream(&self, conn_id: u32) -> bool {
+    pub(crate) fn is_agent_stream(&self, conn_id: u32) -> bool {
         self.conns.contains_key(&conn_id)
     }
 
@@ -150,7 +150,7 @@ impl AgentBridge {
     /// Accept any pending host connections, assigning each a host vsock src_port.
     /// Returns the new conn ids — the device sends an `OP_REQUEST` to the guest
     /// agent (dst_port [`GUEST_AGENT_PORT`]) for each. No-op without a listener.
-    pub fn accept_new(&mut self) -> Vec<u32> {
+    pub(crate) fn accept_new(&mut self) -> Vec<u32> {
         self.evict_idle_at(Instant::now());
         let mut opened = Vec::new();
         let Some(listener) = &self.listener else {
@@ -194,7 +194,7 @@ impl AgentBridge {
     /// Mark a stream established: the guest accepted it (`OP_RESPONSE`). Only after
     /// this does [`Self::drain_host`] read the host socket, so request bytes the
     /// client wrote before the handshake completed stay ordered behind it.
-    pub fn on_established(&mut self, conn_id: u32) {
+    pub(crate) fn on_established(&mut self, conn_id: u32) {
         if self
             .conns
             .get(&conn_id)
@@ -213,7 +213,7 @@ impl AgentBridge {
 
     /// A refused initial request is not a new host connection. Keep the socket,
     /// unread host bytes, and source port until this one cold readiness expires.
-    pub fn on_reset_at(&mut self, conn_id: u32, now: Instant) -> bool {
+    pub(crate) fn on_reset_at(&mut self, conn_id: u32, now: Instant) -> bool {
         let Some(c) = self.conns.get_mut(&conn_id) else {
             return false;
         };
@@ -229,7 +229,7 @@ impl AgentBridge {
 
     /// Timer service independent of guest/host readiness. MSG_PEEK detects EOF
     /// without consuming or copying the original client's buffered handshake.
-    pub fn readiness_at(&mut self, now: Instant) -> Vec<u32> {
+    pub(crate) fn readiness_at(&mut self, now: Instant) -> Vec<u32> {
         let mut retry = Vec::new();
         let mut closed = Vec::new();
         for (&id, c) in &mut self.conns {
@@ -271,7 +271,7 @@ impl AgentBridge {
         retry
     }
 
-    pub fn readiness_timeout(&self, now: Instant) -> Option<Duration> {
+    pub(crate) fn readiness_timeout(&self, now: Instant) -> Option<Duration> {
         self.conns
             .values()
             .filter(|c| !c.established)
@@ -288,7 +288,7 @@ impl AgentBridge {
     /// Read each established host connection once (non-blocking). Returns
     /// `(conn_id, bytes)` for the device to `OP_RW` to the guest. A peer EOF/error
     /// closes that stream in place (dropping it from the open set).
-    pub fn drain_host(&mut self) -> Vec<(u32, Vec<u8>)> {
+    pub(crate) fn drain_host(&mut self) -> Vec<(u32, Vec<u8>)> {
         self.evict_idle_at(Instant::now());
         let mut ready = Vec::new();
         let mut closed = Vec::new();
@@ -320,7 +320,7 @@ impl AgentBridge {
     /// What the socket cannot take yet stays queued for [`Self::flush_backlogs`];
     /// a stream the bridge no longer holds fails, so the guest is reset rather
     /// than left waiting for credit that will never come.
-    pub fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) -> HostWrite {
+    pub(crate) fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) -> HostWrite {
         let Some(c) = self.conns.get_mut(&conn_id) else {
             return HostWrite::Failed;
         };
@@ -331,7 +331,7 @@ impl AgentBridge {
     /// Retry queued guest bytes. Returns `(conn_id, bytes forwarded)` for each
     /// stream that made progress; a stream whose host socket failed is closed
     /// and reported through [`Self::take_host_closed`].
-    pub fn flush_backlogs(&mut self) -> Vec<(u32, usize)> {
+    pub(crate) fn flush_backlogs(&mut self) -> Vec<(u32, usize)> {
         let mut forwarded = Vec::new();
         let mut failed = Vec::new();
         for (conn_id, c) in self.conns.iter_mut() {
@@ -355,18 +355,18 @@ impl AgentBridge {
     }
 
     /// Whether any stream has guest bytes waiting for its host socket.
-    pub fn has_backlog(&self) -> bool {
+    pub(crate) fn has_backlog(&self) -> bool {
         self.conns.values().any(|c| c.backlog.is_pending())
     }
 
     /// Close a stream (guest `OP_SHUTDOWN`/`OP_RST`, or a host EOF/error).
-    pub fn close(&mut self, conn_id: u32) {
+    pub(crate) fn close(&mut self, conn_id: u32) {
         if self.conns.remove(&conn_id).is_some() {
             self.bump(-1);
         }
     }
 
-    pub fn close_all(&mut self) {
+    pub(crate) fn close_all(&mut self) {
         let conn_ids: Vec<u32> = self.conns.keys().copied().collect();
         for conn_id in conn_ids {
             self.close(conn_id);

@@ -256,53 +256,56 @@ impl VsockShared {
         }
     }
 
-    pub fn set_agent_socket(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+    pub(crate) fn set_agent_socket(&mut self, path: &std::path::Path) -> std::io::Result<()> {
         self.handlers.set_agent_socket(path)
     }
 
-    pub fn set_agent_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+    pub(crate) fn set_agent_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.handlers.set_agent_activity(counter);
     }
 
-    pub fn set_network_endpoint(&mut self, path: &std::path::Path) {
+    pub(crate) fn set_network_endpoint(&mut self, path: &std::path::Path) {
         self.handlers.set_network_endpoint(path);
     }
 
-    pub fn set_trusted_builder_egress(&mut self) {
+    pub(crate) fn set_trusted_builder_egress(&mut self) {
         self.handlers.set_trusted_builder_egress();
         self.transport
             .exempt_host_ports_from_idle(VsockHandlerRegistry::relay_ports());
     }
 
-    pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+    pub(crate) fn set_substitution_activity(
+        &mut self,
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         self.handlers.set_substitution_activity(counter);
     }
 
-    pub fn set_broker_endpoint(&mut self, path: &std::path::Path) {
+    pub(crate) fn set_broker_endpoint(&mut self, path: &std::path::Path) {
         self.handlers.set_broker_endpoint(path);
     }
 
-    pub fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+    pub(crate) fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.handlers.set_broker_activity(counter);
     }
 
-    pub fn set_display_endpoint(&mut self, path: &std::path::Path) {
+    pub(crate) fn set_display_endpoint(&mut self, path: &std::path::Path) {
         self.handlers.set_display_endpoint(path);
     }
 
-    pub fn set_gpu_endpoint(&mut self, path: &std::path::Path) {
+    pub(crate) fn set_gpu_endpoint(&mut self, path: &std::path::Path) {
         self.handlers.set_gpu_endpoint(path);
     }
 
-    pub fn set_display_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+    pub(crate) fn set_display_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.handlers.set_display_activity(counter);
     }
 
-    pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
+    pub(crate) fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
         self.lifecycle.exit_stop = Some(self.handlers.capture_workload_exit(stop));
     }
 
-    pub fn set_host_dial_sockets<'a>(
+    pub(crate) fn set_host_dial_sockets<'a>(
         &mut self,
         ports: impl IntoIterator<Item = (u32, &'a std::path::Path)>,
     ) -> std::io::Result<()> {
@@ -313,22 +316,22 @@ impl VsockShared {
     /// reclaim a quiet stream: the host-dial bridge, which closes the host
     /// socket, and the transport's credit table, which sends the guest an
     /// `OP_RST`. Fixing only one leaves the other to sever the connection.
-    pub fn set_long_lived_host_dial_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+    pub(crate) fn set_long_lived_host_dial_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
         let ports: Vec<u32> = ports.into_iter().collect();
         self.handlers
             .set_long_lived_host_dial_ports(ports.iter().copied());
         self.transport.set_long_lived_ports(ports);
     }
 
-    pub fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+    pub(crate) fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.handlers.set_host_dial_activity(counter);
     }
 
-    pub fn read(&self, offset: u64) -> u64 {
+    pub(crate) fn read(&self, offset: u64) -> u64 {
         self.transport.read(offset, R_CONFIG)
     }
 
-    pub fn write(&mut self, offset: u64, value: u64) -> bool {
+    pub(crate) fn write(&mut self, offset: u64, value: u64) -> bool {
         match self.transport.write_register(offset, value) {
             RegisterWrite::None => false,
             RegisterWrite::Notify(queue) => self.on_notify(queue),

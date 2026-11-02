@@ -297,7 +297,7 @@ pub(crate) struct MemTree {
 
 #[cfg(test)]
 impl MemTree {
-    pub fn file(mut self, path: &str, bytes: &[u8]) -> Self {
+    pub(crate) fn file(mut self, path: &str, bytes: &[u8]) -> Self {
         self.entries.insert(
             path.into(),
             EntryInfo {
@@ -310,7 +310,7 @@ impl MemTree {
         self
     }
 
-    pub fn dir(mut self, path: &str) -> Self {
+    pub(crate) fn dir(mut self, path: &str) -> Self {
         self.entries.insert(
             path.into(),
             EntryInfo {
@@ -322,7 +322,7 @@ impl MemTree {
         self
     }
 
-    pub fn link(mut self, path: &str, target: &str) -> Self {
+    pub(crate) fn link(mut self, path: &str, target: &str) -> Self {
         self.entries.insert(
             path.into(),
             EntryInfo {
@@ -335,7 +335,7 @@ impl MemTree {
         self
     }
 
-    pub fn mode(mut self, path: &str, mode: u32) -> Self {
+    pub(crate) fn mode(mut self, path: &str, mode: u32) -> Self {
         if let Some(entry) = self.entries.get_mut(path) {
             entry.mode = mode;
         }

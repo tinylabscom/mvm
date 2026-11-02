@@ -24,7 +24,7 @@ const CALLBACK_APPROVE_ONCE: i32 = 1;
 const CALLBACK_APPROVE_SESSION: i32 = 2;
 
 /// The callback shape exposed through the C ABI.
-pub type ApprovalCallback = unsafe extern "C" fn(*const u8, usize) -> i32;
+pub(crate) type ApprovalCallback = unsafe extern "C" fn(*const u8, usize) -> i32;
 
 #[derive(Default)]
 struct CallbackState {

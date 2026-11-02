@@ -115,11 +115,11 @@ mod base64_bytes {
     use serde::Deserialize;
     use serde::de::Error as _;
 
-    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&B64.encode(bytes))
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let encoded = String::deserialize(d)?;
         B64.decode(encoded.as_bytes()).map_err(D::Error::custom)
     }

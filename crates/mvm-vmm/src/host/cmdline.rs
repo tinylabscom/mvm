@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    pub fn vsock_egress_cmdline_token_for_ingress_under_deny_all() {
+    pub(crate) fn vsock_egress_cmdline_token_for_ingress_under_deny_all() {
         let dir = tempfile::tempdir().unwrap();
         let deny_all = VmStartConfig::default();
         assert_eq!(vsock_egress_cmdline_token(&deny_all, dir.path()), None);

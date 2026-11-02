@@ -1,4 +1,5 @@
 #![deny(unsafe_code)]
+#![deny(unreachable_pub)]
 //! Filesystem + image materialization for mvm.
 //!
 //! - [`oci`]: OCI distribution client — registry resolution, manifest/layer

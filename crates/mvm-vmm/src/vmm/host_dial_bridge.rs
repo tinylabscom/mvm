@@ -103,7 +103,7 @@ pub(crate) struct HostDialBridge {
 }
 
 impl HostDialBridge {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             listeners: HashMap::new(),
             conns: HashMap::new(),
@@ -130,7 +130,7 @@ impl HostDialBridge {
     /// Callers pass the long-lived *control* ports (the builder's dispatch and
     /// daemon channels). Console data ports are deliberately left evictable: an
     /// abandoned-but-open console is exactly the case idle reclaim is for.
-    pub fn set_long_lived_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+    pub(crate) fn set_long_lived_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
         self.long_lived = ports.into_iter().collect();
     }
 
@@ -139,7 +139,7 @@ impl HostDialBridge {
     /// list. An empty list (sealed prod) binds nothing. A per-port bind failure is
     /// skipped (that console port is simply unreachable) so one bad path never
     /// takes down the others.
-    pub fn bind_ports<'a>(
+    pub(crate) fn bind_ports<'a>(
         &mut self,
         ports: impl IntoIterator<Item = (u32, &'a Path)>,
     ) -> std::io::Result<()> {
@@ -173,24 +173,24 @@ impl HostDialBridge {
     }
 
     /// Share the open-connection counter with the run loop heartbeat.
-    pub fn set_activity(&mut self, counter: Arc<AtomicUsize>) {
+    pub(crate) fn set_activity(&mut self, counter: Arc<AtomicUsize>) {
         self.active = Some(counter);
     }
 
-    pub fn has_binding(&self) -> bool {
+    pub(crate) fn has_binding(&self) -> bool {
         !self.listeners.is_empty()
     }
 
     /// Is `conn_id` a host-initiated console stream (so guest packets addressed to
     /// it route here, not to the agent / workload-exit / egress / capture paths)?
-    pub fn is_host_dial_stream(&self, conn_id: u32) -> bool {
+    pub(crate) fn is_host_dial_stream(&self, conn_id: u32) -> bool {
         self.conns.contains_key(&conn_id)
     }
 
     /// Fds the host-I/O thread should watch: all bound listeners plus established
     /// console streams. As with the agent bridge, unestablished streams stay out
     /// of the readiness set until the guest accepts them.
-    pub fn poll_fds(&self) -> Vec<RawFd> {
+    pub(crate) fn poll_fds(&self) -> Vec<RawFd> {
         let mut fds = Vec::new();
         fds.extend(self.listeners.values().map(AsRawFd::as_raw_fd));
         fds.extend(
@@ -206,7 +206,7 @@ impl HostDialBridge {
     /// assigning each a host vsock src_port. Returns `(conn_id, guest_port)` for
     /// each — the device sends an `OP_REQUEST` to the guest console listener on
     /// `guest_port`. No-op when no listeners are bound (sealed prod).
-    pub fn accept_new(&mut self) -> Vec<(u32, u32)> {
+    pub(crate) fn accept_new(&mut self) -> Vec<(u32, u32)> {
         self.evict_idle_at(Instant::now());
         // Two phases: first drain every listener to `WouldBlock` (borrows only
         // `self.listeners`), then register the accepted streams (borrows
@@ -252,7 +252,7 @@ impl HostDialBridge {
     /// Mark a stream established: the guest accepted it (`OP_RESPONSE`). Only after
     /// this does [`Self::drain_host`] read the host socket, so any PTY bytes the
     /// client wrote before the handshake completed stay ordered behind it.
-    pub fn on_established(&mut self, conn_id: u32) {
+    pub(crate) fn on_established(&mut self, conn_id: u32) {
         if let Some(c) = self.conns.get_mut(&conn_id) {
             c.established = true;
             c.last_activity = Instant::now();
@@ -262,7 +262,7 @@ impl HostDialBridge {
     /// Read each established host connection once (non-blocking). Returns
     /// `(conn_id, guest_port, bytes)` for the device to `OP_RW` to the guest on the
     /// right console port. A peer EOF/error closes that stream in place.
-    pub fn drain_host(&mut self) -> Vec<(u32, u32, Vec<u8>)> {
+    pub(crate) fn drain_host(&mut self) -> Vec<(u32, u32, Vec<u8>)> {
         self.evict_idle_at(Instant::now());
         let mut ready = Vec::new();
         let mut closed = Vec::new();
@@ -293,7 +293,7 @@ impl HostDialBridge {
     /// What the socket cannot take yet stays queued for [`Self::flush_backlogs`];
     /// a stream the bridge no longer holds fails, so the guest is reset rather
     /// than left waiting for credit that will never come.
-    pub fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) -> HostWrite {
+    pub(crate) fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) -> HostWrite {
         let Some(c) = self.conns.get_mut(&conn_id) else {
             return HostWrite::Failed;
         };
@@ -304,7 +304,7 @@ impl HostDialBridge {
     /// Retry queued guest bytes. Returns `(conn_id, guest_port, bytes
     /// forwarded)` for each stream that made progress; a stream whose host
     /// socket failed is closed and reported through [`Self::take_host_closed`].
-    pub fn flush_backlogs(&mut self) -> Vec<(u32, u32, usize)> {
+    pub(crate) fn flush_backlogs(&mut self) -> Vec<(u32, u32, usize)> {
         let mut forwarded = Vec::new();
         let mut failed = Vec::new();
         for (conn_id, c) in self.conns.iter_mut() {
@@ -328,23 +328,23 @@ impl HostDialBridge {
     }
 
     /// Whether any stream has guest bytes waiting for its host socket.
-    pub fn has_backlog(&self) -> bool {
+    pub(crate) fn has_backlog(&self) -> bool {
         self.conns.values().any(|c| c.backlog.is_pending())
     }
 
     /// Drain host-side closures so the device can reset the guest stream.
-    pub fn take_host_closed(&mut self) -> Vec<(u32, u32)> {
+    pub(crate) fn take_host_closed(&mut self) -> Vec<(u32, u32)> {
         std::mem::take(&mut self.host_closed)
     }
 
     /// Close a stream (guest `OP_SHUTDOWN`/`OP_RST`, or a host EOF/error).
-    pub fn close(&mut self, conn_id: u32) {
+    pub(crate) fn close(&mut self, conn_id: u32) {
         if self.conns.remove(&conn_id).is_some() {
             self.bump(-1);
         }
     }
 
-    pub fn close_all(&mut self) {
+    pub(crate) fn close_all(&mut self) {
         let conn_ids: Vec<u32> = self.conns.keys().copied().collect();
         for conn_id in conn_ids {
             self.close(conn_id);

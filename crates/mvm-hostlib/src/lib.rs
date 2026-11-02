@@ -59,6 +59,7 @@
 // workspace's unsafe_code lint is lifted. Each unsafe block states what it
 // relies on.
 #![allow(unsafe_code)]
+#![deny(unreachable_pub)]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;

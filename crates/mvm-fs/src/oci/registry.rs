@@ -180,7 +180,7 @@ struct TokenKey {
 }
 
 #[derive(Clone)]
-pub struct RegistryClient {
+pub(crate) struct RegistryClient {
     http: mvm_http::Client,
     config: ClientConfig,
     auth: RegistryAuthConfig,
@@ -215,11 +215,11 @@ enum SentAuthorization {
 }
 
 impl RegistryClient {
-    pub fn new(config: ClientConfig, auth: RegistryAuthConfig) -> Self {
+    pub(crate) fn new(config: ClientConfig, auth: RegistryAuthConfig) -> Self {
         Self::with_http_client(mvm_http::Client::new(), config, auth)
     }
 
-    pub fn with_http_client(
+    pub(crate) fn with_http_client(
         http: mvm_http::Client,
         config: ClientConfig,
         auth: RegistryAuthConfig,
@@ -232,7 +232,7 @@ impl RegistryClient {
         }
     }
 
-    pub async fn get_manifest(
+    pub(crate) async fn get_manifest(
         &self,
         reference: &ImageReference,
         accept: &[&str],
@@ -247,7 +247,7 @@ impl RegistryClient {
             .await
     }
 
-    pub async fn get_blob(
+    pub(crate) async fn get_blob(
         &self,
         reference: &ImageReference,
         digest: &str,
@@ -265,7 +265,7 @@ impl RegistryClient {
     /// Only a `200` counts as present. A registry that answers `HEAD` with a
     /// redirect to storage is treated as not having it, which costs a
     /// redundant upload and never a missing blob.
-    pub async fn blob_exists(
+    pub(crate) async fn blob_exists(
         &self,
         reference: &ImageReference,
         digest: &str,
@@ -287,7 +287,7 @@ impl RegistryClient {
     /// The session location must stay on the registry's own origin. The
     /// request that closes the session carries the registry credentials, and
     /// a location elsewhere would hand them to whoever the registry named.
-    pub async fn upload_blob(
+    pub(crate) async fn upload_blob(
         &self,
         reference: &ImageReference,
         digest: &str,
@@ -331,7 +331,7 @@ impl RegistryClient {
     /// Store `bytes` as the manifest at `reference`'s tag, or at its digest
     /// when it has no tag. Returns the digest the registry reports, if any,
     /// so the caller can check it against the digest of what it sent.
-    pub async fn put_manifest(
+    pub(crate) async fn put_manifest(
         &self,
         reference: &ImageReference,
         media_type: &str,
@@ -886,7 +886,7 @@ async fn unexpected_status(method: &str, url: &str, mut response: mvm_http::Resp
     }
 }
 
-pub struct RegistryResponse {
+pub(crate) struct RegistryResponse {
     pub content_type: Option<String>,
     pub docker_content_digest: Option<String>,
     pub response: mvm_http::Response,

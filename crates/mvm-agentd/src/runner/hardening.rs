@@ -20,7 +20,7 @@ mod platform {
     /// `/proc/<pid>/mem` access from non-root processes. Combined with
     /// the agent-side `RLIMIT_CORE = 0`, prevents payload bytes from
     /// ever reaching a coredump file.
-    pub fn disable_coredump() -> std::io::Result<()> {
+    pub(crate) fn disable_coredump() -> std::io::Result<()> {
         // SAFETY: `prctl` is a vararg-shaped syscall wrapper; the args
         // we pass are scalars and the call has no out-pointer. A
         // negative return is converted to `Err`.
@@ -40,7 +40,7 @@ mod platform {
     /// (macOS, including the maintainer's primary dev machine) can
     /// exercise the surrounding control flow without the real
     /// `prctl` syscall.
-    pub fn disable_coredump() -> std::io::Result<()> {
+    pub(crate) fn disable_coredump() -> std::io::Result<()> {
         Ok(())
     }
 }
