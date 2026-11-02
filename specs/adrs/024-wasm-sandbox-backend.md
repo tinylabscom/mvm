@@ -5,7 +5,7 @@
 Accepted — boundary ratified; scoped as the **claim-free portability / demo /
 browser tier** (host `wasmtime`, opt-in, honest capabilities, no numbered
 isolation claims). The seam design of record is
-[specs/refactor/11-wasm-backend.md](../refactor/11-wasm-backend.md).
+specs/refactor/11-wasm-backend.md (retired; recover from tag specs-archive-2026-11-02).
 
 A browser-hosted Linux backend is now in implementation under
 [ADR-049](049-weblinux-browser-backend-and-local-builder.md); ADR-049

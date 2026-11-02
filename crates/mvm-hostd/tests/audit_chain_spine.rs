@@ -1,7 +1,6 @@
 //! One provable audit spine across both chain-signed logs.
 //!
-//! mvm keeps two audit chains that canonicalize differently on purpose (see
-//! specs/notes/2026-07-24-audit-chain-two-canonicalizations.md):
+//! mvm keeps two audit chains that canonicalize differently on purpose:
 //!
 //! - the host-lifecycle chain (`FileAuditSigner` / `verify_audit_chain`) signs a
 //!   fixed-shape struct in `serde_json` declaration order and has a `no_std`

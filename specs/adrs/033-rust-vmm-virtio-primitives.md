@@ -15,8 +15,8 @@ validation / "no RX buffer → leave queued" handling (Slice 4) is preserved
 unchanged by the header swap — the packet round-trips byte-identically to
 the hand-rolled encode/decode across every op and boundary value. The
 staged implementation lives in
-`specs/notes/2026-07-27-vsock-device-hardening-plan.md`; the audit that
-motivates it in `specs/notes/2026-07-27-vsock-device-audit-findings.md`.
+specs/notes/2026-07-27-vsock-device-hardening-plan.md (retired; recover from tag specs-archive-2026-11-02); the audit that
+motivates it in specs/notes/2026-07-27-vsock-device-audit-findings.md (retired; recover from tag specs-archive-2026-11-02).
 The block/fs device migrations (which reuse the same `vm-memory` seam and
 `Queue` gate) remain out of scope here.
 

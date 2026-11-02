@@ -10,11 +10,11 @@ ADR-014, ADR-020 (host services broker), ADR-023 (secrets subsystem — egress
 substitution), ADR-035 (workload stream plane), ADR-045 (sections 8, 18, 19),
 ADR-046 (sections 7, 13, 14).
 **Depends on:** the durable agent sessions design,
-`specs/plans/2026-08-18-durable-agent-sessions.md`, which is unmerged at the
+specs/plans/2026-08-18-durable-agent-sessions.md (retired; recover from tag specs-archive-2026-11-02), which is unmerged at the
 time of writing — it exists on `docs/durable-agent-sessions` and has no open
 pull request. Every reference to it below is a forward reference to a design
 that may still change, not to a landed document.
-**Implemented by:** `specs/plans/2026-08-18-agent-tool-and-memory-planes.md`.
+**Implemented by:** specs/plans/2026-08-18-agent-tool-and-memory-planes.md (retired; recover from tag specs-archive-2026-11-02).
 
 ## Context
 

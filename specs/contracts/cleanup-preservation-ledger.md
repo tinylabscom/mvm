@@ -46,7 +46,7 @@ Evidence commit: `d95c9a4303` (origin/main when this was written). Date:
 | `check-no-guest-tool-client` | clean |
 | `check-spec-hygiene` | clean |
 | `check-doc-claims` | clean |
-| `check-conformance` | docs/CONFORMANCE.md equals the model (25 claims) |
+| `check-conformance` | model/CONFORMANCE.md equals the model (25 claims) |
 | `check-image-reproducibility` | clean (0 mkfs, 0 veritysetup, 0 cpio) |
 
 Targeted tests (one nextest invocation over `mvm-contract`, `mvm-gpu`,

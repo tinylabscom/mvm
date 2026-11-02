@@ -24,7 +24,7 @@ host forwarder. ADR-052 added a second, unprivileged forwarding backend for
 it. Both shipped. The tree therefore carries **two** production workload
 networking paths with different policy code, different resource accounting,
 different audit shapes, and different security properties — and
-`specs/refactor/03-networking.md` still asserts the raw-packet path was
+specs/refactor/03-networking.md (retired; recover from tag specs-archive-2026-11-02) still asserts the raw-packet path was
 deleted, which stopped being true when it was reintroduced.
 
 Two paths is the problem this ADR resolves. It is not primarily a performance
@@ -155,7 +155,7 @@ transformation applies to it.
 
 ## Migration
 
-Staged in `specs/plans/316-single-flow-vsock-networking.md`, phases 0–8. The
+Staged in specs/plans/316-single-flow-vsock-networking.md (retired; recover from tag specs-archive-2026-11-02), phases 0–8. The
 plan's performance gate is a merge gate: opaque TCP/UDP may regress at most 5%
 on p50/p95 latency, must retain at least 95% throughput, and may not grow peak
 RSS by more than 10%, measured against baselines recorded before the endpoint

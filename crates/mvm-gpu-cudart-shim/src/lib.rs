@@ -4,8 +4,6 @@
 //! speaks: allocations, copies, and synchrony map one-to-one onto driver
 //! operations server-side, so the wire carries one vocabulary. Runtime
 //! device pointers are the endpoint's opaque device pointers verbatim.
-//!
-//! v1 coverage is documented in `specs/plans/2026-09-20-gpu-over-vsock.md`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

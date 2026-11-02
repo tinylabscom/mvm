@@ -35,7 +35,7 @@ TCP/UDP transparently but has no support for raw sockets, multicast,
 TUN/TAP, or ICMP.
 
 A second, independent data point comes from an open-source AI-sandbox
-offering — reviewed in `specs/research/external-sandbox-refactor-lessons.md`
+offering — reviewed in specs/research/external-sandbox-refactor-lessons.md (retired; recover from tag specs-archive-2026-11-02)
 and referred to here only as the open-source competitor, never by name.
 It is a KVM microVM sandbox for AI agents built on the `rust-vmm`
 community crates plus a self-developed, minimal-device VMM. Independently
@@ -167,4 +167,4 @@ with the warm-path security witnesses. No existing security claim is relaxed:
 the implemented warm path is gated more tightly than cold boot, extending
 claims 1, 3, 8, 10, and 13 into the restore path rather than weakening them.
 The full surface-by-surface enumeration lives in
-`specs/notes/2026-07-26-fast-start-warm-snapshot-design.md`.
+specs/notes/2026-07-26-fast-start-warm-snapshot-design.md (retired; recover from tag specs-archive-2026-11-02).

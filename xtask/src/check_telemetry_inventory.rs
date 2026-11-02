@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-const INVENTORY: &str = "specs/telemetry/binaries.toml";
+const INVENTORY: &str = "xtask/data/telemetry/binaries.toml";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -548,7 +548,7 @@ required-features = ["hidden"]
                 .to_string()
                 .contains("read telemetry inventory")
         );
-        std::fs::create_dir_all(root.path().join("specs/telemetry")).unwrap();
+        std::fs::create_dir_all(root.path().join("xtask/data/telemetry")).unwrap();
         std::fs::write(root.path().join(INVENTORY), "not = [valid").unwrap();
         assert!(
             run(root.path())

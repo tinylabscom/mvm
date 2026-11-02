@@ -5,7 +5,7 @@ Validation: none
 
 ## Status
 
-Accepted, 2026-10-06. Design: `specs/plans/2026-10-06-mvm-packs.md`.
+Accepted, 2026-10-06. Design: specs/plans/2026-10-06-mvm-packs.md (retired; recover from tag specs-archive-2026-11-02).
 Delivery: [#3716](https://github.com/tinylabscom/mvm/issues/3716).
 
 ## Context

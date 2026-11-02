@@ -562,8 +562,8 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 
     There is no unrestricted
     acknowledgement, so nothing is being bypassed — but nothing warns either,
-    and `specs/plans/296` cites the non-existent hatch as prior art for its
-    E7 redaction opt-out. Building the acknowledgement is Plan 306 WS5.
+    and a retired plan cited the non-existent hatch as prior art for its E7
+    redaction opt-out. Building the acknowledgement is tracked in the issues.
     Cardoso-flavoured
     audit of DNS / vsock control-plane carve-out / Plan 104 broker
     channels as covert egress is tracked in Plan 111 Workstream A.
@@ -1011,27 +1011,9 @@ macOS / Linux Host
 - `public/src/content/docs/guides/troubleshooting.md` -- common issues and fixes
 - `public/src/content/docs/contributing/adr/001-firecracker-only.md` -- ADR: Firecracker-only execution
 - `public/src/content/docs/reference/cli-commands.md` -- complete CLI command reference
-- `specs/plans/` -- technical implementation plans for active issues; issues
-  own their status and legacy plans remain only as context
+- `specs/prd.md` -- the product requirements document
+- `specs/adrs/` and `specs/contracts/` -- durable decisions and stable contracts
 - `specs/README.md` -- current specs policy and retention rules
-
-## Naming a new plan
-
-**Name it by slug, not by number**: `specs/plans/2026-08-15-sdk-binding-fan-out.md`.
-A date prefix keeps plans sorting chronologically, which is the only thing the
-numbers were really giving.
-
-Numbers were a sequential id picked at authoring time, and this repo adds
-roughly three plans a day across concurrent branches — so two authors routinely
-picked the same next-free number, and neither could see the other's claim until
-its PR opened. 18 numbers ended up shared by two plans. Scanning open PRs before
-picking does not fix it: a branch that has claimed a number and not yet opened
-its PR is invisible to any scan.
-
-The plans that already carry numbers keep them — renaming them would invalidate
-hundreds of `Plan NNN` references for no benefit. `xtask check-plan-names`
-freezes that set and fails a _new_ number-named plan. Refer to a plan by its
-path or title rather than a bare number.
 
 ## Work tracking and specifications
 
