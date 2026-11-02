@@ -578,3 +578,55 @@ anything on aarch64; `ebpf-telemetry` and `embed-host-bins` clippy (excluded by
 CI's own lane); Windows and WHP. Host B runs systemd 259, which the live KVM
 evidence found breaks the scoped Firecracker launch; no Firecracker boot was
 attempted on it here.
+
+## Telemetry-affecting changes this campaign (box: tracing/telemetry review)
+
+Method: all 33 merged PRs matching `#4839 in:title` were diffed
+(`gh pr diff`) and filtered for `tracing::`, `span`, `otlp`, `observab`, `audit`,
+`redact`, log macros and `emit`. Most hits are comment or contract-doc edits.
+Only the PRs below change code in or beside a telemetry, audit or redaction path;
+every other PR in the set (docs, comment-only, CLI alias, image-set pin, backend
+selector, HVF boot, BDD) touches none.
+
+| PR | Change | Behavior at risk | Post-merge evidence | Verdict |
+| --- | --- | --- | --- | --- |
+| 4935 | `tracing-subscriber` built without default `tracing-log` | Third-party `log::` records (rustls, mio) are no longer forwarded to the subscriber when `.init()` runs (`observability/logging.rs`) | No first-party `log::` macro, `LogTracer` or `tracing_log` use remains (`rg` over `crates/`, `src/`). First-party messages, spans, OTLP export, correlation ids and redaction all go through `tracing` and are untouched. The PR's dependency table records the risk as accepted | Retained for first-party; third-party `log` diagnostics intentionally dropped (documented) |
+| 4937 | Local `sha256_hex` / `hex_lower` / `hex_encode` copies replaced by `mvm_contract::hash::sha256_hex` and `hex::encode` (incl. `snapshot_hmac`, `snapshot_sign`, attestation header, hostd `binary_integrity`) | Digest and hex text feeding signed or audited values | Both old and new emit lowercase two-digit hex of the same SHA-256 bytes; `sha256_hex_matches_the_standard_encoding` (mvm-contract) and the existing snapshot/attestation round-trip tests still compile against the new helper | Retained |
+| 4963 | Audit evidence completeness requires each leaf exactly once | Mandatory signed-audit guarantee | Strengthened, not weakened: `a_leaf_listed_twice_in_place_of_another_fails_completeness_despite_equal_count` | Retained, tightened |
+| 4964 | Deleted tautological tests: `filter_default_covers_mvm_targets_at_trace` (span_timing), `default_capacity_constant_is_documented_value` (event_bus), and a source-text scan in `input_gate.rs` | Redaction and bounded-queue invariants | `span_timing::DEFAULT_FILTER` still exists and is used by `logging.rs`. The input-gate scan asserted the plaintext-carrying `KnownSecret` type stays deleted: it does not exist anywhere in `crates/` or `xtask/`, and the only setter, `with_fingerprint`, takes a `SecretFingerprint` (compiler-enforced); `xtask check-stream-redaction-seam` is clean. The event-bus capacity constant is still used; queue-full behavior is covered by other tests | Retained |
+| 4954 | hostd comment edits in `audit/merkle.rs`, `supervisor/audit_file.rs` | none (comments) | Diff has no code lines | Retained |
+
+Named bounded-queue and loss witnesses, all still present on main:
+`a_full_queue_drops_the_span_and_counts_it_without_blocking`
+(`mvm-cli/src/observability/otlp/export.rs`),
+`a_full_queue_sheds_output_with_counted_loss_instead_of_waiting`
+(`mvm-agentd/src/telemetry_capture/stdio_tap.rs`),
+`stopped_reader_consumer_bounds_bytes_and_counts_every_loss`
+(`mvm-agentd/src/stream_pump/reader_tests.rs`).
+
+Verdict: **MET for the review duty on this campaign's merged set**: no regression
+found, so no fix PR. The open W3-W7 completeness issues and the telemetry
+inventory's runtime gaps (see the tracing/stream section) are unchanged and
+still own completeness. Later PRs need the same per-diff review.
+
+## #4840 status on main (box: macOS fixture and owned-child performance)
+
+Landed: PR 4854 (synthetic-checkout fixtures for the nine pair/default-image/
+kernel unit consumers; bounded owned-child helper `test_boot_payload.rs`) and PR
+4883 (observer-error and cleanup-failure branches).
+
+| Acceptance item | State on main |
+| --- | --- |
+| Inventory of real-checkout reads | Done (issue comment) |
+| Synthetic fixtures, no production bypass | Done; production compiled-root selection unchanged |
+| Real-checkout identity/custody witnesses retained | Present: `mvm-build/src/image_source/tests/git_identity.rs` builds real git repos (staged, sparse, submodule, worktree, hostile-git cases); `tests/local_set.rs` covers checkout-root refusal |
+| Bounded child: deadline, reaping, diagnostics | Done and tested: `expired_child_deadline_reports_termination_and_reaping`, `observer_error_is_returned_after_the_child_is_killed_and_reaped` (child blocked and running), `cleanup_failure_is_reported_not_swallowed`, `diagnostic_capture_is_bounded`. Scope: the test helper owns its direct child only; no process-tree or parent-SIGKILL guarantee is claimed |
+| Immutable clean-main vs PR baseline, identical features | **Not done** |
+| Before/after timing with identical commands | **Not done** |
+| Native macOS full-workspace run within a budget | **Not done** |
+
+Why the last three are open: they need a quiet native macOS host. This session's
+host load average was 270 (64 users) at measurement time, so any timing taken
+now would be noise and would not satisfy "identical-feature timing". A timing
+claim here would be fabricated; it needs a dedicated run and cannot be produced
+by editing code. Verdict: **PARTIAL**.
