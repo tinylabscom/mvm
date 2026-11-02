@@ -33,10 +33,10 @@ pub const NPM_LOCKFILE: &str = "package-lock.json";
 
 /// Key under [`PACK_EXTENSION`] holding the resolved Python environment, so
 /// the workload digest a lock records covers every wheel's URL and hash.
-pub const PACK_PYTHON_KEY: &str = "python";
+pub(super) const PACK_PYTHON_KEY: &str = "python";
 
 /// Key under [`PACK_EXTENSION`] holding the build-scoped package names.
-pub const PACK_BUILD_PACKAGES_KEY: &str = "build_packages";
+pub(super) const PACK_BUILD_PACKAGES_KEY: &str = "build_packages";
 
 /// Lower a validated spec into a single-app, command-entrypoint Workload and
 /// validate the result.

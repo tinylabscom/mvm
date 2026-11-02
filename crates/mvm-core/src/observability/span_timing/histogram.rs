@@ -11,14 +11,14 @@ const SUB_BITS: u32 = 2;
 /// Linear sub-buckets per power of two.
 const SUB_COUNT: u64 = 1 << SUB_BITS;
 /// Total bucket count: one set of sub-buckets per `u64` exponent.
-pub const BUCKET_COUNT: usize = 64 * SUB_COUNT as usize;
+pub(super) const BUCKET_COUNT: usize = 64 * SUB_COUNT as usize;
 
 /// Bucket a duration in nanoseconds falls into.
 ///
 /// Values below [`SUB_COUNT`] are stored exactly in the leading buckets; every
 /// larger value maps to `(exponent, sub)` where `exponent` is the position of
 /// its most significant bit.
-pub fn bucket_index(ns: u64) -> usize {
+pub(super) fn bucket_index(ns: u64) -> usize {
     if ns < SUB_COUNT {
         return ns as usize;
     }
@@ -28,7 +28,7 @@ pub fn bucket_index(ns: u64) -> usize {
 }
 
 /// Smallest nanosecond value that maps to `index`.
-pub fn bucket_lower(index: usize) -> u64 {
+pub(super) fn bucket_lower(index: usize) -> u64 {
     if (index as u64) < SUB_COUNT {
         return index as u64;
     }
@@ -38,7 +38,7 @@ pub fn bucket_lower(index: usize) -> u64 {
 }
 
 /// Width in nanoseconds of the value range covered by `index`.
-pub fn bucket_width(index: usize) -> u64 {
+pub(super) fn bucket_width(index: usize) -> u64 {
     if (index as u64) < SUB_COUNT {
         return 1;
     }

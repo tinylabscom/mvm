@@ -656,7 +656,7 @@ async fn write_request_body(stream: &mut Stream, body: Option<RequestBody>) -> R
 /// below never runs. That is not hypothetical — a host with a configured but
 /// non-functional IPv6 route hangs here indefinitely with no diagnostic, which
 /// is how an image pull came to sit in `SYN-SENT` for half an hour.
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a connected peer may send nothing before the read gives up.
 ///
@@ -669,7 +669,7 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Deliberately generous. This bounds *silence*, not slowness: a slow transfer
 /// that keeps delivering bytes re-arms the budget on every read, so only a
 /// genuinely stalled connection trips it.
-pub const DEFAULT_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The per-read idle budget. An unset timeout resolves to a finite default; it
 /// must never resolve to "wait indefinitely", which is what let a silent peer

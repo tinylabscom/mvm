@@ -6,7 +6,7 @@ use crate::collect::{TraverseLimits, inspect_executable, obs_id};
 use crate::report::{CaptureReportV1, Confidence, Evidence, Observation, ObservationKind};
 
 /// Resolve PATH executables and their native package ownership.
-pub fn collect_path_executables(
+pub(super) fn collect_path_executables(
     report: &mut CaptureReportV1,
     limits: &TraverseLimits,
 ) -> Result<(), CaptureError> {
@@ -58,7 +58,7 @@ pub fn collect_path_executables(
 }
 
 /// Resolve package versions for observations that already name a package.
-pub fn collect_packages(report: &mut CaptureReportV1) -> Result<(), CaptureError> {
+pub(super) fn collect_packages(report: &mut CaptureReportV1) -> Result<(), CaptureError> {
     let providers = all_providers();
     for obs in &mut report.observations {
         if obs.evidence.package_version.is_some() {
@@ -85,7 +85,7 @@ pub fn collect_packages(report: &mut CaptureReportV1) -> Result<(), CaptureError
 }
 
 /// Trace explicitly supplied commands and record observed artifacts.
-pub fn trace_explicit_commands(
+pub(super) fn trace_explicit_commands(
     report: &mut CaptureReportV1,
     commands: &[String],
 ) -> Result<(), CaptureError> {

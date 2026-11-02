@@ -101,7 +101,7 @@ pub fn classify(name: &str) -> Option<EnvFamily> {
 }
 
 /// Whether `name` is one family's whole prefix rather than a variable.
-pub fn is_family_prefix(name: &str) -> bool {
+pub(super) fn is_family_prefix(name: &str) -> bool {
     DENYLIST
         .iter()
         .any(|(matcher, _)| matches!(matcher, Matcher::Prefix(prefix) if *prefix == name))

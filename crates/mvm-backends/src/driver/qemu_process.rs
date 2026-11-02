@@ -647,7 +647,7 @@ pub struct VsockListener {
 impl VsockListener {
     /// Bind `AF_VSOCK(VMADDR_CID_ANY, port)` and start listening.
     pub fn bind(port: u32) -> std::io::Result<Self> {
-        pub const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
+        pub(crate) const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
         let fd = vsock_socket()?;
         let addr = sockaddr_vm(VMADDR_CID_ANY, port);
         // SAFETY: bind(2)/listen(2) on a valid fd; addr is fully initialized

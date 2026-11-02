@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 /// Events that a dynamic tracer may observe.
 #[derive(Clone, Debug, PartialEq)]
-pub enum TraceEvent {
+pub(super) enum TraceEvent {
     Execve { argv: Vec<String> },
     Open { path: String },
     Connect { endpoint: String },
@@ -14,7 +14,7 @@ pub enum TraceEvent {
 
 /// Limits applied to a traced run.
 #[derive(Clone, Debug)]
-pub struct StraceLimits {
+pub(super) struct StraceLimits {
     pub max_seconds: u64,
     pub max_output_bytes: u64,
     pub max_events: usize,
@@ -31,19 +31,22 @@ impl Default for StraceLimits {
 }
 
 /// Linux `strace` tracer.
-pub struct StraceTracer {
+pub(super) struct StraceTracer {
     limits: StraceLimits,
 }
 
 impl StraceTracer {
-    pub fn new(limits: StraceLimits) -> Self {
+    pub(super) fn new(limits: StraceLimits) -> Self {
         Self { limits }
     }
 }
 
 impl StraceTracer {
     /// Run `strace` against `command` and return observed events.
-    pub fn trace_command(&self, command: &[String]) -> Result<Vec<TraceEvent>, CaptureError> {
+    pub(super) fn trace_command(
+        &self,
+        command: &[String],
+    ) -> Result<Vec<TraceEvent>, CaptureError> {
         if command.is_empty() {
             return Err(CaptureError::InvalidObservation(
                 "empty command cannot be traced".to_owned(),

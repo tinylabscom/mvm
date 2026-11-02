@@ -22,9 +22,9 @@ use serde::Deserialize;
 use super::ApprovalBackend;
 
 /// Largest reply read from a webhook.
-pub const MAX_WEBHOOK_REPLY_BYTES: u64 = 4 * 1024;
+pub(super) const MAX_WEBHOOK_REPLY_BYTES: u64 = 4 * 1024;
 /// Default wait for a webhook reply.
-pub const DEFAULT_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const DEFAULT_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why a webhook URL is refused at configuration.
 #[derive(Debug, thiserror::Error)]

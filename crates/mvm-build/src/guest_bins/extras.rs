@@ -61,7 +61,7 @@ pub(crate) struct ExtraBuild {
 }
 
 impl ExtraBuild {
-    pub fn args(&self) -> Vec<String> {
+    pub(crate) fn args(&self) -> Vec<String> {
         let mut args = vec![
             "zigbuild".to_string(),
             "--release".to_string(),

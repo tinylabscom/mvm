@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(unreachable_pub)]
 //! Language-neutral compilation stages shared by the workload SDK and pack
 //! authoring surfaces.
 //!

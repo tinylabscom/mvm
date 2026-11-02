@@ -122,11 +122,13 @@ mod sig_base64 {
     use base64::engine::general_purpose::STANDARD as B64;
     use serde::{Deserialize as _, Deserializer, Serialize as _, Serializer};
 
-    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
         B64.encode(bytes).serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
         let encoded = String::deserialize(deserializer)?;
         B64.decode(encoded.as_bytes())
             .map_err(serde::de::Error::custom)

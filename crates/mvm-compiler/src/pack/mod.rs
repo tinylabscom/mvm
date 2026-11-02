@@ -135,7 +135,7 @@ pub(crate) mod test_support {
     use crate::mvm_pin::PinnedMvmRevision;
     use mvm_contract::pack_spec::PackSpec;
 
-    pub fn spec() -> PackSpec {
+    pub(crate) fn spec() -> PackSpec {
         serde_json::from_value(serde_json::json!({
             "schema": "mvm.pack-spec/v1",
             "identity": { "name": "acme/hello", "version": "1.0.0" },
@@ -153,7 +153,7 @@ pub(crate) mod test_support {
         .unwrap()
     }
 
-    pub fn revision() -> PinnedMvmRevision {
+    pub(crate) fn revision() -> PinnedMvmRevision {
         PinnedMvmRevision::parse("4e65b221744885e536ec91a3f2948cdc508dcb49").unwrap()
     }
 }

@@ -3,7 +3,7 @@
 use std::path::Path;
 
 /// Trait for querying native package ownership and installed versions.
-pub trait PackageProvider: Send + Sync {
+pub(super) trait PackageProvider: Send + Sync {
     /// Package-manager short name (e.g. `"dpkg"`, `"rpm"`).
     fn name(&self) -> &'static str;
 
@@ -16,18 +16,18 @@ pub trait PackageProvider: Send + Sync {
 
 /// Package ownership record returned by a provider.
 #[derive(Clone, Debug)]
-pub struct PackageRecord {
+pub(super) struct PackageRecord {
     pub name: String,
     pub version: Option<String>,
 }
 
 /// All built-in providers, tried in order on Linux hosts.
-pub fn all_providers() -> Vec<Box<dyn PackageProvider>> {
+pub(super) fn all_providers() -> Vec<Box<dyn PackageProvider>> {
     vec![Box::new(DpkgProvider), Box::new(NixIndexProvider)]
 }
 
 /// Debian/Ubuntu provider using `dpkg` and `dpkg-query`.
-pub struct DpkgProvider;
+pub(super) struct DpkgProvider;
 
 impl PackageProvider for DpkgProvider {
     fn name(&self) -> &'static str {
@@ -80,7 +80,7 @@ fn parse_dpkg_version(output: &str) -> Option<&str> {
 
 /// Optional `nix-index` provider that maps a store path to a nixpkgs
 /// attribute. Tried only after native package managers return no match.
-pub struct NixIndexProvider;
+pub(super) struct NixIndexProvider;
 
 impl PackageProvider for NixIndexProvider {
     fn name(&self) -> &'static str {

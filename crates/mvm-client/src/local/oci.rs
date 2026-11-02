@@ -106,7 +106,7 @@ async fn pull_image_to_dir_with_fetcher(
 /// Unique outputs avoid collisions with concurrent runs and cache publishers.
 /// This is not a sandbox against other code running with the same host identity.
 #[derive(Debug)]
-pub struct OciMaterialization {
+pub(crate) struct OciMaterialization {
     directory: tempfile::TempDir,
     digest: String,
     canonical_reference: String,
@@ -146,38 +146,38 @@ fn hash_regular_file(path: &Path) -> Result<String> {
 }
 
 impl OciMaterialization {
-    pub fn resolved_manifest_digest(&self) -> &str {
+    pub(crate) fn resolved_manifest_digest(&self) -> &str {
         &self.digest
     }
 
-    pub fn canonical_reference(&self) -> &str {
+    pub(crate) fn canonical_reference(&self) -> &str {
         &self.canonical_reference
     }
 
-    pub fn arch(&self) -> GuestArch {
+    pub(crate) fn arch(&self) -> GuestArch {
         self.arch
     }
 
-    pub fn sealed(&self) -> bool {
+    pub(crate) fn sealed(&self) -> bool {
         self.sealed
     }
 
-    pub fn rootfs_path(&self) -> &Path {
+    pub(crate) fn rootfs_path(&self) -> &Path {
         &self.files[0].path
     }
 
-    pub fn rootfs_sha256(&self) -> &str {
+    pub(crate) fn rootfs_sha256(&self) -> &str {
         &self.files[0].sha256
     }
 
-    pub fn sidecar_sha256(&self) -> &str {
+    pub(crate) fn sidecar_sha256(&self) -> &str {
         &self.files[1].sha256
     }
 
     /// Check every bound artifact before and after consuming it for export.
     /// The private directory prevents cooperating materializers from replacing
     /// these files; hashes additionally detect accidental mutation by consumers.
-    pub fn verify_integrity(&self) -> Result<()> {
+    pub(crate) fn verify_integrity(&self) -> Result<()> {
         if !self.directory.path().is_dir() {
             return Err(backend_err("OCI materialization directory disappeared"));
         }

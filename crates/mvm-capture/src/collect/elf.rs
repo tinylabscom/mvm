@@ -8,7 +8,7 @@ use crate::CaptureError;
 
 /// ELF metadata relevant to environment capture.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct ElfMetadata {
+pub(super) struct ElfMetadata {
     pub arch: Option<String>,
     pub interpreter: Option<String>,
     pub needed_libraries: Vec<String>,
@@ -38,7 +38,7 @@ const DT_NULL: u64 = 0;
 /// inputs that claim to be ELF but are malformed in a way that suggests
 /// tampering or truncation.
 #[cfg(test)]
-pub fn parse_elf_metadata(bytes: &[u8]) -> Result<Option<ElfMetadata>, CaptureError> {
+pub(super) fn parse_elf_metadata(bytes: &[u8]) -> Result<Option<ElfMetadata>, CaptureError> {
     parse_elf_metadata_with_extent(bytes, true)
 }
 
@@ -47,7 +47,7 @@ pub fn parse_elf_metadata(bytes: &[u8]) -> Result<Option<ElfMetadata>, CaptureEr
 /// Segments outside the supplied prefix are omitted and reported through
 /// [`ElfMetadata::incomplete`]; malformed structures inside the prefix still
 /// fail closed.
-pub fn parse_elf_prefix_metadata(bytes: &[u8]) -> Result<Option<ElfMetadata>, CaptureError> {
+pub(super) fn parse_elf_prefix_metadata(bytes: &[u8]) -> Result<Option<ElfMetadata>, CaptureError> {
     parse_elf_metadata_with_extent(bytes, false)
 }
 

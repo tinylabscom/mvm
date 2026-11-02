@@ -39,7 +39,7 @@ pub const HOST_BINARIES_SCRIPT: &str = "scripts/build-host-binaries.sh";
 /// relative to the checkout root. Present since the ABI was declared; an
 /// absent file means a checkout from before it, which builds the legacy
 /// (host-binaries-baked) image.
-pub const BUILDER_BOOT_ABI_FILE: &str = "images/builder-vm/boot-abi.nix";
+pub(super) const BUILDER_BOOT_ABI_FILE: &str = "images/builder-vm/boot-abi.nix";
 /// The image checkout's local-manifest emitter, relative to its root.
 pub const EMIT_MANIFEST_SCRIPT: &str = "scripts/emit-local-manifest.py";
 const BASE_IMAGE_CONTRACT_FILE: &str = "images/base-image-contract.nix";
@@ -339,7 +339,7 @@ pub fn stage_work_tree(
 /// in from `MVM_HOST_BIN_DIR`. That is also exactly the checkout shape that
 /// still carries `scripts/build-host-binaries.sh`, so an absent marker never
 /// routes a build at the deleted script.
-pub fn checkout_builder_boot_abi(
+pub(super) fn checkout_builder_boot_abi(
     images_root: &Path,
 ) -> Result<BuilderBootAbi, LocalImageBuildError> {
     let path = images_root.join(BUILDER_BOOT_ABI_FILE);
@@ -836,7 +836,7 @@ pub fn build_target_for_pair(
 
 /// Admits the build of the named artifact, told the reason its cache entry was
 /// just evicted when one was.
-pub type AdmitPairBuild<'a> = &'a mut dyn FnMut(&str, Option<&str>) -> Result<(), String>;
+pub(super) type AdmitPairBuild<'a> = &'a mut dyn FnMut(&str, Option<&str>) -> Result<(), String>;
 
 /// The boundaries a pair build crosses once the cache has not answered:
 /// admitting the build to the user, readying the builder, and booting it.

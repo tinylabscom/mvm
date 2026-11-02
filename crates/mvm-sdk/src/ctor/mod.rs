@@ -3,11 +3,11 @@
 //! wrappers that pre-fill IR struct/variant fields with sensible
 //! defaults so the prelude stays readable at the call site.
 
-pub mod addon;
-pub mod concurrency;
-pub mod deps;
-pub mod entrypoint;
-pub mod image;
-pub mod network;
-pub mod resources;
-pub mod source;
+pub(crate) mod addon;
+pub(crate) mod concurrency;
+pub(crate) mod deps;
+pub(crate) mod entrypoint;
+pub(crate) mod image;
+pub(crate) mod network;
+pub(crate) mod resources;
+pub(crate) mod source;
