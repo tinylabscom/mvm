@@ -204,10 +204,14 @@ inventory's 30 gaps.
 
 ### Cold/warm startup evidence (<300 ms / <50 ms)
 
-Evidence: none produced. Needs a native HVF (and per-backend) measurement of
-invocation-to-ready; #4391 is OPEN.
+Evidence: a Firecracker attempt on Linux on 2026-11-02, recorded in "Firecracker
+startup attempt 2026-11-02" below. It produced no lane-valid sample, and the
+gate was not weakened to obtain one. Native HVF is not measured: the only Mac
+available ran at a load average near 200. #4391 is OPEN.
 
-Verdict: **BLOCKED (operator with native hardware; #4391)**.
+Verdict: **BLOCKED**. Firecracker: the prepared-cold lane refuses every launch
+for hashing artifacts, and the warm-claim lane refuses a 1,248 ms sample against
+its 300 ms ceiling. HVF: needs a quiet native Mac.
 
 ### Backend/feature combinations including WASM
 
@@ -610,11 +614,45 @@ they differ.
 | Browser/WASM capability tiers (ADR-024/049) | PARTIAL | WASM refusal and bound tests ran on a Linux host: `a_fuel_only_grant_is_refused`, `an_unbounded_wall_clock_does_not_satisfy_a_fuel_grant`; no claim row treats WASM as hardware isolation; ADR-049 is preview | Deferral of WebLinux and the local builder is carried by #4222, #4224, #4226, #4228 (all OPEN). No speculative implementation exists, which is what the box asks |
 | Future Windows direction | MET | ADR-009 Status and Decision state the future libkrun/WHP direction in #3553, keep Linux/macOS tiers unchanged, rule out a new in-house WHP driver, and list the promotion gate (qualified boot witness, private-state ACLs, signing/integrity posture, named refusal and doctor agreement, capability evidence). #3553 OPEN | The reconcile is on `main`. Promotion itself is future and not claimed |
 | Staged-state contradictions | PARTIAL | README Install names the macOS 13-25 libkrun tier as packaged with a live witness still open (matches ADR-028 staged and #4577 OPEN); ADR-054 Status and ADR-030 "Amended 2026-10-05" agree and state that publication and boot evidence is outstanding; ADR-046 is `Proposed` with ADR-035 still Accepted for streams. #4794 now carries a comment that its in-line preparation proposal must be a separate, excluded lane and that the refusal witnesses change deliberately | #4794 is a proposal, not a decision: the maintainer must accept or reject in-line preparation. Until then the measured prepared-launch semantics hold |
-| Record reproducible cold/warm startup evidence | BLOCKED | `every_prepared_lane_is_held_to_the_ceiling_from_invocation` and the `prepared_cold_rejects_*` guards pin the budget definitions; no measurement exists. #4391 OPEN (HVF warm claims take about 3.2 s on the CI runner, so warm launches are refused) | Needs native HVF (and per backend) invocation-to-ready runs against the 300 ms and 50 ms targets. The Firecracker numbers in `live-kvm-acceptance-evidence-2026-11-01.md` are not a substitute for the HVF target. Operator with native hardware |
+| Record reproducible cold/warm startup evidence | BLOCKED | `every_prepared_lane_is_held_to_the_ceiling_from_invocation` and the `prepared_cold_rejects_*` guards pin the budget definitions. 2026-11-02, Firecracker, Linux x86_64: `mvmctl bench --lane prepared-cold` refused the first warm-up for `artifact_hash`, `--lane warm-claim` refused a sample that reached the guest 1,248.3 ms after invocation (ceiling 300 ms); see "Firecracker startup attempt 2026-11-02". #4391 OPEN (HVF warm claims take about 3.2 s on the CI runner, so warm launches are refused) | Firecracker needs the cause of the per-launch artifact hash found and fixed (or shown to be specific to the contributor surface) so a lane sample can be produced, and the warm claim brought under 300 ms and then 50 ms. HVF needs invocation-to-ready runs on a quiet native Mac. The 2026-08-19 Firecracker row in `performance.md` is not a current measurement. Owner of #4391 and #4648, plus an operator with a quiet Mac |
 
 Not changed by this section: the README's 300 ms warm refusal ceiling is still
 not evidence for the 50 ms warm goal, and no verdict above edits an issue body
 or ticks a box.
+
+### Firecracker startup attempt 2026-11-02
+
+Host: Hetzner `mvm-kvm`, AMD Ryzen 5 3600 (12 logical CPUs), Linux 6.1.0-53,
+Firecracker v1.17.0, rotational ext4 (`ROTA=1`), shared with a CI runner. Load
+average at the start of each command: 0.06, 0.35, 1.11, 1.41. Binary:
+`cargo build --locked --profile release-min --features dev` at `56b56666f2`
+(optimised, contributor surface, the surface a source checkout runs), with an
+isolated `MVM_HOME`. Prepared with `mvmctl image dev ensure`, `mvmctl dev
+runtime-overlay build` and `mvmctl bootstrap --production --kernel-source
+download`; a plain `mvmctl run --no-detect -- /bin/true` then booted (1.3 s
+including teardown). Everything created on the host was removed afterwards.
+
+| Command | Result |
+|---|---|
+| `mvmctl bench --lane prepared-cold --runs 20 --warmup 2` (first attempt) | `warm-up launch 0 does not belong in this lane: lane prepared_cold forbids warm_claim, artifact_hash but the launch performed it`. The `warm_claim` part was my own earlier launch leaving a standby |
+| Same, after killing the standby and with `MVM_RESIDENCY=cold` | `lane prepared_cold forbids artifact_hash but the launch performed it`. A plain launch had already run once, so the cache sidecars existed; no third attempt was made |
+| `mvmctl pool warm`, then `mvmctl bench --lane warm-claim` | `lane warm_claim sample reached the guest 1248.3ms after invocation; every sample must be under 300.0ms` |
+| 22 sequential `mvmctl run --no-detect -- /bin/true`, `MVM_RESIDENCY=cold`, first two discarded, wall clock of the whole command | n=20: min 856.8, p50 863.5, p95 1,654.6, max 1,660.3 ms (load 1.41). This is invocation to exit including teardown, not the lane's invocation-to-ready, and it is not a lane sample |
+
+What it shows. The harness refuses rather than reports, which is its design: the
+budgets and the work flags were left alone. `artifact_hash` means a launch read
+and hashed artifact bytes after the cache was prepared. An `strace` of one launch
+shows the per-machine runtime generation (`overlay.ext4`, `overlay.verity`,
+`initramfs.cpio.gz`) being created under `runtime-evidence/` and then reopened
+for reading, and `rootfs.ext4` being opened read-only; that is consistent with
+the flag but is not proof, because the bytes hashed per file were not counted.
+Whether a release-channel binary behaves the same was not tested. The seeded
+2026-08-19 row in `performance.md` (171.5 ms dispatch window, 795 ms total, a
+different CPU and commit) measured a different quantity, so the 863 ms above is
+neither a confirmation nor a regression of it.
+
+Missing: a lane-valid Firecracker sample on this commit, any warm sample under
+300 ms, and every HVF number.
 
 ## Telemetry-affecting changes this campaign (box: tracing/telemetry review)
 
