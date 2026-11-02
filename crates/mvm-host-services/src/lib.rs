@@ -353,6 +353,7 @@ unsafe fn call_with_stream(
     request: &[u8],
     out: *mut MvmHsvcBuf,
 ) -> i32 {
+    // SAFETY: the caller of this fn guarantees `out` is valid and writable.
     unsafe { write_outcome(out, dispatch_on(stream, method, request)) }
 }
 
@@ -382,12 +383,15 @@ pub unsafe extern "C" fn mvm_hsvc_call(
             return MVM_HSVC_INVALID_INPUT;
         }
         // Make `*out` freeable no matter which path we return on.
+        // SAFETY: `out` is non-null (checked above) and, per `mvm_hsvc_call`'s contract, writable.
         unsafe { *out = MvmHsvcBuf::empty() };
 
+        // SAFETY: `method`/`method_len` satisfy `mvm_hsvc_call`'s contract: readable bytes, or null with length 0.
         let method_bytes = unsafe { borrow(method, method_len) };
         let method = match std::str::from_utf8(method_bytes) {
             Ok(m) => m,
             Err(_) => {
+                // SAFETY: `out` is non-null and writable, as above.
                 return unsafe {
                     write_outcome(
                         out,
@@ -399,11 +403,13 @@ pub unsafe extern "C" fn mvm_hsvc_call(
                 };
             }
         };
+        // SAFETY: `request`/`request_len` satisfy `mvm_hsvc_call`'s contract, as for `method`.
         let request = unsafe { borrow(request, request_len) };
 
         let mut stream = match connect_host_vsock(BROKER_PORT, timeout_secs) {
             Ok(s) => s,
             Err(e) => {
+                // SAFETY: `out` is non-null and writable, as above.
                 return unsafe {
                     write_outcome(
                         out,
@@ -415,6 +421,7 @@ pub unsafe extern "C" fn mvm_hsvc_call(
                 };
             }
         };
+        // SAFETY: `out` is non-null and writable, as above.
         unsafe { call_with_stream(&mut stream, method, request, out) }
     }));
     result.unwrap_or(MVM_HSVC_TRANSPORT)
@@ -433,6 +440,7 @@ pub unsafe extern "C" fn mvm_hsvc_free(buf: MvmHsvcBuf) {
         return;
     }
     let slice = ptr::slice_from_raw_parts_mut(buf.data, buf.len);
+    // SAFETY: `buf` came from `into_c_buf` (a boxed slice of exactly `len` bytes), is non-null here, and `mvm_hsvc_free`'s contract forbids a second free.
     drop(unsafe { Box::from_raw(slice) });
 }
 
