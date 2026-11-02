@@ -275,11 +275,16 @@ pub(super) fn install_ctrlc_teardown(
     let handler_interrupted = interrupted.clone();
     let vm_name = vm_name.to_string();
     let backend_name = backend_name.to_string();
-    let _ = crate::signal::set_ctrlc_handler(move |_signal| {
+    let installed = crate::signal::set_ctrlc_handler(move |_signal| {
         handler_interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
         let backend = AnyBackend::from_hypervisor(&backend_name);
-        let _ = backend.stop_transient(&VmId(vm_name.clone()));
+        if let Err(error) = backend.stop_transient(&VmId(vm_name.clone())) {
+            tracing::warn!(%error, vm = %vm_name, "stopping the transient VM on Ctrl-C failed");
+        }
     });
+    if let Err(error) = installed {
+        tracing::warn!(%error, "Ctrl-C will not stop the transient VM early; normal teardown still runs");
+    }
     interrupted
 }
 
