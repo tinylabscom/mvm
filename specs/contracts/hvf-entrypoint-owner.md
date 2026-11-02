@@ -289,3 +289,23 @@ The table authenticates no one. A receiver authenticates the connected peer and
 principal before calling `apply`, and the rest of this document's blockers
 (keyless operations, native resource and owner-death containment, the
 local-built frozen-input route) are unchanged. No launcher consumes this type.
+
+## Maintainer decision: in-process bound and owner death
+
+The maintainer decided, for the cold-HVF owner envelope and owner death
+(relayed by the cleanup coordinator on #4655):
+
+- The accepted resource bound is the in-process one: the same summed vCPU
+  CPU-time bound the HVF run loop enforces for claim 18, plus the existing
+  guest-memory ceiling. This replaces the requirement above for hard
+  per-process memory, thread and process containment on macOS; those rows of
+  the qualification table are not enforced and are not claimed.
+- Owner death is absorbing quarantine and nothing in this slice clears it. No
+  separate owner-death containment mechanism is required.
+- The concrete owner and receiver need review by a fresh independent security
+  reviewer before merge. A live HVF run for the owner witnesses is authorised
+  once the owner exists.
+
+This decision does not authorise a launcher by itself; the keyless lifecycle
+operations, authenticated recovery proof and the local-built frozen-input
+route above remain prerequisites.
