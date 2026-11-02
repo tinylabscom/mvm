@@ -280,7 +280,11 @@ above executable:
   original-generation finalization, cleanup and audit); with any half missing the
   operation is `RecoveryRequired` and no result revision exists. A preparation
   failure releases only when proven child-free. `RecoveryRequired` never returns
-  to `Prepared` or `Active`.
+  to `Prepared` or `Active`, but it is not an end: the child may still run. A
+  cancel or frontend disconnect there is retained as cancellation intent (only
+  `Terminal` makes cancellation moot); the owner may move it to `Stopping` once if
+  no stop was attempted yet (never a second attempt); and it reaches `Terminal`
+  only through the same three-halves proof.
 - **Disconnect and owner death.** A frontend disconnect records cancellation
   intent and keeps custody. Owner death is `Quarantined`, which is absorbing:
   every later request and transition refuses.
