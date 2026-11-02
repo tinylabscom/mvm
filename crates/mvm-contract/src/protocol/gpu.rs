@@ -498,7 +498,7 @@ pub(crate) mod serde_bytes {
 
     use serde::{Deserialize, Deserializer, Serializer, ser::SerializeSeq as _};
 
-    pub fn serialize<S: Serializer>(bytes: &[u8], ser: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(bytes: &[u8], ser: S) -> Result<S::Ok, S::Error> {
         let mut seq = ser.serialize_seq(Some(bytes.len()))?;
         for b in bytes {
             seq.serialize_element(b)?;
@@ -506,7 +506,7 @@ pub(crate) mod serde_bytes {
         seq.end()
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<u8>, D::Error> {
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<u8>, D::Error> {
         Vec::<u8>::deserialize(de)
     }
 }
@@ -517,7 +517,7 @@ pub(crate) mod serde_bytes_vec {
 
     use serde::{Deserialize, Deserializer, Serializer, ser::SerializeSeq as _};
 
-    pub fn serialize<S: Serializer>(blobs: &[Vec<u8>], ser: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(blobs: &[Vec<u8>], ser: S) -> Result<S::Ok, S::Error> {
         let mut seq = ser.serialize_seq(Some(blobs.len()))?;
         for blob in blobs {
             seq.serialize_element(&ByteSeq(blob))?;
@@ -537,7 +537,7 @@ pub(crate) mod serde_bytes_vec {
         }
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<Vec<u8>>, D::Error> {
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<Vec<u8>>, D::Error> {
         Vec::<Vec<u8>>::deserialize(de)
     }
 }

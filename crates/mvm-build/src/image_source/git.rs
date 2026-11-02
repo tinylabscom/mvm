@@ -31,7 +31,7 @@ fn message(e: impl std::fmt::Display) -> String {
 pub fn probe_identity(root: &Path) -> Result<RepoIdentity, String> {
     observe(root, &mut BTreeSet::new())
 }
-pub fn toplevel(dir: &Path) -> Result<String, String> {
+pub(super) fn toplevel(dir: &Path) -> Result<String, String> {
     let repo = repository(dir)?;
     git_rules::Rules::open(&repo, &[])?
         .workdir()?

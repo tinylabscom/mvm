@@ -34,7 +34,7 @@ fn secret_field_tokens() -> Vec<&'static str> {
 /// plus a per-language Nix factory in `nix/factories/`, dispatch
 /// from `flake.rs`, and a corpus entry. Parsed fresh on every call — see
 /// [`secret_field_tokens`] for why this isn't a lazy static.
-pub fn supported_languages() -> Vec<&'static str> {
+pub(super) fn supported_languages() -> Vec<&'static str> {
     parse_lines(include_str!("../../data/supported_languages.txt"))
 }
 

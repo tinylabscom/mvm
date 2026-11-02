@@ -1,4 +1,5 @@
 #![deny(unsafe_code)]
+#![deny(unreachable_pub)]
 //! mvm-sdk — Rust SDK for declaring, recording, and driving mvm workloads.
 //!
 //! Builder-pattern surface (no globals), build-time DSL only in v1 (no

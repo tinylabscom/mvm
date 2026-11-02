@@ -43,14 +43,14 @@ const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
 
 /// True when a label key names material that must not be rendered
 /// (secret values, environment values, credentials, key material).
-pub fn is_sensitive_label_key(key: &str) -> bool {
+pub(super) fn is_sensitive_label_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     SENSITIVE_KEY_FRAGMENTS.iter().any(|f| lower.contains(f))
 }
 
 /// Sanitize one label value for display: host-path-looking values are
 /// replaced wholesale, everything else is control-stripped and capped.
-pub fn sanitize_label_value(value: &str) -> String {
+pub(super) fn sanitize_label_value(value: &str) -> String {
     match redact_host_path(value) {
         Cow::Borrowed(v) => sanitize_free_text(v, MAX_FIELD_LEN),
         Cow::Owned(redacted) => redacted,

@@ -22,7 +22,7 @@ const SECRET_PATTERNS: &[&str] = &[
     "kubeconfig",
 ];
 
-pub fn collect_manifests(
+pub(super) fn collect_manifests(
     report: &mut CaptureReportV1,
     root: &Path,
     limits: &TraverseLimits,

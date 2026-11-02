@@ -2,7 +2,7 @@
 
 use crate::report::PlatformFacts;
 
-pub fn collect_platform_facts() -> PlatformFacts {
+pub(super) fn collect_platform_facts() -> PlatformFacts {
     let mut facts = PlatformFacts {
         architecture: Some(std::env::consts::ARCH.to_owned()),
         ..Default::default()

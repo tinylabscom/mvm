@@ -450,7 +450,7 @@ impl ColdNativeCustody {
 
     /// The sole connection attempt. Even a failed handshake retains its stream
     /// and disables retry; there is no name-based reconnect path.
-    pub fn open(&mut self) -> Result<()> {
+    pub(crate) fn open(&mut self) -> Result<()> {
         anyhow::ensure!(
             self.bridge.state == ColdChannelState::Unopened,
             "cold HVF channel cannot reconnect"
@@ -529,7 +529,7 @@ impl ColdNativeCustody {
 
     /// Protected activation or flush on the retained session; response
     /// contracts are checked before the caller can interpret an ACK.
-    pub fn call_unary(
+    pub(crate) fn call_unary(
         &mut self,
         request: &mvm_agentd::vsock::GuestRequest,
     ) -> Result<mvm_agentd::vsock::GuestResponse> {
@@ -570,7 +570,7 @@ impl ColdNativeCustody {
         Ok(response)
     }
 
-    pub fn exec(
+    pub(crate) fn exec(
         &mut self,
         request: &mvm_agentd::vsock::GuestRequest,
         on_event: impl FnMut(&mvm_agentd::vsock::ExecEvent),

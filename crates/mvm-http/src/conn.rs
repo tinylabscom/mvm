@@ -32,7 +32,7 @@ enum Kind {
 /// legitimately slow, and capping the whole request would break exactly the
 /// large images this is meant to keep working. What is never legitimate is a
 /// connection that yields no bytes at all for minutes.
-pub struct Stream {
+pub(crate) struct Stream {
     kind: Kind,
     idle: Duration,
     /// Armed on the first `Pending` and cleared whenever bytes arrive, so the
@@ -50,7 +50,7 @@ impl std::fmt::Debug for Stream {
 }
 
 impl Stream {
-    pub fn plain(tcp: TcpStream, idle: Duration) -> Self {
+    pub(crate) fn plain(tcp: TcpStream, idle: Duration) -> Self {
         Self {
             kind: Kind::Plain(tcp),
             idle,
@@ -58,7 +58,7 @@ impl Stream {
         }
     }
 
-    pub fn tls(tls: Box<TlsStream<TcpStream>>, idle: Duration) -> Self {
+    pub(crate) fn tls(tls: Box<TlsStream<TcpStream>>, idle: Duration) -> Self {
         Self {
             kind: Kind::Tls(tls),
             idle,

@@ -53,7 +53,7 @@ mod linux {
     use mvm_build::egress_proxy::Allowlist;
     use mvm_build::egress_proxy::{DEFAULT_BIND, start};
 
-    pub fn run() -> ExitCode {
+    pub(crate) fn run() -> ExitCode {
         let allowlist = build_allowlist();
         let bind_addr = resolve_bind_addr();
 

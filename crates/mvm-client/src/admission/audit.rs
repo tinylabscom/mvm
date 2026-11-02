@@ -8,7 +8,7 @@ use anyhow::Result;
 use crate::admission::policy_resolver::{PolicyResolutionKind, ResolveError};
 use mvm_hostd::audit::emitter::{AuditEmitter, default_audit_dir};
 
-pub fn build_default_audit_emitter(
+pub(super) fn build_default_audit_emitter(
     signing_key: ed25519_dalek::SigningKey,
     audit_dir: Option<&std::path::Path>,
 ) -> Result<AuditEmitter> {
@@ -23,7 +23,7 @@ pub fn build_default_audit_emitter(
     emitter.with_decisions()
 }
 
-pub fn build_policy_audit_emitter(
+pub(super) fn build_policy_audit_emitter(
     signing_key: ed25519_dalek::SigningKey,
     audit_dir: Option<&std::path::Path>,
     policy: Option<&mvm_core::policy::AuditPolicy>,
@@ -46,7 +46,7 @@ pub fn build_policy_audit_emitter(
     emitter.with_decisions()
 }
 
-pub fn emit_policy_resolved(
+pub(super) fn emit_policy_resolved(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     resolution: PolicyResolutionKind,
@@ -56,7 +56,7 @@ pub fn emit_policy_resolved(
     }
 }
 
-pub fn emit_policy_resolve_failure(
+pub(super) fn emit_policy_resolve_failure(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     err: &anyhow::Error,
@@ -82,7 +82,7 @@ pub fn emit_policy_resolve_failure(
 
 /// Record a launch refused for asking more than its bundle's signed posture
 /// allows, bound to the plan it would have run under.
-pub fn emit_bundle_posture_refused(
+pub(super) fn emit_bundle_posture_refused(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     err: &anyhow::Error,
@@ -99,9 +99,9 @@ pub fn emit_bundle_posture_refused(
 
 /// The audit class a launch refused by its bundle's signed environment is
 /// recorded under.
-pub const BUNDLE_ENVIRONMENT_REFUSED_CLASS: &str = "bundle-environment-refused";
+pub(super) const BUNDLE_ENVIRONMENT_REFUSED_CLASS: &str = "bundle-environment-refused";
 
-pub fn emit_bundle_environment_refused(
+pub(super) fn emit_bundle_environment_refused(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     err: &anyhow::Error,
@@ -116,7 +116,7 @@ pub fn emit_bundle_environment_refused(
     }
 }
 
-pub fn emit_policy_audit_invalid(
+pub(super) fn emit_policy_audit_invalid(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     err: &anyhow::Error,

@@ -484,7 +484,7 @@ fn open_at(dir: &File, name: &std::ffi::OsStr, flags: OFlags) -> io::Result<File
 mod faults {
     use std::{cell::Cell, io};
     #[derive(Clone, Copy, PartialEq, Eq)]
-    pub enum Boundary {
+    pub(super) enum Boundary {
         Unlink,
         DirectorySync,
     }
@@ -495,9 +495,9 @@ mod faults {
         consumed: bool,
     }
     thread_local! { static STATE: Cell<Option<State>> = const { Cell::new(None) }; }
-    pub struct Guard(Option<State>);
+    pub(super) struct Guard(Option<State>);
     impl Guard {
-        pub fn arm(boundary: Boundary, occurrence: usize) -> Self {
+        pub(super) fn arm(boundary: Boundary, occurrence: usize) -> Self {
             assert!(occurrence > 0);
             Self(STATE.replace(Some(State {
                 boundary,
@@ -505,7 +505,7 @@ mod faults {
                 consumed: false,
             })))
         }
-        pub fn consumed(&self) -> bool {
+        pub(super) fn consumed(&self) -> bool {
             STATE.get().is_some_and(|state| state.consumed)
         }
     }
@@ -514,7 +514,7 @@ mod faults {
             STATE.set(self.0);
         }
     }
-    pub fn hit(boundary: Boundary) -> io::Result<()> {
+    pub(super) fn hit(boundary: Boundary) -> io::Result<()> {
         if let Some(mut state) = STATE.get()
             && state.boundary == boundary
             && !state.consumed

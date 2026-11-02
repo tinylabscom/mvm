@@ -1,3 +1,4 @@
+#![deny(unreachable_pub)]
 //! A minimal HTTP/1.1 client over rustls.
 //!
 //! This exists to keep the hyper/tower stack out of the shipped `mvmctl`
