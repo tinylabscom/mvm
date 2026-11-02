@@ -173,9 +173,14 @@ reap() {
     while read -r name; do
       [[ -z "$name" ]] && continue
       echo "    - $name"
-      if ! MVM_HOME="$E2E_HOME" "$MVMCTL" machine stop "$name" --yes >/dev/null 2>&1; then
-        cleanup_failure "$phase cleanup could not confirm stop; removal refused"
-        return 1
+      # stop is best-effort: a machine that already exited (its scenario ended)
+      # makes stop fail, and rm below is the correct next step for that — it
+      # refuses a genuinely running machine, and "does not exist" is accepted
+      # as the goal met. Surface the stop output either way; /dev/null is not
+      # a diagnostic.
+      local stop_out=""
+      if ! stop_out="$(MVM_HOME="$E2E_HOME" "$MVMCTL" machine stop "$name" --yes 2>&1)"; then
+        printf '    machine stop reported: %s\n' "$stop_out" >&2
       fi
       # stop is a request, not an event: teardown (a supervisor exiting, state
       # flushing) lands after the CLI returns, and rm refuses a machine still
