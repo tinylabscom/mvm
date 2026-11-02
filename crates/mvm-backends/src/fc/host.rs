@@ -38,6 +38,14 @@ pub fn has_base_assets() -> Result<bool> {
 }
 
 /// Check if the jailer binary is installed.
+/// Tear down a paused restore after a failed step. The step's own error is the
+/// one the caller returns, so a teardown failure is logged, not propagated.
+fn warn_teardown_paused(io: &super::io::FirecrackerIO) {
+    if let Err(error) = mvm_vmm::snapshot::SnapshotIO::teardown_paused(io) {
+        tracing::warn!(error = %format!("{error:#}"), "tearing down the paused Firecracker restore failed");
+    }
+}
+
 fn jailer_is_installed() -> Result<bool> {
     let output = run_in_vm("command -v jailer >/dev/null 2>&1")?;
     Ok(output.status.success())
@@ -835,7 +843,7 @@ impl FcForkRestorer {
         match super::runtime_artifacts::verify_restored_layout(&io, expected) {
             Ok(accepted) => super::runtime_artifacts::seal_accepted_digests(&accepted),
             Err(error) => {
-                let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
+                warn_teardown_paused(&io);
                 return Err(error);
             }
         }
@@ -895,8 +903,7 @@ pub(crate) fn attach_late_volumes(
 ) -> anyhow::Result<()> {
     for volume in late_volumes {
         if let Err(error) = io.repoint_drive(&format!("blk{}", volume.slot), &volume.source) {
-            let _ =
-                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(io);
+            warn_teardown_paused(io);
             return Err(error.context("attaching a late volume to the restored child"));
         }
     }
@@ -937,7 +944,7 @@ pub(crate) fn resume_preloaded_fork_child(
         super::runtime_artifacts::verify_restored_layout(io, expected).map(|_| ())
     })();
     if let Err(error) = verified {
-        let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(io);
+        warn_teardown_paused(io);
         return Err(error.context("prepared runtime verification"));
     }
     mvm_vmm::agent_debug::phase("fc-resume-verify", started, "phase=layout_verified");
@@ -973,15 +980,13 @@ impl FcForkRestorer {
             format!("FC warm-restore for forked child '{child_vm_name}' failed")
         })?;
         if let Err(error) = super::runtime_artifacts::verify_restored_layout(&io, expected) {
-            let _ =
-                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(&io);
+            warn_teardown_paused(&io);
             return Err(error);
         }
         attach_late_volumes(&io, late_volumes)?;
         if let Err(error) = <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::resume(&io)
         {
-            let _ =
-                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(&io);
+            warn_teardown_paused(&io);
             return Err(error.context("resume after attaching late volumes"));
         }
         Ok(())
@@ -1005,7 +1010,7 @@ impl FcForkRestorer {
         let resumed = super::runtime_artifacts::verify_restored_layout(&io, expected)
             .and_then(|_| mvm_vmm::snapshot::SnapshotIO::resume(&io));
         if resumed.is_err() {
-            let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
+            warn_teardown_paused(&io);
         }
         resumed
     }

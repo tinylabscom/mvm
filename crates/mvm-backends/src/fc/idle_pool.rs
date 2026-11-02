@@ -235,7 +235,9 @@ pub fn claim(
                 error = %format!("{error:#}"),
                 "could not persist the claim journal; rolling back"
             );
-            let _ = std::fs::rename(&claimed, &entry);
+            if let Err(error) = std::fs::rename(&claimed, &entry) {
+                tracing::warn!(%error, claimed = %claimed.display(), "claim rollback rename failed; the reaper will retire the entry");
+            }
             continue;
         }
         stop_reaper(&claimed, &entry);

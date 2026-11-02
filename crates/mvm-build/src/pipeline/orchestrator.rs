@@ -88,7 +88,9 @@ pub fn pool_build(
             backend.build(env)?;
             backend.extract_artifacts(env)
         })();
-        let _ = backend.teardown(env);
+        if let Err(error) = backend.teardown(env) {
+            env.log_warn(&format!("builder backend teardown failed: {error:#}"));
+        }
         let backend_result = result?;
         let revision_hash = backend_result.revision_hash;
         let lock_hash = backend_result.lock_hash;
