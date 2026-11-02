@@ -220,10 +220,27 @@ security contract:
 - A pack's grants are bounded by pack, application, invocation, user policy and
   host constraints (ADR-055).
 
-The two orders do not conflict. Precedence decides which layer's *choice* wins
-among peers (later and more specific wins). Ceilings, denies and blocks are
-monotone: no layer, however late, can widen what an outer layer withheld. The
-requirement is that this is one documented order with a test per rule.
+Precedence is one rule set (settled by the owner, 2026-11-02):
+
+1. **Layers.** Host constraints, organization policy, user policy (groups and
+   profiles; with repeated `--policy`, the last wins), the signed pack and
+   application, and the invocation's flags.
+2. **Ceilings, denies and blocks are monotone.** Set by any layer, they are
+   never undone by another. Resource values are ceilings; the smallest wins.
+3. **Grants come only from the host owner's layers** (host, organization,
+   user, flags): allowed hosts, secret bindings, shares, environment names,
+   tools. A pack or application may request a grant; a request grants nothing
+   until a user layer grants it.
+4. **Effective permission is the grant intersected with every layer's
+   ceiling**, the pack's and application's included. A signed ceiling binds the
+   user and cannot be widened locally.
+5. **Choices that are not security limits** (a timeout default, a name): among
+   peer layers the last wins, parents before children.
+6. **Escape hatches exist only in user-authored layers.**
+7. **Every rule has a test, and `mvmctl policy show` says which layer decided.**
+
+To verify before this is claimed: that a pack's allowed network hosts are
+requests, as its secret bindings and host shares already are.
 
 ```bash
 mvmctl run --policy ./org-base.toml --policy ./team.toml --policy ./mine.json -- make test
@@ -466,7 +483,7 @@ Each release, check the PRD against the tree:
 ## Open decisions for the owner
 
 Settled by the owner on 2026-11-02: cold under 300 ms including admission,
-warm under 50 ms, the boot-time gate on every PR, one precedence order,
+warm under 50 ms, the boot-time gate on every PR, the precedence rule set,
 lightweight measured by `.mvmpkg` size on disk and by memory (guest and
 per-VM host), headless builder, SDKs first-class, a name is PII only as a full
 name, S3 volumes deferred. Still open:
@@ -479,16 +496,11 @@ name, S3 volumes deferred. Still open:
    the table assumes; cold cannot reach 50 ms without a different design.
 3. **Taint trigger.** Confirm the recommendation: on when egress, a host
    service, a secret or a tool grant is admitted; off for offline workloads.
-4. **The unified precedence order.** Write it down once, as a numbered list,
-   and pin each rule to a test. Proposed: anything may narrow; only the
-   host's own layers (host, org, user, command-line flags) may widen; a pack
-   may request but never grants itself; among peer layers the last one wins
-   for choices, and ceilings and denies always win.
-5. **First language binding.** Pick the reference binding for requirement 14
+4. **First language binding.** Pick the reference binding for requirement 14
    (recommended: Go).
-6. **Cache and home mounts.** Tools want a persistent cache (`~/.cache`,
+5. **Cache and home mounts.** Tools want a persistent cache (`~/.cache`,
    package caches). Today only `/data` and `/work` are allowed. Either keep it
    that way and document a `/data/cache` convention, or add one more allowed
    root by ADR. I'd keep the allow-list as is.
-7. **Make mount policy a ledger claim.** Add an ADR-001 row with its witness
+6. **Make mount policy a ledger claim.** Add an ADR-001 row with its witness
    so `check-claim-catalog` guards it.
