@@ -182,10 +182,15 @@ reap() {
       # running. The refusal deletes nothing, so retry against that window —
       # what would replace this is a supervisor-exit notification. Keep the
       # last refusal: on exhaustion it is the only evidence of why rm held
-      # out, and /dev/null is not a diagnostic.
+      # out, and /dev/null is not a diagnostic. A "does not exist" refusal is
+      # the goal already met — stop removed the machine itself.
       local attempt delay=1 refusal=""
       for attempt in 1 2 3 4 5 6 7 8; do
         if refusal="$(MVM_HOME="$E2E_HOME" "$MVMCTL" machine rm "$name" --yes 2>&1)"; then
+          break
+        fi
+        if [[ "$refusal" == *"does not exist"* ]]; then
+          echo "    $name already gone (stop removed it)"
           break
         fi
         if [[ $attempt == 8 ]]; then
