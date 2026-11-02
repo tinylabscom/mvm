@@ -1257,8 +1257,8 @@ fn the_resolved_bundle_is_the_archive_a_mvmpkg_run_would_install() {
 #[test]
 fn a_policy_pack_pin_is_not_an_application_and_never_resolves() {
     let installed = installed();
-    let legacy = br#"{"schema_version":1,"reference":"runtime/policy@1.0.0"}"#;
-    let digest = crate::packs::Sha256Hex::from_bytes(legacy);
+    let legacy = crate::registry_pack::tests::signed_manifest_bytes("runtime/policy@1.0.0");
+    let digest = crate::packs::Sha256Hex::from_bytes(&legacy);
     let reference: PackReference = "runtime/policy@1.0.0".parse().unwrap();
     let python = crate::registry_pack_store::load_pack_lockfile(&installed.store.lock_path)
         .unwrap()
@@ -1272,7 +1272,7 @@ fn a_policy_pack_pin_is_not_an_application_and_never_resolves() {
     .unwrap();
     let directory = installed.store.descriptor_cache_root.join(digest.as_str());
     std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(directory.join("manifest.json"), legacy).unwrap();
+    std::fs::write(directory.join("manifest.json"), &legacy).unwrap();
     assert!(!names_installed_application(&reference, &installed.store));
     assert!(names_installed_policy_pack(&reference, &installed.store));
     assert!(!names_installed_policy_pack(
@@ -1281,6 +1281,182 @@ fn a_policy_pack_pin_is_not_an_application_and_never_resolves() {
     ));
     assert!(resolve(&installed, "runtime/policy").is_err());
     resolve(&installed, "runtime/python").unwrap();
+}
+
+fn classification_store(
+    manifest: &[u8],
+) -> (tempfile::TempDir, ApplicationInstallStore, PackReference) {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ApplicationInstallStore::new(
+        directory.path().join("descriptors"),
+        directory.path().join("packs.lock.toml"),
+        directory.path().join("bundles"),
+    );
+    let reference: PackReference = "test/hello@1.0.0".parse().unwrap();
+    let digest = crate::packs::Sha256Hex::from_bytes(manifest);
+    let pin = crate::registry_pack::PackPin::new(reference.clone(), digest.clone()).unwrap();
+    crate::registry_pack_store::save_pack_lockfile(
+        &store.lock_path,
+        &crate::registry_pack::PackLockfile::new(vec![pin]).unwrap(),
+    )
+    .unwrap();
+    let cached = store.descriptor_cache_root.join(digest.as_str());
+    std::fs::create_dir_all(&cached).unwrap();
+    std::fs::write(cached.join("manifest.json"), manifest).unwrap();
+    (directory, store, reference)
+}
+
+#[test]
+fn pinned_classification_distinguishes_valid_metadata_without_authenticating_it() {
+    let application = include_bytes!("../application_manifest_v2.json").as_slice();
+    let legacy = crate::registry_pack::tests::signed_manifest_bytes("test/hello@1.0.0");
+    for (manifest, expected) in [
+        (application, PinnedRegistryKind::Application),
+        (legacy.as_slice(), PinnedRegistryKind::Legacy),
+    ] {
+        let (_directory, store, reference) = classification_store(manifest);
+        assert_eq!(
+            classify_pinned_registry_reference(&reference, &store).unwrap(),
+            Some(expected)
+        );
+        assert_eq!(
+            names_installed_application(&reference, &store),
+            expected == PinnedRegistryKind::Application
+        );
+        assert_eq!(
+            names_installed_policy_pack(&reference, &store),
+            expected == PinnedRegistryKind::Legacy
+        );
+        assert_eq!(
+            classify_pinned_registry_reference(&"other/unpinned".parse().unwrap(), &store).unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
+fn pinned_classification_propagates_missing_nonregular_and_changed_metadata() {
+    for case in ["missing", "directory", "changed"] {
+        let (_directory, store, reference) =
+            classification_store(include_bytes!("../application_manifest_v2.json"));
+        let pin = crate::registry_pack_store::load_pack_lockfile(&store.lock_path)
+            .unwrap()
+            .pins()[0]
+            .clone();
+        let manifest = store
+            .descriptor_cache_root
+            .join(pin.manifest_sha256().as_str())
+            .join("manifest.json");
+        std::fs::remove_file(&manifest).unwrap();
+        match case {
+            "missing" => {}
+            "directory" => std::fs::create_dir(&manifest).unwrap(),
+            "changed" => std::fs::write(&manifest, b"changed metadata").unwrap(),
+            _ => unreachable!(),
+        }
+        assert!(
+            classify_pinned_registry_reference(&reference, &store).is_err(),
+            "{case}"
+        );
+        assert!(!names_installed_application(&reference, &store));
+        assert!(!names_installed_policy_pack(&reference, &store));
+    }
+}
+
+#[test]
+fn pinned_classification_refuses_malformed_kind_schema_type_and_reference() {
+    let original: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../application_manifest_v2.json")).unwrap();
+    let mut cases = vec![b"{".to_vec(), br#""not a manifest""#.to_vec()];
+    for (field, value) in [
+        ("kind", json!("unknown")),
+        ("kind", json!(7)),
+        ("schema_version", json!(3)),
+        ("schema_version", json!("2")),
+        ("application", json!(false)),
+        ("reference", json!("other/reference@1.0.0")),
+    ] {
+        let mut manifest = original.clone();
+        manifest[field] = value;
+        cases.push(serde_json::to_vec(&manifest).unwrap());
+    }
+    for manifest in cases {
+        let (_directory, store, reference) = classification_store(&manifest);
+        assert!(classify_pinned_registry_reference(&reference, &store).is_err());
+    }
+}
+
+#[test]
+fn pinned_classification_distinguishes_absent_lock_from_corrupt_or_unreadable_lock() {
+    for case in ["absent", "corrupt", "directory"] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ApplicationInstallStore::new(
+            directory.path().join("descriptors"),
+            directory.path().join("packs.lock.toml"),
+            directory.path().join("bundles"),
+        );
+        match case {
+            "absent" => {}
+            "corrupt" => std::fs::write(&store.lock_path, b"not a lock file").unwrap(),
+            "directory" => std::fs::create_dir(&store.lock_path).unwrap(),
+            _ => unreachable!(),
+        }
+        let result = classify_pinned_registry_reference(&"test/hello".parse().unwrap(), &store);
+        if case == "absent" {
+            assert_eq!(result.unwrap(), None);
+        } else if case == "directory" {
+            assert!(matches!(
+                result,
+                Err(ApplicationLaunchError::Store(
+                    crate::registry_pack_store::RegistryPackStoreError::Io { .. }
+                ))
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(ApplicationLaunchError::Store(
+                    crate::registry_pack_store::RegistryPackStoreError::Parse { .. }
+                ))
+            ));
+        }
+    }
+}
+
+#[test]
+fn pinned_classification_redacts_lock_contents_in_every_error_surface() {
+    const MARKER: &str = "SYNTHETIC_PRIVATE_LOCK_MARKER";
+    let (_directory, store, reference) =
+        classification_store(include_bytes!("../application_manifest_v2.json"));
+    std::fs::write(&store.lock_path, format!("{MARKER} =")).unwrap();
+    let original = crate::registry_pack_store::load_pack_lockfile(&store.lock_path).unwrap_err();
+    assert!(format!("{original}").contains(MARKER));
+
+    let error = classify_pinned_registry_reference(&reference, &store).unwrap_err();
+    assert!(matches!(
+        &error,
+        ApplicationLaunchError::Store(
+            crate::registry_pack_store::RegistryPackStoreError::Parse { .. }
+        )
+    ));
+    for rendered in [
+        format!("{error}"),
+        format!("{error:#}"),
+        format!("{error:?}"),
+    ] {
+        assert!(!rendered.contains(MARKER), "{rendered}");
+    }
+    let contextual = anyhow::Error::new(error).context("checking registry intent");
+    for rendered in [
+        format!("{contextual}"),
+        format!("{contextual:#}"),
+        format!("{contextual:?}"),
+    ] {
+        assert!(!rendered.contains(MARKER), "{rendered}");
+    }
+    for source in contextual.chain() {
+        assert!(!format!("{source}").contains(MARKER));
+        assert!(!format!("{source:?}").contains(MARKER));
+    }
 }
 
 /// A synthetic local registry: a root catalog advertising the descriptor's

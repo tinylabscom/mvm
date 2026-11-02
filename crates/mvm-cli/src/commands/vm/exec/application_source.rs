@@ -5,16 +5,16 @@
 //! it again, and then continue as `--manifest <bundle-sha256>`: the same plan
 //! synthesis, signing and admit-time bundle re-verification a `.mvmpkg` gets.
 //!
-//! A flag treats its value strictly as a reference. A positional is one only
-//! when it parses as a reference and names an installed application, so an
-//! OCI image reference or a `.mvmpkg` path goes where it always went.
+//! A flag treats its value strictly as a reference. Positional registry pins
+//! require readable, valid cached metadata; broken metadata must not select an
+//! OCI image instead. Never-pinned images and `.mvmpkg` paths keep their route.
 
 use anyhow::{Context, Result};
 use mvm_client::policy_profiles::environment::with_request_ceiling;
 use mvm_core::registry_pack::PackReference;
 use mvm_core::registry_pack::application_bundle::{
-    ApplicationInstallStore, ApplicationLaunchError, ResolvedApplication,
-    names_installed_application, names_installed_policy_pack, resolve_installed_application,
+    ApplicationInstallStore, ApplicationLaunchError, PinnedRegistryKind, ResolvedApplication,
+    classify_pinned_registry_reference, resolve_installed_application,
 };
 
 use super::RunArgs;
@@ -210,8 +210,7 @@ pub(in crate::commands) fn apply_application_source(args: &mut RunArgs) -> Resul
     let policy = mvm_core::config::registry_pack_publisher_policy_path();
     settle(
         args,
-        |reference| names_installed_application(reference, &store),
-        |reference| names_installed_policy_pack(reference, &store),
+        |reference| classify_pinned_registry_reference(reference, &store),
         |reference| resolve_installed_application(reference, &store, &policy, &trust),
     )
 }
@@ -238,30 +237,9 @@ pub(in crate::commands) fn record_launch(
     event.emit();
 }
 
-/// A positional that names an installed policy pack is not an OCI image; say
-/// so rather than let it fall through to a registry pull.
-fn refuse_positional_policy_pack(
-    source: Option<&str>,
-    names_policy_pack: impl Fn(&PackReference) -> bool,
-) -> Result<()> {
-    let Some((raw, reference)) =
-        source.and_then(|raw| Some((raw, raw.parse::<PackReference>().ok()?)))
-    else {
-        return Ok(());
-    };
-    if names_policy_pack(&reference) {
-        anyhow::bail!(
-            "`{raw}` is installed as a policy pack, not an application, and cannot be run; \
-             to run an OCI image of that name use `--image {raw}`"
-        );
-    }
-    Ok(())
-}
-
 fn settle(
     args: &mut RunArgs,
-    names_installed: impl Fn(&PackReference) -> bool,
-    names_policy_pack: impl Fn(&PackReference) -> bool,
+    classify: impl Fn(&PackReference) -> Result<Option<PinnedRegistryKind>, ApplicationLaunchError>,
     resolve: impl Fn(&PackReference) -> Result<ResolvedApplication, ApplicationLaunchError>,
 ) -> Result<()> {
     let reference = if let Some(raw) = args.application.take() {
@@ -272,12 +250,24 @@ fn settle(
         .source
         .as_deref()
         .and_then(|raw| raw.parse::<PackReference>().ok())
-        .filter(|reference| names_installed(reference))
     {
-        args.source = None;
-        reference
+        match classify(&reference).with_context(|| {
+            format!(
+                "checking registry metadata for {reference}; restore pinned metadata with \
+                 `mvmctl pack pull {reference}` or select an image explicitly with `--image`"
+            )
+        })? {
+            Some(PinnedRegistryKind::Application) => {
+                args.source = None;
+                reference
+            }
+            Some(PinnedRegistryKind::Legacy) => anyhow::bail!(
+                "`{reference}` is installed as a policy pack, not an application, and cannot be run; \
+                 to run an OCI image of that name use `--image {reference}`"
+            ),
+            None => return Ok(()),
+        }
     } else {
-        refuse_positional_policy_pack(args.source.as_deref(), names_policy_pack)?;
         return Ok(());
     };
     let resolved = resolve(&reference)?;
@@ -506,7 +496,14 @@ mod tests {
             source: Some("alpine".into()),
             ..Default::default()
         };
-        assert!(settle(&mut args, |_| true, |_| false, resolved).is_err());
+        assert!(
+            settle(
+                &mut args,
+                classified(Some(PinnedRegistryKind::Application)),
+                resolved
+            )
+            .is_err()
+        );
         assert_eq!(args.source.as_deref(), Some("alpine"));
         assert!(args.resolved_application.is_none());
     }
@@ -559,6 +556,80 @@ mod tests {
         }
     }
 
+    fn classified(
+        kind: Option<PinnedRegistryKind>,
+    ) -> impl Fn(&PackReference) -> Result<Option<PinnedRegistryKind>, ApplicationLaunchError> {
+        move |_| Ok(kind)
+    }
+
+    #[test]
+    fn a_pinned_reference_with_missing_metadata_never_falls_back_to_an_image() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let pin = mvm_core::registry_pack::PackPin::new(
+            "agent/claude@2.0.0".parse().unwrap(),
+            mvm_core::packs::Sha256Hex::new("a".repeat(64)).unwrap(),
+        )
+        .unwrap();
+        mvm_core::registry_pack_store::save_pack_lockfile(
+            &mvm_core::config::pack_lockfile_path(),
+            &mvm_core::registry_pack::PackLockfile::new(vec![pin]).unwrap(),
+        )
+        .unwrap();
+
+        let mut args = positional("agent/claude");
+        apply_application_source(&mut args)
+            .expect_err("a pinned registry reference must not become an image");
+        assert!(args.manifest.is_none());
+        assert!(args.resolved_application.is_none());
+    }
+
+    #[test]
+    fn broken_registry_locks_refuse_implicit_but_not_explicit_images() {
+        const MARKER: &str = "SYNTHETIC_PRIVATE_LOCK_MARKER";
+        for directory_lock in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.isolate_mvm_home(home.path());
+            let lock = mvm_core::config::pack_lockfile_path();
+            std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+            if directory_lock {
+                std::fs::create_dir(&lock).unwrap();
+            } else {
+                std::fs::write(&lock, format!("{MARKER} =")).unwrap();
+            }
+            let mut implicit = positional("agent/claude");
+            let error = apply_application_source(&mut implicit).unwrap_err();
+            assert!(format!("{error:#}").contains("registry metadata"));
+            for rendered in [
+                format!("{error}"),
+                format!("{error:#}"),
+                format!("{error:?}"),
+            ] {
+                assert!(!rendered.contains(MARKER), "{rendered}");
+            }
+            assert!(implicit.manifest.is_none());
+            assert!(implicit.resolved_application.is_none());
+
+            let mut explicit = parse(&["--image", "agent/claude", "--", "true"]).unwrap();
+            apply_application_source(&mut explicit).unwrap();
+            assert_eq!(explicit.image.as_deref(), Some("agent/claude"));
+        }
+    }
+
+    #[test]
+    fn an_absent_registry_lock_preserves_an_unpinned_image_reference() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let mut args = positional("other/unpinned");
+        apply_application_source(&mut args).unwrap();
+        assert_eq!(args.source.as_deref(), Some("other/unpinned"));
+        assert!(args.manifest.is_none());
+        assert!(args.resolved_application.is_none());
+    }
+
     #[test]
     fn the_launch_entry_names_the_run_and_the_plan() {
         let dir = tempfile::tempdir().unwrap();
@@ -589,7 +660,12 @@ mod tests {
     #[test]
     fn a_positional_naming_an_installed_application_becomes_its_bundle() {
         let mut args = positional("agent/claude@1.0.1");
-        settle(&mut args, |_| true, |_| false, resolved).unwrap();
+        settle(
+            &mut args,
+            classified(Some(PinnedRegistryKind::Application)),
+            resolved,
+        )
+        .unwrap();
         assert_eq!(args.manifest.as_deref(), Some(SHA.repeat(32).as_str()));
         let pin = args
             .registry_pack_image
@@ -611,8 +687,7 @@ mod tests {
             let mut args = positional(value);
             settle(
                 &mut args,
-                |_| true,
-                |_| false,
+                classified(Some(PinnedRegistryKind::Application)),
                 |_| panic!("must not resolve"),
             )
             .unwrap();
@@ -626,8 +701,7 @@ mod tests {
         let mut args = positional("agent/claude@1.0.1");
         let error = settle(
             &mut args,
-            |_| false,
-            |_| true,
+            classified(Some(PinnedRegistryKind::Legacy)),
             |_| panic!("must not resolve"),
         )
         .unwrap_err()
@@ -637,19 +711,18 @@ mod tests {
             "{error}"
         );
         let mut oci = positional("alpine/curl:latest");
-        settle(&mut oci, |_| false, |_| true, resolved).unwrap();
+        settle(
+            &mut oci,
+            classified(Some(PinnedRegistryKind::Legacy)),
+            resolved,
+        )
+        .unwrap();
     }
 
     #[test]
     fn a_positional_reference_that_is_not_installed_is_left_alone() {
         let mut args = positional("agent/claude");
-        settle(
-            &mut args,
-            |_| false,
-            |_| false,
-            |_| panic!("must not resolve"),
-        )
-        .unwrap();
+        settle(&mut args, classified(None), |_| panic!("must not resolve")).unwrap();
         assert_eq!(args.source.as_deref(), Some("agent/claude"));
     }
 
@@ -659,7 +732,7 @@ mod tests {
             application: Some("agent/claude".to_string()),
             ..RunArgs::default()
         };
-        let error = settle(&mut args, |_| false, |_| false, missing)
+        let error = settle(&mut args, classified(None), missing)
             .unwrap_err()
             .to_string();
         assert!(error.contains("mvmctl pack pull agent/claude"), "{error}");
@@ -672,7 +745,14 @@ mod tests {
             application: Some("alpine/curl:latest".to_string()),
             ..RunArgs::default()
         };
-        assert!(settle(&mut args, |_| true, |_| false, resolved).is_err());
+        assert!(
+            settle(
+                &mut args,
+                classified(Some(PinnedRegistryKind::Application)),
+                resolved
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -681,7 +761,7 @@ mod tests {
             application: Some("agent/claude".to_string()),
             ..RunArgs::default()
         };
-        settle(&mut args, |_| false, |_| false, resolved).unwrap();
+        settle(&mut args, classified(None), resolved).unwrap();
         assert_eq!(args.manifest.as_deref(), Some(SHA.repeat(32).as_str()));
     }
 
