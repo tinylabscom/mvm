@@ -1090,6 +1090,51 @@ impl HvfVmFullControl {
         )
     }
 
+    /// Own this VM's pause/capture/resume sequence until the guard drops.
+    fn sequence(&self) -> Result<mvm_vmm::host::snapshot_publish::CaptureLock> {
+        mvm_vmm::host::snapshot_publish::CaptureLock::acquire(&self.state_dir)
+            .with_context(|| format!("locking HVF capture sequence for '{}'", self.vm_name))
+    }
+
+    /// Ask the paused supervisor for one capture and wait for the files it
+    /// publishes under this request's identity. The caller holds the sequence
+    /// lock. A request that is never served is withdrawn, so a retry loop in
+    /// the supervisor cannot outlive its caller, and anything a late finish
+    /// writes is swept by the next capture.
+    fn request_capture(
+        &self,
+        request: &Path,
+        ram: &Path,
+        frame: &Path,
+        timeout: std::time::Duration,
+    ) -> Result<(PathBuf, PathBuf)> {
+        use mvm_vmm::host::snapshot_publish as publish;
+        publish::sweep_outputs(ram);
+        publish::sweep_outputs(frame);
+        publish::clear_error(&self.state_dir);
+        let nonce = publish::new_nonce();
+        let (ram, frame) = (
+            publish::output_for(ram, &nonce),
+            publish::output_for(frame, &nonce),
+        );
+        mvm_core::util::atomic_io::atomic_write(request, publish::request_body(&nonce).as_bytes())
+            .with_context(|| format!("request HVF snapshot at {}", request.display()))?;
+        let deadline = Instant::now() + timeout;
+        let mut wait = std::time::Duration::from_micros(200);
+        while !frame.exists() && Instant::now() < deadline {
+            std::thread::sleep(wait);
+            wait = (wait * 2).min(std::time::Duration::from_millis(5));
+        }
+        if !frame.exists() {
+            let _ = std::fs::remove_file(request);
+            let why = publish::last_error(&self.state_dir).map_or_else(String::new, |reason| {
+                format!("; the supervisor's last refusal: {reason}")
+            });
+            bail!("HVF supervisor did not publish its paused snapshot within {timeout:?}{why}");
+        }
+        Ok((ram, frame))
+    }
+
     /// Refuse to capture a VM whose guest can write to a block device.
     ///
     /// A snapshot carries guest RAM plus the devices' control plane, never a
@@ -1131,6 +1176,7 @@ impl VmFullControl for HvfVmFullControl {
     }
 
     fn pause(&self) -> Result<()> {
+        let _sequence = self.sequence()?;
         hvf_backend::signal_vm(
             &self.state_dir.join(PID_FILE_NAME),
             libc::SIGUSR1,
@@ -1151,28 +1197,11 @@ impl VmFullControl for HvfVmFullControl {
             .ok_or_else(|| anyhow!("memory path has no parent directory"))?;
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create snapshot output {}", parent.display()))?;
+        // Held to the end: a resume or another capture queues behind this one.
+        let _sequence = self.sequence()?;
         let (request, ram, frame) = self.fixed_snapshot_paths();
-        let _ = std::fs::remove_file(&ram);
-        let _ = std::fs::remove_file(&frame);
-        mvm_vmm::host::snapshot_publish::clear_error(&self.state_dir);
-        std::fs::write(&request, b"capture\n")
-            .with_context(|| format!("request HVF snapshot at {}", request.display()))?;
-        let deadline = Instant::now() + SNAPSHOT_PUBLISH_TIMEOUT;
-        let mut wait = std::time::Duration::from_micros(200);
-        while (!ram.exists() || !frame.exists()) && Instant::now() < deadline {
-            std::thread::sleep(wait);
-            wait = (wait * 2).min(std::time::Duration::from_millis(5));
-        }
-        if !ram.exists() || !frame.exists() {
-            let why = mvm_vmm::host::snapshot_publish::last_error(&self.state_dir)
-                .map_or_else(String::new, |reason| {
-                    format!("; the supervisor's last refusal: {reason}")
-                });
-            bail!(
-                "HVF supervisor did not publish its paused snapshot within \
-                 {SNAPSHOT_PUBLISH_TIMEOUT:?}{why}"
-            );
-        }
+        let (ram, frame) =
+            self.request_capture(&request, &ram, &frame, SNAPSHOT_PUBLISH_TIMEOUT)?;
         std::fs::copy(&ram, memory_path).with_context(|| {
             format!(
                 "copying captured HVF RAM {} -> {}",
@@ -1194,10 +1223,13 @@ impl VmFullControl for HvfVmFullControl {
                 frame_dst.display()
             )
         })?;
+        mvm_vmm::host::snapshot_publish::sweep_outputs(&self.fixed_snapshot_paths().1);
+        mvm_vmm::host::snapshot_publish::sweep_outputs(&self.fixed_snapshot_paths().2);
         Ok(())
     }
 
     fn resume(&self) -> Result<()> {
+        let _sequence = self.sequence()?;
         hvf_backend::signal_vm(
             &self.state_dir.join(PID_FILE_NAME),
             libc::SIGUSR2,
@@ -1388,11 +1420,13 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn pause(&self) -> Result<()> {
+        let _sequence = mvm_vmm::host::snapshot_publish::CaptureLock::acquire(&self.state_dir)?;
         hvf_backend::signal_vm(&self.pid_file, libc::SIGUSR1, "pause")?;
         hvf_backend::wait_for_pause_state(&self.state_dir.join("pause.state"), true)
     }
 
     fn resume(&self) -> Result<()> {
+        let _sequence = mvm_vmm::host::snapshot_publish::CaptureLock::acquire(&self.state_dir)?;
         hvf_backend::signal_vm(&self.pid_file, libc::SIGUSR2, "resume")?;
         hvf_backend::wait_for_pause_state(&self.state_dir.join("pause.state"), false)
     }
@@ -2427,6 +2461,81 @@ mod tests {
             Some(drive),
             "the captured identity anchor points at the state dir's own drive"
         );
+    }
+
+    fn bare_control(state: &Path) -> HvfVmFullControl {
+        HvfVmFullControl {
+            vm_name: "race-vm".into(),
+            state_dir: state.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn an_unserved_capture_is_withdrawn_and_a_late_writers_files_are_not_taken() {
+        use mvm_vmm::host::snapshot_publish as publish;
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = bare_control(dir.path());
+        let (request, ram, frame) = ctl.fixed_snapshot_paths();
+        // An abandoned earlier request finishing late.
+        std::fs::write(publish::output_for(&frame, "deadbeef"), b"late").unwrap();
+        let err = ctl
+            .request_capture(&request, &ram, &frame, std::time::Duration::ZERO)
+            .unwrap_err();
+        assert!(err.to_string().contains("did not publish"), "{err}");
+        assert!(!request.exists(), "an unserved request is withdrawn");
+        assert!(
+            !publish::output_for(&frame, "deadbeef").exists(),
+            "the next capture sweeps what a late finish left"
+        );
+    }
+
+    #[test]
+    fn a_capture_takes_exactly_the_files_published_for_its_own_request() {
+        use mvm_vmm::host::snapshot_publish as publish;
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = bare_control(dir.path());
+        let (request, ram, frame) = ctl.fixed_snapshot_paths();
+        let supervisor = {
+            let (request, ram, frame) = (request.clone(), ram.clone(), frame.clone());
+            std::thread::spawn(move || {
+                while !request.exists() {
+                    std::thread::yield_now();
+                }
+                let (body, nonce) = publish::read_request(&request).unwrap();
+                // A stale finish for another identity lands first.
+                std::fs::write(publish::output_for(&frame, "0bad"), b"stale").unwrap();
+                std::fs::write(publish::output_for(&ram, &nonce), b"ram").unwrap();
+                std::fs::write(publish::output_for(&frame, &nonce), b"frame").unwrap();
+                publish::consume_request(&request, &body);
+                nonce
+            })
+        };
+        let (got_ram, got_frame) = ctl
+            .request_capture(&request, &ram, &frame, std::time::Duration::from_secs(30))
+            .unwrap();
+        let nonce = supervisor.join().unwrap();
+        assert_eq!(got_ram, publish::output_for(&ram, &nonce));
+        assert_eq!(std::fs::read(got_frame).unwrap(), b"frame");
+    }
+
+    #[test]
+    fn a_resume_queues_behind_a_capture_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = std::sync::Arc::new(bare_control(dir.path()));
+        let capture = ctl.sequence().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let racer = {
+            let ctl = std::sync::Arc::clone(&ctl);
+            std::thread::spawn(move || done_tx.send(ctl.resume().is_err()).unwrap())
+        };
+        assert!(
+            done_rx.try_recv().is_err(),
+            "resume must not run inside a capture"
+        );
+        drop(capture);
+        // No supervisor here, so the resume that finally runs refuses.
+        assert!(done_rx.recv().unwrap());
+        racer.join().unwrap();
     }
 
     /// A control over a state dir holding a launch config with these disks.

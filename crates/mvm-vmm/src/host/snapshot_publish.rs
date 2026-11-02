@@ -1,7 +1,7 @@
 //! The supervisor's side of a paused-snapshot request, as the host sees it.
 //!
-//! The host asks for a capture by writing `snapshot.request` and waits for the
-//! frame to appear. A capture can be refused for a reason that is a property of
+//! The host asks for a capture by writing `snapshot.request` (naming a nonce)
+//! and waits for that nonce's frame to appear. A capture can be refused for a reason that is a property of
 //! the moment (a device with host I/O still draining), and killing the guest
 //! for that — as an error out of the run loop does — turns a retryable refusal
 //! into a lost machine and leaves the host waiting out its whole deadline with
@@ -43,6 +43,99 @@ pub fn settle_attempt(request: &Path, last: &mut String, outcome: Result<(), Str
                 *last = reason;
             }
         }
+    }
+}
+
+/// File name of the exclusive lock that orders pause, capture and resume.
+const LOCK_FILE: &str = "capture.lock";
+
+/// Exclusive ownership of a VM's pause and capture sequence, held for the
+/// guard's lifetime. A second requester queues behind it, so a resume can never
+/// land inside a capture and two captures never share the request file.
+#[derive(Debug)]
+pub struct CaptureLock {
+    _file: std::fs::File,
+}
+
+impl CaptureLock {
+    /// Block until this process owns the sequence for `state_dir`.
+    pub fn acquire(state_dir: &Path) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(state_dir.join(LOCK_FILE))?;
+        // SAFETY: `file` is open and owned here; the lock lives as long as it.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+/// A fresh identity for one capture request. Outputs are published under it, so
+/// a supervisor that finishes an abandoned request late writes files nobody
+/// is waiting on instead of overwriting the next capture's.
+pub fn new_nonce() -> String {
+    format!("{:016x}", rand::random::<u64>())
+}
+
+/// The request file's body for `nonce`.
+pub fn request_body(nonce: &str) -> String {
+    format!("capture {nonce}\n")
+}
+
+/// The nonce a request file names, if it is well formed.
+pub fn request_nonce(body: &str) -> Option<&str> {
+    let nonce = body.strip_prefix("capture ")?.strip_suffix('\n')?;
+    (!nonce.is_empty() && nonce.len() <= 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then_some(nonce)
+}
+
+/// Where the output published for `nonce` lands, derived from the configured path.
+pub fn output_for(base: &Path, nonce: &str) -> PathBuf {
+    let mut name = base.as_os_str().to_owned();
+    name.push(".");
+    name.push(nonce);
+    PathBuf::from(name)
+}
+
+/// Remove every published output beside `base`, whatever request made it.
+pub fn sweep_outputs(base: &Path) {
+    let (Some(dir), Some(stem)) = (base.parent(), base.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str()
+            && name
+                .strip_prefix(stem)
+                .is_some_and(|rest| rest.starts_with('.'))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Read the request at `path` and the nonce it names.
+pub fn read_request(path: &Path) -> Result<(String, String), String> {
+    let body = std::fs::read_to_string(path).map_err(|error| format!("request read: {error}"))?;
+    let nonce = request_nonce(&body)
+        .ok_or_else(|| "request names no capture identity".to_string())?
+        .to_owned();
+    Ok((body, nonce))
+}
+
+/// Consume the request that was served: removed only if it still reads `body`,
+/// so a request a later caller wrote meanwhile is left for its own attempt.
+pub fn consume_request(path: &Path, body: &str) {
+    if std::fs::read_to_string(path).is_ok_and(|now| now == body) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -153,5 +246,80 @@ mod tests {
         std::fs::write(dir.path().join(ERROR_FILE), b"old").unwrap();
         clear_error(dir.path());
         assert_eq!(last_error(dir.path()), None);
+    }
+
+    #[test]
+    fn a_second_capture_waits_for_the_first_to_release_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = CaptureLock::acquire(dir.path()).unwrap();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let path = dir.path().to_path_buf();
+        let second = std::thread::spawn(move || {
+            let _lock = CaptureLock::acquire(&path).unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+        assert!(
+            acquired_rx.try_recv().is_err(),
+            "the second requester must queue"
+        );
+        drop(first);
+        acquired_rx.recv().unwrap();
+        second.join().unwrap();
+    }
+
+    #[test]
+    fn a_late_writers_output_never_aliases_the_next_requests() {
+        let base = Path::new("/s/snapshot.ram");
+        let (a, b) = (new_nonce(), new_nonce());
+        assert_ne!(a, b);
+        assert_ne!(output_for(base, &a), output_for(base, &b));
+        assert_eq!(request_nonce(&request_body(&a)), Some(a.as_str()));
+        for bad in [
+            "capture\n",
+            "capture \n",
+            "capture ../x\n",
+            "capture abc",
+            "x abc\n",
+        ] {
+            assert_eq!(request_nonce(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn sweeping_removes_abandoned_outputs_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("snapshot.ram");
+        let stale = output_for(&base, "abc");
+        std::fs::write(&stale, b"x").unwrap();
+        std::fs::write(&base, b"fixed").unwrap();
+        let other = dir.path().join("snapshot.frame.abc");
+        std::fs::write(&other, b"y").unwrap();
+        sweep_outputs(&base);
+        assert!(!stale.exists() && base.exists() && other.exists());
+    }
+
+    #[test]
+    fn serving_a_request_never_consumes_a_newer_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = dir.path().join("snapshot.request");
+        let (old, new) = (new_nonce(), new_nonce());
+        std::fs::write(&request, request_body(&old)).unwrap();
+        let (body, nonce) = read_request(&request).unwrap();
+        assert_eq!(nonce, old);
+        // The caller gave up and a second caller wrote its own request.
+        std::fs::write(&request, request_body(&new)).unwrap();
+        consume_request(&request, &body);
+        assert_eq!(read_request(&request).unwrap().1, new);
+        let (body, _) = read_request(&request).unwrap();
+        consume_request(&request, &body);
+        assert!(!request.exists());
+    }
+
+    #[test]
+    fn a_request_without_an_identity_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = dir.path().join("snapshot.request");
+        std::fs::write(&request, b"capture\n").unwrap();
+        assert!(read_request(&request).is_err());
     }
 }

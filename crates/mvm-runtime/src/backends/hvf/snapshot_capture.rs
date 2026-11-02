@@ -34,6 +34,12 @@ impl SnapshotAttempt<'_> {
     /// signal that both files are complete, so neither may be visible
     /// half-written.
     pub fn publish(self) -> Result<(), String> {
+        use mvm_vmm::host::snapshot_publish::{consume_request, output_for, read_request};
+        // Outputs carry the request's identity, so finishing a request its caller
+        // abandoned writes files only that caller's sweep will look at.
+        let (body, nonce) = read_request(self.request)?;
+        let ram = output_for(self.ram, &nonce);
+        let frame_path = output_for(self.frame, &nonce);
         let devices = capture_device_states(self.devices)
             .map_err(|error| format!("device state: {error}"))?;
         let gic = capture_gic_device_state().map_err(|error| format!("GIC state: {error:?}"))?;
@@ -51,8 +57,8 @@ impl SnapshotAttempt<'_> {
             .transpose()
             .map_err(|error| format!("runtime evidence: {error}"))?
             .unwrap_or_default();
-        let layout = write_ram_image(self.guest_ram, self.ram)
-            .map_err(|error| format!("RAM image: {error}"))?;
+        let layout =
+            write_ram_image(self.guest_ram, &ram).map_err(|error| format!("RAM image: {error}"))?;
         let frame = encode_hvf_snapshot_frame(
             HVF_SNAPSHOT_BACKEND_KIND,
             0,
@@ -63,8 +69,9 @@ impl SnapshotAttempt<'_> {
             &artifacts,
         )
         .map_err(|error| format!("frame encode: {error:?}"))?;
-        mvm_core::util::atomic_io::atomic_write(self.frame, &frame)
+        mvm_core::util::atomic_io::atomic_write(&frame_path, &frame)
             .map_err(|error| format!("frame write: {error}"))?;
-        std::fs::remove_file(self.request).map_err(|error| format!("request cleanup: {error}"))
+        consume_request(self.request, &body);
+        Ok(())
     }
 }
