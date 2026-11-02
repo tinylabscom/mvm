@@ -487,26 +487,43 @@ not paraphrase this row without them.
 **Approved source-design direction, not shipped enforcement or a live witness.**
 The owner approved [option A for #4414](https://github.com/tinylabscom/mvm/issues/4414#issuecomment-6481580558):
 direct current-user launches with operator-provisioned access and predelegated
-resources. This refines the [existing-role contract](https://github.com/tinylabscom/mvm/issues/4414#issuecomment-6224073768);
-it does not promote a claim, change the tier matrix, or establish that the
-current shell/scope launch paths satisfy this boundary.
+resources. This refines the [existing-role contract](https://github.com/tinylabscom/mvm/issues/4414#issuecomment-6224073768).
+The [owner-approved process-boundary refinement](https://github.com/tinylabscom/mvm/issues/4414#issuecomment-6587589521)
+supersedes the earlier blanket utility/`systemd-run` prohibition. These decisions
+do not promote a claim, change the tier matrix, or establish that the current
+shell/scope launch paths satisfy this boundary.
 
 - **Provisioning precedes launch.** The operator supplies KVM/device access and
   delegated resource authority separately. Hosts relying on the old implicit
   privileged route are unsupported by the replacement until provisioned. Missing
-  rights or mechanisms refuse before process creation; there is no `sudo`,
-  `doas`, `pkexec`, shell, utility, or unbounded-launch fallback.
+  rights or mechanisms refuse before process creation; there is no privilege-
+  escalation fallback through passwords, `sudo`, `doas` or `pkexec`, and no
+  unbounded-launch fallback. No root password, `sudo -C`, sudoers edit or
+  `visudo` setup may become a user requirement.
 - **Containment exists at birth.** Before creating the selected VMM process, the
   backend validates finite CPU, memory, swap, task, FD and time limits against
   the admitted plan and operator policy. Linux resource-group placement must be
-  atomic with process creation, not a later move into a cgroup. A mechanism that
+  atomic with process creation, not a later move into a cgroup. `systemd-run` is
+  permitted for these born-bounded resource scopes (claim 18). A mechanism that
   cannot enforce a required limit cannot launch. Numeric role profiles and their
   enforcement need review and evidence; this decision invents no default budget.
-- **Authority is closed and prepared.** Only the selected verified VMM binary
-  and the original admitted typed plan authorize a launch. Final effective
+- **Production helpers are bounded by invariants, not executable names.** Fixed
+  programs with fixed, code-constructed argv, including `find`, `stat`, `kill`,
+  `mkfs`, `nft` and `systemd-run`, are permitted when signed admission, secret
+  custody, containment and typed lifecycle ownership hold. Shell command strings
+  built from untrusted input, every workload launch outside signed admission
+  (claims 8 and 10), and secrets in argv or the process environment (claim 13)
+  are forbidden. Prefer typed/in-process replacements on hot paths for
+  performance and simpler lifecycle ownership, not as a blanket security
+  prohibition on utility names. Development, build, test and operator tooling
+  are outside this production-runtime restriction.
+- **Authority is closed and prepared.** The original admitted typed plan
+  authorizes every workload launch, and only the selected verified VMM binary
+  may serve as that workload's VMM. Final effective
   configuration, environment, generation and retained descriptors stay bound
   to that admission. Caller-provided program paths, argv, PIDs or callbacks are
-  not execution authority; deferred build, probing or signing is not a launch step.
+  not execution authority; no arbitrary public program/argv API is exposed, and
+  deferred build, probing or signing is not a launch step.
 - **Original ownership survives failure.** The original process/generation
   observer, runtime/file leases, required role owners and capture writer remain
   held through activation, dispatch, flush and confirmed stop. Uncertain stop or
@@ -514,16 +531,19 @@ current shell/scope launch paths satisfy this boundary.
   or terminal audit seal. PID disappearance alone is not terminal proof.
 - **Existing security boundaries remain.** Keep the VMM supervisor, FlowMux
   endpoint, broker/signer key-holder, host-agent and conditional GPU roles
-  separate and use only those required by the selected backend. This authorizes
-  no additional service or generic helper. Signed grants, chain-signed audit,
-  the NIC-less guest and authenticated vsock path remain binding; keys and raw
+  separate and use only those required by the selected backend. Parser/signer
+  process isolation must not collapse merely to reduce process count. This
+  authorizes no additional service or generic helper. Signed grants,
+  chain-signed audit, the NIC-less guest and authenticated vsock path remain
+  binding; keys and raw
   credentials do not move into the parser, VMM or guest.
 
 The alternative of a new privileged launch service was not approved: it would
 add privileged IPC, installation and lifecycle authority beyond this contract.
-Implementation must remove the old escalation/utility route and demonstrate
-pre-birth refusal, bounded readiness, confirmed stop, retained recovery ownership
-and cleanup before runtime parity is claimed. Installation, activation, native
+Implementation must remove the old escalation route and every utility path that
+violates these invariants, and demonstrate pre-birth refusal, bounded readiness,
+confirmed stop, retained recovery ownership and cleanup before runtime parity is
+claimed. Installation, activation, native
 or privileged witnesses, billable runs, signing and release actions still need
 their applicable authorization. This decision alone satisfies none of those
 execution or acceptance gates.
