@@ -324,7 +324,7 @@ pub(crate) fn slotted_factory_parent_spec(
 /// Build the factory parent shape for the native HVF live handoff. The stable
 /// paths are inert until a claim links them to the child's own host channels.
 #[cfg(test)]
-pub fn factory_parent_spec_live(
+pub(crate) fn factory_parent_spec_live(
     config: &VmStartConfig,
     state_dir: &Path,
     base_bootargs: impl Fn(bool) -> String,

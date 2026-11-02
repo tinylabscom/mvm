@@ -15,6 +15,8 @@
 //! but is a no-op that exits non-zero; the production binary is
 //! cross-compiled to static musl and embedded in `mvmctl`.
 
+#![deny(unreachable_pub)]
+
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -138,7 +140,7 @@ mod linux {
         if conn_fd < 0 { None } else { Some(conn_fd) }
     }
 
-    pub fn run() -> ExitCode {
+    pub(crate) fn run() -> ExitCode {
         let port = mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT;
         let Some(listen_fd) = open_vsock_listener(port) else {
             return ExitCode::FAILURE;

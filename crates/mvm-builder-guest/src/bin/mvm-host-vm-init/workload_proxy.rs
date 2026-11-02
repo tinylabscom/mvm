@@ -46,14 +46,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Fixed AF_VSOCK port the forwarder listens on inside the host VM,
 /// registered at host-VM launch alongside the dispatch port (21471).
-pub const WORKLOAD_FORWARD_PORT: u32 = 21472;
+pub(crate) const WORKLOAD_FORWARD_PORT: u32 = 21472;
 
 /// Max concurrent forwarded vsock streams. A bounded cap so a
 /// misbehaving outer host can't exhaust the host VM's threads / fds by
 /// opening unbounded hop connections; the listener fails closed (drops
 /// the new connection) at the cap.
 #[cfg(target_os = "linux")]
-pub const MAX_CONCURRENT_FORWARDS: usize = 64;
+pub(crate) const MAX_CONCURRENT_FORWARDS: usize = 64;
 
 /// Upper bound on the inbound handshake body. A handshake is just
 /// `"<uuid> <port>"`, so this is generous; anything larger is junk.
@@ -68,18 +68,18 @@ const MAX_CONNECT_LINE_BYTES: usize = 64;
 /// on drop, i.e. when the handler thread ends) or `None` at capacity,
 /// so the listener can fail closed instead of spawning unboundedly.
 #[derive(Clone)]
-pub struct ConnectionLimiter {
+pub(crate) struct ConnectionLimiter {
     active: Arc<AtomicUsize>,
     max: usize,
 }
 
 /// Live-slot reservation; releases the slot when dropped.
-pub struct ConnectionPermit {
+pub(crate) struct ConnectionPermit {
     active: Arc<AtomicUsize>,
 }
 
 impl ConnectionLimiter {
-    pub fn new(max: usize) -> Self {
+    pub(crate) fn new(max: usize) -> Self {
         Self {
             active: Arc::new(AtomicUsize::new(0)),
             max,
@@ -88,7 +88,7 @@ impl ConnectionLimiter {
 
     /// Atomically reserve a slot if below the cap. Returns the permit
     /// or `None` when already at `max` in-flight connections.
-    pub fn try_acquire(&self) -> Option<ConnectionPermit> {
+    pub(crate) fn try_acquire(&self) -> Option<ConnectionPermit> {
         let mut cur = self.active.load(Ordering::Acquire);
         loop {
             if cur >= self.max {
@@ -112,7 +112,7 @@ impl ConnectionLimiter {
 
     /// Current number of live forwarded streams.
     #[cfg(test)]
-    pub fn active_count(&self) -> usize {
+    pub(crate) fn active_count(&self) -> usize {
         self.active.load(Ordering::Acquire)
     }
 }
@@ -229,7 +229,7 @@ fn splice_bidirectional(a: UnixStream, b: UnixStream) -> io::Result<()> {
 /// touches the fd's read/write/clone, agnostic to address family),
 /// or a [`UnixStream`] pair in tests. `base` is the per-workload
 /// state base dir (`/var/lib/mvm/workloads` in production).
-pub fn handle_forward_conn(mut inbound: UnixStream, base: &Path) -> io::Result<()> {
+pub(crate) fn handle_forward_conn(mut inbound: UnixStream, base: &Path) -> io::Result<()> {
     let (workload_id, port) = read_handshake(&mut inbound)?;
     // Fail closed on a workload_id that could escape the base dir.
     // Real ids are host-minted UUIDs (no `/`, no `..`).
@@ -249,7 +249,7 @@ pub fn handle_forward_conn(mut inbound: UnixStream, base: &Path) -> io::Result<(
 /// the host-side `NestingHopTransport` and the tests share one
 /// definition of the wire shape.
 #[cfg(test)]
-pub fn encode_handshake(workload_id: &str, port: u32) -> Vec<u8> {
+pub(crate) fn encode_handshake(workload_id: &str, port: u32) -> Vec<u8> {
     let body = format!("{workload_id} {port}");
     let mut out = Vec::with_capacity(4 + body.len());
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());

@@ -18,6 +18,8 @@
 //! build config, copy the artifacts to `/out`, and power off. The host side (`stage0::materialize_root_dir` /
 //! `qemu_builder`) lays down the seed and writes this binary as `/init`.
 
+#![deny(unreachable_pub)]
+
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
@@ -126,7 +128,7 @@ mod linux {
         })
     }
 
-    pub fn run() -> ExitCode {
+    pub(crate) fn run() -> ExitCode {
         // libkrunfw's bundled kernel hands PID 1 a low RLIMIT_NOFILE on some
         // arches (x86_64 hit EMFILE copying the seed store to tmpfs). As PID 1
         // / root we can raise both soft and hard limits; do it before any

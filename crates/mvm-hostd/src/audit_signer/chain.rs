@@ -298,7 +298,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 mod hex {
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
+    pub(crate) fn encode(bytes: impl AsRef<[u8]>) -> String {
         let bytes = bytes.as_ref();
         let mut out = String::with_capacity(bytes.len() * 2);
         for b in bytes {

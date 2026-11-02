@@ -74,7 +74,7 @@ pub(crate) struct BootTimings {
 impl BootTimings {
     /// Stamp `init_start_ms = 0` against `anchor`. Subsequent
     /// `mark_*` calls measure ms since `anchor`.
-    pub fn new(anchor: Instant) -> (Self, Instant) {
+    pub(crate) fn new(anchor: Instant) -> (Self, Instant) {
         let t = Self {
             init_start_ms: Some(0),
             ..Self::default()
@@ -89,14 +89,14 @@ impl BootTimings {
     /// host's `mvmctl build --timeout` and the job's own deadline
     /// — neither ever approaches `u64::MAX` ms — but we saturate
     /// rather than panic to keep init crash-safe.
-    pub fn ms_since(anchor: Instant) -> u64 {
+    pub(crate) fn ms_since(anchor: Instant) -> u64 {
         u64::try_from(anchor.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Render the struct as a single-line JSON object using the
     /// same escape discipline as `/job/result`. Hand-rolled to
     /// avoid pulling `serde_json` into the size budget.
-    pub fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         let mut out = String::with_capacity(256);
         out.push('{');
         Self::push_field(&mut out, "init_start_ms", self.init_start_ms, true);

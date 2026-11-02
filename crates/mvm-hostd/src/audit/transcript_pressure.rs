@@ -2,9 +2,8 @@
 use super::*;
 use mvm_core::transcript::GenerationBudget;
 use mvm_core::transcript::evidence_pressure::Candidate;
-pub use mvm_core::transcript::evidence_pressure::{
-    GenerationReservation, PressureEvidence, event_labels,
-};
+pub use mvm_core::transcript::evidence_pressure::GenerationReservation;
+pub(crate) use mvm_core::transcript::evidence_pressure::{PressureEvidence, event_labels};
 use std::path::PathBuf;
 
 /// Hold through discovery, reservation, append, rotation and retirement.

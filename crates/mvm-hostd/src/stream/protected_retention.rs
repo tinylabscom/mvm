@@ -28,7 +28,7 @@ pub(super) struct ManagedRetention {
 }
 
 impl ManagedRetention {
-    pub fn new(root: &Path, vm: &str, tenant: &str, emitter: &AuditEmitter) -> Result<Self> {
+    pub(crate) fn new(root: &Path, vm: &str, tenant: &str, emitter: &AuditEmitter) -> Result<Self> {
         let budget = GenerationBudget::default();
         let owner = BudgetOwner::acquire(root, tenant, vm, budget)?;
         let inventory = Inventory::load(root, vm, tenant, emitter)?;
@@ -48,14 +48,14 @@ impl ManagedRetention {
         })
     }
 
-    pub fn pressure(&self) -> Option<GenerationReservation> {
+    pub(crate) fn pressure(&self) -> Option<GenerationReservation> {
         self.reservations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pressure()
     }
 
-    pub fn maintain(&mut self, emitter: &AuditEmitter, broker: &SharedBroker) -> Result<()> {
+    pub(crate) fn maintain(&mut self, emitter: &AuditEmitter, broker: &SharedBroker) -> Result<()> {
         let now = retention_now()?;
         let mut index = 0;
         let mut attempts = 0;
@@ -97,7 +97,7 @@ impl ManagedRetention {
     }
 
     /// Called only between joined generations, never while a writer is active.
-    pub fn reclaim(
+    pub(crate) fn reclaim(
         &mut self,
         emitter: &AuditEmitter,
         broker: &SharedBroker,
@@ -175,7 +175,7 @@ impl ManagedRetention {
     }
 
     /// The old durable worker has exited and its terminal root is anchored.
-    pub fn record_sealed(&mut self, dir: &Path, manifest: TranscriptManifest) -> Result<()> {
+    pub(crate) fn record_sealed(&mut self, dir: &Path, manifest: TranscriptManifest) -> Result<()> {
         let relative = dir.strip_prefix(&self.root)?.to_path_buf();
         let capture = CaptureDirectory::open(&self.root, &relative)?;
         capture.prepare_payload(&manifest, false)?;

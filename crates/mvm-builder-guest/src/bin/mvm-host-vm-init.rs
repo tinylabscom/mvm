@@ -58,6 +58,8 @@
 //! environment; that's where the size budget (≤ 1.5 MiB) and
 //! static-link requirement get enforced.
 
+#![deny(unreachable_pub)]
+
 use std::process::ExitCode;
 
 // Cross-platform modules. The install-spec parser and install
@@ -1729,7 +1731,7 @@ mod linux {
         }
     }
 
-    pub fn run(pseudo_fs: crate::boot_stage::PseudoFs) -> ExitCode {
+    pub(crate) fn run(pseudo_fs: crate::boot_stage::PseudoFs) -> ExitCode {
         eprintln!("mvm-host-vm-init: pid 1 starting ({pseudo_fs:?})");
         append_init_breadcrumb("run_enter", "pid1");
 

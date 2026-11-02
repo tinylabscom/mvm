@@ -33,7 +33,7 @@ impl SnapshotAttempt<'_> {
     /// is renamed into place: the host takes the frame's appearance as the
     /// signal that both files are complete, so neither may be visible
     /// half-written.
-    pub fn publish(self) -> Result<(), String> {
+    pub(crate) fn publish(self) -> Result<(), String> {
         use mvm_vmm::host::snapshot_publish::{consume_request, output_for, read_request};
         // Outputs carry the request's identity, so finishing a request its caller
         // abandoned writes files only that caller's sweep will look at.

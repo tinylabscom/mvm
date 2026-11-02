@@ -33,10 +33,10 @@ use std::process::Command;
 /// requests key off it (they carry no base). Treated as the
 /// host→guest convention until the contract is formalised.
 #[cfg(target_os = "linux")]
-pub const WORKLOAD_STATE_BASE: &str = "/var/lib/mvm/workloads";
+pub(crate) const WORKLOAD_STATE_BASE: &str = "/var/lib/mvm/workloads";
 
 /// Path the Firecracker binary is baked at by mvm-images' builder-vm flake.
-pub const FIRECRACKER_BIN: &str = "/usr/bin/firecracker";
+pub(crate) const FIRECRACKER_BIN: &str = "/usr/bin/firecracker";
 
 /// Base kernel cmdline every Firecracker workload boots with;
 /// `kernel_cmdline_extras` (root=/init=/dm-verity roothash) is
@@ -51,7 +51,7 @@ const GUEST_CID: u32 = 3;
 /// Generic (VMM-agnostic) spawn config — the post-parse form of
 /// `mvm_builder_guest::builder_protocol::HostVmRequest::WorkloadStart`.
 #[derive(Debug, Clone)]
-pub struct WorkloadSpawnConfig {
+pub(crate) struct WorkloadSpawnConfig {
     pub workload_id: String,
     pub kernel_path: String,
     pub rootfs_path: String,
@@ -64,7 +64,7 @@ pub struct WorkloadSpawnConfig {
 
 /// A VMM that can launch a workload microVM inside the host VM.
 /// The swap seam that keeps mvm from being locked into Firecracker.
-pub trait WorkloadVmm {
+pub(crate) trait WorkloadVmm {
     /// Render the VMM's config-file contents for this workload. The
     /// state dir supplies VMM-agnostic paths (vsock UDS, etc.).
     fn render_config(&self, cfg: &WorkloadSpawnConfig, state: &WorkloadStateDir) -> String;
@@ -76,7 +76,7 @@ pub trait WorkloadVmm {
 
 /// Firecracker backend. The only type that names Firecracker.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct FirecrackerVmm;
+pub(crate) struct FirecrackerVmm;
 
 impl WorkloadVmm for FirecrackerVmm {
     fn render_config(&self, cfg: &WorkloadSpawnConfig, state: &WorkloadStateDir) -> String {
@@ -137,7 +137,7 @@ impl WorkloadVmm for FirecrackerVmm {
 /// [`WorkloadStateDir::persist`] disarms that once the workload is
 /// successfully running and the dir must outlive this scope.
 #[derive(Debug)]
-pub struct WorkloadStateDir {
+pub(crate) struct WorkloadStateDir {
     path: PathBuf,
     cleanup_on_drop: bool,
 }
@@ -145,7 +145,7 @@ pub struct WorkloadStateDir {
 impl WorkloadStateDir {
     /// Create `<base>/<workload_id>/`. Fails closed if the leaf
     /// already exists (workload-id collision).
-    pub fn create(base: &Path, workload_id: &str) -> io::Result<Self> {
+    pub(crate) fn create(base: &Path, workload_id: &str) -> io::Result<Self> {
         fs::create_dir_all(base)?;
         let path = base.join(workload_id);
         // `create_dir` (not `_all`) so an existing dir → AlreadyExists.
@@ -157,28 +157,28 @@ impl WorkloadStateDir {
     }
 
     #[cfg(test)]
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
-    pub fn config_path(&self) -> PathBuf {
+    pub(crate) fn config_path(&self) -> PathBuf {
         self.path.join("config.json")
     }
-    pub fn pid_path(&self) -> PathBuf {
+    pub(crate) fn pid_path(&self) -> PathBuf {
         self.path.join("fc.pid")
     }
-    pub fn stdout_path(&self) -> PathBuf {
+    pub(crate) fn stdout_path(&self) -> PathBuf {
         self.path.join("fc.stdout.log")
     }
-    pub fn stderr_path(&self) -> PathBuf {
+    pub(crate) fn stderr_path(&self) -> PathBuf {
         self.path.join("fc.stderr.log")
     }
-    pub fn vsock_path(&self) -> PathBuf {
+    pub(crate) fn vsock_path(&self) -> PathBuf {
         self.path.join("v.sock")
     }
 
     /// Disarm `Drop` cleanup — the workload spawned successfully, so
     /// the dir must persist for the host to reach `v.sock` / `fc.pid`.
-    pub fn persist(mut self) -> PathBuf {
+    pub(crate) fn persist(mut self) -> PathBuf {
         self.cleanup_on_drop = false;
         self.path.clone()
     }
@@ -195,7 +195,7 @@ impl Drop for WorkloadStateDir {
 /// Remove a per-workload state dir. Idempotent-ish: a missing dir is
 /// not an error (already cleaned). Used by `WorkloadStop` and as the
 /// final step of [`stop_workload`].
-pub fn cleanup_state_dir(base: &Path, workload_id: &str) -> io::Result<()> {
+pub(crate) fn cleanup_state_dir(base: &Path, workload_id: &str) -> io::Result<()> {
     let dir = base.join(workload_id);
     match fs::remove_dir_all(&dir) {
         Ok(()) => Ok(()),
@@ -209,7 +209,7 @@ pub fn cleanup_state_dir(base: &Path, workload_id: &str) -> io::Result<()> {
 /// VMM's stdout/stderr to log files, spawns, and records the PID.
 /// On any failure the [`WorkloadStateDir`] `Drop` cleans up; on
 /// success the dir is persisted for the host to reach.
-pub fn start_workload(vmm: &dyn WorkloadVmm, cfg: &WorkloadSpawnConfig) -> io::Result<u32> {
+pub(crate) fn start_workload(vmm: &dyn WorkloadVmm, cfg: &WorkloadSpawnConfig) -> io::Result<u32> {
     let base = PathBuf::from(&cfg.vsock_socket_dir);
     let state = WorkloadStateDir::create(&base, &cfg.workload_id)?;
 
@@ -240,7 +240,7 @@ pub fn start_workload(vmm: &dyn WorkloadVmm, cfg: &WorkloadSpawnConfig) -> io::R
 /// SIGTERM the workload's VMM, wait a short grace, fall back to
 /// SIGKILL, then remove the state dir. Linux-only (signal syscalls).
 #[cfg(target_os = "linux")]
-pub fn stop_workload(base: &Path, workload_id: &str) -> io::Result<()> {
+pub(crate) fn stop_workload(base: &Path, workload_id: &str) -> io::Result<()> {
     use std::time::Duration;
 
     let pid_path = base.join(workload_id).join("fc.pid");
@@ -266,7 +266,7 @@ pub fn stop_workload(base: &Path, workload_id: &str) -> io::Result<()> {
 /// dir), `"running"` (PID alive and vsock UDS present), or
 /// `"stopped"`. Linux-only (PID liveness via `kill(pid, 0)`).
 #[cfg(target_os = "linux")]
-pub fn workload_status(base: &Path, workload_id: &str) -> &'static str {
+pub(crate) fn workload_status(base: &Path, workload_id: &str) -> &'static str {
     let dir = base.join(workload_id);
     if !dir.exists() {
         return "not_found";

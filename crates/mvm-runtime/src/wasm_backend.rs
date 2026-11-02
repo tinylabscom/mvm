@@ -758,7 +758,7 @@ mod engine {
     use wasmtime_wasi::p1::{self, WasiP1Ctx};
     use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 
-    pub fn is_compiled_in() -> bool {
+    pub(super) fn is_compiled_in() -> bool {
         true
     }
 
@@ -1402,7 +1402,7 @@ mod engine {
     /// host-fs-isolated by construction beyond the explicit `mvm:egress`
     /// import; a module with no `egress_endpoint` configured gets
     /// `NoEndpointConfigured` on every `mvm:egress` call.
-    pub fn run_module_to_completion(
+    pub(super) fn run_module_to_completion(
         path: &str,
         egress_endpoint: Option<PathBuf>,
         activation: Option<&WasmPreopenPlan>,
@@ -1527,11 +1527,11 @@ mod engine {
     use super::{CompletedRun, WasmBackendError, WasmBounds};
     use crate::wasm_activation::WasmPreopenPlan;
 
-    pub fn is_compiled_in() -> bool {
+    pub(crate) fn is_compiled_in() -> bool {
         false
     }
 
-    pub fn run_module_to_completion(
+    pub(crate) fn run_module_to_completion(
         _path: &str,
         _egress_endpoint: Option<PathBuf>,
         _activation: Option<&WasmPreopenPlan>,
