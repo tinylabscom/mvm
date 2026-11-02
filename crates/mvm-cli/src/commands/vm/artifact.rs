@@ -138,15 +138,16 @@ fn resolve_artifact_dir(id: &str) -> Result<PathBuf> {
         .map(|e| e.path())
         .collect();
 
-    match matches.len() {
-        0 => bail!(
+    let count = matches.len();
+    match <[PathBuf; 1]>::try_from(matches) {
+        Ok([only]) => Ok(only),
+        Err(_) if count == 0 => bail!(
             "no artifact with id or prefix {:?} under {}",
             id,
             artifacts_root.display()
         ),
-        1 => Ok(matches.into_iter().next().unwrap()),
-        n => bail!(
-            "prefix {:?} matches {n} artifacts — provide a longer prefix",
+        Err(_) => bail!(
+            "prefix {:?} matches {count} artifacts — provide a longer prefix",
             id
         ),
     }

@@ -85,7 +85,7 @@ pub fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> Result<St
 }
 
 pub fn strip_glibc(t: &str) -> &str {
-    t.split('.').next().unwrap()
+    t.split('.').next().unwrap_or(t)
 }
 
 /// The pinned zig, or why it could not be found.
