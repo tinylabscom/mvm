@@ -136,8 +136,7 @@ dispatch-window budgets
 records a regression against them. The most recent live prepared-cold
 acceptance on the same CPU (i7-7700) measured 171.5/176.0/178.0 ms
 p50/p95/p99 — inside its budget
-(`specs/sprint/delivery/2574-firecracker-readiness-retry-floor.md`, raw
-evidence beside it under `xtask/data/evidence/performance/`). The two lanes
+(raw evidence under `xtask/data/evidence/performance/`). The two lanes
 measure different things and differ in every input that matters:
 
 - **Profile**: this lane runs the CI boot-latency recipe verbatim, which
