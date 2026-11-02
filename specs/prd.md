@@ -125,10 +125,12 @@ Because the host owns the wire, it can inspect traffic in both directions.
   never by value. ADR-001 already carries this design as "Reversible
   replacement on owned cleartext paths" (proposed, not accepted): replace with
   opaque tokens, restore only exact token echoes, policy inside the signed
-  plan, plaintext-free proof metadata. Limit: patterns find structured identifiers. A last name is
-  not a pattern; catching names needs a dictionary or a model, or the value
-  must be declared. State which one when it is built, and do not claim names
-  are covered until then.
+  plan, plaintext-free proof metadata. Limit: patterns find structured identifiers.
+  Names follow the owner's rule: a name is PII only as a full name, a first
+  and last name together. "Kim" alone is not PII; "Kim Williams" is. Finding
+  a full name needs a name dictionary or model plus adjacency, or declared
+  values. State which when it is built, publish its known misses and false
+  positives, and claim no more than that.
 - **Prompt injection.** Detection is pattern-based and advisory; it will have
   false positives. The guarantee that matters is deterministic: content of
   untrusted provenance cannot authorize a privileged action, because reaching
@@ -324,7 +326,9 @@ echo '[[], {"name": "ari"}]' | mvmctl machine run --entrypoint --flake ./out
 ```
 
 SDK types are generated from one schema, so a new language is a new generator.
-A Kotlin tree exists in `crates/mvm-sdk/sdks/`; it is not yet a promise.
+Beyond Python and TypeScript, the route to more languages is the host library's
+C ABI (requirement 14). A Kotlin tree for pack authoring exists in
+`crates/mvm-sdk/sdks/`; it is not yet a promise.
 
 ## Platforms
 
@@ -404,8 +408,9 @@ numbered claim.
 | 11 | **Windows through libkrun on WHP.** Promote the existing libkrun backend to a released Windows x86-64 tier rather than write a native WHP driver (a from-scratch hypercall and virtio layer is out of scope). Where WHP is absent or libkrun cannot start, refuse with a named reason; never fall back to another tier silently. Keep admission-visible tier labels. Preserve private-state permissions with Windows ACLs equal to the 0700 posture elsewhere. | A boot witness on a real Windows host is archived. `doctor` reports the tier and capabilities, and the platform matrix matches it. Until the witness exists the tier is Preview and claim-free. The guest stays NIC-less and vsock-only; if the WHP path cannot hold that, it ships behind a stated limit, not silently. No GPU on this path. |
 | 12 | **Easy installation on every platform.** One command installs a signed release with no prerequisite: `curl \| sh` on macOS and Linux (user-writable prefix, no `sudo`), a Homebrew tap, distro packages, and `winget` plus a signed zip on Windows. Every channel verifies the signature (claim 20) before running anything. `mvmctl doctor` names anything still missing. | A clean-VM install test per platform ends with requirement 1 passing. |
 | 13 | **Elastic memory on every backend.** A guest returns memory it frees, and a machine's footprint tracks its use, not its size. Over-provisioning costs close to nothing. | Today: HVF uses free page reporting; Firecracker uses a target balloon driven by host pressure; libkrun and QEMU report no mechanism. Each backend must either implement one or advertise `none` in `doctor`. A test fills and frees guest memory and asserts the host footprint falls. Publish the footprint numbers beside the launch budgets. |
+| 14 | **Language bindings through the host library's C ABI.** `libmvm_hostlib` already exposes a versioned C ABI (`mvm_hostlib_abi_version`, `mvm_hostlib_abi_is_compatible`, `mvm_hostlib_call`, `mvm_hostlib_free`, an approval callback) that takes and returns JSON, so any language with a C foreign-function interface can bind it without a subprocess. Candidates in priority order: Go, Java and Kotlin, C#, Swift. Each binding is a thin loader plus types generated from the existing schema. | A reference binding in one new language passes the client-interface conformance suite (ADR-043). Bindings call the version handshake before their first call, free every returned buffer, and never shell out (`check-no-cli-shellout`). How the signed library reaches users per platform is part of the work. |
 
-Also noted for decision, not yet required: a Go SDK, and a local,
+Also noted for decision, not yet required: a local,
 privacy-preserving lifecycle journal (counts and shapes only, no names, paths or
 commands, off by default). It must never become telemetry that leaves the host.
 
@@ -427,8 +432,9 @@ ADR.
   Scrubbed), not features. Until built, only detection ships, and the
   standing guarantee is the narrower one: a privileged action needs a signed
   binding in the plan.
-- **S3, R2 or MinIO-backed volumes.** The volume spec type parses `s3://`; no
-  end-to-end witness found.
+- **S3, R2 or MinIO-backed volumes.** Deferred by the owner; not to be
+  scoped yet. The volume spec type parses `s3://`; no end-to-end witness
+  exists.
 - **An interactive shell inside the builder VM.** The builder is headless and
   exists only to run Nix builds. The shell is a dev image booted with
   `machine run -it`.
@@ -461,24 +467,28 @@ Each release, check the PRD against the tree:
 
 Settled by the owner on 2026-11-02: cold under 300 ms including admission,
 warm under 50 ms, the boot-time gate on every PR, one precedence order,
-lightweight measured by `.mvmpkg` size and resource use, headless builder,
-SDKs first-class. Still open:
+lightweight measured by `.mvmpkg` size on disk and by memory (guest and
+per-VM host), headless builder, SDKs first-class, a name is PII only as a full
+name, S3 volumes deferred. Still open:
 
-1. **Numbers for Lightweight and for development speed.** Measure today's
-   `.mvmpkg` size, guest memory, per-VM host memory, incremental build time,
-   scoped test time and PR time-to-merge, then set the budgets.
+1. **Budgets for Lightweight and for development speed.** The metrics are
+   chosen. Measure today's `.mvmpkg` size, guest memory and per-VM host memory,
+   plus incremental build time, scoped test time and PR time-to-merge, then set
+   the numbers.
 2. **Warm startup definition.** Confirm "under 50 ms" is the warm claim, as
    the table assumes; cold cannot reach 50 ms without a different design.
 3. **Taint trigger.** Confirm the recommendation: on when egress, a host
    service, a secret or a tool grant is admitted; off for offline workloads.
-4. **PII scope.** Decide how names are covered (dictionary, model, or declared
-   values only) before the word "names" appears in any claim.
-5. **The unified precedence order.** Write it down once, as a numbered list,
-   and pin each rule to a test.
-6. **Kotlin SDK and S3 volumes:** promote or cut.
-7. **Cache and home mounts.** Tools want a persistent cache (`~/.cache`,
+4. **The unified precedence order.** Write it down once, as a numbered list,
+   and pin each rule to a test. Proposed: anything may narrow; only the
+   host's own layers (host, org, user, command-line flags) may widen; a pack
+   may request but never grants itself; among peer layers the last one wins
+   for choices, and ceilings and denies always win.
+5. **First language binding.** Pick the reference binding for requirement 14
+   (recommended: Go).
+6. **Cache and home mounts.** Tools want a persistent cache (`~/.cache`,
    package caches). Today only `/data` and `/work` are allowed. Either keep it
    that way and document a `/data/cache` convention, or add one more allowed
    root by ADR. I'd keep the allow-list as is.
-8. **Make mount policy a ledger claim.** Add an ADR-001 row with its witness
+7. **Make mount policy a ledger claim.** Add an ADR-001 row with its witness
    so `check-claim-catalog` guards it.
