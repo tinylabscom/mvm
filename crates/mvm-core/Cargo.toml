@@ -79,6 +79,11 @@ rand.workspace = true
 sigstore-verify = { version = "0.15", default-features = false, optional = true }
 sigstore-trust-root = { version = "0.15", default-features = false, optional = true }
 sigstore-types = { version = "0.15", optional = true }
+# CryptoProvider impl for sigstore-crypto 0.15 (pluggable, no aws-lc-rs).
+# Optional so it is only compiled under manifest-verify.
+sigstore-crypto = { workspace = true, optional = true }
+p256 = { workspace = true, optional = true }
+p384 = { workspace = true, optional = true }
 # Only under the `schema` feature (protocol-schema codegen);
 # 0.8 matches the version mvm-sdk already pins, so no new lockfile entry.
 schemars = { version = "0.8", features = ["chrono"], optional = true }
@@ -178,6 +183,9 @@ manifest-verify = [
     "dep:sigstore-verify",
     "dep:sigstore-trust-root",
     "dep:sigstore-types",
+    "dep:sigstore-crypto",
+    "dep:p256",
+    "dep:p384",
 ]
 # Opt back into the Sigstore network clients (Rekor, timestamp authority, TUF
 # trust-root fetch) for an embedder that fetches trust material online. No

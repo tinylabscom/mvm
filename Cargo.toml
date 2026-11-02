@@ -189,6 +189,9 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"]
 # `KeyProvider` / `WrappedKey` / snapshot-HMAC-key consumer.
 secrecy = { version = "0.10", features = ["serde"] }
 sha2 = "0.11"
+p256 = { version = "0.14", features = ["ecdsa"] }
+p384 = { version = "0.14", features = ["ecdsa"] }
+sigstore-crypto = { version = "0.15", default-features = false }
 sha1 = { version = "=0.10.6", default-features = false, features = ["std"] }
 # BLAKE3 for the Apple Container kernel's digest-pin sidecar — an order of
 # magnitude faster than SHA-256 on multi-hundred-MB kernels. Default

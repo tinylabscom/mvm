@@ -133,14 +133,16 @@ skip = [
     # crate.
     "bitflags",
 
-    # The image-set signature verifier, which the default `mvmctl` build
-    # carries because a first run cannot get past the signed image set without
-    # it. sigstore-verify 0.11, the latest release, is still on the RustCrypto
-    # 0.10 generation (digest 0.10, sha2 0.10, signature 2, const-oid 0.9) while
-    # the workspace is on 0.11, and it brings an older rand/rand_core, ryu-js
-    # via its JSON canonicalizer, and the untrusted 0.7 that aws-lc-rs needs.
-    # Nothing in the workspace asks for these majors directly; they collapse
-    # when sigstore-crypto ships a digest-0.11 release.
+    # sigstore-crypto 0.15 (pulled by manifest-verify) uses der 0.7 and spki 0.7,
+    # while p256 0.14 (the CryptoProvider backend) uses der 0.8 and spki 0.8.
+    # Both pairs are forced by the version constraints of these two crates;
+    # neither can be collapsed without forking the other.
+    "der",
+    "spki",
+
+    # sigstore-verify 0.15 still brings some RustCrypto 0.10 era crates
+    # (via its older const-oid / digest transitive deps) while the workspace
+    # is on 0.11. These collapse when sigstore-crypto fully migrates.
     "block-buffer",
     "const-oid",
     "cpufeatures",

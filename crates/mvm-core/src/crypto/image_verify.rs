@@ -42,6 +42,134 @@ pub struct VerifiedSigner {
     pub issuer: String,
 }
 
+/// CryptoProvider for sigstore-crypto 0.15 built from workspace crates only
+/// (sha2, p256, p384, ed25519-dalek). Registered once per process via
+/// `install_default_provider` so no aws-lc-rs is needed.
+#[cfg(feature = "manifest-verify")]
+mod workspace_provider {
+    use sha2::Digest as _;
+    use sigstore_crypto::{CryptoProvider, Error, HashContext, Result, SigningScheme};
+    use sigstore_types::HashAlgorithm;
+
+    #[derive(Debug)]
+    pub struct WorkspaceProvider;
+    pub static PROVIDER: WorkspaceProvider = WorkspaceProvider;
+
+    struct Sha256Ctx(sha2::Sha256);
+    impl HashContext for Sha256Ctx {
+        fn update(&mut self, data: &[u8]) {
+            self.0.update(data);
+        }
+        fn finalize(self: Box<Self>) -> Vec<u8> {
+            self.0.finalize().to_vec()
+        }
+    }
+    struct Sha384Ctx(sha2::Sha384);
+    impl HashContext for Sha384Ctx {
+        fn update(&mut self, data: &[u8]) {
+            self.0.update(data);
+        }
+        fn finalize(self: Box<Self>) -> Vec<u8> {
+            self.0.finalize().to_vec()
+        }
+    }
+    struct Sha512Ctx(sha2::Sha512);
+    impl HashContext for Sha512Ctx {
+        fn update(&mut self, data: &[u8]) {
+            self.0.update(data);
+        }
+        fn finalize(self: Box<Self>) -> Vec<u8> {
+            self.0.finalize().to_vec()
+        }
+    }
+
+    impl CryptoProvider for WorkspaceProvider {
+        fn hash(&self, algorithm: HashAlgorithm) -> Result<Box<dyn HashContext>> {
+            match algorithm {
+                HashAlgorithm::Sha2256 => Ok(Box::new(Sha256Ctx(sha2::Sha256::new()))),
+                HashAlgorithm::Sha2384 => Ok(Box::new(Sha384Ctx(sha2::Sha384::new()))),
+                HashAlgorithm::Sha2512 => Ok(Box::new(Sha512Ctx(sha2::Sha512::new()))),
+                other => Err(Error::UnsupportedAlgorithm(format!("{other:?}"))),
+            }
+        }
+
+        fn verify_raw(
+            &self,
+            scheme: SigningScheme,
+            spki_pubkey_bytes: &[u8],
+            data: &[u8],
+            signature: &[u8],
+        ) -> Result<()> {
+            match scheme {
+                SigningScheme::EcdsaP256Sha256 => {
+                    use p256::ecdsa::signature::Verifier as _;
+                    let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(spki_pubkey_bytes)
+                        .map_err(|e| Error::InvalidKey(e.to_string()))?;
+                    let sig = p256::ecdsa::DerSignature::try_from(signature)
+                        .map_err(|e| Error::InvalidKeyFormat(e.to_string()))?;
+                    key.verify(data, &sig)
+                        .map_err(|e| Error::Verification(e.to_string()))
+                }
+                SigningScheme::EcdsaP384Sha384 => {
+                    use p384::ecdsa::signature::Verifier as _;
+                    let key = p384::ecdsa::VerifyingKey::from_sec1_bytes(spki_pubkey_bytes)
+                        .map_err(|e| Error::InvalidKey(e.to_string()))?;
+                    let sig = p384::ecdsa::DerSignature::try_from(signature)
+                        .map_err(|e| Error::InvalidKeyFormat(e.to_string()))?;
+                    key.verify(data, &sig)
+                        .map_err(|e| Error::Verification(e.to_string()))
+                }
+                SigningScheme::Ed25519 => {
+                    use ed25519_dalek::Verifier as _;
+                    let key_bytes: &[u8; 32] =
+                        spki_pubkey_bytes.try_into().map_err(|_| {
+                            Error::InvalidKey("Ed25519 public key must be 32 bytes".into())
+                        })?;
+                    let key = ed25519_dalek::VerifyingKey::from_bytes(key_bytes)
+                        .map_err(|e| Error::InvalidKey(e.to_string()))?;
+                    let sig_bytes: &[u8; 64] = signature.try_into().map_err(|_| {
+                        Error::InvalidKeyFormat("Ed25519 signature must be 64 bytes".into())
+                    })?;
+                    let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
+                    key.verify(data, &sig)
+                        .map_err(|e| Error::Verification(e.to_string()))
+                }
+                other => Err(Error::UnsupportedAlgorithm(format!("{other:?}"))),
+            }
+        }
+
+        fn verify_prehashed(
+            &self,
+            scheme: SigningScheme,
+            spki_pubkey_bytes: &[u8],
+            digest: &[u8],
+            signature: &[u8],
+        ) -> Result<()> {
+            match scheme {
+                SigningScheme::EcdsaP256Sha256 | SigningScheme::EcdsaP256Sha384 => {
+                    use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
+                    let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(spki_pubkey_bytes)
+                        .map_err(|e| Error::InvalidKey(e.to_string()))?;
+                    let sig = p256::ecdsa::DerSignature::try_from(signature)
+                        .map_err(|e| Error::InvalidKeyFormat(e.to_string()))?;
+                    key.verify_prehash(digest, &sig)
+                        .map_err(|e| Error::Verification(e.to_string()))
+                }
+                SigningScheme::EcdsaP384Sha256 | SigningScheme::EcdsaP384Sha384 => {
+                    use p384::ecdsa::signature::hazmat::PrehashVerifier as _;
+                    let key = p384::ecdsa::VerifyingKey::from_sec1_bytes(spki_pubkey_bytes)
+                        .map_err(|e| Error::InvalidKey(e.to_string()))?;
+                    let sig = p384::ecdsa::DerSignature::try_from(signature)
+                        .map_err(|e| Error::InvalidKeyFormat(e.to_string()))?;
+                    key.verify_prehash(digest, &sig)
+                        .map_err(|e| Error::Verification(e.to_string()))
+                }
+                other => Err(Error::UnsupportedAlgorithm(format!("{other:?}"))),
+            }
+        }
+    }
+}
+
 /// Verify a cosign bundle over `artifact` under `expected_issuer`, and under
 /// `expected_identity` when one is given, returning the certificate identity
 /// the signature was minted under.
@@ -61,6 +189,8 @@ fn verify_cosign_bundle<'a>(
     use sigstore_trust_root::{SIGSTORE_PRODUCTION_TRUSTED_ROOT, TrustedRoot};
     use sigstore_types::Bundle;
     use sigstore_verify::{VerificationPolicy, verify};
+
+    let _ = sigstore_crypto::install_default_provider(&workspace_provider::PROVIDER);
 
     let bundle_json =
         std::str::from_utf8(cosign_bundle).map_err(|e| VerifyError::SignatureInvalid {
