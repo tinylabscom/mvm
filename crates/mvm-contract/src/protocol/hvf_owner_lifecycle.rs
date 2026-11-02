@@ -80,6 +80,7 @@ pub struct OwnerLifecycle {
     state: OwnerState,
     last_sequence: u64,
     cancel_pending: bool,
+    stop_attempted: bool,
     result_revision: Option<NonZeroU64>,
     acknowledged: bool,
 }
@@ -93,6 +94,7 @@ impl OwnerLifecycle {
             state: OwnerState::Registered,
             last_sequence: 0,
             cancel_pending: false,
+            stop_attempted: false,
             result_revision: None,
             acknowledged: false,
         }
@@ -161,18 +163,31 @@ impl OwnerLifecycle {
     }
 
     /// The owner began its one stop attempt (cancellation, disconnect or deadline).
+    /// From `RecoveryRequired` the child may still run, so a stop is allowed there
+    /// when none has been attempted; a second attempt is never made.
     ///
     /// # Errors
-    /// Refuses unless the operation is `Active`.
+    /// Refuses unless the operation is `Active`, or `RecoveryRequired` with no
+    /// earlier stop attempt.
     pub fn stop_started(&mut self) -> Result<(), LifecycleRefusal> {
-        self.move_if(OwnerState::Active, OwnerState::Stopping)
+        if self.state == OwnerState::Quarantined {
+            return Err(LifecycleRefusal::Quarantined);
+        }
+        let allowed = self.state == OwnerState::Active
+            || (self.state == OwnerState::RecoveryRequired && !self.stop_attempted);
+        if !allowed {
+            return Err(LifecycleRefusal::InvalidTransition);
+        }
+        self.stop_attempted = true;
+        self.state = OwnerState::Stopping;
+        Ok(())
     }
 
-    /// Stop or cleanup ended. Only the complete compound proof reaches `Terminal`
+    /// Stop or cleanup ended, or the owner later proved a recoverable end. Only the complete compound proof reaches `Terminal`
     /// (and only then is a result revision issued); anything less stays recoverable.
     ///
     /// # Errors
-    /// Refuses unless the operation is `Active` or `Stopping`.
+    /// Refuses unless the operation is `Active`, `Stopping` or `RecoveryRequired`.
     pub fn finished(
         &mut self,
         proof: TerminalProof,
@@ -181,7 +196,10 @@ impl OwnerLifecycle {
         if self.state == OwnerState::Quarantined {
             return Err(LifecycleRefusal::Quarantined);
         }
-        if !matches!(self.state, OwnerState::Active | OwnerState::Stopping) {
+        if !matches!(
+            self.state,
+            OwnerState::Active | OwnerState::Stopping | OwnerState::RecoveryRequired
+        ) {
             return Err(LifecycleRefusal::InvalidTransition);
         }
         if proof.complete() {
@@ -198,7 +216,10 @@ impl OwnerLifecycle {
     pub fn frontend_disconnected(&mut self) {
         if matches!(
             self.state,
-            OwnerState::Registered | OwnerState::Prepared | OwnerState::Active
+            OwnerState::Registered
+                | OwnerState::Prepared
+                | OwnerState::Active
+                | OwnerState::RecoveryRequired
         ) {
             self.cancel_pending = true;
         }
@@ -242,10 +263,8 @@ impl OwnerLifecycle {
     }
 
     fn cancel(&mut self) -> Applied {
-        if matches!(
-            self.state,
-            OwnerState::Terminal | OwnerState::RecoveryRequired
-        ) {
+        // RecoveryRequired is not over: the child may still run, so keep the intent.
+        if self.state == OwnerState::Terminal {
             return Applied::CancelMoot;
         }
         self.cancel_pending = true;
@@ -462,6 +481,89 @@ mod tests {
             Err(LifecycleRefusal::InvalidTransition)
         );
         assert_eq!(live.state(), OwnerState::Active);
+    }
+
+    fn recovery_required() -> OwnerLifecycle {
+        let mut life = OwnerLifecycle::register(binding(6));
+        life.prepared().unwrap();
+        life.preparation_failed(false).unwrap();
+        life
+    }
+
+    #[test]
+    fn cancel_and_disconnect_during_recovery_required_are_retained() {
+        let mut life = recovery_required();
+        assert_eq!(
+            life.apply(&req(1, RecoveryOperation::CancelStop {})),
+            Ok(Applied::CancelPending)
+        );
+        assert!(life.cancel_pending());
+        let mut other = recovery_required();
+        other.frontend_disconnected();
+        assert!(other.cancel_pending());
+        assert_eq!(other.state(), OwnerState::RecoveryRequired);
+    }
+
+    #[test]
+    fn stop_is_attempted_at_most_once() {
+        let mut fresh = recovery_required();
+        fresh.stop_started().unwrap();
+        assert_eq!(fresh.state(), OwnerState::Stopping);
+        let mut life = active();
+        life.stop_started().unwrap();
+        life.finished(
+            TerminalProof {
+                cleanup_and_audit: false,
+                ..FULL
+            },
+            nz(1),
+        )
+        .unwrap();
+        assert_eq!(life.state(), OwnerState::RecoveryRequired);
+        assert_eq!(
+            life.stop_started(),
+            Err(LifecycleRefusal::InvalidTransition)
+        );
+    }
+
+    #[test]
+    fn recovery_required_completes_only_with_all_three_halves() {
+        let mut life = recovery_required();
+        let partial = TerminalProof {
+            completion_barrier: false,
+            ..FULL
+        };
+        life.finished(partial, nz(1)).unwrap();
+        assert_eq!(life.state(), OwnerState::RecoveryRequired);
+        assert_eq!(
+            life.apply(&req(
+                1,
+                RecoveryOperation::AcknowledgeResult { revision: nz(1) }
+            )),
+            Err(LifecycleRefusal::ResultNotReady)
+        );
+        life.finished(FULL, nz(1)).unwrap();
+        assert_eq!(life.state(), OwnerState::Terminal);
+        assert_eq!(
+            life.apply(&req(
+                1,
+                RecoveryOperation::AcknowledgeResult { revision: nz(1) }
+            )),
+            Ok(Applied::Acknowledged)
+        );
+    }
+
+    #[test]
+    fn foreign_requests_in_recovery_required_consume_no_sequence() {
+        let mut life = recovery_required();
+        let mut foreign = req(1, RecoveryOperation::CancelStop {});
+        foreign.binding = binding(9);
+        assert_eq!(life.apply(&foreign), Err(LifecycleRefusal::BindingMismatch));
+        assert!(!life.cancel_pending());
+        assert!(
+            life.apply(&req(1, RecoveryOperation::CancelStop {}))
+                .is_ok()
+        );
     }
 
     #[test]
