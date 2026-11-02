@@ -100,7 +100,6 @@ pub const GATES: &[Gate] = &[
     ),
     ("check-abi-layout", crate::check_abi_layout::run),
     ("check-claim-catalog", crate::check_claim_catalog::run),
-    ("check-plan-names", crate::check_plan_names::run),
     ("check-sdk-cdylib-deps", crate::check_sdk_cdylib_deps::run),
     ("check-doc-links", crate::check_doc_links::run),
     (
@@ -204,6 +203,7 @@ pub const GATES: &[Gate] = &[
     ),
     ("check-duplicate-majors", crate::check_duplicate_majors::run),
     ("check-spec-hygiene", crate::check_spec_hygiene::run),
+    ("check-root-layout", crate::check_root_layout::run),
     ("check-workflow-paths", crate::check_workflow_paths::run),
     (
         "check-guest-agent-runtime-free",

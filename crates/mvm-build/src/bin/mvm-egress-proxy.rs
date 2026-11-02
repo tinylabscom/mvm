@@ -36,8 +36,7 @@ fn main() -> ExitCode {
             "mvm-egress-proxy is Linux-only (in-VM egress allowlist proxy \
              for the libkrun builder VM). On a developer host this binary \
              is a no-op; the production binary is cross-compiled to \
-             <arch>-unknown-linux-musl and installed by the builder image. \
-             See specs/plans/73-sdk-port-followups.md §B.2.x."
+             <arch>-unknown-linux-musl and installed by the builder image."
         );
         ExitCode::FAILURE
     }

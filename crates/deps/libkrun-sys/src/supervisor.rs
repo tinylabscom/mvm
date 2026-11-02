@@ -600,7 +600,7 @@ pub fn run_supervisor(cfg: &SupervisorConfig) -> Result<std::convert::Infallible
 #[cfg(not(feature = "libkrun-sys"))]
 pub fn run_supervisor_unavailable() -> Error {
     Error::NotYetWired {
-        tracking: "specs/plans/57-libkrun-spike.md W4 — rebuild with --features libkrun-sys",
+        tracking: "supervisor; rebuild with --features libkrun-sys",
     }
 }
 
@@ -618,7 +618,7 @@ pub fn stop(name: &str) -> Result<(), Error> {
     }
     let _ = name;
     Err(Error::NotYetWired {
-        tracking: "specs/plans/57-libkrun-spike.md W4",
+        tracking: "stopping a running guest",
     })
 }
 

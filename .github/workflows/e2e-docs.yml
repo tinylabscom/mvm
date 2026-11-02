@@ -276,7 +276,7 @@ jobs:
   #
   # Until issue #3011 lands there is no hosted macOS runner that can boot an mvm
   # guest, so the run happens on a maintainer's Apple Silicon machine and gets
-  # committed as `specs/evidence/e2e/macos-hvf.json`. This job is what stops
+  # committed as `xtask/data/evidence/e2e/macos-hvf.json`. This job is what stops
   # that from being a promise: `check-release-evidence` recomputes a digest over
   # every path that could change what the suite proves — `crates/`, `features/`,
   # `examples/`, `nix/`, `src/`, `scripts/`, the README, the manifests — and

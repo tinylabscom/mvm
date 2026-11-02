@@ -116,5 +116,3 @@ outputs/
 
 # Local drafts stay ignored; these maintained documents are shared.
 /docs/*
-!/docs/DEMO-BUILD-GUIDE.md
-!/docs/CONFORMANCE.md

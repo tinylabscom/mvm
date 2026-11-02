@@ -9,7 +9,7 @@ Validation: none — this is a proposed design; no code implements it and no tes
 **Mailbox scope:** Superseded by ADR-057 for mailbox identity, envelope
 ownership, delivery, durability, storage, host-blindness, and the `mvmd`
 boundary. The non-mailbox lanes and their migration remain proposed here.
-**Implemented by:** `specs/plans/2026-08-18-secure-message-fabric.md`  
+**Implemented by:** specs/plans/2026-08-18-secure-message-fabric.md (retired; recover from tag specs-archive-2026-11-02)  
 **Distributed counterpart:** a separately numbered `mvmd` ADR and plan consume the contracts and deterministic state machine defined here.  
 **Would supersede, once accepted and implemented:** ADR-035 for guest↔host transport, inter-workload routing,
 `StreamEdge`, stdin as a workflow protocol, stdout/stderr as return protocols,

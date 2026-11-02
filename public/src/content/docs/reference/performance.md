@@ -118,7 +118,7 @@ sample before the row was added.
 | 2026-08-19 | `prepared_cold` | Linux 6.8.0-137 x86_64, Intel i7-7700 | Firecracker v1.14.1 | rotational md-RAID (`ROTA=1`) | 20 (+2 warm-ups) | 171.5 ms | 176.0 ms | 178.0 ms |
 
 The source revision was `b107dfb22c`. The full schema-v5 raw report is kept at
-`specs/evidence/performance/2574-prepared-cold-firecracker-2026-08-19.json`;
+`xtask/data/evidence/performance/2574-prepared-cold-firecracker-2026-08-19.json`;
 its SHA-256 digest is
 `523ffd3f2904696141edd806861093abb1011de00d6c345b7acc3be27f4ee6c4`.
 All 20 measured samples were release builds, used `block_ext4`, carried no

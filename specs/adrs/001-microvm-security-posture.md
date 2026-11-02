@@ -878,7 +878,7 @@ tuning decision.
   far enough to be missed. Holding
   output longer would delay every quiet stream, and the host holds
   fingerprints, not values, so it cannot recognise a secret's prefix. See
-  `specs/telemetry/studio-contract.md`.
+  `specs/contracts/studio-telemetry-contract.md`.
 
 ### Non-goals
 
@@ -1203,8 +1203,7 @@ signed manifests, exactly as the statement says.
 
 - [ ] Audit each witness for *external-authority* grounding (assert against
   a reference implementation / oracle rather than the code's own output);
-  record gaps in the Authority column. Becomes its own
-  `specs/plans/<N>-claim-witness-authority-audit.md`.
+  record gaps in the Authority column. Tracked as its own issue.
 - [ ] For any witness found to be self-referential, file a follow-up to add
   a reference oracle.
 <!-- claims-catalog:end -->

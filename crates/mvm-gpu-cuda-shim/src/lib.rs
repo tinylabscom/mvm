@@ -5,8 +5,7 @@
 //! links `libcuda.so.1` exactly as it would the real library; nothing in
 //! the guest carries a driver or a device node.
 //!
-//! v1 ABI coverage and the deliberate limits (no PTX-param launches)
-//! are documented in `specs/plans/2026-09-20-gpu-over-vsock.md`.
+//! v1 ABI coverage deliberately excludes PTX-param launches.
 
 use std::cell::Cell;
 use std::collections::HashMap;

@@ -15,7 +15,7 @@ tenant scheduler, provider registry, or fleet control plane.
 plans), ADR-024 (WASI/browser claim boundary), ADR-037 (`mvmd` is the only
 production launch authority), and ADR-042 (one flow-aware workload networking
 path).  
-**Implementation plan:** `specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md`
+**Implementation plan:** specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md (retired; recover from tag specs-archive-2026-11-02)
 
 ## Context
 

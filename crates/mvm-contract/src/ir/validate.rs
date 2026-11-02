@@ -666,8 +666,7 @@ fn validate_addons(addons: &[AddonUse], base: &str, errors: &mut Vec<ValidationE
                 path: format!("{path}.tier"),
                 detail: format!(
                     "addon tier {:?} is reserved but not implemented in v1. \
-                     Hint: only `tier = \"separate\"` is supported today; \
-                     in-VM addons land via `specs/plans/0012-in-vm-addon-tier.md`.",
+                     Hint: only `tier = \"separate\"` is supported today.",
                     addon.tier
                 ),
             });
