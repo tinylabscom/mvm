@@ -667,3 +667,108 @@ host load average was 270 (64 users) at measurement time, so any timing taken
 now would be noise and would not satisfy "identical-feature timing". A timing
 claim here would be fabricated; it needs a dedicated run and cannot be produced
 by editing code. Verdict: **PARTIAL**.
+
+## Panic, ownership and cleanup sweep (box: ownership, allocation, errors, cancellation, cleanup, unsafe, panic paths)
+
+Evidence commit: `origin/main` at `8be5161c7e`, 2026-11-01. Method: a
+line-level scan of every non-test `.rs` file under `crates/` (test modules,
+`#[cfg(test)]` items, `tests/`, `examples/`, `benches/`, `fuzz/`, files declared
+only as test modules, and `mvm-conformance` excluded; comment lines excluded),
+followed by reading each candidate. A count is a candidate count, not a defect
+count. `await_holding_lock` and `await_holding_refcell_ref` are default-warn
+clippy lints, so the existing `-D warnings` gate already holds the
+guard-across-await line; they were not re-scanned by hand.
+
+### Candidate counts per crate (production code only)
+
+| Pattern | Before | After | Where it concentrates |
+|---|---|---|---|
+| `.unwrap()` | 102 | 97 | 96 of the 97 sit in diagnostic and test-support modules that are only compiled behind a test parent (`portable_boot_assets_diagnostic.rs` 41, `foreground_diagnostic.rs` 20, `legacy_*_runtime.rs` fixtures 22, `elf.rs` fixture 3) or in `build.rs` (4); the rest are length-checked `try_into` on fixed slices (`kernel_image.rs` 3, `snapshot_encryption.rs` 2) |
+| `.expect(` | 536 | 536 | `mvm-hostd` 111, `mvm-agentd` 73, `mvm-core` 73, `mvm-contract` 55, `mvm-vmm` 51; spot-read, each names an invariant (poisoned-lock, static regex, infallible encode) |
+| `panic!(` | 11 | 11 | `mvm-cli` 4, `mvm-sdk` 4 (documented `# Panics` in SDK macros), one each elsewhere |
+| `unreachable!(` | 24 | 24 | exhaustive-match arms behind a prior validation |
+| `std::process::exit` | 63 | 63 | 56 are in `[[bin]]` entry points; the 7 in library modules are deliberate (below) |
+| `mem::forget` | 11 | 11 | custody and guard handoffs where the destructor must not run (`cold_channel`, `capture_custody`, `restore_image::self`) |
+| `unsafe` keyword | 1085 | 1085 | `mvm-agentd` 172, `mvm-vmm` 136, GPU crates ~280, `mvm-runtime` 99, `libkrun-sys` 88 |
+| `let _ =` on a removal, rename, kill, shutdown or teardown | 247 | 235 | best-effort teardown, see below |
+
+Per-crate `.unwrap()` before and after: `mvm-build` 2 to 0, `mvm-compiler` 1 to
+0, `mvm-cli` 5 to 4, `mvm-core` 3 to 2; every other crate unchanged.
+
+### Judged benign, and why
+
+- **`process::exit` in library modules.** `host_agent_idle` (idle shutdown of the
+  host agent), `supervisor::claimed_child` (a claimed child that cannot be
+  bounded must not keep running), `supervisor::wall_clock` (the wall-clock kill:
+  the process owns the guest and the exit code is the contract; the exit file and
+  helpers are released first by `record_and_release`), and
+  `helper_contract::exit_with_probe_answer_if_requested` (documented to run first
+  in a helper's `main`). Each runs in a process that owns exactly one VM or probe,
+  so skipping destructors loses nothing the function has not already released.
+- **Detached `tokio::spawn`.** The 32 spawn sites that drop their handle are
+  accept loops, per-connection tasks and watchers whose lifetime is the process
+  or the connection; none owns a resource that outlives its task.
+- **`mem::forget`.** Each call hands a custody guard to a longer-lived owner or
+  defuses a guard whose work the surrounding function already did.
+- **Bulk `let _ = remove_file/remove_dir_all`.** About 200 of the 235 sites run
+  on an error path (the original error is what the caller needs), inside `Drop`,
+  or on a scratch file whose absence is the desired end state. Not changed.
+- **Length-checked fixed-slice conversions** (`kernel_image::parse`,
+  `snapshot_encryption` header probe): the preceding length check makes the
+  conversion infallible. Left as is; rewriting them is churn, not a fix.
+- **`run_sidecars::clear_prior_run`** ignores removal failure by documented
+  design; the boot reports an unwritable state directory more clearly.
+
+### Fixed
+
+| Rank | Finding | Fix |
+|---|---|---|
+| 1 | libkrun and QEMU boot removed the stale pid file with `let _ =`, and boot confirmation is `pid_file.exists()`. A stale file that could not be removed passed for this boot's marker. | `run_sidecars::remove_stale_marker` tolerates only an absent file and refuses the boot otherwise; two tests. |
+| 2 | The builder pipeline discarded `backend.teardown` after a successful build, so a builder left running was silent. | Logged through `env.log_warn`. |
+| 3 | The transient-run Ctrl-C handler discarded both the install result (a second install in one process fails with `AlreadyExists`, leaving Ctrl-C unable to stop the VM early) and the `stop_transient` result. | Both logged. |
+| 4 | Firecracker restore paths discarded `teardown_paused` on four failure branches, hiding a leaked paused VM. | One `warn_teardown_paused` helper logs it; the original error is still returned. |
+| 5 | Idle-pool claim rollback discarded the `rename` back, hiding a stuck claimed directory. | Logged. |
+| 6 | Five production `.unwrap()` on invariants the compiler could not see (`embed_toolchain`, `stage0` seed lift, `vm artifact` prefix resolve, TypeScript decorator site, manifest image ref). | Rewritten so the invariant is in the types: `unwrap_or`, `try_from` to a one-element array, `let ... else`, a bound pattern. |
+| 7 | 16 undocumented `unsafe` blocks in the two crates on the privilege and C-ABI boundary. | `// SAFETY:` comments in `mvm-setpriv` (8) and `mvm-host-services` (8). |
+
+### Unsafe inventory and SAFETY coverage
+
+Blocks, `unsafe impl` and `unsafe fn` definitions, excluding bindgen's `sys.rs`.
+"Undocumented" means no `SAFETY` or `# Safety` text within the 7 lines above to
+2 below. About half of the undocumented count is not a block at all: `extern`
+declarations and `unsafe extern "C" fn` type aliases (`mvm-gpu/src/native.rs` 35,
+`libkrun_bindings.rs` 64) carry their contract in the C header, so the figure
+that matters is blocks and impls.
+
+| Crate | Sites | Undocumented before | Undocumented blocks/impls after this sweep |
+|---|---|---|---|
+| `mvm-agentd` | 170 | 22 | 18 |
+| `mvm-vmm` | 135 | 16 | 13 |
+| `mvm-gpu` | 101 | 43 | 3 |
+| `mvm-gpu-cuda-shim` | 74 | 9 | 9 |
+| `mvm-hostd` | 71 | 11 | 10 |
+| `mvm-runtime` | 69 | 2 | 2 |
+| `libkrun-sys` | 65 | 64 | 1 |
+| `mvm-cli` | 33 | 15 | 15 |
+| `mvm-setpriv` | 16 | 8 | 0 |
+| `mvm-host-services` | 15 | 8 | 0 |
+| `mvm-backends` | 17 | 4 | 3 |
+| `mvm-build` | 8 | 4 | 4 |
+| `mvm-gpu-nvml-shim` | 17 | 2 | 2 |
+| other (`mvm-gpu-cudart-shim`, `mvm-hostlib`, `mvm-builder-guest`, `mvm-fs`, `runmvm-client`, `mvm-gpu-shim-core`, `mvm-core`) | 136 | 6 | 0 |
+| Total | 927 | 214 | 80 |
+
+### Remaining, and why
+
+- 80 undocumented `unsafe` blocks, mostly one-line `libc` calls in `mvm-agentd`
+  (`guest_mount.rs`, `guest_net.rs`), `mvm-cli` (`vm/console.rs`, `seccomp_audit.rs`),
+  `mvm-vmm` (`host/*_spawn.rs`) and the CUDA shim. Left because enabling
+  `clippy::undocumented_unsafe_blocks` workspace-wide needs all of them done in one
+  change, and a half-documented crate would not hold the lint. Tracked by this
+  box staying unticked.
+- The ~100 `.unwrap()` in diagnostic and test-support modules are reachable only
+  from test parents; moving them under an explicit `#[cfg(test)]` would make the
+  next scan exact.
+- No test can force `remove_file` to fail on the engine-start paths of the
+  Firecracker and HVF drivers without a seam that does not exist; the
+  logging-only fixes (ranks 2 to 5) carry no new tests.
