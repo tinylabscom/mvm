@@ -29,7 +29,7 @@ pub(super) struct Inventory {
 }
 
 impl Inventory {
-    pub fn read(root: &Path, tenant: &str) -> Result<Self> {
+    pub(crate) fn read(root: &Path, tenant: &str) -> Result<Self> {
         super::validate_tenant(tenant)?;
         let root = File::from(rustix::fs::open(
             root,

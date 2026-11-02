@@ -24,7 +24,12 @@ pub(super) struct Inventory {
 }
 
 impl Inventory {
-    pub fn load(root: &Path, vm: &str, tenant: &str, emitter: &AuditEmitter) -> Result<Self> {
+    pub(crate) fn load(
+        root: &Path,
+        vm: &str,
+        tenant: &str,
+        emitter: &AuditEmitter,
+    ) -> Result<Self> {
         let mut generations = Vec::new();
         let mut usage = GenerationReservation {
             plaintext_bytes: 0,
@@ -109,7 +114,7 @@ impl Inventory {
         Ok(Self { generations, usage })
     }
 
-    pub fn track(&mut self, relative: PathBuf, manifest: TranscriptManifest) -> Result<()> {
+    pub(crate) fn track(&mut self, relative: PathBuf, manifest: TranscriptManifest) -> Result<()> {
         if manifest.chunks.is_empty() {
             return Ok(());
         }
@@ -136,7 +141,7 @@ impl Inventory {
         Ok(())
     }
 
-    pub fn remove(&mut self, index: usize) -> Result<GenerationReservation> {
+    pub(crate) fn remove(&mut self, index: usize) -> Result<GenerationReservation> {
         let removed = self.generations.remove(index);
         let usage = GenerationReservation {
             plaintext_bytes: removed.manifest.retained_plaintext_bytes()?,

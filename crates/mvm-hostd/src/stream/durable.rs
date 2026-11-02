@@ -128,7 +128,7 @@ pub(in crate::stream) struct DurableCounts {
 impl DurableCounts {
     /// Records that never reached the transcript, whichever end lost them.
     /// Equal, by construction, to the sealed manifest's `refused_chunks`.
-    pub fn missing(self) -> u64 {
+    pub(crate) fn missing(self) -> u64 {
         self.refused.saturating_add(self.shed_chunks)
     }
 }
@@ -155,7 +155,7 @@ pub(in crate::stream) struct DurableSink {
 }
 
 impl DurableSink {
-    pub fn new(vm: &str, writer: TranscriptWriter) -> Self {
+    pub(crate) fn new(vm: &str, writer: TranscriptWriter) -> Self {
         // Taken before the writer moves behind the lock: an empty manifest is
         // cheap to build and is the only state `seal` can still hand back if
         // that lock is never released. The journal mirrors the same seed.
@@ -212,7 +212,7 @@ impl DurableSink {
     /// whatever the disk is doing at that moment — the exact stall this
     /// whole module exists to remove, reached through the one door that
     /// used to bypass it.
-    pub fn push(&self, record: &Arc<StreamRecord>) {
+    pub(crate) fn push(&self, record: &Arc<StreamRecord>) {
         let encoded = match self.seed.payload_encoding {
             mvm_core::transcript::PayloadEncoding::Raw => None,
             mvm_core::transcript::PayloadEncoding::StreamRecordV1 => {
@@ -260,14 +260,14 @@ impl DurableSink {
         }
     }
 
-    pub fn with_reservations(mut self, reservations: Option<SharedReservations>) -> Self {
+    pub(crate) fn with_reservations(mut self, reservations: Option<SharedReservations>) -> Self {
         self.reservations = reservations;
         self
     }
 
     /// Block until every record pushed so far has reached the writer.
     #[cfg(test)]
-    pub fn drain(&self) {
+    pub(crate) fn drain(&self) {
         let Some(jobs) = self.jobs.as_ref() else {
             return; // no writer thread: `push` sheds, nothing is ever queued
         };
@@ -282,11 +282,11 @@ impl DurableSink {
     /// Test-only: holding it is how a test stands in for a disk that stopped
     /// answering, which is the one way to observe the hand-off shedding.
     #[cfg(test)]
-    pub fn writer_lock(&self) -> Arc<Mutex<TranscriptWriter>> {
+    pub(crate) fn writer_lock(&self) -> Arc<Mutex<TranscriptWriter>> {
         Arc::clone(&self.writer)
     }
 
-    pub fn counts(&self) -> DurableCounts {
+    pub(crate) fn counts(&self) -> DurableCounts {
         DurableCounts {
             refused: self.counters.refused.load(Ordering::Relaxed),
             lapses: self.counters.lapses.load(Ordering::Relaxed),
@@ -295,14 +295,14 @@ impl DurableSink {
     }
 
     /// Account for loss before broker ingestion (for example, a UART handoff).
-    pub fn note_unwritten(&self, chunks: u64, bytes: u64) {
+    pub(crate) fn note_unwritten(&self, chunks: u64, bytes: u64) {
         saturating_add(&self.counters.shed_chunks, chunks);
         saturating_add(&self.counters.shed_bytes, bytes);
         saturating_add(&self.counters.total, chunks);
         saturating_add(&self.counters.total_bytes, bytes);
     }
 
-    pub fn ready(&self) -> bool {
+    pub(crate) fn ready(&self) -> bool {
         self.jobs.is_some()
             && (self.seed.generation_budget.is_none() || self.reservations.is_some())
     }
@@ -319,7 +319,7 @@ impl DurableSink {
     /// and reports the whole capture as unwritten instead — the shed
     /// hand-off's own rule ("an honest hole beats a stall"), extended to the
     /// one thing it didn't cover: the writer itself never finishing.
-    pub fn seal(mut self) -> TranscriptManifest {
+    pub(crate) fn seal(mut self) -> TranscriptManifest {
         self.jobs = None;
         let joined = match self.worker.take() {
             Some(worker) => wait_for_writer(worker, SEAL_JOIN_TIMEOUT),

@@ -64,7 +64,7 @@ impl DispatchResponse {
     /// deserializes from. Field order matches the serde-derived
     /// internally-tagged enum encoding (`"kind"` first, then the
     /// variant's struct fields in declaration order).
-    pub fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         let mut out = String::with_capacity(512);
         out.push_str(r#"{"kind":"result","job_id":""#);
         push_json_string(&mut out, &self.job_id);

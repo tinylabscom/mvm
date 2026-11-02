@@ -55,7 +55,7 @@ use std::fmt;
 
 /// In-guest mirror of `mvm_builder_guest::builder_protocol::BuilderJob`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BuilderJob {
+pub(crate) enum BuilderJob {
     Flake {
         flake_ref: String,
         attr_path: String,
@@ -67,7 +67,7 @@ pub enum BuilderJob {
 
 /// In-guest mirror of `mvm_builder_guest::builder_protocol::HostVmRequest`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostVmRequest {
+pub(crate) enum HostVmRequest {
     Run {
         job_id: String,
         job: BuilderJob,
@@ -98,7 +98,7 @@ pub enum HostVmRequest {
 }
 
 #[derive(Debug)]
-pub enum ParseError {
+pub(crate) enum ParseError {
     /// Body wasn't valid UTF-8.
     NotUtf8(std::str::Utf8Error),
     /// Couldn't find the `"kind"` discriminator.
@@ -146,7 +146,7 @@ impl std::error::Error for ParseError {}
 /// whitespace between JSON tokens because serde's writer may emit
 /// either compact or pretty output (we test against compact, but
 /// don't want to fail closed on pretty just to be safe).
-pub fn parse(bytes: &[u8]) -> Result<HostVmRequest, ParseError> {
+pub(crate) fn parse(bytes: &[u8]) -> Result<HostVmRequest, ParseError> {
     let text = std::str::from_utf8(bytes).map_err(ParseError::NotUtf8)?;
     let kind = find_string_value(text, "kind").ok_or(ParseError::MissingKind)?;
     match kind.as_str() {

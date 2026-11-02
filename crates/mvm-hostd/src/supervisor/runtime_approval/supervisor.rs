@@ -23,11 +23,11 @@ use super::{ApprovalVerdict, REASON_APPROVAL_UNAVAILABLE, RuntimeApprover};
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 
 /// How long a held flow waits for an answer before it is denied.
-pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a session-scoped approval lasts.
-pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
+pub(crate) const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 /// Prompts one VM may raise per minute before the rest are denied unasked.
-pub const DEFAULT_PROMPTS_PER_MINUTE: usize = 10;
+pub(crate) const DEFAULT_PROMPTS_PER_MINUTE: usize = 10;
 
 /// The one operator identity the ledger authorises: the broker. Which backend
 /// behind it answered is recorded as the answer's reason.
@@ -40,7 +40,7 @@ const REASON_LEDGER_REFUSED: &str = "ledger_refused";
 const REASON_AUDIT_UNAVAILABLE: &str = "audit_unavailable";
 
 /// A millisecond wall clock; a seam so tests can move time.
-pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+pub(crate) type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 fn system_clock() -> Clock {
     Arc::new(|| {

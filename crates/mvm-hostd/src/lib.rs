@@ -23,6 +23,8 @@
 //!   config parsing, the prelaunched-standby attach-verify, and the
 //!   workload-exit control listener.
 
+#![deny(unreachable_pub)]
+
 pub mod admission_budget;
 pub mod admitted_campaign_runner;
 pub mod assurance_agent_adapter;

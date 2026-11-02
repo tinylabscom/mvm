@@ -32,13 +32,13 @@ use std::fmt;
 /// `mvm_build::app_deps::Language` on the host side, with the same
 /// wire tokens, so the spec round-trips unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
+pub(crate) enum Language {
     Python,
     Node,
 }
 
 impl Language {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Python => "python",
             Self::Node => "node",
@@ -51,13 +51,13 @@ impl Language {
 /// pipeline (it doesn't fail the install on missing optional
 /// gates today; strict mode is formalized in a follow-on slice).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GateLevel {
+pub(crate) enum GateLevel {
     Dev,
     Prod,
 }
 
 impl GateLevel {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Dev => "dev",
             Self::Prod => "prod",
@@ -70,7 +70,7 @@ impl GateLevel {
 /// it from `LibkrunBuilderVm`) and the guest (which interprets it
 /// against in-VM mounts).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InstallSpec {
+pub(crate) struct InstallSpec {
     pub language: Language,
     pub lockfile_relative_path: String,
     pub source_mount: String,
@@ -78,7 +78,7 @@ pub struct InstallSpec {
 }
 
 #[derive(Debug)]
-pub enum SpecError {
+pub(crate) enum SpecError {
     /// JSON wasn't an object or had a structural defect (unbalanced
     /// braces, trailing garbage, …).
     Malformed(String),
@@ -121,7 +121,7 @@ impl std::error::Error for SpecError {}
 /// - No nested objects, arrays, numbers, booleans, or nulls (the
 ///   spec doesn't use them).
 /// - Insignificant whitespace anywhere.
-pub fn parse(bytes: &[u8]) -> Result<InstallSpec, SpecError> {
+pub(crate) fn parse(bytes: &[u8]) -> Result<InstallSpec, SpecError> {
     let text =
         std::str::from_utf8(bytes).map_err(|e| SpecError::Malformed(format!("not UTF-8: {e}")))?;
     let pairs = parse_top_object(text)?;

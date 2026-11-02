@@ -16,7 +16,7 @@ pub(super) struct Reservations {
 }
 
 impl Reservations {
-    pub fn new(limit: GenerationBudget, retained: GenerationReservation) -> Self {
+    pub(crate) fn new(limit: GenerationBudget, retained: GenerationReservation) -> Self {
         Self {
             limit,
             used: retained,
@@ -25,7 +25,7 @@ impl Reservations {
         }
     }
 
-    pub fn reserve(&mut self, bytes: u64) -> bool {
+    pub(crate) fn reserve(&mut self, bytes: u64) -> bool {
         let incoming = GenerationReservation {
             plaintext_bytes: bytes,
             chunks: 1,
@@ -54,14 +54,14 @@ impl Reservations {
 
     /// Only queue rejection may release a reservation. Once a writer has
     /// accepted work, even an I/O failure stays charged until a joined seal.
-    pub fn release_rejected(&mut self, bytes: u64) {
+    pub(crate) fn release_rejected(&mut self, bytes: u64) {
         self.release_retired(GenerationReservation {
             plaintext_bytes: bytes,
             chunks: 1,
         });
     }
 
-    pub fn release_retired(&mut self, retired: GenerationReservation) {
+    pub(crate) fn release_retired(&mut self, retired: GenerationReservation) {
         match (
             self.used
                 .plaintext_bytes
@@ -78,13 +78,13 @@ impl Reservations {
         }
     }
 
-    pub fn pressure(&self) -> Option<GenerationReservation> {
+    pub(crate) fn pressure(&self) -> Option<GenerationReservation> {
         self.pressure
     }
 
     /// Caller holds the family owner and has joined the old writer, verified
     /// every retained terminal root, and completed any authorized cleanup.
-    pub fn reconcile(&mut self, retained: GenerationReservation) {
+    pub(crate) fn reconcile(&mut self, retained: GenerationReservation) {
         self.used = retained;
         self.pressure = None;
         self.blocked = false;

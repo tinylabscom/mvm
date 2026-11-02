@@ -47,7 +47,7 @@ const CHROOT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/
 
 /// Errors surfaced when running the before_build hook.
 #[derive(Debug, thiserror::Error)]
-pub enum BuilderHookError {
+pub(crate) enum BuilderHookError {
     /// Could not create the mount point directory.
     #[error("create mount point {path}: {source}")]
     CreateMountPoint {
@@ -125,7 +125,7 @@ pub enum BuilderHookError {
 /// Returns `Ok(())` if the hook is missing (treated as a no-op) or if it
 /// exits 0. Returns [`BuilderHookError::HookNonZero`] or
 /// [`BuilderHookError::GraceExceeded`] on hook failure.
-pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError> {
+pub(crate) fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError> {
     std::fs::create_dir_all(MOUNT_POINT).map_err(|e| BuilderHookError::CreateMountPoint {
         path: MOUNT_POINT,
         source: e,
@@ -178,7 +178,7 @@ pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError>
     }
 }
 
-pub fn seal_rootfs_journal(rootfs_path: &Path) -> Result<(), BuilderHookError> {
+pub(crate) fn seal_rootfs_journal(rootfs_path: &Path) -> Result<(), BuilderHookError> {
     let output = Command::new(E2FSCK)
         .args(["-p", "-f"])
         .arg(rootfs_path)

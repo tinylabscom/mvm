@@ -120,7 +120,7 @@ pub(in crate::stream) struct CaptureJournal {
 
 impl CaptureJournal {
     /// A journal for the capture `seed` describes, in `dir`.
-    pub fn new(dir: &Path, seed: TranscriptManifest) -> Self {
+    pub(crate) fn new(dir: &Path, seed: TranscriptManifest) -> Self {
         Self {
             path: dir.join(JOURNAL_FILENAME),
             header: Some(Box::new(seed)),
@@ -132,7 +132,7 @@ impl CaptureJournal {
     /// Mirror one landed chunk. Best-effort by contract: the transcript is
     /// already on disk either way, and the only thing a failure here costs is
     /// the ability to seal it from another process.
-    pub fn record(&mut self, chunk: &ChunkRecord, shortfall: JournalShortfall) {
+    pub(crate) fn record(&mut self, chunk: &ChunkRecord, shortfall: JournalShortfall) {
         if self.broken {
             return;
         }
@@ -155,7 +155,7 @@ impl CaptureJournal {
     /// Delete the journal. Called once a manifest supersedes it, so a later
     /// reader cannot mistake a stale mirror for a capture in need of
     /// adoption.
-    pub fn discard(path: &Path) {
+    pub(crate) fn discard(path: &Path) {
         let _ = std::fs::remove_file(path);
     }
 

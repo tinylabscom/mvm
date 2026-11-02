@@ -7,6 +7,8 @@
 //! compiles a small closure. `mvm-build` re-exports every module under its
 //! old path.
 
+#![deny(unreachable_pub)]
+
 pub mod builder_boot;
 pub mod builder_guest_paths;
 pub mod host_payload_manifest;

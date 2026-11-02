@@ -54,17 +54,17 @@ use mvm_contract::verify::{hash_line, seal, signed_bytes_for};
 pub(crate) mod write_faults {
     use std::cell::Cell;
     #[derive(Clone, Copy, PartialEq, Eq)]
-    pub enum Boundary {
+    pub(crate) enum Boundary {
         PartialAppend,
         Sync,
     }
     thread_local! { static STATE: Cell<Option<(Boundary, bool)>> = const { Cell::new(None) }; }
-    pub struct Guard(Option<(Boundary, bool)>);
+    pub(crate) struct Guard(Option<(Boundary, bool)>);
     impl Guard {
-        pub fn arm(boundary: Boundary) -> Self {
+        pub(crate) fn arm(boundary: Boundary) -> Self {
             Self(STATE.replace(Some((boundary, false))))
         }
-        pub fn consumed(&self) -> bool {
+        pub(crate) fn consumed(&self) -> bool {
             STATE.get().is_some_and(|(_, consumed)| consumed)
         }
     }
@@ -73,7 +73,7 @@ pub(crate) mod write_faults {
             STATE.set(self.0);
         }
     }
-    pub fn take(boundary: Boundary) -> bool {
+    pub(crate) fn take(boundary: Boundary) -> bool {
         if STATE.get() == Some((boundary, false)) {
             STATE.set(Some((boundary, true)));
             true

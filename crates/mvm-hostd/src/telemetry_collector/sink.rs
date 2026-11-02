@@ -127,7 +127,7 @@ impl LossCounters {
 /// them, so a secret completed after the hold still withholds the chunk that
 /// completes it. What the hold buys is that the *first* part of the secret is
 /// not written either when the rest follows within it.
-pub const STDIO_HOLD: Duration = Duration::from_millis(500);
+pub(crate) const STDIO_HOLD: Duration = Duration::from_millis(500);
 
 /// Stdio streams with records held back at once. A guest has a handful of
 /// producers; past this the stream held longest is released early (its scan

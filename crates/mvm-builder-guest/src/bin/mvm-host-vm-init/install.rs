@@ -55,12 +55,12 @@ use crate::install_spec::{GateLevel, InstallSpec, Language};
 /// shuffling files. Mirrors that constant explicitly rather than
 /// re-exporting because `mvm-host-vm-init` doesn't depend on
 /// `mvm-compiler` (kept tiny to stay within the init binary's size budget).
-pub const CONTENT_SUBDIR: &str = "content";
-pub const SBOM_FILENAME: &str = "sbom.cdx.json";
-pub const FETCH_LOG_FILENAME: &str = "fetch.log";
-pub const CVE_FILENAME: &str = "cve.json";
+pub(crate) const CONTENT_SUBDIR: &str = "content";
+pub(crate) const SBOM_FILENAME: &str = "sbom.cdx.json";
+pub(crate) const FETCH_LOG_FILENAME: &str = "fetch.log";
+pub(crate) const CVE_FILENAME: &str = "cve.json";
 #[cfg(target_os = "linux")]
-pub const RESULT_FILENAME: &str = "result.json";
+pub(crate) const RESULT_FILENAME: &str = "result.json";
 
 /// CycloneDX-1.5 empty stub. Emitted when the SBOM tool is missing
 /// from the builder VM PATH. A stub SBOM is treated as a
@@ -76,7 +76,7 @@ const CVE_EMPTY_STUB: &str = r#"{"results":[]}"#;
 /// inside the job dir; the host (`LibkrunBuilderVm::run_build`
 /// Install arm) reads it after the VM powers off.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InstallReport {
+pub(crate) struct InstallReport {
     pub installer_exit_code: i32,
     pub sbom_emitted: bool,
     pub cve_emitted: bool,
@@ -92,7 +92,7 @@ impl InstallReport {
     /// Hand-rolled JSON serializer — matches the style of
     /// `mvm-host-vm-init::linux::write_result`. Keeps `serde_json`
     /// out of the init binary's closure.
-    pub fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         format!(
             r#"{{"installer_exit_code":{exit},"sbom_emitted":{sbom},"cve_emitted":{cve},"language":"{lang}","gate":"{gate}","content_path":"{content}","sbom_path":"{sbom_path}","fetch_log_path":"{fetch}","cve_path":"{cve_path}"}}"#,
             exit = self.installer_exit_code,
@@ -111,7 +111,7 @@ impl InstallReport {
 /// Abstraction over the `Command::spawn`-and-tee dance so unit
 /// tests can inject shell stubs. Production callers use
 /// [`SystemCommandRunner`] which spawns real subprocesses.
-pub trait CommandRunner {
+pub(crate) trait CommandRunner {
     /// Run `program` with `args` and `env` added to the inherited
     /// environment (cwd: any working dir the runner picks). Tee stdout +
     /// stderr to `log_path` if `Some`; ignore them otherwise. Returns the
@@ -147,7 +147,7 @@ pub trait CommandRunner {
 /// `pnpm` print to stderr during fetch — into one merged log the
 /// host seals later.
 #[cfg(target_os = "linux")]
-pub struct SystemCommandRunner;
+pub(crate) struct SystemCommandRunner;
 
 #[cfg(target_os = "linux")]
 impl CommandRunner for SystemCommandRunner {
@@ -223,7 +223,7 @@ impl CommandRunner for SystemCommandRunner {
 /// distinguish "installer ran and failed" from "init crashed
 /// before it could run."
 #[derive(Debug)]
-pub enum InstallError {
+pub(crate) enum InstallError {
     /// Directory create / file write / spec parse failed before
     /// any installer could run.
     Io(String),
@@ -253,7 +253,7 @@ impl std::error::Error for InstallError {}
 /// suppress this lint"). All fields are mandatory except
 /// `extra_path` (which is `None` in production and a tempdir-
 /// of-stubs in tests).
-pub struct InstallContext<'a> {
+pub(crate) struct InstallContext<'a> {
     pub spec: &'a InstallSpec,
     pub job_dir: &'a Path,
     pub out_dir: &'a Path,
@@ -300,7 +300,7 @@ fn networked_env<'a>(egress_env: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str
 /// that point `uv` / `pnpm` at that client. The CVE scan gets them too,
 /// because it queries an advisory service; the SBOM emitter does not, since
 /// it only reads content the installer already fetched.
-pub fn run_install(ctx: InstallContext<'_>) -> Result<InstallReport, InstallError> {
+pub(crate) fn run_install(ctx: InstallContext<'_>) -> Result<InstallReport, InstallError> {
     let InstallContext {
         spec,
         job_dir,
