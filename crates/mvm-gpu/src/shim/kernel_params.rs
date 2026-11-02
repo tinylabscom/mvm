@@ -22,7 +22,7 @@ const EIATTR_KPARAM_INFO: u8 = 0x17;
 /// This matches the GPU frame ceiling: a module larger than one frame can
 /// never be sent to the endpoint, so reading or parsing more would only give
 /// untrusted input a larger allocation surface.
-pub const MAX_MODULE_IMAGE_LEN: usize = crate::wire::MAX_MESSAGE_LEN as usize;
+pub const MAX_MODULE_IMAGE_LEN: usize = super::wire::MAX_MESSAGE_LEN as usize;
 
 /// A CUDA module image did not contain trustworthy launch metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,10 +137,10 @@ pub(crate) fn ptx_param_sizes(image: &[u8], entry: &str) -> Result<Vec<usize>, K
                 return Ok(sizes);
             }
             if let Some(directive) = parameter.strip_prefix(".param") {
-                if sizes.len() == crate::wire::MAX_KERNEL_PARAMS {
+                if sizes.len() == super::wire::MAX_KERNEL_PARAMS {
                     return Err(KernelParamError::ParameterCountExceeded {
                         count: sizes.len() + 1,
-                        max: crate::wire::MAX_KERNEL_PARAMS,
+                        max: super::wire::MAX_KERNEL_PARAMS,
                     });
                 }
                 sizes.push(ptx_param_size(directive.trim_start()));
@@ -320,7 +320,7 @@ fn nul_terminated<'a>(
 }
 
 fn parse_nv_info(info: &[u8]) -> Result<Vec<usize>, KernelParamError> {
-    let mut sizes = [None; crate::wire::MAX_KERNEL_PARAMS];
+    let mut sizes = [None; super::wire::MAX_KERNEL_PARAMS];
     let mut highest_ordinal = None;
     let mut cursor = 0_usize;
     while cursor < info.len() {
@@ -353,10 +353,10 @@ fn parse_nv_info(info: &[u8]) -> Result<Vec<usize>, KernelParamError> {
                     let ordinal = read_u16(payload, 4, "KPARAM_INFO record")?;
                     let ordinal_index = usize::from(ordinal);
                     let count = ordinal_index + 1;
-                    if count > crate::wire::MAX_KERNEL_PARAMS {
+                    if count > super::wire::MAX_KERNEL_PARAMS {
                         return Err(KernelParamError::ParameterCountExceeded {
                             count,
-                            max: crate::wire::MAX_KERNEL_PARAMS,
+                            max: super::wire::MAX_KERNEL_PARAMS,
                         });
                     }
                     if sizes[ordinal_index].is_some() {
@@ -815,7 +815,7 @@ mod tests {
             })
         );
         assert_eq!(
-            crate::ptx_entry_param_sizes(ptx.as_bytes(), "too_wide"),
+            super::super::ptx_entry_param_sizes(ptx.as_bytes(), "too_wide"),
             None
         );
     }

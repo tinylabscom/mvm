@@ -48,7 +48,7 @@ fn gpu_probe_staging(world: &mut CliWorld) {
             "--target",
             &target,
             "-p",
-            "mvm-gpu-shim-core",
+            "mvm-gpu",
             "--example",
             "gpu_guest_probe",
         ],

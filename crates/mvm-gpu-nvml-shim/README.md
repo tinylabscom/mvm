@@ -6,7 +6,7 @@ It lets GPU-aware tools discover a remoted device without guest driver access.
 ## How it works
 
 The exported NVML ABI validates initialization state and caller buffers.
-Supported queries become GPU protocol requests through `mvm-gpu-shim-core`.
+Supported queries become GPU protocol requests through `mvm-gpu::shim`.
 The per-machine host endpoint obtains answers from the selected GPU backend.
 Results are written back using the sizes and layouts defined by NVML.
 

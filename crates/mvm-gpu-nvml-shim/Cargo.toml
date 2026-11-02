@@ -16,7 +16,7 @@ name = "nvidia_ml"
 crate-type = ["cdylib"]
 
 [dependencies]
-mvm-gpu-shim-core = { path = "../mvm-gpu-shim-core" }
+mvm-gpu = { path = "../mvm-gpu" }
 mvm-contract = { workspace = true }
 libc.workspace = true
 

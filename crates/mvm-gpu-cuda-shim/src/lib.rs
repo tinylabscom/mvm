@@ -1,7 +1,7 @@
 //! Drop-in `libcuda.so.1` replacement for an mvm guest.
 //!
 //! Every exported symbol implements the CUDA Driver API by forwarding over
-//! vsock to the host GPU endpoint (`mvm-gpu-shim-core::call`). The workload
+//! vsock to the host GPU endpoint (`mvm_gpu::shim::call`). The workload
 //! links `libcuda.so.1` exactly as it would the real library; nothing in
 //! the guest carries a driver or a device node.
 //!
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use mvm_contract::protocol::gpu::GpuResponse;
-use mvm_gpu_shim_core::{call, guard, wire, write_cstr};
+use mvm_gpu::shim::{call, guard, wire, write_cstr};
 
 use libc::{c_char, c_int, c_uchar, c_uint, c_ulonglong, c_void};
 
@@ -759,9 +759,9 @@ pub unsafe extern "C" fn cuModuleGetFunction(
                         .lock()
                         .ok()
                         .and_then(|modules| modules.get(&(module as u64)).cloned());
-                    let param_sizes = image.as_deref().and_then(|bytes| {
-                        mvm_gpu_shim_core::ptx_entry_param_sizes(bytes, &name_owned)
-                    });
+                    let param_sizes = image
+                        .as_deref()
+                        .and_then(|bytes| mvm_gpu::shim::ptx_entry_param_sizes(bytes, &name_owned));
                     if let Ok(mut functions) = functions().lock() {
                         functions.insert(
                             handle,
