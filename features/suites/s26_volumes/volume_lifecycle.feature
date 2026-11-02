@@ -93,7 +93,7 @@ Feature: Encrypted block volume lifecycle and attachment
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume mount bdd-failed-volume --volume work --guest /data --rw"
     Then the command exits with code 0
-    When I attempt a direct start of machine "bdd-failed-volume" with backend "not-a-backend"
+    When I attempt a direct start of machine "bdd-failed-volume" with backend "firecracker"
     Then the command exits with code 1
     And the local volume attachment lease catalog is empty
 
@@ -169,7 +169,7 @@ Feature: Encrypted block volume lifecycle and attachment
     When I register host directory volume "missing-dirvol" at "/data/dirvol" for machine "bdd-missing-dir-volume"
     Then the command exits with code 0
     When I remove the source for host directory volume "missing-dirvol"
-    And I attempt a direct start of machine "bdd-missing-dir-volume" with backend "not-a-backend"
+    And I attempt a direct start of machine "bdd-missing-dir-volume" with backend "firecracker"
     Then the command exits with code 1
     And the error output contains "does not exist"
 
