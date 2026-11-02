@@ -29,7 +29,7 @@ pub mod build_env;
 mod host_shell;
 mod legacy_bundle_runtime;
 mod legacy_portable_runtime;
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub use legacy_bundle_runtime::fixtures::signed_legacy_runtime_fixture;
 #[cfg(any(test, feature = "test-support"))]
 pub use legacy_portable_runtime::fixtures::signed_legacy_portable_runtime_fixture;

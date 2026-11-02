@@ -172,7 +172,7 @@ pub(crate) mod fixtures {
     use mvm_core::vm_backend::LegacyBundleRuntimeProof;
 
     /// Synthetic signed archive inputs, never a verified runtime capability.
-    pub(crate) fn signed_legacy_runtime_fixture(
+    pub fn signed_legacy_runtime_fixture(
         home: &Path,
         trust_home: &Path,
         lean: bool,
