@@ -75,6 +75,13 @@ const ALLOWLIST: &[&str] = &[
     // current Windows support crates. These are host-only.
     "windows-core",
     "windows-sys",
+    // sigstore-crypto 0.15 uses der 0.7 / spki 0.7 / pem-rfc7468 0.6, while
+    // p256 0.14 (the CryptoProvider backend) pulls der 0.8 / spki 0.8 /
+    // pem-rfc7468 0.7. Both pairs are forced by these two crates' constraints;
+    // neither can be collapsed without forking one of them.
+    "der",
+    "pem-rfc7468",
+    "spki",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

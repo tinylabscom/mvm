@@ -36,7 +36,9 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 
 /// Max distinct crates reachable from any workspace member with **every**
 /// feature enabled, excluding dev-dependencies.
-const FEATURE_CLOSURE_BUDGET: usize = 532;
+// sigstore-crypto 0.15 + p256/p384 0.14 (the manifest-verify CryptoProvider)
+// add 6 crates to the all-features closure vs the previous aws-lc-rs path.
+const FEATURE_CLOSURE_BUDGET: usize = 538;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default
