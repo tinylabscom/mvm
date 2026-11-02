@@ -110,6 +110,29 @@ mod workspace_provider {
                     key.verify(data, &sig)
                         .map_err(|e| Error::Verification(e.to_string()))
                 }
+                // P-256 with SHA-384: hash first, then verify over the digest.
+                SigningScheme::EcdsaP256Sha384 => {
+                    use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
+                    let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(spki_pubkey_bytes)
+                        .map_err(|e| Error::InvalidKey(e.to_string()))?;
+                    let sig = p256::ecdsa::DerSignature::try_from(signature)
+                        .map_err(|e| Error::InvalidKeyFormat(e.to_string()))?;
+                    let digest = sha2::Sha384::digest(data);
+                    key.verify_prehash(&digest, &sig)
+                        .map_err(|e| Error::Verification(e.to_string()))
+                }
+                // P-384 with SHA-256 (used by RFC 3161 TSA timestamps in Rekor bundles):
+                // hash with SHA-256 first, then verify over the digest.
+                SigningScheme::EcdsaP384Sha256 => {
+                    use p384::ecdsa::signature::hazmat::PrehashVerifier as _;
+                    let key = p384::ecdsa::VerifyingKey::from_sec1_bytes(spki_pubkey_bytes)
+                        .map_err(|e| Error::InvalidKey(e.to_string()))?;
+                    let sig = p384::ecdsa::DerSignature::try_from(signature)
+                        .map_err(|e| Error::InvalidKeyFormat(e.to_string()))?;
+                    let digest = sha2::Sha256::digest(data);
+                    key.verify_prehash(&digest, &sig)
+                        .map_err(|e| Error::Verification(e.to_string()))
+                }
                 SigningScheme::EcdsaP384Sha384 => {
                     use p384::ecdsa::signature::Verifier as _;
                     let key = p384::ecdsa::VerifyingKey::from_sec1_bytes(spki_pubkey_bytes)
