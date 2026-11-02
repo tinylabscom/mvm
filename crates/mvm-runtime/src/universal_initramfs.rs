@@ -804,6 +804,42 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_with_an_unprepared_initramfs_refuses_naming_bootstrap_without_a_connection() {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+        // Any acquisition attempt would dial this listener.
+        let mirror = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        mirror.set_nonblocking(true).unwrap();
+        env.set(
+            "MVM_UPDATE_DOWNLOAD_URL",
+            format!("http://{}", mirror.local_addr().unwrap()),
+        );
+
+        let mut sc = VmStartConfig {
+            kernel_path: Some("/dummy/vmlinux".to_string()),
+            rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
+            ..Default::default()
+        };
+        let error = attach_universal_initramfs_if_cached(&mut sc, "firecracker")
+            .expect_err("an unprepared initramfs must refuse the launch");
+
+        assert!(
+            format!("{error:#}").contains("mvmctl bootstrap"),
+            "{error:#}"
+        );
+        assert!(
+            sc.initrd_path.is_none(),
+            "a refused launch attaches nothing"
+        );
+        assert_eq!(
+            mirror.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the refusal must not open a connection"
+        );
+    }
+
+    #[test]
     fn attach_universal_initramfs_still_refuses_a_prefer_overlay_rootfs_boot() {
         // PreferOverlay is the default policy, and it is the one every
         // `machine run --image` launch actually carries into this function on a
