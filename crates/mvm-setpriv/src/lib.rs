@@ -150,6 +150,7 @@ fn apply_privileges(invocation: &Invocation) -> Result<(), String> {
         prctl(PR_SET_KEEPCAPS, 1, "prctl(PR_SET_KEEPCAPS) failed")?;
     }
     if invocation.clear_groups {
+        // SAFETY: `setgroups(0, NULL)` reads no memory; it only drops supplementary groups.
         let rc = unsafe { libc::setgroups(0, std::ptr::null()) };
         if rc != 0 {
             return last_error("setgroups(clear) failed");
@@ -157,12 +158,14 @@ fn apply_privileges(invocation: &Invocation) -> Result<(), String> {
     }
 
     let gid = invocation.regid as libc::gid_t;
+    // SAFETY: `setresgid` takes plain integer ids and reads no memory.
     let rc = unsafe { libc::setresgid(gid, gid, gid) };
     if rc != 0 {
         return last_error("setresgid failed");
     }
 
     let uid = invocation.reuid as libc::uid_t;
+    // SAFETY: `setresuid` takes plain integer ids and reads no memory.
     let rc = unsafe { libc::setresuid(uid, uid, uid) };
     if rc != 0 {
         return last_error("setresuid failed");
@@ -183,6 +186,7 @@ fn apply_privileges(invocation: &Invocation) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn prctl(option: libc::c_int, arg: libc::c_ulong, message: &str) -> Result<(), String> {
+    // SAFETY: every `prctl` option this wrapper is called with takes integer arguments only.
     let rc = unsafe { libc::prctl(option, arg, 0, 0, 0) };
     if rc == 0 { Ok(()) } else { last_error(message) }
 }
@@ -200,6 +204,7 @@ fn raise_ambient_capabilities(capabilities: u32) -> Result<(), String> {
         if capabilities & (1u32 << capability) == 0 {
             continue;
         }
+        // SAFETY: `PR_CAP_AMBIENT` takes integer arguments only; no pointer is passed.
         let rc = unsafe {
             libc::prctl(
                 PR_CAP_AMBIENT,
@@ -228,6 +233,7 @@ fn set_capabilities(capabilities: u32) -> Result<(), String> {
         pid: 0,
     };
     let mut data = [CapData::default(); 2];
+    // SAFETY: `header` and `data` are live, properly laid out `repr(C)` values; `capget` writes at most the 2 `CapData` slots the v3 ABI defines.
     let rc = unsafe {
         libc::syscall(
             libc::SYS_capget,
@@ -245,6 +251,7 @@ fn set_capabilities(capabilities: u32) -> Result<(), String> {
         inheritable: capabilities,
     };
     data[1] = CapData::default();
+    // SAFETY: `header` and `data` are live `repr(C)` values; `capset` reads the header and the 2 `CapData` slots of the v3 ABI.
     let rc = unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) };
     if rc != 0 {
         return last_error("capset(requested capabilities) failed");
@@ -259,6 +266,7 @@ fn drop_all_capabilities() -> Result<(), String> {
         pid: 0,
     };
     let data = [CapData::default(); 2];
+    // SAFETY: `header` and `data` are live `repr(C)` values; `capset` reads the header and the 2 `CapData` slots of the v3 ABI.
     let rc = unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) };
     if rc != 0 {
         return last_error("capset(drop all) failed");
