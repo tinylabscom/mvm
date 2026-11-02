@@ -28,11 +28,11 @@ use mvm_fs::oci::{ClientConfig, ClientProtocol, ImageReference};
 use sha2::{Digest, Sha256};
 
 /// A running hermetic registry. Drop the value to tear it down.
-pub struct HermeticRegistry {
+pub(crate) struct HermeticRegistry {
     server: TestHttpServer,
 }
 
-pub struct BearerChallengeFixture {
+pub(crate) struct BearerChallengeFixture {
     issued_token: String,
     basic_auth: Option<BasicAuthFixture>,
     realm_path: String,
@@ -41,7 +41,7 @@ pub struct BearerChallengeFixture {
 }
 
 impl BearerChallengeFixture {
-    pub fn builder(repository: &str) -> BearerChallengeFixtureBuilder {
+    pub(crate) fn builder(repository: &str) -> BearerChallengeFixtureBuilder {
         BearerChallengeFixtureBuilder {
             basic_auth: None,
             issued_token: None,
@@ -52,7 +52,7 @@ impl BearerChallengeFixture {
     }
 }
 
-pub struct BearerChallengeFixtureBuilder {
+pub(crate) struct BearerChallengeFixtureBuilder {
     basic_auth: Option<BasicAuthFixture>,
     issued_token: Option<String>,
     realm_path: String,
@@ -61,12 +61,16 @@ pub struct BearerChallengeFixtureBuilder {
 }
 
 impl BearerChallengeFixtureBuilder {
-    pub fn issued_token(mut self, token: impl Into<String>) -> Self {
+    pub(crate) fn issued_token(mut self, token: impl Into<String>) -> Self {
         self.issued_token = Some(token.into());
         self
     }
 
-    pub fn basic_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub(crate) fn basic_auth(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
         self.basic_auth = Some(BasicAuthFixture {
             password: password.into(),
             username: username.into(),
@@ -74,7 +78,7 @@ impl BearerChallengeFixtureBuilder {
         self
     }
 
-    pub fn build(self) -> BearerChallengeFixture {
+    pub(crate) fn build(self) -> BearerChallengeFixture {
         BearerChallengeFixture {
             issued_token: self
                 .issued_token
@@ -95,7 +99,7 @@ struct BasicAuthFixture {
 impl HermeticRegistry {
     /// Spin up a fresh localhost registry fixture and register the
     /// `/v2/` ping handler.
-    pub async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         let server = TestHttpServer::start().await;
         server.register(Route::exact(
             "GET",
@@ -111,13 +115,13 @@ impl HermeticRegistry {
 
     /// `host:port` form, suitable for use as the registry portion
     /// of an `ImageReference`.
-    pub fn host(&self) -> String {
+    pub(crate) fn host(&self) -> String {
         self.server.addr().to_string()
     }
 
     /// An `ImageReference` whose registry points at this fixture
     /// and whose repository / reference are caller-supplied.
-    pub fn image_ref(&self, repository: &str, tag: &str) -> ImageReference {
+    pub(crate) fn image_ref(&self, repository: &str, tag: &str) -> ImageReference {
         format!("{}/{repository}:{tag}", self.host())
             .parse()
             .expect("fixture-built reference parses")
@@ -128,7 +132,7 @@ impl HermeticRegistry {
     /// digest-pin requests), with the right Content-Type and
     /// Docker-Content-Digest headers. Returns the canonical digest of the
     /// bytes.
-    pub async fn register_manifest(
+    pub(crate) async fn register_manifest(
         &self,
         repository: &str,
         reference: &str,
@@ -152,7 +156,7 @@ impl HermeticRegistry {
     /// Same as [`Self::register_manifest`], but
     /// deliberately omits the `Docker-Content-Digest` response
     /// header to simulate registries that do not advertise it.
-    pub async fn register_manifest_without_digest_header(
+    pub(crate) async fn register_manifest_without_digest_header(
         &self,
         repository: &str,
         reference: &str,
@@ -182,7 +186,7 @@ impl HermeticRegistry {
     /// Serve a manifest only when the request includes the given
     /// bearer token. Also registers the digest path with the same
     /// auth requirement.
-    pub async fn register_bearer_manifest_with_digest_path(
+    pub(crate) async fn register_bearer_manifest_with_digest_path(
         &self,
         repository: &str,
         reference: &str,
@@ -209,7 +213,7 @@ impl HermeticRegistry {
     /// the client exchanges it for a token at the fixture token
     /// endpoint, and the retried manifest GET succeeds with the
     /// issued bearer token.
-    pub async fn register_challenged_manifest_with_digest_path(
+    pub(crate) async fn register_challenged_manifest_with_digest_path(
         &self,
         repository: &str,
         reference: &str,
@@ -267,7 +271,12 @@ impl HermeticRegistry {
     /// Serve `bytes` at `/v2/<repository>/blobs/<sha256-digest>`.
     /// Returns the digest the bytes hash to (caller can compare
     /// against the manifest's layer descriptor).
-    pub async fn register_blob(&self, repository: &str, media_type: &str, bytes: &[u8]) -> String {
+    pub(crate) async fn register_blob(
+        &self,
+        repository: &str,
+        media_type: &str,
+        bytes: &[u8],
+    ) -> String {
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
         self.register_blob_route(repository, media_type, bytes, digest.as_str(), None);
         digest
@@ -275,7 +284,7 @@ impl HermeticRegistry {
 
     /// Serve a blob only when the request includes the given bearer
     /// token.
-    pub async fn register_bearer_blob(
+    pub(crate) async fn register_bearer_blob(
         &self,
         repository: &str,
         media_type: &str,
@@ -290,7 +299,7 @@ impl HermeticRegistry {
     /// Serve an authenticated blob route that redirects to an unauthenticated
     /// same-origin object route. This proves clients strip registry credentials
     /// before following a blob redirect.
-    pub async fn register_redirected_bearer_blob(
+    pub(crate) async fn register_redirected_bearer_blob(
         &self,
         repository: &str,
         media_type: &str,
@@ -326,7 +335,11 @@ impl HermeticRegistry {
 
     /// Serve a blob route that redirects to itself indefinitely. Clients must
     /// stop at their redirect bound instead of looping forever.
-    pub async fn register_blob_redirect_loop(&self, repository: &str, bytes: &[u8]) -> String {
+    pub(crate) async fn register_blob_redirect_loop(
+        &self,
+        repository: &str,
+        bytes: &[u8],
+    ) -> String {
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
         let path = format!("/v2/{repository}/blobs/{digest}");
         self.server.register(Route::exact(
@@ -340,7 +353,7 @@ impl HermeticRegistry {
     /// Serve a *tampered* blob: the path is the legitimate digest
     /// (so the caller's request reaches us) but the response body
     /// is different bytes (so digest verification fails).
-    pub async fn register_tampered_blob(
+    pub(crate) async fn register_tampered_blob(
         &self,
         repository: &str,
         claimed_digest: &str,
@@ -360,7 +373,7 @@ impl HermeticRegistry {
 
     /// Serve a blob that fails `n` times with 503, then succeeds
     /// on attempt `n+1`. Used to exercise the bounded-retry path.
-    pub async fn register_flaky_blob(
+    pub(crate) async fn register_flaky_blob(
         &self,
         repository: &str,
         bytes: &[u8],
@@ -491,7 +504,7 @@ fn token_path(challenge: &BearerChallengeFixture) -> String {
 /// need `HttpsExcept` listing the fixture's `host:port` so the same
 /// `OciManifestFetcher` / `OciLayerFetcher` code path is exercised against
 /// both.
-pub fn client_config_for(registry: &HermeticRegistry) -> ClientConfig {
+pub(crate) fn client_config_for(registry: &HermeticRegistry) -> ClientConfig {
     ClientConfig {
         protocol: ClientProtocol::HttpsExcept(vec![registry.host()]),
     }
@@ -500,7 +513,7 @@ pub fn client_config_for(registry: &HermeticRegistry) -> ClientConfig {
 /// Builds a minimal OCI image manifest JSON pointing at one layer.
 /// The layer's bytes determine the layer descriptor's digest +
 /// size. Returns `(manifest_bytes, layer_digest)`.
-pub fn minimal_image_manifest(layer_bytes: &[u8], media_type: &str) -> (Vec<u8>, String) {
+pub(crate) fn minimal_image_manifest(layer_bytes: &[u8], media_type: &str) -> (Vec<u8>, String) {
     let layer_digest = format!("sha256:{}", hex::encode(Sha256::digest(layer_bytes)));
     let manifest = serde_json::json!({
         "schemaVersion": 2,

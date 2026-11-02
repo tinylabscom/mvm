@@ -304,7 +304,7 @@ pub fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report {
 /// agent's IPv6 bring-up shares.
 #[cfg(any(target_os = "linux", test))]
 mod wire {
-    pub use crate::netlink::wire::*;
+    pub(crate) use crate::netlink::wire::*;
     use std::net::Ipv4Addr;
 
     /// Encode an `RTM_NEWROUTE` netlink message installing a blackhole
@@ -318,7 +318,7 @@ mod wire {
     ///
     /// `seq` is echoed back in the ACK so the caller can match request
     /// to reply on a socket it owns exclusively.
-    pub fn encode_blackhole_route_v4(addr: Ipv4Addr, prefix_len: u8, seq: u32) -> Vec<u8> {
+    pub(crate) fn encode_blackhole_route_v4(addr: Ipv4Addr, prefix_len: u8, seq: u32) -> Vec<u8> {
         let mut msg = Vec::with_capacity(36);
         push_nlmsghdr(
             &mut msg,

@@ -10,14 +10,14 @@ use tokio::task::JoinHandle;
 const HEADER_TERMINATOR: &[u8] = b"\r\n\r\n";
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 
-pub struct TestHttpServer {
+pub(crate) struct TestHttpServer {
     addr: SocketAddr,
     routes: Arc<Mutex<Vec<Route>>>,
     task: JoinHandle<()>,
 }
 
 impl TestHttpServer {
-    pub async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test HTTP server");
@@ -30,11 +30,11 @@ impl TestHttpServer {
         Self { addr, routes, task }
     }
 
-    pub fn addr(&self) -> SocketAddr {
+    pub(crate) fn addr(&self) -> SocketAddr {
         self.addr
     }
 
-    pub fn register(&self, route: Route) {
+    pub(crate) fn register(&self, route: Route) {
         self.routes.lock().expect("lock test routes").push(route);
     }
 }
@@ -45,7 +45,7 @@ impl Drop for TestHttpServer {
     }
 }
 
-pub struct Route {
+pub(crate) struct Route {
     method: String,
     path: String,
     expected_auth: Option<String>,
@@ -53,7 +53,11 @@ pub struct Route {
 }
 
 impl Route {
-    pub fn exact(method: impl Into<String>, path: impl Into<String>, responder: Responder) -> Self {
+    pub(crate) fn exact(
+        method: impl Into<String>,
+        path: impl Into<String>,
+        responder: Responder,
+    ) -> Self {
         Self {
             method: method.into(),
             path: path.into(),
@@ -62,12 +66,12 @@ impl Route {
         }
     }
 
-    pub fn with_bearer_auth(mut self, token: impl Into<String>) -> Self {
+    pub(crate) fn with_bearer_auth(mut self, token: impl Into<String>) -> Self {
         self.expected_auth = Some(format!("Bearer {}", token.into()));
         self
     }
 
-    pub fn with_authorization(mut self, authorization: impl Into<String>) -> Self {
+    pub(crate) fn with_authorization(mut self, authorization: impl Into<String>) -> Self {
         self.expected_auth = Some(authorization.into());
         self
     }
@@ -79,7 +83,7 @@ impl Route {
     }
 }
 
-pub enum Responder {
+pub(crate) enum Responder {
     Static(TestResponse),
     Flaky(FlakyResponder),
 }
@@ -93,14 +97,14 @@ impl Responder {
     }
 }
 
-pub struct FlakyResponder {
+pub(crate) struct FlakyResponder {
     calls: Arc<AtomicU32>,
     fail_first: u32,
     success: TestResponse,
 }
 
 impl FlakyResponder {
-    pub fn new(fail_first: u32, success: TestResponse) -> Self {
+    pub(crate) fn new(fail_first: u32, success: TestResponse) -> Self {
         Self {
             calls: Arc::new(AtomicU32::new(0)),
             fail_first,
@@ -122,14 +126,14 @@ impl FlakyResponder {
 }
 
 #[derive(Clone)]
-pub struct TestResponse {
+pub(crate) struct TestResponse {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
 impl TestResponse {
-    pub fn builder(status: u16) -> TestResponseBuilder {
+    pub(crate) fn builder(status: u16) -> TestResponseBuilder {
         TestResponseBuilder {
             status,
             headers: Vec::new(),
@@ -138,28 +142,28 @@ impl TestResponse {
     }
 }
 
-pub struct TestResponseBuilder {
+pub(crate) struct TestResponseBuilder {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
 impl TestResponseBuilder {
-    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub(crate) fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
     }
 
-    pub fn body_bytes(mut self, body: impl Into<Vec<u8>>) -> Self {
+    pub(crate) fn body_bytes(mut self, body: impl Into<Vec<u8>>) -> Self {
         self.body = body.into();
         self
     }
 
-    pub fn body_string(self, body: impl Into<String>) -> Self {
+    pub(crate) fn body_string(self, body: impl Into<String>) -> Self {
         self.body_bytes(body.into().into_bytes())
     }
 
-    pub fn build(self) -> TestResponse {
+    pub(crate) fn build(self) -> TestResponse {
         TestResponse {
             status: self.status,
             headers: self.headers,

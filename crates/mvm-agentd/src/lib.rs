@@ -1,6 +1,7 @@
 // mvm-agentd: vsock protocol and openclaw connector mapping for mvm
 // Depends on mvm-core
 
+#![deny(unreachable_pub)]
 /// Loopback DNS resolver (`mvm-addon-dns`).
 #[cfg(feature = "addons")]
 pub mod addon_dns;

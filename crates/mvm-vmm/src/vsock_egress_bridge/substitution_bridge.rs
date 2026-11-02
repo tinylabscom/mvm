@@ -311,7 +311,7 @@ struct EndpointConn {
 
 impl SubstitutionBridge {
     #[cfg(test)]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_budget(EgressBudget::new())
     }
 
@@ -325,7 +325,7 @@ impl SubstitutionBridge {
     }
 
     /// Point the bridge at this VM's substitution-endpoint socket.
-    pub fn set_endpoint(&mut self, path: &Path) {
+    pub(crate) fn set_endpoint(&mut self, path: &Path) {
         self.endpoint = Some(path.to_path_buf());
     }
 
@@ -336,7 +336,7 @@ impl SubstitutionBridge {
     }
 
     /// Share the open-connection counter with the run loop heartbeat.
-    pub fn set_activity(&mut self, counter: Arc<AtomicUsize>) {
+    pub(crate) fn set_activity(&mut self, counter: Arc<AtomicUsize>) {
         self.active = Some(counter);
     }
 
@@ -383,7 +383,7 @@ impl SubstitutionBridge {
 
 impl SubstitutionBridge {
     /// Fds the host-I/O thread should watch for endpoint replies.
-    pub fn poll_fds(&self) -> Vec<RawFd> {
+    pub(crate) fn poll_fds(&self) -> Vec<RawFd> {
         self.conns
             .values()
             .map(|conn| conn.stream.as_raw_fd())

@@ -211,7 +211,11 @@ mod apfs {
 
     /// Serve one-request-per-connection APFS operations until the process is
     /// terminated by its service manager.
-    pub fn serve_helper(socket: &Path, allowed_root: &Path, allowed_uid: u32) -> io::Result<()> {
+    pub(crate) fn serve_helper(
+        socket: &Path,
+        allowed_root: &Path,
+        allowed_uid: u32,
+    ) -> io::Result<()> {
         // SAFETY: geteuid has no pointer arguments and cannot invalidate Rust
         // references or memory.
         if unsafe { libc::geteuid() } != 0 {
@@ -472,13 +476,13 @@ mod apfs {
     }
 
     /// Apple APFS-backed trusted snapshot provider.
-    pub struct ApfsTrustedSnapshotBackend {
+    pub(crate) struct ApfsTrustedSnapshotBackend {
         root: PathBuf,
         staging: FsSnapshotStore,
     }
 
     /// Unprivileged client for the authenticated APFS helper boundary.
-    pub struct ApfsTrustedSnapshotHelperBackend {
+    pub(crate) struct ApfsTrustedSnapshotHelperBackend {
         root: PathBuf,
         staging: FsSnapshotStore,
         socket: PathBuf,
@@ -594,7 +598,7 @@ mod apfs {
 
     impl ApfsTrustedSnapshotBackend {
         /// Open an APFS provider rooted on the volume containing root.
-        pub fn new(root: impl AsRef<Path>) -> io::Result<Self> {
+        pub(crate) fn new(root: impl AsRef<Path>) -> io::Result<Self> {
             fs::create_dir_all(root.as_ref())?;
             let root = root.as_ref().canonicalize()?;
             let staging = FsSnapshotStore::new(&root)?;
