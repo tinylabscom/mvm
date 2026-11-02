@@ -143,13 +143,13 @@ impl OciArtifactClient {
         let layer_digest = sha256_digest(layer);
         let manifest_bytes = artifact_manifest_bytes(kind, &layer_digest, layer.len() as u64)?;
         let manifest_digest = sha256_digest(&manifest_bytes);
-        if let Some(pinned) = &reference.digest {
-            if pinned != &manifest_digest {
-                return Err(OciError::DigestMismatch {
-                    expected: pinned.clone(),
-                    computed: manifest_digest,
-                });
-            }
+        if let Some(pinned) = &reference.digest
+            && pinned != &manifest_digest
+        {
+            return Err(OciError::DigestMismatch {
+                expected: pinned.clone(),
+                computed: manifest_digest,
+            });
         }
 
         self.ensure_blob(reference, &sha256_digest(OCI_EMPTY_BLOB), OCI_EMPTY_BLOB)
@@ -166,13 +166,13 @@ impl OciArtifactClient {
             .client
             .put_manifest(&target, OCI_IMAGE_MANIFEST_MEDIA_TYPE, &manifest_bytes)
             .await?;
-        if let Some(reported) = reported {
-            if reported != manifest_digest {
-                return Err(OciError::DigestMismatch {
-                    expected: manifest_digest,
-                    computed: reported,
-                });
-            }
+        if let Some(reported) = reported
+            && reported != manifest_digest
+        {
+            return Err(OciError::DigestMismatch {
+                expected: manifest_digest,
+                computed: reported,
+            });
         }
 
         Ok(PushedArtifact {

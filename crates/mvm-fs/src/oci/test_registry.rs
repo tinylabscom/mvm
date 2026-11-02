@@ -263,15 +263,15 @@ fn route(
             None => Response::new(404),
         };
     }
-    if let Some(token) = &state.required_token {
-        if request.authorization.as_deref() != Some(&format!("Bearer {token}")) {
-            return Response::new(401).header(
-                "WWW-Authenticate",
-                format!(
-                    "Bearer realm=\"http://{addr}/token\",service=\"test-registry\",scope=\"repository:any:pull,push\""
-                ),
-            );
-        }
+    if let Some(token) = &state.required_token
+        && request.authorization.as_deref() != Some(&format!("Bearer {token}"))
+    {
+        return Response::new(401).header(
+            "WWW-Authenticate",
+            format!(
+                "Bearer realm=\"http://{addr}/token\",service=\"test-registry\",scope=\"repository:any:pull,push\""
+            ),
+        );
     }
 
     let Some(rest) = path.strip_prefix("/v2/") else {
@@ -290,10 +290,10 @@ fn route(
 }
 
 fn blob(state: &State, request: &Request, digest: &str) -> Response {
-    if request.method == "GET" {
-        if let Some(location) = state.blob_redirects.get(digest) {
-            return Response::new(307).header("Location", location.clone());
-        }
+    if request.method == "GET"
+        && let Some(location) = state.blob_redirects.get(digest)
+    {
+        return Response::new(307).header("Location", location.clone());
     }
     let Some(stored) = state.blobs.get(digest) else {
         return Response::new(404);

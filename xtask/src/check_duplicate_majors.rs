@@ -61,25 +61,27 @@ const ALLOWLIST: &[&str] = &[
     // feature took the whole ASN.1 stack with it, so the shipped closure now
     // carries no nom at all and this entry covers the fuzz tooling alone.
     "nom",
-    // The image-set signature verifier in the default build: sigstore-verify
-    // 0.11 is still on RustCrypto 0.10 while the workspace is on 0.11, and it
-    // brings an older rand/rand_core, ryu-js and aws-lc-rs's untrusted 0.7.
-    // See deny.toml's matching entry for the full audit.
+    // sigstore-verify 0.15 aligned on RustCrypto 0.11, so most of the old
+    // 0.10-vs-0.11 duplicates are gone. block-buffer/const-oid/cpufeatures/
+    // crypto-common/digest still appear because gix pulls in a sha1 crate that
+    // uses the 0.10 digest line.
     "block-buffer",
     "const-oid",
     "cpufeatures",
     "crypto-common",
     "digest",
-    "rand",
-    "rand_core",
     "ryu-js",
-    "sha2",
-    "signature",
-    "untrusted",
     // sysinfo remains on an older Windows API family than Tokio and the
     // current Windows support crates. These are host-only.
     "windows-core",
     "windows-sys",
+    // sigstore-crypto 0.15 uses der 0.7 / spki 0.7 / pem-rfc7468 0.6, while
+    // p256 0.14 (the CryptoProvider backend) pulls der 0.8 / spki 0.8 /
+    // pem-rfc7468 0.7. Both pairs are forced by these two crates' constraints;
+    // neither can be collapsed without forking one of them.
+    "der",
+    "pem-rfc7468",
+    "spki",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

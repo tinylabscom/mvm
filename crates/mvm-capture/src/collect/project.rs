@@ -149,33 +149,33 @@ fn visit(
     }
     ctx.total_bytes += size;
 
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if ctx.manifest_names.contains(name) {
-            let kind = match name {
-                "Cargo.toml" | "package.json" | "pyproject.toml" | "go.mod" | "mvm.toml"
-                | "mvm.json" => ObservationKind::ProjectManifest,
-                "Dockerfile" | ".env" => ObservationKind::ConfigurationFile,
-                _ => ObservationKind::Lockfile,
-            };
-            let content_hash = hash_bytes(&read_limited(path, ctx.limits.max_file_bytes)?);
-            let sensitivity = classify_sensitivity(path);
-            report.observations.push(Observation {
-                id: obs_id("manifest", rel),
-                kind,
-                path: Some(rel.display().to_string()),
-                source: "project-scan".to_owned(),
-                evidence: Evidence {
-                    observed_path: Some(rel.display().to_string()),
-                    content_hash: Some(content_hash),
-                    declared: true,
-                    sensitivity,
-                    ..Default::default()
-                },
-                confidence: crate::report::Confidence::Observed,
-                warnings: vec![],
-                provenance: vec![format!("scanned {}", rel.display())],
-            });
-        }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str())
+        && ctx.manifest_names.contains(name)
+    {
+        let kind = match name {
+            "Cargo.toml" | "package.json" | "pyproject.toml" | "go.mod" | "mvm.toml"
+            | "mvm.json" => ObservationKind::ProjectManifest,
+            "Dockerfile" | ".env" => ObservationKind::ConfigurationFile,
+            _ => ObservationKind::Lockfile,
+        };
+        let content_hash = hash_bytes(&read_limited(path, ctx.limits.max_file_bytes)?);
+        let sensitivity = classify_sensitivity(path);
+        report.observations.push(Observation {
+            id: obs_id("manifest", rel),
+            kind,
+            path: Some(rel.display().to_string()),
+            source: "project-scan".to_owned(),
+            evidence: Evidence {
+                observed_path: Some(rel.display().to_string()),
+                content_hash: Some(content_hash),
+                declared: true,
+                sensitivity,
+                ..Default::default()
+            },
+            confidence: crate::report::Confidence::Observed,
+            warnings: vec![],
+            provenance: vec![format!("scanned {}", rel.display())],
+        });
     }
 
     #[cfg(unix)]
