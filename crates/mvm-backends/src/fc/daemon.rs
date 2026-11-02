@@ -249,6 +249,36 @@ fn start_vm_firecracker_inner(
     Ok(())
 }
 
+/// Rewrite the launch script so sudo keeps descriptors below `closefrom`.
+#[cfg(any(target_os = "linux", test))]
+fn sudo_closefrom_script(script: &str, closefrom: u32) -> Result<String> {
+    let marker = "sudo setsid";
+    anyhow::ensure!(script.contains(marker), "sudo handoff launch shape changed");
+    Ok(script.replace(marker, &format!("sudo -C {closefrom} setsid")))
+}
+
+/// Refuse up front, with the fix named, when sudo will not honour `-C`.
+///
+/// sudo closes every descriptor from 3 up before it execs unless `-C` moves
+/// that boundary, and it rejects `-C` unless sudoers sets `closefrom_override`.
+/// Reopening the images by path in the root process would drop the original
+/// descriptions, so there is no safe fallback.
+#[cfg(any(target_os = "linux", test))]
+fn require_sudo_closefrom(sudo: &str, closefrom: u32) -> Result<()> {
+    let output = mvm_core::env_hygiene::helper_command(sudo)
+        .args(["-n", "-C", &closefrom.to_string(), "true"])
+        .output()
+        .with_context(|| format!("running `{sudo} -n -C {closefrom} true`"))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "a writable-volume VM started by a non-root user needs sudo to keep the writer's \
+         descriptors open, and this host's sudoers does not allow `sudo -C`. Add \
+         `Defaults closefrom_override` to /etc/sudoers.d (or run mvmctl as root): {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
 /// Preserve exactly the original writable descriptors through bash and sudo.
 #[cfg(target_os = "linux")]
 fn run_with_writable_handoff(
@@ -258,10 +288,8 @@ fn run_with_writable_handoff(
     use std::os::unix::process::CommandExt;
 
     if effective_user_id() != 0 {
-        let marker = "sudo setsid";
-        let replacement = format!("sudo -C {} setsid", handoff.last() + 1);
-        anyhow::ensure!(script.contains(marker), "sudo handoff launch shape changed");
-        script = script.replace(marker, &replacement);
+        require_sudo_closefrom("sudo", handoff.last() + 1)?;
+        script = sudo_closefrom_script(&script, handoff.last() + 1)?;
     }
     let first = handoff.first();
     let last = handoff.last();
@@ -763,6 +791,35 @@ pub fn read_firecracker_pid(abs_dir: &str) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn sudo_closefrom_script_rewrites_the_launch_line() {
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
+        let out = sudo_closefrom_script(&script, 1007).expect("rewrite");
+        assert!(out.contains("sudo -C 1007 setsid"), "{out}");
+        assert!(sudo_closefrom_script("true", 4).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sudo_that_rejects_closefrom_is_refused_naming_the_sudoers_fix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = dir.path().join("sudo");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'sudo: you are not permitted to use the -C option' >&2\nexit 1\n",
+        )
+        .expect("write");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let err = require_sudo_closefrom(&fake.to_string_lossy(), 1004).expect_err("refused");
+        assert!(format!("{err}").contains("closefrom_override"), "{err}");
+        let ok = dir.path().join("ok-sudo");
+        std::fs::write(&ok, "#!/bin/sh\nexit 0\n").expect("write");
+        std::fs::set_permissions(&ok, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        require_sudo_closefrom(&ok.to_string_lossy(), 1004).expect("permitted");
+    }
+
     use super::*;
 
     #[test]
