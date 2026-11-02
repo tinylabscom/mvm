@@ -177,10 +177,22 @@ reap() {
         cleanup_failure "$phase cleanup could not confirm stop; removal refused"
         return 1
       fi
-      if ! MVM_HOME="$E2E_HOME" "$MVMCTL" machine rm "$name" --yes >/dev/null 2>&1; then
-        cleanup_failure "$phase cleanup could not remove the stopped machine"
-        return 1
-      fi
+      # stop is a request, not an event: teardown (a supervisor exiting, state
+      # flushing) lands after the CLI returns, and rm refuses a machine still
+      # running. The refusal deletes nothing, so retry against that window —
+      # what would replace this is a supervisor-exit notification.
+      local attempt delay=1
+      for attempt in 1 2 3 4 5; do
+        if MVM_HOME="$E2E_HOME" "$MVMCTL" machine rm "$name" --yes >/dev/null 2>&1; then
+          break
+        fi
+        if [[ $attempt == 5 ]]; then
+          cleanup_failure "$phase cleanup could not remove the stopped machine"
+          return 1
+        fi
+        sleep "$delay"
+        delay=$((delay * 2))
+      done
     done <<< "$created"
   elif [[ "$phase" == "pre-run" ]]; then
     echo "==> pre-run cleanup: nothing left over"
