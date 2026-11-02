@@ -481,8 +481,8 @@ all 90 direct dependencies (definition in the closure map).
 | Advisories | `cargo audit --no-fetch --db ~/.cargo/advisory-dbs/advisory-db-3157b0e258782691` (cargo-audit 0.22.2; RustSec database commit `2295466c`, 2026-10-30, 1,395 advisories, 727 lock entries) and `cargo deny --offline check advisories` (cargo-deny 0.19.4, `deny.toml` `db-path` database commit `a78282a1`, 2026-10-26) | Both scan `Cargo.lock`, so the 10 off-by-default dependencies that are not in the lock (`aya`, `clap_mangen`, `hickory-resolver`, `notify`, `notify-debouncer-mini`, `object_store`, `schemars`, `tss-esapi`, `wasmtime`, `wasmtime-wasi`) are unscanned. The two databases are four days apart |
 | Licence | `cargo deny --offline check licenses` and the `license` field of `cargo metadata --offline` | SPDX expression as published, not a legal review |
 | Units | Cargo's unit graph for the `mvmctl` release command in the section below (`--profile release-min --target aarch64-apple-darwin`): 497 units at this commit (498 at `4270e14d`; the difference is `tracing-log`, ranked 1). `own` is units of that package; `excl` is units that disappear from the graph when every unit of the package is removed, so it counts the dependency's private subtree | One host target and one feature set. Guests and `mvm-hostd` have their own graphs. `own` and `excl` are unit counts, not seconds |
-| Binary contribution | The only measurement is whole-binary: 19,206,160 bytes for `mvmctl` `release-min` on `aarch64-apple-darwin` (2026-08-20, `public/docs/investigations/binary-size-baseline.md`, budget 25,165,824) | Per-dependency contribution is **not measured: needs a quiet host** and a release build with `cargo bloat --crates` (`cargo-bloat` is installed). It was not run at load 58 |
-| Build cost in seconds | `cargo build --timings` | **Not measured: needs a quiet host**; the unit counts stand in for it |
+| Binary contribution | `cargo bloat --crates -n 400` on an unstripped `release-min` build of `mvmctl` (`CARGO_PROFILE_RELEASE_MIN_STRIP=none`, otherwise the release command in "Release-build timings" below, `x86_64-unknown-linux-gnu`, commit `56b56666f2`): the crate's `.text` bytes. The stripped binary is 33,574,640 bytes and the unstripped one 44,107,304, with a 15.9 MiB `.text` | `cargo-bloat` attributes a symbol by name, so generic code a dependency instantiates for first-party types is charged to the first-party crate: a dependency's number is a lower bound. Measured on Linux gnu, not on the macOS target the earlier whole-binary baseline used |
+| Build cost in seconds | Sum of the `duration` of every unit of the package (library, build script compile and run) in the `cargo build --timings` report of the quiet-host `mvmctl` cold build (run `r3`, load 0.33 at start, 513 s wall) | Unit seconds, not wall seconds: units overlap on 12 cores, so the sum exceeds the wall time. The three repeats of the same build agree to about 10 percent |
 
 ### Advisory and licence results (exact)
 
@@ -509,18 +509,18 @@ all 90 direct dependencies (definition in the closure map).
 
 Units removed counts packages in the `mvmctl` graph that vanish with the whole group, so a group
 that other groups depend on (tokio under rustls users, `serde` under everything) is
-understated or overlaps another. Binary contribution for every group: not measured, needs a quiet host.
+understated or overlaps another. Binary contribution per group is not tabulated; the per-crate numbers are in "Where the binary and the build seconds go" below.
 
 ### Ranked candidates against the same columns
 
-| Rank | Candidate | Exposure and boundary | API usage (files / dirs) | Maintenance | Advisory, licence | Closure delta | Units own / excl | Binary |
+| Rank | Candidate | Exposure and boundary | API usage (files / dirs) | Maintenance | Advisory, licence | Closure delta | Units own / excl | Binary `.text` / build s |
 |---|---|---|---|---|---|---|---|---|
-| 1 | `tracing-subscriber` | Formats logs only; host and `mvm-hostd`, not in guest closures; `tracing-log` forwards third-party `log` records, no parsing of untrusted input | 20 / 5 | 0.3.23, 2026-03-13, 3 releases in 12 months | No advisory in either run; MIT | -1 (applied) | 1 / 7 | Not measured |
-| 2 | `chrono` | Parses and formats timestamps, including audit and plan validity windows (claims 8, 9); all six closures | 192 / 11 | 0.4.45, 2026-06-04, 3 | No advisory; MIT/Apache-2.0 | 0 | 1 / 2 | Not measured |
-| 3 | `serde_jcs` | Produces the canonical bytes that are signed (plans, audit entries, bundles); signing path; all six closures | 15 / 4 | Locked 0.1.0; crates.io latest 0.2.0 on 2026-03-25, 1 release in 12 months | No advisory; MIT/Apache-2.0 | -2 host, 0 guest | 1 / 2 | Not measured |
-| 4 | `tokio` `signal` | Async runtime, signal handling; host only | 222 / 13 | 1.54.1, 2026-10-21, 24 (locked 1.53.3) | No advisory; MIT | 0 | 1 / 3 | Not measured |
-| 5 | `serde_json` `preserve_order` | Parses every wire and config document, untrusted input in the guest agent and host; all six closures | 940 / 25 | 1.0.154, 2026-10-11, 9 (locked 1.0.151) | No advisory; MIT/Apache-2.0 | n/a, retained | 6 / 13 | Not measured |
-| 6 | `tempfile` | Creates files under `/tmp`, unsafe-free API over `rustix`; host and guest | 942 / 22 | 3.27.0, 2026-03-11, 4 | No advisory; MIT/Apache-2.0 | Not measured | 1 / 1 | Not measured |
+| 1 | `tracing-subscriber` | Formats logs only; host and `mvm-hostd`, not in guest closures; `tracing-log` forwards third-party `log` records, no parsing of untrusted input | 20 / 5 | 0.3.23, 2026-03-13, 3 releases in 12 months | No advisory in either run; MIT | -1 (applied) | 1 / 7 | 49.1 KiB / 1.4 s |
+| 2 | `chrono` | Parses and formats timestamps, including audit and plan validity windows (claims 8, 9); all six closures | 192 / 11 | 0.4.45, 2026-06-04, 3 | No advisory; MIT/Apache-2.0 | 0 | 1 / 2 | 40.3 KiB / 1.4 s |
+| 3 | `serde_jcs` | Produces the canonical bytes that are signed (plans, audit entries, bundles); signing path; all six closures | 15 / 4 | Locked 0.1.0; crates.io latest 0.2.0 on 2026-03-25, 1 release in 12 months | No advisory; MIT/Apache-2.0 | -2 host, 0 guest | 1 / 2 | 1.5 KiB + 1.4 KiB (`ryu_js`) / 0.1 s + 0.3 s |
+| 4 | `tokio` `signal` | Async runtime, signal handling; host only | 222 / 13 | 1.54.1, 2026-10-21, 24 (locked 1.53.3) | No advisory; MIT | 0 | 1 / 3 | 51.5 KiB (the whole crate) / 4.2 s |
+| 5 | `serde_json` `preserve_order` | Parses every wire and config document, untrusted input in the guest agent and host; all six closures | 940 / 25 | 1.0.154, 2026-10-11, 9 (locked 1.0.151) | No advisory; MIT/Apache-2.0 | n/a, retained | 6 / 13 | 86.3 KiB / 1.8 s |
+| 6 | `tempfile` | Creates files under `/tmp`, unsafe-free API over `rustix`; host and guest | 942 / 22 | 3.27.0, 2026-03-11, 4 | No advisory; MIT/Apache-2.0 | Not measured | 1 / 1 | 4.9 KiB / 0.3 s |
 
 The evidence changes nothing in the ranking: no candidate has an advisory, a licence concern or a stale
 maintainer, so the order stays decided by closure delta and risk. Two observations the earlier
@@ -630,10 +630,12 @@ Advisory result for every row in the lock: none in either database run; the 10 r
 
 ### Does this meet the section 3 box?
 
-Met: exposure, trust boundary, API usage, maintenance (publish cadence), advisory, licence, closure delta
-and build cost as unit counts, each with its source. Not met: **binary contribution per dependency**
-(needs `cargo bloat --crates` on a release build) and **build cost in seconds** (needs `cargo build --timings`
-on a host with a load below 8); unsafe-block counts (`cargo geiger`) are not installed or run.
+Met: exposure, trust boundary, API usage, maintenance (publish cadence), advisory, licence, closure delta,
+build cost (unit counts and, for the six ranked candidates, measured unit seconds) and binary contribution (`.text`
+bytes from `cargo bloat --crates`), each with its source and limits. The measurements changed no order: the
+largest of the six, `serde_json` at 86 KiB and `tokio` at 52 KiB, are the two that cannot be removed, and the
+only applied candidate (`tracing-subscriber` without `tracing-log`) was a one-line feature change. Not done:
+unsafe-block counts (`cargo geiger` is not installed or run).
 
 ## Release-build compilation count (#4839 section 4)
 
@@ -693,6 +695,139 @@ taken: the host's load average was about 390 on 16 cores, which makes timings
 meaningless, and a full embedded cross build was not run. The embedded guest
 payload is restored from the content store at `~/.cache/mvm/embed` when its
 key matches, so a warm local build does not show the nested compile.
+
+## Release-build timings and diagnosis (#4839 section 4)
+
+Everything here was measured on one Linux host at `56b56666f2` (origin/main, 2026-11-02). The macOS
+`aarch64-apple-darwin` release lane was **not** timed: the Mac available for this work ran at a load
+average near 200 and has no quiet period to measure in. The unit counts above are the only
+macOS evidence.
+
+### Host and method
+
+| | |
+|---|---|
+| Host | Hetzner `mvm-kvm`, x86_64, 12 cores, 62 GiB RAM, Linux 6.1.0-53, rotational disk (`ROTA=1`) |
+| Sharing | The host also runs a self-hosted CI runner (`/opt/actions-runner`). Nothing here was taken on an exclusive host, so the load average at the start of every command is recorded and a run that overlapped CI work says so |
+| Toolchain | rustc 1.97.1 (`8bab26f4f`), `cargo-zigbuild` 0.23.0, zig 0.13.0 (the pinned versions `build.rs` prints), `OPENSSL_STATIC=1 OPENSSL_VENDORED=1` as in `release.yml` |
+| Directories | A fresh clone, a fresh `CARGO_TARGET_DIR` per run, a fresh embed content store per run (`MVM_EMBED_CACHE_DIR`), and a `CARGO_HOME` whose registry was already fetched (`cargo fetch` took 0.4 to 4.7 s). Every directory was under `/tmp/ari4839` and was removed afterwards |
+| Real workflow | Runs `r5` and `r6` execute the Linux musl steps of `release.yml` with its arguments unchanged: `cargo zigbuild --profile release-min --target x86_64-unknown-linux-musl --features host,user,release-artifact-bootstrap,release-channel,embed-host-bins`, then the `--release` daemons build with the six `--bin` names, then `cargo zigbuild --release --target x86_64-unknown-linux-gnu -p mvm-hostlib --features mvm-client/release-channel`, each with `--timings` added |
+| Plain cargo | Runs `r1` to `r4` use `cargo build` on `x86_64-unknown-linux-gnu` with the same `mvmctl` features minus the explicit `embed-host-bins` (a release-profile build embeds anyway: its build script cross-built the five guest binaries with `cargo zigbuild` for musl) |
+
+### Clean builds, no-change rebuilds, one-file rebuild
+
+Seconds of wall time for the command. "Load" is `/proc/loadavg` 1-minute value when the command started.
+
+Real workflow, musl, zigbuild (`r5`, `r6`):
+
+| Step | `r5` | `r6` | Load at start (`r5` / `r6`) |
+|---|---:|---:|---|
+| `mvmctl` `release-min`, clean target, empty store | 541.3 | 499.6 | 1.11 / 6.68 (tail of `r5`) |
+| daemons `--release`, six bins | 348.4 | 334.7 | 1.14 / 1.07 |
+| `mvm-hostlib` `--release`, gnu | 588.9 | 457.1 | 4.05 / 2.17 (`r5` saw a CI test job start, load 19) |
+| all three again, nothing changed | 64.3 | 1.6 | 18.98 / 2.00 |
+| `touch crates/mvm-cli/src/lib.rs`, `mvmctl` again | 219.6 | 159.9 | 17.95 / 1.92 |
+| Sum of the three clean steps | 1,478.6 | 1,291.4 | |
+
+`r6` is the better estimate of a quiet host (21.5 minutes for the three clean steps); `r5` is labelled by its load.
+The `r5` no-change run is an outlier: it relinked `mvmctl` (44 s) and the daemons (18 s) while `r6`, and the four
+plain-cargo no-change runs (0.7 to 3.5 s), did not. `cargo-zigbuild`, zig and the toolchain on the host had not been
+modified (mtimes in September and October), touching the embed store root does not dirty the build, and no `-v` log was
+taken, so **why `r5` rebuilt is not established**.
+
+Plain cargo, gnu (`r1` to `r4`; `mvmctl` is `release-min`, the others `--release`):
+
+| Run | Store | `mvmctl` clean | `mvmctl` no-change | daemons, all bins of `mvm-hostd` | `mvm-hostlib` | all no-change | one-file `mvmctl` |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `r1` | empty | 582.0 (load 4.2, CI test job running) | 2.9 | 467.9 | 510.6 | 3.5 | 175.0 |
+| `r2` | empty | not a clean build: the target directory held units of a build I had killed, so the 423.3 s is a partial build and is **discarded** | 0.7 | 458.8 | 473.2 | 1.1 | 159.4 |
+| `r3` | empty | 512.9 (load 0.33) | | | | | |
+| `r4` | `r3`'s store | 372.2 (load 1.09) | | | | | |
+
+The daemons rows of `r1` and `r2` name `-p mvm-hostd -p mvm-gpu` without `--bin`, so they also built
+`mvm-extension-provider` (one 188.7 s unit, a 23 MB binary) and two other bins that the workflow does not build.
+The workflow's six-`--bin` form took 335 to 348 s, which is the number to use. (The two runs are not a clean A/B: they also differ in target and linker.)
+
+### Sizes and reproducibility
+
+All sizes are bytes of the unpacked, uncompressed ELF; no archive or compression was applied or measured.
+`release-min` is `opt-level = "z"`, `panic = "abort"`, fat LTO, one codegen unit and `strip = true`; `release` is
+`opt-level = 3`, thin LTO, 16 codegen units and `strip = true`.
+
+| Artifact | Profile, target | Bytes |
+|---|---|---:|
+| `mvmctl` | `release-min`, `x86_64-unknown-linux-musl`, static, stripped | 32,549,880 |
+| `mvmctl` | `release-min`, `x86_64-unknown-linux-gnu`, dynamic, stripped | 33,574,640 |
+| `mvmctl` unstripped, for `cargo bloat` | `release-min`, gnu, `strip = none` | 44,107,304 (`.text` 15.9 MiB) |
+| `libmvm_hostlib.so` | `release`, gnu | 38,185,208 |
+| `mvm-network-endpoint`, `mvm-host-agent`, `mvm-signer-helper` | `release`, musl | 10,327,560 / 5,701,216 / 3,777,616 |
+| `mvm-broker`, `mvm-audit-signer`, `mvm-gpu-endpoint` | `release`, musl | 3,376,264 / 2,881,984 / 993,008 |
+| Embedded guest payload (`mvm-egress-client`, `mvm-host-vm-init`, `stage0-init`, `mvm-builderd`, `mvm-setpriv`) | musl, static, cross-built by `build.rs` | 3,012,016 / 942,232 / 841,896 / 783,656 / 415,976 (5.99 MB together) |
+
+Reproducibility: `r5` and `r6` produced byte-identical `mvmctl` (`925cd767…c796`), `mvm-host-agent`
+(`ed8af074…956b`) and `libmvm_hostlib.so` (`690d42d7…f409`); the gnu `mvmctl` was identical across `r1` to `r4`
+(`7f3389a6…4ac5`) and the gnu `libmvm_hostlib.so` across `r1` and `r2` (`47142dfb…b388`). The guest-runtime archive
+(`mvm-guest-bins`) is not part of these steps and was not built.
+
+### Where the binary and the build seconds go
+
+`cargo bloat --crates` on the unstripped `release-min` gnu build (`.text` 15.9 MiB; first-party `mvm_*` crates are
+about 70 percent of it):
+
+| Crate | `.text` | Crate | `.text` |
+|---|---:|---|---:|
+| `mvm_cli` | 3.3 MiB | `rustls` | 226.6 KiB |
+| `mvm_core` | 2.2 MiB | `mvm_agentd` | 222.4 KiB |
+| `mvm_client` | 1.2 MiB | `ring` | 185.7 KiB |
+| `mvm_build` | 946.9 KiB | `sigstore_tsa` | 164.0 KiB |
+| `std` | 925.3 KiB | `aho_corasick` | 129.4 KiB |
+| `mvm_runtime` | 922.6 KiB | `mvm_http` | 126.3 KiB |
+| `mvm_hostd` | 607.3 KiB | `clap_builder` | 111.6 KiB |
+| `mvm_fs` | 410.4 KiB | `regex_syntax` | 103.6 KiB |
+| `mvm_vmm` | 352.3 KiB | `toml_edit` | 87.4 KiB |
+| `aws_lc_sys` | 350.8 KiB | `serde_json` | 86.3 KiB |
+| `regex_automata` | 325.1 KiB | `gix` | 82.6 KiB |
+| `mvm_compiler` | 297.3 KiB | `jiff` | 56.6 KiB |
+
+By cost to build, the 495-unit `mvmctl` graph is 690 to 816 unit-seconds of which the `mvm-cli` build script (the
+nested guest cross-build) is 151 to 179, `mvm-cli`'s own library 37, `mvmctl`'s final fat-LTO link and codegen
+121 to 132, and `aws-lc-sys`'s C build 43 to 94. No third-party Rust crate other than those costs more than about
+7 s to compile.
+
+### Diagnosis
+
+| Suspect | Finding |
+|---|---|
+| Cache or target-directory mismatch | None found in the workflow: one `CARGO_TARGET_DIR` serves the three builds and the repeated units are different profiles or targets, below. The one mismatch seen was mine: `-p mvm-hostd` without the workflow's `--bin` names builds three extra binaries |
+| Changing environment inputs | None identified. `build.rs` declares `MVM_EMBED`, `MVM_EMBED_CARGO`, `MVM_EMBED_RUSTC`, `MVM_EMBED_ZIG`, `MVM_EMBED_NO_CACHE` and the source-commit variables as `rerun-if-env-changed`, and the no-change runs of `r1` to `r4` and `r6` did not rebuild. The `r5` no-change rebuild above is the one unexplained case |
+| Over-broad build-script rerun | **Found, not fixed.** The `mvm-cli` build script emits `rerun-if-changed` on the directories `crates` and `src` (to stamp the source commit and dirty flag), so touching any file under them, including a test or a README, marks `mvm-cli` dirty. Measured in `r4`: creating `crates/mvm-core/ARI-TOUCH.txt` printed `Dirty mvm-cli v0.26.0: the file 'crates' has changed` and started recompiling `mvm-cli`. With a warm store the rerun itself costs 0.9 s, but `mvm-cli` (37 s) and the `mvmctl` link (about 120 s) follow. The directory watch is how the dirty flag stays honest, so narrowing it is a behaviour change, not a cleanup |
+| Repeated hashing or generation | The payload cross-build is the one repeated generation. It takes 151 to 179 s with an empty store and 0.9 s with the store, for byte-identical output (below) |
+| Redundant packaging or build invocations | 343 library packages are compiled in two or three of the three builds (622 to 657 unit-seconds in the extra copies, of 2,200 to 2,600 in total). They are different profiles (`release-min` against `release`: `panic = abort` against unwind, opt-level `z` against 3) or different targets (musl against gnu), so each copy is a different object, as the earlier section records. `aws-lc-sys` is built twice for the same reason |
+
+### The accepted fix, shown in the same workflow
+
+The embed content store at `~/.cache/mvm/embed` is the accepted fix for the repeated payload build. Same command,
+same clean target directory, same host, only the store differs (`r3` against `r4`, `cargo build --profile release-min
+--target x86_64-unknown-linux-gnu --features host,user,release-artifact-bootstrap,release-channel --timings`):
+
+| | Empty store (`r3`) | Warm store (`r4`) |
+|---|---:|---:|
+| Wall seconds | 512.9 | 372.2 (27 percent less) |
+| `mvm-cli` build script, seconds | 150.9 | 0.9 |
+| Unit-seconds | 718 | 578 |
+| `mvmctl` SHA-256 | `7f3389a6…4ac5` | `7f3389a6…4ac5` |
+
+The zigbuild form of the same two states is `r5`/`r6`, whose stores were both empty (541.3 and 499.6 s); a warm-store
+zigbuild run was not taken. The earlier dependency reductions (`tracing-log`, the Sigstore client stack, the S3
+registry feature) remove between 1 and 17 packages each, which is below the 13 percent spread between `r1` (582.0 s, loaded) and
+`r3` (512.9 s, quiet), so no time saving is claimed for them.
+
+### Repeated work that remains necessary
+
+- Any edit under `crates/mvm-cli` costs about 160 s (`r2` 159.4, `r6` 159.9, `r1` 175.0): one codegen unit and fat LTO make `mvmctl` link as a single piece.
+- Any file change under `crates` or `src` reruns the `mvm-cli` build script (above).
+- 343 packages build up to three times because `mvmctl` aborts on panic, the daemons and the SDK library must unwind, and the SDK library is a gnu `cdylib`; the earlier section records why each split stays.
+- The first build after the store is lost spends 150 to 180 s cross-compiling five guest binaries.
 
 ## Unused-dependency and duplicate-version re-scan (#4839 section 3)
 
