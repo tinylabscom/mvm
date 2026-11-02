@@ -68,6 +68,7 @@ mod check_private_diagnostic_files;
 mod check_private_mvm_dirs;
 mod check_public_function_names;
 mod check_require_grant_token_allowlist;
+mod check_rust_footprint;
 mod check_sdk_cdylib_deps;
 mod check_sdk_transport_free;
 mod check_single_display_path;
@@ -496,6 +497,7 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_spec_hygiene::run(&workspace)
         }
+        Some("check-rust-footprint") => check_rust_footprint::run(&workspace_root()),
         Some("check-file-size") => {
             let workspace = workspace_root();
             check_file_size::run(&workspace)
