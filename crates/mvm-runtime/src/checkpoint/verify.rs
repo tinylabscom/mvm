@@ -400,7 +400,7 @@ pub(super) mod tests {
 
     /// Anchor that echoes each record's own recomputed digest: the signed audit
     /// chain agrees with what's on disk — the honest case.
-    pub struct AgreeingAnchor;
+    pub(crate) struct AgreeingAnchor;
     impl CheckpointChainAnchor for AgreeingAnchor {
         fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
             Ok(Some("local".to_string()))
@@ -416,7 +416,7 @@ pub(super) mod tests {
 
     /// Anchor that reports a fixed, unrelated digest for every record: models a
     /// signed chain that disagrees with the on-disk record (post-audit edit).
-    pub struct DisagreeingAnchor(pub CheckpointDigest);
+    pub(crate) struct DisagreeingAnchor(pub CheckpointDigest);
     impl CheckpointChainAnchor for DisagreeingAnchor {
         fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
             Ok(Some("local".to_string()))
@@ -432,7 +432,7 @@ pub(super) mod tests {
 
     /// Anchor with no signed creation entry for anything: models an un-audited
     /// checkpoint, which chain-anchored verification must refuse.
-    pub struct UnauditedAnchor;
+    pub(crate) struct UnauditedAnchor;
     impl CheckpointChainAnchor for UnauditedAnchor {
         fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
             Ok(None)
@@ -448,7 +448,7 @@ pub(super) mod tests {
 
     /// Anchor that agrees on every digest but records the checkpoint's
     /// creation under `self.0`'s tenant (or under none).
-    pub struct TenantAnchor(pub Option<&'static str>);
+    pub(crate) struct TenantAnchor(pub Option<&'static str>);
     impl CheckpointChainAnchor for TenantAnchor {
         fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
             Ok(self.0.map(str::to_string))
@@ -462,7 +462,7 @@ pub(super) mod tests {
         }
     }
 
-    pub fn unrelated_digest() -> CheckpointDigest {
+    pub(crate) fn unrelated_digest() -> CheckpointDigest {
         CheckpointDigest::parse(format!("sha256:{}", "f".repeat(64))).unwrap()
     }
 

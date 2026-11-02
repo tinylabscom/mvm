@@ -1527,11 +1527,11 @@ mod engine {
     use super::{CompletedRun, WasmBackendError, WasmBounds};
     use crate::wasm_activation::WasmPreopenPlan;
 
-    pub fn is_compiled_in() -> bool {
+    pub(crate) fn is_compiled_in() -> bool {
         false
     }
 
-    pub fn run_module_to_completion(
+    pub(crate) fn run_module_to_completion(
         _path: &str,
         _egress_endpoint: Option<PathBuf>,
         _activation: Option<&WasmPreopenPlan>,

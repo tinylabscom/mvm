@@ -23,6 +23,8 @@
 // Machine product abstraction (`machine`) — the
 // construction + capability-gate seam the CLI, mvmd, and the SDKs share.
 
+#![deny(unreachable_pub)]
+
 pub mod build_env;
 mod host_shell;
 mod legacy_bundle_runtime;
