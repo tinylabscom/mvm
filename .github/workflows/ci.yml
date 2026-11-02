@@ -321,6 +321,11 @@ jobs:
       - name: Verify locked Cargo metadata
         run: cargo metadata --locked --format-version 1 --no-deps >/dev/null
 
+      - name: Process-spawn inventory is current
+        run: |
+          cargo fetch --locked
+          python3 scripts/gen-process-spawn-inventory.py --check
+
       - name: Shellcheck install.sh + uninstall.sh + release-asset verifier
         run: |
           sudo apt-get install -y shellcheck

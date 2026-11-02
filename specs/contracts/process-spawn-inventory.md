@@ -1,7 +1,7 @@
 # Production process-spawn inventory
 
 Backing: preview
-Validation: none — a generated inventory with a drift check (`--check`); no xtask gate enforces it yet. The raw-constructor half of the picture is enforced separately by `xtask check-helper-env-hygiene`, and the SDK/client/hostlib CLI-shellout rule by `xtask check-no-cli-shellout`.
+Validation: the `Process-spawn inventory is current` step of the `lint-core` job in `ci.yml` runs the drift check (`--check`), which fails on a stale table or an unannotated spawn file. The raw-constructor half of the picture is enforced separately by `xtask check-helper-env-hygiene`, and the SDK/client/hostlib CLI-shellout rule by `xtask check-no-cli-shellout`.
 
 Scope: the umbrella audit box "audit the full reachable production call graph, not just literal `Command::new` sites". This records every production place `mvm` creates an OS process, why, who can reach it, and what guards it. Test-only processes are excluded and counted, not listed.
 
@@ -76,6 +76,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-backends | `src/driver/libkrun.rs` | 1 | hypervisor supervisor | spawn mvm-libkrun-supervisor | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-backends | `src/driver/qemu.rs` | 1 | hypervisor | launch QEMU | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-backends | `src/driver/qemu_process.rs` | 1 | mvmctl self re-exec | start `mvmctl __qemu-vsock-bridge` | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal |
+| mvm-backends | `src/fc/daemon.rs` | 2 | shell script | launch the Firecracker detach script through bash, with the writable-volume lock descriptors handed across exec | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub |
 | mvm-backends | `src/fc/idle_pool.rs` | 1 | process control | setsid-detached idle standby holder | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-build | `src/builder_egress_process.rs` | 1 | mvmctl self re-exec | start `mvmctl __builder-egress-supervisor` | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal |
 | mvm-build | `src/builder_vm_bootstrap.rs` | 1 | mvmctl self re-exec | run the bootstrap helper to prepare the builder image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal |
@@ -83,7 +84,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-build | `src/builder_vm_runtime.rs` | 1 | storage tool | debugfs read of a builder image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-build | `src/builder_vm_transport.rs` | 1 | toolchain | cargo build of the network endpoint binary | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; embedder refusal |
 | mvm-build | `src/embed_toolchain.rs` | 8 | toolchain | probe rustup/cargo/rustc/zig/python3 for the pinned embed toolchain | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub |
-| mvm-build | `src/guest_agent_build.rs` | 3 | toolchain | cargo / rustup build of guest binaries from this tree | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub |
+| mvm-build | `src/guest_agent_build.rs` | 3 | toolchain | cargo / rustup build of guest binaries from this tree | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub; embedder refusal |
 | mvm-build | `src/libkrun_builder.rs` | 3 | hypervisor supervisor | cargo build of helpers, libkrun builder supervisor (explicit libkrun only) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-build | `src/provenance_mark.rs` | 1 | storage tool | debugfs read of image provenance mark | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-build | `src/qemu_builder.rs` | 6 | hypervisor | QEMU builder: timeout-wrapped boot, zstd, mkfs.ext4, debugfs | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
@@ -140,6 +141,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-runtime | `src/storage/backend.rs` | 1 | storage tool | dmsetup thin-pool operations | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-runtime | `src/storage/volume/encrypted_linux.rs` | 7 | storage tool | cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-setpriv | `src/lib.rs` | 1 | guest helper | privilege-drop-and-exec of the target command | guest | CHS | - | RAW_SITES (guest) |
+| mvm-vmm | `src/driver/prepared_disks.rs` | 1 | systemd-run / sudo | inventory a Firecracker process's descriptors through sudo find on Linux | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub |
 | mvm-vmm | `src/host/aux_bin.rs` | 2 | helper bin | `--contract-version` probe of a helper; cargo build of helpers from source | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; embedder refusal |
 | mvm-vmm | `src/host/broker_services_spawn.rs` | 1 | helper bin | spawn the per-VM host-services broker | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub |
 | mvm-vmm | `src/host/gpu_endpoint_spawn.rs` | 1 | helper bin | spawn the per-VM GPU endpoint | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; check-single-network-path |
@@ -149,12 +151,12 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-vmm | `src/host/network_endpoint_spawn/owned.rs` | 1 | helper bin | spawn an owned network endpoint | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; check-single-network-path |
 | mvm-vmm | `src/host/shell/exec.rs` | 6 | shell script | run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 
-Totals: 191 production sites in 98 files.
+Totals: 194 production sites in 100 files.
 
 | Crate | Sites |
 |---|--:|
 | mvm-agentd | 33 |
-| mvm-backends | 8 |
+| mvm-backends | 10 |
 | mvm-build | 28 |
 | mvm-builder-guest | 32 |
 | mvm-capture | 6 |
@@ -166,9 +168,9 @@ Totals: 191 production sites in 98 files.
 | mvm-hostd | 9 |
 | mvm-runtime | 12 |
 | mvm-setpriv | 1 |
-| mvm-vmm | 16 |
+| mvm-vmm | 17 |
 
-By construct: `Command::new` 60, `SYS_execve` 1, `helper_command` 117, `helper_command_with` 3, `libc::fork` 1, `openpty` 2, `raw:execve` 1, `raw:execveat_raw` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
+By construct: `Command::new` 60, `SYS_execve` 1, `helper_command` 120, `helper_command_with` 3, `libc::fork` 1, `openpty` 2, `raw:execve` 1, `raw:execveat_raw` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
 
 Linked and Traced are host-side facts about the crate and the call graph. A `guest` or `builder VM` row is crate-linked into the host closure (so `CHS`), but its binary only ever runs inside the microVM; the host never calls it. Read those rows by Authority.
