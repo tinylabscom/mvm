@@ -30,31 +30,61 @@ advanced the RustCrypto 0.11 line in `[workspace.dependencies]`:
 | x25519-dalek | `"3"` | 3.0.0 |
 
 The workspace-level migration was complete before this plan ran. The
-0.10.9/0.10.7 versions in the lock file are **read-only transitive entries**
-from `sigstore-crypto 0.11.0` (the latest release as of 2026-08-31), which
-unconditionally depends on the 0.10 digest line. They are gated behind the
-optional `manifest-verify` feature and never enter the default shipped closure.
+0.10.9/0.10.7 versions in the lock file were **read-only transitive entries**
+from `sigstore-crypto 0.11.0`, which unconditionally depended on the 0.10
+digest line. Those entries are gone as of the D2 upgrade below.
 
-## What this PR does
+## What B4 did
 
 - Bumps `aes-gcm` in `Cargo.lock` from 0.11.0 to **0.11.1** (the first stable
   release; `cargo update -p aes-gcm`).
 
-## aws-lc-rs status
+## What D2 did (2026-11-02)
 
-`aws-lc-rs` is present in `Cargo.lock` but is NOT in the default shipped
-closure. Dependency chain:
+sigstore-crypto 0.15.1 (released 2026-10-xx) moved aws-lc-rs to an optional
+feature (`default = ["aws-lc-rs"]` but `aws-lc-rs` behind `dep:aws-lc-rs`).
+sigstore-tsa and sigstore-rekor 0.15.x adopted the client-optional approach
+upstream, so the workspace patches in `third_party/sigstore-{tsa,rekor}-0.11.0`
+are no longer needed and have been removed.
 
-- Default closure: no aws-lc-rs path (confirmed — `mvm-http` uses
-  `reqwest` with `rustls-no-provider` and no `http3` feature; no quinn pulled
-  in on the default path).
-- `user` feature (manifest-verify → sigstore-verify → sigstore-crypto 0.11.0):
-  aws-lc-rs **is** reachable. sigstore-crypto 0.11.0 is the latest upstream
-  release and unconditionally depends on aws-lc-rs. This cannot be removed
-  without an upstream sigstore-crypto update.
-- `template-registry-s3` feature (object_store 0.14.1): aws-lc-rs **is**
-  reachable. This is an optional feature used only by the S3 template registry
-  backend and also blocked on upstream.
+Changes in this step:
+- `mvm-core` sigstore-verify/trust-root/types upgraded from `"0.11"` to `"0.15"`
+- `[patch.crates-io]` entries for sigstore-rekor and sigstore-tsa removed
+- `third_party/sigstore-{tsa,rekor}-0.11.0/` directories deleted
+- `third_party/sigstore-patches.md` deleted (described the now-removed patches)
+- `image_verify.rs`: `VerificationPolicy::default()` → `any_identity()`;
+  `result.identity` → `result.identity().to_string()`; `result.issuer` → `result.issuer()`
+- `cargo tree -i aws-lc-rs` returns exit 101 (not found) for the whole workspace
+
+**Collateral dependency upgrades required to resolve pem/base64 conflicts:**
+
+sigstore-types 0.15.1 introduced `pem 4.0.0`, which requires `base64 ^0.23`.
+The following packages were on `pem ^3` / `base64 ^0.22` and had to be
+upgraded to avoid new `xtask check-duplicate-majors` failures:
+
+| Package | Before | After |
+|---|---|---|
+| rcgen | 0.14.7 | 0.14.10 |
+| plist | 1.10.0 | 1.10.3 |
+| reqwest | 0.13.4 | 0.13.5 |
+| hyper-util | 0.1.20 | 0.1.21 |
+
+All four require Rust 1.88, so the workspace MSRV was bumped from **1.85 →
+1.88** in `Cargo.toml`. Rust 1.88 stabilises let-chains and introduces two new
+lints (`manual_is_multiple_of`, `collapsible_if` with let-chains) that required
+mechanical fixes across several crates.
+
+**Net result:** 5 previously allowlisted duplicates removed (`rand`, `rand_core`,
+`sha2`, `signature`, `untrusted`); workspace drops from 20 to 15 allowlisted
+duplicate-major crates.
+
+`digest 0.10.7` remains in the lock file via `sha1 0.10.6 ← gix`; that is
+unrelated to sigstore and is tracked separately.
+
+## aws-lc-rs status (after D2)
+
+`aws-lc-rs` is **not** in `Cargo.lock`. `cargo tree -i aws-lc-rs` errors
+"package ID specification did not match any packages" for the workspace.
 
 ## C1 note (oci-client rustls-tls-no-provider)
 
@@ -63,20 +93,8 @@ The originally anticipated C1 step — applying the oci-client
 apply to this workspace. The workspace has no `oci-client` dependency; OCI
 operations go through `mvm-fs`'s own OCI layer implementation. No action needed.
 
-## What remains (blocked upstream)
-
-| Item | Blocked on |
-|---|---|
-| Remove sha2 0.10.9 / digest 0.10.7 from lock | sigstore-crypto > 0.11.0 shipping a digest-0.11 build |
-| Remove aws-lc-rs from lock (manifest-verify path) | same |
-| Remove aws-lc-rs from lock (object_store path) | object_store shipping without aws-lc-rs default |
-
-When sigstore-crypto releases a version that uses the 0.11 digest line and
-removes the aws-lc-rs dep, running `cargo update -p sigstore-crypto` will
-clear all three items in one operation.
-
 ## Checklist
 
 - [x] B4 — RustCrypto 0.11 workspace migration (workspace specs were already updated; aes-gcm bumped to 0.11.1 in lockfile)
 - [x] C1 — oci-client rustls-tls-no-provider (not applicable — no oci-client dep in workspace)
-- [ ] D2 ratchet — `cargo tree -i aws-lc-rs` empty in default closure (already true for default; blocked for `manifest-verify` path on sigstore-crypto upstream)
+- [x] D2 ratchet — `cargo tree -i aws-lc-rs` empty across all features (cleared 2026-11-02 by upgrading sigstore-* to 0.15.1)

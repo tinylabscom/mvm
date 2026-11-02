@@ -35,20 +35,20 @@ pub fn resolve_report(report: &CaptureReportV1) -> Result<ResolutionResult, Capt
                 resolved_records.push(resolve_manifest(obs, &mut packages, &mut source_path)?);
             }
             ObservationKind::Executable => {
-                if let Some(ref name) = obs.evidence.executable_name {
-                    if name == "cargo" {
-                        entrypoint_command = vec!["cargo".to_owned(), "run".to_owned()];
-                        packages.push("cargo".to_owned());
-                        packages.push("rustc".to_owned());
-                        resolved_records.push(ResolutionRecord {
-                            observation_id: obs.id.clone(),
-                            strategy: ResolutionStrategy::NativePackage,
-                            confidence: Confidence::Inferred,
-                            evidence: vec!["cargo on PATH".to_owned()],
-                            warnings: vec![],
-                            needs_review: false,
-                        });
-                    }
+                if let Some(ref name) = obs.evidence.executable_name
+                    && name == "cargo"
+                {
+                    entrypoint_command = vec!["cargo".to_owned(), "run".to_owned()];
+                    packages.push("cargo".to_owned());
+                    packages.push("rustc".to_owned());
+                    resolved_records.push(ResolutionRecord {
+                        observation_id: obs.id.clone(),
+                        strategy: ResolutionStrategy::NativePackage,
+                        confidence: Confidence::Inferred,
+                        evidence: vec!["cargo on PATH".to_owned()],
+                        warnings: vec![],
+                        needs_review: false,
+                    });
                 }
             }
             ObservationKind::NativePackage => {

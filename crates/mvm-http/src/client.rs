@@ -1047,11 +1047,9 @@ fn serialize_request(
     if path.is_empty() {
         path.push('/');
     }
-    if !absolute_uri {
-        if let Some(q) = url.query() {
-            path.push('?');
-            path.push_str(q);
-        }
+    if !absolute_uri && let Some(q) = url.query() {
+        path.push('?');
+        path.push_str(q);
     }
 
     let mut headers = inner.default_headers.clone();

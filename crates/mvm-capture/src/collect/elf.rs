@@ -174,9 +174,35 @@ fn parse_elf_metadata_with_extent(
     }
 
     // Resolve DT_NEEDED string offsets against the dynamic string table.
-    if let Some(strtab_va) = strtab_vaddr {
-        if let Some(strtab_offset) = vaddr_to_file_offset(&phdrs, strtab_va) {
-            if strtab_offset >= bytes.len() {
+    if let Some(strtab_va) = strtab_vaddr
+        && let Some(strtab_offset) = vaddr_to_file_offset(&phdrs, strtab_va)
+    {
+        if strtab_offset >= bytes.len() {
+            if !complete_file {
+                metadata.needed_libraries.clear();
+                metadata.incomplete = true;
+                return Ok(Some(metadata));
+            }
+            return Err(CaptureError::MalformedManifest(
+                PathBuf::from("<elf>"),
+                "ELF string table out of bounds".to_owned(),
+            ));
+        }
+        for needed in &mut metadata.needed_libraries {
+            let offset = strtab_offset
+                .checked_add(needed.parse::<usize>().map_err(|_| {
+                    CaptureError::MalformedManifest(
+                        PathBuf::from("<elf>"),
+                        "invalid DT_NEEDED string offset".to_owned(),
+                    )
+                })?)
+                .ok_or_else(|| {
+                    CaptureError::MalformedManifest(
+                        PathBuf::from("<elf>"),
+                        "DT_NEEDED string offset overflow".to_owned(),
+                    )
+                })?;
+            if offset >= bytes.len() {
                 if !complete_file {
                     metadata.needed_libraries.clear();
                     metadata.incomplete = true;
@@ -184,36 +210,10 @@ fn parse_elf_metadata_with_extent(
                 }
                 return Err(CaptureError::MalformedManifest(
                     PathBuf::from("<elf>"),
-                    "ELF string table out of bounds".to_owned(),
+                    "ELF string offset out of bounds".to_owned(),
                 ));
             }
-            for needed in &mut metadata.needed_libraries {
-                let offset = strtab_offset
-                    .checked_add(needed.parse::<usize>().map_err(|_| {
-                        CaptureError::MalformedManifest(
-                            PathBuf::from("<elf>"),
-                            "invalid DT_NEEDED string offset".to_owned(),
-                        )
-                    })?)
-                    .ok_or_else(|| {
-                        CaptureError::MalformedManifest(
-                            PathBuf::from("<elf>"),
-                            "DT_NEEDED string offset overflow".to_owned(),
-                        )
-                    })?;
-                if offset >= bytes.len() {
-                    if !complete_file {
-                        metadata.needed_libraries.clear();
-                        metadata.incomplete = true;
-                        return Ok(Some(metadata));
-                    }
-                    return Err(CaptureError::MalformedManifest(
-                        PathBuf::from("<elf>"),
-                        "ELF string offset out of bounds".to_owned(),
-                    ));
-                }
-                *needed = read_cstr(bytes, offset, bytes.len() - offset)?;
-            }
+            *needed = read_cstr(bytes, offset, bytes.len() - offset)?;
         }
     }
 

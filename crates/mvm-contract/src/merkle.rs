@@ -444,7 +444,11 @@ fn sibling_path(mut level: Vec<[u8; 32]>, mut index: usize) -> Vec<String> {
         // odd-length level.
         let is_lone = index == count - 1 && count % 2 == 1;
         if !is_lone {
-            let sibling = if index % 2 == 0 { index + 1 } else { index - 1 };
+            let sibling = if index.is_multiple_of(2) {
+                index + 1
+            } else {
+                index - 1
+            };
             path.push(encode_hex32(&level[sibling]));
         }
         level = reduce_level(&level);
@@ -483,7 +487,7 @@ pub fn verify_inclusion(proof: &InclusionProof) -> Result<[u8; 32], MerkleError>
         if !is_lone {
             let sibling_hex = path.next().ok_or(MerkleError::AuditPathTooShort)?;
             let sibling = decode_hex32(sibling_hex).map_err(MerkleError::HexDecode)?;
-            hash = if index % 2 == 0 {
+            hash = if index.is_multiple_of(2) {
                 interior_hash(&hash, &sibling)
             } else {
                 interior_hash(&sibling, &hash)

@@ -29,10 +29,10 @@ pub(super) fn collect_platform_facts() -> PlatformFacts {
         }
         if std::path::Path::new("/.dockerenv").exists() {
             facts.virtualization = Some("container".to_owned());
-        } else if let Ok(virt) = std::fs::read_to_string("/proc/1/cgroup") {
-            if virt.contains("docker") || virt.contains("containerd") || virt.contains("lxc") {
-                facts.virtualization = Some("container".to_owned());
-            }
+        } else if let Ok(virt) = std::fs::read_to_string("/proc/1/cgroup")
+            && (virt.contains("docker") || virt.contains("containerd") || virt.contains("lxc"))
+        {
+            facts.virtualization = Some("container".to_owned());
         }
     }
 

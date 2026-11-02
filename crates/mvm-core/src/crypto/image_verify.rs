@@ -76,7 +76,7 @@ fn verify_cosign_bundle<'a>(
         }
     })?;
 
-    let mut policy = VerificationPolicy::default().require_issuer(expected_issuer);
+    let mut policy = VerificationPolicy::any_identity().require_issuer(expected_issuer);
     if let Some(identity) = expected_identity {
         policy = policy.require_identity(identity);
     }
@@ -89,13 +89,14 @@ fn verify_cosign_bundle<'a>(
     // The issuer was required above, so a verified result always carries it;
     // a certificate with no SAN names nobody and cannot satisfy any policy.
     let identity = result
-        .identity
+        .identity()
         .ok_or_else(|| VerifyError::SignatureInvalid {
             reason: "signing certificate carries no identity (SAN)".to_string(),
-        })?;
+        })?
+        .to_string();
     Ok(VerifiedSigner {
         identity,
-        issuer: result.issuer.unwrap_or_else(|| expected_issuer.to_string()),
+        issuer: result.issuer().unwrap_or(expected_issuer).to_string(),
     })
 }
 

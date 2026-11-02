@@ -116,10 +116,11 @@ impl<'a> Rooted<'a> {
             // path must be removed before we can create the directory.
             // If the prior entry is itself a directory, `mkdirat` will
             // return EEXIST and we coalesce below.
-            if let Err(e) = unlinkat(parent.as_fd(), &leaf, AtFlags::empty()) {
-                if e != Errno::NOENT && e != Errno::ISDIR {
-                    return Err(RefusalReason::MalformedHeader);
-                }
+            if let Err(e) = unlinkat(parent.as_fd(), &leaf, AtFlags::empty())
+                && e != Errno::NOENT
+                && e != Errno::ISDIR
+            {
+                return Err(RefusalReason::MalformedHeader);
             }
         }
         create_directory_at(parent.as_fd(), &leaf).map_err(map_resolve_errno)

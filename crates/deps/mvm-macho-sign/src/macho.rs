@@ -263,7 +263,10 @@ fn thin(data: &[u8], offset: usize) -> Result<Slice<'_>> {
         }
         let kind = slice.u32(at)?;
         let size = slice.u32(at + 4)? as usize;
-        if size < 8 || size % 4 != 0 || at.checked_add(size).filter(|x| *x <= end).is_none() {
+        if size < 8
+            || !size.is_multiple_of(4)
+            || at.checked_add(size).filter(|x| *x <= end).is_none()
+        {
             return Err("invalid load command size".into());
         }
         if kind == 1 || kind == 0x19 {

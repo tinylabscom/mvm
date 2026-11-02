@@ -15,7 +15,7 @@ description = "Feature-gated no_std protocol and storage contracts shared by mvm
 # a hardcoded `std` feature) that a member can't override away. Versions
 # match the workspace's resolved versions so Cargo still unifies on one
 # copy of each.
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 # `DateTime<Utc>`'s serde impl emits/parses RFC-3339 identically under
 # `std` and `no_std` — the `clock` feature only gates `Utc::now()`
 # (wall-clock reads), never serialization — so plan DTOs keep their
