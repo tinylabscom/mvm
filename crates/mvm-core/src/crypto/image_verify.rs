@@ -121,10 +121,9 @@ mod workspace_provider {
                 }
                 SigningScheme::Ed25519 => {
                     use ed25519_dalek::Verifier as _;
-                    let key_bytes: &[u8; 32] =
-                        spki_pubkey_bytes.try_into().map_err(|_| {
-                            Error::InvalidKey("Ed25519 public key must be 32 bytes".into())
-                        })?;
+                    let key_bytes: &[u8; 32] = spki_pubkey_bytes.try_into().map_err(|_| {
+                        Error::InvalidKey("Ed25519 public key must be 32 bytes".into())
+                    })?;
                     let key = ed25519_dalek::VerifyingKey::from_bytes(key_bytes)
                         .map_err(|e| Error::InvalidKey(e.to_string()))?;
                     let sig_bytes: &[u8; 64] = signature.try_into().map_err(|_| {
