@@ -35,7 +35,7 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
     }
 
-    for path in tracked_spec_paths(workspace)? {
+    for path in tracked_paths(workspace, "specs")? {
         if !is_allowed(&path) {
             violations.push(format!(
                 "{path}: not allowed under specs/ (it holds the PRD, README, adrs/ and contracts/)"
@@ -56,14 +56,15 @@ fn is_allowed(path: &str) -> bool {
         .any(|entry| path == *entry || (entry.ends_with('/') && path.starts_with(entry)))
 }
 
-fn tracked_spec_paths(workspace: &Path) -> Result<Vec<String>> {
+/// Paths git tracks under `pathspec`, relative to the workspace root.
+pub(crate) fn tracked_paths(workspace: &Path, pathspec: &str) -> Result<Vec<String>> {
     let output = std::process::Command::new("git")
-        .args(["ls-files", "-z", "specs"])
+        .args(["ls-files", "-z", pathspec])
         .current_dir(workspace)
         .output()
-        .context("run git ls-files specs")?;
+        .context("run git ls-files")?;
     if !output.status.success() {
-        bail!("git ls-files specs failed");
+        bail!("git ls-files {pathspec} failed");
     }
     Ok(String::from_utf8_lossy(&output.stdout)
         .split('\0')
