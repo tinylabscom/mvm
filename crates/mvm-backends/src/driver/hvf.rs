@@ -1117,7 +1117,7 @@ impl HvfVmFullControl {
             publish::output_for(ram, &nonce),
             publish::output_for(frame, &nonce),
         );
-        std::fs::write(request, publish::request_body(&nonce))
+        mvm_core::util::atomic_io::atomic_write(request, publish::request_body(&nonce).as_bytes())
             .with_context(|| format!("request HVF snapshot at {}", request.display()))?;
         let deadline = Instant::now() + timeout;
         let mut wait = std::time::Duration::from_micros(200);
