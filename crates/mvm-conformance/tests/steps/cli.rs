@@ -1732,16 +1732,61 @@ fn seal_live_build(world: &mut CliWorld) {
     world.last_run = Some(output);
 }
 
-/// Try to install the sealed bundle in a home that shares nothing with the one
-/// that built it. A host-local build is run by its path, never installed into
-/// a registry, so the install is expected to refuse; nothing boots.
-#[when(expr = "I try to install the sealed bundle into a fresh home")]
+/// Verify and install the sealed bundle in a home that shares nothing with the
+/// one that built it except trust in its signer's public half. Neither command
+/// boots anything.
+#[when(expr = "I install the sealed bundle into a fresh home that trusts its builder")]
 fn install_sealed_bundle(world: &mut CliWorld) {
     let sealed = world
         .sealed_bundle
         .as_ref()
         .expect("a seal step runs before the install");
     let bundle = sealed.path().join("build.mvmpkg");
+    let publisher = sealed.path().join("publisher.pub");
+    let home = tempfile::tempdir().expect("create isolated MVM_HOME");
+    let run = |args: &[&str], path: &Path| {
+        mvmctl_command()
+            .current_dir(workspace_root())
+            .args(args)
+            .arg(path)
+            .isolated_home(home.path())
+            .output()
+            .expect("failed to spawn mvmctl")
+    };
+    for (args, path) in [
+        (&["trust", "add"][..], &publisher),
+        (&["bundle", "fetch"][..], &bundle),
+    ] {
+        let output = run(args, path);
+        assert!(
+            output.status.success(),
+            "`mvmctl {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = run(&["bundle", "install"], &bundle);
+    // `Installed bundle <sha> (N artifacts, publisher key_id=...)`
+    world.bundle_sha = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Installed bundle "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(str::to_string);
+    world.isolated_home = Some(home);
+    world.last_run = Some(output);
+}
+
+/// Try to install a pack-built bundle into a fresh home. `build` labels its
+/// bundle a local build, which install refuses before any trust check; it runs
+/// by its path instead. Nothing boots.
+#[when("I try to install the sealed bundle into a fresh home")]
+fn refuse_sealed_local_build(world: &mut CliWorld) {
+    let bundle = world
+        .sealed_bundle
+        .as_ref()
+        .expect("a seal step runs before the install")
+        .path()
+        .join("build.mvmpkg");
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");
     let output = mvmctl_command()
         .current_dir(workspace_root())
