@@ -13,13 +13,21 @@ plus a separate hosted service with an SDK for both. On our side: this
 repository (`mvm`, the host-side execution authority) and the sibling
 control-plane repository at `../mvmd` (the fleet authority).
 
+**Where it lives.** This note is attached to the tracking issue for its
+findings rather than kept in the tree: `specs/` now holds only the PRD, the
+README, the ADRs, and the contracts, and the repository root is allow-listed
+too, so no in-tree directory fits a research note. The issue holds the
+checklists; this note holds the evidence and the tables.
+
 **Naming rule.** The comparison vendor is referred to as *the vendor* throughout.
-Per the house convention this repository already follows — see
-`specs/research/host-kernel-agent-sandbox-comparison.md` — no product,
-organization, package, artifact, environment-variable, or endpoint proper name
-of theirs appears here, nor in this file's name, nor in any branch, commit, or
-PR that carries it. Describe their surfaces by role instead. This is a handling
-rule for whoever picks the file up next, not a restatement of a legal position.
+No product, organization, package, artifact, environment-variable, or endpoint
+proper name of theirs appears here, nor in any branch, commit, or PR that
+carries it. Describe their surfaces by role instead. This is a handling rule
+for whoever picks the file up next, not a restatement of a legal position.
+
+The precedent this rule follows — an earlier oblique comparison of another
+competitor product — was retired from `specs/` along with the rest of the
+research notes and now lives in the `specs-archive-2026-11-02` tag.
 
 ## TL;DR
 
@@ -240,8 +248,8 @@ it does not overclaim.
 
 ## 9. How to keep this current
 
-- This is a research note, not a tracker. Findings above point at evidence; the
-  issue tracker owns status, owners, and closure.
+- This note is research, not a tracker. The findings above point at evidence;
+  the issue checklists own status, owners, and closure.
 - Re-read the vendor's documentation when a new release note appears and
   update the affected tables rather than appending a new section — the tables
   are the artifact, and a second copy of them is how comparisons rot.
@@ -249,18 +257,21 @@ it does not overclaim.
   vendor artifact by name, describe it by role instead and keep the rule.
 - Record what changed in the revision history below.
 - When a finding above is fixed in either repository, strike it and say what
-  closed it, so the file does not read as a stale list of complaints.
-- **Gates.** No build gate reaches `specs/research/` — the documentation lints
-  scan `public/src/content/docs`, `specs/adrs`, and `specs/plans`, and this
-  file is in none of them. Running them anyway is a cheap sanity check, but
-  note that one of them reports false positives locally: the overclaim lint
-  walks the filesystem rather than the tracked tree, so it picks up stale
-  agent-sandbox copies under the git-ignored `.delta/`, `.qwen/`, `.claude/*`,
-  and `.worktrees/` roots. Every violation it reports is in one of those
-  copies, and a clean checkout is unaffected.
+  closed it, so the note does not read as a stale list of complaints.
+- **Gates.** This note lives with the tracker rather than in the tree, so no
+  build gate can reach it. For reference, the lints now scan
+  `public/src/content/docs` and `public/src/pages` for the published docs,
+  `specs/adrs` and `specs/contracts` for the decision records, and every
+  tracked path under `specs/` and the repository root for layout. One of them
+  reports false positives locally: the overclaim lint walks the filesystem
+  rather than the tracked tree, so it picks up stale agent-sandbox copies
+  under the git-ignored `.delta/`, `.qwen/`, `.claude/*`, and `.worktrees/`
+  roots. Every violation it reports is in one of those copies, and a clean
+  checkout is unaffected.
 
 ## Revision history
 
 | Date | Change |
 |---|---|
 | 2026-11-02 | Initial note. Vendor documentation read in full (44 pages); this repository and the sibling control-plane repository inventoried at source level. |
+| 2026-11-02 | Moved out of the tree to this issue after the `specs/` retirement retired `specs/research/`. Corrected two references that the retirement invalidated: the naming-rule precedent, and the lint roots. |
