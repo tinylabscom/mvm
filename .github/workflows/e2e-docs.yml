@@ -130,11 +130,6 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/free-disk
 
-      # A non-root user starting a writable-volume VM needs `sudo -C` so the
-      # writer inherits the original descriptors; sudo refuses it without this.
-      - name: Allow sudo -C for the writer handoff
-        run: echo 'Defaults closefrom_override' | sudo tee /etc/sudoers.d/mvm-closefrom >/dev/null && sudo chmod 440 /etc/sudoers.d/mvm-closefrom && sudo visudo -cf /etc/sudoers.d/mvm-closefrom
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
