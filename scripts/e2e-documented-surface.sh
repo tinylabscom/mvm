@@ -180,18 +180,22 @@ reap() {
       # stop is a request, not an event: teardown (a supervisor exiting, state
       # flushing) lands after the CLI returns, and rm refuses a machine still
       # running. The refusal deletes nothing, so retry against that window —
-      # what would replace this is a supervisor-exit notification.
-      local attempt delay=1
-      for attempt in 1 2 3 4 5; do
-        if MVM_HOME="$E2E_HOME" "$MVMCTL" machine rm "$name" --yes >/dev/null 2>&1; then
+      # what would replace this is a supervisor-exit notification. Keep the
+      # last refusal: on exhaustion it is the only evidence of why rm held
+      # out, and /dev/null is not a diagnostic.
+      local attempt delay=1 refusal=""
+      for attempt in 1 2 3 4 5 6 7 8; do
+        if refusal="$(MVM_HOME="$E2E_HOME" "$MVMCTL" machine rm "$name" --yes 2>&1)"; then
           break
         fi
-        if [[ $attempt == 5 ]]; then
+        if [[ $attempt == 8 ]]; then
+          printf '    machine rm kept refusing: %s\n' "$refusal" >&2
           cleanup_failure "$phase cleanup could not remove the stopped machine"
           return 1
         fi
         sleep "$delay"
         delay=$((delay * 2))
+        [[ $delay -gt 15 ]] && delay=15
       done
     done <<< "$created"
   elif [[ "$phase" == "pre-run" ]]; then
