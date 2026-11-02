@@ -265,7 +265,7 @@ fn sudo_closefrom_script(script: &str, closefrom: u32) -> Result<String> {
 /// descriptions, so there is no safe fallback.
 #[cfg(any(target_os = "linux", test))]
 fn require_sudo_closefrom(sudo: &str, closefrom: u32) -> Result<()> {
-    let output = std::process::Command::new(sudo)
+    let output = mvm_core::env_hygiene::helper_command(sudo)
         .args(["-n", "-C", &closefrom.to_string(), "true"])
         .output()
         .with_context(|| format!("running `{sudo} -n -C {closefrom} true`"))?;
