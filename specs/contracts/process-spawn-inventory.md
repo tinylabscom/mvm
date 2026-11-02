@@ -76,7 +76,6 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-backends | `src/driver/libkrun.rs` | 1 | hypervisor supervisor | spawn mvm-libkrun-supervisor | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-backends | `src/driver/qemu.rs` | 1 | hypervisor | launch QEMU | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-backends | `src/driver/qemu_process.rs` | 1 | mvmctl self re-exec | start `mvmctl __qemu-vsock-bridge` | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal |
-| mvm-backends | `src/fc/daemon.rs` | 2 | shell script | launch the Firecracker detach script through bash, with the writable-volume lock descriptors handed across exec | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub |
 | mvm-backends | `src/fc/idle_pool.rs` | 1 | process control | setsid-detached idle standby holder | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-build | `src/builder_egress_process.rs` | 1 | mvmctl self re-exec | start `mvmctl __builder-egress-supervisor` | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal |
 | mvm-build | `src/builder_vm_bootstrap.rs` | 1 | mvmctl self re-exec | run the bootstrap helper to prepare the builder image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal |
@@ -151,12 +150,12 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-vmm | `src/host/network_endpoint_spawn/owned.rs` | 1 | helper bin | spawn an owned network endpoint | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; check-single-network-path |
 | mvm-vmm | `src/host/shell/exec.rs` | 6 | shell script | run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 
-Totals: 194 production sites in 100 files.
+Totals: 192 production sites in 99 files.
 
 | Crate | Sites |
 |---|--:|
 | mvm-agentd | 33 |
-| mvm-backends | 10 |
+| mvm-backends | 8 |
 | mvm-build | 28 |
 | mvm-builder-guest | 32 |
 | mvm-capture | 6 |
@@ -170,7 +169,7 @@ Totals: 194 production sites in 100 files.
 | mvm-setpriv | 1 |
 | mvm-vmm | 17 |
 
-By construct: `Command::new` 60, `SYS_execve` 1, `helper_command` 120, `helper_command_with` 3, `libc::fork` 1, `openpty` 2, `raw:execve` 1, `raw:execveat_raw` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
+By construct: `Command::new` 60, `SYS_execve` 1, `helper_command` 118, `helper_command_with` 3, `libc::fork` 1, `openpty` 2, `raw:execve` 1, `raw:execveat_raw` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
 
 Linked and Traced are host-side facts about the crate and the call graph. A `guest` or `builder VM` row is crate-linked into the host closure (so `CHS`), but its binary only ever runs inside the microVM; the host never calls it. Read those rows by Authority.

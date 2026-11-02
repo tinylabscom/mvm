@@ -250,7 +250,6 @@ A = {
     "mvm-backends/src/driver/libkrun.rs": ("hypervisor supervisor", "spawn mvm-libkrun-supervisor"),
     "mvm-backends/src/driver/qemu.rs": ("hypervisor", "launch QEMU"),
     "mvm-backends/src/driver/qemu_process.rs": ("mvmctl self re-exec", "start `mvmctl __qemu-vsock-bridge`"),
-    "mvm-backends/src/fc/daemon.rs": ("shell script", "launch the Firecracker detach script through bash, with the writable-volume lock descriptors handed across exec"),
     "mvm-backends/src/fc/idle_pool.rs": ("process control", "setsid-detached idle standby holder"),
     "mvm-build/src/builder_egress_process.rs": ("mvmctl self re-exec", "start `mvmctl __builder-egress-supervisor`"),
     "mvm-build/src/builder_vm_bootstrap.rs": ("mvmctl self re-exec", "run the bootstrap helper to prepare the builder image"),
