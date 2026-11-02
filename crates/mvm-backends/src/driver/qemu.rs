@@ -414,7 +414,7 @@ impl QemuDriver {
 
         let cid = qemu_process::allocate_cid(&spec.name)?;
         let pid_file = state_dir.join(QEMU_PID_FILE);
-        let _ = std::fs::remove_file(&pid_file);
+        crate::run_sidecars::remove_stale_marker(&pid_file)?;
 
         let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file, self.machine_type);
         tracing::debug!(qemu_bin = %qemu_bin, argv = ?argv, "launching qemu-system");

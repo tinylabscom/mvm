@@ -290,7 +290,7 @@ impl LibkrunDriver {
 
         let pid_file = vm_libkrun_pid(&spec.name);
         // Remove any stale PID file so the poll below detects this launch's.
-        let _ = std::fs::remove_file(&pid_file);
+        crate::run_sidecars::remove_stale_marker(&pid_file)?;
 
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize libkrun SupervisorConfig: {e}"))?;

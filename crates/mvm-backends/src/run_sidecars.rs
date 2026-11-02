@@ -30,9 +30,43 @@ pub fn clear_prior_run(state_dir: &Path) {
     mvm_vmm::host::hvf_supervisor::failure_record::clear(state_dir);
 }
 
+/// Remove a marker file a boot is about to wait for, so the wait cannot be
+/// satisfied by a previous run's copy. An absent file is the desired state; a
+/// file that exists and cannot be removed would pass for this boot's marker,
+/// so that failure refuses the boot.
+pub fn remove_stale_marker(path: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(anyhow::Error::new(error)
+                .context(format!("removing stale marker {}", path.display())))
+        }
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stale_marker_is_removed_and_an_absent_one_is_fine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("pid");
+        remove_stale_marker(&marker).expect("absent marker is fine");
+        std::fs::write(&marker, "1").expect("write");
+        remove_stale_marker(&marker).expect("stale marker removed");
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn a_marker_that_cannot_be_removed_refuses_the_boot() {
+        // A directory is not removable with remove_file, standing in for any
+        // unremovable stale marker.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("pid");
+        std::fs::create_dir(&marker).expect("mkdir");
+        assert!(remove_stale_marker(&marker).is_err());
+    }
     use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
 
     #[test]
