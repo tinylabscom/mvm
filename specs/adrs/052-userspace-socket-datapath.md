@@ -18,7 +18,7 @@ datapath forwarded raw IP packets for `l3-vsock`, which is leaving the
 production workload path along with the mode itself. Its unprivileged-
 forwarding analysis and its performance measurements remain accurate history;
 its `UserspaceSocketDatapath` is not a live production transport. The staged
-removal is `specs/plans/316-single-flow-vsock-networking.md`.**
+removal is specs/plans/316-single-flow-vsock-networking.md (retired; recover from tag specs-archive-2026-11-02).**
 **Supersedes: ADR-036 §"macOS (Apple Silicon)" in part — that section
 staged `MacosUserspaceGateway` as a capability declaration plus a refusal
 and left the translator undesigned. This ADR designs it, and widens it
@@ -408,7 +408,7 @@ IPv6 is not carried either. `mvm_net::l3::admit` refuses any packet whose
 [ADR-038](038-ipv6-support.md) designs the family; nothing of it has landed.
 
 Multi-queue and zero-copy transfer are orthogonal and tracked in the
-deferred set of `specs/plans/285-l3-tun-over-vsock.md` (referenced by
+deferred set of specs/plans/285-l3-tun-over-vsock.md (retired; recover from tag specs-archive-2026-11-02) (referenced by
 filename because `285` is used twice on main).
 
 ## Known defects in what shipped

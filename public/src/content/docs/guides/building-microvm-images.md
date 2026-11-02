@@ -215,7 +215,7 @@ can hide a slow launch. A backend that cannot meet it is not release-ready.
 The artifact expectation is surfaced on every `mkGuest` derivation as
 `passthru.mvm.expectedBootMs`, while `mvmctl bench --lane prepared-cold` enforces the
 runtime maximum from raw samples. See the
-[cold-launch performance plan](https://github.com/tinylabscom/mvm/blob/main/specs/plans/299-cold-launch-performance.md)
+[launch budgets](/reference/performance/)
 for the measured budgets and backend rationale.
 
 The boot path uses the static Rust initramfs agent rather than NixOS,

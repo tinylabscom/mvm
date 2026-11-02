@@ -180,8 +180,7 @@ fn main() -> ExitCode {
             "mvm-host-vm-init is Linux-only (PID 1 for the libkrun \
              builder VM). On a developer host this binary is a no-op; \
              mkGuest cross-compiles the real init for \
-             <arch>-unknown-linux-musl. See \
-             specs/plans/72-builder-vm-via-libkrun.md §W3."
+             <arch>-unknown-linux-musl."
         );
         ExitCode::FAILURE
     }

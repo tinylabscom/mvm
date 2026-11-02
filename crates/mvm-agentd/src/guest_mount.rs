@@ -2343,8 +2343,7 @@ mod privilege_tests {
     /// Live witness. Mutates the calling process's privilege state
     /// irreversibly, so it is gated behind an explicit environment variable
     /// and root; ordinary CI and developer laptops skip it. The
-    /// backend-level witness is the adversarial probe run under
-    /// `specs/research/no-root-workload-live-witness.md`.
+    /// backend-level witness is the adversarial probe run on a live host.
     #[test]
     #[cfg(target_os = "linux")]
     fn harden_init_process_narrows_bounding_set_and_sets_no_new_privs() {

@@ -18,7 +18,7 @@ mailbox milestone lands.
 workload actor model, settles the vocabulary split against this ADR, and
 records the rejection of a third-party actor framework.
 **Research basis:**
-`specs/research/intelligent-capability-secure-microvm-workflows.md`.
+specs/research/intelligent-capability-secure-microvm-workflows.md (retired; recover from tag specs-archive-2026-11-02).
 
 ## Context
 
@@ -768,7 +768,7 @@ The first shipped claim requires:
 - Formal/reference-model vectors for authority, budget, and graph validation.
 
 Implementation is planned in
-`specs/plans/2026-08-18-capability-secure-intelligent-workflows.md`.
+specs/plans/2026-08-18-capability-secure-intelligent-workflows.md (retired; recover from tag specs-archive-2026-11-02).
 
 Sections 18 and 19 are implemented in
-`specs/plans/2026-08-18-agent-tool-and-memory-planes.md`.
+specs/plans/2026-08-18-agent-tool-and-memory-planes.md (retired; recover from tag specs-archive-2026-11-02).

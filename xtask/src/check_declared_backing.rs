@@ -94,7 +94,7 @@ const ASSERTIVE: &[&str] = &[
 /// Files that must carry a header today. Everything under the scanned roots
 /// that is not here and not in [`PENDING`] is an error, so a *new* file
 /// cannot quietly skip the rule.
-const SCANNED_ROOTS: &[&str] = &["specs/adrs", "specs/plans"];
+const SCANNED_ROOTS: &[&str] = &["specs/adrs"];
 
 /// Root-level files in scope.
 const SCANNED_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
@@ -106,8 +106,6 @@ const SCANNED_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 /// if an entry names a file that no longer exists, so the list cannot rot into
 /// a set of stale names that quietly permits nothing.
 const PENDING: &[&str] = &[
-    "specs/plans/271-apple-container-backend.md",
-    "specs/plans/295-workload-stream-plane.md",
     "specs/adrs/002-local-mcp-server.md",
     "specs/adrs/003-hypervisor-egress-policy.md",
     "specs/adrs/004-sealed-signed-builder-image.md",
@@ -151,56 +149,6 @@ const PENDING: &[&str] = &[
     "specs/adrs/040-node-to-node-transport.md",
     "specs/adrs/041-node-control-api.md",
     "specs/adrs/042-single-flow-vsock-networking.md",
-    "specs/plans/13-ws11-wasm-egress-poc.md",
-    "specs/plans/254-admitted-egress-connect-completion.md",
-    "specs/plans/254-control-data-plane-hardening.md",
-    "specs/plans/255-live-fc-warm-claim.md",
-    "specs/plans/255-phase2-warm-pool-substrate.md",
-    "specs/plans/255-vsock-first-snapshot-egress-adoption.md",
-    "specs/plans/256-admitted-egress-connect-completion.md",
-    "specs/plans/258-uniform-vsock-egress-convergence.md",
-    "specs/plans/265-fast-start-slo-sequencing-positioning.md",
-    "specs/plans/267-instant-loop-interaction-latency-gate.md",
-    "specs/plans/268-nonnested-aarch64-machine-run-witness.md",
-    "specs/plans/270-universal-initramfs-vsock-activated-boot.md",
-    "specs/plans/272-mutation-tested-claim-witnesses.md",
-    "specs/plans/274-witness-rigor.md",
-    "specs/plans/276-content-addressing-conformance-and-defense.md",
-    "specs/plans/279-build-action-identity-and-artifact-manifest.md",
-    "specs/plans/285-l3-tun-over-vsock.md",
-    "specs/plans/287-userspace-socket-datapath.md",
-    "specs/plans/288-kernel-cache-verify-on-read.md",
-    "specs/plans/290-sensitive-egress-redaction.md",
-    "specs/plans/292-tiered-artifact-storage-and-warm-start.md",
-    "specs/plans/293-stream-plane-followups.md",
-    "specs/plans/294-stream-plane-completion.md",
-    "specs/plans/295-node-control-api.md",
-    "specs/plans/297-sub-300ms-warm-launch-slo.md",
-    "specs/plans/298-extract-mvm-backends-crate.md",
-    "specs/plans/298-nanda-receipts-and-conformance-badges.md",
-    "specs/plans/298-warm-claim-service-and-hvf-pool.md",
-    "specs/plans/299-cold-launch-performance.md",
-    "specs/plans/301-wasm-backend-completion-and-browser-slice.md",
-    "specs/plans/303-runtime-hardening.md",
-    "specs/plans/305-delete-dead-gateway-stack.md",
-    "specs/plans/306-declared-backing-and-tier-honesty.md",
-    "specs/plans/308-workload-grants-implementation.md",
-    "specs/plans/308-workload-grants.md",
-    "specs/plans/309-dependency-reduction.md",
-    "specs/plans/313-egress-token-accounting-and-compaction.md",
-    "specs/plans/315-bootstrap-machine-readiness.md",
-    "specs/plans/316-builder-vm-shell-job-runner.md",
-    "specs/plans/316-single-flow-vsock-networking.md",
-    "specs/plans/316-website-redesign-implementation.md",
-    "specs/plans/318-span-timing-profiling.md",
-    "specs/plans/321-wasm-in-microvm-workload-format.md",
-    "specs/plans/324-builder-store-lock-ownership.md",
-    "specs/plans/325-sdk-sidecar-reserved-mount.md",
-    "specs/plans/327-hvf-quota-implementation.md",
-    "specs/plans/327-hvf-vcpu-quota.md",
-    "specs/plans/329-browser-wasm-backend-demo.md",
-    "specs/plans/329-remove-docker-backend.md",
-    "specs/plans/330-decision-provenance-layer.md",
 ];
 
 #[derive(Debug)]
@@ -493,7 +441,6 @@ pub fn self_test() -> Result<()> {
     let tmp = std::env::temp_dir().join(format!("mvm-declared-backing-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.join("specs/adrs"))?;
-    std::fs::create_dir_all(tmp.join("specs/plans"))?;
 
     let cases: &[(&str, &str, &str)] = &[
         (
@@ -539,13 +486,13 @@ pub fn self_test() -> Result<()> {
     // The one-way citation rule needs two files that both parse.
     let _ = std::fs::remove_file(tmp.join("specs/adrs/902-preview-asserts.md"));
     std::fs::write(
-        tmp.join("specs/plans/903-preview.md"),
+        tmp.join("specs/adrs/903-preview.md"),
         "# Preview\n\nBacking: preview\nValidation: none\n",
     )?;
     std::fs::write(
         tmp.join("specs/adrs/904-shipped.md"),
         "# Shipped\n\nBacking: shipped-source\nValidation: none\n\n\
-         Evidence: specs/plans/903-preview.md\n",
+         Evidence: specs/adrs/903-preview.md\n",
     )?;
     if run_with(&tmp, &[]).is_ok() {
         std::fs::remove_dir_all(&tmp).ok();

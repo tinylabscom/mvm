@@ -4,7 +4,7 @@ Backing: preview
 Validation: `MVM_BDD_ONLY_TAG=telemetry_collection cargo test -p mvm-conformance --features bdd --test conformance`
 
 The record for W6 of the
-[host-mediated telemetry plan](../plans/2026-09-17-host-mediated-telemetry.md):
+host-mediated telemetry plan (retired; recover from tag specs-archive-2026-11-02):
 what has been run on real backends, what is witnessed by tests, the measured
 cost, and what is not certified. A row says *live* only when a booted guest on
 that backend produced the evidence.

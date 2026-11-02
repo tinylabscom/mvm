@@ -39,7 +39,7 @@ pub fn start(ctx: &KrunContext) -> Result<(), Error> {
     {
         let _ = ctx;
         Err(Error::NotYetWired {
-            tracking: "specs/plans/57-libkrun-spike.md W3+W4",
+            tracking: "guest start and run loop",
         })
     }
     #[cfg(feature = "libkrun-sys")]
@@ -258,7 +258,7 @@ pub fn start_enter(ctx: &KrunContext) -> Result<std::convert::Infallible, Error>
     {
         let _ = ctx;
         Err(Error::NotYetWired {
-            tracking: "specs/plans/57-libkrun-spike.md W3",
+            tracking: "guest start",
         })
     }
     #[cfg(feature = "libkrun-sys")]

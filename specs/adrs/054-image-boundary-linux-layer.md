@@ -11,7 +11,7 @@ Accepted, 2026-10-05. Tracking issue:
 Amends ADR-030 decision 4 (both the builder image and every user-facing image
 build from `mvm-images`) and ADR-004's account of how mvm's own Linux binaries
 reach a guest. Supersedes the consumer half of
-`specs/plans/2026-09-29-guest-bins-artifact-decoupling.md`. ADR-018 carries a
+specs/plans/2026-09-29-guest-bins-artifact-decoupling.md (retired; recover from tag specs-archive-2026-11-02). ADR-018 carries a
 dated note that corrects its acquisition text against today's code and points
 here for where the overlay and sidecar are going.
 
@@ -21,12 +21,12 @@ reads it from the image set. What has not landed is mvm-images' side (it still
 builds and publishes the retired pieces) and release-publication and boot
 evidence for the new asset; "Where the code is today" below says exactly what
 runs now. The design detail lives in
-`specs/plans/2026-10-05-image-boundary-linux-layer.md`.
+specs/plans/2026-10-05-image-boundary-linux-layer.md (retired; recover from tag specs-archive-2026-11-02).
 
 ## Context
 
 Since the image train moved out of this repository (ADR-030 decision 4,
-`specs/plans/2026-09-16-image-repository-extraction.md`), `mvm-images` has
+specs/plans/2026-09-16-image-repository-extraction.md (retired; recover from tag specs-archive-2026-11-02)), `mvm-images` has
 built two different kinds of thing:
 
 1. **The Linux layer**: kernels, the base `default-tenant` and

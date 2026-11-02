@@ -188,8 +188,7 @@ form — or honestly not at all:
   differs. There is no Swift and no Virtualization.framework anywhere in
   the design (the earlier vminitd line was dropped: it is Swift with no
   prebuilt artifact). The kernel's provenance is the artifact cache rather
-  than an mvm build — recorded honestly in the backend's security profile,
-  see `specs/plans/271-apple-container-backend.md`.
+  than an mvm build — recorded honestly in the backend's security profile.
 - **WHP (Windows Hypervisor Platform)** — a future Windows-host backend. The
   guest side is unchanged: the same kernel + universal initramfs boot and the
   same `ActivateEnvironment`. The work is entirely host-side — a WHP

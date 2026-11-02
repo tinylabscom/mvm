@@ -4,7 +4,7 @@ Backing: shipped-source
 Validation: check-telemetry-inventory
 
 `binaries.toml` is the first, deliberately narrow layer of the producer inventory
-for [every-VM host-mediated tracing](../plans/2026-09-17-host-mediated-telemetry.md).
+for every-VM host-mediated tracing (retired; recover from tag specs-archive-2026-11-02).
 It is an inventory of workspace Rust **binary targets**, not a certification of
 running subscribers, exported records, image membership, or backend coverage.
 

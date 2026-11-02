@@ -100,7 +100,6 @@ pub const GATES: &[Gate] = &[
     ),
     ("check-abi-layout", crate::check_abi_layout::run),
     ("check-claim-catalog", crate::check_claim_catalog::run),
-    ("check-plan-names", crate::check_plan_names::run),
     ("check-sdk-cdylib-deps", crate::check_sdk_cdylib_deps::run),
     ("check-doc-links", crate::check_doc_links::run),
     (

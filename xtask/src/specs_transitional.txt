@@ -1,15 +1,5 @@
-# Spec areas the cleanup is retiring. Each stage deletes lines from this file.
-# Nothing may be added: a new path under specs/ belongs in adrs/, contracts/,
-# or is prd.md or README.md.
-specs/plans/
-specs/notes/
-specs/research/
-specs/refactor/
-specs/benchmarks/
+# Spec areas the cleanup is still retiring. Each stage deletes lines from this
+# file. Nothing may be added: a new path under specs/ belongs in adrs/,
+# contracts/, or is prd.md or README.md.
 specs/telemetry/
 specs/evidence/
-specs/validation/
-specs/prompts/
-specs/VERIFICATION.md
-specs/2026-08-25-scitt-integration-and-hash-chained-action-state.md
-specs/2026-08-28-receipt-attached-resource-utilization.md
