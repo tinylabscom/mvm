@@ -257,3 +257,55 @@ operations; perform stop; mint terminal evidence; or clear quarantine.
 The supplied terminal-result revision only controls acknowledgement parsing,
 not completion or cleanup. These omissions are positive-activation blockers,
 not optional checks for callers. No production receiver consumes this shape.
+
+## Lifecycle table (source-only)
+
+`mvm-contract::protocol::hvf_owner_lifecycle::OwnerLifecycle` is the pure
+transition and refusal table for one retained operation. It holds no process,
+key or socket and is created only by the owner before the first native effect;
+nothing deserializes it. It makes the identity, generation and staleness rules
+above executable:
+
+- **Identity and generation.** A request is applied only if its whole
+  `RecoveryBinding` equals the retained one: operation, request digest,
+  controlling principal, tenant, owner incarnation and phase, including the
+  native `HvfInstance` generation. Any difference is `BindingMismatch`.
+- **Stale and repeated requests.** The sequence must be strictly newer than the
+  last accepted one; equal or lower is `StaleSequence`. A refused request does
+  not consume its sequence. Repeated cancellation coalesces into one pending
+  intent; a repeated result acknowledgement is `AlreadyAcknowledged` and repeats
+  no cleanup or audit.
+- **Transitions.** `Registered -> Prepared -> Active -> Stopping -> Terminal`.
+  `Terminal` needs all three halves of the compound proof (completion barrier,
+  original-generation finalization, cleanup and audit); with any half missing the
+  operation is `RecoveryRequired` and no result revision exists. A preparation
+  failure releases only when proven child-free. `RecoveryRequired` never returns
+  to `Prepared` or `Active`.
+- **Disconnect and owner death.** A frontend disconnect records cancellation
+  intent and keeps custody. Owner death is `Quarantined`, which is absorbing:
+  every later request and transition refuses.
+
+The table authenticates no one. A receiver authenticates the connected peer and
+principal before calling `apply`, and the rest of this document's blockers
+(keyless operations, native resource and owner-death containment, the
+local-built frozen-input route) are unchanged. No launcher consumes this type.
+
+## Maintainer decision: in-process bound and owner death
+
+The maintainer decided, for the cold-HVF owner envelope and owner death
+(relayed by the cleanup coordinator on #4655):
+
+- The accepted resource bound is the in-process one: the same summed vCPU
+  CPU-time bound the HVF run loop enforces for claim 18, plus the existing
+  guest-memory ceiling. This replaces the requirement above for hard
+  per-process memory, thread and process containment on macOS; those rows of
+  the qualification table are not enforced and are not claimed.
+- Owner death is absorbing quarantine and nothing in this slice clears it. No
+  separate owner-death containment mechanism is required.
+- The concrete owner and receiver need review by a fresh independent security
+  reviewer before merge. A live HVF run for the owner witnesses is authorised
+  once the owner exists.
+
+This decision does not authorise a launcher by itself; the keyless lifecycle
+operations, authenticated recovery proof and the local-built frozen-input
+route above remain prerequisites.
