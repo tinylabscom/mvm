@@ -4,6 +4,10 @@
 //! exceptional immutable design attachments: one issue link, no progress
 //! ledger. The cutoff makes the legacy set finite without maintaining a second
 //! hand-edited inventory.
+//!
+//! Every tracked path under `specs/` must also be on the allow-list: the PRD,
+//! the README, `adrs/` and `contracts/` permanently, plus the shrinking
+//! transitional list the cleanup is retiring.
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -12,6 +16,16 @@ use std::path::Path;
 const LEGACY_CUTOFF: &str = "2026-09-30";
 const LEGACY_NUMBERED: &str = include_str!("legacy_numbered_plans.txt");
 const RETIRED_DASHBOARDS: &[&str] = &["SPRINT.md", "REFACTOR-STATUS.md"];
+const TRANSITIONAL: &str = include_str!("specs_transitional.txt");
+/// The transitional list may only shrink. Lower this as stages delete entries.
+#[cfg(test)]
+const TRANSITIONAL_CEILING: usize = 12;
+const PERMANENT: &[&str] = &[
+    "specs/README.md",
+    "specs/prd.md",
+    "specs/adrs/",
+    "specs/contracts/",
+];
 
 pub fn run(workspace: &Path) -> Result<()> {
     let plans = workspace.join("specs/plans");
@@ -46,11 +60,50 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
     }
 
+    for path in tracked_spec_paths(workspace)? {
+        if !is_allowed(&path) {
+            violations.push(format!(
+                "{path}: not allowed under specs/ (it holds the PRD, README, adrs/ and contracts/)"
+            ));
+        }
+    }
+
     if violations.is_empty() {
         println!("check-spec-hygiene: clean");
         return Ok(());
     }
     bail!("check-spec-hygiene:\n  {}", violations.join("\n  "))
+}
+
+fn transitional_entries() -> impl Iterator<Item = &'static str> {
+    TRANSITIONAL
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+}
+
+fn is_allowed(path: &str) -> bool {
+    PERMANENT
+        .iter()
+        .copied()
+        .chain(transitional_entries())
+        .any(|entry| path == entry || (entry.ends_with('/') && path.starts_with(entry)))
+}
+
+fn tracked_spec_paths(workspace: &Path) -> Result<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "-z", "specs"])
+        .current_dir(workspace)
+        .output()
+        .context("run git ls-files specs")?;
+    if !output.status.success() {
+        bail!("git ls-files specs failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 fn is_legacy_plan(path: &Path) -> bool {
@@ -133,6 +186,41 @@ mod tests {
         let violations = check(text).join("\n");
         assert!(violations.contains("task checkboxes"));
         assert!(violations.contains("mutable work state"));
+    }
+
+    #[test]
+    fn permanent_areas_are_allowed() {
+        for path in [
+            "specs/prd.md",
+            "specs/README.md",
+            "specs/adrs/001-microvm-security-posture.md",
+            "specs/contracts/policy-approval-v1.md",
+        ] {
+            assert!(is_allowed(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_new_area_is_refused() {
+        for path in [
+            "specs/sprint/delivery/new.md",
+            "specs/01-project.md",
+            "specs/ideas.md",
+            "specs/adrs-extra/x.md",
+        ] {
+            assert!(!is_allowed(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn an_exact_file_entry_does_not_admit_a_sibling_prefix() {
+        assert!(is_allowed("specs/VERIFICATION.md"));
+        assert!(!is_allowed("specs/VERIFICATION.md.bak"));
+    }
+
+    #[test]
+    fn the_transitional_list_only_shrinks() {
+        assert!(transitional_entries().count() <= TRANSITIONAL_CEILING);
     }
 
     #[test]
