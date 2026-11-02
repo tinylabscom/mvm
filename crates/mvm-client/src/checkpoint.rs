@@ -14,17 +14,31 @@ pub mod anchor;
 pub mod fs_quick;
 
 // Types and the liveness probe commands need without naming the runtime.
-pub use mvm_hostd::audit::bind::bind_checkpoint_restored;
+pub use mvm_hostd::audit::bind::{
+    CheckpointForkSecretBinding, bind_checkpoint_created, bind_checkpoint_forked,
+    bind_checkpoint_restored, class_str,
+};
+pub use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
+pub use mvm_runtime::base::runtime_meta;
 pub use mvm_runtime::base::runtime_meta::{VmRuntimeMeta, read as read_runtime_meta};
 pub use mvm_runtime::checkpoint::{
-    CheckpointStore, WorkspaceVolume, checkpoint_ancestry, checkpoint_children, verify_lineage,
-    vm_is_running,
+    BlobStatus, CaptureFsQuickParams, CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore,
+    ForkParams, ForkParentLiveness, LineageRelation, RestoreParams, RestoredChild, WorkspaceVolume,
+    capture_fs_quick, capture_vm_full, checkpoint_ancestry, checkpoint_children, diff_checkpoints,
+    fork_vm_full, materialized_blob_sha256, materialized_source, restore_checkpoint,
+    verify_checkpoint_runtime, verify_lineage, vm_full_restorer_for, vm_is_running,
 };
+pub use mvm_runtime::firecracker::FcForkRestorer;
+pub use mvm_runtime::hvf_restore::HvfForkRestorer;
 pub use mvm_runtime::image_lineage::{
     ImageChainAnchor, ImageStore, image_ancestry, image_children, verify_image_lineage,
 };
 pub use mvm_runtime::lineage::{Ancestry, VerifiedNode};
-pub use mvm_runtime::microvm::fc_pid_path;
+pub use mvm_runtime::microvm::{
+    fc_pid_path, firecracker_vsock_uds_path, resolve_running_vm_dir, stop_vm,
+};
+pub use mvm_runtime::vm::instance_snapshot::lock_resume;
+pub use mvm_runtime::vm::snapshot_key::SNAPSHOT_TENANT_KEY_ENV;
 pub use mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision;
 
 /// Access to the local checkpoint catalog, guarded removal and workspace images.

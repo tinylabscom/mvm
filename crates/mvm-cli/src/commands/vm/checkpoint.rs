@@ -14,15 +14,15 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use serde::Serialize;
 
+use mvm_client::AnyBackend;
 use mvm_client::admission::InheritedBundle;
+use mvm_client::checkpoint::class_str;
+use mvm_client::checkpoint::{
+    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, capture_fs_quick, capture_vm_full,
+};
 use mvm_core::checkpoint::{CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta};
 use mvm_core::config::{machine_state_dir, vm_state_dir};
 use mvm_core::vm_backend::SnapshotCapability;
-use mvm_hostd::audit::bind::class_str;
-use mvm_runtime::backend::AnyBackend;
-use mvm_runtime::checkpoint::{
-    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, capture_fs_quick, capture_vm_full,
-};
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -394,7 +394,7 @@ fn capture_vm_full_for_running_vm(
         vm_name: args.name.to_string(),
         supervisor_config_digest: supervisor_config_digest(args.state_dir),
         runtime_overlay_version,
-        runtime_launch_binding: mvm_runtime::base::runtime_meta::read(args.name)?
+        runtime_launch_binding: mvm_client::checkpoint::read_runtime_meta(args.name)?
             .and_then(|meta| meta.runtime_launch_binding),
         // Backends that drive their VMM through a supervisor config (HVF) carry
         // it into the checkpoint: a restore has to rebuild the launch shape the
@@ -531,7 +531,7 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
             return;
         }
     };
-    if let Err(e) = mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, &plan, meta) {
+    if let Err(e) = mvm_client::checkpoint::bind_checkpoint_created(&emitter, &plan, meta) {
         tracing::warn!(error = %e, "audit emit_checkpoint_created failed (non-fatal)");
     }
 }
@@ -600,14 +600,14 @@ fn diff(a: &str, b: &str, json: bool) -> Result<()> {
     let meta_b = store
         .read_meta(&id_b)
         .with_context(|| format!("reading checkpoint {b:?}"))?;
-    let d = mvm_runtime::checkpoint::diff_checkpoints(&meta_a, &meta_b);
+    let d = mvm_client::checkpoint::diff_checkpoints(&meta_a, &meta_b);
 
     if json {
         crate::json_out::emit_json(&d)?;
         return Ok(());
     }
 
-    use mvm_runtime::checkpoint::{BlobStatus, LineageRelation};
+    use mvm_client::checkpoint::{BlobStatus, LineageRelation};
     ui::info(&format!("checkpoint diff: {a} -> {b}"));
     if d.class_a != d.class_b {
         ui::info(&format!(
@@ -706,19 +706,19 @@ fn restore(id: &str, json: bool) -> Result<()> {
     // dir has no live owner and no registry record, so this lock is what keeps
     // a stop or reconcile in another process from deleting it mid-restore,
     // and what makes this restore wait for a stop that is still removing it.
-    let _lifecycle = mvm_runtime::vm::instance_snapshot::lock_resume(&meta.vm_name)?;
+    let _lifecycle = mvm_client::checkpoint::lock_resume(&meta.vm_name)?;
     if vm_is_running(&meta.vm_name) {
         bail!(
             "cannot restore into '{}': it is still running; stop it first",
             meta.vm_name
         );
     }
-    let restorer = mvm_runtime::checkpoint::vm_full_restorer_for(&meta)?;
+    let restorer = mvm_client::checkpoint::vm_full_restorer_for(&meta)?;
     let anchor = SignedChainAnchor::load()
         .context("loading the signed audit chain to verify the restore source")?;
-    mvm_runtime::checkpoint::restore_checkpoint(
+    mvm_client::checkpoint::restore_checkpoint(
         &store,
-        mvm_runtime::checkpoint::RestoreParams {
+        mvm_client::checkpoint::RestoreParams {
             checkpoint: id.clone(),
             target_vm: meta.vm_name.clone(),
             tenant: crate::commands::vm::tenant_resolution::resolve_tenant(None),
@@ -965,8 +965,8 @@ struct BootForkedChildParams<'a> {
 /// returns early when source == instance, so nothing gets clobbered).
 #[cfg(unix)]
 fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
+    use mvm_client::AnyBackend;
     use mvm_core::util::parse_human_size;
-    use mvm_runtime::backend::AnyBackend;
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
     AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
@@ -1030,7 +1030,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     })?;
     super::up::attach_universal_initramfs_if_cached(&mut start_config, &effective_hypervisor)?;
 
-    let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
+    let ledger = mvm_client::admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
         gpu: false,
         instructions: Default::default(),
@@ -1081,7 +1081,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     populate_fork_rootfs_verity(&mut start_config, p.instance_rootfs)?;
 
-    mvm_hostd::plan_admission::populate_audit_substrate(
+    mvm_client::admission::populate_audit_substrate(
         &mut start_config,
         &admission.admitted,
         admission.policy_bundle.as_ref(),
@@ -1090,7 +1090,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     // Mint the child's verb-grant sidecar. The backend's cmdline builder
     // reads it via verb_grant_cmdline_token at start time.
     if super::up::persists_plan_before_start(&effective_hypervisor) {
-        mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)?;
+        mvm_client::admission::stash_plan_for_bridge(&start_config)?;
     }
 
     if let Err(error) = p.prepared.validate_admitted_plan(&admission.admitted) {
@@ -1274,7 +1274,7 @@ pub(super) fn validate_fork_secret_policy(
     declared: &[mvm_core::plan::SecretBinding],
     allow_secret_drop: bool,
 ) -> Result<()> {
-    let binding_store = mvm_hostd::keyholder::FileBindingStore::default_location()
+    let binding_store = mvm_client::checkpoint::FileBindingStore::default_location()
         .context("opening the child tenant's secret-binding store")?;
     resolve_fork_secret_audit(tenant, declared, &binding_store)?;
 
@@ -1294,8 +1294,8 @@ pub(super) fn validate_fork_secret_policy(
 fn resolve_fork_secret_audit(
     tenant: &str,
     declared: &[mvm_core::plan::SecretBinding],
-    bindings: &dyn mvm_hostd::keyholder::BindingStore,
-) -> Result<Vec<mvm_hostd::audit::bind::CheckpointForkSecretBinding>> {
+    bindings: &dyn mvm_client::checkpoint::BindingStore,
+) -> Result<Vec<mvm_client::checkpoint::CheckpointForkSecretBinding>> {
     use mvm_core::plan::SecretSource;
 
     declared
@@ -1315,7 +1315,7 @@ fn resolve_fork_secret_audit(
                 })?;
             // What the child's endpoint will enforce: the stored allow-list,
             // narrowed by the binding's own destinations.
-            Ok(mvm_hostd::audit::bind::CheckpointForkSecretBinding {
+            Ok(mvm_client::checkpoint::CheckpointForkSecretBinding {
                 name: binding.name.clone(),
                 allowed_hosts: mvm_core::crypto::secret_binding::plan_binding_hosts(
                     binding, address, &metadata,
@@ -1379,11 +1379,11 @@ pub(crate) fn bind_checkpoint_forked(
     let emitter = super::audit_chain::AuditEmitter::new(signer.signing)
         .map(|e| e.with_receipts())
         .context("refusing an unaudited fork: audit emitter unavailable")?;
-    let binding_store = mvm_hostd::keyholder::FileBindingStore::default_location()
+    let binding_store = mvm_client::checkpoint::FileBindingStore::default_location()
         .context("opening the child tenant's secret-binding store for fork audit")?;
     let secret_bindings =
         resolve_fork_secret_audit(child_tenant, declared_secrets, &binding_store)?;
-    mvm_hostd::audit::bind::bind_checkpoint_forked(
+    mvm_client::checkpoint::bind_checkpoint_forked(
         &emitter,
         &plan,
         parent,
@@ -1424,15 +1424,15 @@ mod tests {
                 let home = tempfile::tempdir().unwrap();
                 env.isolate_mvm_home(home.path());
                 env.set(
-                    mvm_runtime::vm::snapshot_key::SNAPSHOT_TENANT_KEY_ENV,
+                    mvm_client::checkpoint::SNAPSHOT_TENANT_KEY_ENV,
                     "19".repeat(32),
                 );
                 let rootfs = home.path().join("rootfs.ext4");
                 std::fs::write(&rootfs, b"fake-ext4-bytes").unwrap();
                 let store = CheckpointStore::open();
-                let parent = mvm_runtime::checkpoint::capture_fs_quick(
+                let parent = mvm_client::checkpoint::capture_fs_quick(
                     &store,
-                    mvm_runtime::checkpoint::CaptureFsQuickParams {
+                    mvm_client::checkpoint::CaptureFsQuickParams {
                         id: CheckpointId::new("parent"),
                         vm_name: "parentvm".into(),
                         rootfs,
@@ -1457,7 +1457,7 @@ mod tests {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
                 let key = mvm_hostd::audit::host_keypair::load_or_init().unwrap();
                 let emitter = mvm_hostd::audit::emitter::AuditEmitter::new(key.signing).unwrap();
-                mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, &plan, &parent).unwrap();
+                mvm_client::checkpoint::bind_checkpoint_created(&emitter, &plan, &parent).unwrap();
                 Self { _env: env, home }
             }
 
@@ -2899,7 +2899,7 @@ mod tests {
             .tenant("local")
             .plan_id("plan-verify")
             .build();
-        mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, &plan, &meta).unwrap();
+        mvm_client::checkpoint::bind_checkpoint_created(&emitter, &plan, &meta).unwrap();
         meta
     }
 

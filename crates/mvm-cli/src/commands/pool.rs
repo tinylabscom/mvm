@@ -20,6 +20,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
+use mvm_client::AnyBackend;
+use mvm_client::checkpoint::CheckpointStore;
+use mvm_client::claim::ClaimRefusal;
+use mvm_client::standby::{STANDBY_POOL_TTL, SupervisorStandbyPool};
+use mvm_client::{ChildGrantIssuer, ClaimContext, PreloadContext, SpawnContext};
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
@@ -27,21 +32,16 @@ use mvm_core::vm_backend::{
     StandbySpec, VmBackend, VmId, VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
 };
 use mvm_fs::snapshot_store::FsSnapshotStore;
-use mvm_runtime::backend::AnyBackend;
-use mvm_runtime::checkpoint::CheckpointStore;
-use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool};
-use mvm_runtime::workload_runner::claim::ClaimRefusal;
-use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, PreloadContext, SpawnContext};
 use sha2::{Digest, Sha256};
 
 use super::Cli;
 use super::vm::checkpoint::{ClaimChainAnchor, SignedChainAnchor};
 use super::vm::host_signer;
-use mvm_contract::builder::BuilderError;
-use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
-use mvm_hostd::plan_admission::{
+use mvm_client::admission::{
     AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run, stash_plan_and_mint_verb_grant,
 };
+use mvm_contract::builder::BuilderError;
+use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
 
 mod cold_start;
 mod late_volumes;
@@ -385,7 +385,7 @@ fn captured_rootfs_digest(
     checkpoints: &CheckpointStore,
     meta: &mvm_core::checkpoint::CheckpointMeta,
 ) -> Result<String> {
-    mvm_runtime::checkpoint::materialized_blob_sha256(
+    mvm_client::checkpoint::materialized_blob_sha256(
         checkpoints,
         meta,
         mvm_core::checkpoint::ROOTFS_BLOB,
@@ -460,7 +460,7 @@ fn admit_standby_parent_plan(
         &ledger,
         None,
         None,
-        mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
+        mvm_client::admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
     )
     .context("admitting a plan for the captured standby parent")
 }
@@ -502,7 +502,7 @@ fn audit_captured_parent(
         .with_receipts()
         .with_decisions()
         .context("enabling the decision store for the pool audit")?;
-    mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, admitted.plan(), &meta)
+    mvm_client::checkpoint::bind_checkpoint_created(&emitter, admitted.plan(), &meta)
         .context("emitting checkpoint.created for the captured standby parent")
 }
 
@@ -665,7 +665,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                             let snapshots =
                                 FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
                             let anchor = SignedChainAnchor::load()?;
-                            let registry_path = mvm_runtime::vm::name_registry::registry_path();
+                            let registry_path = mvm_client::name_registry::registry_path();
                             let preload = PreloadContext {
                                 checkpoints: &checkpoints,
                                 snapshots: &snapshots,
@@ -878,7 +878,7 @@ where
     // whole history on every launch.
     let resident_anchor;
     let claim_anchor;
-    let anchor: &dyn mvm_runtime::checkpoint::CheckpointChainAnchor =
+    let anchor: &dyn mvm_client::checkpoint::CheckpointChainAnchor =
         if backend.as_vm_backend().supports_resident_handoff() {
             resident_anchor = SignedChainAnchor::empty();
             &resident_anchor
@@ -886,7 +886,7 @@ where
             claim_anchor = ClaimChainAnchor::for_checkpoint(&parent_checkpoint)?;
             &claim_anchor
         };
-    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    let registry_path = mvm_client::name_registry::registry_path();
     let grant_issuer = HostChildGrantIssuer;
     let ctx = ClaimContext {
         pool,
@@ -1108,7 +1108,7 @@ pub fn try_warm_claim(
 fn warm_claim_plan_json(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Option<String> {
     match cfg.plan_json.clone() {
         Some(plan) => Some(plan),
-        None if mvm_runtime::catalog::descriptor(backend.kind()).needs_plan_json => {
+        None if mvm_client::catalog::descriptor(backend.kind()).needs_plan_json => {
             Some(String::new())
         }
         None => None,

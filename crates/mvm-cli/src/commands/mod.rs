@@ -428,7 +428,7 @@ fn run_command() -> Result<()> {
     }
 
     if cli.command.emits_machine_readable_stdout() {
-        mvm_runtime::ui::set_chrome_to_stderr(true);
+        mvm_client::ui::set_chrome_to_stderr(true);
     }
 
     install_signal_handler();
@@ -802,7 +802,7 @@ fn register_inhouse_builder() {
     // cannot name the HVF and Firecracker drivers, which live a layer up.
     // `mvm-runtime` owns those constructors and their Stage 0; a library caller
     // registers the same ones before it builds.
-    mvm_runtime::builder_runner::register_driver_backed_builders();
+    mvm_client::register_driver_backed_builders();
 
     // Stage 0's bootstrap kernel is pinned in source and verified in
     // `mvm-build`; this crate supplies only the transport. It has to be curl:
@@ -831,12 +831,12 @@ fn register_inhouse_builder() {
 /// CLI bridges the gap here — the same shape as
 /// [`register_inhouse_builder`] above.
 fn register_stream_plane() {
-    mvm_hostd::stream::install_host_console_streamer();
+    mvm_client::entrypoint::install_host_console_streamer();
 }
 
 fn configure_runtime_logging(cli: &Cli) -> logging::ObservabilityGuard {
     let verbose = cli.verbose > 0 || std::env::var_os("RUST_LOG").is_some();
-    mvm_runtime::ui::set_verbose(verbose);
+    mvm_client::ui::set_verbose(verbose);
     if cli.verbose > 0 {
         set_cli_env(mvm_build::guest_agent_build::GUEST_BUILD_VERBOSE_ENV, "1");
     }
@@ -891,7 +891,7 @@ fn termination_handler(
             "\n{}",
             interrupt_cleanup_message(stage0_active)
         );
-        let ran = mvm_runtime::interrupt_cleanup::run_all();
+        let ran = mvm_client::interrupt_cleanup::run_all();
         if !ran.is_empty() {
             // A cleanup that could not settle its work (an unkillable VMM, a
             // failed registry write) leaves only this line behind.
@@ -927,8 +927,7 @@ fn maybe_converge_on_entry(command: &Commands) {
     if std::env::var("MVM_SKIP_RECONCILE").as_deref() == Ok("1") {
         return;
     }
-    let _ =
-        mvm_runtime::vm::reconcile::converge(&mvm_runtime::vm::reconcile::ConvergeOpts::default());
+    let _ = mvm_client::reconcile::converge(false);
 }
 
 #[cfg(test)]

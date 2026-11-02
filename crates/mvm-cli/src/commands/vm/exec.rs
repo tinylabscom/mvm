@@ -710,7 +710,7 @@ pub(in crate::commands) fn run_secure_started(
     let admit_bundle_posture = args
         .manifest
         .as_deref()
-        .map(mvm_runtime::vm::template::lifecycle::installed_bundle_posture)
+        .map(mvm_client::installed_bundle_posture)
         .transpose()?
         .flatten();
     // The audit substrate carries no emitter, so stash the AdmissionContext here
@@ -745,7 +745,7 @@ pub(in crate::commands) fn run_secure_started(
             runtime_config,
         } = inputs;
         denials_for_admit.arm(vm_name);
-        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
+        let ledger = mvm_client::admission::InMemoryNonceLedger::default();
         let instruction_mounts =
             crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
         // Every refusal is made before this returns; the audit sync is left
@@ -1300,8 +1300,8 @@ impl ReceiptInput {
             }
         };
 
-        mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(backend)?;
-        let selected_backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend);
+        mvm_client::AnyBackend::require_hypervisor_selectable(backend)?;
+        let selected_backend = mvm_client::AnyBackend::from_hypervisor(backend);
         let boots_oci = crate::exec::boots_oci_image(args.image_naming(None))?;
         crate::exec::validate_image_egress_backend(&selected_backend, boots_oci, &policy)?;
         let mut env_keys =

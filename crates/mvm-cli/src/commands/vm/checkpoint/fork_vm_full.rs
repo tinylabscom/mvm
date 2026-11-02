@@ -11,10 +11,10 @@
 //! the child's own state dir before the child VMM starts.
 
 use anyhow::{Context, Result};
+use mvm_client::checkpoint::{CheckpointStore, ForkParams, ForkParentLiveness, fork_vm_full};
 use mvm_contract::protocol::vm_backend::BackendKind;
 use mvm_core::checkpoint::{CheckpointId, VmFullOrigin, vm_full_origin};
 use mvm_core::config::vm_state_dir;
-use mvm_runtime::checkpoint::{CheckpointStore, ForkParams, ForkParentLiveness, fork_vm_full};
 
 use super::{
     CheckpointForkJson, ForkIntent, SignedChainAnchor, bind_checkpoint_forked,
@@ -199,8 +199,8 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
             child_plan_json: Some(child_plan_json),
             child_tenant_id: Some(child_tenant_id),
         },
-        &|child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
-            mvm_runtime::firecracker::FcForkRestorer.restore_fork(
+        &|child: &mvm_client::checkpoint::RestoredChild<'_>| {
+            mvm_client::checkpoint::FcForkRestorer.restore_fork(
                 child.vm_name,
                 child.state_dir,
                 child.cpu_grant,
@@ -322,13 +322,13 @@ struct AdmittedForkChild {
 /// at load time, so these values are claim-8 admission metadata only.
 fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChild> {
     let anchor = SignedChainAnchor::load().context("loading fork runtime audit chain")?;
-    mvm_runtime::checkpoint::verify_lineage(p.store, p.checkpoint, &anchor)
+    mvm_client::checkpoint::verify_lineage(p.store, p.checkpoint, &anchor)
         .context("authenticating inherited runtime metadata before admission")?;
     anyhow::ensure!(
         p.parent_meta.compute_meta_digest() == p.store.read_meta(p.checkpoint)?.meta_digest,
         "fork runtime metadata differs from the authenticated checkpoint"
     );
-    mvm_runtime::checkpoint::verify_checkpoint_runtime(p.store, p.parent_meta)?;
+    mvm_client::checkpoint::verify_checkpoint_runtime(p.store, p.parent_meta)?;
     let restrict_agent_verbs = fork_restrict_agent_verbs(p)?;
     let user_cfg = mvm_core::user_config::load(None);
     // A chunked checkpoint has no contiguous rootfs in its content directory.
@@ -353,7 +353,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         p.declared_secrets,
         p.allow_secret_drop,
     )?;
-    let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
+    let ledger = mvm_client::admission::InMemoryNonceLedger::new();
     let admission = crate::commands::vm::up::admit_plan_for_boot(
         crate::commands::vm::up::AdmitPlanForBootParams {
             gpu: false,
@@ -431,7 +431,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         plan_json: Some(child_plan_json.clone()),
         ..Default::default()
     };
-    mvm_hostd::plan_admission::stash_plan_for_bridge(&mint_cfg)?;
+    mvm_client::admission::stash_plan_for_bridge(&mint_cfg)?;
 
     Ok(AdmittedForkChild {
         admission,
@@ -445,7 +445,7 @@ fn verify_child_plan_binds_restore(
     child_vm_name: &str,
     image_sha256: &str,
 ) -> Result<()> {
-    let trusted = mvm_hostd::audit::host_keypair::load_or_init()
+    let trusted = mvm_client::host_keypair::load_or_init()
         .context("loading the host signer to verify the child plan")?
         .verifying_key();
     mvm_core::plan::verify_restored_child_plan(
@@ -478,7 +478,7 @@ fn fork_restrict_agent_verbs(p: &AdmitForkedChildParams<'_>) -> Result<bool> {
         ForkIntent::Ordinary => Ok(true),
         ForkIntent::Replay => {
             let anchor = SignedChainAnchor::load().context("loading replay source audit chain")?;
-            mvm_runtime::checkpoint::verify_lineage(p.store, p.checkpoint, &anchor)
+            mvm_client::checkpoint::verify_lineage(p.store, p.checkpoint, &anchor)
                 .context("verifying replay source checkpoint lineage")?;
             let recorded_plan_id = anchor
                 .checkpoint_plan_id(p.parent_meta)?
@@ -511,13 +511,13 @@ fn fork_admission_rootfs(
     parent: &mvm_core::checkpoint::CheckpointMeta,
     scratch: &std::path::Path,
 ) -> Result<(std::path::PathBuf, String)> {
-    let rootfs = mvm_runtime::checkpoint::materialized_source(
+    let rootfs = mvm_client::checkpoint::materialized_source(
         store,
         parent,
         mvm_core::checkpoint::ROOTFS_BLOB,
         scratch,
     )?;
-    let digest = mvm_runtime::checkpoint::materialized_blob_sha256(
+    let digest = mvm_client::checkpoint::materialized_blob_sha256(
         store,
         parent,
         mvm_core::checkpoint::ROOTFS_BLOB,
@@ -584,7 +584,7 @@ fn fork_vm_full_arm_hvf(
             child_plan_json: Some(child_plan_json),
             child_tenant_id: Some(child_tenant_id),
         },
-        &mvm_runtime::hvf_restore::HvfForkRestorer,
+        &mvm_client::checkpoint::HvfForkRestorer,
         &anchor,
     );
     if let Err(ref e) = fork_result {
@@ -638,7 +638,7 @@ fn fork_vm_full_arm_hvf(
 /// Stop a restored child when identity rotation or required runtime metadata
 /// fails, and report both the original failure and the outcome of the stop.
 fn stop_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error) -> anyhow::Error {
-    match mvm_runtime::backend::AnyBackend::for_started_vm(child_vm_name) {
+    match mvm_client::AnyBackend::for_started_vm(child_vm_name) {
         Some(backend) => match backend.stop(&mvm_core::vm_backend::VmId(child_vm_name.to_string()))
         {
             Ok(_timing) => error.context(format!(
@@ -658,7 +658,7 @@ fn stop_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error) -
 /// Stop a restored Firecracker child when post-restore hygiene or its runtime
 /// metadata fails, and report both the original failure and the stop outcome.
 fn stop_fc_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error) -> anyhow::Error {
-    match mvm_runtime::microvm::stop_vm(child_vm_name) {
+    match mvm_client::checkpoint::stop_vm(child_vm_name) {
         Ok(()) => error.context(format!(
             "stopped forked child '{child_vm_name}' after restore completion failure"
         )),
@@ -683,7 +683,7 @@ fn record_fork_runtime_meta(
     child_vm_name: &str,
     parent: &mvm_core::checkpoint::CheckpointMeta,
 ) -> Result<()> {
-    use mvm_runtime::vm::runtime_meta;
+    use mvm_client::checkpoint::runtime_meta;
 
     let state_dir = vm_state_dir(child_vm_name);
     let rootfs = state_dir.join(mvm_core::checkpoint::ROOTFS_BLOB);
@@ -751,9 +751,9 @@ fn deliver_fc_fork_post_restore(
     parent_snapshot_digest: &str,
     grant_env: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
 ) -> Result<()> {
-    let vm_dir = mvm_runtime::microvm::resolve_running_vm_dir(child_vm_name)
+    let vm_dir = mvm_client::checkpoint::resolve_running_vm_dir(child_vm_name)
         .with_context(|| format!("resolving VM dir for '{child_vm_name}'"))?;
-    let vsock_path_str = mvm_runtime::microvm::firecracker_vsock_uds_path(&vm_dir);
+    let vsock_path_str = mvm_client::checkpoint::firecracker_vsock_uds_path(&vm_dir);
     const POLL_ATTEMPTS: u32 = 40; // 20 seconds max
     for _ in 0..POLL_ATTEMPTS {
         if mvm_agentd::vsock::ping_at(&vsock_path_str).unwrap_or(false) {

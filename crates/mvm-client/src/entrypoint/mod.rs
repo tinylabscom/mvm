@@ -25,6 +25,7 @@ pub mod verb_audit;
 pub mod workload;
 
 pub use admission::{AdmittedEntrypoint, EntrypointAdmission, EntrypointAdmissionBuilder};
+// Entrypoint output types a frontend renders or records with.
 pub use boot::{
     AdmitInputs, SessionAdmit, SessionAuditSubstrate, SessionBoot, SessionVm, SessionVmName,
     boot_session_vm, tear_down_session_vm,
@@ -40,6 +41,9 @@ pub use dispatch::{
     route_event,
 };
 pub use envelope::{RemoteErrorEnvelope, parse_last_envelope};
+pub use mvm_hostd::stream::{
+    EntrypointSink, RecordedCopy, ShownChunk, StreamPlane, install_host_console_streamer,
+};
 pub use session::{
     IdleTimeoutUpdate, SessionStart, call_session, kill_session, reap_expired_sessions,
     require_running_session, session_info, set_session_idle_timeout, start_session,

@@ -50,29 +50,18 @@ impl Below {
     }
 }
 
+#[cfg(test)]
 const HOSTD: &[Below] = &[Below::Hostd];
+#[cfg(test)]
 const RUNTIME: &[Below] = &[Below::Runtime];
+#[cfg(test)]
 const BOTH: &[Below] = &[Below::Hostd, Below::Runtime];
 
 /// Files under `crates/mvm-cli/src/commands` that still reach a crate below
 /// the client, and which. Every entry is existing debt; remove it when the
-/// logic moves into `mvm-client`.
-const ALLOWLIST: &[(&str, &[Below])] = &[
-    // Command dispatch and top-level verbs.
-    ("mod.rs", BOTH),
-    ("pool.rs", BOTH),
-    // Builds, bundles and the builder VM.
-    // Images and manifests.
-    // Machine lifecycle.
-    // Audit, cache, secrets, storage and trust operations.
-    // Runs, checkpoints, workspaces and the audit-chain readers behind them.
-    ("vm/checkpoint.rs", BOTH),
-    ("vm/checkpoint/fork_vm_full.rs", BOTH),
-    ("vm/exec.rs", BOTH),
-    ("vm/invoke.rs", BOTH),
-    ("vm/run_plan.rs", HOSTD),
-    ("vm/session.rs", RUNTIME),
-];
+/// logic moves into `mvm-client`. Currently empty: no command file may reach
+/// below `mvm-client`, and any new entry must land with its extraction.
+const ALLOWLIST: &[(&str, &[Below])] = &[];
 
 pub fn run(workspace: &Path) -> Result<()> {
     let root = workspace.join("crates/mvm-cli/src/commands");
