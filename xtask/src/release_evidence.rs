@@ -97,7 +97,7 @@ const KNOWN_LANES: &[&str] = &["macos-hvf", "linux-firecracker"];
 
 fn evidence_path(workspace: &Path, lane: &str) -> PathBuf {
     workspace
-        .join("specs/evidence/e2e")
+        .join("xtask/data/evidence/e2e")
         .join(format!("{lane}.json"))
 }
 

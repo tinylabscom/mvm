@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::check_telemetry_inventory::{NonRuntimeCategory, Role};
 use crate::fs_walk::for_each_file;
 
-const SOURCES: &str = "specs/telemetry/sources.toml";
+const SOURCES: &str = "xtask/data/telemetry/sources.toml";
 
 /// Producer keys from the validated binary inventory, `package/name` form.
 #[derive(Debug, Default)]

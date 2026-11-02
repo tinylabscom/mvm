@@ -8,7 +8,7 @@ Feature: A detached machine's output is collected for the VM lifetime
   The workload's stdout and stderr are offered to guest capture by the agent's
   pipe readers, carried over the authenticated capture session, sealed by the
   host collector, and read back with no guest RPC. The live witness on
-  Firecracker is in `specs/telemetry/certification.md`. The stream plane's
+  Firecracker is in `xtask/data/telemetry/certification.md`. The stream plane's
   own gap regression `a_machine_booted_by_another_process_has_no_durable_copy_here`
   still holds: that plane keeps no per-VM copy; this collector does.
 

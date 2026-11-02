@@ -1,18 +1,13 @@
 //! Keep mutable work state out of `specs/`.
 //!
 //! Every tracked path under `specs/` must be on the allow-list: the PRD, the
-//! README, `adrs/` and `contracts/` permanently, plus the shrinking
-//! transitional list the cleanup is retiring. Active guidance must not point
-//! at the retired progress dashboards.
+//! README, `adrs/` and `contracts/`. Active guidance must not point at the
+//! retired progress dashboards.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 const RETIRED_DASHBOARDS: &[&str] = &["SPRINT.md", "REFACTOR-STATUS.md"];
-const TRANSITIONAL: &str = include_str!("specs_transitional.txt");
-/// The transitional list may only shrink. Lower this as stages delete entries.
-#[cfg(test)]
-const TRANSITIONAL_CEILING: usize = 2;
 const PERMANENT: &[&str] = &[
     "specs/README.md",
     "specs/prd.md",
@@ -55,19 +50,10 @@ pub fn run(workspace: &Path) -> Result<()> {
     bail!("check-spec-hygiene:\n  {}", violations.join("\n  "))
 }
 
-fn transitional_entries() -> impl Iterator<Item = &'static str> {
-    TRANSITIONAL
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-}
-
 fn is_allowed(path: &str) -> bool {
     PERMANENT
         .iter()
-        .copied()
-        .chain(transitional_entries())
-        .any(|entry| path == entry || (entry.ends_with('/') && path.starts_with(entry)))
+        .any(|entry| path == *entry || (entry.ends_with('/') && path.starts_with(entry)))
 }
 
 fn tracked_spec_paths(workspace: &Path) -> Result<Vec<String>> {
@@ -120,8 +106,9 @@ mod tests {
 
     #[test]
     fn a_directory_entry_does_not_admit_a_sibling_prefix() {
-        assert!(is_allowed("specs/telemetry/binaries.toml"));
-        assert!(!is_allowed("specs/telemetry-extra/x.toml"));
+        assert!(is_allowed("specs/adrs/001-x.md"));
+        assert!(!is_allowed("specs/adrs-extra/x.md"));
+        assert!(!is_allowed("specs/prd.md.bak"));
     }
 
     #[test]
@@ -130,14 +117,11 @@ mod tests {
             "specs/plans/new.md",
             "specs/notes/new.md",
             "specs/research/new.md",
+            "specs/telemetry/new.toml",
+            "specs/evidence/new.json",
             "specs/sprint/delivery/new.md",
         ] {
             assert!(!is_allowed(path), "{path}");
         }
-    }
-
-    #[test]
-    fn the_transitional_list_only_shrinks() {
-        assert!(transitional_entries().count() <= TRANSITIONAL_CEILING);
     }
 }

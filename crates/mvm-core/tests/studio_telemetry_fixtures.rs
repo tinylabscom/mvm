@@ -10,7 +10,7 @@
 //! `collector-status.jsonl` (the typed status for every collector label).
 //! `crates/mvm-client/tests/studio_telemetry_fixtures.rs` replays the served
 //! fixtures through the real local reader. The companion contract document
-//! is `specs/telemetry/studio-contract.md`.
+//! is `specs/contracts/studio-telemetry-contract.md`.
 //!
 //! The streams are deterministic (fixed epochs, sequences and monotonic
 //! timestamps), so the comparison is byte-exact. Regenerate after a

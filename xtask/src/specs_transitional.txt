@@ -1,5 +1,0 @@
-# Spec areas the cleanup is still retiring. Each stage deletes lines from this
-# file. Nothing may be added: a new path under specs/ belongs in adrs/,
-# contracts/, or is prd.md or README.md.
-specs/telemetry/
-specs/evidence/
