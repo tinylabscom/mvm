@@ -203,7 +203,7 @@ fn toml_array_field(block: &str, name: &str) -> Vec<String> {
 /// be a representative anchor — a subset — but never to name a witness the
 /// model has never heard of. Nothing else compares the two: this gate
 /// resolves the ledger's witnesses against the tree, `check-conformance`
-/// compares the model against `docs/CONFORMANCE.md`. A witness added to
+/// compares the model against `model/CONFORMANCE.md`. A witness added to
 /// the ADR table but not to the model was invisible to both, which is how
 /// two claims had already drifted.
 fn ledger_witnesses_are_known_to_the_model(
