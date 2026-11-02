@@ -29,10 +29,10 @@ Major task families include:
 
 `cargo run -p xtask -- check-telemetry-inventory` (also in `check-all`)
 compares every Cargo workspace binary, including implicit and feature-gated
-targets, with `specs/telemetry/binaries.toml`. Missing, stale, duplicate,
+targets, with `xtask/data/telemetry/binaries.toml`. Missing, stale, duplicate,
 source-moved, or feature-changed entries fail the gate. It checks explicit
 runtime gaps and non-runtime exclusions; success is **not** runtime tracing
-certification. See `specs/telemetry/README.md` for the remaining coverage work.
+certification.
 
 The library target contains report schemas shared with probe programs. The
 optional `man` feature pulls in `mvm-cli` and clap only when generating manual

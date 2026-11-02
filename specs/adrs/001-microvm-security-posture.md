@@ -878,7 +878,7 @@ tuning decision.
   far enough to be missed. Holding
   output longer would delay every quiet stream, and the host holds
   fingerprints, not values, so it cannot recognise a secret's prefix. See
-  `specs/telemetry/studio-contract.md`.
+  `specs/contracts/studio-telemetry-contract.md`.
 
 ### Non-goals
 
