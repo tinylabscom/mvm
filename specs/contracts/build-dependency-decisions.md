@@ -859,6 +859,56 @@ evidence is recorded so the next sweep does not repeat it.
   `hermit-abi` and `is-terminal` but adds `alloca` and `page_size` and needs Rust 1.86.
   Not applied.
 
+## Section 3 applied state (#4839 section 3)
+
+Verified 2026-11-02 at `3d17ff9fdd` (origin/main), `--offline --locked`,
+`aarch64-apple-darwin`, rustc 1.97.1. Every candidate the ranking above judged
+actionable is already on main, so this pass changes no manifest or lockfile.
+
+- Rank 1 (`tracing-subscriber` without `tracing-log`) is applied: the
+  `[workspace.dependencies]` row carries `default-features = false` without
+  `tracing-log`, and `tracing-log` is absent from `Cargo.lock`.
+- Ranks 2–6 stand as recorded: not applied (`chrono` defaults, `tokio` `signal`,
+  `tempfile` — the `host-state` gate is a separate change) or retained
+  (`serde_jcs` until a differential test exists; `serde_json` `preserve_order`).
+- Duplicates: nothing newly unifiable. `vmm-sys-util` on crates.io is still
+  0.15.0 (2025-08-07, `bitflags` 1), so the `bitflags` pair's reopen condition
+  is unmet. Since the pair table above was measured, main moved the `sigstore-*`
+  crates to 0.15.1, which removed the `sha2`, `signature` and `rand`/`rand_core`
+  0.9 pairs by itself. The pairs now in the `mvmctl` closure — `bitflags`,
+  `block-buffer`, `const-oid`, `cpufeatures`, `crypto-common`, `der`, `digest`,
+  `getrandom`, `pem-rfc7468`, `ryu-js`, `spki` — are the RustCrypto generation
+  split (`sha1` `=0.10.6` with `gix` and `x509-cert` 0.2.5), `ring`/`aws-lc-rs`
+  and `serde_jcs`'s `ryu-js`, all held by the retentions above.
+- `cargo machete`: no first-party finding; vendored findings reduced to `gix`
+  (`async-std`), `gix-object` (`gix-hashtable`), `am-fs-ext4` (`am-fs-core`),
+  which stay for the reasons already recorded.
+- The stale remote branches `chore/4839-unused-deps`, `chore/deps-sweep-4839`,
+  `chore/dependency-reduction`, `chore/4670-unused-deps`, `dep-reduction-4839-a`
+  and `dep-reduction-4839-b` were each diffed against this commit: every one is
+  doc text already merged or code superseded by the merged #4663/#4839 changes
+  (`mvm-hostd` has no `mvm-sdk` edge; `tests/security_lane_dependencies.rs`
+  exists; the xtask budgets match). None holds an unapplied candidate.
+
+Numbers at this commit, same commands as the ranking (`cargo tree --offline
+--locked -p mvmctl --target aarch64-apple-darwin -e normal,build --prefix none`
+piped through the same `sed | sort -u | wc -l`; `grep -c '^name = ' Cargo.lock`;
+unit count from `cargo +nightly build --unit-graph -Z unstable-options --offline
+--locked -p mvmctl --profile release-min --target aarch64-apple-darwin
+--features host,user,release-artifact-bootstrap,release-channel`, units
+unchanged with `embed-host-bins` added):
+
+| Measure | Ranking baseline (`152ed1cebf`) | Now (`3d17ff9fdd`) |
+|---|---:|---:|
+| `mvmctl` closure, `aarch64-apple-darwin` | 350 (349 after rank 1) | 347 |
+| `Cargo.lock` packages | 728 (727 after rank 1) | 735 |
+| Distinct duplicate names in `Cargo.lock` | 34 | 34 |
+| `mvmctl` `release-min` unit graph | 497 (at `80a11312e3`) | 487 |
+
+The closure and unit counts fell and the lock grew for reasons outside this
+section (the sigstore 0.15.1 move and other merged work); no delta here is
+claimed as a reduction from this pass. No timing was taken.
+
 ## Owner decisions
 
 - 2026-10-24, #4663: patch the Sigstore Rekor and timestamp crates locally so
