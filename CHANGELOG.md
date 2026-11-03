@@ -2,6 +2,29 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.26.1] — 2026-11-02
+
+Supersedes 0.26.0, which was tagged but never published.
+
+### Added
+- **mailbox**: Relay admission is an explicit policy, and transport peers, streams, retries and relay usage are bounded (#4907, #4908)
+- **sdk**: Typed host-local telemetry reads (#4873)
+- **cli**: Local policy and development launch defaults are configurable (#4853)
+
+### Fixed
+- **fc**: Writable-volume VMs start without `sudo -C` or a sudoers edit (#4984, #5002)
+- **hvf**: Snapshot capture is serialised with pause and resume (#4994); a canonical-kernel bundle with no caller registration boots (#4968)
+- **runtime**: An unrecognised `--hypervisor` is refused and the `krun`/`hypervisor` aliases are dropped (#4973)
+- **runtime**: A bundle signed by this host's own key is admitted at launch (#4931)
+- **core**: Tenant and name are bound as AEAD associated data in the file secret store (#4928)
+- **audit**: Evidence completeness requires each leaf exactly once (#4963)
+- **image**: A broken registry pin no longer falls back to another image (#5004)
+
+### Security
+- **deps**: Bump wasmtime 49.0.4 to 49.0.5 for RUSTSEC-2026-0420, RUSTSEC-2026-0422, RUSTSEC-2026-0423 and RUSTSEC-2026-0424 (#4917)
+
+Tagged v0.26.0; it was not published. Superseded by 0.26.1.
+
 ## [0.26.0] — 2026-10-26
 
 Supersedes 0.25.0, which was tagged but never published.
