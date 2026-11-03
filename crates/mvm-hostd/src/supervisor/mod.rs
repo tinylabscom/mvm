@@ -138,6 +138,13 @@ pub mod tools;
 /// `WallClockControl::SupervisorTimer`.
 pub mod wall_clock;
 
+/// First index of `needle` in `haystack`, or `None`.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
 pub use aggregate::{
     AuditPolicyValidationError, EgressPolicyValidationError, KNOWN_AUDIT_STREAM_SCHEMES,
     KNOWN_INSPECTOR_NAMES, Supervisor, SupervisorError, build_inspector_chain,
