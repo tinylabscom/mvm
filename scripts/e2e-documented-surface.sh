@@ -251,10 +251,33 @@ stop_watcher() {
   WATCHER_PID=""
 }
 
+# Copy the small diagnostic files out of each VM state dir before `reap`
+# removes the machines; a failed stop is otherwise undiagnosable. Allowlist
+# only (no keys, no disk images) and logs are tailed to stay bounded.
+save_vm_diagnostics() {
+  local d name f out="$E2E_HOME/vm-diagnostics"
+  for d in "$E2E_HOME"/vms/*/; do
+    [[ -d "$d" ]] || continue
+    name="$(basename "$d")"
+    mkdir -p "$out/$name" || continue
+    for f in supervisor-status.json shutdown-timing.json hvf-finalized.json hvf-instance.json; do
+      [[ -f "$d$f" ]] && cp "$d$f" "$out/$name/$f"
+    done
+    for f in console.log supervisor.log; do
+      [[ -f "$d$f" ]] && tail -c 65536 "$d$f" > "$out/$name/$f"
+    done
+    if [[ -f "$d/shutdown-timing.json" ]]; then
+      echo "--- $name shutdown-timing.json ---"
+      head -c 4096 "$d/shutdown-timing.json"; echo
+    fi
+  done 2>/dev/null || true
+}
+
 on_exit() {
   local status=$?
   trap - EXIT
   stop_watcher
+  [[ "$status" == 0 ]] || save_vm_diagnostics
   echo
   e2e_phase_summary "Documented surface phase timings ($(uname -s))" || {
     [[ "$status" != 0 ]] || status=1

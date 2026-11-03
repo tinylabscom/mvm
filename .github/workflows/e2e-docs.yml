@@ -462,6 +462,9 @@ jobs:
             ${{ runner.temp }}/e2e-docs.log
             ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/vms/*/console.log
             ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/vms/*/supervisor.log
+            ${{ github.workspace }}/.mvm-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/vm-diagnostics/*/*
+          # The home dir is dot-prefixed; v4+ skips hidden paths by default.
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 
