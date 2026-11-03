@@ -842,7 +842,13 @@ jobs:
     # exists to catch multiple-x regressions.
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 45, not 30: overlay assembly compiles mvmctl plus the guest runtime from
+    # this tree, and on a cache-miss head (any Cargo.lock change) that step
+    # alone has been observed at 19–27+ minutes on shared runners — run
+    # 41567087027 hit the old 30-minute ceiling during assembly and the boot
+    # ceiling below never executed. This is wall-clock headroom for the job,
+    # not a loosening of the 6s boot budget that gate enforces.
+    timeout-minutes: 45
     env:
       # `IMAGE_TAG` is resolved from images.lock by a step below, not written
       # here. Pinned, not `latest`: auto-tracking a moving release is how this
