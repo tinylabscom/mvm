@@ -877,6 +877,12 @@ fi
 # refuses to start against a stale `mvmctl`, and that refusal prints no
 # scenarios at all — which reads as a clean run to anyone counting failures.
 SUITE_LOG="$(mktemp "$E2E_HOME/.e2e-suite.XXXXXX")"
+BDD_ARGS=()
+if [[ "${MVM_BDD_FAIL_FAST:-0}" == "1" ]]; then
+  # Stop this shard at the first failed scenario instead of spending the
+  # remaining budget on a known-red run.
+  BDD_ARGS+=(-- --fail-fast)
+fi
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
 MVM_BDD_DIR_SHARE=1 \
@@ -889,7 +895,7 @@ MVM_HOME="$E2E_HOME" \
     --timeout "$E2E_TIMEOUT_SECS" \
     --grace 5 \
     --log "$SUITE_LOG" \
-    -- ./scripts/cargo.sh test -p mvm-conformance --test conformance --features bdd
+    -- ./scripts/cargo.sh test -p mvm-conformance --test conformance --features bdd "${BDD_ARGS[@]}"
 SUITE_STATUS=$?
 set -e
 e2e_phase_end

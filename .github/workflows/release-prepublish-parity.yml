@@ -1,0 +1,127 @@
+name: Release prepublish parity
+
+# Runs the release docs witness (`e2e-docs.yml`) in strict mode against an
+# explicit signed runtime candidate, without publishing anything.
+#
+# Purpose: exercise the same portable-bundle/runtime-candidate path a tag push
+# release requires, before any publication step is allowed to proceed.
+#
+# This is intentionally separate from `release.yml` dry runs:
+# `workflow_dispatch` release runs cannot mint tag-bound runtime candidates and
+# therefore allow named skips for candidate-dependent scenarios.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_linux:
+        description: Run the Linux Firecracker documented surface lane
+        required: false
+        type: boolean
+        default: true
+      run_macos:
+        description: Run the macOS HVF documented surface lane
+        required: false
+        type: boolean
+        default: true
+      runtime_candidate_artifact_id:
+        description: Signed runtime candidate upload ID
+        required: true
+        type: string
+      runtime_candidate_artifact_digest:
+        description: Signed runtime candidate artifact ZIP digest
+        required: true
+        type: string
+      runtime_archive_sha256:
+        description: Candidate archive byte pin
+        required: true
+        type: string
+      runtime_checksum_sha256:
+        description: Candidate checksum byte pin
+        required: true
+        type: string
+      runtime_archive_bundle_sha256:
+        description: Candidate archive signature bundle byte pin
+        required: true
+        type: string
+      runtime_checksum_bundle_sha256:
+        description: Candidate checksum signature bundle byte pin
+        required: true
+        type: string
+      macos_blocks_on_unusable_host:
+        description: Require recorded/local macOS evidence when no usable host is available
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-prepublish-parity-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require a version tag ref
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::Dispatch this workflow from a release tag (refs/tags/v*), not $REF_TYPE:$REF_NAME." >&2
+            exit 1
+          fi
+          case "$REF_NAME" in
+            v*) ;;
+            *)
+              echo "::error::Dispatch this workflow from a release tag named v* (got $REF_NAME)." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Require a complete runtime candidate quartet
+        env:
+          ARTIFACT_ID: ${{ inputs.runtime_candidate_artifact_id }}
+          ARTIFACT_DIGEST: ${{ inputs.runtime_candidate_artifact_digest }}
+          ARCHIVE_SHA256: ${{ inputs.runtime_archive_sha256 }}
+          CHECKSUM_SHA256: ${{ inputs.runtime_checksum_sha256 }}
+          ARCHIVE_BUNDLE_SHA256: ${{ inputs.runtime_archive_bundle_sha256 }}
+          CHECKSUM_BUNDLE_SHA256: ${{ inputs.runtime_checksum_bundle_sha256 }}
+        run: |
+          set -euo pipefail
+          for key in \
+            ARTIFACT_ID ARTIFACT_DIGEST \
+            ARCHIVE_SHA256 CHECKSUM_SHA256 \
+            ARCHIVE_BUNDLE_SHA256 CHECKSUM_BUNDLE_SHA256; do
+            value="${!key}"
+            if [ -z "${value//[[:space:]]/}" ]; then
+              echo "::error::missing required input $key" >&2
+              exit 1
+            fi
+          done
+
+  documented-surface:
+    needs: preflight
+    permissions:
+      contents: read
+      actions: read
+      id-token: none
+    uses: ./.github/workflows/e2e-docs.yml
+    with:
+      run_linux: ${{ inputs.run_linux }}
+      run_macos: ${{ inputs.run_macos }}
+      runtime_candidate_artifact_id: ${{ inputs.runtime_candidate_artifact_id }}
+      runtime_candidate_artifact_digest: ${{ inputs.runtime_candidate_artifact_digest }}
+      runtime_archive_sha256: ${{ inputs.runtime_archive_sha256 }}
+      runtime_checksum_sha256: ${{ inputs.runtime_checksum_sha256 }}
+      runtime_archive_bundle_sha256: ${{ inputs.runtime_archive_bundle_sha256 }}
+      runtime_checksum_bundle_sha256: ${{ inputs.runtime_checksum_bundle_sha256 }}
+      # Strict parity: this prepublish gate fails if candidate-bound scenarios skip.
+      allow_runtime_candidate_skip: false
+      macos_blocks_on_unusable_host: ${{ inputs.macos_blocks_on_unusable_host }}
