@@ -7,7 +7,6 @@
 
 #[cfg(test)]
 mod fc_orchestration_tests;
-pub mod spec;
 pub mod traits;
 
 pub use mvm_backends::driver::FcDriver;
@@ -16,7 +15,7 @@ pub use mvm_backends::driver::{HvfDriver, LibkrunDriver, QemuDriver};
 // (`driver::libkrun::map_kernel_for_test`), so re-exporting only the driver
 // types leaves those paths unresolvable.
 pub use mvm_backends::driver::{fc, hvf, libkrun, qemu};
-pub use spec::{
+pub use mvm_vmm::driver::spec::{
     BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
 };
 pub use traits::{
