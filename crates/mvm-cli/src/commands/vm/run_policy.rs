@@ -650,6 +650,65 @@ mod tests {
         );
     }
 
+    fn signed_ceiling(hosts: &[&str]) -> mvm_core::plan::EnvironmentDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": "aarch64-linux",
+            "entrypoint": {"argv": ["/app/start"]},
+            "policy": {"allow_hosts": hosts},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_installed_applications_signed_ceiling_refuses_a_wider_operator_host() {
+        let (_env, _home) = isolated();
+        let mut args = RunArgs {
+            allow_host: vec!["unrelated.example:443".into()],
+            ..RunArgs::default()
+        };
+        let error = apply_selected_policy(
+            &mut args,
+            None,
+            Some(signed_ceiling(&["api.example.test:443"])),
+        )
+        .expect_err("a host outside the signed ceiling must be refused");
+        assert!(
+            format!("{error:#}").contains("signed application"),
+            "{error:#}"
+        );
+        assert_eq!(args.allow_host, ["unrelated.example:443"]);
+        assert!(args.applied_policy.is_none());
+    }
+
+    #[test]
+    fn an_operator_deny_removes_a_signed_host_and_a_flag_cannot_restore_it() {
+        let (_env, home) = isolated();
+        let profile = home.path().join("deny-host.toml");
+        std::fs::write(
+            &profile,
+            "[overrides.network]\ndeny = [\"api.example.test:443\"]\n",
+        )
+        .unwrap();
+        let ceiling = signed_ceiling(&["api.example.test:443"]);
+        let mut args = RunArgs {
+            policy: vec![profile.display().to_string()],
+            ..RunArgs::default()
+        };
+        let selected = select(&args).unwrap();
+        apply_selected_policy(&mut args, selected, Some(ceiling.clone())).unwrap();
+        assert!(args.allow_host.is_empty());
+
+        let mut args = RunArgs {
+            policy: vec![profile.display().to_string()],
+            allow_host: vec!["api.example.test:443".into()],
+            ..RunArgs::default()
+        };
+        let selected = select(&args).unwrap();
+        apply_selected_policy(&mut args, selected, Some(ceiling))
+            .expect_err("a flag cannot reopen an operator-denied signed host");
+    }
+
     #[test]
     fn ordinary_policy_folding_preserves_operator_ai_flags() {
         let (_env, _home) = isolated();
