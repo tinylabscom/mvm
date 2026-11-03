@@ -15,8 +15,10 @@ issue and read only what it links.
 2. Read only the ADRs and contracts linked by that issue. They own durable
    decisions and interfaces.
 3. Use Graft to locate the implementation and determine its blast radius.
-4. Use the pull request to record the implementation and verification, and let
-   its `Closes #N` linkage close the issue.
+4. Use the pull request to record the implementation and verification. Use
+   `Closes #N` only when the PR completes the issue's last unchecked checkbox;
+   otherwise link it with `Part of #N`. An issue may only close once every
+   checkbox in its body and comments is checked.
 
 `just maint::task-context <issue>` generates a read-only briefing from those
 sources. The briefing is disposable output, never another work ledger.
