@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use mvm_contract::protocol::gpu::GpuResponse;
-use mvm_gpu_shim_core::{call, guard, wire};
+use mvm_gpu::shim::{call, guard, wire};
 
 use libc::{c_char, c_int, c_uint, c_void};
 

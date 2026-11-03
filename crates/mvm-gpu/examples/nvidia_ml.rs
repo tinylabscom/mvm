@@ -10,7 +10,7 @@
 use std::cell::Cell;
 
 use mvm_contract::protocol::gpu::GpuResponse;
-use mvm_gpu_shim_core::{call, guard, wire, write_cstr};
+use mvm_gpu::shim::{call, guard, wire, write_cstr};
 
 use libc::{c_char, c_int, c_uint, c_void};
 

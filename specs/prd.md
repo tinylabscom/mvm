@@ -116,7 +116,7 @@ Limit: a secret's destination is bound at the host; the guest can still send
 the placeholder anywhere it is allowed to connect. Stdin, when granted, is a
 policy gate with a fingerprint scan, not an identity check (Preview 17).
 
-### Scrubbed (Preview detection; replacement is a requirement)
+### Scrubbed (Preview detection; replacement and taint are Planned requirements 15 and 16)
 
 Because the host owns the wire, it can inspect traffic in both directions.
 
@@ -409,9 +409,10 @@ guest memory; only hardware confidential computing closes that.
 
 ## Planned requirements from a field comparison
 
-Taken from a study of a comparable local microVM project's README and docs.
-Each is a requirement here, status Planned unless noted. None may weaken a
-numbered claim.
+Rows 1 to 14 come from a study of a comparable local microVM project's README
+and docs; rows 15 and 16 are owner requirements from the Scrubbed pillar. Each
+is a requirement here, status Planned unless noted. None may weaken a numbered
+claim.
 
 | # | Requirement | Acceptance |
 | --- | --- | --- |
@@ -429,6 +430,12 @@ numbered claim.
 | 12 | **Easy installation on every platform.** One command installs a signed release with no prerequisite: `curl \| sh` on macOS and Linux (user-writable prefix, no `sudo`), a Homebrew tap, distro packages, and `winget` plus a signed zip on Windows. Every channel verifies the signature (claim 20) before running anything. `mvmctl doctor` names anything still missing. | A clean-VM install test per platform ends with requirement 1 passing. |
 | 13 | **Elastic memory on every backend.** A guest returns memory it frees, and a machine's footprint tracks its use, not its size. Over-provisioning costs close to nothing. | Today: HVF uses free page reporting; Firecracker uses a target balloon driven by host pressure; libkrun and QEMU report no mechanism. Each backend must either implement one or advertise `none` in `doctor`. A test fills and frees guest memory and asserts the host footprint falls. Publish the footprint numbers beside the launch budgets. |
 | 14 | **Language bindings through the host library's C ABI.** `libmvm_hostlib` already exposes a versioned C ABI (`mvm_hostlib_abi_version`, `mvm_hostlib_abi_is_compatible`, `mvm_hostlib_call`, `mvm_hostlib_free`, an approval callback) that takes and returns JSON, so any language with a C foreign-function interface can bind it without a subprocess. Python and TypeScript already ship as first-class SDKs; the new-binding priority is Go, then Swift (Java/Kotlin and C# only on demand). Each binding is a thin loader plus types generated from the existing schema. | A reference binding in one new language passes the client-interface conformance suite (ADR-043). Bindings call the version handshake before their first call, free every returned buffer, and never shell out (`check-no-cli-shellout`). How the signed library reaches users per platform is part of the work. |
+| 15 | **PII replacement.** Detect and replace, not detect only. A matched value (SSN, card number, email, phone, full name) is substituted with a stable opaque token on the host-owned wire before it leaves, and restored only on an exact token echo. The event is audited by rule name, never by value. Policy lives in the signed plan and can only narrow. A name is PII only as a full name (first and last together). State how names are found (dictionary, model plus adjacency, or declared values) and publish the known misses and false positives. Builds on ADR-001's proposed "Reversible replacement on owned cleartext paths". | Tests: each rule replaces on egress and restores only an exact echo; no raw value reaches the wire, a span, a checkpoint or the audit log; a policy cannot widen a lower layer's rule. The claim is limited to what the published miss and false-positive list supports. Needs an ADR-001 ledger row before it is called Shipped. |
+| 16 | **Taint tracking.** Content of untrusted provenance cannot authorize a privileged action. Reaching a host service or releasing a secret already needs a signed binding in the plan; taint makes the provenance real. It is on only when something is admitted to escalate to (egress, a host-service binding, a secret binding or a tool grant), so a fully offline sealed workload pays nothing. The trigger is capability, not a pack label. Prompt-injection detection stays advisory and pattern-based, with false positives. | Tests: a tainted input cannot cause an unbound host-service call or secret release; an offline workload runs with taint off and no added cost on the launch budgets. Trigger confirmation is open decision 3. Needs an ADR-001 ledger row before it is called Shipped. |
+
+Also noted for decision, not yet required: a local,
+privacy-preserving lifecycle journal (counts and shapes only, no names, paths or
+commands, off by default). It must never become telemetry that leaves the host.
 
 ## Trusted computing base
 

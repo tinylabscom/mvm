@@ -4096,44 +4096,8 @@ version = "0.26.0"
 dependencies = [
  "libc",
  "mvm-contract",
- "mvm-gpu-shim-core",
  "mvm-vmm",
  "tempfile",
-]
-
-[[package]]
-name = "mvm-gpu-cuda-shim"
-version = "0.26.0"
-dependencies = [
- "libc",
- "mvm-contract",
- "mvm-gpu-shim-core",
-]
-
-[[package]]
-name = "mvm-gpu-cudart-shim"
-version = "0.26.0"
-dependencies = [
- "libc",
- "mvm-contract",
- "mvm-gpu-shim-core",
-]
-
-[[package]]
-name = "mvm-gpu-nvml-shim"
-version = "0.26.0"
-dependencies = [
- "libc",
- "mvm-contract",
- "mvm-gpu-shim-core",
-]
-
-[[package]]
-name = "mvm-gpu-shim-core"
-version = "0.26.0"
-dependencies = [
- "libc",
- "mvm-contract",
 ]
 
 [[package]]

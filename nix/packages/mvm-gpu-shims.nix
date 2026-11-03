@@ -2,11 +2,11 @@
 # libnvidia-ml.so.1 replacements that forward the CUDA driver/runtime/NVML
 # APIs to the per-VM host GPU endpoint over vsock.
 #
-# Each derivation builds one cdylib from its crate, linked against the same
-# libc the guest userland runs (glibc for OCI-rooted guests, musl for the
-# sealed overlay). The image composition (which guests carry the shims
-# and where the loader finds them) lives in the mvm-images repository; these
-# recipes only produce the .so files with the right sonames.
+# Each derivation builds one cdylib example of the mvm-gpu crate, linked
+# against the same libc the guest userland runs (glibc for OCI-rooted guests,
+# musl for the sealed overlay). The image composition (which guests carry the
+# shims and where the loader finds them) lives in the mvm-images repository;
+# these recipes only produce the .so files with the right sonames.
 
 {
   pkgs,
@@ -38,14 +38,20 @@ let
   # makes the resulting shared object depend on musl's libc.so, not glibc.
   muslLinker = "${pkgs.pkgsMusl.stdenv.cc}/bin/gcc";
 
-  crateFor =
+  shimFor =
     {
-      crate,
       libName,
       soname,
     }:
+    let
+      # The shim examples have no build script, so the soname the guest
+      # loader resolves them by is passed as a linker flag. It reaches
+      # host-built build scripts too in the glibc (no --target) build,
+      # where a soname on an executable is inert.
+      sonameFlag = "-C link-arg=-Wl,-soname,${soname}";
+    in
     pkgs.rustPlatform.buildRustPackage ({
-      pname = crate;
+      pname = "mvm-gpu-shim-${libName}";
       version = "0.18.0";
 
       src = mvmSrc;
@@ -57,7 +63,9 @@ let
 
       cargoBuildFlags = [
         "--package"
-        crate
+        "mvm-gpu"
+        "--example"
+        libName
       ];
 
       # cdylibs only: no test harness, no bins.
@@ -69,13 +77,14 @@ let
         CARGO_PROFILE_RELEASE_STRIP = "symbols";
       };
 
-      # buildRustPackage installs `${libName}.so`; rename to the soname the
+      # The example's .so lands under target/.../release/examples, which
+      # buildRustPackage does not install; find it and install the soname the
       # loader looks for.
       postInstall = ''
         libdir="$out/lib"
         mkdir -p "$libdir"
         if [ ! -e "$libdir/lib${libName}.so" ]; then
-          find target -name 'lib${libName}*.so' -print \
+          find target -path '*/examples/lib${libName}.so' -print \
             -exec install -m0644 {} "$libdir/lib${libName}.so" \;
         fi
         # cudart's soname equals its lib name, so the rename is a no-op
@@ -106,32 +115,31 @@ let
         license = licenses.asl20;
         platforms = platforms.linux;
       };
-    } // lib.optionalAttrs isMusl {
+    } // (if isMusl then {
       nativeBuildInputs = [ muslToolchain ];
       CARGO_BUILD_TARGET = muslTarget;
       # A cdylib must stay dynamically linked to the matching guest libc.
-      RUSTFLAGS = "-C target-feature=-crt-static -C linker=${muslLinker}";
-    });
+      RUSTFLAGS = "-C target-feature=-crt-static -C linker=${muslLinker} ${sonameFlag}";
+    } else {
+      RUSTFLAGS = sonameFlag;
+    }));
 
-  # crate name -> installed soname. The cdylib target name is the crate's
-  # [lib] name (cuda / cudart / nvidia_ml); the soname is what workloads
-  # link against.
+  # cdylib example name -> installed soname. Each shim is a
+  # `crate-type = ["cdylib"]` example of the mvm-gpu crate; the soname is
+  # what workloads link against.
   shims = {
-    "mvm-gpu-cuda-shim" = {
-      libName = "cuda";
+    "cuda" = {
       soname = "libcuda.so.1";
     };
-    "mvm-gpu-cudart-shim" = {
-      libName = "cudart";
+    "cudart" = {
       soname = "libcudart.so";
     };
-    "mvm-gpu-nvml-shim" = {
-      libName = "nvidia_ml";
+    "nvidia_ml" = {
       soname = "libnvidia-ml.so.1";
     };
   };
 
-  each = lib.mapAttrs (crate: shim: crateFor ({ inherit crate; } // shim)) shims;
+  each = lib.mapAttrs (libName: shim: shimFor ({ inherit libName; } // shim)) shims;
 in
 # One derivation per variant: flake `packages` outputs must be derivations,
 # and consumers (the runtime overlay in mvm-images) want the whole shim set

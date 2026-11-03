@@ -35,32 +35,32 @@ fn gpu_probe_staging(world: &mut CliWorld) {
     let staging = tempfile::tempdir().expect("create gpu probe staging dir");
     let target = guest_target_triple();
     let out_dir = staging.path().join("target");
-    let mut shims = vec!["zigbuild", "--release", "--target", &target];
+    let base = || -> Vec<String> {
+        ["zigbuild", "--release", "--target", target]
+            .map(String::from)
+            .to_vec()
+    };
+    let mut probe = base();
+    probe.extend(["-p", "mvm-gpu", "--example", "gpu_guest_probe"].map(String::from));
+    // One invocation per target: each shim example carries its own soname
+    // link-arg, exactly as the guest-bins artifact builds it.
+    let mut invocations = vec![(probe, None)];
     for shim in &STAGED_SHIMS {
-        shims.extend(["-p", shim.package]);
+        let mut args = base();
+        args.extend(shim.cargo_selection());
+        invocations.push((args, Some(shim.soname_link_arg())));
     }
-    // Two invocations: a `--example` flag narrows cargo's build to the
-    // example's package, so the shims build separately.
-    let invocations = [
-        vec![
-            "zigbuild",
-            "--release",
-            "--target",
-            &target,
-            "-p",
-            "mvm-gpu-shim-core",
-            "--example",
-            "gpu_guest_probe",
-        ],
-        shims,
-    ];
-    for invocation in invocations {
+    for (invocation, rustflags) in invocations {
         let mut cmd = Command::new("cargo");
         cmd.args(&invocation)
             .current_dir(workspace_root())
             .env("CARGO_TARGET_DIR", &out_dir)
             .env_remove("RUSTFLAGS")
             .env_remove("RUSTUP_TOOLCHAIN");
+        if let Some(flags) = rustflags {
+            // Per-target, so the flag skips host build scripts and proc macros.
+            cmd.env(target_rustflags_env(target), flags);
+        }
         let status = cmd.status().unwrap_or_else(|error| {
             panic!(
                 "spawn `cargo {}` (is the pinned zig toolchain on PATH?): {error}",
@@ -97,6 +97,14 @@ fn guest_target_triple() -> &'static str {
         "x86_64" => "x86_64-unknown-linux-gnu",
         other => panic!("no guest target triple for host arch {other}"),
     }
+}
+
+/// `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` for `triple`.
+fn target_rustflags_env(triple: &str) -> String {
+    format!(
+        "CARGO_TARGET_{}_RUSTFLAGS",
+        triple.to_ascii_uppercase().replace('-', "_")
+    )
 }
 
 fn workspace_root() -> PathBuf {

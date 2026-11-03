@@ -20,6 +20,7 @@
 
 pub mod native;
 pub mod server;
+pub mod shim;
 pub mod stub;
 
 pub use mvm_contract::protocol::gpu as wire;
