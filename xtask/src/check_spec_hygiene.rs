@@ -7,7 +7,12 @@
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
-const RETIRED_DASHBOARDS: &[&str] = &["SPRINT.md", "REFACTOR-STATUS.md"];
+const RETIRED_DASHBOARDS: &[&str] = &[
+    "SPRINT.md",
+    "REFACTOR-STATUS.md",
+    "cleanup-active-work.md",
+    "cleanup-preservation-ledger.md",
+];
 const PERMANENT: &[&str] = &[
     "specs/README.md",
     "specs/prd.md",
