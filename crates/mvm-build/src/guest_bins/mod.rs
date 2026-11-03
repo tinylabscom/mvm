@@ -59,7 +59,7 @@ pub mod member;
 pub mod python_sdk;
 pub mod release;
 
-pub use cdylib::{GPU_SHIM_CDYLIBS, GuestCdylib, HOST_SERVICES_CDYLIB, guest_cdylibs};
+pub use cdylib::{CdylibKind, GPU_SHIM_CDYLIBS, GuestCdylib, HOST_SERVICES_CDYLIB, guest_cdylibs};
 pub use member::{GuestBinsMember, MemberError};
 
 /// Name of the manifest member inside the archive.
