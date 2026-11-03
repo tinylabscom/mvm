@@ -187,6 +187,24 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
     relay_supervisor_config_with_handoff(spec, paths, None, None)
 }
 
+/// Run the three steps of a live fork in order, calling `mark` after each
+/// succeeds so a trace attributes the time inside the claim's fork phase. A
+/// failing step returns its error without marking, and later steps never run.
+fn run_fork_steps<A, B, C>(
+    mark: &mut dyn FnMut(&'static str),
+    handoff: impl FnOnce() -> std::result::Result<A, StandbyError>,
+    link: impl FnOnce() -> std::result::Result<B, StandbyError>,
+    resume: impl FnOnce() -> std::result::Result<C, StandbyError>,
+) -> std::result::Result<(), StandbyError> {
+    handoff()?;
+    mark("handoff_requested");
+    link()?;
+    mark("child_state_linked");
+    resume()?;
+    mark("parent_resumed");
+    Ok(())
+}
+
 /// The channel bits a live hand-off tells the resident parent to hand its child.
 fn handoff_channel_mask(channels: &[VsockPort]) -> u8 {
     channels.iter().fold(0_u8, |mask, channel| {
@@ -957,15 +975,27 @@ impl VmmDriver for HvfDriver {
             signature: String::new(),
         };
         request.signature = hex::encode(identity.signing.sign(&request.message()).to_bytes());
-        request_live_handoff(
-            &mvm_core::config::vm_hvf_handoff_socket_at(&parent_dir),
-            &request,
+        let started = std::time::Instant::now();
+        run_fork_steps(
+            &mut |phase| {
+                mvm_vmm::agent_debug::phase("hvf-fork", started, format_args!("phase={phase}"));
+            },
+            || {
+                request_live_handoff(
+                    &mvm_core::config::vm_hvf_handoff_socket_at(&parent_dir),
+                    &request,
+                )
+            },
+            || {
+                link_child_state(child_dir, &parent_dir).map_err(|e| {
+                    StandbyError::ClaimFailed(format!("link live HVF child state: {e}"))
+                })
+            },
+            || {
+                hvf_backend::signal_vm(&parent_pid_path, libc::SIGUSR2, "resume live HVF child")
+                    .map_err(|e| StandbyError::ClaimFailed(format!("resume live HVF child: {e}")))
+            },
         )?;
-
-        link_child_state(child_dir, &parent_dir)
-            .map_err(|e| StandbyError::ClaimFailed(format!("link live HVF child state: {e}")))?;
-        hvf_backend::signal_vm(&parent_pid_path, libc::SIGUSR2, "resume live HVF child")
-            .map_err(|e| StandbyError::ClaimFailed(format!("resume live HVF child: {e}")))?;
         // The post-restore identity RPC is the readiness barrier for the child.
         // Waiting here for the supervisor's marker adds the full pause-ack
         // timeout on HVF even after SIGUSR2 has resumed the vCPU; the RPC will
@@ -1911,6 +1941,52 @@ mod tests {
         let twice: Vec<VsockPort> = all.iter().chain(all.iter()).cloned().collect();
         assert_eq!(handoff_channel_mask(&twice), handoff_channel_mask(&all));
         assert_eq!(handoff_channel_mask(&[]), 0);
+    }
+
+    #[test]
+    fn the_live_fork_marks_each_step_in_order_and_stops_at_a_failure() {
+        let log = std::cell::RefCell::new(Vec::<&'static str>::new());
+        let step = |name: &'static str, fail: bool| {
+            let log = &log;
+            move || {
+                log.borrow_mut().push(name);
+                if fail {
+                    Err(StandbyError::ClaimFailed(name.into()))
+                } else {
+                    Ok(())
+                }
+            }
+        };
+        let mut mark = |phase: &'static str| log.borrow_mut().push(phase);
+        run_fork_steps(
+            &mut mark,
+            step("handoff", false),
+            step("link", false),
+            step("resume", false),
+        )
+        .unwrap();
+        assert_eq!(
+            *log.borrow(),
+            [
+                "handoff",
+                "handoff_requested",
+                "link",
+                "child_state_linked",
+                "resume",
+                "parent_resumed"
+            ]
+        );
+
+        log.borrow_mut().clear();
+        let mut mark = |phase: &'static str| log.borrow_mut().push(phase);
+        let err = run_fork_steps(
+            &mut mark,
+            step("handoff", false),
+            step("link", true),
+            step("resume", false),
+        );
+        assert!(matches!(err, Err(StandbyError::ClaimFailed(m)) if m == "link"));
+        assert_eq!(*log.borrow(), ["handoff", "handoff_requested", "link"]);
     }
 
     #[test]
