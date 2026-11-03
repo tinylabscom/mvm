@@ -78,7 +78,7 @@ const PRIVILEGE_DROP: &str = "drop_privilege";
 /// targets. Assertion C follows that one hop.
 const AGENT_WRAPPER: &str = "bootstrap_guest_environment";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut checked = 0usize;
 
     // A — both inits reach the shared bootstrap.

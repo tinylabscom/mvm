@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 const AUDIT_MODULE_PATH: &str = "mvm-core/src/policy/audit.rs";
 
 /// Run the lint over `crates/*/src/**/*.rs` rooted at `workspace`.
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let crates_dir = workspace.join("crates");
     if !crates_dir.is_dir() {
         bail!(

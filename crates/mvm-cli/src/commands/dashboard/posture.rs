@@ -12,7 +12,7 @@
 
 /// The environment a `dashboard` launch was requested in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Posture {
+pub(crate) enum Posture {
     /// An unambiguous local development environment.
     LocalDev,
     /// A production environment.
@@ -25,7 +25,7 @@ pub enum Posture {
 
 /// Why a launch was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PostureRefusal {
+pub(crate) struct PostureRefusal {
     pub posture: Posture,
 }
 
@@ -52,7 +52,7 @@ impl std::fmt::Display for PostureRefusal {
 impl std::error::Error for PostureRefusal {}
 
 /// Refuse everything that is not unambiguously local dev.
-pub fn admit(posture: Posture) -> Result<(), PostureRefusal> {
+pub(crate) fn admit(posture: Posture) -> Result<(), PostureRefusal> {
     match posture {
         Posture::LocalDev => Ok(()),
         other => Err(PostureRefusal { posture: other }),
@@ -64,7 +64,7 @@ pub fn admit(posture: Posture) -> Result<(), PostureRefusal> {
 /// Takes the signals as arguments rather than reading the process environment
 /// so the classification is testable and so a caller cannot be surprised by
 /// which variables are consulted.
-pub fn classify(prod_flag: bool, fleet_flag: bool, dev_flag: bool) -> Posture {
+pub(crate) fn classify(prod_flag: bool, fleet_flag: bool, dev_flag: bool) -> Posture {
     // Production and fleet are checked before dev: a host asserting both is
     // ambiguous, and the safe reading of an ambiguous host is the restrictive
     // one, not the permissive one.

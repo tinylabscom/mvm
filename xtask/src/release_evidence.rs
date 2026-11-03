@@ -113,7 +113,7 @@ fn validate_lane(lane: &str) -> Result<()> {
 
 /// What a run recorded about itself.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct EvidenceRecord {
+pub(crate) struct EvidenceRecord {
     /// Which documented-surface lane this run was.
     pub lane: String,
     /// The commit the tree was at. Explanatory only — see the module docs.
@@ -130,7 +130,7 @@ pub struct EvidenceRecord {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct HostFacts {
+pub(crate) struct HostFacts {
     pub os: String,
     pub os_version: String,
     pub arch: String,
@@ -142,7 +142,7 @@ pub struct HostFacts {
 /// says — the conformance binary refuses to start against a stale `mvmctl`,
 /// and that refusal prints zero scenarios, which reads as zero failures.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct SuiteSummary {
+pub(crate) struct SuiteSummary {
     pub features: u32,
     pub scenarios_total: u32,
     pub scenarios_passed: u32,
@@ -321,7 +321,7 @@ fn term(terms: &[(u32, String)], name: &str) -> u32 {
 
 /// Write the evidence record for a lane, given the log of the run that earned
 /// it.
-pub fn record(workspace: &Path, lane: &str, log: &Path) -> Result<()> {
+pub(crate) fn record(workspace: &Path, lane: &str, log: &Path) -> Result<()> {
     validate_lane(lane)?;
 
     let dirty = dirty_material_paths(workspace)?;
@@ -370,7 +370,7 @@ pub fn record(workspace: &Path, lane: &str, log: &Path) -> Result<()> {
 }
 
 /// Fail unless every named lane has a record covering the current tree.
-pub fn check(workspace: &Path, lanes: &[String]) -> Result<()> {
+pub(crate) fn check(workspace: &Path, lanes: &[String]) -> Result<()> {
     let lanes: Vec<String> = if lanes.is_empty() {
         KNOWN_LANES.iter().map(|l| (*l).to_string()).collect()
     } else {

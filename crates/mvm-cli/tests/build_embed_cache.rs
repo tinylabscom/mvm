@@ -6,7 +6,7 @@
 #[path = "../build_embed_cache.rs"]
 mod build_embed_cache;
 #[path = "../../mvm-build/src/workspace_graph.rs"]
-mod workspace_graph;
+pub mod workspace_graph;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;

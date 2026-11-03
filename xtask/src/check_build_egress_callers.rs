@@ -69,7 +69,7 @@ const PROPERTY_TEST_FILES: &[&str] = &[
     "crates/mvm-contract/tests/egress_predicate_algebra.rs",
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut offenders: Vec<String> = Vec::new();
     let mut allowed_hits = 0usize;
 

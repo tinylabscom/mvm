@@ -19,7 +19,7 @@ use std::path::Path;
 const INSTALL_ACTION: &str = ".github/actions/install-zigbuild/action.yml";
 const RUST_MANIFEST: &str = "crates/mvm-builder-guest/src/host_payload_manifest.rs";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let rust_entries = parse_rust_manifest(workspace)?;
     let nix_entries = parse_nix_attrset(workspace)?;
 

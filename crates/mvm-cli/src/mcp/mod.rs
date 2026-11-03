@@ -28,11 +28,11 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 /// Current stateless MCP protocol version supported by this server.
-pub const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
+pub(crate) const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
 /// Newest `initialize` handshake version, for clients that have not moved to
 /// per-request discovery metadata yet. It is also the answer to a requested
 /// handshake version this server does not implement.
-pub const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
+pub(crate) const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 /// Every version an `initialize` is answered with, newest first.
 ///
 /// The MCP lifecycle has the server echo a requested version it supports and
@@ -51,7 +51,7 @@ pub const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 /// `cacheScope`) are permitted by every listed version's open `Result` shape.
 /// Revisions before 2025-06-18 are not listed because they have no
 /// `structuredContent`.
-pub const HANDSHAKE_PROTOCOL_VERSIONS: &[&str] = &[LEGACY_PROTOCOL_VERSION, "2025-06-18"];
+pub(crate) const HANDSHAKE_PROTOCOL_VERSIONS: &[&str] = &[LEGACY_PROTOCOL_VERSION, "2025-06-18"];
 
 const CATALOG_TTL_MS: u64 = 300_000;
 const UNKNOWN_TOOL: &str = "unknown tool";
@@ -60,7 +60,7 @@ const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Drive operations the MCP adapter exposes. Production uses [`LocalDrive`];
 /// tests inject a recording implementation without booting a machine.
-pub trait DriveTools: Send + Sync {
+pub(crate) trait DriveTools: Send + Sync {
     fn open(&self, cwd: &str) -> Result<String, DriveError>;
     fn write(&self, frame: InputFrame, eof: bool) -> Result<usize, DriveError>;
     fn next_event(&self) -> Result<Option<EntrypointEvent>, DriveError>;
@@ -87,7 +87,7 @@ impl DriveTools for LocalDrive {
 
 /// Bounds applied before allocating or emitting protocol payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ServerLimits {
+pub(crate) struct ServerLimits {
     max_frame_bytes: usize,
     max_output_bytes: usize,
 }
@@ -106,7 +106,7 @@ impl ServerLimits {
     /// to one so the bound remains meaningful.
     #[cfg(test)]
     #[must_use]
-    pub fn max_frame_bytes(mut self, bytes: usize) -> Self {
+    pub(crate) fn max_frame_bytes(mut self, bytes: usize) -> Self {
         self.max_frame_bytes = bytes.max(1);
         self
     }
@@ -115,7 +115,7 @@ impl ServerLimits {
     /// have a small fixed envelope and remain available when this cap trips.
     #[cfg(test)]
     #[must_use]
-    pub fn max_output_bytes(mut self, bytes: usize) -> Self {
+    pub(crate) fn max_output_bytes(mut self, bytes: usize) -> Self {
         self.max_output_bytes = bytes.max(1);
         self
     }
@@ -124,14 +124,14 @@ impl ServerLimits {
 /// A stdio serving failure. Protocol and backend errors are encoded as JSON-RPC
 /// responses and do not terminate the loop.
 #[derive(Debug, thiserror::Error)]
-pub enum ServerError {
+pub(crate) enum ServerError {
     #[error("MCP stdio I/O failed: {0}")]
     Io(#[from] io::Error),
 }
 
 /// Why a policy gate refused one tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolGateDenial {
+pub(crate) struct ToolGateDenial {
     /// A short refusal reason safe to show the caller, e.g.
     /// `"policy denies this tool (tools.deny)"`.
     pub reason: String,
@@ -139,7 +139,7 @@ pub struct ToolGateDenial {
 
 impl ToolGateDenial {
     #[must_use]
-    pub fn new(reason: impl Into<String>) -> Self {
+    pub(crate) fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
         }
@@ -151,7 +151,7 @@ impl ToolGateDenial {
 /// The embedding command resolves the workload policy; the gate must deny
 /// any tool it does not explicitly allow.
 #[async_trait::async_trait]
-pub trait ToolCallGate: Send + Sync {
+pub(crate) trait ToolCallGate: Send + Sync {
     /// Decide one call before backend work. The server serializes calls, so
     /// one approval question and its audit writes are outstanding at a time.
     async fn authorize(
@@ -162,7 +162,7 @@ pub trait ToolCallGate: Send + Sync {
 }
 
 /// Stateless request adapter with one process-lifetime capability snapshot.
-pub struct McpServer {
+pub(crate) struct McpServer {
     client: Arc<dyn MvmClient>,
     drive: Option<Arc<dyn DriveTools>>,
     tool_gate: Option<Arc<dyn ToolCallGate>>,
@@ -173,14 +173,14 @@ pub struct McpServer {
 impl McpServer {
     /// Construct a server over the selected facade implementation.
     #[must_use]
-    pub fn new(client: Arc<dyn MvmClient>) -> Self {
+    pub(crate) fn new(client: Arc<dyn MvmClient>) -> Self {
         Self::with_limits(client, ServerLimits::default())
     }
 
     /// Bind the drive tools to one verified grant. A server never given one
     /// neither lists nor accepts any `mvm.drive.*` tool.
     #[must_use]
-    pub fn with_drive(mut self, drive: Arc<dyn DriveTools>) -> Self {
+    pub(crate) fn with_drive(mut self, drive: Arc<dyn DriveTools>) -> Self {
         self.drive = Some(drive);
         self
     }
@@ -188,14 +188,14 @@ impl McpServer {
     /// Bind the policy gate consulted before every `tools/call`. A server
     /// never given one admits every tool the static catalog accepts.
     #[must_use]
-    pub fn with_tool_gate(mut self, gate: Arc<dyn ToolCallGate>) -> Self {
+    pub(crate) fn with_tool_gate(mut self, gate: Arc<dyn ToolCallGate>) -> Self {
         self.tool_gate = Some(gate);
         self
     }
 
     /// Construct a server with explicit transport/output bounds.
     #[must_use]
-    pub fn with_limits(client: Arc<dyn MvmClient>, limits: ServerLimits) -> Self {
+    pub(crate) fn with_limits(client: Arc<dyn MvmClient>, limits: ServerLimits) -> Self {
         Self {
             client,
             drive: None,
@@ -207,7 +207,7 @@ impl McpServer {
 
     /// Handle one newline-delimited JSON-RPC frame. Notifications return
     /// `None`; all requests return exactly one serialized response.
-    pub async fn handle_json(&self, frame: &str) -> Option<String> {
+    pub(crate) async fn handle_json(&self, frame: &str) -> Option<String> {
         if frame.len() > self.limits.max_frame_bytes {
             return Some(response_error(
                 Value::Null,
@@ -229,7 +229,7 @@ impl McpServer {
 
     /// Serve newline-delimited MCP over the supplied streams until EOF.
     /// stdout-equivalent output contains protocol frames only.
-    pub fn serve<R: BufRead, W: Write>(
+    pub(crate) fn serve<R: BufRead, W: Write>(
         &self,
         mut reader: R,
         mut writer: W,

@@ -21,7 +21,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let registry = parse_registry(workspace)?;
     if registry.is_empty() {
         bail!(

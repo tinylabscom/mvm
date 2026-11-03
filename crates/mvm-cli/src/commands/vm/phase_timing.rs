@@ -109,7 +109,7 @@ impl LaunchMode {
 /// Marks are taken in runner order; spans are `Instant` differences so they
 /// can never go negative for in-order marks.
 #[derive(Debug, Clone, Copy)]
-pub struct RunPhaseMarks {
+pub(crate) struct RunPhaseMarks {
     /// The path that produced this launch.
     pub launch_mode: LaunchMode,
     /// The command was invoked: what a caller waits from, and where the
@@ -170,7 +170,7 @@ pub struct RunPhaseTimings {
 /// launch can use a warm parent. Keeping these marks separate from
 /// [`RunPhaseMarks`] lets cold launches retain a zero-valued warm breakdown.
 #[derive(Debug, Default)]
-pub struct WarmClaimMarks {
+pub(crate) struct WarmClaimMarks {
     /// When warm-pool maintenance and compatible-parent selection began.
     pub pool_wait_started: Option<Instant>,
     /// When the backend claim began after pool maintenance.
@@ -373,7 +373,7 @@ impl RunPhaseMarks {
     /// Collapse the marks into per-phase spans. Arithmetic is saturating
     /// `Instant` difference, so an out-of-order mark yields `0` rather than
     /// a negative span.
-    pub fn to_timings(self) -> RunPhaseTimings {
+    pub(crate) fn to_timings(self) -> RunPhaseTimings {
         let ms = |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f64() * 1000.0;
         RunPhaseTimings {
             launch_mode: self.launch_mode,
@@ -672,20 +672,20 @@ impl RunPhaseTimings {
 /// [`WARM_START_MAX_MS`]; this is the aggregate target a warm pool should
 /// reach once the hard per-run SLO is met.
 #[cfg(test)]
-pub const WARM_START_P50_BUDGET_MS: u64 = 30;
+pub(crate) const WARM_START_P50_BUDGET_MS: u64 = 30;
 
 /// Aggregate p99 target for warm-start dispatch windows. It is intentionally
 /// below the hard per-run ceiling, leaving room for scheduler variance
 /// without making a 300ms outlier normal.
 #[cfg(test)]
-pub const WARM_START_P99_BUDGET_MS: u64 = 50;
+pub(crate) const WARM_START_P99_BUDGET_MS: u64 = 50;
 
 /// Comparison of a warm-started run's hot-start latency against a cold
 /// run's: whether the warm run clears the hard SLO and tighter p50 target,
 /// and how much faster it was.
 #[cfg(test)]
 #[derive(Debug, PartialEq)]
-pub struct WarmVsColdReport {
+pub(crate) struct WarmVsColdReport {
     pub warm_hot_ms: u64,
     pub cold_hot_ms: u64,
     pub clears_slo: bool,
@@ -698,7 +698,7 @@ pub struct WarmVsColdReport {
 /// boot plus boot-to-agent-reachable, the part a warm start improves.
 /// Pure: reads only the two timings, no clock or I/O.
 #[cfg(test)]
-pub fn warm_vs_cold(warm: &RunPhaseTimings, cold: &RunPhaseTimings) -> WarmVsColdReport {
+pub(crate) fn warm_vs_cold(warm: &RunPhaseTimings, cold: &RunPhaseTimings) -> WarmVsColdReport {
     let warm_hot_ms = warm.dispatch_window_ms().round() as u64;
     let cold_hot_ms = cold.dispatch_window_ms().round() as u64;
     let speedup = if warm_hot_ms == 0 {
@@ -721,12 +721,12 @@ pub fn warm_vs_cold(warm: &RunPhaseTimings, cold: &RunPhaseTimings) -> WarmVsCol
 /// its accepted spellings. A second parse here drifted from that one once
 /// already — this module hardcoded the variable name rather than using the
 /// constant beside the parse it was duplicating.
-pub fn mode() -> PhaseTimingMode {
+pub(crate) fn mode() -> PhaseTimingMode {
     mvm_core::launch_trace::phase_timing_mode()
 }
 
 /// Whether phase timing should emit anything at all.
-pub fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     mode().is_on()
 }
 

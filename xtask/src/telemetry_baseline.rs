@@ -360,7 +360,7 @@ struct NoisyRun {
 /// Entry point: `cargo xtask telemetry-baseline [--samples N] [--rounds N]
 /// [--noisy]`. `--noisy` replaces the baseline report with the drop-newest
 /// versus drop-oldest comparison under a noisy producer.
-pub fn run(args: &[String]) -> Result<()> {
+pub(crate) fn run(args: &[String]) -> Result<()> {
     let mut samples = 100_000;
     let mut rounds = 50;
     let mut noisy = false;

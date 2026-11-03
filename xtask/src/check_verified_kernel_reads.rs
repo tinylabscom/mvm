@@ -137,7 +137,7 @@ fn relative(workspace: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let handrolled = handrolled_layout_offenders(workspace)?;
     if !handrolled.is_empty() {
         for o in &handrolled {

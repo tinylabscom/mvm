@@ -1363,15 +1363,15 @@ mod tests {
     /// under every cut the tests use; [`SWEEP_NOW`] is young under a one-second
     /// cut.
     mod ckpt_fixture {
-        pub use mvm_client::cache_admin::checkpoint::CheckpointStore;
+        pub(crate) use mvm_client::cache_admin::checkpoint::CheckpointStore;
         use mvm_core::checkpoint::{
             CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
         };
 
-        pub const SWEEP_NOW: u64 = 10_000_000;
-        pub const AGED: u64 = 0;
+        pub(crate) const SWEEP_NOW: u64 = 10_000_000;
+        pub(crate) const AGED: u64 = 0;
 
-        pub fn ckpt(
+        pub(crate) fn ckpt(
             id: &str,
             tag: Option<&str>,
             parent: Option<&CheckpointMeta>,
@@ -1380,7 +1380,7 @@ mod tests {
             ckpt_from_parent_digest(id, tag, parent.map(|p| p.meta_digest.clone()), created_unix)
         }
 
-        pub fn ckpt_from_parent_digest(
+        pub(crate) fn ckpt_from_parent_digest(
             id: &str,
             tag: Option<&str>,
             parent: Option<CheckpointDigest>,
@@ -1398,11 +1398,11 @@ mod tests {
                 .build()
         }
 
-        pub fn present(store: &CheckpointStore, id: &str) -> bool {
+        pub(crate) fn present(store: &CheckpointStore, id: &str) -> bool {
             store.read_meta(&CheckpointId::new(id)).is_ok()
         }
 
-        pub fn digest_of_nothing() -> CheckpointDigest {
+        pub(crate) fn digest_of_nothing() -> CheckpointDigest {
             CheckpointDigest::parse(format!("sha256:{}", "e".repeat(64))).unwrap()
         }
     }

@@ -38,7 +38,7 @@ const NOTES_DIR: &str = ".agent-memory/notes";
 
 /// A parsed note.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Note {
+pub(crate) struct Note {
     /// Filename stem, which is the note's slug.
     pub slug: String,
     /// One-line summary.
@@ -82,7 +82,7 @@ fn inline_list(value: &str) -> Option<Vec<String>> {
 
 /// Whether `s` is a real `YYYY-MM-DD` calendar date.
 #[must_use]
-pub fn is_calendar_date(s: &str) -> bool {
+pub(crate) fn is_calendar_date(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     let [y, m, d] = parts[..] else { return false };
     if y.len() != 4 || m.len() != 2 || d.len() != 2 {
@@ -129,7 +129,7 @@ fn wiki_links(body: &str) -> Vec<String> {
 ///
 /// When the frontmatter is missing, a required field is absent or empty, or
 /// the date is not a calendar date.
-pub fn parse(slug: &str, text: &str) -> Result<Note> {
+pub(crate) fn parse(slug: &str, text: &str) -> Result<Note> {
     let Some((block, body)) = frontmatter(text) else {
         bail!("no `---` frontmatter block");
     };
@@ -164,7 +164,7 @@ pub fn parse(slug: &str, text: &str) -> Result<Note> {
 /// # Errors
 ///
 /// When a note fails to parse, or names a note that does not exist.
-pub fn run(root: &Path) -> Result<()> {
+pub(crate) fn run(root: &Path) -> Result<()> {
     let dir = root.join(NOTES_DIR);
     let Ok(entries) = std::fs::read_dir(&dir) else {
         println!("check-agent-notes: no {NOTES_DIR} directory; nothing to check");

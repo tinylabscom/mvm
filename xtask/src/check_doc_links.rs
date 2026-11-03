@@ -27,7 +27,7 @@ static HTML_LINK: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Check every Markdown/MDX file in the published documentation tree.
-pub fn run(root: &Path) -> Result<()> {
+pub(crate) fn run(root: &Path) -> Result<()> {
     let docs = root.join(DOCS_DIR);
     if !docs.is_dir() {
         bail!(

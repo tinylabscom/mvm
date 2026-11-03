@@ -257,7 +257,7 @@ fn activation_adapter_connected(source: &str) -> bool {
     native && client && dispatch
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut errors = Vec::new();
     for boundary in BOUNDARIES {
         let content = std::fs::read_to_string(workspace.join(boundary.path))

@@ -812,7 +812,7 @@ impl FrozenFlakeSlot {
         })
     }
 
-    pub fn build(inputs: mvm_build::pipeline::frozen::FrozenInputs) -> Result<Self> {
+    pub(crate) fn build(inputs: mvm_build::pipeline::frozen::FrozenInputs) -> Result<Self> {
         let mut owned = Self::own(inputs)?;
         let flake_ref = owned
             .inputs
@@ -828,7 +828,7 @@ impl FrozenFlakeSlot {
         Ok(owned)
     }
 
-    pub fn verify_revision(&self) -> Result<()> {
+    pub(crate) fn verify_revision(&self) -> Result<()> {
         let current =
             std::fs::canonicalize(mvm_core::manifest::slot_current_symlink(&self.slot_hash))?;
         let expected = std::fs::canonicalize(mvm_core::manifest::slot_revision_dir(
@@ -841,7 +841,7 @@ impl FrozenFlakeSlot {
         Ok(())
     }
 
-    pub fn slot_hash(&self) -> &str {
+    pub(crate) fn slot_hash(&self) -> &str {
         &self.slot_hash
     }
 }

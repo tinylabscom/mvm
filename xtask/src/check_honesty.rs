@@ -62,7 +62,7 @@ struct Authority {
 }
 
 /// Run the R2 behavioural gate.
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let claims: ClaimsFile = read_toml(&workspace.join("model/claims.toml"))?;
     let authorities: AuthoritiesFile = read_toml(&workspace.join("model/authorities.toml"))?;
 

@@ -57,19 +57,19 @@ use anyhow::{Context, Result, bail};
 /// Anything above this triggers a perf-regression alert: typically
 /// "someone bundled tools they shouldn't have" or "the Nix closure
 /// pulled in a transitive dep that bloats the image."
-pub const ROOTFS_MAX_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
+pub(crate) const ROOTFS_MAX_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
 
 /// Maximum complete default guest artifact footprint: rootfs, runtime overlay,
 /// initramfs, their dm-verity sidecars, and kernel. The workload's own
 /// application payload remains outside this contract.
-pub const GUEST_STORAGE_MAX_BYTES: u64 = 50_000_000; // 50 MB
+pub(crate) const GUEST_STORAGE_MAX_BYTES: u64 = 50_000_000; // 50 MB
 
 /// Maximum number of registered Nix store paths retained in the default
 /// rootfs: static BusyBox and the static privilege-drop helper.
-pub const GUEST_ROOTFS_MAX_STORE_PATHS: usize = 2;
+pub(crate) const GUEST_ROOTFS_MAX_STORE_PATHS: usize = 2;
 
 /// Maximum current RSS for the idle guest-agent process.
-pub const GUEST_AGENT_RSS_MAX_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const GUEST_AGENT_RSS_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Maximum size of the optional SDK sidecar image (the glibc host-services
 /// cdylib plus its loader closure).
@@ -79,20 +79,20 @@ pub const GUEST_AGENT_RSS_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// SDK-served host service, so folding it into the base ledger would report a
 /// footprint no ordinary workload actually pays. mvm-images' runtime-overlay
 /// flake allocates the sidecar image at exactly this size.
-pub const SDK_SIDECAR_MAX_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const SDK_SIDECAR_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Cold-boot wall-clock budget for the Firecracker backend.
 /// Every prepared-cold dispatch must be strictly below this threshold.
-pub const FIRECRACKER_BOOT_BUDGET: Duration = Duration::from_millis(200);
+pub(crate) const FIRECRACKER_BOOT_BUDGET: Duration = Duration::from_millis(200);
 
 /// Cold-boot wall-clock budget for the libkrun backend. Slower than
 /// Firecracker because libkrun's startup +
 /// the in-VM init script aren't as tight; 1s is the worst-case
 /// envelope.
-pub const LIBKRUN_BOOT_BUDGET: Duration = Duration::from_millis(1000);
+pub(crate) const LIBKRUN_BOOT_BUDGET: Duration = Duration::from_millis(1000);
 
 /// Dispatch entry — called from `xtask/src/main.rs`.
-pub fn run(args: &[String]) -> Result<()> {
+pub(crate) fn run(args: &[String]) -> Result<()> {
     match args.first().map(|s| s.as_str()) {
         Some("rootfs-size") => rootfs_size_subcommand(&args[1..]),
         Some("footprint") => footprint_subcommand(&args[1..]),
@@ -186,7 +186,7 @@ fn budgets_subcommand(args: &[String]) -> Result<()> {
 /// plus the per-resource caps; the budgets are pinned by tests in
 /// this module so doc/code drift is caught at review.
 #[derive(Debug, serde::Serialize)]
-pub struct PerfBudget {
+pub(crate) struct PerfBudget {
     pub name: &'static str,
     pub limit: u64,
     pub unit: &'static str,
@@ -198,7 +198,7 @@ pub struct PerfBudget {
 /// budgets` and exported for tests. Adding a budget? Edit here
 /// and add a constant-pin test below so the spec/code link is
 /// enforced.
-pub fn all_budgets() -> Vec<PerfBudget> {
+pub(crate) fn all_budgets() -> Vec<PerfBudget> {
     vec![
         PerfBudget {
             name: "rootfs_size",
@@ -351,7 +351,7 @@ fn rootfs_size_subcommand(args: &[String]) -> Result<()> {
 }
 
 /// Test seam — assert `rootfs` exists and is at or under `max_bytes`.
-pub fn rootfs_size_check(rootfs: &Path, max_bytes: u64) -> Result<()> {
+pub(crate) fn rootfs_size_check(rootfs: &Path, max_bytes: u64) -> Result<()> {
     let meta = std::fs::metadata(rootfs)
         .with_context(|| format!("stat rootfs at {}", rootfs.display()))?;
     if !meta.is_file() {

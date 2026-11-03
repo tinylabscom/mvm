@@ -84,7 +84,7 @@ const ALLOWLIST: &[&str] = &[
     "spki",
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let packages = resolved_packages(workspace)?;
     let found = duplicate_major_names(&packages);
 

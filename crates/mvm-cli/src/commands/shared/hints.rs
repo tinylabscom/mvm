@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::ui;
 
-pub fn with_hints(result: Result<()>) -> Result<()> {
+pub(crate) fn with_hints(result: Result<()>) -> Result<()> {
     if let Err(ref e) = result {
         let msg = format!("{:#}", e);
         if msg.contains("firecracker: command not found") || msg.contains("firecracker: not found")

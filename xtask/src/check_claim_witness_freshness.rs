@@ -48,7 +48,7 @@ const MISSED_FIRINGS_ALLOWED: u32 = 3;
 
 /// A workflow that anchors at least one `ci:` witness.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WitnessWorkflow {
+pub(crate) struct WitnessWorkflow {
     /// File name as the Actions API addresses it, e.g. `security.yml`.
     pub file: String,
     /// Claim numbers whose witnesses anchor here, sorted.
@@ -70,7 +70,7 @@ impl WitnessWorkflow {
 
 /// What a single lane's most recent run says about its freshness.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Freshness {
+pub(crate) enum Freshness {
     /// Ran recently enough for its schedule.
     Fresh,
     /// The schedule should have fired by now and did not.
@@ -84,7 +84,7 @@ pub enum Freshness {
 
 /// The fields needed from the latest scheduled Actions run.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LatestRun {
+pub(crate) struct LatestRun {
     pub created_at: String,
     pub status: String,
     pub conclusion: Option<String>,
@@ -92,7 +92,7 @@ pub struct LatestRun {
 
 /// Whether the latest scheduled run established healthy evidence.
 #[derive(Debug, PartialEq, Eq)]
-pub enum RunOutcome {
+pub(crate) enum RunOutcome {
     Healthy,
     Unhealthy {
         status: String,
@@ -108,7 +108,7 @@ pub enum RunOutcome {
 /// every schedule, but an already-completed external run is history: no PR
 /// author can fix it. Historical reconciliation belongs to the scheduled run
 /// and its tracking issue.
-pub fn run(workspace: &Path, check_reporting: bool) -> Result<()> {
+pub(crate) fn run(workspace: &Path, check_reporting: bool) -> Result<()> {
     let workflows = resolve_witness_workflows(workspace)?;
     if workflows.is_empty() {
         bail!(
@@ -239,7 +239,7 @@ fn should_read_run_history(allowed_hours: Option<u32>, check_reporting: bool) ->
 ///
 /// `allowed_hours: None` means the workflow carries no cron this gate can
 /// reason about, so absence proves nothing and the lane is not judged.
-pub fn classify(age_hours: Option<u32>, allowed_hours: Option<u32>) -> Freshness {
+pub(crate) fn classify(age_hours: Option<u32>, allowed_hours: Option<u32>) -> Freshness {
     let Some(allowed_hours) = allowed_hours else {
         return Freshness::NotScheduled;
     };
@@ -253,7 +253,7 @@ pub fn classify(age_hours: Option<u32>, allowed_hours: Option<u32>) -> Freshness
     }
 }
 
-pub fn classify_outcome(run: &LatestRun) -> RunOutcome {
+pub(crate) fn classify_outcome(run: &LatestRun) -> RunOutcome {
     if run.status == "completed" && run.conclusion.as_deref() == Some("success") {
         RunOutcome::Healthy
     } else {
@@ -266,7 +266,7 @@ pub fn classify_outcome(run: &LatestRun) -> RunOutcome {
 
 /// Map every `ci:` witness in the ledger onto the workflow file that
 /// anchors it, carrying the claims and the schedule along.
-pub fn resolve_witness_workflows(workspace: &Path) -> Result<Vec<WitnessWorkflow>> {
+pub(crate) fn resolve_witness_workflows(workspace: &Path) -> Result<Vec<WitnessWorkflow>> {
     let rows = claims_ledger::load(workspace)?;
     let mut wanted: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
     for row in &rows {
@@ -326,7 +326,7 @@ pub fn resolve_witness_workflows(workspace: &Path) -> Result<Vec<WitnessWorkflow
 /// restricted by day-of-month or day-of-week, the gap between firings is not
 /// derivable from the expression alone, and guessing would flag a healthy
 /// weekly lane as stale.
-pub fn shortest_schedule_hours(content: &str) -> Option<u32> {
+pub(crate) fn shortest_schedule_hours(content: &str) -> Option<u32> {
     let mut best: Option<u32> = None;
     for line in content.lines() {
         let t = line.trim_start();
@@ -345,7 +345,7 @@ pub fn shortest_schedule_hours(content: &str) -> Option<u32> {
 }
 
 /// Interval in hours for a 5-field cron, when it fires at least daily.
-pub fn cron_interval_hours(expr: &str) -> Option<u32> {
+pub(crate) fn cron_interval_hours(expr: &str) -> Option<u32> {
     let f: Vec<&str> = expr.split_whitespace().collect();
     if f.len() != 5 {
         return None;
@@ -397,7 +397,7 @@ fn latest_completed_run(file: &str) -> Result<Option<(String, String)>> {
 }
 
 /// `(createdAt, updatedAt)` of the first entry in a `gh run list` payload.
-pub fn first_completed_run(json: &str) -> Option<(String, String)> {
+pub(crate) fn first_completed_run(json: &str) -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let first = v.as_array()?.first()?;
     Some((
@@ -437,7 +437,7 @@ fn watcher_ran_since(watcher: &str, after: &str) -> Result<bool> {
 ///
 /// RFC3339 UTC timestamps from the same API sort lexicographically, which
 /// is why this compares strings rather than parsing.
-pub fn any_created_at_or_after(json: &str, after: &str) -> bool {
+pub(crate) fn any_created_at_or_after(json: &str, after: &str) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return false;
     };
@@ -503,7 +503,7 @@ const SCHEDULED_RUNS_READ: &str = "5";
 /// newest *completed* run, so a nightly still executing when this gate fires
 /// is not read as a failure. With no completed run in the window the newest
 /// run is returned as-is, and its unfinished status is reported.
-pub fn judged_run(json: &str) -> Option<LatestRun> {
+pub(crate) fn judged_run(json: &str) -> Option<LatestRun> {
     let runs = all_runs(json)?;
     runs.iter()
         .find(|run| run.status == "completed")
@@ -529,7 +529,7 @@ fn parse_run(run: &serde_json::Value) -> Option<LatestRun> {
 
 /// Hours between `rfc3339` and `now_unix`. Pure, so the verdict this gate
 /// turns on is unit-testable rather than a function of the wall clock.
-pub fn age_hours_since(rfc3339: &str, now_unix: i64) -> Result<u32> {
+pub(crate) fn age_hours_since(rfc3339: &str, now_unix: i64) -> Result<u32> {
     let then =
         parse_utc_rfc3339(rfc3339).with_context(|| format!("parsing run timestamp {rfc3339:?}"))?;
     Ok((((now_unix - then).max(0)) / 3600) as u32)

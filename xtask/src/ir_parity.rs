@@ -42,7 +42,7 @@ fn fixtures() -> &'static [ParityFixture] {
     ]
 }
 
-pub fn generate(workspace: &Path) -> Result<()> {
+pub(crate) fn generate(workspace: &Path) -> Result<()> {
     for fixture in fixtures() {
         let generated = workspace.join(fixture.generated);
         let bytes = emit_fixture(workspace, fixture)?;
@@ -53,7 +53,7 @@ pub fn generate(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn check(workspace: &Path) -> Result<()> {
+pub(crate) fn check(workspace: &Path) -> Result<()> {
     let mut drift = false;
     for fixture in fixtures() {
         let fresh = emit_fixture(workspace, fixture)?;

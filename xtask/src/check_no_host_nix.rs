@@ -35,7 +35,7 @@ const HOST_NIX_NEEDLES: &[&str] = &[
 ];
 const ALLOW_MARKER: &str = "// allow(host-nix):";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let crates_dir = workspace.join("crates");
     if !crates_dir.is_dir() {
         bail!("expected workspace crates dir at {}", crates_dir.display());

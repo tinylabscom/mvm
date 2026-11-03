@@ -58,7 +58,7 @@ struct Audit {
     table_len: usize,
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     report(audit(workspace)?)
 }
 

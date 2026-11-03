@@ -26,7 +26,7 @@ const CANONICAL: &str = "tests/machine-fixtures";
 /// dependency trees may legitimately ship a same-named directory of their own.
 const SKIP_DIRS: [&str; 4] = ["target", ".git", "node_modules", ".venv"];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut found = Vec::new();
     collect(workspace, &mut found)?;
     found.sort();

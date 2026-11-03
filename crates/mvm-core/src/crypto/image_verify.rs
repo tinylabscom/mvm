@@ -52,8 +52,8 @@ mod workspace_provider {
     use sigstore_types::HashAlgorithm;
 
     #[derive(Debug)]
-    pub struct WorkspaceProvider;
-    pub static PROVIDER: WorkspaceProvider = WorkspaceProvider;
+    pub(crate) struct WorkspaceProvider;
+    pub(crate) static PROVIDER: WorkspaceProvider = WorkspaceProvider;
 
     struct Sha256Ctx(sha2::Sha256);
     impl HashContext for Sha256Ctx {

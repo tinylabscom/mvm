@@ -21,7 +21,7 @@ use anyhow::{Result, bail};
 use mvm_core::kernel_advisory::{KernelPin, UpstreamReleases, assess};
 use regex::Regex;
 
-pub fn run(workspace: &Path, args: &[String]) -> Result<()> {
+pub(crate) fn run(workspace: &Path, args: &[String]) -> Result<()> {
     let quiet = args.iter().any(|a| a == "--quiet");
     let pins = read_local_pins(workspace);
     if pins.is_empty() {

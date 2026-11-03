@@ -60,7 +60,7 @@ const FIELD: &str = "max_vcpus";
 /// host; this floor keeps at least the constants honest.
 const MINIMUM_DECLARATIONS: usize = 2;
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut findings: Vec<String> = Vec::new();
     let mut declarations = 0usize;
 

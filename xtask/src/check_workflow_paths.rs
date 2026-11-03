@@ -162,7 +162,7 @@ fn unversioned_setup_uv_steps(src: &str) -> usize {
         .count()
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let workflows = workflow_files(workspace)?;
     let members = workspace_package_names(workspace)?;
     let mut problems = Vec::new();

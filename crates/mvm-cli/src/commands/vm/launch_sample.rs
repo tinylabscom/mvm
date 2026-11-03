@@ -22,7 +22,7 @@ use super::phase_timing::{LaunchMode, RunPhaseTimings};
 /// Env var naming the file this process writes its launch sample to. Shared
 /// with the backend-side trace gate so the two can never disagree about
 /// whether a launch is being measured.
-pub use mvm_core::launch_trace::LAUNCH_SAMPLE_ENV;
+pub(crate) use mvm_core::launch_trace::LAUNCH_SAMPLE_ENV;
 
 /// Sample schema version. A consumer that reads a different version refuses
 /// the sample as incomparable rather than mis-reading it.
@@ -203,7 +203,7 @@ impl LaunchWork {
 /// itself observes. The acquisition half lives in `mvm-core` so the crates that
 /// actually pull and build can report it.
 #[must_use]
-pub fn recorded_work(mount_materialize: bool, warm_claim: bool) -> LaunchWork {
+pub(crate) fn recorded_work(mount_materialize: bool, warm_claim: bool) -> LaunchWork {
     let acquired = mvm_core::launch_trace::recorded_acquisition();
     LaunchWork {
         image_pull: acquired.image_pull,
@@ -417,7 +417,7 @@ pub struct LaunchSample {
 /// asked for one. An empty or whitespace-only value is treated as unset so a
 /// blank export does not create a file named after nothing.
 #[must_use]
-pub fn sample_path_from_env() -> Option<PathBuf> {
+pub(crate) fn sample_path_from_env() -> Option<PathBuf> {
     sample_path_from(std::env::var(LAUNCH_SAMPLE_ENV).ok().as_deref())
 }
 
@@ -433,7 +433,7 @@ fn sample_path_from(value: Option<&str>) -> Option<PathBuf> {
 }
 
 /// Serialize `sample` to `path`, creating parent directories.
-pub fn write_sample(path: &Path, sample: &LaunchSample) -> Result<()> {
+pub(crate) fn write_sample(path: &Path, sample: &LaunchSample) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -445,7 +445,7 @@ pub fn write_sample(path: &Path, sample: &LaunchSample) -> Result<()> {
 }
 
 /// Read a launch sample a `mvmctl` process wrote.
-pub fn read_sample(path: &Path) -> Result<LaunchSample> {
+pub(crate) fn read_sample(path: &Path) -> Result<LaunchSample> {
     let bytes =
         std::fs::read(path).with_context(|| format!("reading launch sample {}", path.display()))?;
     serde_json::from_slice(&bytes)

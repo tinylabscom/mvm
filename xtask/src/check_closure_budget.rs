@@ -50,7 +50,7 @@ const MACOS_CLOSURE_BUDGET: usize = 349;
 /// Maximum distinct packages in the default Linux closure.
 pub(crate) const CLOSURE_BUDGET: usize = 352;
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {
         check_one(workspace, budget)?;
     }

@@ -30,7 +30,7 @@ use std::path::Path;
 use crate::rust_source::blank_comments_and_strings;
 
 /// Prose that makes claims, and is therefore worth holding to its citations.
-pub const PROSE: &[&str] = &[
+pub(crate) const PROSE: &[&str] = &[
     "CLAUDE.md",
     "README.md",
     "AGENTS.md",
@@ -41,10 +41,10 @@ pub const PROSE: &[&str] = &[
 /// Minimum length for a token to be worth checking. Short snake_case words
 /// (`plan_id`, `vm_name`) are field names, not witnesses, and they are common
 /// enough that including them buys noise rather than coverage.
-pub const MIN_LEN: usize = 12;
+pub(crate) const MIN_LEN: usize = 12;
 
 /// Words that look like identifiers but are prose, config keys, or paths.
-pub const IGNORED: &[&str] = &[
+pub(crate) const IGNORED: &[&str] = &[
     "workflow_dispatch",
     "pull_request",
     "merge_group",
@@ -61,7 +61,7 @@ pub const IGNORED: &[&str] = &[
 
 /// Whether `s` is shaped like a Rust test name.
 #[must_use]
-pub fn is_snake_ident(s: &str) -> bool {
+pub(crate) fn is_snake_ident(s: &str) -> bool {
     s.len() >= MIN_LEN
         && s.contains('_')
         && s.chars()
@@ -72,7 +72,7 @@ pub fn is_snake_ident(s: &str) -> bool {
 
 /// Whether `s` is shaped like a CI job name.
 #[must_use]
-pub fn is_kebab_job(s: &str) -> bool {
+pub(crate) fn is_kebab_job(s: &str) -> bool {
     s.len() >= MIN_LEN
         && s.contains('-')
         && s.chars()
@@ -88,7 +88,7 @@ pub fn is_kebab_job(s: &str) -> bool {
 /// rule than "a cited witness exists", and widening it is a separate decision
 /// from making absence claims mechanical.
 #[must_use]
-pub fn is_screaming_env(s: &str) -> bool {
+pub(crate) fn is_screaming_env(s: &str) -> bool {
     s.len() >= MIN_LEN
         && s.contains('_')
         && s.starts_with(|c: char| c.is_ascii_uppercase())
@@ -103,7 +103,7 @@ pub fn is_screaming_env(s: &str) -> bool {
 /// `fuzz_service_call.rs` is a claim about a target that does or does not
 /// exist, and it is worth the same scrutiny as a function name.
 #[must_use]
-pub fn strip_rs_suffix(token: &str) -> &str {
+pub(crate) fn strip_rs_suffix(token: &str) -> &str {
     token.strip_suffix(".rs").unwrap_or(token)
 }
 
@@ -132,7 +132,7 @@ fn delimited(text: &str, delim: char) -> Vec<String> {
 
 /// Backticked spans in `text`.
 #[must_use]
-pub fn backticked(text: &str) -> Vec<String> {
+pub(crate) fn backticked(text: &str) -> Vec<String> {
     delimited(text, '`')
 }
 
@@ -142,7 +142,7 @@ pub fn backticked(text: &str) -> Vec<String> {
 /// `CLAUDE.md` says so itself, "because backticks assert a real identifier".
 /// So the absence gate has to read the quoted form too.
 #[must_use]
-pub fn quoted(text: &str) -> Vec<String> {
+pub(crate) fn quoted(text: &str) -> Vec<String> {
     delimited(text, '"')
 }
 
@@ -154,7 +154,7 @@ pub fn quoted(text: &str) -> Vec<String> {
 /// claim no enforcement. The number matters because a caller has to know
 /// whether the token fell inside an absence region.
 #[must_use]
-pub fn backticked_with_line(text: &str) -> Vec<(usize, String, String)> {
+pub(crate) fn backticked_with_line(text: &str) -> Vec<(usize, String, String)> {
     let mut out = Vec::new();
     for (idx, line) in text.lines().enumerate() {
         for token in backticked(line) {
@@ -178,7 +178,7 @@ pub fn backticked_with_line(text: &str) -> Vec<(usize, String, String)> {
 /// dispatch table and as a key in YAML. Holding it to the blanked haystack
 /// would report a live gate as fabricated — the opposite error, and the one
 /// that gets a gate deleted.
-pub struct Resolver {
+pub(crate) struct Resolver {
     /// Workspace Rust with comments and literals blanked, plus every scanned
     /// path.
     rust_code: String,
@@ -197,7 +197,7 @@ pub struct Resolver {
 impl Resolver {
     /// Read the workspace once.
     #[must_use]
-    pub fn build(root: &Path) -> Self {
+    pub(crate) fn build(root: &Path) -> Self {
         let rust_dirs = ["crates", "xtask", "src"];
         let mut other = raw_haystack(root, &rust_dirs, &["py"]);
         other.push_str(&raw_haystack(root, &[".github"], &["yml", "yaml"]));
@@ -210,14 +210,14 @@ impl Resolver {
 
     /// Whether `token` appears as code — the rule for a cited symbol.
     #[must_use]
-    pub fn in_code(&self, token: &str) -> bool {
+    pub(crate) fn in_code(&self, token: &str) -> bool {
         self.rust_code.contains(token) || self.other.contains(token)
     }
 
     /// Whether `token` appears anywhere at all, literals and YAML included —
     /// the rule for a gate or job name.
     #[must_use]
-    pub fn anywhere(&self, token: &str) -> bool {
+    pub(crate) fn anywhere(&self, token: &str) -> bool {
         self.rust_raw.contains(token) || self.other.contains(token)
     }
 
@@ -230,7 +230,7 @@ impl Resolver {
     /// each, a name could be simultaneously required to exist and required
     /// not to, and nothing would say so.
     #[must_use]
-    pub fn resolves(&self, token: &str) -> bool {
+    pub(crate) fn resolves(&self, token: &str) -> bool {
         if is_kebab_job(token) {
             self.anywhere(token)
         } else {
@@ -241,7 +241,7 @@ impl Resolver {
 
 /// The set of tokens this module declines to judge.
 #[must_use]
-pub fn ignored_set() -> HashSet<&'static str> {
+pub(crate) fn ignored_set() -> HashSet<&'static str> {
     IGNORED.iter().copied().collect()
 }
 

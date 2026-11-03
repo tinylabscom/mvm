@@ -63,7 +63,7 @@ const BOTH: &[Below] = &[Below::Hostd, Below::Runtime];
 /// below `mvm-client`, and any new entry must land with its extraction.
 const ALLOWLIST: &[(&str, &[Below])] = &[];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let root = workspace.join("crates/mvm-cli/src/commands");
     let mut found: BTreeMap<String, Vec<Reach>> = BTreeMap::new();
     for_each_file(&root, Some("rs"), &mut |path, src| {

@@ -19,7 +19,7 @@ const REQUIRED_WORKLOAD_FORBIDDEN: [&str; 3] = ["signing-key", "plan-admission",
 const BEGIN_MARKER: &str = "<!-- trust-gradient:begin -->";
 const END_MARKER: &str = "<!-- trust-gradient:end -->";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let path = workspace
         .join("specs")
         .join("adrs")

@@ -88,7 +88,7 @@ struct Finding {
 
 /// Run the lint over `public/src/content/docs/**/*.{md,mdx}` and the
 /// repo-root `README.md` rooted at `workspace`.
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let docs_dir = workspace.join(DOCS_DIR);
     if !docs_dir.is_dir() {
         bail!("expected docs dir at {}; got nothing", docs_dir.display());

@@ -146,7 +146,7 @@ const ISOLATION_EXEMPT: &[(&str, &str)] = &[(
      ignore-override contract",
 )];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut hits: Vec<String> = Vec::new();
 
     for root in ["crates", "src", "xtask", "tests"] {

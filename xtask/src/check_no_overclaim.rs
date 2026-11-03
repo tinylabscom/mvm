@@ -29,7 +29,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let adrs_dir = workspace.join("specs").join("adrs");
     if !adrs_dir.is_dir() {
         bail!(
