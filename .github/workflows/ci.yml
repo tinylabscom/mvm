@@ -338,6 +338,8 @@ jobs:
                      scripts/check-no-orchestration-server.test.sh \
                      scripts/security-lane-verdict.sh \
                      scripts/security-lane-verdict.test.sh \
+                     scripts/check-no-authority.sh \
+                     scripts/check-no-authority.test.sh \
                      scripts/cargo.sh \
                      scripts/e2e-phase-timings.sh \
                      scripts/dev-run-guard.test.sh \
@@ -616,6 +618,9 @@ jobs:
       # place their failure reporting is exercised before it has to work.
       - name: Security lane verdict tests
         run: bash scripts/security-lane-verdict.test.sh
+
+      - name: Host-authority symbol gate tests
+        run: bash scripts/check-no-authority.test.sh
 
       # installer-compat.yml needs published releases and runs weekly and on
       # installer pull requests, and it is not a required check. What decides

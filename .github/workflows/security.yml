@@ -152,7 +152,7 @@ jobs:
           restore-keys: cargo-prodagent-
 
       - name: No host-signer / admission symbols in the production agent
-        run: ./scripts/check-prod-agent-no-authority.sh
+        run: ./scripts/check-no-authority.sh guest-agent
 
   builderd-no-authority:
     name: builder daemon carries no host-authority symbols
@@ -174,7 +174,7 @@ jobs:
           restore-keys: cargo-builderd-
 
       - name: No host-signer / admission symbols in the builder daemon
-        run: ./scripts/check-builderd-no-authority.sh
+        run: ./scripts/check-no-authority.sh builderd
 
   # ── Lane 2b: Seccomp tier functional denial (ADR-001 §W2.4) ───────
   # Tier-structure unit tests in `mvm-security` cover cumulative-subset
