@@ -12,7 +12,11 @@ use serde::{Serialize, de::DeserializeOwned};
 
 pub const MAX_FRAME_BYTES: usize = 4096;
 pub const CONNECTION_BUDGET: Duration = Duration::from_secs(2);
-pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(15);
+// Self-hosted macOS runners occasionally need a little over 15s to confirm
+// supervisor exit after a successful transient workload. Keep this bounded, but
+// avoid turning a completed launch into a false teardown failure at the budget
+// edge.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
 pub const INSTANCE_FILE: &str = "hvf-instance.json";
 pub const FINALIZED_FILE: &str = "hvf-finalized.json";
 pub const SOCKET_FILE: &str = "hvf-stop.sock";
