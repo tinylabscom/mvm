@@ -18,10 +18,10 @@
 //!   untrusted input.
 //! - [`stream`] — the per-VM workload output broker: one redaction seam, one
 //!   hash chain, one durable transcript, N followers.
-//! - [`bridge`] / [`firecracker_bridge`] / [`prelaunch`] / [`exit_capture`] —
+//! - [`bridge`] / [`firecracker_bridge`] / [`prelaunch`] —
 //!   the shared per-VM supervisor host-process substrate: bridge-sidecar
 //!   config parsing, the prelaunched-standby attach-verify, and the
-//!   workload-exit control listener.
+//!   workload-exit control listener (`mvm_core::exit_capture`).
 
 #![deny(unreachable_pub)]
 
@@ -40,7 +40,6 @@ pub mod display;
 pub mod drive;
 /// Host egress-broker decision logic (closed-by-default allow/deny per request).
 pub mod egress_broker;
-pub mod exit_capture;
 pub mod extension_admission;
 pub mod extension_controller;
 /// Length-prefixed message framing (4-byte BE length + body,

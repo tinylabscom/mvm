@@ -185,9 +185,9 @@ pub(crate) fn refusal_from_lifecycle(
 /// whole history, which is the one outcome rotation must never produce.
 pub(crate) fn refusal_from_segment_set(
     source: &AuditSourceId,
-    err: &mvm_hostd::supervisor::SegmentSetError,
+    err: &mvm_core::audit_verify::set::SegmentSetError,
 ) -> AuditSourceRefusal {
-    use mvm_hostd::supervisor::SegmentSetError as E;
+    use mvm_core::audit_verify::set::SegmentSetError as E;
     // A per-segment failure keeps the precision the single-file verifier had:
     // the line index is within that segment, and the set error's own message
     // names which one.

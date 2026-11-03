@@ -5,16 +5,14 @@
 //! chain-signed log destroys the property the log exists for.
 
 use ed25519_dalek::SigningKey;
+use mvm_core::audit_verify::segment::{
+    CHAIN_CONTINUED, CHAIN_SEALED, LABEL_PREV_TIP, continuation_from_entry, sealed_from_entry,
+};
+use mvm_core::audit_verify::set::{SegmentSetError, verify_segment_set, verify_segment_topology};
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_hostd::supervisor::audit::{AuditSigner, PlanAuditEntry};
 use mvm_hostd::supervisor::audit_file::{
     FileAuditSigner, RotationPolicy, VerifyError, verify_audit_chain,
-};
-use mvm_hostd::supervisor::audit_segment::{
-    CHAIN_CONTINUED, CHAIN_SEALED, LABEL_PREV_TIP, continuation_from_entry, sealed_from_entry,
-};
-use mvm_hostd::supervisor::audit_set::{
-    SegmentSetError, verify_segment_set, verify_segment_topology,
 };
 use std::path::Path;
 

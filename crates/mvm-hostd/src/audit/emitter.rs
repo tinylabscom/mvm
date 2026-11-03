@@ -70,25 +70,16 @@ use atomic_sync::{AtomicSyncBatch, PendingSync};
 mod atomic_write;
 pub(crate) use atomic_write::{write_atomic, write_atomic_batched, write_atomic_unsynced};
 
-mod native_completion;
-mod session_events;
-mod stream_input_refusal;
-use stream_input_refusal::input_refused_labels;
+mod events;
+pub use events::checkpoint_audit::CheckpointForkedAudit;
+use events::input_refused_labels;
+pub use events::instruction_audit::InstructionTrustEvent;
+pub use events::{
+    agent_prompt_audit, checkpoint_audit, display_audit, drive_audit, grants_audit, image_audit,
+    instruction_audit, stream_audit, wall_clock_audit,
+};
 mod workspace;
 pub use workspace::{WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit};
-
-pub mod agent_prompt_audit;
-pub mod checkpoint_audit;
-pub mod display_audit;
-pub mod drive_audit;
-pub mod grants_audit;
-pub mod wall_clock_audit;
-pub use checkpoint_audit::CheckpointForkedAudit;
-pub mod image_audit;
-pub mod instruction_audit;
-pub use instruction_audit::InstructionTrustEvent;
-
-pub mod stream_audit;
 
 /// Extract the `image.created` label set from a node's provenance attributes.
 /// The parent hash-link is recorded as provenance; nothing here is a trust

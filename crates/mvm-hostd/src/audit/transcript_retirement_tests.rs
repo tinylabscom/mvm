@@ -605,7 +605,7 @@ fn historical_pruning_does_not_prove_that_a_seal_never_existed() {
     // Historical chains can predate pin admission. Construct that signed
     // fixture directly, without adding a bypass to the production prune API.
     let top = history.iter().find(|segment| segment.seq == 2).unwrap();
-    let prune = crate::supervisor::audit_segment::Pruned {
+    let prune = mvm_core::audit_verify::segment::Pruned {
         through: 2,
         tip: mvm_contract::verify::hash_line(
             top.content
@@ -625,8 +625,8 @@ fn historical_pruning_does_not_prove_that_a_seal_never_existed() {
             &for_plan(
                 &f.plan,
                 None,
-                crate::supervisor::audit_segment::CHAIN_PRUNED,
-                crate::supervisor::audit_segment::pruned_labels(&prune),
+                mvm_core::audit_verify::segment::CHAIN_PRUNED,
+                mvm_core::audit_verify::segment::pruned_labels(&prune),
             ),
             EvidenceReceipt::Omitted,
         )

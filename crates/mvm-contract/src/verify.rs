@@ -240,14 +240,14 @@ where
 
 /// Event name of the record that opens every segment after the first.
 ///
-/// Mirrors `mvm_hostd::supervisor::audit_segment::CHAIN_CONTINUED`. The two
+/// Mirrors `mvm_core::audit_verify::segment::CHAIN_CONTINUED`. The two
 /// crates cannot share a constant (this one is `no_std` and sits below the
 /// host), so the value is pinned by
 /// `the_handoff_contract_matches_the_host_writer`.
 pub const CHAIN_CONTINUED: &str = "chain.continued";
 
 /// Label carrying the predecessor's final line hash inside the signed body.
-/// Mirrors `mvm_hostd::supervisor::audit_segment::LABEL_PREV_TIP`.
+/// Mirrors `mvm_core::audit_verify::segment::LABEL_PREV_TIP`.
 pub const LABEL_PREV_TIP: &str = "chain.prev_tip";
 
 /// Label carrying this segment's sequence number.

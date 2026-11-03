@@ -36,8 +36,6 @@ pub mod audit_dedup;
 pub mod audit_file;
 pub mod audit_mirror;
 pub mod audit_recorder;
-pub mod audit_segment;
-pub mod audit_set;
 pub mod backend;
 pub mod balloon;
 pub mod balloon_runtime;
@@ -162,13 +160,6 @@ pub use audit_file::{
 pub use audit_recorder::{
     EventCategory, Recorder, RecorderError, UNBOUND_IMAGE_NAME, UNBOUND_IMAGE_SHA256,
     UNBOUND_PLAN_ID,
-};
-pub use audit_segment::{
-    CHAIN_CONTINUED, CHAIN_PRUNED, CHAIN_SEALED, Continuation, Pruned, Sealed,
-};
-pub use audit_set::{
-    SegmentContent, SegmentReport, SegmentSetError, SetVerification, read_verified_set,
-    verify_segment_entries, verify_segment_set, verify_segment_topology,
 };
 pub use backend::{BackendError, BackendLaunchSpec, BackendLauncher, NoopBackendLauncher};
 #[cfg(target_os = "macos")]

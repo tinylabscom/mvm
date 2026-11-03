@@ -690,7 +690,7 @@ impl FileAuditSigner {
         };
         Ok(serde_json::from_str::<SignedEnvelope>(first)
             .ok()
-            .and_then(|e| crate::supervisor::audit_segment::continuation_from_entry(&e.entry))
+            .and_then(|e| mvm_core::audit_verify::segment::continuation_from_entry(&e.entry))
             .map_or(1, |c| c.segment))
     }
 
@@ -709,15 +709,15 @@ impl FileAuditSigner {
         // at the reading end.
         let entries = content.lines().filter(|l| !l.is_empty()).count() as u64 + 1;
 
-        let sealed = crate::supervisor::audit_segment::Sealed {
+        let sealed = mvm_core::audit_verify::segment::Sealed {
             segment: seq,
             next_segment: seq + 1,
             entries,
         };
         let seal_entry = self.handoff_entry(
             tenant,
-            crate::supervisor::audit_segment::CHAIN_SEALED,
-            crate::supervisor::audit_segment::sealed_labels(seq, entries),
+            mvm_core::audit_verify::segment::CHAIN_SEALED,
+            mvm_core::audit_verify::segment::sealed_labels(seq, entries),
         );
         let tip = self.append_locked(active, &seal_entry)?;
 
@@ -737,13 +737,13 @@ impl FileAuditSigner {
         &self,
         active: &Path,
         tenant: &mvm_core::plan::TenantId,
-        sealed: &crate::supervisor::audit_segment::Sealed,
+        sealed: &mvm_core::audit_verify::segment::Sealed,
         tip: [u8; 32],
     ) -> Result<(), AuditError> {
         let entry = self.handoff_entry(
             tenant,
-            crate::supervisor::audit_segment::CHAIN_CONTINUED,
-            crate::supervisor::audit_segment::continuation_labels(sealed, tip),
+            mvm_core::audit_verify::segment::CHAIN_CONTINUED,
+            mvm_core::audit_verify::segment::continuation_labels(sealed, tip),
         );
         // The one append in this file that signs against a hash it did not read
         // off the file being written: the seed is the *previous* segment's tip.
@@ -799,7 +799,7 @@ impl FileAuditSigner {
         &self,
         tenant: &mvm_core::plan::TenantId,
         through: u64,
-    ) -> Result<crate::supervisor::audit_segment::Pruned, AuditError> {
+    ) -> Result<mvm_core::audit_verify::segment::Pruned, AuditError> {
         crate::audit::prune_pins::validate_tenant(&tenant.0)
             .map_err(|error| AuditError::Io(error.to_string()))?;
         let active = self.tenant_path(&tenant.0);
@@ -812,7 +812,7 @@ impl FileAuditSigner {
 
         let vk = self.signing_key.verifying_key();
         let verified =
-            crate::supervisor::audit_set::verify_segment_set(&dir, &base, &vk).map_err(|e| {
+            mvm_core::audit_verify::set::verify_segment_set(&dir, &base, &vk).map_err(|e| {
                 AuditError::Io(format!(
                     "refusing to prune a chain that does not verify: {e}. Pruning a broken \
                  chain would delete the evidence of whatever broke it"
@@ -822,7 +822,7 @@ impl FileAuditSigner {
         // Already-pruned prefixes are not re-prunable, and the range must start
         // where the surviving history starts.
         let floor = verified.pruned.map_or(1, |p| p.through + 1);
-        let sealed: Vec<&crate::supervisor::audit_set::SegmentReport> =
+        let sealed: Vec<&mvm_core::audit_verify::set::SegmentReport> =
             verified.segments.iter().filter(|s| !s.active).collect();
 
         if through < floor {
@@ -870,15 +870,15 @@ impl FileAuditSigner {
             .filter_map(|s| s.entries)
             .sum::<usize>() as u64;
 
-        let pruned = crate::supervisor::audit_segment::Pruned {
+        let pruned = mvm_core::audit_verify::segment::Pruned {
             through,
             tip: hash_line(last.as_bytes()),
             entries,
         };
         let entry = self.handoff_entry(
             tenant,
-            crate::supervisor::audit_segment::CHAIN_PRUNED,
-            crate::supervisor::audit_segment::pruned_labels(&pruned),
+            mvm_core::audit_verify::segment::CHAIN_PRUNED,
+            mvm_core::audit_verify::segment::pruned_labels(&pruned),
         );
         // Barrier: the record must be durable before the files it explains stop
         // existing.
@@ -937,7 +937,7 @@ impl FileAuditSigner {
         };
         let envelope: SignedEnvelope =
             serde_json::from_str(last).map_err(|e| AuditError::Io(e.to_string()))?;
-        let Some(sealed) = crate::supervisor::audit_segment::sealed_from_entry(&envelope.entry)
+        let Some(sealed) = mvm_core::audit_verify::segment::sealed_from_entry(&envelope.entry)
         else {
             // The newest segment on disk does not end with a sealing record, so
             // it was never retired. Refuse rather than guess: appending a
@@ -1219,7 +1219,7 @@ fn walk_chain(
 fn adopted_continuation_seed(line: &str) -> Option<[u8; 32]> {
     let envelope: SignedEnvelope = serde_json::from_str(line).ok()?;
     let claimed = URL_SAFE_NO_PAD.decode(&envelope.prev_hash).ok()?;
-    let tip = crate::supervisor::audit_segment::continuation_start_hash(&envelope.entry)?;
+    let tip = mvm_core::audit_verify::segment::continuation_start_hash(&envelope.entry)?;
     (claimed == tip).then_some(tip)
 }
 

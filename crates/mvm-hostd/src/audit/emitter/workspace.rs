@@ -86,7 +86,7 @@ impl AuditEmitter {
     /// then sync the containing segment and directory before treating it as
     /// durable. Recovery cannot trust a visible but unsynced JSON match.
     pub fn workspace_mutation_recorded(&self, audit: WorkspaceMutationAudit<'_>) -> Result<bool> {
-        let segments = crate::supervisor::audit_set::read_verified_set(
+        let segments = mvm_core::audit_verify::set::read_verified_set(
             self.audit_dir(),
             "local",
             &self.verifying_key(),
@@ -309,7 +309,7 @@ mod tests {
         );
         let wrong_key = SigningKey::from_bytes(&[8u8; 32]);
         assert!(
-            crate::supervisor::audit_set::verify_segment_entries(
+            mvm_core::audit_verify::set::verify_segment_entries(
                 dir.path(),
                 "local",
                 &wrong_key.verifying_key()

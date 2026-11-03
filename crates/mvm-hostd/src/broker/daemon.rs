@@ -32,6 +32,9 @@ use mvm_core::protocol::audit_signer::{
     SignerHelperResponse,
 };
 use mvm_core::protocol::broker_control;
+use mvm_core::protocol::broker_control::{
+    ControlRequest, ControlResponse, RegisterVm, SignedControl,
+};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -44,9 +47,6 @@ use super::handlers::register_bound_handlers;
 use super::registry::Registry;
 use super::server::{read_frame, serve_on_listener, write_frame};
 use super::service_proxy::ControllerServiceProxy;
-use mvm_core::protocol::broker_control::{
-    ControlRequest, ControlResponse, RegisterVm, SignedControl,
-};
 
 /// Audit category for daemon-emitted health entries. Health probing is
 /// mvm-hostd lifecycle activity, so it files under the host-asserted `host`
