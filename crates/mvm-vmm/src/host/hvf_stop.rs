@@ -130,7 +130,8 @@ impl ConnectedInstance {
             self.observer
                 .wait_event(wait_start + wire::SHUTDOWN_BUDGET)?
                 == ProcessExitWait::Exited,
-            "HVF supervisor exit remains unconfirmed"
+            "HVF supervisor exit remains unconfirmed ({})",
+            unconfirmed_exit_evidence(&self.instance.vm_id)
         );
         let exit_wait = wait_start.elapsed();
         terminal_proof(self.instance, &self.root, dispatch, exit_wait)
@@ -376,6 +377,27 @@ fn require_bridge_peer(stream: &UnixStream, child_id: u32) -> Result<()> {
     Ok(())
 }
 
+/// Payload-free hints for an exit that did not arrive within the budget, read
+/// without trusting them: they say how far the supervisor got, never that it
+/// stopped. Whether it had already published finalization separates a hang in
+/// guest teardown from a hang in process exit.
+fn unconfirmed_exit_evidence(vm: &str) -> String {
+    let Ok(dir) = wire::state_dir(vm) else {
+        return "state directory unresolved".into();
+    };
+    describe_supervisor_progress(&dir)
+}
+
+fn describe_supervisor_progress(dir: &std::path::Path) -> String {
+    let status = std::fs::read_to_string(dir.join("supervisor-status.json"))
+        .map_or_else(|_| "unreadable".into(), |text| text.trim().to_owned());
+    format!(
+        "supervisor status {status}; finalization published: {}; shutdown timing recorded: {}",
+        dir.join(wire::FINALIZED_FILE).exists(),
+        super::hvf_supervisor::shutdown_timing_path(dir).exists(),
+    )
+}
+
 fn terminal_proof(
     instance: HvfInstance,
     root: &VerifyingKey,
@@ -406,6 +428,21 @@ mod tests {
             u32::try_from(super::super::uds_peer::connected_peer_pid(&stream).unwrap()).unwrap();
         assert!(require_bridge_peer(&stream, peer).is_ok());
         assert!(require_bridge_peer(&stream, peer.checked_add(1).unwrap()).is_err());
+    }
+
+    #[test]
+    fn unconfirmed_exit_evidence_reports_how_far_the_supervisor_got() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            describe_supervisor_progress(dir.path()),
+            "supervisor status unreadable; finalization published: false; shutdown timing recorded: false"
+        );
+        std::fs::write(dir.path().join("supervisor-status.json"), "\"stopped\"").unwrap();
+        std::fs::write(dir.path().join(wire::FINALIZED_FILE), "{}").unwrap();
+        assert_eq!(
+            describe_supervisor_progress(dir.path()),
+            "supervisor status \"stopped\"; finalization published: true; shutdown timing recorded: false"
+        );
     }
 
     #[test]
