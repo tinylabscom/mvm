@@ -68,8 +68,9 @@ In priority order. When two conflict, the higher one wins.
 9. **Fast to develop.** The inner loop is short: an incremental build, a
    scoped test run and a local launch all take seconds to low minutes, and a
    PR reaches merge quickly. Contributors need no host Nix, no Docker and no
-   root. Slow loops are bugs. The bar is a number, not a feeling (see Open
-   decisions).
+   root. Slow loops are bugs. The bar is a number, not a feeling: incremental
+   build, scoped test and PR time-to-merge are set from a measured baseline and
+   pinned in the `cargo xtask perf budgets` registry.
 10. **Honest.** Every claim ships with its limit. If a property is policy and
     not absence, we say so.
 
@@ -173,12 +174,14 @@ sit on top of anything the system owns.
 Witnessed by unit tests on `MountPathPolicy` (`mvm-core`
 `crypto/policy/mount.rs`), including the ancestor and segment-aware cases. The
 allow-list is deliberate and strict; widening it needs an ADR. No ADR-001
-claim row names this policy yet. Adding one (under claim 1, "no host-fs access
-beyond explicit shares") is part of making it a ledger entry.
+claim row names this policy yet. The owner has decided it will become a ledger
+entry (under claim 1, "no host-fs access beyond explicit shares"); adding that
+row and its witness is the remaining work.
 
 Corrections to earlier drafts: the allowed roots are `/data` and `/work` only.
 `/mnt` was removed because a share there hid the config and secret drives, and
-`~/.cache` is not an allowed root today.
+`~/.cache` is not an allowed root, by decision (2026-11-02); persistent caches
+use a `/data/cache` convention rather than a new allowed root.
 
 ### Rootless (anti-escalation Shipped; never-root and rootless host Planned)
 
@@ -254,7 +257,7 @@ Source of truth: `public/src/content/docs/guides/policy-and-profiles.md`.
 | Path | Requirement | Enforced today |
 | --- | --- | --- |
 | Cold launch, invocation to guest ready, **admission included** | **< 300 ms**, every sample | Warm launches are refused over 300 ms; cold is only measured on the dispatch window |
-| Warm startup (claimed standby) | **< 50 ms** | Table budget p50 30 ms, p99 50 ms |
+| Warm startup: invocation to guest ready on a claimed standby, **admission included** | **< 50 ms**, every sample | Table budget p50 30 ms, p99 50 ms; the every-sample gate is Planned |
 
 An unnamed run leaves a standby VM behind so the next matching run claims it.
 Live-memory fork is advertised on Firecracker; save/restore state on HVF.
@@ -426,7 +429,7 @@ claim.
 | 11 | **Windows through libkrun on WHP.** Promote the existing libkrun backend to a released Windows x86-64 tier rather than write a native WHP driver (a from-scratch hypercall and virtio layer is out of scope). Where WHP is absent or libkrun cannot start, refuse with a named reason; never fall back to another tier silently. Keep admission-visible tier labels. Preserve private-state permissions with Windows ACLs equal to the 0700 posture elsewhere. | A boot witness on a real Windows host is archived. `doctor` reports the tier and capabilities, and the platform matrix matches it. Until the witness exists the tier is Preview and claim-free. The guest stays NIC-less and vsock-only; if the WHP path cannot hold that, it ships behind a stated limit, not silently. No GPU on this path. |
 | 12 | **Easy installation on every platform.** One command installs a signed release with no prerequisite: `curl \| sh` on macOS and Linux (user-writable prefix, no `sudo`), a Homebrew tap, distro packages, and `winget` plus a signed zip on Windows. Every channel verifies the signature (claim 20) before running anything. `mvmctl doctor` names anything still missing. | A clean-VM install test per platform ends with requirement 1 passing. |
 | 13 | **Elastic memory on every backend.** A guest returns memory it frees, and a machine's footprint tracks its use, not its size. Over-provisioning costs close to nothing. | Today: HVF uses free page reporting; Firecracker uses a target balloon driven by host pressure; libkrun and QEMU report no mechanism. Each backend must either implement one or advertise `none` in `doctor`. A test fills and frees guest memory and asserts the host footprint falls. Publish the footprint numbers beside the launch budgets. |
-| 14 | **Language bindings through the host library's C ABI.** `libmvm_hostlib` already exposes a versioned C ABI (`mvm_hostlib_abi_version`, `mvm_hostlib_abi_is_compatible`, `mvm_hostlib_call`, `mvm_hostlib_free`, an approval callback) that takes and returns JSON, so any language with a C foreign-function interface can bind it without a subprocess. Candidates in priority order: Go, Java and Kotlin, C#, Swift. Each binding is a thin loader plus types generated from the existing schema. | A reference binding in one new language passes the client-interface conformance suite (ADR-043). Bindings call the version handshake before their first call, free every returned buffer, and never shell out (`check-no-cli-shellout`). How the signed library reaches users per platform is part of the work. |
+| 14 | **Language bindings through the host library's C ABI.** `libmvm_hostlib` already exposes a versioned C ABI (`mvm_hostlib_abi_version`, `mvm_hostlib_abi_is_compatible`, `mvm_hostlib_call`, `mvm_hostlib_free`, an approval callback) that takes and returns JSON, so any language with a C foreign-function interface can bind it without a subprocess. Python and TypeScript already ship as first-class SDKs; the new-binding priority is Go, then Swift (Java/Kotlin and C# only on demand). Each binding is a thin loader plus types generated from the existing schema. | A reference binding in one new language passes the client-interface conformance suite (ADR-043). Bindings call the version handshake before their first call, free every returned buffer, and never shell out (`check-no-cli-shellout`). How the signed library reaches users per platform is part of the work. |
 | 15 | **PII replacement.** Detect and replace, not detect only. A matched value (SSN, card number, email, phone, full name) is substituted with a stable opaque token on the host-owned wire before it leaves, and restored only on an exact token echo. The event is audited by rule name, never by value. Policy lives in the signed plan and can only narrow. A name is PII only as a full name (first and last together). State how names are found (dictionary, model plus adjacency, or declared values) and publish the known misses and false positives. Builds on ADR-001's proposed "Reversible replacement on owned cleartext paths". | Tests: each rule replaces on egress and restores only an exact echo; no raw value reaches the wire, a span, a checkpoint or the audit log; a policy cannot widen a lower layer's rule. The claim is limited to what the published miss and false-positive list supports. Needs an ADR-001 ledger row before it is called Shipped. |
 | 16 | **Taint tracking.** Content of untrusted provenance cannot authorize a privileged action. Reaching a host service or releasing a secret already needs a signed binding in the plan; taint makes the provenance real. It is on only when something is admitted to escalate to (egress, a host-service binding, a secret binding or a tool grant), so a fully offline sealed workload pays nothing. The trigger is capability, not a pack label. Prompt-injection detection stays advisory and pattern-based, with false positives. | Tests: a tainted input cannot cause an unbound host-service call or secret release; an offline workload runs with taint off and no added cost on the launch budgets. Trigger confirmation is open decision 3. Needs an ADR-001 ledger row before it is called Shipped. |
 
@@ -445,24 +448,29 @@ provides the boundary and the evidence; the policy decides what crosses it.
 
 ## Not promised
 
-Cut from the old PRD until a witness exists. Each may return as Planned with an
-ADR. PII replacement and taint tracking are not here: they are Planned
-requirements 15 and 16. Until built, only detection ships, and the standing
-guarantee is the narrower one: a privileged action needs a signed binding in
-the plan.
+What this release does not sell. Each carries its disposition: **Planned** (a
+committed requirement, not yet witnessed), **Deferred** (not scoped for this
+release), **Cut** (not pursued here), or **Owned elsewhere**. A Planned item
+moves to Shipped only with an ADR and a witness.
 
-- **S3, R2 or MinIO-backed volumes.** Deferred by the owner; not to be
-  scoped yet. The volume spec type parses `s3://`; no end-to-end witness
-  exists.
-- **An interactive shell inside the builder VM.** The builder is headless and
-  exists only to run Nix builds. The shell is a dev image booted with
+- **PII replacement and taint tracking — Planned.** Both are requirements (see
+  Scrubbed), not features. Until built, only detection ships, and the standing
+  guarantee is the narrower one: a privileged action needs a signed binding in
+  the plan.
+- **S3, R2 or MinIO-backed volumes — Deferred.** Not to be scoped yet. The
+  volume spec type parses `s3://`; no end-to-end witness exists.
+- **A local lifecycle journal — Deferred.** Counts and shapes only, local and
+  opt-in; if reopened it must never become telemetry that leaves the host.
+- **An interactive shell inside the builder VM — Cut.** The builder is headless
+  and exists only to run Nix builds. The shell is a dev image booted with
   `machine run -it`.
-- **WASM as a core goal.** It is a claim-free portability tier.
-- **TUN/TAP over vsock.** Superseded by one flow-aware path (ADR-042).
-- **A Docker or container fallback.** Retired.
-- **Fleet scheduling, tenants, deploy.** mvmd.
-- **Encryption of "every piece of data on the host".** Checkpoints are
-  encrypted at rest; a full at-rest inventory has not been verified.
+- **WASM as a core goal — Cut.** It remains a claim-free portability tier only.
+- **TUN/TAP over vsock — Cut.** Superseded by one flow-aware path (ADR-042).
+- **A Docker or container fallback — Cut.** Retired.
+- **Encryption of "every piece of data on the host" — Cut as a blanket
+  promise.** Checkpoints are encrypted at rest; a full at-rest inventory has not
+  been verified, so only the specific witnessed guarantees stand.
+- **Fleet scheduling, tenants, deploy — Owned by mvmd**, not mvm.
 
 ## How we measure direction
 
@@ -480,29 +488,38 @@ Each release, check the PRD against the tree:
   (`check-single-network-path`, `check-prod-agent-no-exec.sh`).
 - Policy merge rules have a test per row of the table above.
 - README examples run; they gate releases.
-- Nothing is added to Not promised without moving to Shipped or Cut.
+- Nothing is added to Not promised without an explicit disposition (Planned,
+  Deferred, Cut, or Owned elsewhere).
 
-## Open decisions for the owner
+## Owner decisions
 
 Settled by the owner on 2026-11-02: cold under 300 ms including admission,
 warm under 50 ms, the boot-time gate on every PR, the precedence rule set,
 lightweight measured by `.mvmpkg` size on disk and by memory (guest and
 per-VM host), headless builder, SDKs first-class, a name is PII only as a full
-name, S3 volumes deferred. Still open:
+name, S3 volumes deferred.
 
-1. **Budgets for Lightweight and for development speed.** The metrics are
-   chosen. Measure today's `.mvmpkg` size, guest memory and per-VM host memory,
-   plus incremental build time, scoped test time and PR time-to-merge, then set
-   the numbers.
-2. **Warm startup definition.** Confirm "under 50 ms" is the warm claim, as
-   the table assumes; cold cannot reach 50 ms without a different design.
-3. **Taint trigger.** Confirm the recommendation: on when egress, a host
-   service, a secret or a tool grant is admitted; off for offline workloads.
-4. **First language binding.** Pick the reference binding for requirement 14
-   (recommended: Go).
-5. **Cache and home mounts.** Tools want a persistent cache (`~/.cache`,
-   package caches). Today only `/data` and `/work` are allowed. Either keep it
-   that way and document a `/data/cache` convention, or add one more allowed
-   root by ADR. I'd keep the allow-list as is.
-6. **Make mount policy a ledger claim.** Add an ADR-001 row with its witness
-   so `check-claim-catalog` guards it.
+Settled in the same review, closing the last open items:
+
+- **Warm startup** is invocation to guest ready on a claimed standby, admission
+  included, under 50 ms on every PR-gated sample; a run with no standby is
+  measured as cold.
+- **Taint tracking** turns on when the signed plan admits egress, a host
+  service, a secret binding or a tool grant, and stays off for fully offline
+  workloads.
+- **Language bindings:** Python and TypeScript already ship; the new-binding
+  priority is Go, then Swift (Java/Kotlin and C# on demand). Go is the
+  requirement-14 reference binding.
+- **Cache mounts:** the `/data` and `/work` allow-list stands; `~/.cache` is not
+  added, and persistent caches use a `/data/cache` convention.
+- **Mount policy becomes a ledger claim:** add an ADR-001 row and its witness so
+  `check-claim-catalog` guards it.
+- **Lifecycle journal:** deferred (see Not promised).
+- **Budgets** for lightweight and development speed are set from a measured
+  baseline and pinned in the `cargo xtask perf budgets` registry, which already
+  gates the minimal rootfs (20 MiB), the default guest footprint (50 MB) and the
+  idle guest-agent RSS (8 MiB). The remaining ceilings — `.mvmpkg` base size,
+  per-VM host memory overhead, and the development-speed trio (incremental
+  build, scoped test, PR time-to-merge) — are added to that registry from the
+  baseline, each pinned by a test. Until the baseline lands, those three
+  numbers are measured, not invented.
