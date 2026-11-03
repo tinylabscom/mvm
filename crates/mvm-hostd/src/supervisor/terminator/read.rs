@@ -412,6 +412,8 @@ mod tests {
         assert_eq!(find_subslice(b"hello\r\n\r\nworld", b"\r\n\r\n"), Some(5));
         assert_eq!(find_subslice(b"no terminator", b"\r\n\r\n"), None);
         assert_eq!(find_subslice(b"\r\n\r\n", b"\r\n\r\n"), Some(0));
+        assert_eq!(find_subslice(b"ababa", b"aba"), Some(0));
+        assert_eq!(find_subslice(b"", b"\r\n"), None);
     }
 
     #[test]

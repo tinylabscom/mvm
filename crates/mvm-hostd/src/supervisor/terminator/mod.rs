@@ -8,15 +8,10 @@
 //! rebuilds it against the authority the flow was admitted for (`request`), and
 //! drives it through the substitution service.
 
+use super::find_subslice;
+
 pub mod flow;
 mod guest_tls;
 pub mod read;
 pub mod request;
 pub mod tls;
-
-/// First index of `needle` in `haystack`, or `None`.
-pub(super) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}

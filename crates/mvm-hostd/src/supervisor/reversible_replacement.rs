@@ -12,6 +12,7 @@ use mvm_core::policy::{
     RewriteSurface, SensitiveClass,
 };
 
+use crate::supervisor::find_subslice;
 use crate::supervisor::network_endpoint_proxy::ForwardResponse;
 use crate::supervisor::pii_redactor::{PiiMatch, PiiRedactor};
 use crate::supervisor::secrets_scanner::{SecretMatch, SecretsScanner};
@@ -338,7 +339,7 @@ impl ReplacementFlow {
                 .values_by_token
                 .values()
                 .filter_map(|entry| {
-                    find_bytes(&payload[cursor..], entry.token.0.as_bytes())
+                    find_subslice(&payload[cursor..], entry.token.0.as_bytes())
                         .map(|start| (cursor + start, entry.clone()))
                 })
                 .min_by_key(|(start, _)| *start);
@@ -506,12 +507,6 @@ fn digest_hex(key: &[u8; 32], bytes: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("fixed proof key");
     mac.update(bytes);
     hex::encode(mac.finalize().into_bytes())
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 #[cfg(test)]

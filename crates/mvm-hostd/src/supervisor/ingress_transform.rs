@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 
 use mvm_core::policy::{RedactionAction, ReversibleReplacementAction};
 
+use super::find_subslice;
 use super::network_endpoint_proxy::ForwardResponse;
 use super::redactor::{RedactingSubstitution, RedactionHits, StreamingRedactor};
 use super::reversible_replacement::{
@@ -650,12 +651,6 @@ fn add_hits(summary: &mut IngressTransformSummary, hits: &RedactionHits) {
 
 fn add_count(target: &mut u64, count: usize) {
     *target = target.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 #[cfg(test)]
