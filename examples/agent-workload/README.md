@@ -20,8 +20,9 @@ prompt before reducing it; the offline version check is not a capacity test.
 Run Nix builds/evaluations and ordinary workload commands inside the approved
 project builder VM, not directly on macOS or in Lima. A builder without
 `/dev/kvm` can build the image but cannot supply a nested Firecracker workload
-witness. Stop there and record the missing capability; native macOS HVF
-workload smoke needs separate explicit operator permission.
+witness. Stop there and record the missing capability. Native macOS HVF
+refuses this flake-based entrypoint by design (it runs only installed signed
+applications), so the live smoke is a Firecracker witness only.
 
 Build the current checkout CLI without replacing the global installation.
 Source `scripts/dev-env.sh` and use task-local state and build outputs; keep

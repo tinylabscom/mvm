@@ -6,7 +6,12 @@ Feature: The agent workload example boots with a placeholder, not a key
   input. The smoke path does not contact a model API; it proves the guest
   received the host-minted placeholder and the pinned agent binary starts.
 
-  @live
+  Firecracker only: a native HVF launch is refused unless it is a fresh
+  installed application with original signed boot inputs (`boot_entrypoint`),
+  and `--flake` + `--from-workload-ir` is not one. macOS hosts skip this with
+  `needs-firecracker`.
+
+  @live @firecracker
   Scenario: the documented agent workload runs without putting a key in the guest
     Given the agent workload smoke secret is stored
     When I run the agent workload example with "machine run --flake examples/agent-workload --entrypoint --from-workload-ir examples/agent-workload/workload-smoke.json --allow-host api.anthropic.com:443 --timeout 120"
