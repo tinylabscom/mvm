@@ -368,6 +368,22 @@ jobs:
           python3 scripts/test_publish_source_host_helpers.py
           python3 scripts/test_resolve_source_helper_commit.py
 
+      # These suites existed in scripts/ but nothing executed them (issue
+      # #4839 scripts-consolidation audit); they test live helpers, so they
+      # run here instead of being deleted.
+      - name: Script helper tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 scripts/test-runtime-proof-candidate.py
+          python3 scripts/test_claude_demo_consumer.py
+          python3 scripts/test_claude_demo_preflight.py
+          python3 scripts/test_e2e_failure_manifest.py
+          python3 scripts/test_pack_build_native.py
+          python3 scripts/test_smoke_local_demo.py
+          python3 scripts/test_task_context.py
+          python3 scripts/test_watch_issues.py
+
       - name: Disposable GCP KVM controller tests
         run: |
           bash scripts/run-gcp-kvm-test.test.sh

@@ -93,35 +93,8 @@ from `/mnt/c/`** — the cross-fs perf is brutal and the runtime/socket path
 shape is not part of the supported WSL2 workload surface. Keep mvm work inside
 the WSL2 ext4 filesystem (e.g. `~/work/...`).
 
-If you need to read source from a Windows directory, do it explicitly with `cp` rather than running `cargo build` against a `/mnt/c/` path.
-
-## Live smoke
-
-For an opt-in proof on a real WSL2 host, run:
-
-```bash
-sh scripts/run-wsl2-libkrun-smoke.sh
-```
-
-Use a **real Windows host running WSL2** for this proof, for example:
-
-- Windows 11 with WSL2 and nested `/dev/kvm` exposed inside the distro;
-- Windows Server with WSL2 enabled and the same nested-KVM shape.
-
-Do **not** treat the following as equivalent proof for this guide:
-
-- macOS integration layers such as OrbStack;
-- plain Linux VMs that are not actually WSL2;
-- Hetzner Cloud or other hosted VMs that do not expose the required nested-virt shape.
-
-The wrapper checks that you are inside WSL2, confirms `/dev/kvm` exists, and
-refuses DrvFs-backed repo/state paths. It then:
-
-- runs the gated libkrun backend lifecycle smoke;
-- scaffolds and builds a temporary HTTP preset manifest;
-- proves transient `run --json --receipt`;
-- boots a persistent libkrun-backed machine and waits for guest-agent reachability;
-- verifies `machine exec`, `--allow-host` egress, declared FlowMux ingress, and clean stop.
+If you need to read source from a Windows directory, do it explicitly with `cp`
+rather than running `cargo build` against a `/mnt/c/` path.
 
 ## Future Backend Work
 
