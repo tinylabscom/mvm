@@ -10,7 +10,10 @@ trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/bin" "$fixture/target/release"
 
 printf '#!/bin/sh\nexit 0\n' > "$fixture/bin/cargo"
-printf '#!/bin/sh\ncat "$FAKE_NM_SYMBOLS"\n' > "$fixture/bin/nm"
+cat > "$fixture/bin/nm" <<'EOF'
+#!/bin/sh
+cat "$FAKE_NM_SYMBOLS"
+EOF
 chmod +x "$fixture/bin/cargo" "$fixture/bin/nm"
 
 run() { # run <target> <symbols-file>
