@@ -6,6 +6,6 @@
 //! firecracker) per VM, so a VM started under any backend reaches its agent
 //! on the right transport.
 
-pub use mvm_client::readiness::wait_for_guest_agent;
+pub(crate) use mvm_client::readiness::wait_for_guest_agent;
 
-pub use mvm_client::guest::emit_vsock_rpc_audit;
+pub(crate) use mvm_client::guest::emit_vsock_rpc_audit;

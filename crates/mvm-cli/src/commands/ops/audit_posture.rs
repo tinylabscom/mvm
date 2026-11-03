@@ -36,7 +36,7 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum PostureStatus {
+pub(crate) enum PostureStatus {
     /// The check passed — the mitigation is active.
     Ok,
     /// The check passed structurally but the operator may want
@@ -48,19 +48,19 @@ pub enum PostureStatus {
 }
 
 #[derive(Debug, Serialize)]
-pub struct PostureCheck {
+pub(crate) struct PostureCheck {
     pub name: &'static str,
     pub status: PostureStatus,
     pub detail: String,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PostureReport {
+pub(crate) struct PostureReport {
     pub checks: Vec<PostureCheck>,
 }
 
 impl PostureReport {
-    pub fn summary_counts(&self) -> (usize, usize, usize) {
+    pub(crate) fn summary_counts(&self) -> (usize, usize, usize) {
         let mut ok = 0;
         let mut warn = 0;
         let mut fail = 0;
@@ -92,7 +92,7 @@ pub(super) fn run(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn build_report(home: Option<&std::path::Path>) -> PostureReport {
+pub(crate) fn build_report(home: Option<&std::path::Path>) -> PostureReport {
     let checks = vec![
         check_host_signer(home),
         check_audit_chain(home),

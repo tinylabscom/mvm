@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use mvm_client::policy_profiles::{PolicySelection, ProjectPolicy};
 
-pub use mvm_client::launch::manifest_ref::{ManifestArgRef, resolve_manifest_arg};
+pub(crate) use mvm_client::launch::manifest_ref::{ManifestArgRef, resolve_manifest_arg};
 
 /// Select launch policy with operator-configured fallbacks.
 ///
@@ -41,7 +41,7 @@ pub(in crate::commands) fn launch_uses_oci_image(
         .map(Option::unwrap_or_default)
 }
 
-pub use mvm_core::domain::manifest::resolve_flake_ref;
+pub(crate) use mvm_core::domain::manifest::resolve_flake_ref;
 
 /// How faithfully the resolved `backend` enforces `policy` on the transient
 /// (no-signed-bundle) run path. Recorded in the signed receipt **alongside**
@@ -58,7 +58,7 @@ pub use mvm_core::domain::manifest::resolve_flake_ref;
 ///   unlisted address is refused, not just an unlisted name). The tier is
 ///   uniformly `<backend>:l4-host-port`; the backend is still named so the
 ///   receipt records which backend ran the workload.
-pub fn egress_enforcement_label(
+pub(crate) fn egress_enforcement_label(
     backend: &str,
     policy: &mvm_core::network_policy::NetworkPolicy,
 ) -> String {

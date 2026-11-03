@@ -2,7 +2,7 @@
 
 /// Summary returned by [`super::warm_to_target`].
 #[derive(Debug, PartialEq, Eq)]
-pub struct WarmResult {
+pub(crate) struct WarmResult {
     /// Standbys newly spawned and recorded in this call.
     pub spawned: u32,
     /// Spawn attempts that failed (each was logged as a warning).

@@ -68,7 +68,7 @@ const REFILL_LOG: &str = "refill.log";
 /// Only the `mvmctl` binary starts one. Anything else that drives a launch
 /// through this code — a test binary, an embedding — would re-execute itself
 /// with arguments it does not understand.
-pub fn schedule_standby_refill(refill: &StandbyRefill) {
+pub(crate) fn schedule_standby_refill(refill: &StandbyRefill) {
     if let Err(error) = spawn_refill_helper(refill) {
         tracing::debug!(%error, "could not start the standby refill");
     }

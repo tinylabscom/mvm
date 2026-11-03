@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 /// The fixed artifact name. Not configurable: see the module docs.
-pub const STUDIO_SERVER_BIN: &str = "mvm-studio-server";
+pub(crate) const STUDIO_SERVER_BIN: &str = "mvm-studio-server";
 
 /// Why a candidate artifact was refused.
 ///
@@ -31,7 +31,7 @@ pub const STUDIO_SERVER_BIN: &str = "mvm-studio-server";
 /// because a test asserting the *reason* is a stronger test than one asserting
 /// a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LocateError {
+pub(crate) enum LocateError {
     /// Neither location held the artifact.
     NotFound {
         /// Every path looked at, in order, so the message can name them.
@@ -87,7 +87,7 @@ impl std::fmt::Display for LocateError {
 impl std::error::Error for LocateError {}
 
 /// Where to look, in order. Both are derived, never supplied.
-pub fn candidate_paths(mvmctl_exe: &Path, mvm_home_bin: &Path) -> Vec<PathBuf> {
+pub(crate) fn candidate_paths(mvmctl_exe: &Path, mvm_home_bin: &Path) -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(2);
     if let Some(dir) = mvmctl_exe.parent() {
         out.push(dir.join(STUDIO_SERVER_BIN));
@@ -101,7 +101,7 @@ pub fn candidate_paths(mvmctl_exe: &Path, mvm_home_bin: &Path) -> Vec<PathBuf> {
 /// Takes both roots as arguments rather than reading the environment, so the
 /// rules are testable against a temp dir without touching the real
 /// `MVM_HOME` or the real executable path.
-pub fn locate_studio_server(
+pub(crate) fn locate_studio_server(
     mvmctl_exe: &Path,
     mvm_home_bin: &Path,
 ) -> Result<PathBuf, LocateError> {

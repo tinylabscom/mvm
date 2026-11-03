@@ -19,8 +19,8 @@
 //! and the failure paths are where every security requirement in the issue
 //! lives.
 
-pub mod locate;
-pub mod posture;
+pub(crate) mod locate;
+pub(crate) mod posture;
 
 use anyhow::{Result, bail};
 use clap::Args as ClapArgs;
