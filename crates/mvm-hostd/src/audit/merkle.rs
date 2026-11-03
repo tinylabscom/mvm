@@ -58,8 +58,8 @@ use mvm_contract::merkle::{
 use crate::audit::emitter;
 use crate::audit::leaf_cache;
 use crate::supervisor::audit_file::verify_chain_bytes_resuming;
-use crate::supervisor::audit_set::{SegmentContent, read_topology_verified_set};
 use mvm_contract::verify::{hash_line, verify_audit_chain_bytes};
+use mvm_core::audit_verify::set::{SegmentContent, read_topology_verified_set};
 
 /// Read a tenant's audit lines as Merkle leaves, in file order, **after**
 /// verifying the chain is intact — from the SAME bytes. The file is read
@@ -106,7 +106,7 @@ fn read_leaves_from_genesis(
     // `read_verified_set` verifies each segment *and* the handoffs between
     // them, from the same buffers it returns, so the fail-closed policy
     // covers "a segment was removed" as well as "a line was edited".
-    match crate::supervisor::audit_set::read_verified_set(audit_dir, tenant, vk) {
+    match mvm_core::audit_verify::set::read_verified_set(audit_dir, tenant, vk) {
         Ok(segments) => Ok(segments
             .iter()
             .flat_map(|s| s.lines().into_iter().map(str::to_string))
@@ -114,7 +114,7 @@ fn read_leaves_from_genesis(
         // An un-rotated host has no segment set to speak of; fall back to the
         // single-file read so a chain that never rotated behaves exactly as it
         // did before, including its error text.
-        Err(crate::supervisor::audit_set::SegmentSetError::NoChain { .. }) => {
+        Err(mvm_core::audit_verify::set::SegmentSetError::NoChain { .. }) => {
             let path = emitter::audit_path_for_tenant(audit_dir, tenant);
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading audit chain {}", path.display()))?;
@@ -214,7 +214,7 @@ fn read_segment_bytes(
 ) -> Option<Vec<SegmentContent>> {
     match read_topology_verified_set(audit_dir, tenant, vk) {
         Ok(segments) => Some(segments),
-        Err(crate::supervisor::audit_set::SegmentSetError::NoChain { .. }) => {
+        Err(mvm_core::audit_verify::set::SegmentSetError::NoChain { .. }) => {
             let path = emitter::audit_path_for_tenant(audit_dir, tenant);
             Some(vec![SegmentContent {
                 seq: 0,
@@ -355,7 +355,7 @@ impl CachedChain {
         // set's shape does, cheaply — a lost segment must reach the genesis
         // walk, which names it, rather than being folded over as though nothing
         // were missing.
-        let shape = crate::supervisor::audit_set::segment_shape(audit_dir, tenant).ok()?;
+        let shape = mvm_core::audit_verify::set::segment_shape(audit_dir, tenant).ok()?;
         if shape.active.0 != cache.active_seq || shape.sealed.len() != cache.sealed.len() {
             return None;
         }
@@ -430,7 +430,7 @@ impl CachedChain {
 
 /// Fingerprint every sealed segment in `shape`, or `None` if any is gone.
 fn sealed_fingerprints(
-    shape: &crate::supervisor::audit_set::SegmentShape,
+    shape: &mvm_core::audit_verify::set::SegmentShape,
 ) -> Option<Vec<leaf_cache::SealedFingerprint>> {
     shape
         .sealed
@@ -445,7 +445,7 @@ fn sealed_fingerprints(
 /// Best effort throughout: every early return leaves no cache, which costs
 /// another genesis walk and nothing else.
 fn seed_leaf_cache(audit_dir: &Path, tenant: &str, leaves: &[String]) {
-    let Ok(shape) = crate::supervisor::audit_set::segment_shape(audit_dir, tenant) else {
+    let Ok(shape) = mvm_core::audit_verify::set::segment_shape(audit_dir, tenant) else {
         return;
     };
     let Some(sealed) = sealed_fingerprints(&shape) else {

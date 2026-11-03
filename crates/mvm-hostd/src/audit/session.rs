@@ -56,7 +56,7 @@ use mvm_core::plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
 
 use crate::supervisor::audit_file::VerifyError;
-use crate::supervisor::audit_set::{SegmentSetError, read_verified_set};
+use mvm_core::audit_verify::set::{SegmentSetError, read_verified_set};
 
 /// The chain event that seals a session.
 pub const SESSION_SEALED_EVENT: &str = "session.sealed";

@@ -6,11 +6,11 @@
 //! way to relabel an edit.
 
 use ed25519_dalek::SigningKey;
+use mvm_core::audit_verify::segment::{LABEL_PRUNED_THROUGH, LABEL_PRUNED_TIP};
+use mvm_core::audit_verify::set::{SegmentSetError, verify_segment_set};
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_hostd::supervisor::audit::{AuditSigner, PlanAuditEntry};
 use mvm_hostd::supervisor::audit_file::{FileAuditSigner, RotationPolicy};
-use mvm_hostd::supervisor::audit_segment::{LABEL_PRUNED_THROUGH, LABEL_PRUNED_TIP};
-use mvm_hostd::supervisor::audit_set::{SegmentSetError, verify_segment_set};
 use std::path::Path;
 
 fn key() -> SigningKey {

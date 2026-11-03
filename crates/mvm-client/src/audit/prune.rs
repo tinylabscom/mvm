@@ -2,9 +2,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use mvm_core::audit_verify::set::verify_segment_set;
 use mvm_core::plan::TenantId;
 use mvm_hostd::audit::{host_keypair, validate_prune_tenant};
-use mvm_hostd::supervisor::{FileAuditSigner, verify_segment_set};
+use mvm_hostd::supervisor::FileAuditSigner;
 use serde::{Deserialize, Serialize};
 
 /// Removal requires an explicit commit request; the default only previews.

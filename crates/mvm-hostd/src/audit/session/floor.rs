@@ -55,9 +55,9 @@ fn floors() -> &'static Mutex<Floors> {
 /// A chain that does not exist yet opens at segment 1, which is what its
 /// first line will be written to.
 fn live_segment(audit_dir: &Path, tenant: &str) -> Option<u64> {
-    match crate::supervisor::audit_set::segment_shape(audit_dir, tenant) {
+    match mvm_core::audit_verify::set::segment_shape(audit_dir, tenant) {
         Ok(shape) => Some(shape.active.0),
-        Err(crate::supervisor::audit_set::SegmentSetError::NoChain { .. }) => Some(1),
+        Err(mvm_core::audit_verify::set::SegmentSetError::NoChain { .. }) => Some(1),
         Err(_) => None,
     }
 }

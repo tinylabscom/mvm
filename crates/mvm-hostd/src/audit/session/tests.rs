@@ -344,7 +344,7 @@ fn a_checkpoint_without_a_digest_cannot_be_sealed() {
 #[test]
 fn session_and_segment_boundaries_are_sync_barriers() {
     use crate::supervisor::audit_file::{SyncPolicy, sync_policy_for};
-    use crate::supervisor::audit_segment::{CHAIN_CONTINUED, CHAIN_PRUNED, CHAIN_SEALED};
+    use mvm_core::audit_verify::segment::{CHAIN_CONTINUED, CHAIN_PRUNED, CHAIN_SEALED};
     for event in [
         SESSION_SEALED_EVENT,
         "plan.exited",

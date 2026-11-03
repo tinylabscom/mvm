@@ -133,28 +133,25 @@ pub fn collect_run(
         .file_stem()
         .and_then(|stem| stem.to_str())
         .with_context(|| format!("audit chain path {} has no file stem", path.display()))?;
-    let (all_entries, verification) = match mvm_hostd::supervisor::audit_set::verify_segment_entries(
-        audit_dir,
-        base,
-        verifying_key,
-    ) {
-        Ok(entries) => {
-            let count = entries.len();
-            (entries, Ok(count))
-        }
-        Err(error) => {
-            let content = std::fs::read_to_string(path)
-                .with_context(|| format!("reading audit chain {}", path.display()))?;
-            let entries = content
-                .lines()
-                .filter_map(|line| match parse_chain_line(line) {
-                    ChainLine::Entry(entry) => Some(*entry),
-                    ChainLine::Foreign(_) => None,
-                })
-                .collect();
-            (entries, Err(error))
-        }
-    };
+    let (all_entries, verification) =
+        match mvm_core::audit_verify::set::verify_segment_entries(audit_dir, base, verifying_key) {
+            Ok(entries) => {
+                let count = entries.len();
+                (entries, Ok(count))
+            }
+            Err(error) => {
+                let content = std::fs::read_to_string(path)
+                    .with_context(|| format!("reading audit chain {}", path.display()))?;
+                let entries = content
+                    .lines()
+                    .filter_map(|line| match parse_chain_line(line) {
+                        ChainLine::Entry(entry) => Some(*entry),
+                        ChainLine::Foreign(_) => None,
+                    })
+                    .collect();
+                (entries, Err(error))
+            }
+        };
 
     let matches: Vec<&PlanAuditEntry> = all_entries
         .iter()

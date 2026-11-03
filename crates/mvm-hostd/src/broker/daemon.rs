@@ -1,7 +1,8 @@
 //! Resident per-tenant host-agent daemon.
 //!
 //! One daemon per tenant, not one process per VM. VMs register with it over
-//! the host-signed control plane ([`super::control`]); on each `RegisterVm` it
+//! the host-signed control plane (`mvm_core::protocol::broker_control`); on
+//! each `RegisterVm` it
 //! binds that VM's `BROKER_PORT` socket and serves host-services on it, and on
 //! `DeregisterVm` it unbinds and drops the VM. A tenant's many microVMs are
 //! *registrations* in the `vm_id` map, not processes — `O(active tenants)`
@@ -32,6 +33,9 @@ use mvm_core::protocol::audit_signer::{
     SignerHelperResponse,
 };
 use mvm_core::protocol::broker_control;
+use mvm_core::protocol::broker_control::{
+    ControlRequest, ControlResponse, RegisterVm, SignedControl,
+};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -39,7 +43,6 @@ use tracing::warn;
 use crate::audit_signer::helper_client::SignerHelperClient;
 
 use super::audit_client::AuditClient;
-use super::control::{ControlRequest, ControlResponse, RegisterVm, SignedControl};
 use super::handlers::host_audit_v1::HostAuditV1Handler;
 use super::handlers::register_bound_handlers;
 use super::registry::Registry;
@@ -846,9 +849,9 @@ mod tests {
         SignerHelper, serve_on_listener as serve_helper_on_listener,
     };
     use crate::audit_signer::verify::verify_workload_chain;
-    use crate::broker::control::DeregisterVm;
     use ed25519_dalek::SigningKey;
     use mvm_core::protocol::broker::{ServiceCall, ServiceId, ServiceResponse};
+    use mvm_core::protocol::broker_control::DeregisterVm;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::net::UnixStream;

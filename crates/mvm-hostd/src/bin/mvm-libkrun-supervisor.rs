@@ -260,7 +260,7 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
         match UnixListener::bind(&control_sock) {
             Ok(listener) => {
                 std::thread::spawn(move || {
-                    if let Err(e) = mvm_hostd::exit_capture::capture_once(&listener, &state_dir) {
+                    if let Err(e) = mvm_core::exit_capture::capture_once(&listener, &state_dir) {
                         eprintln!("mvm-libkrun-supervisor: exit capture: {e}");
                     }
                 });

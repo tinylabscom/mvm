@@ -9,7 +9,7 @@
 //! sources. It discovers the per-tenant lifecycle chains
 //! (`<audit_dir>/<tenant>.jsonl`) and the per-VM workload chains
 //! (`<audit_dir>/<tenant>.<vm>.workload.jsonl`), verifies each through the
-//! canonical verifiers (`mvm_hostd::supervisor::audit_set::verify_segment_entries`
+//! canonical verifiers (`mvm_core::audit_verify::set::verify_segment_entries`
 //! and `mvm_hostd::audit_signer::verify::verify_workload_chain_entries`),
 //! and returns normalized [`VerifiedAuditEvent`]s only from sources whose
 //! signatures, chain links, and tenant scope all hold. A source that fails
@@ -202,7 +202,7 @@ impl LocalAuditReader {
                 // `<tenant>.jsonl` would hand back the live segment as though
                 // it were the history, which is exactly the silent narrowing
                 // rotation must not introduce.
-                let entries = mvm_hostd::supervisor::audit_set::verify_segment_entries(
+                let entries = mvm_core::audit_verify::set::verify_segment_entries(
                     &self.audit_dir,
                     &source.tenant,
                     &self.verifying_key,
