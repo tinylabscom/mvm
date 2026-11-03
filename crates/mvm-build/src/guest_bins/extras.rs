@@ -452,7 +452,10 @@ mod tests {
 
         let musl_shim = by_path(GuestArch::Aarch64, "aarch64/lib/musl/libcuda.so.1");
         assert_eq!(
-            env_of(&musl_shim, "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS"),
+            env_of(
+                &musl_shim,
+                "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS"
+            ),
             Some("-C target-feature=-crt-static -C link-arg=-Wl,-soname,libcuda.so.1")
         );
 
