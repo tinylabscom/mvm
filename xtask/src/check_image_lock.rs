@@ -89,7 +89,7 @@ impl Finding {
     }
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let lock_path = workspace.join(LOCK_FILE);
     let lock_text = std::fs::read_to_string(&lock_path)
         .with_context(|| format!("reading {}", lock_path.display()))?;

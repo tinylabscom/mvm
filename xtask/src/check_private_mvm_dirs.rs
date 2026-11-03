@@ -55,7 +55,7 @@ const REQUIRED: &str = "create_private_dir";
 /// already created privately by the emitter before any write reaches it.
 const ALLOWED: &[&str] = &["emitter/atomic_write.rs"];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut findings: Vec<String> = Vec::new();
     let mut converted = 0usize;
 

@@ -82,7 +82,7 @@ fn item_name(line: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
     let mut scanned = 0usize;
     let mut contracted = 0usize;

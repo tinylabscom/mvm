@@ -138,7 +138,7 @@ fn allowed(relative: &str, raw: &str, line: usize) -> bool {
         .any(|(file, needle, _)| relative == *file && context.contains(needle))
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut findings = Vec::new();
     let mut private = 0usize;
     for dir in WATCHED {

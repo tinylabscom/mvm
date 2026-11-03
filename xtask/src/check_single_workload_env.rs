@@ -46,7 +46,7 @@ const CONSUMERS: [&str; 2] = [
 /// Roots to scan for a second reader.
 const ROOTS: [&str; 3] = ["crates", "src", "tests"];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let resolver = workspace.join(RESOLVER);
     let body = std::fs::read_to_string(&resolver)
         .map_err(|e| anyhow::anyhow!("the workload-env resolver is missing at {RESOLVER}: {e}"))?;

@@ -298,7 +298,7 @@ pub(crate) fn known_producers(
 }
 
 /// Validate static target classification without certifying runtime capture.
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let inventory = load(workspace)?;
     let summary = validate(workspace, &inventory, &discover(workspace)?)?;
     eprintln!(

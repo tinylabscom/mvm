@@ -73,7 +73,7 @@ const EXEMPT: [(&str, &str); 2] = [
     ),
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let owner = workspace.join(OWNER_FILE);
     let body = std::fs::read_to_string(&owner)
         .map_err(|e| anyhow::anyhow!("the host predicate is missing at {OWNER_FILE}: {e}"))?;

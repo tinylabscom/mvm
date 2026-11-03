@@ -17,7 +17,7 @@ const SOURCES: &str = "xtask/data/telemetry/sources.toml";
 
 /// Producer keys from the validated binary inventory, `package/name` form.
 #[derive(Debug, Default)]
-pub struct KnownProducers {
+pub(crate) struct KnownProducers {
     /// Guest and builder-guest runtime gaps: each needs at least one launch edge.
     pub launchable: BTreeSet<String>,
 }
@@ -470,7 +470,7 @@ fn validate(
 }
 
 /// Validate the source inventory; classification only, never runtime coverage.
-pub fn run(workspace: &Path, producers: &KnownProducers) -> Result<()> {
+pub(crate) fn run(workspace: &Path, producers: &KnownProducers) -> Result<()> {
     let text =
         std::fs::read_to_string(workspace.join(SOURCES)).context("read telemetry sources")?;
     let sources: Sources = toml::from_str(&text).context("parse telemetry sources")?;

@@ -44,7 +44,7 @@ const RUNTIME_OVERLAY_RS: &str = "crates/mvm-build/src/runtime_overlay.rs";
 const GUEST_BINS_EXTRAS: &str = "crates/mvm-build/src/guest_bins/extras.rs";
 const GUEST_BINS_MEMBER: &str = "crates/mvm-build/src/guest_bins/member.rs";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let universe = guest_bin_universe(workspace)?;
 
     let lists = [

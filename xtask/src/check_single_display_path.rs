@@ -19,7 +19,7 @@ const ATTENDED_VIEWER: &str = "crates/mvm-cli/src/commands/vm/display/attended.r
 const GUEST_INPUT: &str = "crates/mvm-agentd/src/display_input.rs";
 const HOST_INPUT_ROUTE: &str = "crates/mvm-hostd/src/stream/display_input_route.rs";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let contract = production(&read(workspace, CONTRACT)?);
     if contract.matches("pub const DISPLAY_FRAME_PORT").count() != 1 {
         bail!("check-single-display-path: the display port must have one contract definition");

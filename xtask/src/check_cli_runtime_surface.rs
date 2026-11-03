@@ -151,7 +151,7 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
     ),
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let root = workspace.join("crates/mvm-cli/src");
     let mut hits: Vec<String> = Vec::new();
     walk(&root, &mut |path| scan_file(&root, path, &mut hits))?;

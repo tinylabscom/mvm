@@ -11,7 +11,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 
-pub fn output(command: Command, timeout: Duration) -> io::Result<Output> {
+pub(crate) fn output(command: Command, timeout: Duration) -> io::Result<Output> {
     capture_using_reader(command, timeout, |mut file, buf| file.read(buf))
 }
 

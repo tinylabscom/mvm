@@ -31,7 +31,7 @@ const ALLOWLIST: &[&str] = &[
     "crates/mvm-agentd/src/builder_agent.rs",
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let re = Regex::new(r"HostVmRequest::(Run|Build)\s*\{").expect("static regex");
     let mut rs_files = Vec::new();
     collect_rs_files(&workspace.join("crates"), &mut rs_files)?;

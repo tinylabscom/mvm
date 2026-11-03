@@ -431,7 +431,7 @@ const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
 const KNOWN_MISSING_ADR_SECTIONS: &[(u32, &str, &str)] = &[];
 
 /// Run the check; print findings; return Err on any `[error]` line.
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let adrs = discover_adrs(workspace)?;
     let adr_paths = discover_adr_paths(workspace)?;
     let refs = scan_for_refs(workspace)?;

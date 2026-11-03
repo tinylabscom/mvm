@@ -299,7 +299,7 @@ fn render_const(kind: ConstKind, manifest: &[u8]) -> Result<(String, String)> {
 }
 
 /// Generate every artifact's schema + Python + TypeScript types in place.
-pub fn generate(workspace: &Path) -> Result<()> {
+pub(crate) fn generate(workspace: &Path) -> Result<()> {
     for art in artifacts() {
         println!("==> {} stubs", art.label);
         let schema_path = workspace.join(art.schema_path);
@@ -350,7 +350,7 @@ pub fn generate(workspace: &Path) -> Result<()> {
 
 /// CI guard: regenerate every artifact to a tempdir, diff against the
 /// committed paths, fail if any has drifted. Exit 0 = no drift.
-pub fn check(workspace: &Path) -> Result<()> {
+pub(crate) fn check(workspace: &Path) -> Result<()> {
     let tmp = tempfile::tempdir().context("creating tempdir")?;
     let mut drift = false;
 

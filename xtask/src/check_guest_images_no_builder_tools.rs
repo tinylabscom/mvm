@@ -27,7 +27,7 @@ const MK_GUEST: &str = "nix/lib/mk-guest.nix";
 /// mkGuest itself.
 const FORBIDDEN: &[&str] = &["mvmctl", "mvm-builderd"];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let path = workspace.join(MK_GUEST);
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("reading guest-image builder {MK_GUEST}"))?;

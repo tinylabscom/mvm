@@ -72,7 +72,7 @@ const WHOLE_TREES: &[&str] = &["nix"];
 const ROOT_FILES: &[&str] = &["install.sh", "Justfile"];
 
 /// Run the R4 gate.
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let violations = find_violations(workspace)?;
     if !violations.is_empty() {
         bail!(

@@ -89,7 +89,7 @@ const PINNED: &[(&str, usize, &str)] = &[
     ),
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let re = Regex::new(ATTACH_PATTERN).expect("attach pattern compiles");
     let mut found: BTreeMap<String, usize> = BTreeMap::new();
 

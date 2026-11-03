@@ -53,7 +53,7 @@ const PROJECTION_FILE: &str = "crates/mvm-contract/src/grants/projection.rs";
 /// a crate under `crates/`.
 const ROOTS: [&str; 3] = ["crates", "src", "tests"];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let projection = workspace.join(PROJECTION_FILE);
     if !projection.is_file() {
         bail!("the grants projection is missing at {PROJECTION_FILE}");

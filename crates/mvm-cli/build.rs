@@ -3,11 +3,11 @@ mod build_support;
 // The crate graph and source hashing are shared with `mvm-build`, whose
 // local image cache keys builder images on the same closures.
 #[path = "../mvm-build/src/workspace_graph.rs"]
-mod workspace_graph;
+pub mod workspace_graph;
 // The pinned-toolchain resolution is shared with `mvm-build`. A build script
 // cannot depend on a workspace crate, so it reads the same file off disk.
 #[path = "../mvm-build/src/embed_toolchain.rs"]
-mod embed_toolchain;
+pub mod embed_toolchain;
 // What the payload holds, its content-store keys and the `cargo zigbuild` that
 // produces it. `mvmctl` compiles the same file to build the payload at run time,
 // and each side uses parts the other does not.
@@ -19,7 +19,7 @@ mod payload_build;
 // included modules start toolchain processes as `super::helper_command`.
 #[path = "../mvm-core/src/env_hygiene/denylist.rs"]
 #[allow(dead_code)]
-mod env_denylist;
+pub mod env_denylist;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

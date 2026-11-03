@@ -43,7 +43,7 @@ struct ExternalModule {
     test_only: bool,
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut files = Vec::new();
     for root in ["crates", "src", "xtask"] {
         collect_rs_files(&workspace.join(root), &mut files)?;

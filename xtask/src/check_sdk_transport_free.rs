@@ -80,7 +80,7 @@ fn tree_crates(workspace: &Path, package: &str, include_build: bool) -> Result<V
     Ok(names)
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     for package in ["mvm-sdk", "mvm-host-services"] {
         // `-e no-dev` excludes dev-deps: `mvm-sdk` keeps a tokio dev-dep for
         // the gated facade's `#[tokio::test]`s, which reaches nothing shipped.

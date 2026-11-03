@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 #[path = "../src/image_source/tests/repository.rs"]
-mod repository;
+pub mod repository;
 
 const DATA: &[u8] = include_bytes!("fixtures/local-producer-v2.json");
 // An explicit protocol fixture, not an installed-runtime compatibility claim.

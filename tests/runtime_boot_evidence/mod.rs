@@ -7,11 +7,11 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SCOPE: &str = "backend launch / agent-ready only; attribution activation/first-tool not measured; not production attribution evidence";
+pub(crate) const SCOPE: &str = "backend launch / agent-ready only; attribution activation/first-tool not measured; not production attribution evidence";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct Options {
+pub(crate) struct Options {
     pub report_path: Option<PathBuf>,
     /// Operator-supplied nonsecret host/config identity, not a hostname dump.
     pub host_tag: Option<String>,
@@ -23,14 +23,14 @@ pub struct Options {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Artifact {
+pub(crate) struct Artifact {
     pub sha256: String,
     pub bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Integrity {
+pub(crate) struct Integrity {
     pub initramfs: Artifact,
     pub verity: Artifact,
     pub roothash: String,
@@ -38,7 +38,7 @@ pub struct Integrity {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Overlay {
+pub(crate) struct Overlay {
     pub artifact: Artifact,
     pub verity: Artifact,
     pub roothash: String,
@@ -46,7 +46,7 @@ pub struct Overlay {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Identity {
+pub(crate) struct Identity {
     pub host_os: String,
     pub host_arch: String,
     pub host_tag: Option<String>,
@@ -66,7 +66,7 @@ pub struct Identity {
     pub ready_poll_ns: u64,
 }
 
-pub fn artifact(path: &Path) -> Result<Artifact> {
+pub(crate) fn artifact(path: &Path) -> Result<Artifact> {
     let mut file = File::open(path).context("open evidence artifact")?;
     let mut digest = Sha256::new();
     let mut bytes = 0;
@@ -87,7 +87,7 @@ pub fn artifact(path: &Path) -> Result<Artifact> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Sample {
+pub(crate) struct Sample {
     /// Instant elapsed, not a wall-clock timestamp; origin is backend.start.
     pub elapsed_ns: u64,
     pub stop_ns: Option<u64>,
@@ -96,7 +96,7 @@ pub struct Sample {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Status {
+pub(crate) enum Status {
     NotRun,
     Measured,
     MeasurementFailed,
@@ -104,7 +104,7 @@ pub enum Status {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Phase {
+pub(crate) struct Phase {
     pub status: Status,
     pub samples: Vec<Sample>,
 }
@@ -120,7 +120,7 @@ impl Default for Phase {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Report {
+pub(crate) struct Report {
     pub schema: u32,
     pub scope: String,
     /// Explicit allowlist assembled by the harness. Never the raw launch config.
@@ -135,7 +135,7 @@ pub struct Report {
 
 /// Reserve the explicit output before any boot. Never overwrite an old report
 /// or follow an existing symlink. The caller keeps this same descriptor.
-pub fn create(path: &Path) -> Result<File> {
+pub(crate) fn create(path: &Path) -> Result<File> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -148,7 +148,7 @@ pub fn create(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-pub fn persist(file: &mut File, report: &Report) -> Result<()> {
+pub(crate) fn persist(file: &mut File, report: &Report) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(report)?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&bytes)?;
@@ -157,7 +157,7 @@ pub fn persist(file: &mut File, report: &Report) -> Result<()> {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
-pub struct Delta {
+pub(crate) struct Delta {
     pub phase: &'static str,
     pub p50_ns: i128,
     pub p95_ns: i128,
@@ -165,7 +165,7 @@ pub struct Delta {
 }
 
 /// Candidate minus baseline. No relative pass/fail policy is applied.
-pub fn compare(baseline: &Report, candidate: &Report) -> Result<Vec<Delta>> {
+pub(crate) fn compare(baseline: &Report, candidate: &Report) -> Result<Vec<Delta>> {
     ensure!(
         baseline.schema == 1
             && candidate.schema == 1

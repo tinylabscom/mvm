@@ -177,7 +177,7 @@ const SOCKET_TOKENS: &[&str] = &[
     "UdpSocket::bind(",
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     check_runner_shape(workspace)?;
     check_single_endpoint_implementation(workspace)?;
     check_network_flow_channels(workspace)?;

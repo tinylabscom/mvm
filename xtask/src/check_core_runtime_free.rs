@@ -16,7 +16,7 @@ use std::process::Command;
 /// Async-runtime crates that must not appear in mvm-core's default tree.
 const RUNTIME_CRATES: &[&str] = &["tokio"];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     // `-e no-dev` excludes dev-deps (mvm-core keeps a tokio dev-dep so the
     // gated `hostd-transport` tests build); `--prefix none` makes every
     // line start with the crate name. Resolved with the workspace's

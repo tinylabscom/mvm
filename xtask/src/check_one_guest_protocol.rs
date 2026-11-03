@@ -82,7 +82,7 @@ const MARKER_DECLARATION_SITES: &[&str] = &[
     "crates/mvm-hostd/src/supervisor/icmp_handler.rs",
 ];
 
-pub fn run(root: &Path) -> Result<()> {
+pub(crate) fn run(root: &Path) -> Result<()> {
     let mut violations = Vec::new();
     check_no_marker_dispatch(root, &mut violations)?;
     check_no_second_dialer(root, &mut violations)?;

@@ -143,7 +143,7 @@ fn verdict(total: Tally) -> Result<()> {
     Ok(())
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let listing = Command::new("git")
         .args(["ls-files", "-z", "*.rs"])
         .current_dir(workspace)

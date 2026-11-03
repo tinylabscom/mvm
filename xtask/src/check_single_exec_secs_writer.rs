@@ -41,7 +41,7 @@ const PROJECTION_FN: &str = "exec_secs_from_grants";
 /// integration tests; both could host a second writer as easily as `crates/`.
 const ROOTS: [&str; 3] = ["crates", "src", "tests"];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let writer = workspace.join(WRITER_FILE);
     let body = std::fs::read_to_string(&writer)
         .map_err(|e| anyhow::anyhow!("the exec_secs writer is missing at {WRITER_FILE}: {e}"))?;

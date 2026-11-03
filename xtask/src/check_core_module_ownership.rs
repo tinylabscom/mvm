@@ -29,7 +29,7 @@ const OWNED_MODULES: &[(&str, &str)] = &[
     ("socks5_udp", "crates/mvm-agentd/src/socks5_udp.rs"),
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let core_src = workspace.join("crates/mvm-core/src");
     let core_lib = std::fs::read_to_string(core_src.join("lib.rs"))?;
 

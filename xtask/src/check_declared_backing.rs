@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 
 /// Evidence classes, weakest to strongest in the sense rule 3 cares about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Backing {
+pub(crate) enum Backing {
     /// A record of something that was true once; not a current claim.
     Historical,
     /// A design or proposal. Not yet enforced by anything.
@@ -306,7 +306,7 @@ fn is_resolvable_name(value: &str) -> bool {
     kebab || snake
 }
 
-pub fn run(root: &Path) -> Result<()> {
+pub(crate) fn run(root: &Path) -> Result<()> {
     run_with(root, PENDING)
 }
 
@@ -316,7 +316,7 @@ pub fn run(root: &Path) -> Result<()> {
 /// carrying its own (empty) backlog. Sharing the real `PENDING` there would
 /// make the stale-entry rule fire on 147 files that legitimately do not exist
 /// in a scratch directory — a correct rule applied to the wrong tree.
-pub fn run_with(root: &Path, pending_list: &[&str]) -> Result<()> {
+pub(crate) fn run_with(root: &Path, pending_list: &[&str]) -> Result<()> {
     let pending: BTreeSet<&str> = pending_list.iter().copied().collect();
     let corpus = resolvable_corpus(root);
     let files = scoped_files(root);
@@ -437,7 +437,7 @@ pub fn run_with(root: &Path, pending_list: &[&str]) -> Result<()> {
 /// real [`run`] against a synthetic tree rather than testing the helpers in
 /// isolation, so a rule that is implemented but never reached still fails
 /// here.
-pub fn self_test() -> Result<()> {
+pub(crate) fn self_test() -> Result<()> {
     let tmp = std::env::temp_dir().join(format!("mvm-declared-backing-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.join("specs/adrs"))?;

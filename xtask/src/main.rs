@@ -106,6 +106,12 @@ mod publish_plan;
 mod release_boot_image;
 mod release_evidence;
 mod repin_image_lock;
+// Shared by path with the payload producers; `pub` at the crate root is what
+// keeps the shared file's own `pub` items reachable.
+#[path = "../../crates/mvm-build/src/embed_toolchain.rs"]
+#[allow(dead_code)] // the report reads the pin; the compile/probe arms serve the producers
+pub mod embed_toolchain;
+use mvm_core::env_hygiene::helper_command;
 mod report_compile_units;
 mod rust_source;
 mod telemetry_baseline;

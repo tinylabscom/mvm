@@ -25,7 +25,7 @@ use std::path::Path;
 
 const KNOWN_STATUSES: [&str; 4] = ["Shipped", "Preview", "Planned", "Not-claimed"];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let rows = claims_ledger::load(workspace)?;
 
     let model_path = workspace.join("model").join("claims.toml");

@@ -20,7 +20,7 @@ struct OverrideFilter {
     test_group: String,
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let config_path = workspace.join(".config").join("nextest.toml");
     if !config_path.is_file() {
         bail!("nextest config not found at {}", config_path.display());
