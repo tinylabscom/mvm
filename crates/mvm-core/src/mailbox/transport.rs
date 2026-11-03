@@ -181,6 +181,7 @@ pub struct TransportBindingContext {
     pub current_policy_epoch: u64,
     pub minimum_assurance: TransportAssurance,
     pub now_unix_ms: i64,
+    pub revoked_bindings: Vec<TransportBindingId>,
 }
 
 /// Transport-binding verification failures contain no locator or payload data.
@@ -198,6 +199,8 @@ pub enum TransportBindingError {
     InvalidRouteLocator,
     #[error("transport binding has an invalid validity window")]
     InvalidValidityWindow,
+    #[error("transport binding has been revoked")]
+    Revoked,
     #[error("transport binding issuer does not match")]
     WrongIssuer,
     #[error("transport binding mailbox address does not match")]
@@ -312,6 +315,9 @@ pub fn authorize_route(
         )
         .map_err(|_| TransportBindingError::SignatureInvalid)?;
     let claims = &signed.claims;
+    if context.revoked_bindings.contains(&claims.binding_id) {
+        return Err(TransportBindingError::Revoked);
+    }
     if claims.issuer != context.expected_issuer {
         return Err(TransportBindingError::WrongIssuer);
     }

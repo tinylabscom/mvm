@@ -65,6 +65,7 @@ fn binding_context() -> TransportBindingContext {
         current_policy_epoch: 12,
         minimum_assurance: TransportAssurance::IsolatedProduction,
         now_unix_ms: NOW,
+        revoked_bindings: Vec::new(),
     }
 }
 
@@ -201,6 +202,9 @@ fn binding_verification_rejects_tamper_identity_epoch_policy_time_and_assurance(
     wrong.expected_address.mailbox = MailboxId::from_bytes(id(33));
     contexts.push((wrong, TransportBindingError::WrongAddress));
     let mut wrong = binding_context();
+    wrong.expected_address.tenant = TenantId::from_bytes(id(34));
+    contexts.push((wrong, TransportBindingError::WrongAddress));
+    let mut wrong = binding_context();
     wrong.current_execution_epoch = ExecutionEpoch::new(8).expect("epoch");
     contexts.push((wrong, TransportBindingError::StaleExecutionEpoch));
     let mut wrong = binding_context();
@@ -225,6 +229,19 @@ fn binding_verification_rejects_tamper_identity_epoch_policy_time_and_assurance(
     assert_eq!(
         authorize_route(&tampered, &binding_context(), &authority.verifying_key()),
         Err(TransportBindingError::SignatureInvalid)
+    );
+}
+
+#[test]
+fn binding_verification_rejects_revoked_binding() {
+    let authority = SigningKey::from_bytes(&id(30));
+    let (signed, _) = signed_route(TransportPath::Direct, 31, &authority);
+    let mut context = binding_context();
+    context.revoked_bindings.push(signed.claims.binding_id);
+
+    assert_eq!(
+        authorize_route(&signed, &context, &authority.verifying_key()),
+        Err(TransportBindingError::Revoked)
     );
 }
 
