@@ -389,7 +389,7 @@ fn identity_scope_epoch_expiry_and_content_type_are_checked() {
 }
 
 #[test]
-fn destination_receipt_signature_covers_outcome_and_identity() {
+fn destination_receipt_wire_roundtrip_and_signature_cover_outcome_and_identity() {
     let destination_key = SigningKey::from_bytes(&[31; 32]);
     let receipt = mvm_contract::protocol::mailbox::DestinationReceipt {
         protocol_version: ProtocolVersion::V1,
@@ -403,7 +403,11 @@ fn destination_receipt_signature_covers_outcome_and_identity() {
         ciphertext_commitment: [33; 32],
     };
     let mut signed = sign_receipt(receipt, &destination_key).expect("sign receipt");
-    verify_receipt(&signed, &destination_key.verifying_key()).expect("verify receipt");
+    let wire = serde_jcs::to_vec(&signed).expect("encode receipt");
+    let decoded: mvm_contract::protocol::mailbox::SignedDestinationReceipt =
+        serde_json::from_slice(&wire).expect("decode receipt");
+    assert_eq!(decoded, signed);
+    verify_receipt(&decoded, &destination_key.verifying_key()).expect("verify decoded receipt");
     signed.receipt.outcome = DeliveryOutcome::Refused;
     assert!(matches!(
         verify_receipt(&signed, &destination_key.verifying_key()),
