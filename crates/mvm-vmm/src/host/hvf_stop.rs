@@ -389,8 +389,12 @@ fn unconfirmed_exit_evidence(vm: &str) -> String {
 }
 
 fn describe_supervisor_progress(dir: &std::path::Path) -> String {
-    let status = std::fs::read_to_string(dir.join("supervisor-status.json"))
-        .map_or_else(|_| "unreadable".into(), |text| text.trim().to_owned());
+    let status = wire::read_record::<super::hvf_supervisor::ProtectedSupervisorStatus>(
+        &dir.join("supervisor-status.json"),
+    )
+    .ok()
+    .and_then(|status| serde_json::to_string(&status).ok())
+    .unwrap_or_else(|| "unreadable".into());
     format!(
         "supervisor status {status}; finalization published: {}; shutdown timing recorded: {}",
         dir.join(wire::FINALIZED_FILE).exists(),
@@ -442,6 +446,42 @@ mod tests {
         assert_eq!(
             describe_supervisor_progress(dir.path()),
             "supervisor status \"stopped\"; finalization published: true; shutdown timing recorded: false"
+        );
+    }
+
+    #[test]
+    fn unconfirmed_exit_evidence_never_echoes_invalid_or_oversized_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor-status.json");
+        for contents in [
+            b"\"unknown\"".to_vec(),
+            b"\"stopped\"\ninjected-log-line".to_vec(),
+            vec![0xff],
+            [
+                b"\"stopped\"".as_slice(),
+                &vec![b' '; wire::MAX_FRAME_BYTES],
+            ]
+            .concat(),
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            assert_eq!(
+                describe_supervisor_progress(dir.path()),
+                "supervisor status unreadable; finalization published: false; shutdown timing recorded: false"
+            );
+        }
+    }
+
+    #[test]
+    fn unconfirmed_exit_evidence_canonicalizes_valid_status() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("supervisor-status.json"),
+            b"\"stop\\u0070ed\"",
+        )
+        .unwrap();
+        assert_eq!(
+            describe_supervisor_progress(dir.path()),
+            "supervisor status \"stopped\"; finalization published: false; shutdown timing recorded: false"
         );
     }
 
