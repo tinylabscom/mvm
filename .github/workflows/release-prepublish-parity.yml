@@ -59,7 +59,7 @@ permissions:
 
 concurrency:
   group: release-prepublish-parity-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   preflight:
