@@ -10,42 +10,80 @@
 pub struct GuestCdylib {
     /// The Cargo package that builds it.
     pub package: &'static str,
-    /// The package's `[lib] name`, which decides cargo's output file name.
+    /// Which cargo target in the package builds it.
+    pub kind: CdylibKind,
+    /// The cargo target name, which decides cargo's output file name.
     pub lib_name: &'static str,
     /// The name the object is installed under — the soname a workload links
     /// against, or the file name an SDK `dlopen`s.
     pub soname: &'static str,
 }
 
+/// Which cargo target builds a [`GuestCdylib`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CdylibKind {
+    /// The package's `[lib]`.
+    Lib,
+    /// A `crate-type = ["cdylib"]` example named [`GuestCdylib::lib_name`].
+    Example,
+}
+
 impl GuestCdylib {
-    /// The file cargo writes into `target/<triple>/release/`.
+    /// The file cargo writes, relative to `target/<triple>/release/`.
     pub fn cargo_output_file(&self) -> String {
-        format!("lib{}.so", self.lib_name)
+        match self.kind {
+            CdylibKind::Lib => format!("lib{}.so", self.lib_name),
+            CdylibKind::Example => format!("examples/lib{}.so", self.lib_name),
+        }
+    }
+
+    /// The cargo `-p`/target arguments that build exactly this object.
+    pub fn cargo_selection(&self) -> Vec<String> {
+        let mut args = vec!["-p".to_string(), self.package.to_string()];
+        match self.kind {
+            CdylibKind::Lib => args.push("--lib".to_string()),
+            CdylibKind::Example => {
+                args.push("--example".to_string());
+                args.push(self.lib_name.to_string());
+            }
+        }
+        args
+    }
+
+    /// The rustflag embedding [`Self::soname`]. The guest loader resolves
+    /// libraries by soname, and an example target has no build script to
+    /// advertise one, so every builder of a guest-target shim passes this.
+    pub fn soname_link_arg(&self) -> String {
+        format!("-C link-arg=-Wl,-soname,{}", self.soname)
     }
 }
 
 /// The in-guest host-services C ABI every language SDK loads.
 pub const HOST_SERVICES_CDYLIB: GuestCdylib = GuestCdylib {
     package: "mvm-host-services",
+    kind: CdylibKind::Lib,
     lib_name: "mvm_host_services",
     soname: "libmvm_host_services.so",
 };
 
 /// The drop-in CUDA driver, CUDA runtime and NVML replacements that forward
-/// to the per-VM host GPU endpoint.
+/// to the per-VM host GPU endpoint — each a cdylib example of `mvm-gpu`.
 pub const GPU_SHIM_CDYLIBS: [GuestCdylib; 3] = [
     GuestCdylib {
-        package: "mvm-gpu-cuda-shim",
+        package: "mvm-gpu",
+        kind: CdylibKind::Example,
         lib_name: "cuda",
         soname: "libcuda.so.1",
     },
     GuestCdylib {
-        package: "mvm-gpu-cudart-shim",
+        package: "mvm-gpu",
+        kind: CdylibKind::Example,
         lib_name: "cudart",
         soname: "libcudart.so",
     },
     GuestCdylib {
-        package: "mvm-gpu-nvml-shim",
+        package: "mvm-gpu",
+        kind: CdylibKind::Example,
         lib_name: "nvidia_ml",
         soname: "libnvidia-ml.so.1",
     },
@@ -69,8 +107,8 @@ mod tests {
         .expect("the test runs inside the mvm workspace")
     }
 
-    /// `crate => (lib_name, soname)` from the Nix recipe's `shims` attrset.
-    fn nix_shims(recipe: &str) -> BTreeMap<String, (String, String)> {
+    /// `lib_name => soname` from the Nix recipe's `shims` attrset.
+    fn nix_shims(recipe: &str) -> BTreeMap<String, String> {
         let start = recipe
             .find("shims = {")
             .expect("mvm-gpu-shims.nix declares a `shims` attrset");
@@ -78,19 +116,15 @@ mod tests {
         let body = &body[..body.find("\n  };").expect("the attrset closes")];
         let quoted = |line: &str| line.split('"').nth(1).map(str::to_string);
         let mut shims = BTreeMap::new();
-        let mut current: Option<(String, Option<String>)> = None;
+        let mut current: Option<String> = None;
         for line in body.lines().map(str::trim) {
-            if line.starts_with("\"mvm-gpu-") {
-                current = quoted(line).map(|package| (package, None));
-            } else if line.starts_with("libName") {
-                if let Some((_, lib_name)) = current.as_mut() {
-                    *lib_name = quoted(line);
-                }
+            if line.starts_with('"') {
+                current = quoted(line);
             } else if line.starts_with("soname")
-                && let Some((package, Some(lib_name))) = current.take()
+                && let Some(lib_name) = current.take()
             {
                 let soname = quoted(line).expect("a quoted soname");
-                shims.insert(package, (lib_name, soname));
+                shims.insert(lib_name, soname);
             }
         }
         shims
@@ -110,21 +144,18 @@ mod tests {
             )
         });
         let from_nix = nix_shims(&recipe);
-        let from_table: BTreeMap<String, (String, String)> = GPU_SHIM_CDYLIBS
+        let from_table: BTreeMap<String, String> = GPU_SHIM_CDYLIBS
             .iter()
-            .map(|c| {
-                (
-                    c.package.to_string(),
-                    (c.lib_name.to_string(), c.soname.to_string()),
-                )
-            })
+            .map(|c| (c.lib_name.to_string(), c.soname.to_string()))
             .collect();
         assert_eq!(from_nix.len(), 3, "parsed {from_nix:?} from the recipe");
         assert_eq!(from_table, from_nix);
     }
 
+    /// Every table row names a real cargo target: the host-services `[lib]`,
+    /// and one `crate-type = ["cdylib"]` example per GPU shim.
     #[test]
-    fn each_package_declares_the_lib_name_the_table_names() {
+    fn each_table_row_names_the_cargo_target_that_builds_it() {
         for cdylib in guest_cdylibs() {
             let manifest = workspace_root()
                 .join("crates")
@@ -134,13 +165,39 @@ mod tests {
                 .expect("read the package manifest")
                 .parse()
                 .expect("parse the package manifest");
-            let lib_name = manifest
-                .get("lib")
-                .and_then(|lib| lib.get("name"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or(cdylib.package)
-                .replace('-', "_");
-            assert_eq!(lib_name, cdylib.lib_name, "{}", cdylib.package);
+            match cdylib.kind {
+                CdylibKind::Lib => {
+                    let lib_name = manifest
+                        .get("lib")
+                        .and_then(|lib| lib.get("name"))
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or(cdylib.package)
+                        .replace('-', "_");
+                    assert_eq!(lib_name, cdylib.lib_name, "{}", cdylib.package);
+                }
+                CdylibKind::Example => {
+                    let examples = manifest
+                        .get("example")
+                        .and_then(toml::Value::as_array)
+                        .expect("the package declares examples");
+                    let example = examples
+                        .iter()
+                        .find(|e| {
+                            e.get("name").and_then(toml::Value::as_str) == Some(cdylib.lib_name)
+                        })
+                        .unwrap_or_else(|| {
+                            panic!("{} declares example {}", cdylib.package, cdylib.lib_name)
+                        });
+                    let crate_type: Vec<&str> = example
+                        .get("crate-type")
+                        .and_then(toml::Value::as_array)
+                        .expect("the example declares a crate-type")
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .collect();
+                    assert_eq!(crate_type, ["cdylib"], "{}", cdylib.lib_name);
+                }
+            }
         }
     }
 
@@ -150,6 +207,9 @@ mod tests {
             HOST_SERVICES_CDYLIB.cargo_output_file(),
             "libmvm_host_services.so"
         );
-        assert_eq!(GPU_SHIM_CDYLIBS[2].cargo_output_file(), "libnvidia_ml.so");
+        assert_eq!(
+            GPU_SHIM_CDYLIBS[2].cargo_output_file(),
+            "examples/libnvidia_ml.so"
+        );
     }
 }

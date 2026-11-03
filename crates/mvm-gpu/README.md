@@ -25,6 +25,16 @@ Production guests reach the endpoint over the machine's vsock channel.
 Tests use a Unix socket while exercising the same framed protocol.
 Messages are length-limited before allocation or dispatch.
 
+## Guest shims
+
+The guest-side drop-ins live in this crate as `crate-type = ["cdylib"]`
+examples: `cuda` (`libcuda.so.1`), `cudart` (`libcudart.so`), and
+`nvidia_ml` (`libnvidia-ml.so.1`). Each forwards its API to the endpoint
+through the shared client module `src/shim.rs`. The guest-bins build
+(`mvm-build`) and `nix/packages/mvm-gpu-shims.nix` build one example per
+invocation for each guest libc and pass the soname link-arg the guest
+loader resolves them by.
+
 ## Testing
 
 Run `cargo test -p mvm-gpu` for dispatch, backend, and endpoint tests.

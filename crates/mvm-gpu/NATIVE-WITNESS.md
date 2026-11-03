@@ -31,8 +31,8 @@ It requires Python 3.9+, a C compiler, the installed NVIDIA driver, and host
 Inside the builder, from the repository root:
 
 ```sh
-cargo build -p mvm-gpu \
-  -p mvm-gpu-cuda-shim -p mvm-gpu-nvml-shim
+cargo build -p mvm-gpu --bin mvm-gpu-endpoint \
+  --example cuda --example nvidia_ml
 cc -std=c11 -Wall -Wextra -Werror crates/mvm-gpu/tests/native_witness.c \
   -ldl -o /tmp/mvm-native-witness
 ```
@@ -46,8 +46,8 @@ test -n "$CARGO_TARGET_DIR"
 python3 scripts/native-gpu-witness.py \
   --endpoint "$CARGO_TARGET_DIR/debug/mvm-gpu-endpoint" \
   --probe /tmp/mvm-native-witness \
-  --cuda-shim "$CARGO_TARGET_DIR/debug/libmvm_gpu_cuda_shim.so" \
-  --nvml-shim "$CARGO_TARGET_DIR/debug/libmvm_gpu_nvml_shim.so" \
+  --cuda-shim "$CARGO_TARGET_DIR/debug/examples/libcuda.so" \
+  --nvml-shim "$CARGO_TARGET_DIR/debug/examples/libnvidia_ml.so" \
   --timeout 60 > /tmp/mvm-native-witness.json
 ```
 

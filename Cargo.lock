@@ -4101,33 +4101,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-gpu-cuda-shim"
-version = "0.26.0"
-dependencies = [
- "libc",
- "mvm-contract",
- "mvm-gpu",
-]
-
-[[package]]
-name = "mvm-gpu-cudart-shim"
-version = "0.26.0"
-dependencies = [
- "libc",
- "mvm-contract",
- "mvm-gpu",
-]
-
-[[package]]
-name = "mvm-gpu-nvml-shim"
-version = "0.26.0"
-dependencies = [
- "libc",
- "mvm-contract",
- "mvm-gpu",
-]
-
-[[package]]
 name = "mvm-host-services"
 version = "0.26.0"
 dependencies = [

@@ -36,3 +36,22 @@ workspace = true
 [[bin]]
 name = "mvm-gpu-endpoint"
 path = "src/bin/mvm-gpu-endpoint.rs"
+
+# The guest drop-in shim cdylibs (libcuda.so.1 / libcudart.so /
+# libnvidia-ml.so.1), each forwarding its API to the host endpoint over
+# vsock through `src/shim.rs`. Examples rather than crates so the guest
+# side lives in the same umbrella crate as the endpoint; the guest-bins
+# build and nix/packages/mvm-gpu-shims.nix build one `--example` per
+# invocation and pass the soname link-arg the loader resolves them by
+# (an example has no build script of its own).
+[[example]]
+name = "cuda"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "cudart"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "nvidia_ml"
+crate-type = ["cdylib"]

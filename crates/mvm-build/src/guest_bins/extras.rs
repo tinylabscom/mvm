@@ -56,7 +56,7 @@ pub(crate) struct ExtraBuild {
     pub selection: Vec<String>,
     /// Environment added on top of the pinned guest-build environment.
     pub env: Vec<(String, String)>,
-    /// The file cargo writes under `target/<triple>/release/`.
+    /// The path cargo writes it to, relative to `target/<triple>/release/`.
     pub output: String,
 }
 
@@ -144,13 +144,15 @@ fn cdylib_profile(cdylib: &GuestCdylib) -> Vec<(String, String)> {
 
 /// One guest shared object for one libc. musl's target links statically by
 /// default, which a shared object cannot be: it must load against the guest's
-/// own `libc.so`.
+/// own `libc.so`. The GPU shims are cdylib examples with no build script, so
+/// their soname link-arg is passed here, exactly as the image recipe does.
 fn cdylib_build(
     arch: GuestArch,
     libc: GuestLibc,
     cdylib: GuestCdylib,
 ) -> Result<ExtraBuild, GuestAgentBuildError> {
     let mut env = cdylib_profile(&cdylib);
+    let mut rustflags: Vec<String> = Vec::new();
     let (target, cargo_triple) = match libc {
         GuestLibc::Glibc => {
             let triple = gnu_target_triple(arch);
@@ -158,10 +160,7 @@ fn cdylib_build(
         }
         GuestLibc::Musl => {
             let triple = musl_target_triple(arch);
-            env.push((
-                target_rustflags_env(triple),
-                "-C target-feature=-crt-static".to_string(),
-            ));
+            rustflags.push("-C target-feature=-crt-static".to_string());
             (triple.to_string(), triple)
         }
         GuestLibc::Unknown => {
@@ -170,15 +169,17 @@ fn cdylib_build(
             });
         }
     };
+    if GPU_SHIM_CDYLIBS.contains(&cdylib) {
+        rustflags.push(cdylib.soname_link_arg());
+    }
+    if !rustflags.is_empty() {
+        env.push((target_rustflags_env(cargo_triple), rustflags.join(" ")));
+    }
     Ok(ExtraBuild {
         member: member(GuestBinsMember::shared_object(arch, libc, cdylib.soname))?,
         target,
         cargo_triple,
-        selection: vec![
-            "-p".to_string(),
-            cdylib.package.to_string(),
-            "--lib".to_string(),
-        ],
+        selection: cdylib.cargo_selection(),
         env,
         output: cdylib.cargo_output_file(),
     })
@@ -210,15 +211,7 @@ pub(crate) const EXTRAS_SOURCE_INPUTS: &[&str] = &[
     "crates/mvm-gpu/Cargo.toml",
     "crates/mvm-gpu/src/shim.rs",
     "crates/mvm-gpu/src/shim",
-    "crates/mvm-gpu-cuda-shim/Cargo.toml",
-    "crates/mvm-gpu-cuda-shim/build.rs",
-    "crates/mvm-gpu-cuda-shim/src",
-    "crates/mvm-gpu-cudart-shim/Cargo.toml",
-    "crates/mvm-gpu-cudart-shim/build.rs",
-    "crates/mvm-gpu-cudart-shim/src",
-    "crates/mvm-gpu-nvml-shim/Cargo.toml",
-    "crates/mvm-gpu-nvml-shim/build.rs",
-    "crates/mvm-gpu-nvml-shim/src",
+    "crates/mvm-gpu/examples",
     "crates/mvm-build/src/guest_bins/cdylib.rs",
     "crates/mvm-build/src/guest_bins/extras.rs",
 ];
@@ -446,14 +439,24 @@ mod tests {
                 "--target",
                 "x86_64-unknown-linux-gnu.2.34",
                 "-p",
-                "mvm-gpu-cuda-shim",
-                "--lib"
+                "mvm-gpu",
+                "--example",
+                "cuda"
             ]
         );
-        assert_eq!(glibc.output, "libcuda.so");
+        assert_eq!(glibc.output, "examples/libcuda.so");
         assert_eq!(
             env_of(&glibc, "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"),
-            None
+            Some("-C link-arg=-Wl,-soname,libcuda.so.1")
+        );
+
+        let musl_shim = by_path(GuestArch::Aarch64, "aarch64/lib/musl/libcuda.so.1");
+        assert_eq!(
+            env_of(
+                &musl_shim,
+                "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS"
+            ),
+            Some("-C target-feature=-crt-static -C link-arg=-Wl,-soname,libcuda.so.1")
         );
 
         let musl = by_path(
