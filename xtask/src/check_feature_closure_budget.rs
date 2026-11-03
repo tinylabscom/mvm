@@ -50,7 +50,7 @@ const _: () = assert!(
     "the all-features closure budget must exceed the default-closure budget"
 );
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let count = feature_closure_crate_count(workspace)?;
     if count > FEATURE_CLOSURE_BUDGET {
         bail!(

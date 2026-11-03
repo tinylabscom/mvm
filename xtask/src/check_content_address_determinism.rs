@@ -26,7 +26,7 @@ const CRATES: &[&str] = &["mvm-core", "mvm-contract"];
 /// The feature whose presence on `serde_json` would break key-order determinism.
 const FORBIDDEN_FEATURE: &str = "preserve_order";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut offenders: Vec<String> = Vec::new();
     for crate_name in CRATES {

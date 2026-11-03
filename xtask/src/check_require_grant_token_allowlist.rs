@@ -21,7 +21,7 @@ const ALLOWLIST: &[&str] = &[
     "crates/mvm-agentd/src/vsock/verb_grant.rs",
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut rs_files = Vec::new();
     collect_rs_files(&workspace.join("crates"), &mut rs_files)?;
 

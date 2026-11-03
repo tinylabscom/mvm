@@ -50,7 +50,7 @@ use serde_json::Value;
 
 /// The declared reason a crate cannot be published.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Blocker {
+pub(crate) struct Blocker {
     /// `out-of-crate-source`, which this gate verifies, or any other kind,
     /// which it takes on trust.
     pub kind: String,
@@ -91,14 +91,14 @@ struct Workspace {
 
 /// The ordered publish set and what was held back.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Plan {
+pub(crate) struct Plan {
     /// Crates to publish, dependencies first.
     pub publish: Vec<String>,
     /// Crates withheld, each with the reason.
     pub withheld: Vec<(String, String)>,
 }
 
-pub fn run_plan(workspace: &Path) -> Result<()> {
+pub(crate) fn run_plan(workspace: &Path) -> Result<()> {
     let ws = load(workspace)?;
     let plan = plan(&ws)?;
     for name in &plan.publish {
@@ -110,7 +110,7 @@ pub fn run_plan(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run_check(workspace: &Path) -> Result<()> {
+pub(crate) fn run_check(workspace: &Path) -> Result<()> {
     let ws = load(workspace)?;
     let escapes = ws
         .packages

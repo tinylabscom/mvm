@@ -20,7 +20,7 @@ const PERMANENT: &[&str] = &[
     "specs/contracts/",
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut violations = Vec::new();
 
     for path in [

@@ -31,13 +31,13 @@
 /// Delimiters go too: a blanked string leaves no `"` behind, so a gate
 /// counting braces or splitting on delimiters never meets half a literal.
 #[must_use]
-pub fn blank_comments_and_strings(source: &str) -> String {
+pub(crate) fn blank_comments_and_strings(source: &str) -> String {
     blank_source(source, CommentSyntax::Rust, false)
 }
 
 /// Comment syntax for a source gate that must retain literal arguments.
 #[derive(Clone, Copy)]
-pub enum CommentSyntax {
+pub(crate) enum CommentSyntax {
     Rust,
     /// Nix composition and its embedded shell: hash line comments, block
     /// comments and quoted arguments. Indented-string delimiters are retained.
@@ -47,7 +47,7 @@ pub enum CommentSyntax {
 /// Blank comments without destroying quoted paths and command arguments.
 /// Uses the same nested-comment and Rust literal lexer as the token gates.
 #[must_use]
-pub fn blank_comments(source: &str, syntax: CommentSyntax) -> String {
+pub(crate) fn blank_comments(source: &str, syntax: CommentSyntax) -> String {
     blank_source(source, syntax, true)
 }
 
@@ -462,7 +462,7 @@ fn blank_char_literal(chars: &[char], start: usize, out: &mut String) -> usize {
 /// file. The input must be blanked: a brace inside a string or a comment would
 /// otherwise be counted.
 #[must_use]
-pub fn strip_cfg_test_items(blanked: &str) -> String {
+pub(crate) fn strip_cfg_test_items(blanked: &str) -> String {
     blank_ranges(blanked, &cfg_test_item_ranges(blanked))
 }
 
@@ -471,7 +471,7 @@ pub fn strip_cfg_test_items(blanked: &str) -> String {
 /// so a caller that must keep string literals can blank these ranges out of
 /// the original text instead.
 #[must_use]
-pub fn cfg_test_item_ranges(blanked: &str) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn cfg_test_item_ranges(blanked: &str) -> Vec<std::ops::Range<usize>> {
     const ATTRS: [&str; 2] = ["#[cfg(test)]", "#[test]"];
     let attrs: Vec<Vec<char>> = ATTRS.iter().map(|a| a.chars().collect()).collect();
     let chars: Vec<char> = blanked.chars().collect();
@@ -494,7 +494,7 @@ pub fn cfg_test_item_ranges(blanked: &str) -> Vec<std::ops::Range<usize>> {
 
 /// Replace every char of `text` inside `ranges` with a space, keeping newlines.
 #[must_use]
-pub fn blank_ranges(text: &str, ranges: &[std::ops::Range<usize>]) -> String {
+pub(crate) fn blank_ranges(text: &str, ranges: &[std::ops::Range<usize>]) -> String {
     text.chars()
         .enumerate()
         .map(|(index, c)| {

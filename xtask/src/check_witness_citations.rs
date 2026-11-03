@@ -48,7 +48,7 @@ use crate::prose_citations::{
 ///
 /// When a prose file cites a test- or job-shaped name that appears nowhere in
 /// the sources or workflows.
-pub fn run(root: &Path) -> Result<()> {
+pub(crate) fn run(root: &Path) -> Result<()> {
     let resolver = Resolver::build(root);
     let ignored = ignored_set();
 

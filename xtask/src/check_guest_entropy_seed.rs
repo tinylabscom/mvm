@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 /// and exercises both with and without a seed, so it is not a call site.
 const DEFINING_MODULE: &str = "crates/mvm-runtime/src/vmm/fdt.rs";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut rs_files = Vec::new();
     collect_rs_files(&workspace.join("crates"), &mut rs_files)?;
 

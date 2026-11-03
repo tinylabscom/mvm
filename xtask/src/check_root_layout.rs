@@ -59,7 +59,7 @@ const ALLOWED: &[&str] = &[
     "xtask",
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let tracked = tracked_roots(&tracked_paths(workspace, ".")?);
     let violations = violations(&tracked);
     if violations.is_empty() {

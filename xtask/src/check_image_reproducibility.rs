@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 const NIX_ROOT: &str = "nix";
 const MAKE_EXT4_FS: &str = "make-ext4-fs.nix";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut files = Vec::new();
     collect_nix_files(&workspace.join(NIX_ROOT), &mut files)?;
     files.sort();

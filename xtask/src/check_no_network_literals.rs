@@ -78,7 +78,7 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
     ),
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let matchers = Matchers::new();
     let mut hits: Vec<String> = Vec::new();
 

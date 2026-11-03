@@ -16,7 +16,7 @@
 use anyhow::{Result, bail};
 use std::path::Path;
 
-pub fn run(args: &[String]) -> Result<()> {
+pub(crate) fn run(args: &[String]) -> Result<()> {
     let path = arg_value(args, "--path")
         .or_else(|| std::env::var("MVM_BINARY_SIZE_PATH").ok())
         .ok_or_else(|| anyhow::anyhow!("check-binary-size: missing --path <binary>"))?;

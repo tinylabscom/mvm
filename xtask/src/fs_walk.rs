@@ -35,7 +35,7 @@ fn is_nested_checkout(dir: &Path) -> bool {
 ///
 /// A missing `dir` is not an error — a gate that scans an optional tree
 /// should stay silent rather than fail when the tree is absent.
-pub fn walk_files(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<()> {
+pub(crate) fn walk_files(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
     }
@@ -66,7 +66,11 @@ pub fn walk_files(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<()> {
 ///
 /// Files that are not valid UTF-8 are skipped: a gate that greps source has
 /// nothing to say about a binary blob.
-pub fn for_each_file(dir: &Path, ext: Option<&str>, cb: &mut dyn FnMut(&Path, &str)) -> Result<()> {
+pub(crate) fn for_each_file(
+    dir: &Path,
+    ext: Option<&str>,
+    cb: &mut dyn FnMut(&Path, &str),
+) -> Result<()> {
     walk_files(dir, &mut |path| {
         let matches_ext = match ext {
             Some(want) => path.extension().and_then(|e| e.to_str()) == Some(want),

@@ -256,7 +256,7 @@ struct Finding {
     why: &'static str,
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut findings = Vec::new();
     for surface in SURFACES {
         findings.extend(scan_surface(workspace, surface)?);

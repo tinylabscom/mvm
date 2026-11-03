@@ -320,7 +320,7 @@ fn callers(root: &Path, symbol: &str, defining_file: &str) -> Result<Vec<String>
 ///
 /// When a declared-live control has no production caller, or a declared-dormant
 /// one has acquired a caller, or the manifest names a file that does not exist.
-pub fn run(root: &Path) -> Result<()> {
+pub(crate) fn run(root: &Path) -> Result<()> {
     let manifest_path = root.join(MANIFEST);
     let text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;

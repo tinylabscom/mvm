@@ -96,7 +96,7 @@ const GUEST_TARGET: &str = "aarch64-unknown-linux-musl";
 /// The binaries that ship inside a guest.
 const GUEST_PACKAGES: &[&str] = &["mvm-agentd", "mvm-builder-guest", "mvm-setpriv"];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     for package in GUEST_PACKAGES {
         check_one(workspace, package)?;
         check_no_host_state_feature(workspace, package)?;

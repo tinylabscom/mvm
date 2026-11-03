@@ -55,7 +55,7 @@ const LOOPBACK_EXCEPTION: (&str, &str, &[&str]) = (
     &["\"127.0.0.1\"", "\"::1\""],
 );
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let dir = workspace.join(GUARDED_DIR);
     if !dir.is_dir() {
         bail!(

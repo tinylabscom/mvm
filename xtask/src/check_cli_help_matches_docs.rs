@@ -48,7 +48,7 @@ struct Verb {
     line: usize,
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let source = read_required(workspace, COMMANDS_SOURCE)?;
     let reference = read_required(workspace, CLI_REFERENCE)?;
 

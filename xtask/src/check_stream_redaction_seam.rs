@@ -68,7 +68,7 @@ const FORBIDDEN_BROKER_PARAMS: &[&str] = &["Box<dyn StreamRedactor>", "redactor:
 /// may run before assertion C stops looking for the curated seam.
 const CALL_WINDOW_LINES: usize = 5;
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     check_seam_is_unforgeable(workspace)?;
     check_broker_has_one_door(workspace)?;
     let sites = check_call_sites_use_curated(workspace)?;

@@ -50,7 +50,7 @@ const FORBIDDEN_IN_PRODUCT_CLOSURE: &[&str] = &[
     "sigstore-tuf",
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut failures: Vec<String> = Vec::new();
 
     // (1) Lockfile name ban.

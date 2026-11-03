@@ -57,7 +57,7 @@ const ENUM_PATH: &str = "BackendKind::";
 /// blocks in this file, and neither may go missing without the gate saying so.
 const MINIMUM_MATRICES: usize = 2;
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let path = workspace.join(CONTROLS_FILE);
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("reading {CONTROLS_FILE}: {e}"))?;

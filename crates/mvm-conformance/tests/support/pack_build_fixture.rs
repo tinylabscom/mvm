@@ -1,6 +1,6 @@
 use std::path::Path;
 
-pub fn producer_binary(
+pub(crate) fn producer_binary(
     arguments: &[String],
     live: bool,
     configured: Option<std::ffi::OsString>,
@@ -17,7 +17,7 @@ pub fn producer_binary(
 /// The arguments that apply the published, signed image-set revocation list
 /// from the directory the e2e script downloaded it into. The update verb is
 /// offline and has no default source, so the files must be named.
-pub fn revocation_update_args(directory: &Path) -> Vec<std::ffi::OsString> {
+pub(crate) fn revocation_update_args(directory: &Path) -> Vec<std::ffi::OsString> {
     vec![
         "image".into(),
         "revocations".into(),
@@ -31,7 +31,7 @@ pub fn revocation_update_args(directory: &Path) -> Vec<std::ffi::OsString> {
 
 /// Stage authored data independently of the output archive and lock, so later
 /// outputs cannot change the source tree the lock commits to.
-pub fn stage(dir: &Path) {
+pub(crate) fn stage(dir: &Path) {
     let mut spec: serde_json::Value = serde_json::from_str(include_str!(
         "../../../mvm-contract/tests/fixtures/pack-spec-v1/minimal.json"
     ))

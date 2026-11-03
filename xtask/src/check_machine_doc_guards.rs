@@ -49,7 +49,7 @@ struct Finding {
     message: String,
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let use_cases = read_required(workspace, USE_CASES)?;
     let limitations = read_required(workspace, LIMITATIONS)?;
 

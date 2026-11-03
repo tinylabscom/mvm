@@ -22,7 +22,7 @@ use std::process::Command;
 
 const FORBIDDEN: &[&str] = &["mvm-http", "ring", "rustls", "tokio", "tokio-rustls"];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = Command::new(&cargo)
         .current_dir(workspace)

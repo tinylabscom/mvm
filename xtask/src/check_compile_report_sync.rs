@@ -74,7 +74,7 @@ const REPORTED_BUILDS: [(&str, BuildPredicate); 4] = [
     ),
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let path = workspace.join(".github/workflows/release.yml");
     let src = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let problems = check_release_workflow(&src);

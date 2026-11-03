@@ -22,7 +22,7 @@ const EXEMPT: &[&str] = &[
     "xtask/src/check_no_spec_refs_in_comments.rs",
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let token = canonical_regex();
     let mut hits: Vec<String> = Vec::new();
 

@@ -51,7 +51,7 @@ const ENGINE_STORE_CALLS: &[&str] = &[
 ];
 const SEQUENCE_FN: &str = "fn commit_audited(";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut violations = Vec::new();
     for root in ["crates", "src"] {
         let dir = workspace.join(root);

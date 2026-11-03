@@ -663,7 +663,7 @@ const HELPER_SPAWNS: &[(&str, &str)] = &[
     ),
 ];
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let mut failures = Vec::new();
     for (file, header) in HELPER_SPAWNS {
         let path = workspace.join(file);

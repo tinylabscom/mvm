@@ -67,7 +67,7 @@ const BUILD_ONLY: [&str; 4] = [
 /// docs example from one build. Asserted structurally below.
 const DEV_META: &str = "dev";
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub(crate) fn run(workspace: &Path) -> Result<()> {
     let manifest = std::fs::read_to_string(workspace.join("Cargo.toml"))?;
     let features = feature_names(&manifest);
 

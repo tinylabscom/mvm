@@ -63,7 +63,7 @@ const END: &str = "<!-- absent:end -->";
 
 /// A span of prose asserting that the identifiers it names do not exist.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Region {
+pub(crate) struct Region {
     /// 1-based line of the opening marker.
     pub begin: usize,
     /// 1-based line of the closing marker.
@@ -77,7 +77,7 @@ pub struct Region {
 /// # Errors
 ///
 /// When a marker is unbalanced or a region opens inside another.
-pub fn regions(text: &str) -> Result<Vec<Region>> {
+pub(crate) fn regions(text: &str) -> Result<Vec<Region>> {
     let mut out = Vec::new();
     let mut open: Option<(usize, Vec<&str>)> = None;
     let mut in_fence = false;
@@ -134,7 +134,7 @@ pub fn regions(text: &str) -> Result<Vec<Region>> {
 /// `check-witness-citations` uses this to stand down inside a region: a name
 /// asserted absent there must not simultaneously be required to resolve.
 #[must_use]
-pub fn absent_line_numbers(text: &str) -> BTreeSet<usize> {
+pub(crate) fn absent_line_numbers(text: &str) -> BTreeSet<usize> {
     let mut out = BTreeSet::new();
     if let Ok(found) = regions(text) {
         for region in found {
@@ -146,7 +146,7 @@ pub fn absent_line_numbers(text: &str) -> BTreeSet<usize> {
 
 /// The identifier-shaped tokens a region claims do not exist.
 #[must_use]
-pub fn claimed_absent(body: &str) -> Vec<String> {
+pub(crate) fn claimed_absent(body: &str) -> Vec<String> {
     let ignored = ignored_set();
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
@@ -165,7 +165,7 @@ pub fn claimed_absent(body: &str) -> Vec<String> {
 
 /// What one file's regions produced.
 #[derive(Debug, Default)]
-pub struct Outcome {
+pub(crate) struct Outcome {
     /// One message per failed absence claim or malformed region.
     pub errors: Vec<String>,
     /// Names whose absence was confirmed.
@@ -180,7 +180,7 @@ pub struct Outcome {
 /// without needing a document in the tree that violates them — a gate whose
 /// only test is "the tree passes" cannot tell you it would catch anything.
 #[must_use]
-pub fn check_text(rel: &str, text: &str, resolver: &Resolver) -> Outcome {
+pub(crate) fn check_text(rel: &str, text: &str, resolver: &Resolver) -> Outcome {
     let mut out = Outcome::default();
     let found = match regions(text) {
         Ok(found) => found,
@@ -221,7 +221,7 @@ pub fn check_text(rel: &str, text: &str, resolver: &Resolver) -> Outcome {
 ///
 /// When a name asserted absent resolves, a region names nothing checkable, or
 /// the markers are unbalanced.
-pub fn run(root: &Path) -> Result<()> {
+pub(crate) fn run(root: &Path) -> Result<()> {
     let resolver = Resolver::build(root);
     let mut errors = Vec::new();
     let mut checked = 0usize;

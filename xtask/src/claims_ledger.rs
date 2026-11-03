@@ -12,10 +12,10 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
-pub const BEGIN_MARKER: &str = "<!-- claims-catalog:begin -->";
-pub const END_MARKER: &str = "<!-- claims-catalog:end -->";
+pub(crate) const BEGIN_MARKER: &str = "<!-- claims-catalog:begin -->";
+pub(crate) const END_MARKER: &str = "<!-- claims-catalog:end -->";
 
-pub struct Row {
+pub(crate) struct Row {
     pub number: u32,
     pub claim: String,
     pub witnesses: Vec<Witness>,
@@ -24,7 +24,7 @@ pub struct Row {
 }
 
 #[derive(Clone)]
-pub enum Witness {
+pub(crate) enum Witness {
     /// `fn:NAME` — resolves to `fn NAME(` anywhere under `crates/`.
     Fn(String),
     /// `ci:NAME` — resolves to the literal NAME in any workflow file.
@@ -32,7 +32,7 @@ pub enum Witness {
 }
 
 impl Witness {
-    pub fn token(&self) -> String {
+    pub(crate) fn token(&self) -> String {
         match self {
             Self::Fn(n) => format!("fn:{n}"),
             Self::Ci(n) => format!("ci:{n}"),
@@ -41,7 +41,7 @@ impl Witness {
 }
 
 /// The ADR that carries the ledger.
-pub fn ledger_path(workspace: &Path) -> PathBuf {
+pub(crate) fn ledger_path(workspace: &Path) -> PathBuf {
     workspace
         .join("specs")
         .join("adrs")
@@ -49,7 +49,7 @@ pub fn ledger_path(workspace: &Path) -> PathBuf {
 }
 
 /// Read and parse the ledger rows.
-pub fn load(workspace: &Path) -> Result<Vec<Row>> {
+pub(crate) fn load(workspace: &Path) -> Result<Vec<Row>> {
     let path = ledger_path(workspace);
     let source =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -68,7 +68,7 @@ pub fn load(workspace: &Path) -> Result<Vec<Row>> {
 /// compliance mappings) with their own pipe-delimited rows; scoping to the
 /// marker-delimited region keeps those from ever being mistaken for
 /// claim-catalog rows.
-pub fn extract_ledger_section(source: &str) -> Result<&str> {
+pub(crate) fn extract_ledger_section(source: &str) -> Result<&str> {
     let start = source
         .find(BEGIN_MARKER)
         .ok_or_else(|| anyhow::anyhow!("begin marker not found"))?
@@ -79,7 +79,7 @@ pub fn extract_ledger_section(source: &str) -> Result<&str> {
     Ok(&source[start..start + end])
 }
 
-pub fn parse_rows(source: &str) -> Result<Vec<Row>> {
+pub(crate) fn parse_rows(source: &str) -> Result<Vec<Row>> {
     let mut rows = Vec::new();
     for line in source.lines() {
         let line = line.trim();
@@ -128,7 +128,7 @@ fn is_separator(cells: &[String]) -> bool {
     })
 }
 
-pub fn parse_witnesses(cell: &str) -> Result<Vec<Witness>> {
+pub(crate) fn parse_witnesses(cell: &str) -> Result<Vec<Witness>> {
     let mut out = Vec::new();
     for tok in cell.split(',') {
         let tok = tok.trim().trim_matches('`').trim();
@@ -154,7 +154,7 @@ pub fn parse_witnesses(cell: &str) -> Result<Vec<Witness>> {
 /// Walk `dir` recursively, calling `cb` with the path and text of every
 /// file whose extension matches `ext`. Re-exported from `fs_walk`, which
 /// owns the one traversal all the source-scanning gates share.
-pub use crate::fs_walk::for_each_file;
+pub(crate) use crate::fs_walk::for_each_file;
 
 /// The exact names a `ci:` witness may resolve to: a job key, or a token
 /// written in parentheses inside a step name.
@@ -174,7 +174,7 @@ pub use crate::fs_walk::for_each_file;
 /// as jobs, and the repo already has a convention for it: a step backing a
 /// claim carries its token in parentheses, as in
 /// `Fuzz bounded DNS codec (fuzz-dns-codec)`.
-pub fn ci_anchors(content: &str) -> Vec<String> {
+pub(crate) fn ci_anchors(content: &str) -> Vec<String> {
     let mut anchors = Vec::new();
     let mut in_jobs = false;
     for line in content.lines() {
@@ -232,7 +232,7 @@ pub fn ci_anchors(content: &str) -> Vec<String> {
 /// Tokens written `(like-this)` inside a step name. Only bare
 /// identifier-shaped contents count, so a bracketed spec citation with
 /// spaces and punctuation contributes nothing.
-pub fn parenthesised_tokens(name: &str) -> Vec<String> {
+pub(crate) fn parenthesised_tokens(name: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = name;
     while let Some(open) = rest.find('(') {

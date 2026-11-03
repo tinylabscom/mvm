@@ -36,11 +36,7 @@ use std::process::Command;
 // they share with each other: a build script cannot depend on the crate it
 // builds, and xtask cannot depend on mvm-cli either, because building that
 // dependency runs the build script that *is* the payload build.
-use mvm_core::env_hygiene::helper_command;
-
-#[path = "../../crates/mvm-build/src/embed_toolchain.rs"]
-#[allow(dead_code)] // the report reads the pin; the compile/probe arms serve the producers
-mod embed_toolchain;
+use crate::embed_toolchain;
 
 #[path = "../../crates/mvm-cli/src/host_binaries/payload_build_plan.rs"]
 mod payload_build_plan;
@@ -56,7 +52,7 @@ const PROFILE_FIELDS: [&str; 7] = [
     "overflow_checks",
 ];
 
-pub fn run(args: &[String]) -> Result<()> {
+pub(crate) fn run(args: &[String]) -> Result<()> {
     let builds = flag_values(args, "--build");
     if builds.is_empty() {
         bail!("report-compile-units: pass at least one --build \"<label>=<cargo build args>\"");
