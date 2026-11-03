@@ -222,6 +222,13 @@ pub fn all_budgets() -> Vec<PerfBudget> {
             description: "Idle guest-agent current resident memory",
         },
         PerfBudget {
+            name: "vmm_memory_overhead",
+            limit: mvm_core::spawn_scope::VMM_MEMORY_OVERHEAD_MIB * (1 << 20),
+            unit: "bytes",
+            source: "mvm-core spawn_scope::VMM_MEMORY_OVERHEAD_MIB",
+            description: "Per-VM host memory overhead added on top of guest RAM for admission",
+        },
+        PerfBudget {
             name: "firecracker_cold_boot",
             limit: FIRECRACKER_BOOT_BUDGET.as_millis() as u64,
             unit: "ms",
@@ -840,6 +847,21 @@ mod tests {
     }
 
     #[test]
+    fn vmm_memory_overhead_budget_tracks_spawn_scope_constant() {
+        // The registry entry must stay bound to the single source of
+        // truth in mvm-core, and that constant is 256 MiB today.
+        assert_eq!(mvm_core::spawn_scope::VMM_MEMORY_OVERHEAD_MIB, 256);
+        let budget = all_budgets()
+            .into_iter()
+            .find(|b| b.name == "vmm_memory_overhead")
+            .expect("vmm_memory_overhead budget registered");
+        assert_eq!(
+            budget.limit,
+            mvm_core::spawn_scope::VMM_MEMORY_OVERHEAD_MIB * (1 << 20)
+        );
+    }
+
+    #[test]
     fn firecracker_boot_budget_is_200ms() {
         assert_eq!(FIRECRACKER_BOOT_BUDGET, Duration::from_millis(200));
     }
@@ -1253,7 +1275,7 @@ mod tests {
         // The count is a tripwire — if someone adds a budget without
         // a corresponding constant-pin test, this assert pushes them
         // to update both.
-        assert_eq!(all_budgets().len(), 13);
+        assert_eq!(all_budgets().len(), 14);
     }
 
     #[test]
