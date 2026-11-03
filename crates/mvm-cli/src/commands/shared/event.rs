@@ -4,7 +4,7 @@ use serde::Serialize;
 
 /// Structured event emitted during sync/build operations in --json mode.
 #[derive(Debug, Serialize)]
-pub struct PhaseEvent {
+pub(crate) struct PhaseEvent {
     timestamp: String,
     command: &'static str,
     phase: String,
@@ -16,7 +16,7 @@ pub struct PhaseEvent {
 }
 
 impl PhaseEvent {
-    pub fn new(command: &'static str, phase: &str, status: &'static str) -> Self {
+    pub(crate) fn new(command: &'static str, phase: &str, status: &'static str) -> Self {
         Self {
             timestamp: chrono::Utc::now().to_rfc3339(),
             command,
@@ -27,17 +27,17 @@ impl PhaseEvent {
         }
     }
 
-    pub fn with_message(mut self, msg: &str) -> Self {
+    pub(crate) fn with_message(mut self, msg: &str) -> Self {
         self.message = Some(msg.to_string());
         self
     }
 
-    pub fn with_error(mut self, err: &str) -> Self {
+    pub(crate) fn with_error(mut self, err: &str) -> Self {
         self.error = Some(err.to_string());
         self
     }
 
-    pub fn emit(&self) {
+    pub(crate) fn emit(&self) {
         if let Ok(json) = serde_json::to_string(self) {
             println!("{}", json);
         }

@@ -51,12 +51,12 @@ mod status;
 mod warm;
 mod warm_source;
 
-pub use cold_start::{ColdStartReason, WarmClaimOutcome};
+pub(crate) use cold_start::{ColdStartReason, WarmClaimOutcome};
 use cold_start::{claim_gate, claim_required, outcome_for_refusal};
 use late_volumes::late_volumes_attachable;
-pub use refill::{StandbyRefill, schedule_standby_refill};
+pub(crate) use refill::{StandbyRefill, schedule_standby_refill};
 use select::{recent_image_limit, warm_each, warm_sources};
-pub use warm::WarmResult;
+pub(crate) use warm::WarmResult;
 #[cfg(test)]
 use warm_source::manifest_template_source;
 use warm_source::warm_if_eligible;
@@ -74,14 +74,14 @@ impl ChildGrantIssuer for HostChildGrantIssuer {
 }
 
 /// Lowercase-hex sha256 of a kernel image — part of the base-compat key.
-pub fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
+pub(crate) fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
     let bytes =
         std::fs::read(kernel).with_context(|| format!("read kernel {}", kernel.display()))?;
     Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
 /// 32 random bytes as lowercase hex — the per-spawn binding nonce.
-pub fn fresh_binding_nonce() -> String {
+pub(crate) fn fresh_binding_nonce() -> String {
     use rand::Rng;
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
@@ -91,13 +91,13 @@ pub fn fresh_binding_nonce() -> String {
 /// The compat-key kernel identity, computed identically at claim **and** replenish time:
 /// the sha256 of the on-disk kernel the workload boots. Every workload backend boots an
 /// explicit kernel file, libkrun included.
-pub fn kernel_identity(kernel_path: Option<&str>) -> Result<String> {
+pub(crate) fn kernel_identity(kernel_path: Option<&str>) -> Result<String> {
     let kernel = kernel_path.context("launch config has no kernel path for the compat key")?;
     kernel_sha256_hex(Path::new(kernel))
 }
 
 /// Inputs to [`build_standby_spec`] (grouped to avoid a long positional signature).
-pub struct StandbySpecParams<'a> {
+pub(crate) struct StandbySpecParams<'a> {
     /// `~/.mvm/pool/` root — holds the control UDS.
     pub pool_root: &'a Path,
     /// Registered template identity for a template-bound warm parent.
@@ -133,7 +133,7 @@ impl<'a> StandbySpecParams<'a> {
     /// Start building a [`StandbySpecParams`]. Every value is set by name, so a
     /// call site cannot transpose two fields that share a type.
     #[must_use]
-    pub fn builder() -> StandbySpecParamsBuilder<'a> {
+    pub(crate) fn builder() -> StandbySpecParamsBuilder<'a> {
         StandbySpecParamsBuilder::new()
     }
 }
@@ -141,7 +141,7 @@ impl<'a> StandbySpecParams<'a> {
 /// Builder for [`StandbySpecParams`]. Required fields are checked by
 /// [`StandbySpecParamsBuilder::build`] rather than defaulted, so an unset one is a
 /// reported error and never a silently empty value.
-pub struct StandbySpecParamsBuilder<'a> {
+pub(crate) struct StandbySpecParamsBuilder<'a> {
     pool_root: Option<&'a Path>,
     template_id: Option<&'a str>,
     vms_root: Option<&'a Path>,
@@ -160,7 +160,7 @@ pub struct StandbySpecParamsBuilder<'a> {
 impl<'a> StandbySpecParamsBuilder<'a> {
     /// An empty builder: nothing set yet.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             pool_root: None,
             template_id: None,
@@ -180,97 +180,97 @@ impl<'a> StandbySpecParamsBuilder<'a> {
 
     /// Set `pool_root`.
     #[must_use]
-    pub fn pool_root(mut self, pool_root: &'a Path) -> Self {
+    pub(crate) fn pool_root(mut self, pool_root: &'a Path) -> Self {
         self.pool_root = Some(pool_root);
         self
     }
 
     /// Set `template_id`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
-    pub fn template_id(mut self, template_id: impl Into<Option<&'a str>>) -> Self {
+    pub(crate) fn template_id(mut self, template_id: impl Into<Option<&'a str>>) -> Self {
         self.template_id = template_id.into();
         self
     }
 
     /// Set `vms_root`.
     #[must_use]
-    pub fn vms_root(mut self, vms_root: &'a Path) -> Self {
+    pub(crate) fn vms_root(mut self, vms_root: &'a Path) -> Self {
         self.vms_root = Some(vms_root);
         self
     }
 
     /// Set `kernel`.
     #[must_use]
-    pub fn kernel(mut self, kernel: &'a Path) -> Self {
+    pub(crate) fn kernel(mut self, kernel: &'a Path) -> Self {
         self.kernel = Some(kernel);
         self
     }
 
     /// Set `kernel_sha256`.
     #[must_use]
-    pub fn kernel_sha256(mut self, kernel_sha256: &'a str) -> Self {
+    pub(crate) fn kernel_sha256(mut self, kernel_sha256: &'a str) -> Self {
         self.kernel_sha256 = Some(kernel_sha256);
         self
     }
 
     /// Set `vcpus`.
     #[must_use]
-    pub fn vcpus(mut self, vcpus: u8) -> Self {
+    pub(crate) fn vcpus(mut self, vcpus: u8) -> Self {
         self.vcpus = Some(vcpus);
         self
     }
 
     /// Set `mem_mib`.
     #[must_use]
-    pub fn mem_mib(mut self, mem_mib: u32) -> Self {
+    pub(crate) fn mem_mib(mut self, mem_mib: u32) -> Self {
         self.mem_mib = Some(mem_mib);
         self
     }
 
     /// Set `signer_id`.
     #[must_use]
-    pub fn signer_id(mut self, signer_id: &'a str) -> Self {
+    pub(crate) fn signer_id(mut self, signer_id: &'a str) -> Self {
         self.signer_id = Some(signer_id);
         self
     }
 
     /// Set `signing_key_path`.
     #[must_use]
-    pub fn signing_key_path(mut self, signing_key_path: &'a Path) -> Self {
+    pub(crate) fn signing_key_path(mut self, signing_key_path: &'a Path) -> Self {
         self.signing_key_path = Some(signing_key_path);
         self
     }
 
     /// Set `image_path`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
-    pub fn image_path(mut self, image_path: impl Into<Option<&'a Path>>) -> Self {
+    pub(crate) fn image_path(mut self, image_path: impl Into<Option<&'a Path>>) -> Self {
         self.image_path = image_path.into();
         self
     }
 
     /// Set `image_sha256`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
-    pub fn image_sha256(mut self, image_sha256: impl Into<Option<&'a str>>) -> Self {
+    pub(crate) fn image_sha256(mut self, image_sha256: impl Into<Option<&'a str>>) -> Self {
         self.image_sha256 = image_sha256.into();
         self
     }
 
     /// Set `root_strategy`.
     #[must_use]
-    pub fn root_strategy(mut self, root_strategy: RuntimeSourceRootStrategy) -> Self {
+    pub(crate) fn root_strategy(mut self, root_strategy: RuntimeSourceRootStrategy) -> Self {
         self.root_strategy = Some(root_strategy);
         self
     }
 
     /// Set `vsock_egress`.
     #[must_use]
-    pub fn vsock_egress(mut self, vsock_egress: bool) -> Self {
+    pub(crate) fn vsock_egress(mut self, vsock_egress: bool) -> Self {
         self.vsock_egress = Some(vsock_egress);
         self
     }
 
     /// Finish, or name the first required field left unset.
-    pub fn build(self) -> Result<StandbySpecParams<'a>, BuilderError> {
+    pub(crate) fn build(self) -> Result<StandbySpecParams<'a>, BuilderError> {
         Ok(StandbySpecParams {
             pool_root: self
                 .pool_root
@@ -320,7 +320,7 @@ impl<'a> Default for StandbySpecParamsBuilder<'a> {
 /// `pool_root/<id>/control-<nonce>.sock` (nonce in the path — defense in depth); the VM's
 /// runtime state dir is the normal `vms_root/<id>/` so stop/status/console resolve it like
 /// any cold-booted VM.
-pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
+pub(crate) fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
     let nonce = fresh_binding_nonce();
     // `standby-<16 hex>` — nonce-derived (defense-in-depth obfuscation within the 0700
     // dir). The socket filename is kept SHORT and fixed: a Unix domain socket path must fit
@@ -352,7 +352,7 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
 }
 
 /// Parameters for [`warm_to_target`] — grouped to keep the signature small.
-pub struct WarmParams<'a> {
+pub(crate) struct WarmParams<'a> {
     pub backend: &'a AnyBackend,
     pub signer_id: &'a str,
     pub signing_key_path: &'a Path,
@@ -576,7 +576,10 @@ fn residency_source() -> mvm_core::residency::ResidencySource {
     mvm_core::residency::resolve_residency().1
 }
 
-pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
+pub(crate) fn warm_to_target(
+    pool: &SupervisorStandbyPool,
+    p: &WarmParams<'_>,
+) -> Result<WarmResult> {
     if p.target == 0 {
         return Ok(WarmResult {
             spawned: 0,
@@ -766,7 +769,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
 /// Hashing goes through the size+mtime-keyed sidecar cache that plan admission
 /// already populated for this rootfs, so the launch path re-reads a digest
 /// instead of re-hashing ~100 MB before it can decide.
-pub fn image_identity(rootfs_path: &Path) -> Result<String> {
+pub(crate) fn image_identity(rootfs_path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file_cached(rootfs_path).with_context(|| {
         format!(
             "hashing rootfs for the warm-pool compat key: {}",
@@ -779,7 +782,7 @@ pub fn image_identity(rootfs_path: &Path) -> Result<String> {
 // `machine run` orphaned it; the surviving standby primitives are unchanged).
 // Wired into `crate::exec::run_inner`.
 
-pub enum LaunchDecision {
+pub(crate) enum LaunchDecision {
     /// A standby was claimed and is booting under this VmId.
     Claimed(VmId),
     /// No compatible warm standby — caller may cold-boot when its mode permits it.
@@ -797,7 +800,7 @@ pub enum LaunchDecision {
 /// substrate (`gateway-<vm>.sock`) is name-keyed, and a claimed VM runs under its
 /// standby-id, so the caller must compute those paths against `handle.id`. Errors from
 /// `make_claim` are surfaced as a preparation refusal.
-pub fn claim_with_mode<F>(
+pub(crate) fn claim_with_mode<F>(
     pool: &SupervisorStandbyPool,
     backend: &AnyBackend,
     want: &StandbyCompat,
@@ -1033,7 +1036,7 @@ fn warm_eligible_launch(cfg: &VmStartConfig, late_volume_slots: u8) -> bool {
 /// and signed plan threaded into the config, and a backend with a standby
 /// pool. An operator who set `MVM_RESIDENCY` on a backend without one still
 /// gets the explicit typed error.
-pub fn try_warm_claim(
+pub(crate) fn try_warm_claim(
     backend: &AnyBackend,
     cfg: &VmStartConfig,
     user_named: bool,
@@ -1124,7 +1127,7 @@ fn warm_claim_plan_json(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Option<
 /// reap failure must never block a launch, so it is logged at debug and
 /// swallowed. Uses the same [`STANDBY_POOL_TTL`] as `cache prune` so the two
 /// reapers agree on what "stale" means.
-pub fn reap_stale_standbys_best_effort() {
+pub(crate) fn reap_stale_standbys_best_effort() {
     match SupervisorStandbyPool::open()
         .and_then(|pool| pool.reap_stale(STANDBY_POOL_TTL, mvm_core::time::now_unix_secs()))
     {

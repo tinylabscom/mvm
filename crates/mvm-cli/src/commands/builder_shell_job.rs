@@ -24,7 +24,7 @@ use mvm_core::user_config::MvmConfig;
 use super::Cli;
 
 #[derive(ClapArgs, Debug, Clone)]
-pub struct Args {
+pub(crate) struct Args {
     /// Path to the shell script to stage as `/job/cmd.sh` inside the builder VM.
     #[arg(long, value_name = "PATH")]
     pub script: PathBuf,

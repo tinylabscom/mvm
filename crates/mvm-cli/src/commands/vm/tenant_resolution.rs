@@ -11,7 +11,7 @@
 //! the audit chain file — not identity / authentication / credential
 //! storage.
 
-pub fn resolve_tenant(flag_value: Option<&str>) -> String {
+pub(crate) fn resolve_tenant(flag_value: Option<&str>) -> String {
     if let Some(v) = flag_value
         && !v.is_empty()
     {

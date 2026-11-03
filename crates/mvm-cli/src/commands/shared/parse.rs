@@ -5,19 +5,19 @@ use anyhow::{Context, Result};
 use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 
 /// Validate a VM name at Clap parse time.
-pub fn clap_vm_name(s: &str) -> Result<String, String> {
+pub(crate) fn clap_vm_name(s: &str) -> Result<String, String> {
     mvm_core::naming::validate_vm_name(s).map_err(|e| e.to_string())?;
     Ok(s.to_owned())
 }
 
 /// Validate a Nix flake reference at Clap parse time.
-pub fn clap_flake_ref(s: &str) -> Result<String, String> {
+pub(crate) fn clap_flake_ref(s: &str) -> Result<String, String> {
     mvm_core::naming::validate_flake_ref(s).map_err(|e| e.to_string())?;
     Ok(s.to_owned())
 }
 
 /// Validate a port spec (`PORT` or `HOST:GUEST`) at Clap parse time.
-pub fn clap_port_spec(s: &str) -> Result<String, String> {
+pub(crate) fn clap_port_spec(s: &str) -> Result<String, String> {
     if s.is_empty() {
         return Err("port spec must not be empty".to_owned());
     }
@@ -56,7 +56,7 @@ pub fn clap_port_spec(s: &str) -> Result<String, String> {
 /// The base rootfs + every runtime-managed mount stay read-only and are
 /// never user-controllable (see `validate_guest_mount`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VolumeSpec {
+pub(crate) enum VolumeSpec {
     /// Host-directory snapshot materialized as a read-only ext4 block image.
     DirShare {
         host_dir: String,
@@ -93,13 +93,13 @@ fn is_volume_keyword(tok: &str) -> bool {
     matches!(tok.to_ascii_lowercase().as_str(), "ro" | "rw" | "enc")
 }
 
-pub use mvm_client::admission::AssetSpec;
+pub(crate) use mvm_client::admission::AssetSpec;
 
 const ASSET_GRAMMAR_HINT: &str = "expected KIND:HOST_PATH with KIND one of dataset, model, prompt, agent, policy, compute_environment, other";
 
 /// Parse `--asset KIND:HOST_PATH`. The kind is a caller label (it decides
 /// how audit readers group the identity); the path must be non-empty.
-pub fn parse_asset_spec(spec: &str) -> Result<AssetSpec> {
+pub(crate) fn parse_asset_spec(spec: &str) -> Result<AssetSpec> {
     let (kind, path) = spec
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("invalid asset '{spec}' — {ASSET_GRAMMAR_HINT}"))?;
@@ -132,7 +132,7 @@ pub fn parse_asset_spec(spec: &str) -> Result<AssetSpec> {
 /// what comes back is bounded and checked before any of it lands in
 /// `host_dir`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutputSpec {
+pub(crate) struct OutputSpec {
     /// Host directory the collected files land in, as the user wrote it.
     pub host_dir: String,
     /// Absolute guest mount point the workload writes under.
@@ -144,15 +144,15 @@ pub struct OutputSpec {
 }
 
 /// Byte bound when `--output` names no SIZE.
-pub const DEFAULT_OUTPUT_SIZE: &str = "64M";
+pub(crate) const DEFAULT_OUTPUT_SIZE: &str = "64M";
 /// Entry bound when `--output` names no MAX_ENTRIES.
-pub const DEFAULT_OUTPUT_MAX_ENTRIES: u64 = 10_000;
+pub(crate) const DEFAULT_OUTPUT_MAX_ENTRIES: u64 = 10_000;
 
 const OUTPUT_GRAMMAR_HINT: &str = "expected HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]";
 
 /// Parse `--output`. Pure: the host directory is checked separately by
 /// [`resolve_output_destination`], so the grammar is testable on its own.
-pub fn parse_output_spec(spec: &str) -> Result<OutputSpec> {
+pub(crate) fn parse_output_spec(spec: &str) -> Result<OutputSpec> {
     let parts: Vec<&str> = spec.split(':').collect();
     let (host_dir, guest, size, entries) = match parts.as_slice() {
         [host, guest] => (*host, *guest, None, None),
@@ -193,7 +193,7 @@ pub fn parse_output_spec(spec: &str) -> Result<OutputSpec> {
 /// be absent or empty, and it may not sit inside a protected host directory.
 /// Returning the resolved path is what lets collection refuse a parent that
 /// was swapped for a link after the grant was signed.
-pub fn resolve_output_destination(host_dir: &str) -> Result<std::path::PathBuf> {
+pub(crate) fn resolve_output_destination(host_dir: &str) -> Result<std::path::PathBuf> {
     let raw = expand_tilde(host_dir);
     let absolute = if raw.is_absolute() {
         raw
@@ -226,7 +226,7 @@ pub fn resolve_output_destination(host_dir: &str) -> Result<std::path::PathBuf> 
     Ok(destination)
 }
 
-pub fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
+pub(crate) fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
     if spec.is_empty() {
         anyhow::bail!("volume spec must not be empty");
     }
@@ -315,7 +315,7 @@ pub fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
 }
 
 /// Parse a transient live directory share and reject disk-image syntax.
-pub fn parse_dir_share_spec(spec: &str) -> Result<DirShareSpec> {
+pub(crate) fn parse_dir_share_spec(spec: &str) -> Result<DirShareSpec> {
     match parse_volume_spec(spec)? {
         VolumeSpec::DirShare {
             host_dir,
@@ -338,7 +338,7 @@ pub fn parse_dir_share_spec(spec: &str) -> Result<DirShareSpec> {
 
 /// Convert a parsed [`VolumeSpec`] into the backend-agnostic
 /// [`VmVolume`] carried by `VmStartConfig`.
-pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
+pub(crate) fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
     match spec {
         VolumeSpec::DirShare {
             host_dir,
@@ -393,7 +393,7 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
 /// development override (which `--prod` refuses). The image and any directory
 /// created for it are owner-only. A read-only image is only read, so neither
 /// rule applies to it.
-pub fn materialize_disk_volume(
+pub(crate) fn materialize_disk_volume(
     v: &VmVolume,
 ) -> Result<Option<mvm_build::volume_image::VolumeImageLock>> {
     #[cfg(not(test))]
@@ -464,7 +464,7 @@ fn admit_disk_image_storage(
 /// `mvm_core::crypto::policy::MountPathPolicy` rather than keeping its own
 /// copy of the roots: the agent applies the same policy before `mount(2)`,
 /// and two copies of a security constant drift.
-pub fn validate_guest_mount(guest: &str) -> Result<()> {
+pub(crate) fn validate_guest_mount(guest: &str) -> Result<()> {
     mvm_core::crypto::policy::validate_mount_path(guest)
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -586,7 +586,7 @@ fn validate_host_path(host: &str, expect_dir: bool) -> Result<String> {
 /// - **Host-path safety:** the host path is canonicalized (symlinks
 ///   resolved), checked against a protected-directory deny-list, and the
 ///   **resolved** path is pinned back onto the volume (TOCTOU-safe).
-pub fn vm_volume_from_spec_validated(spec: &VolumeSpec) -> Result<VmVolume> {
+pub(crate) fn vm_volume_from_spec_validated(spec: &VolumeSpec) -> Result<VmVolume> {
     validate_volume_spec(spec)?;
 
     let mut vmv = volume_spec_to_vm_volume(spec);
@@ -600,7 +600,7 @@ pub fn vm_volume_from_spec_validated(spec: &VolumeSpec) -> Result<VmVolume> {
 /// This deliberately does not inspect the host filesystem, so dry-run and
 /// receipt construction can reject encryption and guest-path violations
 /// without requiring a synthetic host path to exist.
-pub fn validate_volume_spec(spec: &VolumeSpec) -> Result<()> {
+pub(crate) fn validate_volume_spec(spec: &VolumeSpec) -> Result<()> {
     if let VolumeSpec::Disk {
         encrypted: true, ..
     } = spec

@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 /// One completed execution, decrypted in memory for planning or replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InputEntry {
+pub(crate) struct InputEntry {
     pub seq: u64,
     pub at_unix: u64,
     pub argv: Vec<String>,
@@ -41,7 +41,7 @@ enum StoredEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PendingExec {
+pub(crate) struct PendingExec {
     seq: u64,
 }
 
@@ -52,12 +52,12 @@ struct CompletedEvent {
     succeeded: bool,
 }
 
-pub fn journal_path(machine_state_dir: &Path) -> PathBuf {
+pub(crate) fn journal_path(machine_state_dir: &Path) -> PathBuf {
     machine_state_dir.join("input-journal.jsonl")
 }
 
 /// Serialize exec and checkpoint operations for one machine.
-pub fn lock(machine_state_dir: &Path) -> Result<FileLock> {
+pub(crate) fn lock(machine_state_dir: &Path) -> Result<FileLock> {
     FileLock::acquire(&journal_path(machine_state_dir)).with_context(|| {
         format!(
             "locking the machine input journal {}",
@@ -67,7 +67,7 @@ pub fn lock(machine_state_dir: &Path) -> Result<FileLock> {
 }
 
 /// Encrypt and durably record an execution before dispatching it.
-pub fn begin_exec(machine_state_dir: &Path, argv: &[String]) -> Result<Option<PendingExec>> {
+pub(crate) fn begin_exec(machine_state_dir: &Path, argv: &[String]) -> Result<Option<PendingExec>> {
     if argv.is_empty() {
         return Ok(None);
     }
@@ -93,7 +93,7 @@ pub fn begin_exec(machine_state_dir: &Path, argv: &[String]) -> Result<Option<Pe
 }
 
 /// Durably finish an execution while the journal lock remains held.
-pub fn finish_exec(
+pub(crate) fn finish_exec(
     machine_state_dir: &Path,
     pending: Option<PendingExec>,
     succeeded: bool,
@@ -112,13 +112,13 @@ pub fn finish_exec(
 
 /// Last fully committed input sequence. This refuses an unfinished exec, so a
 /// checkpoint never seals ambiguous state.
-pub fn cursor(machine_state_dir: &Path) -> Result<u64> {
+pub(crate) fn cursor(machine_state_dir: &Path) -> Result<u64> {
     Ok(scan(machine_state_dir)?.last().map_or(0, |entry| entry.seq))
 }
 
 /// Read complete entries in order. A torn, unterminated final JSON line is
 /// dropped; malformed durable lines and unfinished executions fail closed.
-pub fn read(machine_state_dir: &Path) -> Result<Vec<InputEntry>> {
+pub(crate) fn read(machine_state_dir: &Path) -> Result<Vec<InputEntry>> {
     let replay_store = store(machine_state_dir);
     scan(machine_state_dir)?
         .into_iter()
@@ -201,7 +201,7 @@ fn scan(machine_state_dir: &Path) -> Result<Vec<CompletedEvent>> {
     Ok(entries)
 }
 
-pub fn select_after_cursor(entries: &[InputEntry], cursor: u64) -> Vec<InputEntry> {
+pub(crate) fn select_after_cursor(entries: &[InputEntry], cursor: u64) -> Vec<InputEntry> {
     entries
         .iter()
         .filter(|entry| entry.seq > cursor)

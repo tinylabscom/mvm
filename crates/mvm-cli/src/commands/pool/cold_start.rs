@@ -10,7 +10,7 @@ use mvm_core::vm_backend::{VmId, VmStartConfig, WarmClaimRefusal};
 
 /// The result of trying to serve a launch from a standby.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WarmClaimOutcome {
+pub(crate) enum WarmClaimOutcome {
     /// A standby was claimed and the VM now runs under this id.
     Claimed(VmId),
     /// The launch boots cold, for this reason.
@@ -19,7 +19,7 @@ pub enum WarmClaimOutcome {
 
 /// Why a launch booted cold instead of claiming a standby.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColdStartReason {
+pub(crate) enum ColdStartReason {
     /// The launch could have claimed a standby but none was ready: the first
     /// run of this image on this host, a run after its standby was claimed and
     /// not yet replaced, or released after sitting idle, or a run that lost
@@ -43,7 +43,7 @@ pub enum ColdStartReason {
 impl ColdStartReason {
     /// The label recorded on the chain-signed log.
     #[must_use]
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::NoStandbyReady => "no_standby_ready",
             Self::Named => "named",
@@ -59,7 +59,7 @@ impl ColdStartReason {
     /// served does: replenishing for a named run or an ineligible shape would
     /// prepare something no later launch of that shape can claim.
     #[must_use]
-    pub fn leaves_a_standby(self) -> bool {
+    pub(crate) fn leaves_a_standby(self) -> bool {
         matches!(self, Self::NoStandbyReady)
     }
 
@@ -67,7 +67,7 @@ impl ColdStartReason {
     /// when the cold boot is the shape's normal path and there is nothing to
     /// say.
     #[must_use]
-    pub fn declaration(self) -> Option<&'static str> {
+    pub(crate) fn declaration(self) -> Option<&'static str> {
         match self {
             Self::NoStandbyReady => Some(
                 "No standby of this image is ready, so this run boots cold. \

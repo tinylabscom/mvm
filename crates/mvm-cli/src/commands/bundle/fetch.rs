@@ -130,7 +130,7 @@ enum ArchiveFile {
 
 impl LoadedBundle {
     /// The archive's path, for streaming verification and install.
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         match &self.archive {
             ArchiveFile::Local(path) => path,
             ArchiveFile::Temporary(path) => path,
@@ -138,12 +138,12 @@ impl LoadedBundle {
     }
 
     /// Whether acquisition read the archive directly from a local path.
-    pub fn is_local_path(&self) -> bool {
+    pub(crate) fn is_local_path(&self) -> bool {
         matches!(&self.archive, ArchiveFile::Local(_))
     }
 
     #[cfg(test)]
-    pub fn bytes(&self) -> Vec<u8> {
+    pub(crate) fn bytes(&self) -> Vec<u8> {
         std::fs::read(self.path()).expect("read loaded archive")
     }
 }
