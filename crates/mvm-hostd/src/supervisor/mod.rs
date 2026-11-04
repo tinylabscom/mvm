@@ -49,14 +49,11 @@ pub mod dns_resolver;
 pub mod ebpf_telemetry;
 pub mod egress;
 pub mod entropy_scanner;
-pub mod event_bus;
 pub mod firewall;
 pub mod runtime_approval;
 pub mod tool_decision;
-// Per-VM gateway flow-event subscriber sink. Lives next to
-// `event_bus` and `firewall` as a peer fan-out substrate; the gateway
-// bridge emits each FlowEvent through here in parallel with the signer
-// mpsc.
+// Per-VM gateway flow-event subscriber sink: the gateway bridge emits each
+// FlowEvent through here in parallel with the signer mpsc.
 pub mod gateway_audit;
 // Per-VM gateway audit bridge. Splices guest virtio-net <-> host
 // gateway, emits FlowOpened/FlowClosed
@@ -75,7 +72,6 @@ pub mod inspector;
 pub mod instance_sampler;
 pub mod keystore;
 pub mod l7_proxy;
-pub mod lifecycle_hooks;
 pub mod name_scanner;
 pub mod names_gazetteer;
 // Observer trait + Pipeline builder for the gateway audit substrate.
@@ -182,7 +178,6 @@ pub use circuit_breaker::{
 };
 pub use destination::DestinationPolicy;
 pub use egress::{EgressDecision, EgressError, NoopEgressProxy, SupervisorEgressProxy};
-pub use event_bus::{DEFAULT_CAPACITY as EVENT_BUS_DEFAULT_CAPACITY, EventBus, LifecycleEvent};
 #[cfg(any(target_os = "linux", test))]
 pub use firewall::linux_nft::{CommandNftApplier, LinuxNftFirewall, NftApplier, NftError};
 pub use firewall::{FirewallEnforcer, FirewallError, FirewallSpec, NoopFirewallEnforcer};
@@ -199,7 +194,6 @@ pub use l7_proxy::{
     EgressAuditSink, EgressOutcome, EvaluationResult, L7EgressProxy, NoopEgressAuditSink,
     TokioDnsResolver, parse_connect,
 };
-pub use lifecycle_hooks::{LifecycleHooks, standard_hooks};
 pub use pii_redactor::{
     Mode as PiiMode, PII_CATEGORY_NAMES, PiiPolicyError, PiiRedactor, PiiRule, PiiValidator,
 };
