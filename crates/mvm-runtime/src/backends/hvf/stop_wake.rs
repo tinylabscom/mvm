@@ -6,28 +6,40 @@ use std::time::Duration;
 
 /// Force-exit the vCPUs, and keep doing so until the run reports it is over.
 ///
-/// A force-exit is only seen by a vCPU that is inside `hv_vcpu_run`. One that
-/// is between runs, servicing a device or an earlier heartbeat, can take the
-/// single stop wake without it landing, and a guest idle in WFI then never
-/// leaves the loop that checks the stop flag. Re-issuing the wake bounds that
-/// window to one interval instead of leaving it open indefinitely.
+/// An observed SMP shutdown left a secondary in Hypervisor.framework's WFI
+/// wait after the first request. A force-exit request is not completion:
+/// keep requesting it until the run owner has joined every vCPU thread.
 pub(super) fn wake_until_done(done: &AtomicBool, interval: Duration, mut wake: impl FnMut()) {
-    loop {
+    while !done.load(Ordering::Acquire) {
         wake();
         if done.load(Ordering::Acquire) {
             return;
         }
-        std::thread::sleep(interval);
+        std::thread::park_timeout(interval);
     }
 }
 
 /// Marks the run as over when dropped, so a boot that returns early still
 /// releases the watchdog instead of leaving it waking vCPUs that are gone.
-pub(super) struct RunOver(pub(super) Arc<AtomicBool>);
+pub(super) struct RunOver {
+    done: Arc<AtomicBool>,
+    watchdog: std::thread::Thread,
+}
+
+impl RunOver {
+    pub(super) fn new(done: Arc<AtomicBool>, watchdog: std::thread::Thread) -> Self {
+        Self { done, watchdog }
+    }
+
+    pub(super) fn complete(&self) {
+        self.done.store(true, Ordering::Release);
+        self.watchdog.unpark();
+    }
+}
 
 impl Drop for RunOver {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
+        self.complete();
     }
 }
 
@@ -36,8 +48,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
-    /// A stop wake that lands while the vCPU is between runs is lost; the
-    /// watchdog must therefore keep waking until the run has ended.
+    /// Completion, not a successful wake request, ends cancellation delivery.
     #[test]
     fn the_stop_wake_is_repeated_until_the_run_is_over() {
         let done = AtomicBool::new(false);
@@ -51,12 +62,37 @@ mod tests {
     }
 
     #[test]
-    fn a_run_that_is_already_over_is_woken_once() {
+    fn a_completed_run_is_not_woken() {
         let done = AtomicBool::new(true);
         let wakes = AtomicUsize::new(0);
         wake_until_done(&done, Duration::from_secs(60), || {
             wakes.fetch_add(1, Ordering::Relaxed);
         });
-        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        assert_eq!(wakes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn completion_guard_wakes_the_parked_watchdog() {
+        let done = Arc::new(AtomicBool::new(false));
+        let observed_done = done.clone();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let waiting = gate.clone();
+        let (finished, observed) = std::sync::mpsc::sync_channel(1);
+        let watchdog = std::thread::spawn(move || {
+            waiting.wait();
+            std::thread::park();
+            finished
+                .send(observed_done.load(Ordering::Acquire))
+                .unwrap();
+        });
+        let guard = RunOver::new(done.clone(), watchdog.thread().clone());
+        drop(guard);
+        gate.wait();
+        let completed = observed.recv_timeout(Duration::from_secs(5));
+        // Ensure the fixture exits even if the guard's notification regresses.
+        done.store(true, Ordering::Release);
+        watchdog.thread().unpark();
+        watchdog.join().unwrap();
+        assert_eq!(completed, Ok(true));
     }
 }
