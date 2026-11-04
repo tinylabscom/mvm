@@ -63,6 +63,10 @@ not sufficient recovery authority. The proposed initial rule is:
 1. Start binds an explicitly enrolled controlling principal's public identity
    to the operation. Later control requires fresh proof by that same principal;
    delegated recovery principals are not supported in this first contract.
+   `RecoveryBinding.controlling_principal` is the enrolled Ed25519 public-key
+   bytes, not a fingerprint. Recovery possession additionally binds the full
+   `EnrolledIdentity`, including its installation UUID, checked against the
+   actually loaded credential and independently retained receiver enrollment.
 2. Authenticate the actual connected peer and the original owner on that
    connection. A fresh challenge binds the operation, principal, tenant,
    request digest, plan/configuration binding, owner incarnation, native
@@ -257,6 +261,30 @@ operations; perform stop; mint terminal evidence; or clear quarantine.
 The supplied terminal-result revision only controls acknowledgement parsing,
 not completion or cleanup. These omissions are positive-activation blockers,
 not optional checks for callers. No production receiver consumes this shape.
+
+## Recovery possession (source-only)
+
+`mvm-core::crypto::recovery_possession` supplies a separate
+`mvm.controlling-principal.recovery-possession.v1` Ed25519 possession purpose.
+The signed message is the domain (including its trailing NUL) followed by
+`serde_json` serialization of the fixed typed `RecoveryChallenge` schema in
+declaration order. This is not JCS: integer fields retain exact decimal `u64`
+values, including request sequences and result revisions above $2^{53}$.
+It binds the complete typed request, full enrollment, receiver-issued fresh
+per-connection nonce and issuance time. Verification compares against the
+receiver's independently retained complete expectation. Labels are bounded
+before signing; the proof decoder checks its 4-KiB slice limit before parsing.
+A transport must bound declared receive lengths before allocation and enforce
+its separate monotonic deadline. Challenges expire after 30 seconds and refuse
+future issuance times.
+
+`CallerCredential::prove_recovery` reuses the loaded credential without changing
+enrollment or exposing a key/sign-bytes operation. Its output is possession
+evidence only: it does not authenticate the actual connected peer or original
+owner, consume nonce/sequence, admit work, stop execution, prove completion or
+authorize cleanup. A public nonce or digest alone does not defeat forwarding.
+There is no receiver or production wiring, and existing registration proofs
+remain a different purpose.
 
 ## Lifecycle table (source-only)
 

@@ -43,6 +43,8 @@ pub enum RecoveryPhase {
 pub struct RecoveryBinding {
     pub operation_id: [u8; 32],
     pub request_digest: [u8; 32],
+    /// Enrolled controlling principal's Ed25519 public-key bytes.
+    /// Recovery possession also binds the independently retained installation UUID.
     pub controlling_principal: [u8; 32],
     pub tenant_id: String,
     pub owner_incarnation: [u8; 32],
