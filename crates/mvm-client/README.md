@@ -34,6 +34,14 @@ be read or parsed, rather than silently omitting stopped entries or metadata.
 A missing registry remains a valid empty initial registry. Bulk-stop target
 discovery stays best-effort and excludes registry-only entries.
 
+`input_journal` owns the encrypted machine-exec journal and its per-machine
+lock for execution, checkpoint cursors, and replay. An absent journal is an
+empty history; an unreadable journal or dangling journal symlink is an error.
+Callers hold the same lock through execution and checkpoint capture. Read entries
+contain decrypted arguments and must be handled as sensitive; their `Debug`
+representation redacts those arguments. The module adds no guest, MCP, SDK, or
+remote operation.
+
 `checkpoint::Checkpoints::remove` owns host-local checkpoint removal for the CLI
 and host library. It refuses incomplete/unreadable metadata, session pins,
 dependent checkpoints, and failed guard reads. An absent checkpoint directory is
@@ -52,6 +60,7 @@ or path changes with deletion; they do not grant guest, MCP, or remote authority
 | `launch` / `boot` | Request validation and machine startup |
 | `inventory` / `registration` | Machine discovery and durable identity |
 | `checkpoint` | Host-local catalog access and guarded checkpoint removal |
+| `input_journal` | Locked encrypted execution input and replay cursors |
 | `stream` | Captured output access |
 | `volume` | Volume lifecycle, leases, and snapshots |
 | `secret` | Secret-reference inputs and audit records |

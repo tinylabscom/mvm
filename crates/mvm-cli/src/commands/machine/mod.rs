@@ -16,7 +16,6 @@
 
 mod checkpoint;
 mod create_policy;
-pub(crate) mod input_journal;
 pub(crate) mod lifecycle;
 mod list;
 mod manifest_source;
@@ -44,6 +43,7 @@ use mvm_core::manifest::ManifestMachineWorkflow;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::{config, naming};
 
+use mvm_client::input_journal;
 use mvm_client::machine_spec::{
     MACHINE_SPEC_SCHEMA_VERSION, MachineSpec, ReconfigurePatch, SpecReconcile, apply_patch,
     list_machine_specs, load_machine_spec, machine_config_diff, overwrite_machine_spec,
