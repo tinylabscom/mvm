@@ -5,6 +5,7 @@
 // export would be lost. End early through `observability::exit`, which
 // flushes them first.
 #![deny(clippy::exit)]
+#![deny(unreachable_pub)]
 
 pub mod approval;
 pub mod bench;
