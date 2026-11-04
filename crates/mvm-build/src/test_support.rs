@@ -23,11 +23,12 @@ pub(crate) fn isolated_lock_probe(probe: impl FnOnce()) {
     // Any concurrent fork inherits open descriptions, even CLOEXEC ones.
     // Exec a private test process before opening probe resources so last-close
     // assertions cannot race another libtest thread's fork-before-exec window.
-    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
-        .args(["--exact", name, "--nocapture", "--test-threads=1"])
-        .env(CHILD_ENV, name)
-        .output()
-        .expect("run the isolated lock probe");
+    let output =
+        mvm_core::env_hygiene::helper_command(std::env::current_exe().expect("test executable"))
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CHILD_ENV, name)
+            .output()
+            .expect("run the isolated lock probe");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
