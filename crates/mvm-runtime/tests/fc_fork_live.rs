@@ -322,6 +322,38 @@ fn copy_checkpoint_content(
         .unwrap_or_else(|e| panic!("materialize checkpoint {} for {checkpoint}: {e}", meta.id));
 }
 
+fn exec_on_retained_flow(
+    stream: &mut std::os::unix::net::UnixStream,
+    session: &mut mvm_agentd::vsock::AuthenticatedSession,
+    command: &str,
+) -> Result<i32, String> {
+    let request = mvm_agentd::vsock::GuestRequest::Exec {
+        command: command.to_string(),
+        stdin: None,
+        timeout_secs: Some(AGENT_TIMEOUT_SECS),
+    };
+    let event =
+        mvm_agentd::vsock::send_exec_on_authenticated_session(stream, session, &request, |_| {})
+            .map_err(|error| format!("{error:#}"))?;
+    match event {
+        ExecEvent::Exit { code } => Ok(code),
+        ExecEvent::TimedOut => Err("guest command timed out".to_string()),
+        other => Err(format!("unexpected terminal exec event: {other:?}")),
+    }
+}
+
+fn exec_on_vsock(vsock_path: &str, command: &str) -> Result<i32, String> {
+    let mut stream = connect_to(vsock_path, AGENT_TIMEOUT_SECS)
+        .map_err(|error| format!("connect to guest agent: {error:#}"))?;
+    let event = send_exec_streaming(&mut stream, command, None, Some(AGENT_TIMEOUT_SECS), |_| {})
+        .map_err(|error| format!("guest exec: {error:#}"))?;
+    match event {
+        ExecEvent::Exit { code } => Ok(code),
+        ExecEvent::TimedOut => Err("guest command timed out".to_string()),
+        other => Err(format!("unexpected terminal exec event: {other:?}")),
+    }
+}
+
 fn read_getrandom(vsock_path: &str) -> Vec<u8> {
     let mut stream = connect_to(vsock_path, AGENT_TIMEOUT_SECS)
         .expect("connect to restored child for randomness witness");
@@ -620,6 +652,25 @@ fn fc_live_fork_n_children_from_running_parent() {
         "the parent guest agent must answer an authenticated ping before capture"
     );
 
+    // Keep one authenticated host→guest connection open across capture and fork.
+    // It must remain attached to the parent endpoint, or disconnect; it must
+    // never exchange guest state with a restored child.
+    let mut stale_flow = connect_to(&parent_vsock, AGENT_TIMEOUT_SECS)
+        .expect("connect the flow that will remain open across restore");
+    mvm_agentd::vsock::negotiate_protocol(&mut stale_flow, Vec::new())
+        .expect("negotiate the retained flow protocol");
+    let mut stale_session = mvm_agentd::vsock::AuthenticatedSession::host(
+        &mut stale_flow,
+        &format!("fc-stale-flow-{pid}"),
+        host_signing_key.clone(),
+    )
+    .expect("authenticate the retained flow");
+    assert_eq!(
+        exec_on_retained_flow(&mut stale_flow, &mut stale_session, "true"),
+        Ok(0),
+        "the retained flow must work before the snapshot"
+    );
+
     // Capture the RUNNING parent's whole state, then let it resume — the
     // live-parent fork the activation exists for. This is the same call the
     // `machine fork` verb makes through the driver's own control.
@@ -695,6 +746,45 @@ fn fc_live_fork_n_children_from_running_parent() {
                 .expect("the child must answer while its parent and siblings are up"),
             "child '{child_id}' must be reachable alongside the whole fork family"
         );
+    }
+
+    // A fresh child writes a child-only marker. The retained connection either
+    // remains attached to the running parent (which must not see that marker) or
+    // is disconnected. Then write through the retained flow and prove the child
+    // does not see the parent's marker.
+    let child_id = child_ids.first().expect("at least one child is required");
+    let child_vsock = mvm_runtime::microvm::firecracker_vsock_uds_path(
+        &mvm_core::config::vm_state_dir(child_id).to_string_lossy(),
+    );
+    let child_marker = format!("/tmp/mvm-child-flow-{pid}");
+    let parent_marker = format!("/tmp/mvm-parent-flow-{pid}");
+    assert_eq!(
+        exec_on_vsock(&child_vsock, &format!("touch {child_marker}")),
+        Ok(0),
+        "the fresh child must create its private marker"
+    );
+    match exec_on_retained_flow(
+        &mut stale_flow,
+        &mut stale_session,
+        &format!("test ! -e {child_marker}"),
+    ) {
+        Ok(0) => {
+            match exec_on_retained_flow(
+                &mut stale_flow,
+                &mut stale_session,
+                &format!("touch {parent_marker}"),
+            ) {
+                Ok(0) => assert_eq!(
+                    exec_on_vsock(&child_vsock, &format!("test ! -e {parent_marker}")),
+                    Ok(0),
+                    "a write on the retained parent flow must not reach the child"
+                ),
+                Err(error) => eprintln!("retained parent flow disconnected: {error}"),
+                Ok(code) => panic!("retained parent flow touch exited with {code}"),
+            }
+        }
+        Err(error) => eprintln!("retained parent flow disconnected: {error}"),
+        Ok(code) => panic!("retained flow observed child-only state (exit {code})"),
     }
 
     // Per-child vsock endpoints resolve to distinct paths — the recorded

@@ -5,16 +5,16 @@ description: Pause a microVM into sealed state, create checkpoints, and restore 
 
 Cold mode means a workload is not currently consuming a running guest, but it has recoverable state. In `mvm`, that state is represented by backend-specific snapshot and checkpoint artifacts.
 
-The `machine` verbs on this page (`pause`, `resume`, `snapshot`, `checkpoint`) are
-hidden advanced operations: they work, but they do not appear in
-`mvmctl machine --help`.
+`pause` and `resume` are advanced single-VM lifecycle operations hidden from
+`mvmctl machine --help`. Checkpoints use the current `machine checkpoint`
+interface. This page does not describe a reusable snapshot-template workflow.
 
 ## Recovery paths and current status
 
 | Path | Meaning | Current status |
 | --- | --- | --- |
-| Live-memory snapshot/restore | Restore guest RAM plus VMM state. | Not advertised by the selectable workload runners. `resume --warm` refuses with a typed error when the selected backend cannot honor it. |
-| Save/restore machine state | Restore serialized VMM state without claiming live-memory fidelity. | Advertised by `hvf` and `apple-container`. `firecracker`, `libkrun`, `qemu`, and `wasm` all report `unsupported`. |
+| Live-memory snapshot/restore | Restore guest RAM plus VMM state. | Firecracker advertises `live-memory` on a usable KVM host. `machine fork` uses the checkpoint restore path. The separate trait-level `resume --warm` request is not wired and fails closed rather than falling back to a cold boot. |
+| Save/restore machine state | Restore serialized VMM state without claiming live-memory fidelity. | `hvf` and `apple-container` advertise `save-restore`; Firecracker's stronger `live-memory` tier satisfies it. `libkrun`, `qemu`, and `wasm` report `unsupported`. |
 | Disk-only CoW warm start | Reboot from a copy-on-write disk/overlay artifact without restoring RAM. | The raw libkrun substrate has this primitive, but no selectable workload runner advertises it yet. |
 | Prelaunched supervisor standby | Pre-pay supervisor/setup latency before attaching a workload. | Separate from snapshots; advertised by `firecracker` and `hvf`, and by no other selectable runner. |
 | Cold boot | Boot immutable artifacts from scratch. | Supported baseline recovery path. |
@@ -160,9 +160,10 @@ What a refusal does and does not undo:
   to the local audit log, which is unsigned and written best-effort; neither
   goes to the chain-signed per-tenant log.
 
-`resume --warm` would refuse on the same grounds and stop the VM the same way,
-but no backend completes a live-memory warm start today, so that path is not
-reachable yet.
+`resume --warm` is a separate trait-level live-memory request. Firecracker
+reports the `live-memory` capability, but that `warm_start` operation is not
+wired and returns a typed failure instead of falling back to a cold boot. This
+does not disable the separate checkpoint `machine fork` restore path.
 
 When the snapshot is encrypted, a resume decrypts it into a
 private directory beside the sealed snapshot (mode 0700, files 0600) and loads
@@ -177,16 +178,13 @@ resumed from a sealed snapshot until they are rebuilt. A snapshot taken from
 such an image keeps the old guest runtime and can never reseed, so after you rebuild,
 boot the machine fresh before you pause it again.
 
-List and remove local sealed snapshots:
-
-```sh
-mvmctl machine snapshot ls
-mvmctl machine snapshot rm agent-sandbox
-```
+Sealed instance snapshots are managed by `pause` and `resume`; there is no
+public named-snapshot list/remove workflow. For named, chain-anchored
+checkpoints, use `mvmctl machine checkpoint ls`, `verify`, and `rm`.
 
 ## Full-VM memory checkpoints
 
-Full-VM memory checkpoints capture full guest state. They require a backend whose snapshot tier is `save-restore` or better — today `hvf` and `apple-container`; `firecracker`, `libkrun`, and `qemu` refuse with an explicit tier error. Check `mvmctl doctor` for the authoritative capability on this host:
+Full-VM memory checkpoints capture full guest state. They require a backend whose snapshot tier is `save-restore` or better. Current selectable runners report `live-memory` for Firecracker on KVM, and `save-restore` for `hvf` and `apple-container`; `libkrun`, `qemu`, and `wasm` report `unsupported`. Check `mvmctl doctor` for the authoritative capability on this host:
 
 ```sh
 mvmctl machine checkpoint create agent-sandbox --class vm-full

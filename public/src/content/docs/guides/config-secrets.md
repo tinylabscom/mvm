@@ -144,55 +144,32 @@ A typical `mkGuest` service uses `preStart` to check for
 `command` script sources `/data/secrets/<env-file>` if present so
 environment variables are available to the service process.
 
-### Using snapshots for faster startup
+### Preparing a warm standby
 
-There is no `--snapshot` flag on `machine build`. Snapshots are taken from a
-running machine with the (hidden) `mvmctl machine snapshot` verb on a backend
-that supports it; subsequent runs can restore instead of cold-booting. Published latency numbers must name the backend, host, artifact,
-and readiness boundary.
+For a frequently used verified image, `mvmctl pool warm --image alpine` prepares
+an image-keyed standby. A compatible `machine run` may claim it; `mvmctl pool
+status` shows the current pool. `mvmctl image pull --warm` combines a verified
+registry pull with warming.
 
-```bash
-mvmctl machine build --flake ./openclaw
-mvmctl machine run --flake ./openclaw --name oc --port 3000:3000
-```
+A standby is a prelaunched supervisor, not a saved running workload or a
+reusable named snapshot template. It does not preserve a prior workload's
+processes, session, files, or credentials. Keep configuration and file-shaped
+secrets on the registered-volume path described above; each launch applies its
+own mounts and admission policy.
 
-When restoring from a snapshot with registered directory volumes, each
-volume is snapshotted from its host directory again at start.
-
-#### Snapshots + dynamic mounts
-
-**Key insight:** the snapshot stores OS and application state
-(memory, running processes, compiled code caches), but **registered
-volumes are snapshotted fresh at start** from your host directories. This means:
-
-- ✅ **Same snapshot** can serve multiple instances with different
-  configs.
-- ✅ **Update configs without rebuilding** — change the host files
-  and restart the machine.
-- ✅ **Instant boot + dynamic configuration** — get both benefits
-  simultaneously.
-
-Example: run three instances from one snapshot with different API
-keys:
+Register each environment's files on its own machine:
 
 ```bash
-# Production gateway with prod Anthropic key
 mvmctl machine volume mount oc-prod --volume config --host "$PWD/prod/config" --guest /data/config
 mvmctl machine volume mount oc-prod --volume secrets --host "$PWD/prod/secrets" --guest /data/secrets
-mvmctl machine run --manifest openclaw --name oc-prod --port 3000:3000
-
-# Staging gateway with test key
 mvmctl machine volume mount oc-staging --volume config --host "$PWD/staging/config" --guest /data/config
 mvmctl machine volume mount oc-staging --volume secrets --host "$PWD/staging/secrets" --guest /data/secrets
-mvmctl machine run --manifest openclaw --name oc-staging --port 3001:3000
-
-# Dev gateway with no key (localhost-only testing)
 mvmctl machine volume mount oc-dev --volume config --host "$PWD/dev/config" --guest /data/config
-mvmctl machine run --manifest openclaw --name oc-dev --port 3002:3000
 ```
 
-All three restore from the same snapshot (1-2 second boot) but get
-different configs and secrets at runtime.
+These are registered host-directory mounts, not snapshot-time refreshes. They
+apply to their named machines and do not claim that one saved workload can be
+reused for multiple environments.
 
 ### Monitoring the VM
 
