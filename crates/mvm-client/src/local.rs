@@ -88,22 +88,6 @@ pub fn auto_selected_backend_name() -> String {
 }
 
 impl LocalBackend {
-    /// Release the leases a stopped machine holds. A persistent machine owns
-    /// every lease under its name; a transient one releases only those its
-    /// session receipt recorded, and none when it has no receipt.
-    fn release_stopped_leases(&self, name: &str) -> anyhow::Result<()> {
-        use crate::volume::{LocalVolumeService, SessionRelease, VolumeService as _};
-        let service = LocalVolumeService::new();
-        if mvm_core::config::machine_spec_path(name).exists() {
-            service.release_owner_leases(name)?;
-        } else if let SessionRelease::Retained(reason) =
-            service.release_session_leases(name, &self.session_root())?
-        {
-            tracing::warn!(machine = name, %reason, "stop retained volume leases");
-        }
-        Ok(())
-    }
-
     pub fn new() -> Self {
         Self {
             backend: AnyBackend::auto_select(),

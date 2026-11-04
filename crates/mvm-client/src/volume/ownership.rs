@@ -203,7 +203,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        mvm_core::config::create_private_dir(parent)
             .with_context(|| format!("creating parent of {}", path.display()))?;
     }
     let bytes = serde_json::to_vec_pretty(value).context("serializing ownership record")?;
