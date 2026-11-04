@@ -12,6 +12,7 @@
 /.cursor/
 /.mcp.json
 /.trail/
+/.zed/
 /.delta/
 .claude/*
 /.serena/

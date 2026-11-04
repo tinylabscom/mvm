@@ -8,6 +8,31 @@ Working with an AI coding agent on this repo? Read the
 it covers claiming issues, the mandatory worktree flow, the Graft/Serena tooling
 split, the fast feedback ladder, and what CI does and does not gate.
 
+## Repository layout
+
+- `src/` and `crates/` contain the CLI entry point and Rust workspace crates.
+  `crates/deps/` contains workspace dependencies, including the libkrun
+  bindings and the locally adapted Mach-O signing crate.
+- `third_party/` contains vendored upstream sources used by the root
+  `[patch.crates-io]` overrides. Check each dependency's provenance and
+  license before changing or removing it; `crates/deps/mvm-macho-sign` also
+  contains adapted upstream code with its own provenance and license.
+- `specs/` holds the PRD, architectural decisions and durable contracts.
+  `schema/` holds machine-readable interfaces used by SDK generation.
+  `model/` holds the conformance claims, authorities and ledger; its generated
+  `CONFORMANCE.md` connects claims to scenarios and witnesses.
+- `assets/` holds the macOS signing entitlement profiles used in builds and
+  installation. `features/` and `tests/` hold behavioral and integration tests.
+- `Justfile` provides common commands; `just/` contains its recipe modules.
+  `scripts/` contains supporting scripts and `xtask/` contains Rust maintenance
+  and validation commands.
+- `nix/` contains Nix build definitions as well as packaging, operational
+  tooling and tests. The Linux image layer belongs to `mvm-images`, but not
+  every file under `nix/` is an image definition: the staged boundary is
+  documented in [ADR-054](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/054-image-boundary-linux-layer.md).
+- `public/` contains the documentation site; `web/` contains web components.
+  `examples/` contains example workloads and `bin/` contains executable tools.
+
 ## macOS documented-surface evidence
 
 After the change under test has landed on `main`, an authorized maintainer can
