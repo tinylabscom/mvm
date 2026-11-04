@@ -23,7 +23,7 @@ boundary only when a workflow actually needs Linux build or evaluation work.
 | Declare a repeatable machine | `mvmctl machine create dev --manifest ./mvm.toml` | TOML-backed image, sizing, network, volume, and dev-init settings. |
 | Branch a running machine | `mvmctl machine fork dev --as dev-branch` | Snapshot a running VM and boot a fresh child with new identity and secrets. |
 | Branch a saved checkpoint | `mvmctl machine restore ckpt-dev-123 --as dev-restore` | Restore a `vm_full` checkpoint into a fresh child VM with new identity and secrets. |
-| Verify a portable artifact | `mvmctl machine check-artifact ./app.mvm --key ./publisher.pub` | Signature, hash, format, and host-architecture verification before admission. |
+| Verify a portable artifact | `mvmctl machine check-artifact ./app.mvmpkg --trust-store ./publisher-trust` | Signature, hash, format, and host-architecture verification before admission. |
 
 Portable artifact creation and `machine run <artifact>` are still preview
 follow-ups in Plan 200. Until those commands land, use `machine check-artifact`

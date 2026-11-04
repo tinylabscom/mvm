@@ -264,7 +264,7 @@ version in `pack.toml`. Publish a fix as a new version; consumers move to it
 with `mvmctl pack update runtime/node`. The older
 `mvmctl pack registry update runtime/node` spelling remains available.
 
-The same check the workflow runs is available in a checkout:
+The same check the workflow runs is available in a `mvm-packs` checkout:
 
 ```sh
 python3 scripts/validate-packs.py

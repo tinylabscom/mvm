@@ -181,7 +181,7 @@ guest whose agent predates the tier — including the one in the image set a
 release binary pins, until that set is re-pinned — runs unfiltered.
 
 The one place you can name a tier is the hidden developer command
-`mvmctl seccomp-audit --tier <tier>`, which is Linux-only, boots no microVM,
+`mvmctl seccomp-audit <tier> -- <command>`, which is Linux-only, boots no microVM,
 and installs no filter — it only reports on a syscall set.
 
 ## Recommended defaults

@@ -74,7 +74,7 @@ export const greet = mvm.app({
 Build, run, invoke:
 
 ```sh
-mvmctl dev compile examples/node/hello-app/app.ts --out /tmp/hello-app
+mvmctl dev compile examples/typescript/hello-app/app.ts --out /tmp/hello-app
 echo '[[], {"name":"ari"}]' | mvmctl machine run --entrypoint --flake /tmp/hello-app   # → "hello ari"
 ```
 

@@ -26,7 +26,8 @@ mvmctl dev kernel build --all --source auto
 
 Flags:
 
-- `--which {builder,workload}` — which kernel (default `builder`).
+- `--which {builder,workload,workload-k8s,rootless}` — which kernel (default
+  `builder`). `workload-k8s` is never compiled; only a cached one is selectable.
 - `--all` — build both variants.
 - `--source {compile,download,auto}` — where the kernel comes from (default
   `compile`, unless `--kernel-source` or `MVM_KERNEL_SOURCE` is set).
@@ -35,15 +36,13 @@ Flags:
   VM on it and confirm the in-guest agent answers over vsock.
 
 Workload kernels ship with `CONFIG_CC_OPTIMIZE_FOR_SIZE=y`. There is no
-`workload-sizeopt` selector on `--which` — the only two values are `builder`
-and `workload`. (A `workload-sizeopt-metrics` *flake output* still exists as a
-compatibility alias; see below.)
+`workload-sizeopt` selector on `--which`.
 
 The compiled or downloaded kernel is cached at
 `~/.mvm/cache/kernels/<arch>/<variant>/vmlinux` and reused by every
 later run that needs it. (A kernel left at the older
 `~/.mvm/cache/builder-vm/<arch>/kernels/<variant>/` path is moved to the
-current one the next time it is read, so an existing cache is not rebuilt.) (There is no `mvmctl dev` command — it was removed.)
+current one the next time it is read, so an existing cache is not rebuilt.)
 
 When the kernel was compiled locally, the cache directory also carries a
 resolved `config` sidecar and `kernel-metrics-<arch>.json`, so you can inspect
@@ -65,27 +64,10 @@ published kernel.
 
 ## Inspect resolved configs and metrics
 
-```bash
-# Direct flake outputs for the resolved configs
-nix build ./nix/images/kernel#builder-configfile -o /tmp/builder.config
-nix build ./nix/images/kernel#workload-configfile -o /tmp/workload.config
-diff -u /tmp/builder.config /tmp/workload.config || true
-
-# Or build both together
-nix build ./nix/images/kernel#resolved-configs -o /tmp/kernel-configs
-ls -l /tmp/kernel-configs
-
-# Per-variant metrics
-nix build ./nix/images/kernel#builder-metrics -o /tmp/builder-metrics
-nix build ./nix/images/kernel#workload-metrics -o /tmp/workload-metrics
-cat /tmp/workload-metrics/metrics.json
-
-# Compatibility alias for the size-oriented workload metrics
-nix build ./nix/images/kernel#workload-sizeopt-metrics -o /tmp/workload-sizeopt-metrics
-cat /tmp/workload-sizeopt-metrics/metrics.json
-```
-
-The legacy `metrics` output remains an alias of `workload-metrics`.
+A locally compiled kernel leaves its resolved `config` and
+`kernel-metrics-<arch>.json` beside it in the cache (see above). The kernel
+flake and its config outputs live in the `mvm-images` repository, so inspect or
+diff configs from a checkout of it.
 
 ## compile vs download
 
