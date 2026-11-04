@@ -22,11 +22,12 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
+use mvm_client::input_journal;
 use mvm_core::user_config::MvmConfig;
 
 use super::checkpoint::{self, validated_checkpoint_id};
 use super::workspace;
-use crate::commands::machine::{MachineExecArgs, input_journal, lifecycle};
+use crate::commands::machine::{MachineExecArgs, lifecycle};
 
 #[derive(Args, Debug, Clone)]
 pub(in crate::commands) struct ReplayArgs {

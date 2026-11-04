@@ -174,6 +174,12 @@ Every `machine exec` records its argv in a per-machine journal — the input,
 never the output. From a checkpoint, the whole session can be re-run against
 byte-identical state:
 
+An absent input journal is an empty history. If the journal cannot be opened or
+read, or its path is a dangling symlink, `machine exec` with nonempty argv,
+checkpoint cursor capture, and replay refuse rather than treating that history
+as empty. Repair or recover the journal before retrying; do not discard it to
+bypass an ambiguous input.
+
 ```sh
 mvmctl machine save coding-agent --tag before-refactor
 mvmctl machine replay <checkpoint-id> --dry-run

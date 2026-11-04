@@ -5,25 +5,45 @@
 //! live in [`ReplayInputStore`], encrypted with the host KEK. The same
 //! per-machine lock covers execution and checkpoint capture, making the
 //! checkpoint's cursor an exact boundary rather than a wall-clock guess.
+//! Callers must hold that lock throughout execution, completion and capture.
+//! The lock serializes cooperating callers, not out-of-band file changes.
+//! Reading entries returns decrypted arguments; treat them as sensitive.
 
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use mvm_client::replay_input::{ReplayInputBinding, ReplayInputRef, ReplayInputStore};
 use mvm_contract::protocol::agent_session::AgentSessionId;
 use mvm_core::util::atomic_io::FileLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::replay_input::{ReplayInputBinding, ReplayInputRef, ReplayInputStore};
+
 /// One completed execution, decrypted in memory for planning or replay.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InputEntry {
+#[derive(Clone, PartialEq, Eq)]
+pub struct InputEntry {
+    /// Monotonic sequence assigned when the execution was recorded.
     pub seq: u64,
+    /// Wall-clock timestamp of the execution's start, in Unix seconds.
     pub at_unix: u64,
+    /// Decrypted command arguments. These can contain sensitive input.
     pub argv: Vec<String>,
+    /// Whether the execution returned successfully.
     pub succeeded: bool,
+}
+
+impl std::fmt::Debug for InputEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InputEntry")
+            .field("seq", &self.seq)
+            .field("at_unix", &self.at_unix)
+            .field("argv", &"[REDACTED]")
+            .field("succeeded", &self.succeeded)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,8 +60,18 @@ enum StoredEvent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PendingExec {
+/// One started execution, to be finished once under the same machine's lock.
+///
+/// A pending execution cannot be copied and finished twice.
+///
+/// ```compile_fail
+/// use mvm_client::input_journal::PendingExec;
+/// fn duplicate(pending: PendingExec) -> (PendingExec, PendingExec) {
+///     (pending, pending)
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct PendingExec {
     seq: u64,
 }
 
@@ -52,12 +82,16 @@ struct CompletedEvent {
     succeeded: bool,
 }
 
-pub(crate) fn journal_path(machine_state_dir: &Path) -> PathBuf {
+fn journal_path(machine_state_dir: &Path) -> PathBuf {
     machine_state_dir.join("input-journal.jsonl")
 }
 
 /// Serialize exec and checkpoint operations for one machine.
-pub(crate) fn lock(machine_state_dir: &Path) -> Result<FileLock> {
+///
+/// # Errors
+///
+/// The journal lock could not be created or acquired.
+pub fn lock(machine_state_dir: &Path) -> Result<FileLock> {
     FileLock::acquire(&journal_path(machine_state_dir)).with_context(|| {
         format!(
             "locking the machine input journal {}",
@@ -67,7 +101,13 @@ pub(crate) fn lock(machine_state_dir: &Path) -> Result<FileLock> {
 }
 
 /// Encrypt and durably record an execution before dispatching it.
-pub(crate) fn begin_exec(machine_state_dir: &Path, argv: &[String]) -> Result<Option<PendingExec>> {
+/// The caller must hold the machine journal lock until execution is finished.
+///
+/// # Errors
+///
+/// The journal is unreadable or ambiguous, the input cannot be encrypted,
+/// or the start event cannot be durably appended.
+pub fn begin_exec(machine_state_dir: &Path, argv: &[String]) -> Result<Option<PendingExec>> {
     if argv.is_empty() {
         return Ok(None);
     }
@@ -93,7 +133,13 @@ pub(crate) fn begin_exec(machine_state_dir: &Path, argv: &[String]) -> Result<Op
 }
 
 /// Durably finish an execution while the journal lock remains held.
-pub(crate) fn finish_exec(
+///
+/// Use the same machine directory and lock held when the execution was started.
+///
+/// # Errors
+///
+/// The finish event cannot be durably appended.
+pub fn finish_exec(
     machine_state_dir: &Path,
     pending: Option<PendingExec>,
     succeeded: bool,
@@ -111,14 +157,24 @@ pub(crate) fn finish_exec(
 }
 
 /// Last fully committed input sequence. This refuses an unfinished exec, so a
-/// checkpoint never seals ambiguous state.
-pub(crate) fn cursor(machine_state_dir: &Path) -> Result<u64> {
+/// checkpoint never seals ambiguous state. Hold the journal lock through the
+/// capture that consumes this cursor.
+///
+/// # Errors
+///
+/// The journal is unreadable, malformed or contains an unfinished execution.
+pub fn cursor(machine_state_dir: &Path) -> Result<u64> {
     Ok(scan(machine_state_dir)?.last().map_or(0, |entry| entry.seq))
 }
 
 /// Read complete entries in order. A torn, unterminated final JSON line is
 /// dropped; malformed durable lines and unfinished executions fail closed.
-pub(crate) fn read(machine_state_dir: &Path) -> Result<Vec<InputEntry>> {
+/// The returned arguments are decrypted and must be treated as sensitive.
+///
+/// # Errors
+///
+/// The journal or an encrypted input is unreadable, malformed or incomplete.
+pub fn read(machine_state_dir: &Path) -> Result<Vec<InputEntry>> {
     let replay_store = store(machine_state_dir);
     scan(machine_state_dir)?
         .into_iter()
@@ -140,8 +196,29 @@ pub(crate) fn read(machine_state_dir: &Path) -> Result<Vec<InputEntry>> {
 
 fn scan(machine_state_dir: &Path) -> Result<Vec<CompletedEvent>> {
     let path = journal_path(machine_state_dir);
-    let Ok(mut file) = OpenOptions::new().read(true).open(&path) else {
-        return Ok(Vec::new());
+    let mut file = match OpenOptions::new().read(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(&path) {
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(Vec::new());
+                }
+                Err(metadata_error) => {
+                    return Err(metadata_error).with_context(|| {
+                        format!("inspecting machine input journal {}", path.display())
+                    });
+                }
+                Ok(_) => {
+                    return Err(error).with_context(|| {
+                        format!("opening machine input journal {}", path.display())
+                    });
+                }
+            }
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("opening machine input journal {}", path.display()));
+        }
     };
     let mut text = String::new();
     file.read_to_string(&mut text)
@@ -201,7 +278,7 @@ fn scan(machine_state_dir: &Path) -> Result<Vec<CompletedEvent>> {
     Ok(entries)
 }
 
-pub(crate) fn select_after_cursor(entries: &[InputEntry], cursor: u64) -> Vec<InputEntry> {
+pub fn select_after_cursor(entries: &[InputEntry], cursor: u64) -> Vec<InputEntry> {
     entries
         .iter()
         .filter(|entry| entry.seq > cursor)
@@ -291,6 +368,68 @@ mod tests {
         let _lock = lock(dir.path()).expect("lock");
         assert_eq!(begin_exec(dir.path(), &[]).expect("begin"), None);
         assert!(read(dir.path()).expect("read").is_empty());
+    }
+
+    #[test]
+    fn a_missing_journal_is_an_empty_history_without_creating_it() {
+        let (dir, _env) = isolated();
+        assert_eq!(cursor(dir.path()).expect("missing journal"), 0);
+        assert!(read(dir.path()).expect("missing journal").is_empty());
+        assert!(!journal_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn an_unreadable_journal_is_not_an_empty_history() {
+        let (dir, _env) = isolated();
+        let not_a_directory = dir.path().join("not-a-directory");
+        std::fs::write(&not_a_directory, b"preserve").expect("write");
+
+        assert!(cursor(&not_a_directory).is_err());
+        assert!(read(&not_a_directory).is_err());
+        assert!(begin_exec(&not_a_directory, &["echo".into()]).is_err());
+        assert_eq!(std::fs::read(&not_a_directory).expect("read"), b"preserve");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_journal_symlink_is_not_an_absent_journal() {
+        let (dir, _env) = isolated();
+        let path = journal_path(dir.path());
+        std::os::unix::fs::symlink("missing-target", &path).expect("symlink");
+
+        assert!(cursor(dir.path()).is_err());
+        assert!(read(dir.path()).is_err());
+        assert_eq!(
+            std::fs::read_link(&path).expect("symlink remains"),
+            Path::new("missing-target")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_journal_symlink_remains_readable() {
+        let (dir, _env) = isolated();
+        record(dir.path(), &["preserved"], true);
+        let path = journal_path(dir.path());
+        std::fs::rename(&path, dir.path().join("existing-journal")).expect("rename");
+        std::os::unix::fs::symlink("existing-journal", &path).expect("symlink");
+
+        assert_eq!(cursor(dir.path()).expect("cursor"), 1);
+        assert_eq!(read(dir.path()).expect("read")[0].argv, ["preserved"]);
+    }
+
+    #[test]
+    fn debug_output_never_contains_decrypted_arguments() {
+        let entry = InputEntry {
+            seq: 1,
+            at_unix: 42,
+            argv: vec!["private-input-must-not-appear".into()],
+            succeeded: true,
+        };
+        let rendered = format!("{entry:?}");
+        assert!(!rendered.contains("private-input-must-not-appear"));
+        assert!(!format!("{entry:#?}").contains("private-input-must-not-appear"));
+        assert!(rendered.contains("seq"));
     }
 
     #[test]

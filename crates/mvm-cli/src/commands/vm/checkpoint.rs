@@ -20,13 +20,13 @@ use mvm_client::checkpoint::class_str;
 use mvm_client::checkpoint::{
     CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, capture_fs_quick, capture_vm_full,
 };
+use mvm_client::input_journal;
 use mvm_core::checkpoint::{CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta};
 use mvm_core::config::{machine_state_dir, vm_state_dir};
 use mvm_core::vm_backend::SnapshotCapability;
 
 use super::Cli;
 use super::shared::clap_vm_name;
-use crate::commands::machine::input_journal;
 use crate::ui;
 use admitted::admitted_capture_for;
 
