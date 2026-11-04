@@ -65,15 +65,11 @@ pub fn prepare_replay(
         descendants.push(step);
     }
     descendants.reverse();
-    if descendants.is_empty() {
+    let Some(newest) = descendants.last() else {
         bail!("no recorded replay inputs follow the checkpoint cursor");
-    }
-    verify_lineage(
-        checkpoints,
-        &descendants.last().expect("non-empty").id,
-        anchor,
-    )
-    .context("verifying committed replay checkpoint timeline")?;
+    };
+    verify_lineage(checkpoints, &newest.id, anchor)
+        .context("verifying committed replay checkpoint timeline")?;
     let mut recorded = Vec::with_capacity(descendants.len());
     let mut last_cursor = binding.journal_cursor;
     for step in descendants {

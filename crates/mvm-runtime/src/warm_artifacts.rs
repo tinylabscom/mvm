@@ -406,8 +406,13 @@ impl WarmArtifactStore {
             .map_err(|error| WarmArtifactError::Io(anyhow::Error::new(error)))?;
         mvm_core::atomic_io::atomic_write(&manifest_path, &body).map_err(WarmArtifactError::Io)?;
         verify_manifest(staging, &manifest)?;
-        fs::create_dir_all(object_root.parent().expect("object root has a parent"))
-            .map_err(|error| io_error(object_root, error))?;
+        let object_parent = object_root.parent().ok_or_else(|| {
+            WarmArtifactError::Corrupt(format!(
+                "object root {} has no parent directory",
+                object_root.display()
+            ))
+        })?;
+        fs::create_dir_all(object_parent).map_err(|error| io_error(object_root, error))?;
         fs::rename(staging, object_root).map_err(|error| io_error(object_root, error))?;
         Ok(WarmArtifactSet {
             root: object_root.to_path_buf(),

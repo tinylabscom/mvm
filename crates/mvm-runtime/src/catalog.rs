@@ -293,16 +293,15 @@ pub fn descriptor_for_marker_file(marker_file: &str) -> Option<&'static BackendD
 /// Descriptors that drop a per-VM marker file, ordered by their started-VM
 /// probe priority so `for_started_vm` checks them deterministically.
 pub fn started_vm_probe_descriptors() -> Vec<&'static BackendDescriptor> {
-    let mut descriptors: Vec<_> = BACKEND_DESCRIPTORS
+    let mut ordered: Vec<_> = BACKEND_DESCRIPTORS
         .iter()
-        .filter(|descriptor| descriptor.started_vm_probe_order.is_some())
+        .filter_map(|descriptor| Some((descriptor.started_vm_probe_order?, descriptor)))
         .collect();
-    descriptors.sort_by_key(|descriptor| {
-        descriptor
-            .started_vm_probe_order
-            .expect("started-vm probe descriptors must have a probe order")
-    });
-    descriptors
+    ordered.sort_by_key(|(order, _)| *order);
+    ordered
+        .into_iter()
+        .map(|(_, descriptor)| descriptor)
+        .collect()
 }
 
 /// Descriptors included in the aggregate running-VM listing (`mvmctl ls`).

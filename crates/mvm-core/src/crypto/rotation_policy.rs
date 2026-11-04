@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use secrecy::ExposeSecret;
 
@@ -88,9 +88,8 @@ pub fn rotate_if_due(
     if !rotation_due(&manifest, interval, now) {
         return Ok(RotationDecision::NotDue);
     }
-    // `rotation_due` returning true implies an Active entry exists.
     let from_version = active_entry(&manifest)
-        .expect("rotation_due implies an active KEK")
+        .context("rotation is due but the manifest has no active KEK")?
         .version;
 
     let old_master = load_master_key(active_dir, from_version)?;

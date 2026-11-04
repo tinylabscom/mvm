@@ -38,11 +38,9 @@ pub enum TtlParseError {
 /// Parse `30s`, `5m`, `2h`, `7d`, or a bare positive integer (seconds).
 pub fn parse_ttl(s: &str) -> Result<Duration, TtlParseError> {
     let trimmed = s.trim();
-    if trimmed.is_empty() {
+    let Some(last) = trimmed.chars().last() else {
         return Err(TtlParseError::Empty);
-    }
-
-    let last = trimmed.chars().last().expect("non-empty after trim");
+    };
     let (num_str, multiplier) = if last.is_ascii_digit() {
         (trimmed, 1u64)
     } else {

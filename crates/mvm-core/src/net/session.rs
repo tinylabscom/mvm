@@ -755,7 +755,12 @@ pub fn write_sealed_frame<W: Write>(
     let mut buf = Vec::new();
     frame.encode(&mut buf)?;
     let len = u32::try_from(buf.len())
-        .expect("bounded sealed frame length fits u32")
+        .map_err(|_| {
+            SessionError::InvalidHandshake(format!(
+                "sealed frame length {} exceeds the u32 length prefix",
+                buf.len()
+            ))
+        })?
         .to_be_bytes();
     stream.write_all(&len)?;
     stream.write_all(&buf)?;
@@ -904,7 +909,12 @@ pub fn write_json_frame<T: Serialize>(
         )));
     }
     let len = u32::try_from(data.len())
-        .expect("bounded frame length fits u32")
+        .map_err(|_| {
+            SessionError::InvalidHandshake(format!(
+                "frame length {} exceeds the u32 length prefix",
+                data.len()
+            ))
+        })?
         .to_be_bytes();
     stream.write_all(&len)?;
     stream.write_all(&data)?;

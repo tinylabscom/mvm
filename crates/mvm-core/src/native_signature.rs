@@ -65,14 +65,16 @@ mod macos {
             if xml.get(..4) != Some(&0xfade_7171u32.to_be_bytes()) {
                 return Err("invalid XML entitlement blob".into());
             }
+            let xml_body = xml.get(8..).ok_or("truncated XML entitlement blob")?;
             let value =
-                plist::Value::from_reader_xml(&xml[8..]).map_err(|error| error.to_string())?;
+                plist::Value::from_reader_xml(xml_body).map_err(|error| error.to_string())?;
             verify_values(&value, required)?;
             if let Some(der) = signature.get(&7) {
                 if der.get(..4) != Some(&0xfade_7172u32.to_be_bytes()) {
                     return Err("invalid DER entitlement blob".into());
                 }
-                let der = mvm_macho_sign::decode_entitlements_der(&der[8..])
+                let der_body = der.get(8..).ok_or("truncated DER entitlement blob")?;
+                let der = mvm_macho_sign::decode_entitlements_der(der_body)
                     .map_err(|error| error.to_string())?;
                 verify_values(&der, required)?;
                 if der != value {

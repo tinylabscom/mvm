@@ -630,10 +630,9 @@ impl AgentSessionJournal {
                     "session history is not contiguous durable history",
                 ));
             }
-            if let AgentSessionEvent::Durable { event } = &envelope.event {
-                let sequence = envelope
-                    .durable_sequence
-                    .expect("validated durable sequence");
+            if let (AgentSessionEvent::Durable { event }, Some(sequence)) =
+                (&envelope.event, envelope.durable_sequence)
+            {
                 journal.replay_state(event, sequence)?;
             }
             journal.push_event(envelope)?;
