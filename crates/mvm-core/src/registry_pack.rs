@@ -1012,9 +1012,11 @@ fn validate_registry_pack_manifest(
                 reason: format!("manifest path {path:?} must be a safe in-pack mvm.toml"),
             });
         }
-        let parent = manifest_path
-            .parent()
-            .expect("a safe in-pack mvm.toml has a parent");
+        let Some(parent) = manifest_path.parent() else {
+            return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+                reason: format!("manifest path {path:?} has no parent directory"),
+            });
+        };
         for name in ["mvm.toml", "flake.nix", "flake.lock"] {
             let required = parent.join(name);
             let required = required.to_string_lossy();

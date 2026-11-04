@@ -64,15 +64,10 @@ pub fn normalize_fc_version(raw: &str) -> String {
     // Capture the last semantic version (v?MAJOR.MINOR[.PATCH])
     let re = regex::Regex::new(r"(?:v)?\d+\.\d+(?:\.\d+)?").expect("valid regex");
     let candidate = re
-        .captures_iter(raw)
+        .find_iter(raw)
         .last()
-        .or_else(|| re.captures_iter(FC_VERSION_DEFAULT).last())
-        .map(|c| {
-            c.get(0)
-                .expect("regex capture group 0 must exist")
-                .as_str()
-                .to_string()
-        })
+        .or_else(|| re.find_iter(FC_VERSION_DEFAULT).last())
+        .map(|m| m.as_str().to_string())
         .unwrap_or_else(|| FC_VERSION_DEFAULT.to_string());
 
     if candidate.starts_with('v') {
