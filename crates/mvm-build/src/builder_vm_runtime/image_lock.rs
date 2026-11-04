@@ -797,6 +797,7 @@ pub fn hold_image_lock(lock_path: &Path, wait: LockWait) -> Result<HeldImageLock
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::isolated_lock_probe;
     use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
 
     // -----------------------------------------------------------------
@@ -1328,66 +1329,68 @@ mod tests {
         drop(guard);
     }
 
-    /// RW volume image the test expects to be FREE. The short wait
-    /// absorbs a spurious `WouldBlock` without letting a genuinely
-    /// stuck lock hang the suite.
-    fn ensure_vol_rw_or_retry(path: &Path, size_bytes: u64) -> VolumeImageLock {
+    /// RW volume image the isolated test expects to be free immediately.
+    fn ensure_vol_rw(path: &Path, size_bytes: u64) -> VolumeImageLock {
         crate::volume_image::ensure_persistent_volume_image_within(
             path,
             size_bytes,
             false,
-            LockWait::of(Duration::from_secs(5)),
+            LockWait::none(),
         )
         .expect("ensure volume")
     }
 
     #[test]
     fn ensure_persistent_volume_image_sparse_creates_and_is_idempotent() {
-        let scratch = tempfile::TempDir::new().unwrap();
-        let img = scratch.path().join("vols").join("data.img");
-        let guard = ensure_vol_rw_or_retry(&img, 32 * 1024 * 1024);
-        assert!(img.is_file(), "parent dir + sparse image created");
-        assert_eq!(
-            std::fs::metadata(&img).unwrap().len(),
-            32 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES
-        );
-        let mut file = std::fs::File::open(&img).unwrap();
-        use std::io::{Read as _, Seek as _};
-        file.seek(std::io::SeekFrom::Start(1024 + 56)).unwrap();
-        let mut magic = [0u8; 2];
-        file.read_exact(&mut magic).unwrap();
-        assert_eq!(u16::from_le_bytes(magic), 0xef53, "new volume is ext4");
-        drop(guard);
-        // Second call leaves the existing (non-empty) image untouched —
-        // a warm volume's data must survive. Pass a different size to
-        // prove we don't resize an existing image.
-        let guard2 = ensure_vol_rw_or_retry(&img, 8 * 1024 * 1024);
-        assert_eq!(
-            std::fs::metadata(&img).unwrap().len(),
-            32 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES,
-            "existing volume must not be resized"
-        );
-        drop(guard2);
+        isolated_lock_probe(|| {
+            let scratch = tempfile::TempDir::new().unwrap();
+            let img = scratch.path().join("vols").join("data.img");
+            let guard = ensure_vol_rw(&img, 32 * 1024 * 1024);
+            assert!(img.is_file(), "parent dir + sparse image created");
+            assert_eq!(
+                std::fs::metadata(&img).unwrap().len(),
+                32 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES
+            );
+            let mut file = std::fs::File::open(&img).unwrap();
+            use std::io::{Read as _, Seek as _};
+            file.seek(std::io::SeekFrom::Start(1024 + 56)).unwrap();
+            let mut magic = [0u8; 2];
+            file.read_exact(&mut magic).unwrap();
+            assert_eq!(u16::from_le_bytes(magic), 0xef53, "new volume is ext4");
+            drop(guard);
+            // Second call leaves the existing (non-empty) image untouched —
+            // a warm volume's data must survive. Pass a different size to
+            // prove we don't resize an existing image.
+            let guard2 = ensure_vol_rw(&img, 8 * 1024 * 1024);
+            assert_eq!(
+                std::fs::metadata(&img).unwrap().len(),
+                32 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES,
+                "existing volume must not be resized"
+            );
+            drop(guard2);
+        });
     }
 
     #[test]
     fn ensure_persistent_volume_image_rw_refuses_concurrent() {
-        let scratch = tempfile::TempDir::new().unwrap();
-        let img = scratch.path().join("data.img");
-        let first = ensure_vol_rw_or_retry(&img, 16 * 1024 * 1024);
-        let err = crate::volume_image::ensure_persistent_volume_image_within(
-            &img,
-            16 * 1024 * 1024,
-            false,
-            LockWait::none(),
-        )
-        .unwrap_err();
-        assert!(
-            format!("{err}").contains("is still held by"),
-            "unexpected error: {err}"
-        );
-        drop(first);
-        ensure_vol_rw_or_retry(&img, 16 * 1024 * 1024);
+        isolated_lock_probe(|| {
+            let scratch = tempfile::TempDir::new().unwrap();
+            let img = scratch.path().join("data.img");
+            let first = ensure_vol_rw(&img, 16 * 1024 * 1024);
+            let err = crate::volume_image::ensure_persistent_volume_image_within(
+                &img,
+                16 * 1024 * 1024,
+                false,
+                LockWait::none(),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err}").contains("is still held by"),
+                "unexpected error: {err}"
+            );
+            drop(first);
+            ensure_vol_rw(&img, 16 * 1024 * 1024);
+        });
     }
 
     #[test]

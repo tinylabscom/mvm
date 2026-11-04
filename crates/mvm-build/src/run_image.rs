@@ -1095,6 +1095,8 @@ pub fn resolve_guest_runtime_identity(cache_root: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::test_support::isolated_lock_probe;
 
     #[test]
     fn pure_sealed_materialization_keeps_its_content_bound_seal() {
@@ -1528,49 +1530,58 @@ mod tests {
     #[cfg(unix)]
     fn dropping_a_file_lock_releases_it_while_an_unrelated_child_is_before_exec() {
         use mvm_core::util::atomic_io::FileLock;
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("guard");
-        let held = FileLock::acquire(&path).unwrap();
-        let reacquired = while_child_is_before_exec(|| {
-            drop(held);
-            FileLock::try_acquire(&path)
+
+        isolated_lock_probe(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("guard");
+            let held = FileLock::acquire(&path).unwrap();
+            let reacquired = while_child_is_before_exec(|| {
+                drop(held);
+                FileLock::try_acquire(&path)
+            });
+            assert!(
+                reacquired.unwrap().is_some(),
+                "guard drop must release the lock before child exec"
+            );
         });
-        assert!(
-            reacquired.unwrap().is_some(),
-            "guard drop must release the lock before child exec"
-        );
     }
 
     #[test]
     #[cfg(unix)]
     fn dropping_a_one_shot_store_lock_releases_it_before_an_unrelated_child_execs() {
         use crate::builder_vm_runtime::{LockWait, acquire_nix_store_image_lock, hold_image_lock};
-        let directory = tempfile::tempdir().unwrap();
-        let held = acquire_nix_store_image_lock(directory.path(), "aarch64", 16).unwrap();
-        let mut sidecar = held.path().as_os_str().to_owned();
-        sidecar.push(".lock");
-        let path = std::path::PathBuf::from(sidecar);
-        let reacquired = while_child_is_before_exec(|| {
-            drop(held);
-            hold_image_lock(&path, LockWait::none())
+
+        isolated_lock_probe(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let held = acquire_nix_store_image_lock(directory.path(), "aarch64", 16).unwrap();
+            let mut sidecar = held.path().as_os_str().to_owned();
+            sidecar.push(".lock");
+            let path = std::path::PathBuf::from(sidecar);
+            let reacquired = while_child_is_before_exec(|| {
+                drop(held);
+                hold_image_lock(&path, LockWait::none())
+            });
+            let _reacquired =
+                reacquired.expect("one-shot guard drop must release the lock before child exec");
         });
-        let _reacquired =
-            reacquired.expect("one-shot guard drop must release the lock before child exec");
     }
 
     #[test]
     #[cfg(unix)]
     fn dropping_a_persistent_store_lock_releases_it_before_an_unrelated_child_execs() {
         use crate::builder_vm_runtime::{LockWait, hold_image_lock};
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("store.img.lock");
-        let held = hold_image_lock(&path, LockWait::none()).unwrap();
-        let reacquired = while_child_is_before_exec(|| {
-            drop(held);
-            hold_image_lock(&path, LockWait::none())
+
+        isolated_lock_probe(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("store.img.lock");
+            let held = hold_image_lock(&path, LockWait::none()).unwrap();
+            let reacquired = while_child_is_before_exec(|| {
+                drop(held);
+                hold_image_lock(&path, LockWait::none())
+            });
+            let _reacquired =
+                reacquired.expect("persistent guard drop must release the lock before child exec");
         });
-        let _reacquired =
-            reacquired.expect("persistent guard drop must release the lock before child exec");
     }
 
     /// The locks the whole materialization runs under are held for exactly as
