@@ -104,7 +104,8 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// 9 added caller-owned invocation contexts with independent negotiation.
 /// 10 added complete read-only checkpoint catalog metadata.
 /// 11 added guarded host-local checkpoint removal.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 11;
+/// 12 added host-local signed-chain checkpoint lineage verification.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 12;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -615,6 +616,25 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_lineage_is_negotiated_without_constructing_machine_services() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let method = checkpoint::VERIFY_LINEAGE.as_bytes();
+        let request = br#"{"id":"absent"}"#;
+        assert_eq!(
+            handle(false, method, request, &Untouched).status,
+            MVM_HOSTLIB_ABI_NOT_NEGOTIATED
+        );
+        assert_eq!(
+            handle(true, method, request, &Untouched).status,
+            status::MVM_HOSTLIB_BACKEND
+        );
+        assert!(!mvm_core::config::checkpoints_dir().exists());
+        assert!(!home.path().join("keys").exists());
+    }
+
+    #[test]
     fn host_local_routes_require_negotiation_without_constructing_services() {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
@@ -665,13 +685,14 @@ mod tests {
 
     #[test]
     fn recovery_status_and_c_buffer_do_not_depend_on_last_negotiated_minor() {
-        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 11));
+        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 12));
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 7), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 8), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 9), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 10), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 11), 1);
-        assert_eq!(mvm_hostlib_abi_is_compatible(1, 12), 0);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 12), 1);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 13), 0);
         for minor in [7, 8, 9, 7] {
             assert_eq!(mvm_hostlib_abi_is_compatible(1, minor), 1);
             let outcome = Outcome::from(mvm_core::client::MvmError::RecoveryRequired {

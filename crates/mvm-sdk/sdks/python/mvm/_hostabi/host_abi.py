@@ -176,6 +176,16 @@ class CheckpointRemoveRequest:
 
 
 @dataclass
+class CheckpointVerifyLineageReply:
+    pass
+
+
+@dataclass
+class CheckpointVerifyLineageRequest:
+    id: str
+
+
+@dataclass
 class ContentBlob:
     name: str
     sha256: str
@@ -1091,6 +1101,12 @@ class CheckpointRemove:
 
 
 @dataclass
+class CheckpointVerifyLineage:
+    reply: CheckpointVerifyLineageReply
+    request: CheckpointVerifyLineageRequest
+
+
+@dataclass
 class GuestCp:
     reply: GuestCpReply
     request: GuestCpRequest
@@ -1775,6 +1791,7 @@ class HostAbi:
     backend_capabilities: BackendCapabilities
     checkpoint_list: CheckpointList
     checkpoint_remove: CheckpointRemove
+    checkpoint_verify_lineage: CheckpointVerifyLineage
     entrypoint_call: EntrypointCall
     guest_cp: GuestCp
     guest_fs_list: GuestFsList

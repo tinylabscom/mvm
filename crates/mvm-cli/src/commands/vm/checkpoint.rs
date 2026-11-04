@@ -2922,6 +2922,27 @@ mod tests {
         verify_lineage(&store, &meta.id, &anchor).unwrap();
     }
 
+    #[test]
+    fn checkpoint_verify_cli_accepts_signed_lineage_and_refuses_changed_metadata() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let store = CheckpointStore::open();
+        let meta = seed_audited_checkpoint(&store, "ckpt-cli-verify", "aa");
+        for json in [false, true] {
+            lineage::verify(meta.id.as_str(), json).unwrap();
+        }
+        let path = store.dir_for(&meta.id).join("meta.json");
+        let mut changed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        changed["vm_name"] = serde_json::json!("changed-after-signing");
+        std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        for json in [false, true] {
+            let error = lineage::verify(meta.id.as_str(), json).unwrap_err();
+            assert!(error.to_string().contains("lineage verification failed"));
+        }
+    }
+
     /// The point of chain-anchoring: a fully self-consistent local re-forge — an
     /// attacker rewrites the record's content AND recomputes its `meta_digest` so
     /// the two agree on disk — passes local recompute but is caught by the signed

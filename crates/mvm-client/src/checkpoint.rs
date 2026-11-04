@@ -41,7 +41,7 @@ pub use mvm_runtime::vm::instance_snapshot::lock_resume;
 pub use mvm_runtime::vm::snapshot_key::SNAPSHOT_TENANT_KEY_ENV;
 pub use mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision;
 
-/// Access to the local checkpoint catalog, guarded removal and workspace images.
+/// Host-local checkpoint catalog, lineage verification, removal and workspace images.
 pub struct Checkpoints {
     store: CheckpointStore,
 }
@@ -59,6 +59,7 @@ impl Checkpoints {
     /// Catalog reads can use isolated state without changing process-global
     /// configuration. Removal still checks the configured host-wide session
     /// pins; an explicit catalog root does not select another session policy.
+    /// Lineage verification still uses the configured host's signed audit chains.
     pub fn at(root: impl AsRef<Path>) -> Self {
         Self {
             store: CheckpointStore::at(root.as_ref().to_path_buf()),
@@ -89,6 +90,26 @@ impl Checkpoints {
             );
         }
         Ok(meta)
+    }
+
+    /// Verify metadata ancestry against the configured host's signed audit chains.
+    ///
+    /// This does not hash snapshot blobs, admit a restore or establish runtime
+    /// compatibility. Verification uses the existing host identity; loading the
+    /// anchor may initialize that identity when the audit directory exists.
+    ///
+    /// # Errors
+    ///
+    /// Invalid path-component IDs return `MvmError::InvalidSpec` before anchor
+    /// access. Missing, altered, unaudited or broken ancestry and unreadable
+    /// audit chains fail closed through the existing lineage verifier.
+    pub fn verify_lineage(&self, id: &CheckpointId) -> Result<()> {
+        let id = validated_id(id.as_str()).map_err(|_| MvmError::InvalidSpec {
+            reason: "invalid checkpoint id".into(),
+        })?;
+        let anchor = anchor::SignedChainAnchor::load()
+            .context("loading the signed audit chain to anchor lineage verification")?;
+        verify_lineage(&self.store, &id, &anchor)
     }
 
     /// Remove a checkpoint only after metadata, session-pin and descendant checks.
@@ -308,6 +329,140 @@ mod tests {
         .build();
         checkpoints.store.write_meta(&meta).unwrap();
         meta
+    }
+
+    fn audit_record(meta: &CheckpointMeta) {
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-lineage-test")
+            .build();
+        let signer = mvm_hostd::audit::host_keypair::load_or_init().unwrap();
+        let emitter = mvm_hostd::audit::emitter::AuditEmitter::new(signer.signing).unwrap();
+        bind_checkpoint_created(&emitter, &plan, meta).unwrap();
+    }
+
+    fn seed_lineage_record(
+        checkpoints: &Checkpoints,
+        id: &str,
+        parent: Option<&CheckpointMeta>,
+    ) -> CheckpointMeta {
+        let meta = CheckpointMeta::builder(
+            CheckpointId::new(id),
+            mvm_core::checkpoint::CheckpointClass::FsQuick,
+            "vm",
+        )
+        .parent(parent.map(|record| record.meta_digest.clone()))
+        .content(vec![mvm_core::checkpoint::ContentBlob {
+            name: "rootfs.ext4".into(),
+            sha256: "a".repeat(64),
+        }])
+        .build();
+        checkpoints.store.write_meta(&meta).unwrap();
+        meta
+    }
+
+    #[test]
+    fn checkpoint_verify_lineage_walks_signed_ancestors_without_reading_content() {
+        let (home, _env, _) = removal_fixture();
+        let checkpoints = Checkpoints::at(home.path().join("explicit-catalog"));
+        let root = seed_lineage_record(&checkpoints, "root", None);
+        audit_record(&root);
+        let child = seed_lineage_record(&checkpoints, "child", Some(&root));
+        audit_record(&child);
+        let audit_path = home.path().join("audit/local.jsonl");
+        let audit_before = std::fs::read(&audit_path).unwrap();
+        for meta in [&root, &child] {
+            let before =
+                std::fs::read(checkpoints.store.dir_for(&meta.id).join("meta.json")).unwrap();
+            assert!(!checkpoints.store.content_dir(&meta.id).exists());
+            checkpoints.verify_lineage(&meta.id).unwrap();
+            assert_eq!(
+                std::fs::read(checkpoints.store.dir_for(&meta.id).join("meta.json")).unwrap(),
+                before
+            );
+        }
+        assert_eq!(std::fs::read(audit_path).unwrap(), audit_before);
+    }
+
+    #[test]
+    fn checkpoint_verify_lineage_refuses_invalid_ids_before_anchor_initialization() {
+        let (home, _env, checkpoints) = removal_fixture();
+        // A file rather than a directory makes accidental anchor access fail.
+        std::fs::write(home.path().join("audit"), b"do not open").unwrap();
+        for raw in ["", ".", "..", "../outside", "a/b", "a\\b", "a\0b", "a\nb"] {
+            let error = checkpoints
+                .verify_lineage(&CheckpointId::new(raw))
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<MvmError>(),
+                    Some(MvmError::InvalidSpec { .. })
+                ),
+                "{raw:?}: {error:#}"
+            );
+        }
+        assert!(!home.path().join("keys").exists());
+        assert!(!checkpoints.store.root().exists());
+    }
+
+    #[test]
+    fn checkpoint_verify_lineage_refuses_missing_unaudited_reforged_or_dangling_records() {
+        for failure in [
+            "missing",
+            "unaudited",
+            "reforged",
+            "dangling",
+            "broken-chain",
+            "misbound",
+        ] {
+            let (home, _env, checkpoints) = removal_fixture();
+            let root = seed_lineage_record(&checkpoints, "root", None);
+            audit_record(&root);
+            let child = seed_lineage_record(&checkpoints, "child", Some(&root));
+            if failure != "unaudited" {
+                audit_record(&child);
+            }
+            match failure {
+                "missing" => {
+                    std::fs::remove_file(checkpoints.store.dir_for(&child.id).join("meta.json"))
+                        .unwrap();
+                }
+                "reforged" => {
+                    let changed = CheckpointMeta::builder(
+                        child.id.clone(),
+                        mvm_core::checkpoint::CheckpointClass::FsQuick,
+                        "forged",
+                    )
+                    .parent(Some(root.meta_digest.clone()))
+                    .build();
+                    checkpoints.store.write_meta(&changed).unwrap();
+                    assert_eq!(changed.meta_digest, changed.compute_meta_digest());
+                }
+                "dangling" => checkpoints.store.remove(&root.id).unwrap(),
+                "misbound" => {
+                    std::fs::copy(
+                        checkpoints.store.dir_for(&root.id).join("meta.json"),
+                        checkpoints.store.dir_for(&child.id).join("meta.json"),
+                    )
+                    .unwrap();
+                }
+                "broken-chain" => {
+                    let path = home.path().join("audit/local.jsonl");
+                    let bytes = std::fs::read_to_string(&path).unwrap();
+                    let damaged = bytes.replace("fs_quick", "vm_full");
+                    assert_ne!(bytes, damaged);
+                    std::fs::write(path, damaged).unwrap();
+                }
+                _ => {}
+            }
+            let error = checkpoints.verify_lineage(&child.id).unwrap_err();
+            if failure == "reforged" {
+                assert!(
+                    format!("{error:#}").contains("does not match the signed audit chain"),
+                    "{error:#}"
+                );
+            }
+        }
     }
 
     #[test]

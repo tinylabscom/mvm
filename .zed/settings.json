@@ -1,9 +1,0 @@
-{
-  "context_servers": {
-    "graft": {
-      "command": "graft",
-      "args": ["mcp"],
-      "env": {}
-    }
-  }
-}

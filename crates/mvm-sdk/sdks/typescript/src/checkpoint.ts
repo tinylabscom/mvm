@@ -1,6 +1,6 @@
 /** Host-local checkpoint operations through the client-owned host service. */
 import { call } from "./_hostlib.js";
-import { CHECKPOINT_LIST, CHECKPOINT_REMOVE } from "./hostabi/methods.js";
+import { CHECKPOINT_LIST, CHECKPOINT_REMOVE, CHECKPOINT_VERIFY_LINEAGE } from "./hostabi/methods.js";
 import type { CheckpointListReply } from "./hostabi/host_abi.js";
 
 export type CheckpointMeta = CheckpointListReply[number];
@@ -22,4 +22,14 @@ export function list(): CheckpointListReply {
  */
 export function remove(id: string): void {
   call(CHECKPOINT_REMOVE, { id });
+}
+
+/**
+ * Verify metadata ancestry against this host's signed audit chains.
+ * Refuses missing, changed or unaudited ancestry. Does not hash snapshot blobs,
+ * establish runtime compatibility or authorize a restore. Loading the existing
+ * host anchor may initialize its identity when an audit directory exists.
+ */
+export function verifyLineage(id: string): void {
+  call(CHECKPOINT_VERIFY_LINEAGE, { id });
 }

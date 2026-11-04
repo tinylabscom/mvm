@@ -1,6 +1,6 @@
 {
   "abi_major": 1,
-  "abi_minor": 11,
+  "abi_minor": 12,
   "methods": [
     {
       "classification": "prod_safe",
@@ -13,6 +13,12 @@
       "key": "checkpoint_remove",
       "name": "checkpoint.remove",
       "summary": "Remove a host-local checkpoint only after metadata, session-pin and descendant checks."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "checkpoint_verify_lineage",
+      "name": "checkpoint.verify_lineage",
+      "summary": "Verifies checkpoint metadata ancestry against the host's signed audit chains, not blob contents or restore authority."
     },
     {
       "classification": "prod_safe",
