@@ -1556,6 +1556,8 @@ mod sudo_elision_tests {
     fn a_systemd_that_rewrites_dollars_still_yields_a_numeric_pid() {
         use std::os::unix::fs::PermissionsExt;
 
+        // Other scope tests temporarily replace PATH.
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let root = tempfile::tempdir().expect("root");
         let bin = root.path().join("bin");
         let vm_dir = root.path().join("vm");
