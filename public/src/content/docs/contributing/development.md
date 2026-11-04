@@ -313,9 +313,11 @@ home isolation or increasing the lane timeout.
 ### Kernel builds
 
 The builder-VM and workload microVM kernels are slim custom Linux
-builds: one shared config in `nix/images/kernel/base.nix` plus a
-per-variant delta (`workload.nix` adds dm-verity; `builder.nix` adds
-the nix-build sandbox + egress-lockdown bits). Because the config is
+builds: one shared config plus a per-variant delta (the workload kernel
+adds dm-verity; the builder kernel adds the nix-build sandbox and
+egress-lockdown bits). The kernel flake lives in `mvm-images`, not in this
+repository, so a compile needs a selected or sibling `mvm-images` checkout.
+Because the config is
 custom, `cache.nixos.org` has no substitute, so the first build on a
 fresh machine compiles the kernel from source. It can take several minutes
 depending on the host and is memory-heavy; later builds reuse the persistent
@@ -424,19 +426,9 @@ just ci
 - CLI binary tests go in root `tests/cli.rs`
 - Use `#[serde(default)]` when adding fields to structs used in test fixtures
 
-### Gated E2E: the core-demo regression guard
+### Gated E2E
 
-`crates/mvm-cli/tests/core_demo_e2e.rs` exercises the whole `bootstrap → compile → machine run → vsock ping` spine end-to-end. It boots the persistent builder VM, lowers `examples/python/hello-app/app.py` to a flake, builds + boots the workload microVM, and waits for the guest agent to answer over vsock. Default-skips so it doesn't fire on routine `cargo test` runs; gate is `MVM_E2E_SMOKE=1`:
-
-```bash
-# Local run — requires libkrun + libkrunfw on pre-26 macOS, or
-# native /dev/kvm on Linux. Threads `--hypervisor` per host.
-MVM_E2E_SMOKE=1 cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
-```
-
-The lane mirrored at `.github/workflows/ci.yml::core-demo-e2e` runs the same command on a self-hosted runner labelled `[self-hosted, macOS, ARM64, libkrun]`, gated on the `MACOS_LIBKRUN_AVAILABLE` repo variable. GitHub-hosted macOS runners cannot serve this lane (no nested HVF, no libkrun) — it stays opt-in until a self-hosted runner is wired.
-
-The same gated convention covers `crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`, which exercises `Sandbox.exec(*argv) -> ExecResult` against a real microVM. Default-skips on `pytest`; opt-in with `MVM_E2E_SMOKE=1 python -m pytest crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`.
+The `MVM_E2E_SMOKE=1` gate covers `crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`, which exercises `Sandbox.exec(*argv) -> ExecResult` against a real microVM. Default-skips on `pytest`; opt-in with `MVM_E2E_SMOKE=1 python -m pytest crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`.
 
 ### Running on the shared KVM box
 
