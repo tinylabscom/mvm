@@ -5,15 +5,18 @@ description: Pause, save, restore, and wake sandboxes from backend-specific snap
 
 Cold mode lets a sandbox stop consuming a running VM while keeping recoverable state.
 
-Every verb on this page is an advanced single-VM op reached through `machine`. They work, but they are hidden from `machine --help`.
+`pause` and `resume` are hidden advanced single-VM operations. Explicit checkpoint capture and restore use the `machine checkpoint` interface.
 
 ## Firecracker sealed pause/resume
 
 ```sh
 cargo run -- machine pause agent-sandbox
-cargo run -- machine snapshot ls
 cargo run -- machine resume agent-sandbox
 ```
+
+The sealed instance snapshot is managed by `pause` and `resume`; there is no
+public named-snapshot list command. Use `machine checkpoint ls` for explicit,
+chain-anchored checkpoints.
 
 Firecracker pause/resume writes sealed instance state and verifies it before resume. This is the local `mvm` primitive.
 
@@ -26,7 +29,7 @@ cargo run -- machine checkpoint restore <checkpoint-id>
 
 `checkpoint restore` takes the checkpoint's own id, not the VM name.
 
-Full-VM checkpoints capture full machine state. Among the selectable workload runners only `hvf` and `apple-container` support save/restore; `firecracker`, `libkrun`, `qemu`, and `wasm` do not. Check `mvmctl doctor` for the backend and capability on your host before relying on one. `mvm` records the checkpoint content hash in the audit chain when the launch plan and host signer are available, and restore records whether the content matched the prior chain entry.
+Full-VM checkpoints capture full machine state. Current selectable runners report `live-memory` for Firecracker on KVM and `save-restore` for `hvf` and `apple-container`; `libkrun`, `qemu`, and `wasm` report `unsupported`. Check `mvmctl doctor` for the backend and capability on your host before relying on one. The checkpoint metadata digest (including the snapshot-store ID when present) is bound into the signed audit chain, and restore verifies it against that chain before loading saved state.
 
 ## Security checklist
 

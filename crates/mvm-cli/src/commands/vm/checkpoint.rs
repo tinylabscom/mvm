@@ -2923,6 +2923,65 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_snapshot_store_id_is_anchored_by_signed_lineage() {
+        use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotStore};
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        let snapshots = FsSnapshotStore::new(home.path().join("snapshots")).unwrap();
+        let source = home.path().join("snapshot-content");
+        std::fs::create_dir(&source).unwrap();
+        let rootfs_bytes = b"captured rootfs";
+        std::fs::write(source.join("rootfs.ext4"), rootfs_bytes).unwrap();
+        let snapshot_id = snapshots.create_content_addressed(&source).unwrap();
+        let materialized = home.path().join("materialized-snapshot");
+        snapshots.materialize(&snapshot_id, &materialized).unwrap();
+        assert_eq!(
+            std::fs::read(materialized.join("rootfs.ext4")).unwrap(),
+            rootfs_bytes
+        );
+
+        let meta = CheckpointMeta::builder(
+            CheckpointId::new("ckpt-snapshot-lineage"),
+            CheckpointClass::VmFull,
+            "vm",
+        )
+        .content(vec![mvm_core::checkpoint::ContentBlob {
+            name: "rootfs.ext4".into(),
+            sha256: mvm_core::crypto::image_verify::sha256_reader(rootfs_bytes.as_slice()).unwrap(),
+        }])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .snapshot_id(Some(snapshot_id.id().to_string()))
+        .build();
+        let store = CheckpointStore::open();
+        store.write_meta(&meta).unwrap();
+        let signer = super::super::host_signer::load_or_init().unwrap();
+        let emitter = super::super::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-snapshot-lineage")
+            .build();
+        mvm_client::checkpoint::bind_checkpoint_created(&emitter, &plan, &meta).unwrap();
+
+        lineage::verify(meta.id.as_str(), false).unwrap();
+
+        let path = store.dir_for(&meta.id).join("meta.json");
+        let mut forged: CheckpointMeta =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        forged.snapshot_id = Some("different-content-address".into());
+        forged.meta_digest = forged.compute_meta_digest();
+        std::fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        let error = lineage::verify(meta.id.as_str(), false).unwrap_err();
+        assert!(
+            error.to_string().contains("lineage verification failed"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn checkpoint_verify_cli_accepts_signed_lineage_and_refuses_changed_metadata() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().unwrap();
