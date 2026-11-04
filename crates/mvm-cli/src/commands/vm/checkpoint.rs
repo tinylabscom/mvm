@@ -1607,6 +1607,24 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_cursor_refuses_a_torn_journal_without_changing_it() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        let dir = machine_state_dir("cursor-torn");
+        std::fs::create_dir_all(&dir).expect("state dir");
+        let path = dir.join("input-journal.jsonl");
+        let torn = b"{\"event\":\"started\"";
+        std::fs::write(&path, torn).expect("torn journal");
+
+        let error = lock_machine_input_cursor("cursor-torn")
+            .err()
+            .expect("torn cursor must refuse");
+        assert!(format!("{error:#}").contains("unterminated"), "{error:#}");
+        assert_eq!(std::fs::read(path).expect("unchanged"), torn);
+    }
+
+    #[test]
     fn checkpoint_cursor_is_zero_for_a_new_machine() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().expect("tempdir");

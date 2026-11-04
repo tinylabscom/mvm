@@ -239,6 +239,9 @@ mod tests {
 
     #[test]
     fn the_default_name_carries_the_checkpoint_and_timestamp() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let args = ReplayArgs {
             from: "ckpt-x".into(),
             as_name: None,
@@ -277,5 +280,28 @@ mod tests {
             plan_replay(&meta("web", 100), "replay-test-child".to_string(), &args).expect("plan");
         assert_eq!(plan.entries.len(), 1, "{plan:?}");
         assert_eq!(plan.entries[0].argv, ["during"]);
+    }
+
+    #[test]
+    fn replay_plan_refuses_a_torn_journal_without_changing_it() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let state = mvm_core::config::machine_state_dir("web");
+        std::fs::create_dir_all(&state).expect("state dir");
+        let path = state.join("input-journal.jsonl");
+        let torn = b"{\"event\":\"started\"";
+        std::fs::write(&path, torn).expect("torn journal");
+        let args = ReplayArgs {
+            from: "ckpt-x".into(),
+            as_name: Some("replay-test-child".into()),
+            dry_run: true,
+            step_checkpoints: true,
+        };
+
+        let error = plan_replay(&meta("web", 100), "replay-test-child".into(), &args)
+            .expect_err("torn replay input must refuse");
+        assert!(format!("{error:#}").contains("unterminated"), "{error:#}");
+        assert_eq!(std::fs::read(path).expect("unchanged"), torn);
     }
 }
