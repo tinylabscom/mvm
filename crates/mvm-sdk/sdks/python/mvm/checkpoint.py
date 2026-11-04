@@ -6,7 +6,7 @@ import builtins
 from typing import Any
 
 from mvm import _hostlib
-from mvm._hostabi.methods import CHECKPOINT_LIST, CHECKPOINT_REMOVE
+from mvm._hostabi.methods import CHECKPOINT_LIST, CHECKPOINT_REMOVE, CHECKPOINT_VERIFY_LINEAGE
 
 
 def list() -> builtins.list[dict[str, Any]]:
@@ -26,3 +26,13 @@ def remove(id: str) -> None:
     pin, lineage or path changes, and grant no guest or remote deletion authority.
     """
     _hostlib.call(CHECKPOINT_REMOVE, {"id": id})
+
+
+def verify_lineage(id: str) -> None:
+    """Verify metadata ancestry against this host's signed audit chains.
+
+    Refuses missing, changed or unaudited ancestry. Does not hash snapshot blobs,
+    establish runtime compatibility or authorize a restore. Loading the existing
+    host anchor may initialize its identity when an audit directory exists.
+    """
+    _hostlib.call(CHECKPOINT_VERIFY_LINEAGE, {"id": id})

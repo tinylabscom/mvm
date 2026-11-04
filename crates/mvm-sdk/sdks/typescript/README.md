@@ -24,6 +24,19 @@ non-directory entries and directories without metadata are ignored.
 This is the same data as `mvmctl machine checkpoint ls --json`. Listing neither
 opens checkpoint content nor authenticates lineage or grants restore authority.
 
+## Verify checkpoint lineage
+
+`mvm.checkpoint.verifyLineage(id)` calls the host-local
+`checkpoint.verify_lineage` method (ABI 1.12), returning `undefined` on success.
+It uses the same client-owned signed-audit ancestry verification as
+`mvmctl machine checkpoint verify`. Missing, altered or unaudited ancestry
+throws a nonretryable host error; invalid IDs are refused before anchor access.
+No root or trust-key override, VM boot, HTTP server or subprocess is involved.
+
+This verifies metadata lineage, not snapshot blob bytes, runtime compatibility
+or permission to restore. Loading the existing host anchor may initialize its
+identity when an audit directory exists.
+
 ## Quick start
 
 ```ts

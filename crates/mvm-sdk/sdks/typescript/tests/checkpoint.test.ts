@@ -55,3 +55,30 @@ it.each([
   expect(failure).toBeInstanceOf(errorType);
   expect(failure).toMatchObject({ code, retryable: false, message: "checkpoint removal refused" });
 });
+
+it("verifies lineage only through the host-local closed operation", () => {
+  const calls: unknown[] = [];
+  setInvokeForTesting((method, body) => {
+    calls.push([method, JSON.parse(body.toString("utf8"))]);
+    return [0, Buffer.from("{}")];
+  });
+  expect(checkpoint.verifyLineage("ckpt-local")).toBeUndefined();
+  expect(calls).toEqual([["checkpoint.verify_lineage", { id: "ckpt-local" }]]);
+});
+
+it.each([
+  { code: "INVALID_SPEC", errorType: MachineSpecError },
+  { code: "BACKEND_ERROR", errorType: MachineBackendError },
+])("preserves nonretryable lineage refusal $code", ({ code, errorType }) => {
+  setInvokeForTesting(() => [1, Buffer.from(JSON.stringify({
+    code, message: "checkpoint lineage refused", retryable: false,
+  }))]);
+  let failure: unknown;
+  try {
+    checkpoint.verifyLineage("ckpt-local");
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(errorType);
+  expect(failure).toMatchObject({ code, retryable: false, message: "checkpoint lineage refused" });
+});

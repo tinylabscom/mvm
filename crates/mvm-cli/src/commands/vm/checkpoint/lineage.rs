@@ -1,8 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 
-use mvm_client::checkpoint::anchor::SignedChainAnchor;
-use mvm_client::checkpoint::{CheckpointStore, verify_lineage};
+use mvm_client::checkpoint::Checkpoints;
 
 use super::validated_checkpoint_id;
 use crate::ui;
@@ -20,11 +19,8 @@ struct CheckpointVerifyJson<'a> {
 /// Exits nonzero on any failure so it is scriptable.
 pub(super) fn verify(id: &str, json: bool) -> Result<()> {
     let checkpoint = validated_checkpoint_id(id)?;
-    let store = CheckpointStore::open();
-    let anchor = SignedChainAnchor::load()
-        .context("loading the signed audit chain to anchor lineage verification")?;
 
-    match verify_lineage(&store, &checkpoint, &anchor) {
+    match Checkpoints::open().verify_lineage(&checkpoint) {
         Ok(()) => {
             if json {
                 crate::json_out::emit_json(&CheckpointVerifyJson {

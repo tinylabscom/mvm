@@ -51,3 +51,23 @@ def test_remove_preserves_nonretryable_host_refusals(hostlib, code, error_type):
     assert caught.value.retryable is False
     assert str(caught.value) == "checkpoint removal refused"
     assert hostlib.calls == [("checkpoint.remove", {"id": "ckpt-local"})]
+
+
+def test_verify_lineage_calls_only_the_host_local_closed_operation(hostlib):
+    hostlib.reply("checkpoint.verify_lineage", {})
+    assert mvm.checkpoint.verify_lineage("ckpt-local") is None
+    assert hostlib.calls == [("checkpoint.verify_lineage", {"id": "ckpt-local"})]
+
+
+@pytest.mark.parametrize(
+    ("code", "error_type"),
+    [("INVALID_SPEC", MachineSpecError), ("BACKEND_ERROR", MachineBackendError)],
+)
+def test_verify_lineage_preserves_nonretryable_host_refusals(hostlib, code, error_type):
+    hostlib.fail("checkpoint.verify_lineage", code, "checkpoint lineage refused")
+    with pytest.raises(error_type) as caught:
+        mvm.checkpoint.verify_lineage("ckpt-local")
+    assert caught.value.code == code
+    assert caught.value.retryable is False
+    assert str(caught.value) == "checkpoint lineage refused"
+    assert hostlib.calls == [("checkpoint.verify_lineage", {"id": "ckpt-local"})]

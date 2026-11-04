@@ -220,6 +220,14 @@ pub const REGISTRY: &[MethodDef] = &[
         reply: schema_of::<DispatchEmpty>,
     },
     MethodDef {
+        name: crate::checkpoint::VERIFY_LINEAGE,
+        key: "checkpoint_verify_lineage",
+        summary: "Verifies checkpoint metadata ancestry against the host's signed audit chains, not blob contents or restore authority.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<crate::checkpoint::CheckpointVerifyLineageRequest>,
+        reply: schema_of::<DispatchEmpty>,
+    },
+    MethodDef {
         name: crate::attestation::EXPORT,
         key: "attestation_export",
         summary: "Export a host-signed v0 identity report, not measured-boot evidence.",

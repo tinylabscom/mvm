@@ -19,7 +19,19 @@ Current:
 - record mode for plan/build flows;
 - live mode through `mvmctl run --mode live`
 
-Planned:
+### Host-local checkpoint lineage
+
+`mvm.checkpoint.verifyLineage(id)` verifies checkpoint metadata and every
+ancestor against this host's signed audit chains through host-library ABI 1.12.
+It returns `undefined` on success and throws a nonretryable host error on failure.
+There is no caller-selected trust key or catalog root, subprocess or VM boot.
+Loading the host anchor may initialize its identity when an audit directory exists.
+
+This is not blob-content verification, runtime compatibility checking or restore
+authorization. `mvm.checkpoint.list()` remains unauthenticated catalog inspection;
+use lineage verification when checking whether the recorded history is anchored.
+
+## Planned runtime additions
 
 - `sandbox.logs(...)` on the sandbox handle, and richer event streams beyond the current machine-log follow API;
 - snapshot, cold, resume, detach, destroy;
