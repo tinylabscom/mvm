@@ -68,6 +68,8 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
             serde_json::to_string_pretty(&serde_json::json!({
                 "path": args.path.display().to_string(),
                 "bundle_sha256": verified.bundle_sha256,
+                "publisher": verified.manifest.publisher,
+                "publisher_key_id": verified.key_id.0,
                 "arch": verified.manifest.arch,
                 "runnable_here": null,
                 "host_arch_compatible": true,
@@ -118,6 +120,10 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
             } else {
                 String::new()
             },
+        );
+        println!(
+            "  publisher label: {:?} (key_id={})",
+            verified.manifest.publisher, verified.key_id.0
         );
         println!("  posture: {}", posture_line(&verified.manifest));
         if let Some(cmdline) = verified.manifest.kernel_cmdline() {

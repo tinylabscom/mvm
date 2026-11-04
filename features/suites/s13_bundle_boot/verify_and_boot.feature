@@ -63,6 +63,8 @@ Feature: s13_bundle_boot verify-and-boot
     When I run mvmctl in the scratch directory with "machine check-artifact app.mvmpkg"
     Then the command exits with code 0
     And the output contains "local build, signed by this host's key; not release-verified"
+    And the output contains "publisher label:"
+    And the output contains "key_id="
     And the output does not contain "verified, architecture compatible"
 
   @MVM-SEC-25 @build @local_build
