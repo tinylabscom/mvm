@@ -59,7 +59,7 @@ pub(super) fn run_in_guest(
     phase.finish();
     // Agent reachable over vsock: the command is about to be dispatched.
     let vsock_ready = std::time::Instant::now();
-    let req = &with_provisioned_egress_env(req, vm_name);
+    let req = &with_provisioned_egress_env(req, vm_name)?;
     let wrapper = build_guest_wrapper(req);
 
     let dispatch = command_dispatch(
@@ -337,24 +337,29 @@ fn pty_console_request(req: &ExecRequest, wrapper: String) -> PtyConsoleRequest 
 ///
 /// Read here, after the endpoint has a session, because that is when the
 /// placeholders exist: they are minted at boot, so no request built before
-/// boot can carry them. The caller's explicit `--env` comes last and wins.
-fn with_provisioned_egress_env(req: &ExecRequest, vm_name: &str) -> ExecRequest {
+/// boot can carry them. An explicit `--env` cannot replace a provisioned value.
+fn with_provisioned_egress_env(req: &ExecRequest, vm_name: &str) -> Result<ExecRequest> {
     let mut provisioned = req.clone();
     provisioned.env = compose_egress_env(
         mvm_hostd::workload_env::workload_egress_env(vm_name),
         &req.env,
-    );
-    provisioned
+    )?;
+    Ok(provisioned)
 }
 
-/// The provisioned egress variables, then the caller's.
+/// The provisioned egress variables, then non-conflicting caller variables.
 fn compose_egress_env(
     provisioned: Vec<(String, String)>,
     caller: &[(String, String)],
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>> {
+    for (name, _) in caller {
+        if provisioned.iter().any(|(bound, _)| bound == name) {
+            anyhow::bail!("cannot override host-provisioned egress variable {name:?} with --env");
+        }
+    }
     let mut env = provisioned;
     env.extend(caller.iter().cloned());
-    env
+    Ok(env)
 }
 
 fn direct_pty_inline_argv(req_argv: &[String]) -> bool {
@@ -578,14 +583,37 @@ mod tests {
                 ("API_TOKEN".into(), placeholder.clone()),
             ],
             &[("TERM".into(), "xterm-256color".into())],
-        );
+        )
+        .unwrap();
         assert_eq!(env.len(), 3);
         assert_eq!(env[1], ("API_TOKEN".to_string(), placeholder));
         assert_eq!(
             env.last().map(|(k, _)| k.as_str()),
             Some("TERM"),
-            "the caller's explicit env comes last"
+            "non-conflicting caller env follows the host-provisioned values"
         );
+    }
+
+    #[test]
+    fn a_caller_cannot_override_a_secret_placeholder_or_egress_proxy() {
+        for name in ["API_TOKEN", "HTTPS_PROXY"] {
+            let error = compose_egress_env(
+                vec![
+                    ("API_TOKEN".into(), "mvm-secret-placeholder".into()),
+                    ("HTTPS_PROXY".into(), "http://127.0.0.1:1080".into()),
+                ],
+                &[(name.into(), "raw-private-value".into())],
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(name),
+                "the collision must name the variable: {error}"
+            );
+            assert!(
+                !error.to_string().contains("raw-private-value"),
+                "the refusal must not echo the caller's value: {error}"
+            );
+        }
     }
 
     #[test]
@@ -619,7 +647,7 @@ mod tests {
             sdk_host_services: Vec::new(),
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
-        let provisioned = with_provisioned_egress_env(&req, "no-egress-vm");
+        let provisioned = with_provisioned_egress_env(&req, "no-egress-vm").unwrap();
         assert_eq!(provisioned.env, req.env);
     }
 
