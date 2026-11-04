@@ -124,6 +124,13 @@ struct CommandStartFailure {
     stop: Result<()>,
 }
 
+/// The name a persistent request must carry.
+fn persistent_name(request: &LaunchRequest) -> Result<String> {
+    request.name.clone().ok_or_else(|| MvmError::InvalidSpec {
+        reason: "a persistent machine request must carry a name".into(),
+    })
+}
+
 impl CommandStartFailure {
     fn into_error(self) -> MvmError {
         let reason = match self.stop {
@@ -855,10 +862,7 @@ impl LocalBackend {
         match request.mode {
             LifecycleMode::Transient => self.launch_transient(request).await,
             LifecycleMode::Persistent => {
-                let name = request
-                    .name
-                    .clone()
-                    .expect("validated: persistent requests carry a name");
+                let name = persistent_name(&request)?;
                 let (_, origin) = self.create_definition(&request, &name)?;
                 let booted = self.boot_persistent(&name, &request).await;
                 let outcome = self.discard_definition_on_failure(&name, origin, booted)?;
@@ -891,10 +895,7 @@ impl LocalBackend {
                     .into(),
             });
         }
-        let name = request
-            .name
-            .clone()
-            .expect("validated: persistent requests carry a name");
+        let name = persistent_name(request)?;
         let (spec, _) = self.create_definition(request, &name)?;
         Ok(MachineState {
             id: MachineId(name.clone()),

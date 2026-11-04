@@ -5,6 +5,7 @@
 //! `mvm` can fail fast on configuration errors before evaluating the flake.
 
 use crate::hooks::merge_hooks;
+use crate::orchestrator::CompileError;
 use crate::source::SourcePlan;
 use mvm_contract::ir::{Hooks, Workload, canonicalize, ir_hash};
 use serde::Serialize;
@@ -82,14 +83,8 @@ struct LaunchPlan<'a> {
     dependencies: Option<serde_json::Value>,
 }
 
-pub fn build_launch_json(
-    workload: &Workload,
-    source: &SourcePlan,
-) -> Result<String, serde_json::Error> {
-    let app = workload
-        .apps
-        .first()
-        .expect("validate() ensures at least one app");
+pub fn build_launch_json(workload: &Workload, source: &SourcePlan) -> Result<String, CompileError> {
+    let app = workload.apps.first().ok_or(CompileError::NoApp)?;
     let mesh_enabled = !app.addons.is_empty();
     let expected_peers: Vec<String> = app
         .addons
@@ -142,7 +137,7 @@ pub fn build_launch_json(
         files: serde_json::to_value(&app.files)?,
         dependencies,
     };
-    canonicalize(&plan)
+    Ok(canonicalize(&plan)?)
 }
 
 #[cfg(test)]
@@ -196,6 +191,17 @@ mod tests {
             file_count: 0,
             tree_hash: "0".repeat(64),
         }
+    }
+
+    #[test]
+    fn a_workload_with_no_app_is_refused_not_panicked() {
+        let mut w = sample();
+        w.apps.clear();
+        let src = empty_source_plan();
+        assert!(matches!(
+            build_launch_json(&w, &src),
+            Err(CompileError::NoApp)
+        ));
     }
 
     #[test]

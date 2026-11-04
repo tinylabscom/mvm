@@ -325,7 +325,7 @@ pub fn build_deploy_bundle(
         .tempdir_in(out.parent().unwrap_or_else(|| Path::new(".")))?;
     let staging = temp.path().join("artifact");
     compile(workload, &staging, manifest_dir)?;
-    let spec = build_mvmd_spec(workload);
+    let spec = build_mvmd_spec(workload)?;
     let spec_json = serde_json::to_vec_pretty(&spec)?;
     std::fs::write(staging.join("mvmd-spec.json"), spec_json)?;
     let boot_dir = staging.join("boot");
@@ -573,11 +573,11 @@ fn read_dependency_volume(path: &Path) -> Result<DependencyVolumeRecord, DeployE
 /// Build the `MvmdSpec` JSON sidecar from a workload's mvmd-bound
 /// fields. v1 picks the first (and only) app; the IR validator
 /// enforces single-app workloads.
-pub fn build_mvmd_spec(workload: &Workload) -> MvmdSpec {
+pub fn build_mvmd_spec(workload: &Workload) -> Result<MvmdSpec, DeployError> {
     let app = workload
         .apps
         .first()
-        .expect("validate() ensures at least one app");
+        .ok_or(DeployError::Compile(CompileError::NoApp))?;
     let env_keys: Vec<String> = app.env.keys().cloned().collect();
     let secret_refs: Vec<SecretRef> = app
         .env
@@ -633,7 +633,7 @@ pub fn build_mvmd_spec(workload: &Workload) -> MvmdSpec {
         after_start_hash: hook_phase_hash(&app.hooks.after_start),
         before_stop_hash: hook_phase_hash(&app.hooks.before_stop),
     };
-    MvmdSpec {
+    Ok(MvmdSpec {
         schema_version: "0.1".to_string(),
         workload_id: workload.id.clone(),
         env_keys,
@@ -642,7 +642,7 @@ pub fn build_mvmd_spec(workload: &Workload) -> MvmdSpec {
         network,
         threat_tier,
         lifecycle,
-    }
+    })
 }
 
 fn secret_ref_of(reference: &crate::ir::SecretRef) -> SecretRef {
@@ -891,8 +891,18 @@ mod tests {
     }
 
     #[test]
+    fn a_workload_with_no_app_has_no_mvmd_spec() {
+        let mut workload = sample_workload();
+        workload.apps.clear();
+        assert!(matches!(
+            build_mvmd_spec(&workload),
+            Err(DeployError::Compile(CompileError::NoApp))
+        ));
+    }
+
+    #[test]
     fn mvmd_spec_reflects_workload_fields() {
-        let spec = build_mvmd_spec(&sample_workload());
+        let spec = build_mvmd_spec(&sample_workload()).unwrap();
         assert_eq!(spec.schema_version, "0.1");
         assert_eq!(spec.workload_id, "hello");
         assert_eq!(spec.resources.cpu_cores, 1);
@@ -910,7 +920,7 @@ mod tests {
 
     #[test]
     fn mvmd_spec_serializes_round_trip() {
-        let spec = build_mvmd_spec(&sample_workload());
+        let spec = build_mvmd_spec(&sample_workload()).unwrap();
         let json = serde_json::to_vec(&spec).expect("serialize");
         let back: MvmdSpec = serde_json::from_slice(&json).expect("deserialize");
         assert_eq!(spec, back);
@@ -918,7 +928,7 @@ mod tests {
 
     #[test]
     fn mvmd_spec_rejects_unknown_fields() {
-        let mut value = serde_json::to_value(build_mvmd_spec(&sample_workload())).unwrap();
+        let mut value = serde_json::to_value(build_mvmd_spec(&sample_workload()).unwrap()).unwrap();
         value
             .as_object_mut()
             .unwrap()
