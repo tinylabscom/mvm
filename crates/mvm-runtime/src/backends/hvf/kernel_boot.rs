@@ -1215,10 +1215,7 @@ fn verify_redistributor_frame(vcpu_id: hv_vcpu_t, cpu: u32) -> Result<(), HvfErr
 /// ordering cannot be separated from the call it exists to order — it was a
 /// pair of statements at the call site once, and deleting them was a one-line
 /// change that reintroduced the race with nothing in CI to notice.
-fn create_secondary_vcpu(
-    cpu: u32,
-    order: &CreationOrder,
-) -> Result<(HvfVcpu, hv_vcpu_t), HvfError> {
+fn create_secondary_vcpu(cpu: u32, order: &CreationOrder) -> Result<HvfVcpu, HvfError> {
     // Held until this function returns, by any path.
     let _turn = order.take_turn(cpu);
     let mut vcpu_id: hv_vcpu_t = 0;
@@ -1237,11 +1234,13 @@ fn create_secondary_vcpu(
         .set_sys(SysReg::MpidrEl1, fdt::mpidr_for_cpu(cpu))
         .and_then(|()| verify_redistributor_frame(vcpu_id, cpu));
     if let Err(e) = identified {
-        // SAFETY: created on this thread and not used again.
-        unsafe { hv_vcpu_destroy(vcpu_id) };
+        let status = vcpu.destroy();
+        if status != HV_SUCCESS {
+            tracing::warn!(cpu, status, "failed to destroy an unidentified HVF vCPU");
+        }
         return Err(e);
     }
-    Ok((vcpu, vcpu_id))
+    Ok(vcpu)
 }
 
 /// What the machine consumed, from what each of its vCPUs reported.
@@ -1305,7 +1304,7 @@ fn run_secondary<B: run::DeviceBus>(
     // `hv_vcpu_create` order and the device tree tells the guest CPU n owns the
     // nth, so the nth vCPU created has to be CPU n whatever order the scheduler
     // started these threads in.
-    let (vcpu, vcpu_id) = match create_secondary_vcpu(cpu, shared.creation_order) {
+    let vcpu = match create_secondary_vcpu(cpu, shared.creation_order) {
         Ok(created_vcpu) => created_vcpu,
         Err(e) => {
             let _ = created.send(Err(e));
@@ -1432,9 +1431,14 @@ fn run_secondary<B: run::DeviceBus>(
     // This CPU is done, so the machine is: release every other CPU rather than
     // leaving them in a guest that has nothing left to run.
     shared.end();
-    // SAFETY: created on this thread, never used after this point, and the VM
-    // outlives the thread.
-    unsafe { hv_vcpu_destroy(vcpu_id) };
+    let destroy_status = vcpu.destroy();
+    if destroy_status != HV_SUCCESS {
+        tracing::warn!(
+            cpu,
+            status = destroy_status,
+            "HVF secondary vCPU destroy failed"
+        );
+    }
     result.map(|(_, diagnostics)| diagnostics)
 }
 
@@ -1534,7 +1538,10 @@ unsafe fn run(
         let started = apply_vcpu_start(&vcpu, VcpuStart::primary(entry, dtb_addr))
             .and_then(|()| verify_redistributor_frame(vcpu_id, 0));
         if let Err(e) = started {
-            hv_vcpu_destroy(vcpu_id);
+            let status = vcpu.destroy();
+            if status != HV_SUCCESS {
+                tracing::warn!(status, "failed to destroy an unstarted HVF vCPU");
+            }
             return Err(e);
         }
 
@@ -2151,7 +2158,10 @@ unsafe fn run(
         let io_thread_join = io_thread_join_started.elapsed();
         let final_pc = vcpu.get_core(CoreReg::Pc).unwrap_or(0);
         let vcpu_destroy_started = Instant::now();
-        hv_vcpu_destroy(vcpu_id);
+        let destroy_status = vcpu.destroy();
+        if destroy_status != HV_SUCCESS {
+            tracing::warn!(status = destroy_status, "HVF boot vCPU destroy failed");
+        }
         let vcpu_destroy = vcpu_destroy_started.elapsed();
 
         let mut r = KernelBootResult {

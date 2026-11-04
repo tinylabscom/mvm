@@ -6,6 +6,7 @@
 //! live arm64 Linux guest through exactly this path.
 
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
 use super::HvfError;
 use super::snapshot::{
@@ -21,17 +22,73 @@ use crate::vmm::hv::{CoreReg, HypervisorVcpu, HypervisorVm, SysReg, VcpuExit, Vc
 /// zero-sized marker; `create` performs the global setup.
 pub struct HvfVm;
 
-/// A cross-thread token to force a vCPU out of `step()` (HVF `hv_vcpus_exit`).
-#[derive(Clone, Copy)]
-pub struct HvfHandle(hv_vcpu_t);
+/// A cross-thread token to force a live vCPU out of `step()`.
+///
+/// The shared slot is invalidated while holding the same lock used by
+/// `force_exit`, so no caller can pass a destroyed vCPU id to HVF.
+#[derive(Clone)]
+pub struct HvfHandle(Arc<Mutex<Option<hv_vcpu_t>>>);
+
+impl HvfHandle {
+    fn new(vcpu: hv_vcpu_t) -> Self {
+        Self(Arc::new(Mutex::new(Some(vcpu))))
+    }
+
+    fn with_live_ids<R>(handles: &[Self], call: impl FnOnce(&[hv_vcpu_t]) -> R) -> R {
+        let mut unique: Vec<_> = handles.iter().collect();
+        unique.sort_unstable_by_key(|handle| Arc::as_ptr(&handle.0) as usize);
+        unique.dedup_by(|left, right| Arc::ptr_eq(&left.0, &right.0));
+
+        let slots: Vec<_> = unique
+            .iter()
+            .map(|handle| {
+                handle
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            })
+            .collect();
+        let ids: Vec<_> = slots.iter().filter_map(|slot| **slot).collect();
+        call(&ids)
+    }
+
+    fn retire_with(&self, destroy: impl FnOnce(hv_vcpu_t) -> hv_return_t) -> hv_return_t {
+        let mut slot = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(vcpu) = *slot else {
+            return HV_SUCCESS;
+        };
+        let status = destroy(vcpu);
+        if status == HV_SUCCESS {
+            *slot = None;
+        }
+        status
+    }
+
+    fn destroy(&self) -> hv_return_t {
+        self.retire_with(|vcpu| {
+            // SAFETY: this handle serializes destruction against cross-thread
+            // exit requests, and the vCPU is destroyed only once.
+            unsafe { hv_vcpu_destroy(vcpu) }
+        })
+    }
+}
 
 impl VcpuHandle for HvfHandle {
     fn force_exit(handles: &[Self]) {
-        let ids: Vec<hv_vcpu_t> = handles.iter().map(|h| h.0).collect();
-        // SAFETY: documented cross-thread cancel over valid vCPU ids.
-        unsafe {
-            let _ = hv_vcpus_exit(ids.as_ptr(), ids.len() as u32);
-        }
+        Self::with_live_ids(handles, |ids| {
+            if ids.is_empty() {
+                return;
+            }
+            // SAFETY: `with_live_ids` holds every token's lifetime lock across
+            // the call, so each id is live for the duration of the request.
+            let status = unsafe { hv_vcpus_exit(ids.as_ptr(), ids.len() as u32) };
+            if status != HV_SUCCESS {
+                tracing::warn!(status, "HVF cross-thread vCPU exit request failed");
+            }
+        });
     }
 }
 
@@ -42,6 +99,7 @@ pub struct HvfVcpu {
     vcpu: hv_vcpu_t,
     exit: *mut hv_vcpu_exit_t,
     pending_read: Cell<Option<(u8, u8)>>,
+    exit_token: HvfHandle,
 }
 
 impl HvfVcpu {
@@ -52,7 +110,12 @@ impl HvfVcpu {
             vcpu,
             exit,
             pending_read: Cell::new(None),
+            exit_token: HvfHandle::new(vcpu),
         }
+    }
+
+    pub(super) fn destroy(&self) -> hv_return_t {
+        self.exit_token.destroy()
     }
 
     /// Capture the architecturally visible core registers exposed by HVF.
@@ -235,7 +298,7 @@ impl HypervisorVcpu for HvfVcpu {
     type Handle = HvfHandle;
 
     fn exit_token(&self) -> HvfHandle {
-        HvfHandle(self.vcpu)
+        self.exit_token.clone()
     }
 
     fn get_core(&self, reg: CoreReg) -> Result<u64, HvfError> {
@@ -424,11 +487,7 @@ impl HypervisorVm for HvfVm {
         if rc != HV_SUCCESS {
             return Err(HvfError::VcpuCreate(rc));
         }
-        Ok(HvfVcpu {
-            vcpu,
-            exit,
-            pending_read: Cell::new(None),
-        })
+        Ok(HvfVcpu::from_raw(vcpu, exit))
     }
 
     fn set_irq(&self, intid: u32, level: bool) -> Result<(), HvfError> {
@@ -480,5 +539,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn force_exit_and_destroy_are_serialized_by_the_shared_handle() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let handle = HvfHandle::new(7);
+        let forcing_handle = handle.clone();
+        let (force_entered_tx, force_entered_rx) = mpsc::channel();
+        let (release_force_tx, release_force_rx) = mpsc::channel();
+        let forcing = std::thread::spawn(move || {
+            HvfHandle::with_live_ids(&[forcing_handle], |ids| {
+                assert_eq!(ids, [7]);
+                force_entered_tx.send(()).unwrap();
+                release_force_rx.recv().unwrap();
+            });
+        });
+        force_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("force exit acquired the live handle");
+
+        assert!(
+            matches!(
+                handle.0.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ),
+            "the in-flight force exit must hold the vCPU lifetime lock"
+        );
+        release_force_tx.send(()).unwrap();
+        forcing.join().unwrap();
+
+        let status = handle.retire_with(|vcpu| {
+            assert_eq!(vcpu, 7);
+            HV_SUCCESS
+        });
+        assert_eq!(status, HV_SUCCESS);
+        assert!(
+            HvfHandle::with_live_ids(&[handle], |ids| ids.is_empty()),
+            "retired handles must not be sent to hv_vcpus_exit"
+        );
     }
 }

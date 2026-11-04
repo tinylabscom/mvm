@@ -103,7 +103,7 @@ pub enum VcpuExit {
 /// thread to force it out of [`HypervisorVcpu::step`] (e.g. a run watchdog, or a
 /// snapshot rendezvous). vCPUs are thread-bound, but the orchestration holds
 /// these tokens to interrupt them without owning the `Vcpu`.
-pub trait VcpuHandle: Copy + Send + Sync + 'static {
+pub trait VcpuHandle: Clone + Send + Sync + 'static {
     /// Force the given vCPUs out of `step()`, callable from any thread. Batched:
     /// HVF does it in one call (`hv_vcpus_exit`); KVM signals each thread.
     fn force_exit(handles: &[Self]);

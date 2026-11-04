@@ -37,6 +37,18 @@ Feature: README persistent machine lifecycle works end to end
     When I run mvmctl in the isolated mvm home with "machine stop bdd-detached-ready --yes"
     Then the command exits with code 0
 
+  @live
+  Scenario: machine stop confirms while a guest keeps admitted HTTPS egress open
+    Given an isolated mvm home
+    And the image "curlimages/curl:8.21.0" is prepared in the live home
+    When I run mvmctl in an isolated live home with "machine run -d --profile dev --name bdd-egress-stop-open --image curlimages/curl:8.21.0 --allow-host example.com:443"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine exec bdd-egress-stop-open -- /bin/sh -c 'curl -fsSL --limit-rate 1 https://example.com >/dev/null 2>&1 </dev/null & pid=$!; sleep 3; IFS=\" \" read -r _ _ state _ </proc/$pid/stat; test \"$state\" != Z; echo active-egress'"
+    Then the command exits with code 0
+    And the output contains "active-egress"
+    When I run mvmctl in the isolated mvm home with "machine stop bdd-egress-stop-open --yes"
+    Then the command exits with code 0
+
   @live @firecracker @tool_live
   Scenario: a persistent machine mediates declared and bound commands across restart
     Given an isolated mvm home on encrypted backing storage
