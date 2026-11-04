@@ -220,8 +220,33 @@ fn failed_wait_forbids_signals_and_preserves_evidence() {
     endpoint.child.kill().unwrap();
     exited(&mut endpoint);
     assert!(endpoint.shutdown().is_err());
-    assert!(endpoint.exit_status().is_some());
+    assert!(endpoint.exit_status().is_none());
+    assert_eq!(endpoint.child.wait().unwrap().signal(), Some(libc::SIGKILL));
     assert!(evidence.exists());
+}
+
+#[test]
+fn failed_wait_cannot_be_reclassified_by_a_later_successful_exit() {
+    let mut endpoint = helper("read signal; exit 0");
+    endpoint.faults.wait_error = true;
+    assert!(endpoint.shutdown().is_err());
+    endpoint.faults.wait_error = false;
+
+    endpoint
+        .child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"finish\n")
+        .unwrap();
+    exited(&mut endpoint);
+    assert!(
+        endpoint.shutdown().is_err(),
+        "a later zero exit cannot restore lost child custody"
+    );
+    assert!(endpoint.exit_status().is_none());
+    assert_eq!(endpoint.faults.signal_attempts, 0);
+    assert_eq!(endpoint.child.wait().unwrap().code(), Some(0));
 }
 
 #[test]
