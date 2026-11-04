@@ -37,10 +37,12 @@ discovery stays best-effort and excludes registry-only entries.
 `input_journal` owns the encrypted machine-exec journal and its per-machine
 lock for execution, checkpoint cursors, and replay. An absent journal is an
 empty history; an unreadable journal or dangling journal symlink is an error.
+An unterminated final record also refuses `machine exec`, checkpoint cursors and
+replay; it is preserved for recovery rather than truncated or appended to.
 Callers hold the same lock through execution and checkpoint capture. Read entries
 contain decrypted arguments and must be handled as sensitive; their `Debug`
 representation redacts those arguments. The module adds no guest, MCP, SDK, or
-remote operation.
+remote operation. It does not journal or block separate interactive shell paths.
 
 `checkpoint::Checkpoints::verify_lineage` owns signed-chain metadata ancestry
 verification for the CLI and host library. It uses the configured host's audit

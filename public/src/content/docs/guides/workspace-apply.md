@@ -175,10 +175,18 @@ never the output. From a checkpoint, the whole session can be re-run against
 byte-identical state:
 
 An absent input journal is an empty history. If the journal cannot be opened or
-read, or its path is a dangling symlink, `machine exec` with nonempty argv,
+read, or its path is a dangling symlink, `machine exec`,
 checkpoint cursor capture, and replay refuse rather than treating that history
 as empty. Repair or recover the journal before retrying; do not discard it to
 bypass an ambiguous input.
+
+An unterminated final journal record also refuses these operations. The journal
+bytes are left intact for investigation; the runtime does not truncate or append
+to the partial record. There is no automatic repair command: preserve the journal
+and reconcile the workload's external effects before any operator-led repair or
+retry. A finish event likewise refuses if the journal vanished after execution
+started; the command may already have run.
+Separate interactive shell paths are not recorded or blocked by this journal.
 
 ```sh
 mvmctl machine save coding-agent --tag before-refactor

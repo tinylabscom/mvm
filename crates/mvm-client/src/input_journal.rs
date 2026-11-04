@@ -10,7 +10,7 @@
 //! Reading entries returns decrypted arguments; treat them as sensitive.
 
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::replay_input::{ReplayInputBinding, ReplayInputRef, ReplayInputStore};
+
+const TORN_RECORD_ERROR: &str = "machine input journal has an unterminated final record; \
+    refusing machine exec, checkpoint and replay until it is recovered";
 
 /// One completed execution, decrypted in memory for planning or replay.
 #[derive(Clone, PartialEq, Eq)]
@@ -108,10 +111,10 @@ pub fn lock(machine_state_dir: &Path) -> Result<FileLock> {
 /// The journal is unreadable or ambiguous, the input cannot be encrypted,
 /// or the start event cannot be durably appended.
 pub fn begin_exec(machine_state_dir: &Path, argv: &[String]) -> Result<Option<PendingExec>> {
+    let entries = scan(machine_state_dir)?;
     if argv.is_empty() {
         return Ok(None);
     }
-    let entries = scan(machine_state_dir)?;
     let seq = entries.last().map_or(1, |entry| entry.seq + 1);
     let at_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -167,8 +170,8 @@ pub fn cursor(machine_state_dir: &Path) -> Result<u64> {
     Ok(scan(machine_state_dir)?.last().map_or(0, |entry| entry.seq))
 }
 
-/// Read complete entries in order. A torn, unterminated final JSON line is
-/// dropped; malformed durable lines and unfinished executions fail closed.
+/// Read complete entries in order. Unterminated or malformed lines and
+/// unfinished executions fail closed.
 /// The returned arguments are decrypted and must be treated as sensitive.
 ///
 /// # Errors
@@ -223,12 +226,12 @@ fn scan(machine_state_dir: &Path) -> Result<Vec<CompletedEvent>> {
     let mut text = String::new();
     file.read_to_string(&mut text)
         .with_context(|| format!("reading machine input journal {}", path.display()))?;
+    if !text.is_empty() && !text.ends_with('\n') {
+        bail!("{TORN_RECORD_ERROR}");
+    }
     let mut entries: Vec<CompletedEvent> = Vec::new();
     let mut pending: Option<(u64, u64, ReplayInputRef)> = None;
     for raw in text.split_inclusive('\n') {
-        if !raw.ends_with('\n') {
-            break;
-        }
         let line = raw.trim();
         if line.is_empty() {
             continue;
@@ -287,18 +290,36 @@ pub fn select_after_cursor(entries: &[InputEntry], cursor: u64) -> Vec<InputEntr
 }
 
 fn append(machine_state_dir: &Path, event: &StoredEvent) -> Result<()> {
-    std::fs::create_dir_all(machine_state_dir).with_context(|| {
-        format!(
-            "creating machine state directory {}",
-            machine_state_dir.display()
-        )
-    })?;
+    if matches!(event, StoredEvent::Started { .. }) {
+        std::fs::create_dir_all(machine_state_dir).with_context(|| {
+            format!(
+                "creating machine state directory {}",
+                machine_state_dir.display()
+            )
+        })?;
+    }
     let path = journal_path(machine_state_dir);
     let mut file = OpenOptions::new()
-        .create(true)
+        .create(matches!(event, StoredEvent::Started { .. }))
+        .read(true)
         .append(true)
         .open(&path)
         .with_context(|| format!("opening machine input journal {}", path.display()))?;
+    if file
+        .metadata()
+        .with_context(|| format!("inspecting machine input journal {}", path.display()))?
+        .len()
+        > 0
+    {
+        file.seek(SeekFrom::End(-1))
+            .with_context(|| format!("seeking machine input journal {}", path.display()))?;
+        let mut last = [0];
+        file.read_exact(&mut last)
+            .with_context(|| format!("reading machine input journal {}", path.display()))?;
+        if last[0] != b'\n' {
+            bail!("{TORN_RECORD_ERROR}");
+        }
+    }
     serde_json::to_writer(&mut file, event).context("encoding machine input journal event")?;
     file.write_all(b"\n")?;
     file.sync_data()?;
@@ -379,6 +400,35 @@ mod tests {
     }
 
     #[test]
+    fn empty_and_newline_terminated_blank_journals_accept_execution() {
+        for initial in [b"".as_slice(), b"\n", b" \t\r\n"] {
+            let (dir, _env) = isolated();
+            let path = journal_path(dir.path());
+            std::fs::write(&path, initial).expect("journal");
+            assert_eq!(cursor(dir.path()).expect("empty history"), 0);
+            record(dir.path(), &["one"], true);
+            assert_eq!(read(dir.path()).expect("read")[0].argv, ["one"]);
+            assert!(std::fs::read(&path).expect("journal").starts_with(initial));
+        }
+    }
+
+    #[test]
+    fn any_unterminated_tail_refuses_before_recording_or_appending() {
+        for tail in [b" ".as_slice(), b"\r", b"{}"] {
+            let (dir, _env) = isolated();
+            let path = journal_path(dir.path());
+            std::fs::write(&path, tail).expect("torn journal");
+            let _lock = lock(dir.path()).expect("lock");
+            assert!(cursor(dir.path()).is_err(), "{tail:?}");
+            assert!(read(dir.path()).is_err(), "{tail:?}");
+            assert!(begin_exec(dir.path(), &["one".into()]).is_err(), "{tail:?}");
+            assert!(begin_exec(dir.path(), &[]).is_err(), "{tail:?}");
+            assert_eq!(std::fs::read(&path).expect("unchanged"), tail);
+            assert!(!dir.path().join("input-artifacts").exists());
+        }
+    }
+
+    #[test]
     fn an_unreadable_journal_is_not_an_empty_history() {
         let (dir, _env) = isolated();
         let not_a_directory = dir.path().join("not-a-directory");
@@ -433,14 +483,123 @@ mod tests {
     }
 
     #[test]
-    fn a_torn_final_line_is_dropped_but_a_finished_entry_survives() {
+    fn a_torn_final_line_refuses_reads_and_checkpoint_cursors() {
+        let (dir, _env) = isolated();
+        record(dir.path(), &["one"], true);
+        let path = journal_path(dir.path());
+        let mut file = OpenOptions::new().append(true).open(&path).expect("open");
+        file.write_all(b"{\"event\":\"started\",\"private\":\"sensitive-tail")
+            .expect("tear");
+        file.sync_data().expect("persist torn bytes");
+        let before = std::fs::read(&path).expect("torn journal");
+        for error in [
+            read(dir.path()).expect_err("torn input must refuse"),
+            cursor(dir.path()).expect_err("torn cursor must refuse"),
+        ] {
+            assert!(error.to_string().contains("unterminated"), "{error:#}");
+            assert!(!format!("{error:#}").contains("sensitive-tail"));
+        }
+        assert_eq!(std::fs::read(&path).expect("unchanged"), before);
+    }
+
+    #[test]
+    fn a_torn_start_refuses_a_new_execution_before_recording_input() {
         let (dir, _env) = isolated();
         record(dir.path(), &["one"], true);
         let path = journal_path(dir.path());
         let mut file = OpenOptions::new().append(true).open(&path).expect("open");
         file.write_all(b"{\"event\":\"started\",\"seq\":2")
             .expect("tear");
-        assert_eq!(read(dir.path()).expect("read").len(), 1);
+        file.sync_data().expect("persist torn bytes");
+        let before = std::fs::read(&path).expect("torn journal");
+        let next_artifact = dir
+            .path()
+            .join("input-artifacts")
+            .join(binding(dir.path(), 2).expect("binding").session_id.as_str())
+            .join("replay-inputs/generation-0/cursor-2.json");
+        assert!(!next_artifact.exists());
+
+        let _lock = lock(dir.path()).expect("lock");
+        let error = begin_exec(dir.path(), &["two".into()]).expect_err("must refuse");
+        assert!(error.to_string().contains("unterminated"), "{error:#}");
+        assert!(
+            begin_exec(dir.path(), &[]).is_err(),
+            "shell entry must refuse"
+        );
+        assert_eq!(std::fs::read(&path).expect("unchanged"), before);
+        assert!(
+            !next_artifact.exists(),
+            "no new encrypted input was recorded"
+        );
+    }
+
+    #[test]
+    fn a_torn_finish_after_a_started_execution_is_already_ambiguous() {
+        let (dir, _env) = isolated();
+        let _lock = lock(dir.path()).expect("lock");
+        let _pending = begin_exec(dir.path(), &["one".into()]).expect("start");
+        let path = journal_path(dir.path());
+        let mut file = OpenOptions::new().append(true).open(&path).expect("open");
+        file.write_all(b"{\"event\":\"finished\",\"seq\":1")
+            .expect("tear");
+        file.sync_data().expect("persist torn bytes");
+        let before = std::fs::read(&path).expect("torn journal");
+
+        let error = begin_exec(dir.path(), &["two".into()]).expect_err("unfinished start");
+        assert!(error.to_string().contains("unterminated"), "{error:#}");
+        assert!(cursor(dir.path()).is_err());
+        assert!(read(dir.path()).is_err());
+        assert_eq!(std::fs::read(&path).expect("unchanged"), before);
+    }
+
+    #[test]
+    fn a_torn_tail_added_after_start_refuses_the_finish_without_mutation() {
+        let (dir, _env) = isolated();
+        let _lock = lock(dir.path()).expect("lock");
+        let pending = begin_exec(dir.path(), &["one".into()]).expect("start");
+        let path = journal_path(dir.path());
+        let mut file = OpenOptions::new().append(true).open(&path).expect("open");
+        file.write_all(b"{\"event\":\"finished\",\"seq\":1")
+            .expect("tear");
+        file.sync_data().expect("persist torn bytes");
+        let before = std::fs::read(&path).expect("torn journal");
+
+        let error = finish_exec(dir.path(), pending, true).expect_err("must refuse");
+        assert!(error.to_string().contains("unterminated"), "{error:#}");
+        assert_eq!(std::fs::read(&path).expect("unchanged"), before);
+        assert!(read(dir.path()).is_err());
+    }
+
+    #[test]
+    fn a_missing_journal_after_start_is_not_recreated_by_finish() {
+        let (dir, _env) = isolated();
+        let _lock = lock(dir.path()).expect("lock");
+        let pending = begin_exec(dir.path(), &["one".into()]).expect("start");
+        let path = journal_path(dir.path());
+        std::fs::remove_file(&path).expect("remove journal");
+
+        assert!(finish_exec(dir.path(), pending, true).is_err());
+        assert!(!path.exists(), "finish must not invent a new journal");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_machine_directory_after_start_is_not_recreated_by_finish() {
+        let (dir, _env) = isolated();
+        let machine = dir.path().join("machine");
+        std::fs::create_dir(&machine).expect("machine directory");
+        let _lock = lock(&machine).expect("lock");
+        let pending = begin_exec(&machine, &["one".into()]).expect("start");
+        let before = std::fs::read(journal_path(&machine)).expect("started journal");
+        let moved = dir.path().join("moved-machine");
+        std::fs::rename(&machine, &moved).expect("move machine directory");
+
+        assert!(finish_exec(&machine, pending, true).is_err());
+        assert!(!machine.exists(), "finish must not recreate the directory");
+        assert_eq!(
+            std::fs::read(journal_path(&moved)).expect("preserved journal"),
+            before
+        );
     }
 
     #[test]
