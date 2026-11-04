@@ -292,6 +292,7 @@ fn internet_checksum(data: &[u8]) -> u16 {
 /// A `sockaddr_storage` for `ip` with port zero (ICMP has no port), plus its
 /// family-correct length.
 fn sockaddr_for(ip: IpAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
+    // SAFETY: `sockaddr_storage` is plain C data for which the all-zero pattern is valid.
     let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     match ip {
         IpAddr::V4(v4) => {

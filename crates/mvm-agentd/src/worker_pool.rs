@@ -636,6 +636,8 @@ fn spawn_worker(
 
     // Workers execute through the validated `/proc/self/fd/<n>` path, so keep
     // that descriptor and close every other inherited agent descriptor.
+    // SAFETY: the pre_exec closure runs between fork and exec and only calls
+    // async-signal-safe fd-flag operations; it allocates nothing and takes no locks.
     unsafe {
         cmd.pre_exec(move || {
             #[cfg(target_os = "linux")]

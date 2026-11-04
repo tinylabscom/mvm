@@ -340,12 +340,11 @@ impl HostPressureSource for VmPressureLevelSource {
 /// kernel publishes one of: 1 (Normal), 2 (Warn), 4 (Critical).
 #[cfg(target_os = "macos")]
 fn read_macos_pressure_level() -> anyhow::Result<i32> {
-    use std::ffi::CString;
-
-    let name = CString::new("kern.memorystatus_vm_pressure_level")
-        .expect("sysctl name has no interior NULs");
+    let name = c"kern.memorystatus_vm_pressure_level";
     let mut value: i32 = 0;
     let mut size: libc::size_t = std::mem::size_of::<i32>();
+    // SAFETY: `name` is NUL-terminated and outlives the call; `value` and `size`
+    // describe a writable i32, and no new value is passed (null, 0).
     let rc = unsafe {
         libc::sysctlbyname(
             name.as_ptr(),

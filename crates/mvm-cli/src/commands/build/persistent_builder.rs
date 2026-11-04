@@ -870,6 +870,7 @@ fn print_outcome(outcome: &DispatchOutcome) {
 fn supervisor_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
+        // SAFETY: kill(pid, 0) only probes for existence and delivers no signal.
         let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
         rc == 0
     }
@@ -883,6 +884,7 @@ fn supervisor_alive(pid: u32) -> bool {
 fn send_sigterm(pid: u32) {
     #[cfg(unix)]
     {
+        // SAFETY: kill takes integer arguments and touches no memory.
         unsafe {
             let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
         }

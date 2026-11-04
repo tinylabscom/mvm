@@ -103,6 +103,7 @@ pub(crate) fn bind_vsock_listener(port: u32) -> std::io::Result<RawFd> {
     // SAFETY: fd is valid; on failure it is closed before returning.
     if unsafe { listen(fd, 16) } != 0 {
         let err = std::io::Error::last_os_error();
+        // SAFETY: `fd` is the socket created above and is closed exactly once here.
         unsafe {
             close(fd);
         }

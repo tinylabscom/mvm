@@ -1042,6 +1042,8 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
         log_file,
     );
     // Detach into its own session so it survives this `mvmctl` process.
+    // SAFETY: the pre_exec closure runs in the forked child and only calls setsid,
+    // which is async-signal-safe.
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
@@ -1302,10 +1304,12 @@ fn read_pid(path: &Path) -> Option<libc::pid_t> {
 }
 
 fn pid_alive(pid: libc::pid_t) -> bool {
+    // SAFETY: kill(pid, 0) only probes for existence and delivers no signal.
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
 fn kill(pid: libc::pid_t, sig: libc::c_int) {
+    // SAFETY: kill takes integer arguments and touches no memory.
     unsafe {
         libc::kill(pid, sig);
     }

@@ -98,6 +98,8 @@ pub fn spawn_telemetry_collector(
         .stdout(std::process::Stdio::null())
         .stderr(log_file);
     // Detach into its own session so it survives this `mvmctl` process.
+    // SAFETY: the pre_exec closure runs in the forked child and only calls setsid,
+    // which is async-signal-safe.
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {

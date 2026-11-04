@@ -109,7 +109,11 @@ pub struct StartupDiagnostics {
 fn nonblocking(fd: libc::c_int) -> io::Result<()> {
     // SAFETY: fcntl operates on an owned, live pipe descriptor.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fcntl operates on the same owned, live pipe descriptor.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())

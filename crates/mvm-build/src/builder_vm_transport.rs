@@ -511,6 +511,7 @@ fn reap_builder_vsock_egress_endpoint(state_dir: &Path) {
 }
 
 fn kill_pid(pid: libc::pid_t, sig: libc::c_int) {
+    // SAFETY: kill takes integer arguments and touches no memory.
     unsafe {
         libc::kill(pid, sig);
     }

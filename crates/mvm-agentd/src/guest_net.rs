@@ -232,6 +232,8 @@ fn apply_ioctls(
     gateway: [u8; 4],
 ) -> Result<(), String> {
     apply_interface_address(sock, iface, addr, netmask)?;
+    // SAFETY: `rt` is a zero-initialised rtentry (all-zero is a valid value) that
+    // outlives the ioctl; `sock` is the caller's open AF_INET socket.
     unsafe {
         // default route
         let mut rt: libc::rtentry = std::mem::zeroed();
@@ -253,6 +255,8 @@ fn apply_interface_address(
     addr: [u8; 4],
     netmask: [u8; 4],
 ) -> Result<(), String> {
+    // SAFETY: each `ifr` is a fully initialised ifreq that outlives its ioctl;
+    // `sock` is the caller's open AF_INET socket.
     unsafe {
         let mut ifr = ifreq_for(iface);
         set_sockaddr_in(&mut ifr.ifr_ifru.ifru_addr, addr);

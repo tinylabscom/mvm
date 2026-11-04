@@ -944,6 +944,8 @@ fn setup_sigwinch_handler(
     let (tx, rx) = std::sync::mpsc::channel::<()>();
 
     // Install SIGWINCH handler
+    // SAFETY: `sigwinch_handler` is an async-signal-safe extern "C" function that
+    // only stores to atomics.
     unsafe {
         libc::signal(
             libc::SIGWINCH,
@@ -1000,6 +1002,8 @@ fn get_terminal_size() -> (u16, u16) {
 
 /// Put the terminal in raw mode and return the original termios for restoration.
 fn enter_raw_mode() -> Result<libc::termios> {
+    // SAFETY: `orig` is zeroed plain C data that tcgetattr fills before it is used;
+    // fd 0 is stdin, and failure paths return early.
     unsafe {
         let mut orig: libc::termios = std::mem::zeroed();
         if libc::tcgetattr(0, &mut orig) != 0 {
@@ -1018,6 +1022,7 @@ fn enter_raw_mode() -> Result<libc::termios> {
 
 /// Restore the terminal to its original mode.
 fn restore_terminal(orig: &libc::termios) {
+    // SAFETY: `orig` is a valid termios; fd 0 is stdin.
     unsafe {
         libc::tcsetattr(0, libc::TCSANOW, orig);
     }
@@ -1124,7 +1129,10 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<Cons
     let vsock_fd = read_stream.as_raw_fd();
 
     // Save original flags so we can restore stdin after the relay exits.
+    // SAFETY: fcntl on stdin's descriptor takes only integer arguments.
     let orig_stdin_flags = unsafe { libc::fcntl(stdin_fd, libc::F_GETFL) };
+    // SAFETY: fcntl on descriptors this function holds open for its whole body takes
+    // only integer arguments.
     unsafe {
         libc::fcntl(stdin_fd, libc::F_SETFL, orig_stdin_flags | libc::O_NONBLOCK);
         libc::fcntl(vsock_fd, libc::F_SETFL, libc::O_NONBLOCK);
@@ -1148,6 +1156,7 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<Cons
                 revents: 0,
             },
         ];
+        // SAFETY: `fds` is a live array of exactly two pollfds, matching the count passed.
         let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, 500) };
         if ret < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
@@ -1205,6 +1214,7 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<Cons
     };
 
     // Restore stdin's original file-status flags before returning to the shell.
+    // SAFETY: fcntl on stdin's descriptor takes only integer arguments.
     unsafe {
         libc::fcntl(stdin_fd, libc::F_SETFL, orig_stdin_flags);
     }

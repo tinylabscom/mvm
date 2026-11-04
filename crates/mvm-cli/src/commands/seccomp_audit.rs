@@ -153,6 +153,8 @@ fn run_linux(args: Args) -> Result<()> {
     // execve. std::process::Command::spawn blocks on a status pipe from the
     // child until after all pre_exec closures return, so raising SIGSTOP inside
     // a pre_exec hook would deadlock the parent.
+    // SAFETY: the child branch only runs ptrace/exec setup and never returns into
+    // the multi-threaded parent's state; the parent branch continues normally.
     let main_pid = match unsafe { nix::unistd::fork() }
         .with_context(|| format!("failed to fork child for {program}"))?
     {
@@ -343,6 +345,7 @@ fn read_syscall_number(pid: nix::unistd::Pid) -> Result<i64> {
     // nix exposes PTRACE_GETREGS only on x86. AArch64 uses the architecture-
     // neutral GETREGSET request with NT_PRSTATUS and returns user_pt_regs in
     // the iovec supplied by the tracer.
+    // SAFETY: `user_regs_struct` is plain C data for which the all-zero pattern is valid.
     let mut registers: libc::user_regs_struct = unsafe { std::mem::zeroed() };
     let mut registers_iovec = libc::iovec {
         iov_base: std::ptr::from_mut(&mut registers).cast(),
@@ -389,6 +392,7 @@ fn close_non_stdio_fds() {
     // Best-effort close of any file descriptors the parent left open. We do
     // not treat errors as fatal: the audited command must run even if a close
     // fails because the fd was already closed or invalid.
+    // SAFETY: sysconf takes an integer name and touches no memory.
     let max_fd = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) } as i32;
     let max_fd = if max_fd < 0 { 1024 } else { max_fd };
     for fd in 3..max_fd {

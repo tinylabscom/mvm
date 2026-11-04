@@ -40,6 +40,7 @@ pub(super) fn raise_ambient_capabilities(capabilities: u64) -> std::io::Result<(
         if !super::bounding_set_retains(capabilities, capability) {
             continue;
         }
+        // SAFETY: prctl(PR_CAP_AMBIENT) takes only integer arguments and touches no memory.
         let rc = unsafe {
             libc::prctl(
                 PR_CAP_AMBIENT,

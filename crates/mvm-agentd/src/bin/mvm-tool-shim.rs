@@ -186,6 +186,7 @@ fn send_request(
         }
         fds.push(owned);
     }
+    // SAFETY: CMSG_SPACE is a pure size computation on an integer.
     let mut control = vec![0u8; unsafe { libc::CMSG_SPACE(24) } as usize];
     let mut iov = libc::iovec {
         iov_base: line.as_mut_ptr().cast(),
@@ -194,6 +195,7 @@ fn send_request(
     // Zero-initialized rather than a struct literal: `msghdr` carries private
     // padding fields on some libC targets (linux-musl), which makes literal
     // construction unconstructable there.
+    // SAFETY: `msghdr` is plain C data for which the all-zero pattern is valid.
     let mut header = unsafe { std::mem::zeroed::<libc::msghdr>() };
     header.msg_name = std::ptr::null_mut();
     header.msg_namelen = 0;

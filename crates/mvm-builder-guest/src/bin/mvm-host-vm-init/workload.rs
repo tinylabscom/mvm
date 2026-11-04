@@ -246,9 +246,11 @@ pub(crate) fn stop_workload(base: &Path, workload_id: &str) -> io::Result<()> {
     let pid_path = base.join(workload_id).join("fc.pid");
     if let Ok(Ok(pid)) = fs::read_to_string(&pid_path).map(|s| s.trim().parse::<i32>()) {
         // SIGTERM, then poll up to ~2s for the process to exit.
+        // SAFETY: kill takes integer arguments; a stale pid at worst signals nothing.
         unsafe { libc::kill(pid, libc::SIGTERM) };
         let mut exited = false;
         for _ in 0..40 {
+            // SAFETY: kill takes integer arguments; a stale pid at worst signals nothing.
             if unsafe { libc::kill(pid, 0) } != 0 {
                 exited = true;
                 break;
@@ -256,6 +258,7 @@ pub(crate) fn stop_workload(base: &Path, workload_id: &str) -> io::Result<()> {
             std::thread::sleep(Duration::from_millis(50));
         }
         if !exited {
+            // SAFETY: kill takes integer arguments; a stale pid at worst signals nothing.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }
@@ -274,6 +277,7 @@ pub(crate) fn workload_status(base: &Path, workload_id: &str) -> &'static str {
     let alive = fs::read_to_string(dir.join("fc.pid"))
         .ok()
         .and_then(|s| s.trim().parse::<i32>().ok())
+        // SAFETY: kill(pid, 0) only probes for existence and delivers no signal.
         .map(|pid| unsafe { libc::kill(pid, 0) } == 0)
         .unwrap_or(false);
     if alive && dir.join("v.sock").exists() {

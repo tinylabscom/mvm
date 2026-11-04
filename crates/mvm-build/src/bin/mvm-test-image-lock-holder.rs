@@ -30,6 +30,7 @@ fn main() {
 
     // Acquire an exclusive lock and hold it until the process exits.
     let fd = file.as_raw_fd();
+    // SAFETY: `fd` belongs to `file`, which stays open for the life of the process.
     let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
     assert_eq!(rc, 0, "acquire exclusive flock");
 
