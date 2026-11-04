@@ -7,7 +7,8 @@ use crate::{host_local, status::Outcome};
 
 pub const LIST: &str = "checkpoint.list";
 pub const REMOVE: &str = "checkpoint.remove";
-pub const METHODS: &[&str] = &[LIST, REMOVE];
+pub const VERIFY_LINEAGE: &str = "checkpoint.verify_lineage";
+pub const METHODS: &[&str] = &[LIST, REMOVE, VERIFY_LINEAGE];
 
 /// Listing has no filters; reject unknown fields rather than silently ignoring them.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -20,6 +21,14 @@ pub(crate) struct ListRequest {}
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CheckpointRemoveRequest {
+    id: String,
+}
+
+/// A host-local checkpoint ID, with no caller-supplied trust or root override.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CheckpointVerifyLineageRequest {
     id: String,
 }
 
@@ -44,6 +53,16 @@ pub(crate) fn dispatch(method: &str, request: &[u8]) -> Outcome {
                 Err(outcome) => return outcome,
             };
             match Checkpoints::open().remove(&CheckpointId::new(request.id)) {
+                Ok(()) => Outcome::ok(&crate::dispatch::Empty {}),
+                Err(error) => host_local::error(error),
+            }
+        }
+        VERIFY_LINEAGE => {
+            let request = match host_local::parse::<CheckpointVerifyLineageRequest>(request) {
+                Ok(request) => request,
+                Err(outcome) => return outcome,
+            };
+            match Checkpoints::open().verify_lineage(&CheckpointId::new(request.id)) {
                 Ok(()) => Outcome::ok(&crate::dispatch::Empty {}),
                 Err(error) => host_local::error(error),
             }
@@ -132,6 +151,74 @@ mod tests {
         )
         .unwrap();
         meta
+    }
+
+    #[test]
+    fn checkpoint_verify_lineage_refuses_invalid_requests_and_ids() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        for request in [
+            b"{}".as_slice(),
+            b"null",
+            br#"{"id":"target","root":"/outside"}"#,
+            br#"{"id":"target","tenant":"other"}"#,
+            br#"{"id":"target","public_key_file":"untrusted"}"#,
+            br#"{"id":"target","id":"other"}"#,
+            br#"{"id":42}"#,
+        ] {
+            assert_eq!(
+                dispatch("checkpoint.verify_lineage", request).status,
+                MVM_HOSTLIB_INVALID_INPUT
+            );
+        }
+        let outcome = dispatch("checkpoint.verify_lineage", br#"{"id":"../outside"}"#);
+        assert_eq!(outcome.status, crate::status::MVM_HOSTLIB_INVALID_SPEC);
+        assert!(!home.path().join("audit").exists());
+        assert!(!home.path().join("keys").exists());
+    }
+
+    #[test]
+    fn checkpoint_verify_lineage_uses_the_signed_host_chain_without_machine_services() {
+        use mvm_client::audit::chain::{emitter::AuditEmitter, host_keypair};
+
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let meta = seed_checkpoint("signed", None);
+        let request = br#"{"id":"signed"}"#;
+        assert_eq!(
+            dispatch("checkpoint.verify_lineage", request).status,
+            MVM_HOSTLIB_BACKEND
+        );
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-lineage-test")
+            .build();
+        let emitter = AuditEmitter::new(host_keypair::load_or_init().unwrap().signing).unwrap();
+        mvm_client::checkpoint::bind_checkpoint_created(&emitter, &plan, &meta).unwrap();
+        let outcome = dispatch("checkpoint.verify_lineage", request);
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(outcome.body, b"{}");
+        assert!(!home.path().join("machines").exists());
+
+        let path = mvm_core::config::checkpoints_dir().join("signed/meta.json");
+        let mut forged = serde_json::to_value(&meta).unwrap();
+        forged["class"] = serde_json::json!("private-parser-payload");
+        std::fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        let failure = dispatch("checkpoint.verify_lineage", request);
+        assert_eq!(failure.status, MVM_HOSTLIB_BACKEND);
+        let body: serde_json::Value = serde_json::from_slice(&failure.body).unwrap();
+        assert_eq!(body["retryable"], false);
+        assert_eq!(
+            body["message"],
+            "backend error: host-local operation failed"
+        );
+        assert!(
+            !String::from_utf8(failure.body)
+                .unwrap()
+                .contains("private-parser-payload")
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ void     mvm_hostlib_free(MvmHostlibBuf buf);
    `MVM_HOSTLIB_ABI_NOT_NEGOTIATED`: a binding and library that disagree about
    the buffer layout would otherwise read and free memory neither described.
 2. It calls a dotted method with a JSON request. Request types refuse unknown
-   fields. The ABI is 1.11.
+   fields. The ABI is 1.12.
 3. It gets back a status and a JSON buffer, and releases the buffer with
    `mvm_hostlib_free`. Statuses 1 to 7 mirror `MvmError`, and the error body
    carries the same `code` and `retryable` every other programmatic surface
@@ -154,7 +154,7 @@ classes and method tables for both SDKs.
 | Log streams | `machine.logs.stream.{open,next,close}` | `mvm_core::stream_client::open_vm_output` (what `mvmctl machine logs --follow` reads), on a reader thread |
 | Functions | `entrypoint.call`, `session.{start,call,stop,info}` | `mvm_client::entrypoint`, the dispatch `mvmctl machine run --entrypoint` and `machine session` use |
 | Host identity | `attestation.export`, `attestation.verify`, `attestation.status` | bounded `mvm_client::attestation` facade, without machine services |
-| Host-local checkpoints | `checkpoint.list`, `checkpoint.remove` | `mvm_client::checkpoint::Checkpoints`, without machine services |
+| Host-local checkpoints | `checkpoint.list`, `checkpoint.remove`, `checkpoint.verify_lineage` | `mvm_client::checkpoint::Checkpoints`, without machine services |
 | Image revocations | `image_revocations.update`, `image_revocations.status` | canonical signed revocation store through `mvm_client::image_admin::revocations` |
 
 ABI 1.10 adds `checkpoint.list`, a strict empty-object request returning the
@@ -181,10 +181,20 @@ administration under the caller's existing filesystem authority, not a new grant
 The guards are preflight checks, not an atomic transaction with concurrent pin,
 lineage or path changes.
 
+ABI 1.12 adds `checkpoint.verify_lineage`, accepting only
+`{"id":"checkpoint-id"}` and returning `{}` after signed-chain metadata
+ancestry verification. Invalid IDs return nonretryable `INVALID_SPEC` before
+anchor access; verification/read failures return nonretryable `BACKEND_ERROR`
+without parser payloads. There is no caller-selected root, tenant or trust key.
+The host anchor may initialize the existing host identity when an audit
+directory exists. Success does not hash snapshot blobs, establish runtime
+compatibility or authorize a restore. No VM service, guest capability, MCP
+method, remote endpoint or HTTP server is added.
+
 These host-local methods are `ProdSafe` data/admin operations under the
 registry's guest-tier classification, not authentication or a role grant. They
 run after ABI negotiation and before machine service construction. Empty
-operations require literal `{}`. Verification requires explicit
+operations require literal `{}`. Attestation verification requires explicit
 `{"kind":"self_identity"}` or
 `{"kind":"public_key_file","path":"/trusted/host.pub"}` trust;
 embedded keys, inline key bytes, issuer, storage-root and policy overrides are

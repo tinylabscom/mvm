@@ -34,6 +34,12 @@ be read or parsed, rather than silently omitting stopped entries or metadata.
 A missing registry remains a valid empty initial registry. Bulk-stop target
 discovery stays best-effort and excludes registry-only entries.
 
+`checkpoint::Checkpoints::verify_lineage` owns signed-chain metadata ancestry
+verification for the CLI and host library. It uses the configured host's audit
+anchor, even with an explicit catalog root. It does not hash snapshot blobs,
+check runtime compatibility or authorize a restore. Loading the existing anchor
+may initialize the host identity when an audit directory exists.
+
 `checkpoint::Checkpoints::remove` owns host-local checkpoint removal for the CLI
 and host library. It refuses incomplete/unreadable metadata, session pins,
 dependent checkpoints, and failed guard reads. An absent checkpoint directory is

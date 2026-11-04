@@ -549,6 +549,26 @@
       "title": "CheckpointRemoveRequest",
       "type": "object"
     },
+    "CheckpointVerifyLineageReply": {
+      "additionalProperties": false,
+      "description": "A request that carries nothing.",
+      "title": "Empty",
+      "type": "object"
+    },
+    "CheckpointVerifyLineageRequest": {
+      "additionalProperties": false,
+      "description": "A host-local checkpoint ID, with no caller-supplied trust or root override.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "CheckpointVerifyLineageRequest",
+      "type": "object"
+    },
     "ContentBlob": {
       "additionalProperties": false,
       "description": "One named artifact inside a checkpoint's `content/` dir, with its hash.",
@@ -4710,6 +4730,23 @@
       "title": "CheckpointRemove",
       "type": "object"
     },
+    "checkpoint_verify_lineage": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointVerifyLineageReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointVerifyLineageRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointVerifyLineage",
+      "type": "object"
+    },
     "entrypoint_call": {
       "additionalProperties": false,
       "properties": {
@@ -5513,6 +5550,7 @@
   "required": [
     "checkpoint_list",
     "checkpoint_remove",
+    "checkpoint_verify_lineage",
     "attestation_export",
     "attestation_verify",
     "attestation_status",
