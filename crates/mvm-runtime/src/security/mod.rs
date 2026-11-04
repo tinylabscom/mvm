@@ -1,8 +1,2 @@
 pub mod jailer;
 pub mod seccomp;
-
-// Re-export pure-logic modules from mvm-core::crypto for backward compatibility
-pub use mvm_core::crypto::command_gate;
-pub use mvm_core::crypto::posture;
-pub use mvm_core::crypto::rate_limiter;
-pub use mvm_core::crypto::threat_classifier;
