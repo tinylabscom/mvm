@@ -350,12 +350,13 @@ impl<S: RecordSink> ScrubbingSink<S> {
         stream.held_bytes += bytes.len();
         // The oldest chunk goes once the chunks after it cover the carry.
         let mut released = Vec::new();
-        while let Some((front, _)) = stream.chunks.front() {
-            let front_len = stdio_bytes(front).len();
+        while let Some(front_len) = stream.chunks.front().map(|(f, _)| stdio_bytes(f).len()) {
             if stream.held_bytes - front_len < carry {
                 break;
             }
-            let (front, _) = stream.chunks.pop_front().expect("front exists");
+            let Some((front, _)) = stream.chunks.pop_front() else {
+                break;
+            };
             stream.held_bytes -= front_len;
             released.push(front);
         }

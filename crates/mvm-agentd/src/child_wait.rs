@@ -175,15 +175,19 @@ pub fn install_orphan_reaper() {
     if REAPER_RUNNING.swap(true, Ordering::AcqRel) {
         return;
     }
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("mvm-orphan-reaper".to_string())
         .spawn(|| {
             loop {
                 reap_in(registry(), waitpid_any);
                 std::thread::sleep(REAP_INTERVAL);
             }
-        })
-        .expect("spawn orphan reaper thread");
+        });
+    if let Err(e) = spawned {
+        // Let a later call retry; orphans stay unreaped until one succeeds.
+        REAPER_RUNNING.store(false, Ordering::Release);
+        tracing::error!(error = %e, "could not start the orphan reaper thread");
+    }
 }
 
 // ---------------------------------------------------------------------------

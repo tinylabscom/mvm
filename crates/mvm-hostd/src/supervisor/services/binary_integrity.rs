@@ -158,7 +158,7 @@ impl BinarySignature {
     /// are written by the release pipeline).
     pub fn write_for(&self, binary: &Path) -> std::io::Result<()> {
         let sidecar = Self::sidecar_path(binary);
-        let bytes = serde_json::to_vec_pretty(self).expect("serialise own struct");
+        let bytes = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(sidecar, bytes)
     }
 }
@@ -251,13 +251,10 @@ impl IntegrityChecker for SignedBinaryChecker {
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(&sidecar.signature_b64)
             .map_err(|source| IntegrityError::BadSignatureEncoding { source })?;
-        if sig_bytes.len() != 64 {
-            return Err(IntegrityError::BadSignatureLength {
-                got: sig_bytes.len(),
-                want: 64,
-            });
-        }
-        let sig_arr: [u8; 64] = sig_bytes.try_into().expect("checked len above");
+        let got = sig_bytes.len();
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| IntegrityError::BadSignatureLength { got, want: 64 })?;
         let signature = Signature::from_bytes(&sig_arr);
 
         // mmap-read the binary. `memmap2` would be the more efficient

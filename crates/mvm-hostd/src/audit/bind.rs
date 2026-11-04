@@ -2,7 +2,7 @@
 // admitted plan, and the checkpoint metadata; these extract the labels and
 // emit. Error policy (best-effort vs fatal) belongs to the caller.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use mvm_contract::provenance::{
     ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
@@ -118,7 +118,7 @@ pub fn bind_checkpoint_forked(
     let parent_digest = child
         .parent
         .as_ref()
-        .expect("a forked child always carries a parent hash-link");
+        .context("a forked child must carry a parent hash-link")?;
     let secret_bindings_json = serde_json::to_string(secret_bindings)?;
     emitter.emit_checkpoint_forked(
         plan,
@@ -215,6 +215,27 @@ mod tests {
         assert!(content.contains("restored-child"));
         assert!(content.contains("rewind"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn bind_forked_refuses_a_child_with_no_parent_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seed = [0u8; 32];
+        rand::rng().fill_bytes(&mut seed);
+        let emitter = AuditEmitter::with_dir(SigningKey::from_bytes(&seed), dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-G");
+        let orphan = vm_full_meta("ckpt-orphan", "orphanvm");
+        let err = bind_checkpoint_forked(
+            &emitter,
+            &plan,
+            &CheckpointId::new("ckpt-parent"),
+            &orphan,
+            &orphan.vm_name,
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("parent hash-link"), "{err}");
+        assert!(!dir.path().join("local.jsonl").exists());
     }
 
     #[test]

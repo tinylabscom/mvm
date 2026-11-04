@@ -146,12 +146,10 @@ fn read_extension_frame(
 ) -> Result<ExtensionFrame, StreamFrameError> {
     let mut header = [0u8; HEADER_BYTES];
     reader.read_exact(&mut header)?;
-    let announced = usize::try_from(u32::from_be_bytes(
-        header[16..20]
-            .try_into()
-            .expect("fixed-width payload length slice"),
-    ))
-    .expect("u32 fits in usize on supported hosts");
+    let announced = usize::try_from(u32::from_be_bytes([
+        header[16], header[17], header[18], header[19],
+    ]))
+    .unwrap_or(usize::MAX);
     if announced > maximum {
         return Err(ExtensionFrameError::PayloadTooLarge { announced, maximum }.into());
     }

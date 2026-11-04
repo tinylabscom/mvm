@@ -132,7 +132,7 @@ impl QuotaConfig {
     /// CPU time the vCPU may burn per period.
     pub fn slice(&self) -> Duration {
         let us = self.period.as_micros() * u128::from(self.millicores) / 1_000;
-        Duration::from_micros(u64::try_from(us).expect("slice fits in u64"))
+        Duration::from_micros(u64::try_from(us).unwrap_or(u64::MAX))
     }
 
     /// Guest-visible worst-case freeze: `period × (1 - quota)`.
