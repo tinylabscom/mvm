@@ -45,6 +45,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use mvm_contract::hash::hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -422,14 +423,6 @@ fn canonical_json(manifest: &VolumeManifest) -> Result<Vec<u8>, VolumeError> {
         volume: PathBuf::from("<sealing>"),
         source,
     })
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
 }
 
 // Wire-shape sketches for the artifacts the builder VM emits. Kept

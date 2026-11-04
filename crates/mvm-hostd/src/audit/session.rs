@@ -50,6 +50,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
+use mvm_contract::hash::hex;
 use mvm_contract::merkle::merkle_root;
 use mvm_contract::verify::{PlanAuditEntry, SignedEnvelope, hash_line};
 use mvm_core::plan::ExecutionPlan;
@@ -253,14 +254,6 @@ fn label(name: &str, value: String) -> (String, String) {
 
 fn is_hex_hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn hex(bytes: &[u8; 32]) -> String {
-    use std::fmt::Write as _;
-    bytes.iter().fold(String::with_capacity(64), |mut out, b| {
-        let _ = write!(out, "{b:02x}");
-        out
-    })
 }
 
 /// One chain line with its position, hash, and decoded entry.

@@ -7,6 +7,7 @@
 //! excluded.
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use mvm_contract::hash::hex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -351,23 +352,6 @@ fn path_to_relative_str(p: &Path) -> String {
         }
     }
     parts.join("/")
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(nibble(b >> 4));
-        out.push(nibble(b & 0x0f));
-    }
-    out
-}
-
-fn nibble(n: u8) -> char {
-    match n {
-        0..=9 => (b'0' + n) as char,
-        10..=15 => (b'a' + (n - 10)) as char,
-        _ => unreachable!(),
-    }
 }
 
 #[cfg(test)]

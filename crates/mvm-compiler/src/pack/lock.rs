@@ -4,6 +4,7 @@
 use super::PackError;
 use crate::launch::{ARTIFACT_FORMAT_VERSION, TOOLCHAIN_VERSION};
 use crate::mvm_pin::PinnedMvmRevision;
+use mvm_contract::hash::hex;
 use mvm_contract::ir::{Workload, ir_hash};
 use mvm_contract::pack_lock::{LockedCompiler, PackLock, PackLockSchema};
 use mvm_contract::pack_spec::PackSpec;
@@ -88,10 +89,6 @@ pub fn stale_fields(expected: &PackLock, locked: &PackLock) -> Vec<LockField> {
     .into_iter()
     .filter_map(|(field, same)| (!same).then_some(field))
     .collect()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
