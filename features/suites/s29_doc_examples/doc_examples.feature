@@ -24,6 +24,13 @@ Feature: Documented examples work
     When I run mvmctl in the isolated mvm home with "agent-session ls"
     Then the command exits with code 0
 
+  Scenario: attestation status works in an empty home
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "trust attest status"
+    Then the command exits with code 0
+    And the output contains "identity.signer_id"
+    And the output contains "hardware providers:"
+
   Scenario: a sealed audit fixture has a correlated JSON verdict
     Given an isolated mvm home
     And a sealed audit fixture for session "sha256:1111111111111111111111111111111111111111111111111111111111111111"
