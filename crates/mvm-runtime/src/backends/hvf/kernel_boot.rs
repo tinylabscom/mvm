@@ -1442,6 +1442,11 @@ fn run_secondary<B: run::DeviceBus>(
     result.map(|(_, diagnostics)| diagnostics)
 }
 
+/// # Safety
+///
+/// A Hypervisor.framework VM must be created in this process and stay alive until
+/// this returns, and `ram` must be the base of the mapping backing `guest_ram`,
+/// valid for its whole length until return.
 unsafe fn run(
     guest_ram: &mut GuestRam,
     ram: *mut u8,
@@ -1488,6 +1493,8 @@ unsafe fn run(
             "protected handoff controller missing",
         ));
     }
+    // SAFETY: the VM exists (see the function's contract); the GIC is configured
+    // before any vCPU is created, and the HVF calls here only read values passed by value.
     unsafe {
         // In-kernel GICv3 — created after the VM, before any vCPU. Base
         // addresses must match the DTB's intc node, or the kernel's IRQ/timer

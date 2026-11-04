@@ -396,6 +396,8 @@ pub(crate) fn spawn_vsock_bridges(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // Detach into its own session so it survives this process.
+    // SAFETY: the pre_exec closure runs in the forked child and only calls setsid,
+    // which is async-signal-safe.
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
@@ -758,6 +760,7 @@ pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
 }
 
 pub(crate) fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
+    // SAFETY: kill takes integer arguments and touches no memory.
     unsafe {
         libc::kill(pid, sig);
     }

@@ -91,6 +91,7 @@ fn set_cloexec_or_close(fd: i32) -> i32 {
     }
     // SAFETY: plain descriptor flag update on a descriptor this function owns.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        // SAFETY: `fd` is the descriptor this function owns and closes it exactly once.
         unsafe { libc::close(fd) };
         return -1;
     }

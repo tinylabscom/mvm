@@ -1387,6 +1387,7 @@ mod linux {
 
     /// `uname -m` via libc (no coreutils in the seed). aarch64 / x86_64.
     fn machine_arch() -> Result<String, String> {
+        // SAFETY: `utsname` is plain C data for which the all-zero pattern is valid.
         let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
         // SAFETY: uname writes into the provided utsname struct.
         if unsafe { libc::uname(&mut uts) } != 0 {

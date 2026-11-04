@@ -30,6 +30,8 @@ impl ThreadCpuHandle {
         // libc's Mach bindings are deprecated in favor of the `mach2` crate,
         // but this project deliberately avoids adding that dependency. The
         // deprecation is confined to this small macOS-only block.
+        // SAFETY: mach_thread_self has no arguments; it returns a send right owned by
+        // the handle built here.
         #[allow(deprecated)]
         let port = unsafe { libc::mach_thread_self() };
         Ok(Self { port })
@@ -57,6 +59,7 @@ unsafe extern "C" {
 #[cfg(target_os = "macos")]
 impl ThreadCpuClock for ThreadCpuHandle {
     fn consumed(&self) -> Duration {
+        // SAFETY: `thread_basic_info` is plain C data for which the all-zero pattern is valid.
         let mut info: libc::thread_basic_info = unsafe { std::mem::zeroed() };
         let mut count = libc::THREAD_BASIC_INFO_COUNT;
         // SAFETY: `info` is a valid out-param of the correct size for

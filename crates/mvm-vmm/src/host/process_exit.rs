@@ -184,6 +184,8 @@ impl ProcessExitObserver {
         }
         // EV_RECEIPT returns one EV_ERROR record. ESRCH closes the registration
         // race by telling us the process exited before it could be watched.
+        // SAFETY: kevent returned success with room for one receipt, and EV_RECEIPT
+        // guarantees it wrote that record before returning.
         let receipt = unsafe { receipt.assume_init() };
         if receipt.flags & libc::EV_ERROR != 0 && receipt.data != 0 {
             let error = io::Error::from_raw_os_error(receipt.data as i32);

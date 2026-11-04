@@ -40,6 +40,7 @@ fn main() {
     }
     if probe_name == "groups" {
         // A zero-sized query reads only the count; it cannot change groups.
+        // SAFETY: a zero count with a null buffer is the documented size query; nothing is written.
         if unsafe { libc::getgroups(0, std::ptr::null_mut()) } < 0 {
             exit_errno("getgroups(0, NULL)");
         }
@@ -53,10 +54,12 @@ fn main() {
             std::process::exit(64);
         }
     };
+    // SAFETY: socket takes only integer arguments.
     let fd = unsafe { libc::socket(family, libc::SOCK_STREAM, 0) };
     if fd < 0 {
         exit_errno("socket");
     }
+    // SAFETY: `fd` was just returned by socket and is closed exactly once here.
     unsafe {
         libc::close(fd);
     }

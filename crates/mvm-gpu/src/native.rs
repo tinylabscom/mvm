@@ -48,6 +48,7 @@ struct Dynlib {
 
 // The handle is a dlopen reference: owned, not aliased, and only ever used
 // from this thread behind `&mut` backend methods.
+// SAFETY: see the invariant above; the dlopen handle has a single owner.
 unsafe impl Send for Dynlib {}
 
 impl Dynlib {
@@ -368,6 +369,8 @@ pub struct NativeCudaBackend {
 // the driver. It is only ever used behind a `Mutex` owned by one connection
 // thread (see `server::serve_connection`), so handing it across threads
 // cannot create aliasing driver state.
+// SAFETY: see the invariant above; the raw driver handles are never shared
+// between threads concurrently.
 unsafe impl Send for NativeCudaBackend {}
 
 /// Load the driver and initialize it. `None` when no usable driver is
@@ -791,6 +794,8 @@ impl GpuBackend for NativeCudaBackend {
         // asynchronous host-buffer lifetime would leave a borrowed frame
         // buffer behind, so finish the driver DMA before releasing it while
         // preserving stream ordering and endpoint completion tracking.
+        // SAFETY: `stream_synchronize` was resolved from the driver at load and `stream_ptr`
+        // is a stream this backend created and still owns.
         let code = unsafe { (self.cuda.stream_synchronize)(stream_ptr) };
         self.cuda.check(code, "cuStreamSynchronize after HtoD")?;
         self.completion()

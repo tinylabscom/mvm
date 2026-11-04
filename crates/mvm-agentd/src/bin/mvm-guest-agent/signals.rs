@@ -56,6 +56,11 @@ pub(crate) const BEFORE_STOP_HOOK: &str = "/etc/mvm/hooks/before_stop.sh";
 /// Second signal: `_exit(128 + signo)`. POSIX convention for
 /// signal-killed processes; matches what bash sees as the process
 /// exit code.
+///
+/// # Safety
+///
+/// Must be installed only as a signal handler, so that the kernel supplies a
+/// valid signal number and the body's async-signal-safety requirement holds.
 unsafe extern "C" fn on_shutdown_signal(sig: libc::c_int) {
     let prior = SHUTDOWN_SIGNAL_COUNT.fetch_add(1, Ordering::AcqRel);
     if prior >= 1 {
@@ -78,6 +83,10 @@ unsafe extern "C" fn on_shutdown_signal(sig: libc::c_int) {
 /// SIGHUP triggers a fresh reload.
 ///
 /// Async-signal-safe — only an atomic store.
+///
+/// # Safety
+///
+/// Must be installed only as a signal handler.
 unsafe extern "C" fn on_reload_signal(_sig: libc::c_int) {
     RELOAD_REQUESTED.store(true, Ordering::Release);
 }

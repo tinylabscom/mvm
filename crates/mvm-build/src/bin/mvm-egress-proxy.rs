@@ -130,6 +130,8 @@ mod linux {
         // happy under `function-casts-as-integer` (warn-by-default in
         // recent nightlies, hard error under workspace `-D warnings`).
         sa.sa_sigaction = signal_handler as *const () as usize;
+        // SAFETY: `sa` is a zeroed sigaction with its handler set to an extern "C"
+        // function; a null old-action pointer is permitted.
         unsafe { libc::sigaction(sig, &sa, std::ptr::null_mut()) };
     }
 }

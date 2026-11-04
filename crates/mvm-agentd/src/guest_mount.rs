@@ -691,22 +691,28 @@ fn assume_identity_with_saved_gid(
     saved_gid: u32,
     keep: u64,
 ) -> std::io::Result<()> {
+    // SAFETY: prctl(PR_SET_KEEPCAPS) takes only integer arguments and touches no memory.
     if unsafe { libc::prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     narrow_bounding_set_where_enforceable(keep)?;
+    // SAFETY: a zero-length group list with a null pointer is the documented way to
+    // clear supplementary groups; the pointer is never read.
     if unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    // SAFETY: setresgid takes only integer ids and touches no memory.
     if unsafe { libc::setresgid(gid, gid, saved_gid) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    // SAFETY: setuid takes an integer id and touches no memory.
     if unsafe { libc::setuid(uid) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     set_capabilities(keep)?;
     raise_ambient_capabilities(keep)?;
     set_no_new_privileges()?;
+    // SAFETY: getuid has no arguments and cannot fail.
     if unsafe { libc::getuid() } == 0 {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
     }
@@ -760,6 +766,8 @@ fn drop_capability_bounding_set_to(keep: u64) -> std::io::Result<()> {
         if bounding_set_retains(keep, cap) {
             continue;
         }
+        // SAFETY: prctl(PR_CAPBSET_DROP) takes only integer arguments; EINVAL for
+        // an unimplemented slot is handled below.
         let rc = unsafe { libc::prctl(PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
         if rc != 0 {
             let err = std::io::Error::last_os_error();
@@ -849,6 +857,7 @@ fn bounding_drop_is_unenforceable(err: &std::io::Error) -> bool {
 
 #[cfg(target_os = "linux")]
 fn set_no_new_privileges() -> std::io::Result<()> {
+    // SAFETY: prctl(PR_SET_NO_NEW_PRIVS) takes only integer arguments and touches no memory.
     if unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -1215,6 +1224,8 @@ fn setup_verity_target(
     let mut buf = vec![0u8; payload.len()];
     buf.copy_from_slice(&payload);
     let header_ptr = buf.as_mut_ptr().cast::<DmIoctl>();
+    // SAFETY: `header_ptr` points at `buf`, which holds a complete dm-ioctl header
+    // followed by its table payload and stays alive and unmoved for the whole call.
     unsafe {
         do_ioctl(fd, iowr(DM_TABLE_LOAD_CMD), header_ptr)
             .map_err(|e| MountError::syscall(format!("DM_TABLE_LOAD({device_name})"), e))?;
