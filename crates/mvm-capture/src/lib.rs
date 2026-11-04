@@ -1,3 +1,4 @@
+#![deny(unreachable_pub)]
 //! `mvm-capture` — project-environment capture frontend for mvm.
 //!
 //! This crate implements the isolated host-inspection component for the

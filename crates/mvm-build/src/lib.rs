@@ -1,3 +1,4 @@
+#![deny(unreachable_pub)]
 //! Image identity and production primitives, with Unix-only VM orchestration.
 //!
 //! Non-Unix hosts can observe repositories and produce/verify local manifests.

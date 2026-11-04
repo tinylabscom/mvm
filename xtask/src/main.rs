@@ -1,3 +1,4 @@
+#![deny(unreachable_pub)]
 use anyhow::Result;
 use std::path::PathBuf;
 use xtask::network_perf;
