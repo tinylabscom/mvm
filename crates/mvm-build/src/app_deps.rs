@@ -69,6 +69,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use mvm_contract::hash::hex;
 use mvm_core::deps_audit::{
     FILE_CONTENT_DIR, FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, VolumeError, seal_volume,
     verify_sealed_volume,
@@ -703,14 +704,6 @@ fn sha256_file(path: &Path) -> Result<String, io::Error> {
         h.update(&buf[..n]);
     }
     Ok(hex(&h.finalize()))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
 }
 
 #[cfg(test)]

@@ -29,6 +29,7 @@ use super::file::{VerifyError, verify_chain_bytes};
 use super::segment::{
     Continuation, Pruned, Sealed, continuation_from_entry, pruned_from_entry, sealed_from_entry,
 };
+use mvm_contract::hash::hex;
 use mvm_contract::verify::hash_line;
 
 /// What went wrong across the set, as opposed to within one file.
@@ -275,10 +276,6 @@ fn active_seq(path: &Path) -> Result<u64, SegmentSetError> {
         .ok()
         .and_then(|e| continuation_from_entry(&e.entry))
         .map_or(1, |c| c.segment))
-}
-
-fn hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// One segment, read exactly once.

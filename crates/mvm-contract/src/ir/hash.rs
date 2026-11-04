@@ -1,3 +1,4 @@
+use crate::hash::hex;
 use crate::ir::canonicalize::canonicalize;
 use alloc::string::String;
 use sha2::{Digest, Sha256};
@@ -10,23 +11,6 @@ pub fn ir_hash<T: serde::Serialize>(value: &T) -> Result<String, serde_json::Err
     let canonical = canonicalize(value)?;
     let digest = Sha256::digest(canonical.as_bytes());
     Ok(hex(&digest))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(nibble(b >> 4));
-        out.push(nibble(b & 0x0f));
-    }
-    out
-}
-
-fn nibble(n: u8) -> char {
-    match n {
-        0..=9 => (b'0' + n) as char,
-        10..=15 => (b'a' + (n - 10)) as char,
-        _ => unreachable!(),
-    }
 }
 
 #[cfg(test)]
