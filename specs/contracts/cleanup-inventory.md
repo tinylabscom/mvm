@@ -827,26 +827,16 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_WORKSPACE_PATH` | set-only | `crates/mvm-build/src/image_source/build.rs:398` | 0 | NO | yes |
 | `MVM_WRAPPER_CONFIG_PATH` | set-only | `crates/mvm-cli/src/commands/vm/sdk_no_vm.rs:127` | 0 | NO | yes |
 
-Documented names with no reader anywhere (docs-only):
+Documented names with no reader anywhere (docs-only): none. Every name the
+table used to list was checked against `crates/`, `xtask/`, `scripts/`, `src/`, `tests/`, `.github/`, justfiles, `nix/` and the SDKs; the verdicts are in the table below.
 
-| Name | First doc site | Removal statement |
-|---|---|---|
-| `MVM_ASSURANCE_BOOT_CONFIG` | `public/src/content/docs/guides/assurance-runtime.md:57` | no removal statement |
-| `MVM_BUILDER_AGENT_BIN` | `public/src/content/docs/reference/cli-commands.md:2835` | no removal statement |
-| `MVM_DEV_FLAKE_URL` | `public/src/content/docs/reference/cli-commands.md:2833` | no removal statement |
-| `MVM_EGRESS_BENCH` | `public/src/content/docs/guides/networking.md:201` | no removal statement |
-| `MVM_FC_ASSET_BASE` | `public/src/content/docs/reference/cli-commands.md:2796` | no removal statement |
-| `MVM_FC_ASSET_KERNEL` | `public/src/content/docs/reference/cli-commands.md:2798` | no removal statement |
-| `MVM_FC_ASSET_ROOTFS` | `public/src/content/docs/reference/cli-commands.md:2797` | no removal statement |
-| `MVM_RUNTIME_ARCH` | `public/src/content/docs/guides/assurance-runtime.md:64` | no removal statement |
-| `MVM_RUNTIME_ARCHIVE` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
-| `MVM_RUNTIME_CHECKSUM` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
-| `MVM_RUNTIME_INITRAMFS` | `public/src/content/docs/guides/assurance-runtime.md:60` | no removal statement |
-| `MVM_RUNTIME_ROOT_HASH` | `public/src/content/docs/guides/assurance-runtime.md:62` | no removal statement |
-| `MVM_RUNTIME_SIGNATURE_BUNDLE` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
-| `MVM_RUNTIME_VERITY` | `public/src/content/docs/guides/assurance-runtime.md:60` | no removal statement |
-| `MVM_RUNTIME_VERSION` | `public/src/content/docs/guides/assurance-runtime.md:63` | no removal statement |
-| `MVM_SRC` | `public/src/content/docs/reference/cli-commands.md:2834` | no removal statement |
+| Name | Verdict |
+|---|---|
+| `MVM_ASSURANCE_BOOT_CONFIG`, `MVM_RUNTIME_ARCH`, `MVM_RUNTIME_ARCHIVE`, `MVM_RUNTIME_CHECKSUM`, `MVM_RUNTIME_INITRAMFS`, `MVM_RUNTIME_OVERLAY`, `MVM_RUNTIME_ROOT_HASH`, `MVM_RUNTIME_SIGNATURE_BUNDLE`, `MVM_RUNTIME_VERITY`, `MVM_RUNTIME_VERSION` | inputs of the inline Python snippet in `public/src/content/docs/guides/assurance-runtime.md` (it reads them with `os.environ`). No `mvmctl` code reads them, and the page says the operator sets them before running the snippet; the docs are accurate |
+| `MVM_EGRESS_BENCH` | read by `tests/egress_path_bench.rs:27` (test-only opt-in, with `_RUNS` and `_PAYLOAD_BYTES`); `guides/networking.md` documents it correctly |
+| `MVM_FC_ASSET_BASE`, `MVM_FC_ASSET_ROOTFS`, `MVM_FC_ASSET_KERNEL` | only reader is `crates/mvm-build/resources/builder_scripts/download_builder_artifacts.sh.tera`, which is registered in `nix/scripts.rs` but never rendered outside the template-list test, so no run reads them. Rows removed from `reference/cli-commands.md` |
+| `MVM_BUILDER_AGENT_BIN`, `MVM_DEV_FLAKE_URL` | no reader, and no public doc names them any more |
+| `MVM_SRC` | a shell variable the generated builder-VM build script assigns itself (`crates/mvm-build/src/builder_vm_runtime.rs:436`), not an environment input; not in public docs |
 <!-- env:end -->
 
 ### 3.5 Backend x platform x feature combinations
