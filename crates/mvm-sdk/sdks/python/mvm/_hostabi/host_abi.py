@@ -657,6 +657,7 @@ class MachinePauseRequest:
 class MachinePromptRequest:
     id: str
     prompt_b64: str
+    checkpoint: Optional[bool] = False
     idempotency_key: Optional[str] = None
     request_id: Optional[str] = None
     session_id: Optional[str] = None
@@ -1483,6 +1484,8 @@ class MachinePromptReply:
     delivered: bool
     journal_cursor: int
     agent_error: Optional[AgentErrorReply] = None
+    checkpoint_failed: Optional[bool] = None
+    checkpoint_id: Optional[str] = None
     error: Optional[RemoteErrorReply] = None
     exit_code: Optional[int] = None
     output_truncated: Optional[bool] = None

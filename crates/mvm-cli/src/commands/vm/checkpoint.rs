@@ -28,13 +28,11 @@ use mvm_core::vm_backend::SnapshotCapability;
 use super::Cli;
 use super::shared::clap_vm_name;
 use crate::ui;
-use admitted::admitted_capture_for;
+use mvm_client::checkpoint::admitted::admitted_capture_for;
 
-mod admitted;
 mod fork_vm_full;
 mod lineage;
-mod prompt_step;
-pub(in crate::commands) use prompt_step::VmFullStepCheckpointer;
+pub(in crate::commands) use mvm_client::checkpoint::prompt_step::VmFullStepCheckpointer;
 mod revert;
 mod timeline;
 mod vm_state;

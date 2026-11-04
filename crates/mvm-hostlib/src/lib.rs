@@ -105,7 +105,8 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// 10 added complete read-only checkpoint catalog metadata.
 /// 11 added guarded host-local checkpoint removal.
 /// 12 added host-local signed-chain checkpoint lineage verification.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 12;
+/// 13 added opt-in prompt-step checkpointing.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 13;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -685,14 +686,15 @@ mod tests {
 
     #[test]
     fn recovery_status_and_c_buffer_do_not_depend_on_last_negotiated_minor() {
-        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 12));
+        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 13));
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 7), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 8), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 9), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 10), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 11), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 12), 1);
-        assert_eq!(mvm_hostlib_abi_is_compatible(1, 13), 0);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 13), 1);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 14), 0);
         for minor in [7, 8, 9, 7] {
             assert_eq!(mvm_hostlib_abi_is_compatible(1, minor), 1);
             let outcome = Outcome::from(mvm_core::client::MvmError::RecoveryRequired {

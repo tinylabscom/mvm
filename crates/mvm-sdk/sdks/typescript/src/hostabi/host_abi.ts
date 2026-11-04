@@ -1362,6 +1362,14 @@ export interface MachinePromptReply {
  */
 agent_error?: (AgentErrorReply | null)
 /**
+ * True when the step did not commit a checkpoint.
+ */
+checkpoint_failed?: (boolean | null)
+/**
+ * Checkpoint ID when the delivered step was committed.
+ */
+checkpoint_id?: (string | null)
+/**
  * False when a prompt under the same retry key was already accepted and nothing was sent.
  */
 delivered: boolean
@@ -1388,6 +1396,10 @@ stdout_b64?: string
  * A `machine.prompt` request.
  */
 export interface MachinePromptRequest {
+/**
+ * Opt in to capture a full-VM checkpoint after delivery.
+ */
+checkpoint?: boolean
 /**
  * The running machine whose agent is prompted.
  */
