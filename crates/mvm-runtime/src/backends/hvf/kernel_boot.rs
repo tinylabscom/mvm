@@ -1444,9 +1444,8 @@ fn run_secondary<B: run::DeviceBus>(
 
 /// # Safety
 ///
-/// A Hypervisor.framework VM must be created in this process and stay alive until
-/// this returns, and `ram` must be the base of the mapping backing `guest_ram`,
-/// valid for its whole length until return.
+/// A VM created in this process must stay alive until return; `ram` must
+/// point to the base of `guest_ram`'s valid, full-length mapping.
 unsafe fn run(
     guest_ram: &mut GuestRam,
     ram: *mut u8,
@@ -1531,17 +1530,11 @@ unsafe fn run(
         // loop (crate::vmm::run) — the same body the KVM backend uses.
         let vcpu = HvfVcpu::from_raw(vcpu_id, exit);
 
-        // MPIDR_EL1 must match this CPU's `cpu@<addr>` node and hence its GIC
-        // redistributor frame (else gic_populate_rdist walks off the region and
-        // faults). arm64 boot protocol: x0 per `VcpuStart`, x1..x3=0, PC=entry,
-        // EL1h with DAIF masked. Routed through `VcpuStart` so a secondary
-        // released by PSCI takes this same path with different data rather than
-        // a second copy of it.
-        // The start state sets MPIDR_EL1, which is what HVF places the GIC
-        // redistributor frame by — so the frame can only be checked afterwards.
-        // Checked for the boot CPU too: a machine whose CPU 0 cannot find its
-        // redistributor hangs in IRQ init with an empty console, and that is
-        // worth naming whether it happens on one CPU or four.
+        // MPIDR_EL1 must match this CPU's DTB node and GIC redistributor frame,
+        // or IRQ init faults/hangs without console. `VcpuStart` sets it before
+        // we can verify the frame, for the primary and PSCI-released secondaries.
+        // arm64 boot: x0 per `VcpuStart`, x1..x3=0, PC=entry, EL1h, DAIF masked.
+        // Sharing `VcpuStart` avoids duplicating the secondary boot path.
         let started = apply_vcpu_start(&vcpu, VcpuStart::primary(entry, dtb_addr))
             .and_then(|()| verify_redistributor_frame(vcpu_id, 0));
         if let Err(e) = started {
