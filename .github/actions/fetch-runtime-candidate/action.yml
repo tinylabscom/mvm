@@ -1,5 +1,5 @@
 name: Fetch exact runtime candidate
-description: Verify current-attempt runtime transport, fixed signatures and all four output pins
+description: Verify pinned same-run runtime transport, fixed signatures and all four output pins
 inputs:
   artifact-id:
     description: Actual candidate upload ID
