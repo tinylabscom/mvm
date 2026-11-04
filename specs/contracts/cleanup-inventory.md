@@ -439,7 +439,7 @@ Documented as removed or non-existent (checked against the generated block: none
 | Knob | Source of the statement | Status in code |
 |---|---|---|
 | `MVM_NETWORKING`, `MVM_GATEWAY_BIN` | CLAUDE.md: gone with the gateway | no literal anywhere |
-| `MVM_ACK_UNRESTRICTED_NETWORK` | CLAUDE.md claim 10: never existed | no literal; but `public/src/content/docs/guides/fleet-stream-edges.md:61` still documents it, see the docs-only table |
+| `MVM_ACK_UNRESTRICTED_NETWORK` | CLAUDE.md claim 10: never existed | no literal, and no public doc names it any more |
 | `MVM_NO_VM` | read by the SDKs (`__sdk-no-vm`) | not a Rust literal |
 
 <!-- env:begin -->
@@ -831,7 +831,6 @@ Documented names with no reader anywhere (docs-only):
 
 | Name | First doc site | Removal statement |
 |---|---|---|
-| `MVM_ACK_UNRESTRICTED_NETWORK` | `public/src/content/docs/guides/fleet-stream-edges.md:61` | no removal statement |
 | `MVM_ASSURANCE_BOOT_CONFIG` | `public/src/content/docs/guides/assurance-runtime.md:57` | no removal statement |
 | `MVM_BUILDER_AGENT_BIN` | `public/src/content/docs/reference/cli-commands.md:2835` | no removal statement |
 | `MVM_DEV_FLAKE_URL` | `public/src/content/docs/reference/cli-commands.md:2833` | no removal statement |
@@ -848,8 +847,6 @@ Documented names with no reader anywhere (docs-only):
 | `MVM_RUNTIME_VERITY` | `public/src/content/docs/guides/assurance-runtime.md:60` | no removal statement |
 | `MVM_RUNTIME_VERSION` | `public/src/content/docs/guides/assurance-runtime.md:63` | no removal statement |
 | `MVM_SRC` | `public/src/content/docs/reference/cli-commands.md:2834` | no removal statement |
-| `MVM_STUDIO_BACKEND` | `public/src/content/docs/sdk/rust.md:146` | no removal statement |
-| `MVM_TOKEN` | `public/src/content/docs/sdk/rust.md:136` | no removal statement |
 <!-- env:end -->
 
 ### 3.5 Backend x platform x feature combinations
