@@ -652,8 +652,32 @@ impl LocalBackend {
     /// declares references; a machine with any invalid reference must not
     /// boot (and nothing is recorded for it).
     fn validate_and_record_secret_refs(&self, name: &str, refs: &[MachineSecretRef]) -> Result<()> {
-        if refs.is_empty() {
+        let Some(service) = self.admit_secret_refs(refs)? else {
             return Ok(());
+        };
+        service
+            .record_machine_references(name, refs)
+            .map_err(|e| crate::local::backend_err(format!("recording secret refs: {e}")))
+    }
+
+    /// [`Self::validate_and_record_secret_refs`] for a transient attempt: the
+    /// sidecar is written under the lifecycle lock and its digest bound into
+    /// the attempt's receipt, so cleanup removes only what this attempt wrote.
+    fn record_transient_secret_refs(&self, name: &str, refs: &[MachineSecretRef]) -> Result<()> {
+        let Some(service) = self.admit_secret_refs(refs)? else {
+            return Ok(());
+        };
+        crate::volume::ownership::record_secret_refs(&self.session_root(), name, || {
+            Ok(service.record_machine_references(name, refs)?)
+        })
+        .map_err(|e| crate::local::backend_err(format!("recording secret refs: {e:#}")))
+    }
+
+    /// Fail-closed validation of `refs`; the service to record them with, or
+    /// `None` when there is nothing to record.
+    fn admit_secret_refs(&self, refs: &[MachineSecretRef]) -> Result<Option<Arc<SecretService>>> {
+        if refs.is_empty() {
+            return Ok(None);
         }
         let service = self.secrets()?;
         service
@@ -661,9 +685,7 @@ impl LocalBackend {
             .map_err(|e| MvmError::Rejected {
                 reason: format!("secret reference admission refused: {e}"),
             })?;
-        service
-            .record_machine_references(name, refs)
-            .map_err(|e| crate::local::backend_err(format!("recording secret refs: {e}")))
+        Ok(Some(service))
     }
 
     /// Register the request's typed volume attachments for `name`. An
@@ -675,13 +697,29 @@ impl LocalBackend {
         volumes: &[LaunchVolumeSpec],
         profile: AdmittedProfile,
     ) -> Result<()> {
-        if volumes.is_empty() {
-            return Ok(());
-        }
         let service = launch_volume_service();
+        for request in Self::unregistered_attachments(&service, name, volumes, profile)? {
+            service.prepare_attachment(&request).map_err(|e| {
+                crate::local::backend_err(format!("attaching {:?}: {e:#}", request.volume))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// The attachments of `volumes` that `name` does not already hold.
+    fn unregistered_attachments(
+        service: &LocalVolumeService,
+        name: &str,
+        volumes: &[LaunchVolumeSpec],
+        profile: AdmittedProfile,
+    ) -> Result<Vec<AttachmentRequest>> {
+        if volumes.is_empty() {
+            return Ok(Vec::new());
+        }
         let existing = service
             .list_attachments(name)
             .map_err(|e| crate::local::backend_err(format!("listing attachments: {e:#}")))?;
+        let mut missing = Vec::new();
         for spec in volumes {
             let identical = existing.iter().any(|a| {
                 a.guest_path == spec.guest_path
@@ -700,21 +738,46 @@ impl LocalBackend {
                     ),
                 });
             }
-            let request = AttachmentRequest::builder(name, &spec.volume)
-                .and_then(|b| {
-                    b.guest_path(&spec.guest_path)
-                        .access(spec.access)
-                        .profile(profile)
-                        .build()
-                })
-                .map_err(|e| MvmError::InvalidSpec {
-                    reason: format!("volume attachment {:?}: {e:#}", spec.volume),
-                })?;
-            service.prepare_attachment(&request).map_err(|e| {
-                crate::local::backend_err(format!("attaching {:?}: {e:#}", spec.volume))
-            })?;
+            missing.push(
+                AttachmentRequest::builder(name, &spec.volume)
+                    .and_then(|b| {
+                        b.guest_path(&spec.guest_path)
+                            .access(spec.access)
+                            .profile(profile)
+                            .build()
+                    })
+                    .map_err(|e| MvmError::InvalidSpec {
+                        reason: format!("volume attachment {:?}: {e:#}", spec.volume),
+                    })?,
+            );
         }
-        Ok(())
+        Ok(missing)
+    }
+
+    /// Directory the transient session receipt and secret sidecar live under:
+    /// the secret service's configured machines root, else the default.
+    pub(crate) fn session_root(&self) -> std::path::PathBuf {
+        self.secret_service
+            .as_ref()
+            .map_or_else(machine_state_root, |service| {
+                service.machines_root().to_path_buf()
+            })
+    }
+
+    /// Register the volumes the request declares under the attempt's receipt. Registrations this attempt did not create
+    /// are borrowed and never recorded for removal.
+    fn register_transient_volumes(&self, name: &str, request: &LaunchRequest) -> Result<()> {
+        let root = self.session_root();
+        let service = launch_volume_service();
+        let missing = Self::unregistered_attachments(
+            &service,
+            name,
+            &request.volumes,
+            AdmittedProfile::from_profile_name(&request.profile),
+        )?;
+        service
+            .register_session_volumes(name, &missing, &root)
+            .map_err(|e| crate::local::backend_err(format!("attaching volumes: {e:#}")))
     }
 
     /// Resolve `name`'s registered attachments and take exclusive leases for
@@ -1083,6 +1146,14 @@ impl LocalBackend {
         let launched_at = std::time::Instant::now();
         let profile = AdmittedProfile::from_profile_name(&request.profile);
         let mut preparation = self.acquire_leases(name, profile)?;
+        if transient {
+            crate::volume::ownership::note_leases(
+                &self.session_root(),
+                name,
+                preparation.lease_keys(),
+            )
+            .map_err(|e| crate::local::backend_err(format!("recording volume leases: {e:#}")))?;
+        }
         let volumes: Vec<mvm_core::vm_backend::VmVolume> = preparation
             .volumes
             .iter()
@@ -1344,18 +1415,45 @@ impl LocalBackend {
     /// session-owned resource, and drop the per-VM state dirs. Safe to call
     /// repeatedly and on names that never launched. An attempted stop error
     /// returns before any session resource is released.
+    ///
+    /// A transient session releases only what its receipt names and only
+    /// while the receipt still describes the resources; otherwise they are
+    /// retained, with the state that records them.
     pub fn cleanup_transient(&self, name: &str) -> Result<()> {
         if self.machine_running(name) {
             self.stop_for_recreate(name)?;
         }
-        self.release_session_resources(name)?;
+        let retained = if machine_spec_path(name).exists() {
+            self.release_session_resources(name)?;
+            false
+        } else {
+            self.release_transient_resources(name)?
+        };
         remove_vm_runtime_dirs(name)?;
         // The state dir under machines/ only carries session sidecars for a
         // transient (no machine.json); never touch a persistent definition.
-        if !machine_spec_path(name).exists() {
+        if !retained && !machine_spec_path(name).exists() {
             remove_dir_if_present(&machine_state_dir(name))?;
         }
         Ok(())
+    }
+
+    /// Settle a transient session through its receipt. Returns whether
+    /// anything was retained.
+    fn release_transient_resources(&self, name: &str) -> Result<bool> {
+        let release = LocalVolumeService::new()
+            .release_session(name, &self.session_root())
+            .map_err(|e| {
+                crate::local::backend_err(format!("releasing session resources: {e:#}"))
+            })?;
+        crate::local::deregister_from_name_registry(name);
+        match release {
+            crate::volume::SessionRelease::Released => Ok(false),
+            crate::volume::SessionRelease::Retained(reason) => {
+                tracing::warn!(machine = name, %reason, "transient cleanup retained session resources");
+                Ok(true)
+            }
+        }
     }
 }
 

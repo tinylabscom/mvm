@@ -1836,3 +1836,251 @@ fn a_persistent_request_stripped_of_its_name_is_refused_not_panicked() {
         Err(MvmError::InvalidSpec { .. })
     ));
 }
+
+// ── Transient request-volume registration ───────────────────────────
+
+fn work_volume_service() -> crate::volume::LocalVolumeService {
+    let volumes = crate::volume::test_support::service();
+    volumes
+        .create_block_volume(
+            &crate::volume::dto::CreateBlockVolumeRequest::builder("work")
+                .unwrap()
+                .capacity_mib(crate::volume::test_support::TEST_VOLUME_MIB)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    volumes.unlock_volume("work").unwrap();
+    volumes
+}
+
+fn work_volume_request(home: &Isolated, name: &str) -> LaunchRequestBuilder {
+    transient_request(&home.rootfs())
+        .name(name)
+        .volume(LaunchVolumeSpec {
+            volume: "work".into(),
+            guest_path: "/data/work".into(),
+            access: AccessMode::ReadOnly,
+        })
+}
+
+#[tokio::test]
+async fn transient_declared_volume_is_registered_and_leased_without_preregistration() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let volumes = work_volume_service();
+    let name = "t-declared-volume";
+
+    let outcome = client
+        .launch(work_volume_request(&home, name).build().unwrap())
+        .await
+        .expect("launch");
+
+    assert_eq!(volumes.list_attachments(name).unwrap().len(), 1);
+    assert_eq!(
+        volumes
+            .describe_volume("work")
+            .unwrap()
+            .attached_to
+            .as_deref(),
+        Some(name)
+    );
+    client.stop_machine(&outcome.machine.id).await.unwrap();
+    client.cleanup_transient(name).unwrap();
+}
+
+#[tokio::test]
+async fn transient_declared_volume_missing_from_catalog_refuses_before_boot() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let name = "t-missing-volume";
+
+    let error = client
+        .launch(work_volume_request(&home, name).build().unwrap())
+        .await
+        .expect_err("an unknown volume must refuse");
+
+    assert!(error.to_string().contains("work"), "{error}");
+    assert!(!client.machine_running(name));
+}
+
+fn receipt_path(name: &str) -> std::path::PathBuf {
+    machine_state_root().join(name).join("volume-receipt.json")
+}
+
+fn work_attachment(name: &str) -> AttachmentRequest {
+    AttachmentRequest::builder(name, "work")
+        .unwrap()
+        .guest_path("/data/work")
+        .access(AccessMode::ReadOnly)
+        .profile(AdmittedProfile::from_profile_name("standard"))
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn transient_cleanup_removes_what_the_session_registered_and_leased() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let volumes = work_volume_service();
+    let name = "t-owned-volume";
+    let outcome = client
+        .launch(work_volume_request(&home, name).build().unwrap())
+        .await
+        .unwrap();
+    assert!(receipt_path(name).exists());
+
+    client.stop_machine(&outcome.machine.id).await.unwrap();
+    client.cleanup_transient(name).unwrap();
+
+    assert!(volumes.list_attachments(name).unwrap().is_empty());
+    assert_eq!(volumes.describe_volume("work").unwrap().attached_to, None);
+    assert!(!receipt_path(name).exists());
+}
+
+#[tokio::test]
+async fn a_fresh_client_cleans_up_a_session_it_did_not_launch() {
+    let home = Isolated::new();
+    let volumes = work_volume_service();
+    let name = "t-fresh-client";
+    let launcher = mock_client();
+    let outcome = launcher
+        .launch(work_volume_request(&home, name).build().unwrap())
+        .await
+        .unwrap();
+    launcher.stop_machine(&outcome.machine.id).await.unwrap();
+    drop(launcher);
+
+    mock_client().cleanup_transient(name).unwrap();
+
+    assert!(volumes.list_attachments(name).unwrap().is_empty());
+    assert!(!receipt_path(name).exists());
+}
+
+#[tokio::test]
+async fn cleanup_keeps_a_registration_the_session_borrowed() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let volumes = work_volume_service();
+    let name = "t-borrowed-volume";
+    volumes.prepare_attachment(&work_attachment(name)).unwrap();
+
+    let outcome = client
+        .launch(work_volume_request(&home, name).build().unwrap())
+        .await
+        .unwrap();
+    client.stop_machine(&outcome.machine.id).await.unwrap();
+    client.cleanup_transient(name).unwrap();
+
+    assert_eq!(volumes.list_attachments(name).unwrap().len(), 1);
+    assert_eq!(volumes.describe_volume("work").unwrap().attached_to, None);
+}
+
+#[tokio::test]
+async fn cleanup_keeps_a_registration_recreated_after_the_session_made_it() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let volumes = work_volume_service();
+    let name = "t-recreated-volume";
+    let outcome = client
+        .launch(work_volume_request(&home, name).build().unwrap())
+        .await
+        .unwrap();
+    client.stop_machine(&outcome.machine.id).await.unwrap();
+
+    // Detach and recreate the identical registration within the same second:
+    // every field of the record is equal, only its history differs.
+    volumes.detach(name, "/data/work").unwrap();
+    volumes.prepare_attachment(&work_attachment(name)).unwrap();
+    client.cleanup_transient(name).unwrap();
+
+    assert_eq!(volumes.list_attachments(name).unwrap().len(), 1);
+    assert!(receipt_path(name).exists(), "the receipt is retained too");
+    assert!(machine_state_dir(name).exists());
+}
+
+#[tokio::test]
+async fn a_corrupt_receipt_retains_every_resource() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let volumes = work_volume_service();
+    let name = "t-corrupt-receipt";
+    let outcome = client
+        .launch(work_volume_request(&home, name).build().unwrap())
+        .await
+        .unwrap();
+    client.stop_machine(&outcome.machine.id).await.unwrap();
+    std::fs::write(receipt_path(name), b"{not json").unwrap();
+
+    client.cleanup_transient(name).unwrap();
+
+    assert_eq!(volumes.list_attachments(name).unwrap().len(), 1);
+    assert!(receipt_path(name).exists());
+}
+
+#[tokio::test]
+async fn a_missing_receipt_retains_registrations() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let volumes = work_volume_service();
+    let name = "t-missing-receipt";
+    let outcome = client
+        .launch(work_volume_request(&home, name).build().unwrap())
+        .await
+        .unwrap();
+    client.stop_machine(&outcome.machine.id).await.unwrap();
+    std::fs::remove_file(receipt_path(name)).unwrap();
+
+    client.cleanup_transient(name).unwrap();
+
+    assert_eq!(volumes.list_attachments(name).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_partly_registered_request_leaves_nothing_behind() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let volumes = work_volume_service();
+    let name = "t-partial-volumes";
+    let request = work_volume_request(&home, name)
+        .volume(LaunchVolumeSpec {
+            volume: "absent".into(),
+            guest_path: "/data/absent".into(),
+            access: AccessMode::ReadOnly,
+        })
+        .build()
+        .unwrap();
+
+    client
+        .launch(request)
+        .await
+        .expect_err("second volume is unknown");
+
+    assert!(volumes.list_attachments(name).unwrap().is_empty());
+    assert_eq!(volumes.describe_volume("work").unwrap().attached_to, None);
+    assert!(!client.machine_running(name));
+}
+
+#[tokio::test]
+async fn cleanup_keeps_secret_references_changed_after_the_session_wrote_them() {
+    let home = Isolated::new();
+    let service = fixture_secret_service(&home);
+    let secret_ref = seeded_secret_ref(&service);
+    let client = mock_client().with_secret_service(service);
+    let name = "t-changed-secret-refs";
+    let request = transient_request(&home.rootfs())
+        .name(name)
+        .secret_ref(secret_ref)
+        .build()
+        .unwrap();
+    let outcome = client.launch(request).await.unwrap();
+    client.stop_machine(&outcome.machine.id).await.unwrap();
+    let sidecar = machine_state_root().join(name).join("secret-refs.json");
+    let mut text = std::fs::read_to_string(&sidecar).unwrap();
+    text.push('\n');
+    std::fs::write(&sidecar, text).unwrap();
+
+    client.cleanup_transient(name).unwrap();
+
+    assert!(sidecar.exists());
+}
