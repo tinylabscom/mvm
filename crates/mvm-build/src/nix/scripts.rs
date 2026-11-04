@@ -15,9 +15,6 @@ fn script_source(name: &str) -> Option<&'static str> {
         "refresh_builder_rootfs" => Some(include_str!(
             "../../resources/builder_scripts/refresh_builder_rootfs.sh.tera"
         )),
-        "download_builder_artifacts" => Some(include_str!(
-            "../../resources/builder_scripts/download_builder_artifacts.sh.tera"
-        )),
         "extract_artifacts_vsock_disk" => Some(include_str!(
             "../../resources/builder_scripts/extract_artifacts_vsock_disk.sh.tera"
         )),
@@ -37,7 +34,6 @@ fn script_names() -> &'static [&'static str] {
         "ensure_builder_artifacts",
         "launch_firecracker_vsock",
         "refresh_builder_rootfs",
-        "download_builder_artifacts",
         "extract_artifacts_vsock_disk",
         "run_nix_build_host",
         "extract_artifacts_host",

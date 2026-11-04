@@ -836,9 +836,6 @@ Documented names with no reader anywhere (docs-only):
 | `MVM_BUILDER_AGENT_BIN` | `public/src/content/docs/reference/cli-commands.md:2835` | no removal statement |
 | `MVM_DEV_FLAKE_URL` | `public/src/content/docs/reference/cli-commands.md:2833` | no removal statement |
 | `MVM_EGRESS_BENCH` | `public/src/content/docs/guides/networking.md:201` | no removal statement |
-| `MVM_FC_ASSET_BASE` | `public/src/content/docs/reference/cli-commands.md:2796` | no removal statement |
-| `MVM_FC_ASSET_KERNEL` | `public/src/content/docs/reference/cli-commands.md:2798` | no removal statement |
-| `MVM_FC_ASSET_ROOTFS` | `public/src/content/docs/reference/cli-commands.md:2797` | no removal statement |
 | `MVM_RUNTIME_ARCH` | `public/src/content/docs/guides/assurance-runtime.md:64` | no removal statement |
 | `MVM_RUNTIME_ARCHIVE` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
 | `MVM_RUNTIME_CHECKSUM` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
