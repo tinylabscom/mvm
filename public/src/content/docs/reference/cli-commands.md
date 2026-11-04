@@ -987,6 +987,11 @@ never served from a standby and always boots cold.
 | `mvmctl trust receipt verify <path>`                                | Verify a signed run receipt against `~/.mvm/keys/host-signer.pub`                                                                                                                                                                                                                                                                                                                     |
 | `mvmctl trust receipt verify <path> --pubkey <path>`                | Verify a signed run receipt against an explicit raw Ed25519 public key                                                                                                                                                                                                                                                                                                                |
 
+For `run` and `machine run`, caller environment variables cannot override
+host-provisioned egress variables, including secret placeholders, proxy settings,
+and CA settings. A collision refuses command dispatch and reports only the
+variable name, never its value. `--allow-env` does not bypass this restriction.
+
 `run --dry-run` is a preflight-only path. It validates profile, env-key,
 resource, and host-share policy, then reports hashes and policy-relevant
 metadata. Manifest arguments, argv, host paths, and receipt paths are hashed
