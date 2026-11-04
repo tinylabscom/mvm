@@ -933,7 +933,7 @@ struct MachineShared<'a> {
 impl MachineShared<'_> {
     /// True once this run is over, for any reason.
     fn stopping(&self) -> bool {
-        self.stop.load(Ordering::Relaxed) || self.machine_over.load(Ordering::Relaxed)
+        self.stop.load(Ordering::Acquire) || self.machine_over.load(Ordering::Acquire)
     }
 
     /// Record what `cpu` consumed, as read on `cpu`'s own thread.
@@ -1009,13 +1009,18 @@ impl MachineShared<'_> {
     /// End the machine: release every parked secondary and force every running
     /// one out of the guest.
     ///
-    /// Called by each vCPU as it leaves its run loop, and on a failed bring-up.
-    /// Idempotent, and it must stay that way — every CPU calls it, and the
-    /// scope joining them afterwards would otherwise wait forever on a CPU the
-    /// guest never onlined.
+    /// Called by every vCPU as it leaves its run loop, and on a failed bring-up.
+    /// Only the first caller releases parked CPUs or submits an exit batch.
     fn end(&self) {
-        self.machine_over.store(true, Ordering::Relaxed);
+        if self.machine_over.swap(true, Ordering::AcqRel) {
+            return;
+        }
         self.gates.shutdown();
+        // The watchdog owns an explicit stop and submits the final wake. Avoid
+        // a second exit batch from the first vCPU that returns in response.
+        if self.stop.load(Ordering::Acquire) {
+            return;
+        }
         let handles = self
             .roster
             .lock()
@@ -1234,10 +1239,7 @@ fn create_secondary_vcpu(cpu: u32, order: &CreationOrder) -> Result<HvfVcpu, Hvf
         .set_sys(SysReg::MpidrEl1, fdt::mpidr_for_cpu(cpu))
         .and_then(|()| verify_redistributor_frame(vcpu_id, cpu));
     if let Err(e) = identified {
-        let status = vcpu.destroy();
-        if status != HV_SUCCESS {
-            tracing::warn!(cpu, status, "failed to destroy an unidentified HVF vCPU");
-        }
+        vcpu.destroy(cpu);
         return Err(e);
     }
     Ok(vcpu)
@@ -1305,7 +1307,7 @@ fn run_secondary<B: run::DeviceBus>(
     // nth, so the nth vCPU created has to be CPU n whatever order the scheduler
     // started these threads in.
     let vcpu = match create_secondary_vcpu(cpu, shared.creation_order) {
-        Ok(created_vcpu) => created_vcpu,
+        Ok(vcpu) => vcpu,
         Err(e) => {
             let _ = created.send(Err(e));
             return Err(e);
@@ -1431,14 +1433,7 @@ fn run_secondary<B: run::DeviceBus>(
     // This CPU is done, so the machine is: release every other CPU rather than
     // leaving them in a guest that has nothing left to run.
     shared.end();
-    let destroy_status = vcpu.destroy();
-    if destroy_status != HV_SUCCESS {
-        tracing::warn!(
-            cpu,
-            status = destroy_status,
-            "HVF secondary vCPU destroy failed"
-        );
-    }
+    vcpu.destroy(cpu);
     result.map(|(_, diagnostics)| diagnostics)
 }
 
@@ -1538,10 +1533,7 @@ unsafe fn run(
         let started = apply_vcpu_start(&vcpu, VcpuStart::primary(entry, dtb_addr))
             .and_then(|()| verify_redistributor_frame(vcpu_id, 0));
         if let Err(e) = started {
-            let status = vcpu.destroy();
-            if status != HV_SUCCESS {
-                tracing::warn!(status, "failed to destroy an unstarted HVF vCPU");
-            }
+            vcpu.destroy(0);
             return Err(e);
         }
 
@@ -1606,12 +1598,12 @@ unsafe fn run(
                     }
                     return None; // run already ended; don't poke a finishing vCPU
                 }
-                if stop.load(Ordering::Relaxed) {
+                if stop.load(Ordering::Acquire) {
                     break Instant::now(); // requested stop / workload-exit
                 }
                 waited += step;
                 if waited >= timeout {
-                    stop.store(true, Ordering::Relaxed); // timeout → end the run
+                    stop.store(true, Ordering::Release); // timeout → end the run
                     break Instant::now();
                 }
                 // Break the guest out of `hv_vcpu_run` when: a pause was requested
@@ -2158,10 +2150,7 @@ unsafe fn run(
         let io_thread_join = io_thread_join_started.elapsed();
         let final_pc = vcpu.get_core(CoreReg::Pc).unwrap_or(0);
         let vcpu_destroy_started = Instant::now();
-        let destroy_status = vcpu.destroy();
-        if destroy_status != HV_SUCCESS {
-            tracing::warn!(status = destroy_status, "HVF boot vCPU destroy failed");
-        }
+        vcpu.destroy(0);
         let vcpu_destroy = vcpu_destroy_started.elapsed();
 
         let mut r = KernelBootResult {
