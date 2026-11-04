@@ -265,7 +265,7 @@ class CandidateTransportTests(unittest.TestCase):
                     candidate.emit_upload_context(root, directory, "unsigned")
             self.assertEqual(json.loads((directory / candidate.UPLOAD_CONTEXT).read_text()), record)
 
-    def test_same_run_same_sha_old_attempt_and_rerun_failed_jobs_refuse(self):
+    def test_rerun_failed_jobs_accepts_only_prior_same_run_producer_context(self):
         first = candidate.tag_source(self.env(), "0.24.0")
         second = candidate.tag_source({**self.env(), "GITHUB_RUN_ATTEMPT": "2"}, "0.24.0")
         self.assertNotEqual(first, second)
@@ -275,15 +275,15 @@ class CandidateTransportTests(unittest.TestCase):
             directory, record = self.unsigned(Path(temporary), self.env())
             # A failed downstream job reruns while the successful producer did
             # not: its retained output still belongs to attempt 1.
-            with self.assertRaisesRegex(ValueError, "attempt"):
-                candidate.verify_directory(second, directory, "unsigned")
+            candidate.verify_directory(second, directory, "unsigned")
             del record["run_attempt"]
             (directory / candidate.UPLOAD_CONTEXT).write_text(json.dumps(record))
             with self.assertRaises(ValueError):
                 candidate.verify_directory(first, directory, "unsigned")
 
     def test_complete_fetch_checks_context_even_with_valid_zip_and_metadata(self):
-        for consumer_attempt in ["1", "2"]:
+        for consumer_attempt, producer_attempt in [("1", "1"), ("2", "1"),
+                                                   ("2", "2"), ("1", "2")]:
             with self.subTest(consumer_attempt=consumer_attempt), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 producer, record = self.unsigned(root, self.env())
@@ -294,7 +294,7 @@ class CandidateTransportTests(unittest.TestCase):
                     {**self.env(), "GITHUB_RUN_ATTEMPT": consumer_attempt}, "0.24.0"
                 )
                 metadata = self.metadata()
-                metadata["name"] = candidate.artifact_name(source, "unsigned")
+                metadata["name"] = f"mvm-guest-bins-attempt-{producer_attempt}"
                 metadata["digest"] = "sha256:" + digest
                 metadata["size_in_bytes"] = len(zipped)
                 args = SimpleNamespace(artifact_id="789", artifact_digest=digest,
@@ -304,18 +304,17 @@ class CandidateTransportTests(unittest.TestCase):
                 with patch.object(candidate.subprocess, "check_output",
                                   return_value=json.dumps(metadata)), \
                      patch.object(candidate, "download_archive", side_effect=download):
-                    if consumer_attempt == "1":
+                    if int(producer_attempt) <= int(consumer_attempt) and producer_attempt == "1":
                         self.assertEqual(candidate.fetch(args, source), record["files"])
                     else:
-                        with self.assertRaisesRegex(ValueError, "attempt"):
+                        with self.assertRaises(ValueError):
                             candidate.fetch(args, source)
 
-    def test_signed_context_also_refuses_prior_attempt_and_boolean_attempt(self):
+    def test_signed_context_accepts_prior_attempt_but_refuses_boolean_attempt(self):
         env = {**self.env(), "GITHUB_JOB": "runtime-proof-candidate"}
         record = candidate.upload_record(env, "0.24.0", "signed", {"archive": "b" * 64})
         second = candidate.tag_source({**self.env(), "GITHUB_RUN_ATTEMPT": "2"}, "0.24.0")
-        with self.assertRaises(ValueError):
-            candidate.validate_upload_record(record, second, "signed", record["files"])
+        candidate.validate_upload_record(record, second, "signed", record["files"])
         record["run_attempt"] = True
         with self.assertRaises(ValueError):
             candidate.validate_upload_record(
@@ -729,13 +728,24 @@ class CandidateTransportTests(unittest.TestCase):
             for name, digest in pins.items():
                 self.assertEqual(hashlib.sha256((args.out_dir / name).read_bytes()).hexdigest(), digest)
 
-    def test_collector_refuses_old_attempt_ambiguous_and_incomplete_lists(self):
-        for mutation in ["old", "duplicate", "incomplete"]:
+    def test_collector_reuses_successful_producers_on_failed_jobs_rerun(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, env, args, _, api, download, pins = self.release_inputs(Path(temporary), "1")
+            rerun = candidate.replace(source, run_attempt=2)
+            env["GITHUB_RUN_ATTEMPT"] = "2"
+            with patch.dict(os.environ, env, clear=True), \
+                 patch.object(candidate, "gh_json", side_effect=api), \
+                 patch.object(candidate, "download_archive", side_effect=download), \
+                 patch.object(proof.subprocess, "run"):
+                self.assertEqual(candidate.collect_release(rerun, args), pins)
+
+    def test_collector_refuses_future_attempt_ambiguous_and_incomplete_lists(self):
+        for mutation in ["future", "duplicate", "incomplete"]:
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
                 source, env, args, listing, api, download, _ = self.release_inputs(Path(temporary))
-                if mutation == "old":
+                if mutation == "future":
                     listing["artifacts"][0]["name"] = listing["artifacts"][0]["name"].replace(
-                        "attempt-2", "attempt-1"
+                        "attempt-2", "attempt-3"
                     )
                 elif mutation == "duplicate":
                     listing["artifacts"].append(dict(listing["artifacts"][0]))
