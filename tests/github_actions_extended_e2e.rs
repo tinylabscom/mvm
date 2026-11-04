@@ -1703,3 +1703,56 @@ fn the_documented_surface_creates_its_mvm_home_private() {
          mode only to directories it creates, leaving an already-loose home loose"
     );
 }
+
+/// A retained machine whose supervisor is still alive is sampled before the
+/// run reaps it, and one whose supervisor is gone is left alone.
+#[test]
+fn live_supervisors_are_sampled_and_dead_ones_are_not() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = documented_surface_script();
+    let start = script
+        .find("sample_live_processes() {")
+        .expect("the runner defines the sampler");
+    let function = &script[start..start + script[start..].find("\n}\n").unwrap() + 3];
+
+    let scratch = tempfile::tempdir().expect("create sampler fixture");
+    let root = scratch.path();
+    let bin = root.join("bin");
+    let vm = root.join("vm");
+    let out = root.join("out");
+    for dir in [&bin, &vm, &out] {
+        fs::create_dir_all(dir).expect("create fixture dir");
+    }
+    let fake = |name: &str, body: &str| {
+        let path = bin.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake tool");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    };
+    fake(
+        "sample",
+        r#"while [ "$1" != "-file" ]; do shift; done; echo sampled > "$2""#,
+    );
+    fake("lsof", "echo open-files");
+    // The test process is alive; this pid is not.
+    fs::write(vm.join("hvf.pid"), std::process::id().to_string()).unwrap();
+    fs::write(vm.join("fc.pid"), "2147483646").unwrap();
+
+    let status = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "{function}\nsample_live_processes \"{}/\" \"{}\"",
+            vm.display(),
+            out.display()
+        ))
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .status()
+        .expect("run sampler");
+    assert!(status.success());
+    assert!(out.join("hvf.sample.txt").is_file());
+    assert!(out.join("hvf.lsof.txt").is_file());
+    assert!(!out.join("fc.sample.txt").exists());
+}
