@@ -27,7 +27,13 @@ def main() -> int:
     names = (parent, child)
 
     def run(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([ctl, *args], text=True, capture_output=True, check=True)
+        result = subprocess.run([ctl, *args], text=True, capture_output=True, check=False)
+        if result.returncode:
+            raise RuntimeError(
+                f"command {args!r} failed ({result.returncode}):\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+        return result
 
     try:
         run("machine", "run", "--flake", "examples/agent-prompt", "--name", parent, "-d")
@@ -56,7 +62,7 @@ def main() -> int:
                     capture_output=True,
                     check=False,
                 )
-                if result.returncode:
+                if result.returncode and f'machine "{name}" does not exist' not in result.stderr:
                     failures.append(f"{action} {name}: {result.stderr.strip()}")
         if failures:
             print("cleanup failures: " + "; ".join(failures), file=sys.stderr)
