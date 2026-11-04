@@ -207,11 +207,7 @@ pub fn load_host_signer_verifying_key(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::anyhow!("failed to read host-signer pubkey: {e}")),
     };
-    if raw.len() == 32 {
-        let key_bytes: [u8; 32] = raw
-            .as_slice()
-            .try_into()
-            .expect("length checked before converting host-signer pubkey");
+    if let Ok(key_bytes) = <[u8; 32]>::try_from(raw.as_slice()) {
         return ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
             .map(Some)
             .map_err(|e| anyhow::anyhow!("host-signer pubkey is not a valid Ed25519 key: {e}"));

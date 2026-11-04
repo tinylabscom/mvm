@@ -13,6 +13,16 @@ use mvm_core::security::{PROTOCOL_VERSION_AUTHENTICATED, SessionHello, SessionHe
 use serde::Serialize;
 use x25519_dalek::{PublicKey, StaticSecret};
 
+/// 32 bytes from the OS entropy source, or an error naming `what` when the
+/// source is unavailable, so a handshake fails instead of aborting the agent.
+fn random_seed(what: &str) -> Result<[u8; 32]> {
+    let mut seed = [0u8; 32];
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut seed)
+        .map_err(|e| anyhow::anyhow!("OS entropy unavailable for {what}: {e}"))?;
+    Ok(seed)
+}
+
 /// Read a single length-prefixed JSON frame from a stream.
 /// Returns the deserialized value.
 pub fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Result<T> {
@@ -20,8 +30,8 @@ pub fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Res
     stream
         .read_exact(&mut len_buf)
         .with_context(|| "Failed to read frame length")?;
-    let frame_len =
-        usize::try_from(u32::from_be_bytes(len_buf)).expect("u32 frame length fits usize");
+    let frame_len = usize::try_from(u32::from_be_bytes(len_buf))
+        .map_err(|_| anyhow::anyhow!("frame length does not fit this platform's usize"))?;
 
     if frame_len > MAX_FRAME_SIZE {
         bail!(
@@ -50,7 +60,7 @@ pub fn write_frame<T: Serialize>(stream: &mut (impl Write + ?Sized), value: &T) 
         );
     }
     let len = u32::try_from(data.len())
-        .expect("bounded frame length fits u32")
+        .context("frame length does not fit the 4-byte prefix")?
         .to_be_bytes();
     stream
         .write_all(&len)
@@ -76,17 +86,9 @@ pub fn handshake_as_host(
 ) -> Result<VerifyingKey> {
     let _span = tracing::info_span!("vsock_handshake").entered();
     let t = std::time::Instant::now();
-    let mut challenge = [0u8; 32];
-    rand::rngs::SysRng
-        .try_fill_bytes(&mut challenge)
-        .expect("SysRng entropy for handshake challenge");
-    let challenge: Vec<u8> = challenge.to_vec();
+    let challenge: Vec<u8> = random_seed("handshake challenge")?.to_vec();
     let host_pubkey = host_signing_key.verifying_key().to_bytes().to_vec();
-    let mut host_ephemeral_seed = [0u8; 32];
-    rand::rngs::SysRng
-        .try_fill_bytes(&mut host_ephemeral_seed)
-        .expect("SysRng entropy for host X25519 secret");
-    let host_ephemeral_secret = StaticSecret::from(host_ephemeral_seed);
+    let host_ephemeral_secret = StaticSecret::from(random_seed("host X25519 secret")?);
 
     let hello = SessionHello {
         version: PROTOCOL_VERSION_AUTHENTICATED,
@@ -184,11 +186,7 @@ pub fn handshake_as_guest(
     // Sign the challenge to prove we hold the session key
     let challenge_sig = guest_signing_key.sign(&hello.challenge);
     let guest_pubkey = guest_signing_key.verifying_key().to_bytes().to_vec();
-    let mut guest_ephemeral_seed = [0u8; 32];
-    rand::rngs::SysRng
-        .try_fill_bytes(&mut guest_ephemeral_seed)
-        .expect("SysRng entropy for guest X25519 secret");
-    let guest_ephemeral_secret = StaticSecret::from(guest_ephemeral_seed);
+    let guest_ephemeral_secret = StaticSecret::from(random_seed("guest X25519 secret")?);
 
     let ack = SessionHelloAck {
         version: hello.version,
@@ -313,6 +311,21 @@ mod tests {
     use super::*;
     use rand::Rng;
     use std::io::Cursor;
+
+    #[test]
+    fn random_seed_yields_distinct_nonzero_seeds() {
+        let a = random_seed("test").unwrap();
+        let b = random_seed("test").unwrap();
+        assert_ne!(a, [0u8; 32]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn read_frame_rejects_an_oversized_announced_length() {
+        let mut wire = Cursor::new(u32::MAX.to_be_bytes().to_vec());
+        let err = read_frame::<serde_json::Value>(&mut wire).unwrap_err();
+        assert!(err.to_string().contains("Frame too large"), "{err}");
+    }
 
     // ========================================================================
     // Authenticated frame tests
