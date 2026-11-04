@@ -514,6 +514,10 @@ tier = "parse"
 reason = "names a publisher pubkey file that no fixture stages yet"
 
 [[command]]
+path = "trust attest status"
+tier = "exec"
+
+[[command]]
 path = "trust audit decisions export"
 tier = "exec"
 
