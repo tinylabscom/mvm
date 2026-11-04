@@ -1234,7 +1234,9 @@ fn copy_cached_template_files_recursive(
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let src = entry.path();
-        let rel = src.strip_prefix(root).expect("entries are under root");
+        let rel = src
+            .strip_prefix(root)
+            .with_context(|| format!("{} is outside {}", src.display(), root.display()))?;
         if src.is_dir() {
             copy_cached_template_files_recursive(root, &src, dest, skip)?;
         } else if src.is_file() {

@@ -54,10 +54,10 @@ fn build(source: &Path, output: &Path) -> Result<BuildReport> {
     if parent.starts_with(&source) {
         bail!("output directory must be outside the staged application tree");
     }
-    if output.file_name().is_none() || output.file_name().is_some_and(|n| n == "." || n == "..") {
+    let Some(name) = output.file_name().filter(|n| *n != "." && *n != "..") else {
         bail!("output must name a new directory");
-    }
-    let output = parent.join(output.file_name().expect("output name checked above"));
+    };
+    let output = parent.join(name);
     if fs::symlink_metadata(&output).is_ok() {
         bail!("output already exists: {}", output.display());
     }
@@ -173,6 +173,22 @@ fn report_asset(path: &Path, name: &'static str) -> Result<AssetReport> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn an_output_without_a_final_name_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("staged");
+        fs::create_dir(&source).unwrap();
+        for output in [tmp.path().join(".."), tmp.path().join("out/..")] {
+            let err = build(&source, &output).unwrap_err().to_string();
+            assert!(
+                err.contains("must name a new directory") || err.contains("must exist"),
+                "{err}"
+            );
+        }
+        let err = build(&source, Path::new("..")).unwrap_err().to_string();
+        assert!(err.contains("must name a new directory"), "{err}");
+    }
 
     #[test]
     fn cli_requires_explicit_source_and_output() {

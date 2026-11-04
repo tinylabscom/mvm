@@ -346,7 +346,9 @@ fn select_workspace(vm: &str, volume: Option<&str>) -> Result<Workspace> {
                     names.join(", ")
                 )
             }
-            Ok(all.into_iter().next().expect("one workspace"))
+            all.into_iter()
+                .next()
+                .with_context(|| format!("machine {vm:?} has no workspace volume"))
         }
     }
 }

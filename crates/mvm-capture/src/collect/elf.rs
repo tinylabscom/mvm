@@ -421,9 +421,9 @@ fn parse_note_build_id(
             .and_then(|x| x.checked_add(name_padding))
             .and_then(|x| x.checked_add(descsz))
             .and_then(|x| x.checked_add(desc_padding));
-        if next.map(|n| n > end).unwrap_or(true) {
+        let Some(next) = next.filter(|n| *n <= end) else {
             break;
-        }
+        };
 
         if namesz == 4 && note_type == 3 && cursor + 4 <= end {
             let name = &bytes[cursor..cursor + 4];
@@ -434,7 +434,7 @@ fn parse_note_build_id(
             }
         }
 
-        pos = next.expect("checked above");
+        pos = next;
     }
 
     Ok(None)

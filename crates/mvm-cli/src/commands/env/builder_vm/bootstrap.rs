@@ -110,9 +110,8 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
 
     match decide_builder_image_acquisition(allow_local_build, env_override, has_checkout) {
         Ok(mvm_build::boot_image_select::BootImageAcquisition::Build) => {
-            // Safe to unwrap: the decision only returns Build when a
-            // checkout exists and was permitted.
-            bootstrap_builder_vm_image_from_local_pair(&checkout.expect("checkout present"))?;
+            let checkout = checkout.context("a local build was chosen without a checkout")?;
+            bootstrap_builder_vm_image_from_local_pair(&checkout)?;
         }
         Ok(mvm_build::boot_image_select::BootImageAcquisition::Fetch) => {
             bootstrap_tool_builder_vm_image()?;

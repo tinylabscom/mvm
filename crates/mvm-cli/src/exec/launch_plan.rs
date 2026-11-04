@@ -187,7 +187,10 @@ fn parse_workload_ir(apps: Vec<RawLaunchApp>, source: &str) -> Result<LaunchEntr
         entrypoint,
         entrypoints,
         env: app_env,
-    } = apps.into_iter().next().expect("apps non-empty");
+    } = apps
+        .into_iter()
+        .next()
+        .with_context(|| format!("launch plan '{source}' declares no apps"))?;
     anyhow::ensure!(
         addons.is_empty(),
         "launch plan '{source}': addon orchestration is not supported by command wrappers"
