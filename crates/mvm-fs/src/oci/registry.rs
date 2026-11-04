@@ -237,7 +237,7 @@ impl RegistryClient {
         reference: &ImageReference,
         accept: &[&str],
     ) -> Result<RegistryResponse, OciError> {
-        let url = self.endpoint(reference, &manifest_path(reference));
+        let url = self.endpoint(reference, &manifest_path(reference)?);
         let parts = RequestParts {
             accept: Some(accept),
             ..RequestParts::default()
@@ -337,7 +337,7 @@ impl RegistryClient {
         media_type: &str,
         bytes: &[u8],
     ) -> Result<Option<String>, OciError> {
-        let url = self.endpoint(reference, &manifest_path(reference));
+        let url = self.endpoint(reference, &manifest_path(reference)?);
         let parts = RequestParts {
             content_type: Some(media_type),
             body: Some(bytes),
@@ -892,13 +892,18 @@ pub(crate) struct RegistryResponse {
     pub response: mvm_http::Response,
 }
 
-fn manifest_path(reference: &ImageReference) -> String {
+fn manifest_path(reference: &ImageReference) -> Result<String, OciError> {
     let selector = reference
         .digest
         .as_deref()
         .or(reference.tag.as_deref())
-        .expect("image reference always has a tag or digest");
-    format!("/v2/{}/manifests/{selector}", reference.repository)
+        .ok_or_else(|| {
+            OciError::InvalidReference(format!(
+                "{}/{} carries neither a tag nor a digest",
+                reference.registry, reference.repository
+            ))
+        })?;
+    Ok(format!("/v2/{}/manifests/{selector}", reference.repository))
 }
 
 fn blob_path(reference: &ImageReference, digest: &str) -> String {
@@ -1076,6 +1081,20 @@ struct TokenResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reference_with_neither_tag_nor_digest_is_refused_not_panicked() {
+        let reference = ImageReference {
+            registry: "docker.io".into(),
+            repository: "library/alpine".into(),
+            tag: None,
+            digest: None,
+        };
+        assert!(matches!(
+            manifest_path(&reference),
+            Err(OciError::InvalidReference(_))
+        ));
+    }
+
     use super::*;
 
     #[test]

@@ -35,6 +35,8 @@ pub enum CompileError {
     /// `@mvm.*`) from the bundled source failed.
     StripFramework(io::Error),
     Render(serde_json::Error),
+    /// The workload declares no app, so there is nothing to compile.
+    NoApp,
     Write(io::Error),
     Source(SourceError),
     Reachability(ReachabilityError),
@@ -81,6 +83,7 @@ impl std::fmt::Display for CompileError {
             Self::Staging(e) => write!(f, "atomic staging failed: {e}"),
             Self::StripFramework(e) => write!(f, "stripping framework constructs failed: {e}"),
             Self::Render(e) => write!(f, "rendering artifact failed: {e}"),
+            Self::NoApp => write!(f, "workload declares no app to compile"),
             Self::Write(e) => write!(f, "writing artifact failed: {e}"),
             Self::Source(e) => write!(f, "source bundling failed: {e}"),
             Self::Reachability(e) => write!(f, "reachability scoping failed: {e}"),
@@ -108,6 +111,12 @@ impl std::fmt::Display for CompileError {
 }
 
 impl std::error::Error for CompileError {}
+
+impl From<serde_json::Error> for CompileError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Render(e)
+    }
+}
 
 /// Returns true when `out` should be written as a single deterministic
 /// `.tar.gz` rather than as a directory of individual
@@ -222,10 +231,7 @@ fn compile_with_mvm_url(
     fs::create_dir_all(&staging).map_err(CompileError::Staging)?;
 
     let result = (|| -> Result<(), CompileError> {
-        let app = workload
-            .apps
-            .first()
-            .expect("validate() ensures at least one app");
+        let app = workload.apps.first().ok_or(CompileError::NoApp)?;
         let bundle_dir = staging.join("src");
         let mut source_plan = match &app.source {
             Source::LocalPath {
@@ -327,7 +333,7 @@ fn compile_with_mvm_url(
         // flake) can ever observe it. The image is secret-free by construction.
         let baked = strip_secret_env(workload);
         let flake = render_flake_nix_at_url(&baked, mvm_url).map_err(CompileError::Render)?;
-        let launch = build_launch_json(&baked, &source_plan).map_err(CompileError::Render)?;
+        let launch = build_launch_json(&baked, &source_plan)?;
         write_lf(&staging.join("flake.nix"), &flake)?;
         write_lf(&staging.join("launch.json"), &launch)?;
         // The canonical (unstripped) IR — `mvmctl machine run --from-workload-ir`'s

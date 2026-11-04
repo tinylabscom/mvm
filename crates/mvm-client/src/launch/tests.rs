@@ -1825,3 +1825,14 @@ fn create_refuses_a_command_it_would_have_nowhere_to_keep() {
     );
     assert!(!machine_spec_path("p-create-cmd").exists());
 }
+
+#[test]
+fn a_persistent_request_stripped_of_its_name_is_refused_not_panicked() {
+    let mut request = persistent_request("img", "p-named").build().unwrap();
+    assert_eq!(super::persistent_name(&request).unwrap(), "p-named");
+    request.name = None;
+    assert!(matches!(
+        super::persistent_name(&request),
+        Err(MvmError::InvalidSpec { .. })
+    ));
+}
