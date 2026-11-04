@@ -169,8 +169,7 @@ Both tools answer "where does this live and who calls it", but at different
 granularity. Reach for each where it is strongest instead of duplicating the
 question in both.
 
-- **Graft** (`graft/` in this repo, MCP server `graft mcp`, also wired into
-  `.cursor/mcp.json` and `.zed/settings.json`) is the repository orientation
+- **Graft** (`graft/` in this repo, MCP server `graft mcp`) is the repository orientation
   graph: prose nodes with exact `file:line` spans plus a who-calls-what wiring
   graph. Use it first for cross-cutting questions — "how does X work", "what
   breaks if I change Y", "where does behavior Z live". Its tools are ranked
@@ -193,10 +192,9 @@ re-deriving the map yourself.
 
 ## Editor configuration for Serena
 
-The repo's shared MCP files (`.cursor/mcp.json`, `.zed/settings.json`) carry only
-the graft server, and that is deliberate: Serena's project root must point at the
-**worktree you currently have open**. An absolute `--project` path committed to a
-shared file would silently name someone else's (or no one's) checkout, so Serena
+Editor MCP configuration is local. Serena's project root must point at the
+**worktree you currently have open**. An absolute `--project` path shared with
+others would silently name someone else's (or no one's) checkout, so Serena
 is a per-developer, user-level installation.
 
 Setup (Serena is distributed as `serena-agent` and managed by `uv`):
@@ -224,8 +222,7 @@ across worktrees:
 
 - **Cursor** — paste that block into user settings (`~/.cursor/mcp.json`) or the
   project `.cursor/mcp.json`. Serena activates its project per session, so the
-  same block works in both scopes; the repo's committed `.cursor/mcp.json`
-  intentionally keeps only graft.
+  same block works in both scopes.
 - **Zed** — same server under Zed's `context_servers` key (not `mcpServers`), in
   `~/.config/zed/settings.json` for user scope:
 
@@ -242,8 +239,9 @@ across worktrees:
   ```
 
   On macOS, GUI apps inherit a minimal `PATH`; if `serena` is not found, use the
-  absolute path from `which serena` in the `command` field. The committed
-  `.zed/settings.json` already shows the graft entry in the same shape.
+  absolute path from `which serena` in the `command` field. To configure graft
+  locally, add a `graft` entry with command `graft` and args `["mcp"]` under
+  the same `context_servers` key.
 
 The agent then runs Serena's project onboarding/activation for the open
 worktree before symbol work, and points activation at a different worktree
