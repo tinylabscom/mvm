@@ -1567,7 +1567,6 @@ unsafe fn run(
         // loop ends.
         let done = Arc::new(AtomicBool::new(false));
         let done_w = done.clone();
-        let _run_over = RunOver(done.clone());
         // Open-egress-connection count, shared with the vsock device. The heartbeat
         // only fires while this is non-zero — a guest with no open egress socket has
         // no host push to wait for, so the host can idle instead of waking 200×/s.
@@ -1640,7 +1639,7 @@ unsafe fn run(
             if let Some(path) = &pause_state_w {
                 let _ = std::fs::remove_file(path);
             }
-            // Final wake, every CPU → each loop sees the stop and returns.
+            // Keep cancellation alive until every vCPU thread has returned.
             wake_until_done(&done_w, step, || {
                 let handles = roster_w
                     .lock()
@@ -1650,6 +1649,7 @@ unsafe fn run(
             });
             Some(stop_observed_at)
         });
+        let run_over = RunOver::new(done.clone(), watchdog.thread().clone());
 
         let mut uart = Pl011::new(UART_BASE);
         // Mirror guest output to the host log as it arrives. Write-only, and
@@ -2122,7 +2122,7 @@ unsafe fn run(
         };
 
         let vcpu_exited_at = Instant::now();
-        done.store(true, Ordering::Relaxed);
+        run_over.complete();
         let watchdog_join_started = Instant::now();
         let stop_observed_at = watchdog.join().ok().flatten();
         let watchdog_join = watchdog_join_started.elapsed();
