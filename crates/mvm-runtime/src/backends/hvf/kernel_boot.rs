@@ -36,6 +36,7 @@ use super::mmio_layout::{
 };
 use super::smp::{CreationOrder, Release, SecondaryGates, VcpuStart, psci};
 use super::snapshot::{HVF_SNAPSHOT_BACKEND_KIND, HvfVcpuState};
+use super::stop_wake::{RunOver, wake_until_done};
 use super::sys::*;
 use super::vcpu::esr_ec;
 use super::{BootFault, default_bootargs};
@@ -1559,6 +1560,7 @@ unsafe fn run(
         // loop ends.
         let done = Arc::new(AtomicBool::new(false));
         let done_w = done.clone();
+        let _run_over = RunOver(done.clone());
         // Open-egress-connection count, shared with the vsock device. The heartbeat
         // only fires while this is non-zero — a guest with no open egress socket has
         // no host push to wait for, so the host can idle instead of waking 200×/s.
@@ -1632,11 +1634,13 @@ unsafe fn run(
                 let _ = std::fs::remove_file(path);
             }
             // Final wake, every CPU → each loop sees the stop and returns.
-            let handles = roster_w
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            HvfHandle::force_exit(&handles);
+            wake_until_done(&done_w, step, || {
+                let handles = roster_w
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                HvfHandle::force_exit(&handles);
+            });
             Some(stop_observed_at)
         });
 

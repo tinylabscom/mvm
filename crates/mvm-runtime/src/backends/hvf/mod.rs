@@ -14,6 +14,7 @@ mod page_release;
 mod smp;
 pub mod snapshot;
 mod snapshot_capture;
+mod stop_wake;
 mod sys;
 mod vcpu;
 

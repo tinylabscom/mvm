@@ -251,6 +251,21 @@ stop_watcher() {
   WATCHER_PID=""
 }
 
+# A supervisor that outlives a stop request is the one failure its own files
+# cannot explain, so capture where its threads are stuck while it is still
+# alive. Read-only and bounded (`sample` runs 3 s per process); nothing is killed.
+sample_live_processes() {
+  local d="$1" out="$2" pidfile pid
+  command -v sample >/dev/null 2>&1 || return 0
+  for pidfile in "$d"*.pid; do
+    [[ -f "$pidfile" ]] || continue
+    pid="$(cat "$pidfile" 2>/dev/null)"
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || continue
+    sample "$pid" 3 -file "$out/$(basename "$pidfile" .pid).sample.txt" >/dev/null 2>&1 || true
+    lsof -p "$pid" 2>/dev/null | head -60 > "$out/$(basename "$pidfile" .pid).lsof.txt" || true
+  done
+}
+
 # Copy the small diagnostic files out of each VM state dir before `reap`
 # removes the machines; a failed stop is otherwise undiagnosable. Allowlist
 # only (no keys, no disk images) and logs are tailed to stay bounded.
@@ -266,6 +281,7 @@ save_vm_diagnostics() {
     for f in console.log supervisor.log; do
       [[ -f "$d$f" ]] && tail -c 65536 "$d$f" > "$out/$name/$f"
     done
+    sample_live_processes "$d" "$out/$name"
     if [[ -f "$d/shutdown-timing.json" ]]; then
       echo "--- $name shutdown-timing.json ---"
       head -c 4096 "$d/shutdown-timing.json"; echo
