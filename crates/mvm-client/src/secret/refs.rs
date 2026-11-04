@@ -58,7 +58,7 @@ pub struct MachineSecretRefSet {
     pub references: Vec<MachineSecretRef>,
 }
 
-fn sidecar_path(machines_root: &Path, machine: &str) -> Result<PathBuf> {
+pub(crate) fn sidecar_path(machines_root: &Path, machine: &str) -> Result<PathBuf> {
     mvm_core::naming::validate_id(machine, "machine name")?;
     Ok(machines_root
         .join(machine)

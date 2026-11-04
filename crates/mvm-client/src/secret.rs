@@ -520,6 +520,11 @@ impl SecretService {
         Ok(refs::record_refs(&self.machines_root, machine, references)?)
     }
 
+    /// Directory holding each machine's state, where reference sidecars live.
+    pub fn machines_root(&self) -> &std::path::Path {
+        &self.machines_root
+    }
+
     /// Drop `machine`'s secret-reference record. Idempotent.
     pub fn clear_machine_references(&self, machine: &str) -> Result<(), SecretServiceError> {
         Ok(refs::clear_refs(&self.machines_root, machine)?)

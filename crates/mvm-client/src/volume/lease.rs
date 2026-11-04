@@ -173,6 +173,11 @@ impl LaunchLease {
         })
     }
 
+    /// The catalog keys of the leases this guard took.
+    pub fn keys(&self) -> &[String] {
+        &self.keys
+    }
+
     /// Mark the launch as successful: the leases outlive this guard.
     pub fn commit(&mut self) {
         self.committed = true;
