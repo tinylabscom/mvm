@@ -537,7 +537,11 @@ pub(crate) fn run_captured_started(
         posture,
         startup_started,
     )
-    .map(|either| either.right().expect("capture mode returns ExecOutput"))
+    .and_then(|either| {
+        either
+            .right()
+            .context("capture mode did not return captured output")
+    })
 }
 
 /// Run the request: boot, run, tear down.
@@ -568,7 +572,11 @@ pub(crate) fn run_started(
         posture,
         startup_started,
     )
-    .map(|either| either.left().expect("streaming mode returns exit code"))
+    .and_then(|either| {
+        either
+            .left()
+            .context("streaming mode did not return an exit code")
+    })
 }
 
 fn reported_exit_code(

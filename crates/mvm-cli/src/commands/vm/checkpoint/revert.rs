@@ -617,7 +617,10 @@ fn pick_child<R>(
                     digests.join(", ")
                 );
             }
-            Ok(all.into_iter().next().expect("len == 1").1)
+            all.into_iter()
+                .next()
+                .map(|(_, child)| child)
+                .ok_or_else(|| anyhow::anyhow!("cannot advance: {target_label} has no children"))
         }
     }
 }

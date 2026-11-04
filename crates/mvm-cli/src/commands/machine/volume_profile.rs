@@ -17,7 +17,7 @@ pub(super) fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<Stri
         // tail verbatim so disk volumes and modifiers survive the round-trip.
         let (_, tail) = raw
             .split_once(':')
-            .expect("parse_volume_spec guarantees a host:guest separator");
+            .with_context(|| format!("volume {raw:?} is not host:guest"))?;
         out.push(format!("{}:{}", vmv.host, tail));
     }
     Ok(out)

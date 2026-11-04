@@ -155,21 +155,16 @@ impl RunPreflightSummary {
             let parsed = super::super::shared::parse_volume_spec(spec)?;
             super::super::shared::validate_volume_spec(&parsed)?;
         }
-        let image = match args.manifest.as_ref() {
+        let image = match (args.manifest.as_ref(), args.image.as_deref()) {
             _ if args.runtime_pack => RunPreflightImage::RuntimePack,
-            Some(manifest) if args.image.is_none() => RunPreflightImage::Manifest {
+            (Some(manifest), None) => RunPreflightImage::Manifest {
                 argument_sha256: sha256_hex(manifest.as_bytes()),
             },
-            None if args.image.is_some() => RunPreflightImage::Oci {
-                reference_sha256: sha256_hex(
-                    args.image
-                        .as_deref()
-                        .expect("matched image presence")
-                        .as_bytes(),
-                ),
+            (None, Some(image)) => RunPreflightImage::Oci {
+                reference_sha256: sha256_hex(image.as_bytes()),
             },
-            None => RunPreflightImage::DefaultMicrovm,
-            Some(_) => unreachable!("clap conflicts_with prevents --manifest + --image"),
+            (None, None) => RunPreflightImage::DefaultMicrovm,
+            (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
         };
         let mut notes = vec![
             "preflight only; no image was resolved, built, booted, or executed".to_string(),

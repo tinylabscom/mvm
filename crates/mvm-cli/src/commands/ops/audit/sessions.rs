@@ -81,10 +81,10 @@ fn parse_time_bound_at(raw: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, S
         return Ok(at);
     }
     if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-        return Ok(date
+        return date
             .and_hms_opt(0, 0, 0)
-            .expect("midnight exists on every date")
-            .and_utc());
+            .map(|midnight| midnight.and_utc())
+            .ok_or_else(|| format!("{raw:?} has no midnight"));
     }
     let ago = mvm_core::crypto::policy::parse_ttl(raw).map_err(|_| {
         format!(

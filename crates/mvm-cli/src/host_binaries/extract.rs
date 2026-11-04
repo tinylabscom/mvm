@@ -159,8 +159,7 @@ fn rand_suffix() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock is after unix epoch")
-        .as_nanos();
+        .map_or(0, |since_epoch| since_epoch.as_nanos());
     format!("{n:x}")
 }
 
