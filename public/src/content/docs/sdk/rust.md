@@ -131,6 +131,7 @@ use mvm_client::{connect, MvmClient, Target};
 let local = connect(Target::Local)?;          // == mvm_client::LocalBackend::new()
 
 // Remote — a hosted fleet or a local sidecar over REST (feature `remote`).
+let my_fleet_token = "replace-with-token-from-your-config".to_owned();
 let remote = connect(Target::Gateway {
     base_url: "https://fleet.example.com".into(),
     token: my_fleet_token,            // supplied by your own config; mvm reads no env var for it
