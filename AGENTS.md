@@ -15,7 +15,7 @@ anything this file describes, update this file in the same change.
   `TBD`, `placeholder`, `<...>`, or similar stand-ins where contributors need
   concrete instructions.
 - **Task context has one route.** Start from the GitHub issue, read only the
-  ADRs/contracts it links, then use Graft for implementation discovery. Never
+  ADRs/contracts it links, then use Trail for implementation discovery. Never
   recursively read `specs/` or treat a legacy plan as current work.
 - **Docs update with behavior changes.** If commands, flags, or behavior move,
   update the matching docs in the same change, including
@@ -481,16 +481,6 @@ mark work done while docs are stale. Verify the changed reference against code.
 Never put agent-created scratch or intermediate files anywhere in a worktree,
 including gitignored paths. Use `/tmp` for logs, merge scratch, screenshots,
 and snapshots; `.agent-memory/notes/` is the sole findings exception.
-
-## Graft context graph
-
-For repo orientation, use the indexed `graft/` graph before raw source search
-when available. Use `graft ask "<question>" --source` for ranked code spans,
-`graft grep "<literal>"` for exhaustive indexed matches,
-`graft skeleton <file>` for an API surface, and `graft callers <symbol>`
-for call edges; raw search is for unindexed files or missing results. Use the
-equivalent graft MCP tools first when this harness exposes them. Refresh the
-graph with `graft build` after large code changes.
 
 ## Retry discipline
 
