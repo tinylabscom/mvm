@@ -40,6 +40,12 @@ impl LocalHostInterface {
         }
     }
 
+    /// Start from a persisted node record instead of the fresh-node default.
+    pub fn with_record(self, state: NodeState, epoch: ExecutionEpoch) -> Self {
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = (state, epoch);
+        self
+    }
+
     pub fn with_enforcement_ready(mut self, ready: bool) -> Self {
         self.enforcement_ready = ready;
         self

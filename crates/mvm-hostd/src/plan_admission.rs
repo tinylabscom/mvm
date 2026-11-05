@@ -369,6 +369,7 @@ pub fn admit_plan_for_run(
     // over live machines only — counting records instead would turn a single
     // crashed VM into a permanent refusal of every later boot.
     admit_within_host_budget(plan)?;
+    admit_host_interface(plan)?;
 
     // Load or generate the host signer. load_or_init refuses
     // loose perms; that error propagates verbatim.
@@ -446,6 +447,7 @@ pub fn admit_signed_plan_for_run(
     verify_registry_pack_assets(&verified)?;
     admit_grants(&verified, &host_grant_ceiling(), posture)?;
     admit_within_host_budget(&verified)?;
+    admit_host_interface(&verified)?;
 
     finish_admission(VerifiedAdmission {
         verified,
@@ -804,6 +806,38 @@ fn admit_within_host_budget(plan: &ExecutionPlan) -> Result<()> {
     let grants = plan.grants.as_ref().unwrap_or(&undeclared);
     let request = crate::admission_budget::charge_for(plan.resources.mem_mib, grants);
     crate::admission_budget::admits(&budget, crate::admission_budget::committed(), request)
+}
+
+/// Run the host-interface preflight for this plan through the local adapter.
+///
+/// Local state is read from `<mvm_home>/host-interface/`; with no files there
+/// the node is `Active` under a permissive policy, so a plain local run is
+/// unchanged. A revoked or quarantined node, an expired or out-of-scope
+/// policy, an image outside a pinned list, an invalid volume grant or a
+/// required attestation the node cannot meet refuses the boot. Resources are
+/// covered by [`admit_within_host_budget`] and enforcement by the runtime
+/// verification in `RunPosture`, both of which run just before this.
+fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
+    use mvm_core::host_interface::{
+        Assurance, ExecutionEpoch, HostInterface, LaunchRequest, local::LocalHostInterface, store,
+    };
+    let home = std::path::PathBuf::from(mvm_core::config::mvm_home());
+    let record = store::load_node_record_at(&home)?;
+    let policy = store::load_policy_at(&home)?;
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    };
+    // Software evidence only: this adapter collects no hardware attestation.
+    let host = LocalHostInterface::new(&record.node_id, policy, Assurance::Software, now)
+        .with_record(record.state, record.epoch);
+    host.authorize_workload(&LaunchRequest {
+        workload_id: plan.workload.0.clone(),
+        image_digest: plan.image.sha256.clone(),
+        epoch: ExecutionEpoch(record.epoch.0),
+    })?;
+    Ok(())
 }
 
 /// What admission has to be told, because the plan cannot be trusted to say
@@ -3709,6 +3743,68 @@ mod tests {
             host_cpu_mechanism_gap(&cpu_share(1000), BackendKind::Firecracker, missing_bus)
                 .expect("a missing mechanism must be reported for a share-capable tier");
         assert!(detail.contains("no user session bus"), "{detail}");
+    }
+
+    /// Admit the fixture under a home whose `host-interface/` files are
+    /// `files`; returns the admission result.
+    fn admit_with_host_interface_files(files: &[(&str, &str)]) -> Result<AdmittedPlan> {
+        let (_env, home) = host_with_ceiling(Default::default());
+        let hi = home.path().join("host-interface");
+        std::fs::create_dir_all(&hi).unwrap();
+        for (name, body) in files {
+            std::fs::write(hi.join(name), body).unwrap();
+        }
+        let keys = tempfile::tempdir().unwrap();
+        admit_for_run(
+            &fixture_input("vm-host-interface"),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            RunPosture::without_backend(Variant::Dev),
+        )
+    }
+
+    #[test]
+    fn host_interface_with_no_local_state_admits_unchanged() {
+        admit_with_host_interface_files(&[]).expect("the permissive local default admits");
+    }
+
+    #[test]
+    fn host_interface_refuses_revoked_and_quarantined_nodes() {
+        for state in ["revoked", "quarantined"] {
+            let node = format!(r#"{{"node_id":"local","state":"{state}","epoch":1}}"#);
+            let err = admit_with_host_interface_files(&[("node.json", &node)])
+                .expect_err("a node that is not active must not boot a workload");
+            assert!(err.to_string().contains(state), "{err}");
+        }
+    }
+
+    #[test]
+    fn host_interface_refuses_expired_policy_and_unpinned_image() {
+        let expired =
+            admit_with_host_interface_files(&[("policy.json", r#"{"version":1,"not_after":1}"#)])
+                .expect_err("an expired policy must not admit");
+        assert!(expired.to_string().contains("expired"), "{expired}");
+        let pinned = admit_with_host_interface_files(&[(
+            "policy.json",
+            r#"{"version":1,"not_after":null,"image_digests":["feedface"]}"#,
+        )])
+        .expect_err("an image outside the pinned list must not admit");
+        assert!(pinned.to_string().contains("image"), "{pinned}");
+    }
+
+    #[test]
+    fn host_interface_refuses_a_malformed_or_hardware_requiring_policy() {
+        let bad = admit_with_host_interface_files(&[("policy.json", "{nope")])
+            .expect_err("a malformed policy must fail closed");
+        assert!(bad.to_string().contains("unreadable"), "{bad}");
+        let hw = admit_with_host_interface_files(&[(
+            "policy.json",
+            r#"{"version":1,"not_after":null,"attestation":{"required":true,"minimum":"hardware"}}"#,
+        )])
+        .expect_err("software evidence cannot satisfy a hardware requirement");
+        assert!(hw.to_string().contains("attestation"), "{hw}");
     }
 
     #[test]
