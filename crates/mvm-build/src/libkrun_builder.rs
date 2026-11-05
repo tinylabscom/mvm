@@ -2817,9 +2817,8 @@ fn wait_with_panic_detector_until(
     match captured {
         Some((kind, line)) => {
             let console_log_path = console_log
-                .expect("a terminal line can only be captured when console log exists")
-                .display()
-                .to_string();
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
             Ok(match kind {
                 Terminal::Panic => WaitOutcome::KernelPanic {
                     panic_line: line,

@@ -84,19 +84,17 @@ pub fn ensure_qemu_runtime_source_supported(config: &VmStartConfig) -> Result<()
 }
 
 pub fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
-    if qemu_verity_enabled(config) {
+    if let Some(verity_path) = config
+        .verity_path
+        .as_deref()
+        .filter(|_| qemu_verity_enabled(config))
+    {
         let mut drives = vec![
             format!(
                 "file={},if=virtio,format=raw,readonly=on",
                 config.rootfs_path
             ),
-            format!(
-                "file={},if=virtio,format=raw,readonly=on",
-                config
-                    .verity_path
-                    .as_deref()
-                    .expect("verity-enabled qemu boot must carry a verity sidecar")
-            ),
+            format!("file={},if=virtio,format=raw,readonly=on", verity_path),
         ];
         if let Some((overlay_path, overlay_verity_path, _)) = qemu_runtime_overlay(config) {
             drives.push(format!(

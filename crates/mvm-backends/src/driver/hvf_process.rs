@@ -150,7 +150,11 @@ pub fn hvf_endpoint_needed(
 }
 
 pub fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
-    if cmdline::verity_enabled(config) {
+    if let Some(verity_path) = config
+        .verity_path
+        .as_deref()
+        .filter(|_| cmdline::verity_enabled(config))
+    {
         let mut disks = vec![
             HvfDisk {
                 path: PathBuf::from(&config.rootfs_path),
@@ -158,12 +162,7 @@ pub fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
                 ephemeral: false,
             },
             HvfDisk {
-                path: PathBuf::from(
-                    config
-                        .verity_path
-                        .as_deref()
-                        .expect("verity-enabled boot must carry a verity sidecar"),
-                ),
+                path: PathBuf::from(verity_path),
                 read_only: true,
                 ephemeral: false,
             },
