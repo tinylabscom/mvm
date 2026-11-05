@@ -701,6 +701,12 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 0
 
+# The local-volume service encrypts whole ext4 images through mvm-core.
+# Optimise the caller where AES-GCM's generic loop is instantiated: 42
+# volume tests took 80s at level 0 and 10s at level 2 on the same host.
+[profile.dev.package.mvm-core]
+opt-level = 2
+
 [profile.dev.package.syn]
 opt-level = 3
 [profile.dev.package.quote]
