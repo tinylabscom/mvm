@@ -193,6 +193,31 @@ class ConsumerTests(unittest.TestCase):
             demo.reserve_attempt(self.args, self.evidence)
         self.assertTrue(path.exists())
 
+    def test_secret_scan_reports_names_never_values(self):
+        fake = "sk-" + "ant-" + "A1b2C3d4E5f6G7h8I9"
+        (self.evidence / "joke.stderr").write_text("hello " + fake)
+        (self.evidence / "report.json").write_text('{"binding_name": "demo-key", "slot": "ANTHROPIC_API_KEY"}')
+        hits = demo.scan_for_secrets(self.evidence)
+        self.assertEqual(hits[0][0], "joke.stderr")
+        self.assertIn("anthropic-key", {name for _, name in hits})
+        self.assertNotIn(fake, repr(hits))
+        self.assertFalse([h for h in hits if h[0] == "report.json"])
+
+    def test_secret_scan_clean_evidence_passes(self):
+        (self.evidence / "joke.stdout").write_text("Why did the VM cross the road?\n")
+        self.assertEqual(demo.scan_for_secrets(self.evidence), [])
+
+    def test_results_dir_must_be_absolute_private_existing(self):
+        run = demo.evidence_dir(self.root)
+        self.assertEqual(run.parent, self.root)
+        self.assertTrue(run.name.startswith("mvm-claude-consumer-"))
+        for bad in ("relative", self.root / "missing"):
+            with self.assertRaises(demo.Blocked):
+                demo.evidence_dir(bad)
+        self.root.chmod(0o777)
+        with self.assertRaises(demo.Blocked):
+            demo.evidence_dir(self.root)
+
     def test_live_requires_both_authorizations_before_spawn(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(demo.subprocess, "Popen") as spawn:
             with self.assertRaises(demo.Blocked):
