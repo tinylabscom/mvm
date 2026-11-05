@@ -50,7 +50,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
     let stream = open_frames(&args.name)?;
     let viewer = Viewer::bind(stream).context("bind the local display viewer")?;
-    println!("Open {} (the token works once)", viewer.url());
+    println!("Open {} (the token works once)", viewer.url()?);
     viewer.serve_once()
 }
 
@@ -87,12 +87,12 @@ impl Viewer {
         })
     }
 
-    fn url(&self) -> String {
-        format!(
-            "http://{}/{}",
-            self.listener.local_addr().expect("bound viewer address"),
-            hex::encode(self.token)
-        )
+    fn url(&self) -> Result<String> {
+        let addr = self
+            .listener
+            .local_addr()
+            .context("read the local display viewer address")?;
+        Ok(format!("http://{addr}/{}", hex::encode(self.token)))
     }
 
     fn serve_once(mut self) -> Result<()> {

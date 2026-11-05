@@ -376,10 +376,11 @@ fn record_explicit_run_resources(matches: &clap::ArgMatches, cli: &mut Cli) {
 
 fn run_command() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let cli = match cli_command().try_get_matches_from(std::env::args_os()) {
-        Ok(matches) => {
-            let mut cli = Cli::from_arg_matches(&matches)
-                .expect("generated CLI arguments must convert into the typed command");
+    let parsed = cli_command()
+        .try_get_matches_from(std::env::args_os())
+        .and_then(|matches| Cli::from_arg_matches(&matches).map(|cli| (matches, cli)));
+    let cli = match parsed {
+        Ok((matches, mut cli)) => {
             record_explicit_run_resources(&matches, &mut cli);
             cli
         }

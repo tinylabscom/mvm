@@ -179,7 +179,7 @@ fn run_verification_records(
 ) -> Result<Vec<mvm_capture::report::VerificationRecord>> {
     use mvm_capture::verify::{
         BootReplayVerifier, BuilderVmConfig, BuilderVmVerifier, RecordOnlyVerifier,
-        VerificationRequest, Verifier,
+        VerificationRequest,
     };
 
     let mut records = Vec::new();
@@ -203,9 +203,7 @@ fn run_verification_records(
             let verifier = BuilderVmVerifier { config };
             run_or_record(verifier, request)
         } else {
-            RecordOnlyVerifier
-                .verify(&request)
-                .expect("record-only never fails")
+            run_or_record(RecordOnlyVerifier, request)
         };
         records.push(record);
     }

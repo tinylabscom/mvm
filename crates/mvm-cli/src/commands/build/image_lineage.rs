@@ -342,14 +342,12 @@ impl LazySignedChainAnchor {
 
 impl ImageChainAnchor for LazySignedChainAnchor {
     fn recorded_creation_digest(&self, node: &ImageNode) -> Result<Option<CheckpointDigest>> {
-        if self.inner.borrow().is_none() {
-            let loaded = load_signed_chain_anchor()?;
-            *self.inner.borrow_mut() = Some(loaded);
+        let mut slot = self.inner.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(load_signed_chain_anchor()?);
         }
-        self.inner
-            .borrow()
-            .as_ref()
-            .expect("anchor was just loaded")
+        slot.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("signed chain anchor is not loaded"))?
             .recorded_creation_digest(node)
     }
 }
