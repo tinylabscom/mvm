@@ -2,6 +2,11 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.27.0-rc.2] — 2026-11-05
+
+### Fixed
+- **cli**: Preserve incompatible cached kernel on first run
+
 ## [0.27.0-rc.1] — 2026-11-05
 
 ### Added
