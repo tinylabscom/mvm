@@ -198,6 +198,34 @@ fn check_artifact_does_not_report_tampered_bundle_metadata() {
 }
 
 #[test]
+fn check_artifact_rechecks_publisher_trust_after_withdrawal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (artifact, trust_dir) = signed_bundle_fixture(tmp.path());
+    let home = tmp.path().join("recipient");
+    let first = check_artifact_json(&home, &artifact, &trust_dir);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let key_id = mvmctl::core::plan::bundle::key_id_from_pubkey(
+        &ed25519_dalek::SigningKey::from_bytes(&[91; 32]).verifying_key(),
+    );
+    std::fs::remove_file(trust_dir.join(format!("{}.pub", key_id.0)))
+        .expect("withdraw publisher trust");
+    let second = check_artifact_json(&home, &artifact, &trust_dir);
+    assert!(
+        !second.status.success(),
+        "withdrawn publisher must be refused"
+    );
+    assert!(
+        second.stdout.is_empty(),
+        "stale verified metadata must not be reported"
+    );
+}
+
+#[test]
 fn check_artifact_refuses_a_path_that_is_not_a_bundle() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let not_a_bundle = tmp.path().join("app.mvm");
