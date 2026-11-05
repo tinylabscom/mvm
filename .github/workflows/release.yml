@@ -356,11 +356,27 @@ jobs:
         shell: bash
         run: brew install make llvm lld flex bison gnu-sed gnu-tar xz
 
+      # The upstream half of the tier (libkrun and libkrunfw built from pinned
+      # commits) depends only on the build script, its patch and the runner
+      # image, so it is restored rather than rebuilt. The script re-checks the
+      # restored tree against its own pins and recorded digests before using it
+      # and rebuilds from source if anything differs; the supervisor is always
+      # compiled from this checkout. Only dispatch runs write the entry, as with
+      # the Rust cache.
+      - name: Restore the libkrun upstream tree
+        id: libkrun_cache
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/libkrun-upstream
+          key: libkrun-upstream-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-${{ hashFiles('scripts/release/build-libkrun-tier.sh', 'scripts/release/libkrunfw-macos-host.patch') }}
+
       - name: Build libkrun release tier
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
           MVM_GNU_MAKE: gmake
+          MVM_LIBKRUN_UPSTREAM_CACHE: ${{ runner.temp }}/libkrun-upstream
         shell: bash
         run: |
           llvm_prefix="$(brew --prefix llvm)"
@@ -372,6 +388,13 @@ jobs:
           export PATH="${llvm_prefix}/bin:${lld_prefix}/bin:${flex_prefix}/bin:${bison_prefix}/bin:${gnu_sed_prefix}/libexec/gnubin:${gnu_tar_prefix}/libexec/gnubin:${PATH}"
           scripts/release/build-libkrun-tier.sh \
             "target/${BUILD_TARGET}/release/libkrun-tier" "${BUILD_TARGET}"
+
+      - name: Save the libkrun upstream tree
+        if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' && steps.libkrun_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/libkrun-upstream
+          key: ${{ steps.libkrun_cache.outputs.cache-primary-key }}
 
       # Attribution only: which packages the builds above compile more than once
       # and what differs (profile, features, target), so a long release is
