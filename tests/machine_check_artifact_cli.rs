@@ -178,6 +178,26 @@ fn check_artifact_does_not_report_an_untrusted_publisher() {
 }
 
 #[test]
+fn check_artifact_does_not_report_tampered_bundle_metadata() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (artifact, trust_dir) = signed_bundle_fixture(tmp.path());
+    let mut bytes = std::fs::read(&artifact).expect("read signed archive");
+    let offset = bytes
+        .windows(b"check-artifact-test".len())
+        .position(|window| window == b"check-artifact-test")
+        .expect("publisher label in archive");
+    bytes[offset] = b'X';
+    std::fs::write(&artifact, bytes).expect("write tampered archive");
+
+    let check = check_artifact_json(&tmp.path().join("recipient"), &artifact, &trust_dir);
+    assert!(!check.status.success(), "tampered archive must be refused");
+    assert!(
+        check.stdout.is_empty(),
+        "unverified metadata must not be reported"
+    );
+}
+
+#[test]
 fn check_artifact_refuses_a_path_that_is_not_a_bundle() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let not_a_bundle = tmp.path().join("app.mvm");
