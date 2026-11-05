@@ -6,9 +6,6 @@ use std::collections::BTreeMap;
 
 fn script_source(name: &str) -> Option<&'static str> {
     match name {
-        "extract_artifacts_vsock_disk" => Some(include_str!(
-            "../../resources/builder_scripts/extract_artifacts_vsock_disk.sh.tera"
-        )),
         "run_nix_build_host" => Some(include_str!(
             "../../resources/builder_scripts/run_nix_build_host.sh.tera"
         )),
@@ -21,11 +18,7 @@ fn script_source(name: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 fn script_names() -> &'static [&'static str] {
-    &[
-        "extract_artifacts_vsock_disk",
-        "run_nix_build_host",
-        "extract_artifacts_host",
-    ]
+    &["run_nix_build_host", "extract_artifacts_host"]
 }
 
 pub fn render_script(name: &str, context: &BTreeMap<&str, String>) -> Result<String> {
