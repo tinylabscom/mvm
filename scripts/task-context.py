@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a disposable issue → durable context → Graft briefing."""
+"""Generate a disposable issue → durable context → Trail briefing."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def linked_documents(body: str, root: Path) -> list[str]:
     return sorted(found)
 
 
-def render(issue: dict[str, object], documents: list[str], prs: list[dict[str, object]], graft: str) -> str:
+def render(issue: dict[str, object], documents: list[str], prs: list[dict[str, object]], trail: str) -> str:
     labels = ", ".join(label["name"] for label in issue["labels"]) or "none"
     assignees = ", ".join(assignee["login"] for assignee in issue["assignees"]) or "unassigned"
     lines = [
@@ -56,7 +56,7 @@ def render(issue: dict[str, object], documents: list[str], prs: list[dict[str, o
     lines.extend(f"- #{pr['number']}: {pr['title']} ({pr['url']})" for pr in prs)
     if not prs:
         lines.append("- None found.")
-    lines.extend(["", "## Graft orientation", graft or "No Graft result.", ""])
+    lines.extend(["", "## Trail orientation", trail or "No Trail result.", ""])
     return "\n".join(lines)
 
 
@@ -91,8 +91,8 @@ def main(argv: list[str]) -> int:
         )
     )
     query = f"GitHub issue #{number}: {issue['title']}. {str(issue['body'])[:1500]}"
-    graft = run("graft", "ask", query, "--source")
-    print(render(issue, documents, prs, graft))
+    trail = run("trail", "ask", query, "--source")
+    print(render(issue, documents, prs, trail))
     return 0
 
 

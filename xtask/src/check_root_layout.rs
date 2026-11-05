@@ -17,7 +17,6 @@ const ALLOWED: &[&str] = &[
     ".githooks",
     ".github",
     ".gitignore",
-    ".ignore",
     "AGENTS.md",
     "AGENTS.md.sigstore.json",
     "CHANGELOG.md",
