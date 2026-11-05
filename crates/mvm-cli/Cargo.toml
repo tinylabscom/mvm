@@ -134,10 +134,6 @@ embed-host-bins = []
 # Forward to `mvm-runtime/wasm-backend`: enables `mvmctl --hypervisor wasm`.
 # Off by default so the default workspace build carries no `wasmtime` dependency.
 wasm-backend = ["mvm-runtime/wasm-backend"]
-contributor-bootstrap = [
-    "mvm-runtime/contributor-bootstrap",
-    "mvm-build/contributor-bootstrap",
-]
 # Extract libkrunfw's bundled
 # TSI-patched kernel at runtime so Stage 0 boots a kernel where
 # libkrun's AF_INET-over-vsock (TSI) path actually works. The feature

@@ -512,14 +512,11 @@ user = [
 # user, so `dev` builds an `mvmctl` that runs EVERY README/website-docs example
 # on the default (HVF) backend (OCI + flake `machine run`, `machine build`/`build
 # compile`, persistent-machine verbs, `dev up`/`shell`, the SDK compile path).
-# Not a third surface — host + user + the source-checkout bootstrap. The
+# Not a third surface — host + user. The
 # `check-two-surfaces` lint asserts it always aggregates both surfaces.
 dev = [
     "host",
     "user",
-    "mvm-runtime/contributor-bootstrap",
-    "mvm-build/contributor-bootstrap",
-    "mvm-cli/contributor-bootstrap",
 ]
 
 # Optional integration test/development path for the libkrun C VMM. Standard
