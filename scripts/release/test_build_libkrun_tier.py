@@ -138,6 +138,17 @@ class BuildLibkrunTierTests(unittest.TestCase):
         )
         self.assertNotIn("mvm-libkrun-supervisor", restore)
 
+    def test_cached_kernel_tarball_is_checked_against_the_pin(self):
+        source = SCRIPT.read_text()
+        self.assertLess(
+            source.index('cp "$cached_kernel" "$kernel_tarball"'),
+            source.index('"$actual_kernel_sha256" != "$kernel_sha256"'),
+        )
+        self.assertLess(
+            source.index('"$actual_kernel_sha256" != "$kernel_sha256"'),
+            source.index('cp "$kernel_tarball" "$cached_kernel"'),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

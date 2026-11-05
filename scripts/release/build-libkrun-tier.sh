@@ -10,7 +10,13 @@ set -euo pipefail
 # commits, with their licences). It is adopted only when its recorded pins equal
 # this script's and every file still matches the SHA-256 recorded when it was
 # written; anything else is rebuilt from source. The mvm supervisor is always
-# compiled from this tree and never comes from the cache.
+# compiled from this tree and never comes from the cache. The check lives inside
+# the entry, so it detects corruption, not a hostile writer: callers must only
+# supply this cache for rehearsal runs, never for a release that gets signed.
+#
+# MVM_LIBKRUNFW_KERNEL_CACHE names a directory that may hold the kernel source
+# tarball. It is verified against the SHA-256 pinned below like a download, so
+# it is safe in any run.
 
 if [[ $# -ne 2 ]]; then
   echo "usage: $0 OUTPUT_DIR BUILD_TARGET" >&2
@@ -123,8 +129,12 @@ patch -p1 -d "$libkrunfw_src" < "$script_dir/libkrunfw-macos-host.patch"
 
 kernel_tarball="$libkrunfw_src/tarballs/$kernel_version.tar.xz"
 mkdir -p "$(dirname "$kernel_tarball")"
+kernel_cache="${MVM_LIBKRUNFW_KERNEL_CACHE:-}"
+cached_kernel="$kernel_cache/$kernel_version.tar.xz"
 if [[ -n "${MVM_LIBKRUNFW_KERNEL_TARBALL:-}" ]]; then
   cp "$MVM_LIBKRUNFW_KERNEL_TARBALL" "$kernel_tarball"
+elif [[ -n "$kernel_cache" && -f "$cached_kernel" ]]; then
+  cp "$cached_kernel" "$kernel_tarball"
 else
   curl --fail --location \
     "https://cdn.kernel.org/pub/linux/kernel/v6.x/$kernel_version.tar.xz" \
@@ -134,6 +144,10 @@ actual_kernel_sha256="$(shasum -a 256 "$kernel_tarball" | awk '{print $1}')"
 if [[ "$actual_kernel_sha256" != "$kernel_sha256" ]]; then
   echo "kernel source SHA-256 mismatch: $actual_kernel_sha256" >&2
   exit 1
+fi
+# Verified against the pin in this file, so the cache copy is safe in any run.
+if [[ -n "$kernel_cache" && ! -f "$cached_kernel" ]]; then
+  mkdir -p "$kernel_cache" && cp "$kernel_tarball" "$cached_kernel"
 fi
 
 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
