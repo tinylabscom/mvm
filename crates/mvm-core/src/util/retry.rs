@@ -31,14 +31,15 @@ where
                         label,
                     );
                     thread::sleep(delay);
-                    delay *= 2;
+                    delay = delay.saturating_mul(2);
                 }
                 last_err = Some(e);
             }
         }
     }
 
-    Err(last_err.expect("retry loop must have recorded at least one error"))
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("{label}: max_attempts is 0, nothing was tried")))
 }
 
 #[cfg(test)]
@@ -75,6 +76,17 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(count.get(), 3);
+    }
+
+    #[test]
+    fn zero_attempts_is_an_error_not_a_panic() {
+        let ran = Cell::new(false);
+        let result: Result<i32> = retry(0, Duration::from_millis(1), "zero", || {
+            ran.set(true);
+            Ok(1)
+        });
+        assert!(result.unwrap_err().to_string().contains("zero"));
+        assert!(!ran.get());
     }
 
     #[test]
