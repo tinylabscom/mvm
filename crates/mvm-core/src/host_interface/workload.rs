@@ -76,6 +76,14 @@ impl WorkloadLedger {
         e.epoch
     }
 
+    /// Local launch gate: refuses a quarantined workload. It cannot check
+    /// staleness because a local start carries no epoch of its own; that is
+    /// enforced by [`Self::authorize`] where a command or replacement presents
+    /// one (the managed and reconnect paths).
+    pub fn authorize_local_start(&self, workload: &str) -> Result<(), Denial> {
+        self.authorize(workload, self.entry(workload).epoch)
+    }
+
     /// May `workload` start presenting `epoch`? Quarantine and staleness both
     /// refuse; only the current epoch of a contained-free workload passes.
     pub fn authorize(&self, workload: &str, epoch: ExecutionEpoch) -> Result<(), Denial> {
