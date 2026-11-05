@@ -420,7 +420,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     )?;
 
     let child_plan_json = serde_json::to_string(admission.admitted.signed())
-        .expect("admitted plan is always serializable");
+        .context("serializing the admitted child plan")?;
     let child_tenant_id = admission.admitted.plan().tenant.0.clone();
     // Admission just signed this plan; confirm it names this child and the
     // rootfs being restored before it can become the child's authority.
