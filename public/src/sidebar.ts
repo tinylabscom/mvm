@@ -235,6 +235,7 @@ export const sidebar: SidebarGroup[] = [
     label: "Contributing",
     items: [
       { label: "Development Guide", slug: "contributing/development" },
+      { label: "Repository Layout", slug: "contributing/repository-layout" },
       { label: "AI Coding Workflow", slug: "contributing/ai-coding-workflow" },
     ],
   },

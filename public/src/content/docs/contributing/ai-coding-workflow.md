@@ -37,13 +37,13 @@ Use one route from intent to implementation:
    acceptance evidence.
 2. ADRs and contracts linked from that issue own durable decisions and
    interfaces.
-3. Graft locates the implementation and its blast radius.
+3. Trail locates the implementation and its blast radius.
 4. The pull request records what changed and how it was verified.
 
 Do not recursively read `specs/`: it contains historical research and frozen
 pre-migration plans alongside durable documents. For a read-only briefing, run
 `just maint::task-context <issue-number>`. Its output is generated from the live
-issue, linked repository documents, open pull requests, and Graft; do not save it
+issue, linked repository documents, open pull requests, and Trail; do not save it
 as another status file.
 
 For a plain terminal list of unchecked tasks in `tinylabscom/mvm#3731` and
@@ -163,31 +163,31 @@ cleanup fails, the controller prints the same deletion command; cleanup is
 part of the task, not optional follow-up. This specialized host does not relax
 the normal builder-VM boundary for any other work.
 
-## Graft and Serena: division of responsibility
+## Trail and Serena: division of responsibility
 
 Both tools answer "where does this live and who calls it", but at different
 granularity. Reach for each where it is strongest instead of duplicating the
 question in both.
 
-- **Graft** (`graft/` in this repo, MCP server `graft mcp`) is the repository orientation
+- **Trail** (`.trail/cache/`, built locally with `trail build`; gitignored) is the repository orientation
   graph: prose nodes with exact `file:line` spans plus a who-calls-what wiring
   graph. Use it first for cross-cutting questions — "how does X work", "what
   breaks if I change Y", "where does behavior Z live". Its tools are ranked
-  retrieval (`graft ask`), exhaustive search (`graft grep`), per-file API
-  skeletons (`graft skeleton`), and call-graph edges (`graft callers`). It is
+  retrieval (`trail ask`), exhaustive search (`trail grep`), per-file API
+  skeletons (`trail skeleton`), and call-graph edges (`trail callers`). It is
   cheap (no API key, sub-second) and always describes the code as it is right
-  now, including uncommitted edits. See the graft contract
-  (`.cursor/rules/graft.mdc`) for the tool-by-tool usage contract.
+  now, including uncommitted edits. See the Trail section of
+  `AGENTS.md` for the tool-by-tool usage contract.
 - **Serena** is a symbol-level semantic toolset over language servers (installed
   separately; see below). Use it inside the editor/agent for precise symbol
   operations: find symbol, find referencing symbols, rename, replace symbol
   body, insert before/after symbol, diagnostics, and project onboarding checks.
 
-The split in practice: **graft for orientation and blast radius, Serena for
+The split in practice: **trail for orientation and blast radius, Serena for
 symbol surgery.** When you already know the symbol you are touching, Serena's
 find-referencing-symbols is the exhaustive answer; when you are learning an area
-or judging what a change breaks, graft's ranked graph is the faster answer. If a
-graft node lacks a detail, read source at the exact span it cites rather than
+or judging what a change breaks, trail's ranked graph is the faster answer. If a
+trail node lacks a detail, read source at the exact span it cites rather than
 re-deriving the map yourself.
 
 ## Editor configuration for Serena
@@ -239,8 +239,8 @@ across worktrees:
   ```
 
   On macOS, GUI apps inherit a minimal `PATH`; if `serena` is not found, use the
-  absolute path from `which serena` in the `command` field. To configure graft
-  locally, add a `graft` entry with command `graft` and args `["mcp"]` under
+  absolute path from `which serena` in the `command` field. To configure Trail
+  locally, add a `trail` entry with command `trail` and args `["mcp"]` under
   the same `context_servers` key.
 
 The agent then runs Serena's project onboarding/activation for the open

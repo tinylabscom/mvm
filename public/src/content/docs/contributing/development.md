@@ -5,10 +5,13 @@ description: Getting started as a contributor to mvm.
 
 Working with an AI coding agent on this repo? Read the
 [AI Coding Workflow](/contributing/ai-coding-workflow/) guide alongside this one —
-it covers claiming issues, the mandatory worktree flow, the Graft/Serena tooling
+it covers claiming issues, the mandatory worktree flow, the Trail/Serena tooling
 split, the fast feedback ladder, and what CI does and does not gate.
 
 ## Repository layout
+
+The full map, with consumers and the `third_party/` / `crates/deps/` / `nix/`
+boundaries, is [Repository Layout](/contributing/repository-layout/).
 
 - `src/` and `crates/` contain the CLI entry point and Rust workspace crates.
   `crates/deps/` contains workspace dependencies, including the libkrun
@@ -352,16 +355,15 @@ Notes:
 
 - **Host-arch only for `--source compile`.** Stage 0 builds your host's
   architecture (aarch64 *or* x86_64).
-  The other arch is published by the `kernel-build` GitHub workflow,
-  which builds both on native runners — fetch it with `--source
-  download` once a release ships it.
-- Editing `base.nix` or a variant delta? Just re-run the command — a
+  The other arch is published in the signed `mvm-images` image set,
+  which builds both — fetch it with `--source download`.
+- Editing `kernel/base.nix` or a variant delta in your `mvm-images` checkout? Just re-run the command — a
   custom config always compiles locally; downloads only ever return the
   kernel that shipped with that exact `mvmctl` release.
 
 #### Iterating on the kernel config (slimming, adding a driver)
 
-Changing `base.nix` / `workload.nix` / `builder.nix` and want to see the
+Changing `kernel/base.nix` / `workload.nix` / `builder.nix` in `mvm-images` and want to see the
 effect? The loop is build → boot-smoke → measure:
 
 ```bash
@@ -388,13 +390,11 @@ Two sharp edges worth knowing:
   symbol (or only the builder needs one), put it in that variant's
   delta. (The builder kernel, for example, keeps netfilter for its
   egress lockdown while the workload drops it.)
-- **You can't read the resolved `.config` locally** — Stage 0 hands the
-  host a `vmlinux`, not the config. The `=y` symbol count + byte size
-  come from the `kernel-build` CI lane, which uploads
-  `workload-config-<arch>` and `kernel-metrics-<arch>.json`. Trigger it
-  without a release via `gh workflow run kernel-build.yml`. The
-  `check-kernel-config-budget` xtask gate fails CI if the `=y` count
-  regresses past `KERNEL_Y_BUDGET`.
+- **Reading the resolved `.config`.** Stage 0 hands the host a `vmlinux`,
+  not the config. In the `mvm-images` checkout,
+  `nix build .#workload-configfile` (see `kernel/README.md` there) produces
+  it; the `=y` count and size metrics are produced by that repository's
+  kernel build, not by this one.
 
 ## Testing
 
