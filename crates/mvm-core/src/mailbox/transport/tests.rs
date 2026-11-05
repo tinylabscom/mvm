@@ -246,6 +246,21 @@ fn binding_verification_rejects_revoked_binding() {
 }
 
 #[test]
+fn rotating_the_binding_authority_key_retires_bindings_signed_under_the_old_one() {
+    let old_authority = SigningKey::from_bytes(&id(30));
+    let new_authority = SigningKey::from_bytes(&id(40));
+    let (old_binding, _) = signed_route(TransportPath::Direct, 31, &old_authority);
+    let (new_binding, _) = signed_route(TransportPath::Direct, 41, &new_authority);
+    let context = binding_context();
+
+    assert_eq!(
+        authorize_route(&old_binding, &context, &new_authority.verifying_key()),
+        Err(TransportBindingError::SignatureInvalid)
+    );
+    assert!(authorize_route(&new_binding, &context, &new_authority.verifying_key()).is_ok());
+}
+
+#[test]
 fn overlay_orders_direct_then_customer_relay_and_requires_public_relay_opt_in() {
     let authority = SigningKey::from_bytes(&id(34));
     let (_, direct) = signed_route(TransportPath::Direct, 35, &authority);
