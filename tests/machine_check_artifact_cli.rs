@@ -85,6 +85,14 @@ fn check_artifact_verifies_a_signed_mvmpkg_without_booting() {
     );
     let verdict: serde_json::Value = serde_json::from_slice(&check.stdout).expect("JSON verdict");
     assert_eq!(verdict["verified"], true);
+    assert_eq!(verdict["publisher"], "check-artifact-test");
+    assert_eq!(
+        verdict["publisher_key_id"],
+        mvmctl::core::plan::bundle::key_id_from_pubkey(
+            &ed25519_dalek::SigningKey::from_bytes(&[91; 32]).verifying_key(),
+        )
+        .0,
+    );
     assert_eq!(verdict["artifact_count"], 1);
     assert_eq!(verdict["embedded_image_sets"], serde_json::json!([]));
     assert_eq!(verdict.get("runnable_here"), Some(&serde_json::Value::Null));
@@ -146,6 +154,75 @@ fn check_artifact_previews_a_declared_posture() {
     assert_eq!(verdict["posture"]["egress"], "deny-all");
     assert_eq!(verdict["posture"]["volumes"], false);
     assert_eq!(verdict["kernel_cmdline"], "console=ttyS0");
+}
+
+#[test]
+fn check_artifact_does_not_report_an_untrusted_publisher() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (artifact, _trust_dir) = signed_bundle_fixture(tmp.path());
+    let check = check_artifact_json(
+        &tmp.path().join("data"),
+        &artifact,
+        &tmp.path().join("untrusted"),
+    );
+    assert!(!check.status.success());
+    assert!(
+        check.stdout.is_empty(),
+        "unverified metadata must not be reported"
+    );
+    assert!(
+        String::from_utf8_lossy(&check.stderr).contains("trust store has no entry"),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn check_artifact_does_not_report_tampered_bundle_metadata() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (artifact, trust_dir) = signed_bundle_fixture(tmp.path());
+    let mut bytes = std::fs::read(&artifact).expect("read signed archive");
+    let offset = bytes
+        .windows(b"check-artifact-test".len())
+        .position(|window| window == b"check-artifact-test")
+        .expect("publisher label in archive");
+    bytes[offset] = b'X';
+    std::fs::write(&artifact, bytes).expect("write tampered archive");
+
+    let check = check_artifact_json(&tmp.path().join("recipient"), &artifact, &trust_dir);
+    assert!(!check.status.success(), "tampered archive must be refused");
+    assert!(
+        check.stdout.is_empty(),
+        "unverified metadata must not be reported"
+    );
+}
+
+#[test]
+fn check_artifact_rechecks_publisher_trust_after_withdrawal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (artifact, trust_dir) = signed_bundle_fixture(tmp.path());
+    let home = tmp.path().join("recipient");
+    let first = check_artifact_json(&home, &artifact, &trust_dir);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let key_id = mvmctl::core::plan::bundle::key_id_from_pubkey(
+        &ed25519_dalek::SigningKey::from_bytes(&[91; 32]).verifying_key(),
+    );
+    std::fs::remove_file(trust_dir.join(format!("{}.pub", key_id.0)))
+        .expect("withdraw publisher trust");
+    let second = check_artifact_json(&home, &artifact, &trust_dir);
+    assert!(
+        !second.status.success(),
+        "withdrawn publisher must be refused"
+    );
+    assert!(
+        second.stdout.is_empty(),
+        "stale verified metadata must not be reported"
+    );
 }
 
 #[test]
@@ -220,6 +297,17 @@ fn check_artifact_does_not_infer_runtime_or_freshness_from_unverified_cache() {
         // The requested report must not disappear as suppressed UI chatter.
         let text = String::from_utf8_lossy(&human.stdout);
         assert!(text.contains("launch readiness not checked"), "{text}");
+        assert!(
+            text.contains("publisher label: \"check-artifact-test\""),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "key_id={}",
+                verdict["publisher_key_id"].as_str().unwrap()
+            )),
+            "{text}"
+        );
         assert!(!text.contains("runnable on"), "{text}");
     }
 }

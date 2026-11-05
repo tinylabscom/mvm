@@ -1304,7 +1304,7 @@ guest, on any tier.
 | `mvmctl machine reconfigure <name> --memory <size>`                                            | Change the memory limit (accepts `512m`, `1g`, etc.)                                                                                                                                                                                                                                                                                 |
 | `mvmctl machine reconfigure <name> --mem-initial <size>`                                       | Change the initial balloon memory target (CLI-only; not exposed on the remote facade)                                                                                                                                                                                                                                                |
 | `mvmctl machine check-artifact <bundle.mvmpkg> [--trust-store <dir>]`                           | Verify the signed bundle, its declarations, its complete embedded image-set manifest, and every image size/hash, confirm its architecture matches this host, and preview its posture, without installing or booting                                                                                                                                                                                                                        |
-| `mvmctl machine check-artifact <bundle.mvmpkg> --json`                                        | Print the verdict as JSON, including the declared posture (`null` when none), kernel command line, and build input                                                                                                                                                                                                                   |
+| `mvmctl machine check-artifact <bundle.mvmpkg> --json`                                        | Print the verdict as JSON, including the signed publisher label and verified key ID, declared posture (`null` when none), kernel command line, and build input                                                                                                                                                                                                                   |
 | `mvmctl machine check-artifact <bundle.mvmpkg> --backend <name>`                                | Also refuse before boot when the selected Linux-direct backend lacks the artifact's architecture, boot protocol, image format, or required guest device                                                                                                                                                                               |
 
 ### Workload output capture
@@ -1623,8 +1623,13 @@ Release verification success (exit 0) is not a launch-readiness or freshness
 guarantee. A same-host local build also exits successfully but prints `local
 build, signed by this host's key; not release-verified`; JSON reports
 `origin: "local-build"`, `verified: false`, and `release_verified: false`.
+The report names the signed, self-declared publisher label and its verified
+`publisher_key_id`; release bundles verify against the selected trust store,
+while a same-host local build verifies against the existing host key. Neither
+identity proves current launch authority or an effective permission grant.
 The read-only preview does not prepare a runtime, apply a revocation feed,
-install the archive, or boot a VM. JSON reports `runnable_here: null` (unknown),
+resolve effective permissions under destination policy, install the archive, or
+boot a VM. JSON reports `runnable_here: null` (unknown),
 `host_arch_compatible: true`, and `backend_compatibility_checked`, which is true
 only after at least one embedded image set was actually checked for `--backend`.
 Consumers of the former unconditional boolean must handle the nullable field.
