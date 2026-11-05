@@ -359,8 +359,7 @@ pub(super) fn run_steps(production: bool) -> Result<()> {
     }
 
     // Dev mode is libkrun/HVF on Apple Silicon macOS or
-    // native Firecracker on Linux KVM. There is no Lima VM to provision
-    // here; setup_steps below handles the remaining assets.
+    // native Firecracker on Linux KVM; setup_steps below provisions the assets.
     bootstrap::hint_libkrun_if_useful();
 
     // Default sizing for the builder VM; CLI-level overrides ride the

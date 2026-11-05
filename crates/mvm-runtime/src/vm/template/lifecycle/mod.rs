@@ -24,8 +24,6 @@ pub use registry_sync::*;
 pub use slots::*;
 pub use snapshot::*;
 
-use anyhow::Result;
-
 // `clone_rootfs_for_instance` moved to `crate::base::cow`.
 // Re-exported here so existing
 // `crate::vm::template::lifecycle::clone_rootfs_for_instance` callers
@@ -46,12 +44,6 @@ fn build_mode_label(mode: mvm_build::pipeline::BuildMode) -> &'static str {
         mvm_build::pipeline::BuildMode::Dev => "dev",
         mvm_build::pipeline::BuildMode::Prod => "prod",
     }
-}
-
-fn require_local_template_fs() -> Result<()> {
-    // Registry push/pull needs direct file access to ~/.mvm/templates.
-    // With Lima gone the host always has direct access; no-op.
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,9 +1,7 @@
 //! `mvmctl shell-init` — print the shell init block (completions + dev aliases) to stdout.
 //!
 //! The per-shell completion script it evals comes from `mvmctl completions`,
-//! the public verb. This used to carry a hidden `--emit-completions` flag for
-//! that, which the published reference then documented as the way to get
-//! completions — documented and unfindable at once.
+//! the public verb.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;

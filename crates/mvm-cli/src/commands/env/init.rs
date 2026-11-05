@@ -1,8 +1,7 @@
 //! `mvmctl init` — scaffold a project (`mvm.toml` + `flake.nix`).
 //!
-//! The standalone "first-time environment wizard" branch this verb
-//! used to dispatch into is gone. Run `mvmctl bootstrap` for
-//! environment setup; `init` is now a pure project-scaffold verb.
+//! `init` only scaffolds a project; run `mvmctl bootstrap` for environment
+//! setup.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;

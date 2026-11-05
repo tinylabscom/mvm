@@ -1063,8 +1063,7 @@ mod tests {
     // ── audit_chain_check_from_scan unit tests ──────────────────────
 
     /// The point of the check: a damaged chain is a posture *failure*, not an
-    /// informational line. It used to surface only as an unrelated verb
-    /// refusing a record, which reads as a problem with that record.
+    /// informational line.
     #[test]
     fn a_fully_walked_scan_does_not_mention_incremental_verification() {
         let scan = AuditChainScan {

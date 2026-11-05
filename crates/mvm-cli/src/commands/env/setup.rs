@@ -31,11 +31,9 @@ pub(super) fn run_setup_steps(force: bool, _builder_cpus: u32, _builder_mem: u32
         return Ok(());
     }
 
-    // Lima is gone; what remains here is the Firecracker asset
-    // pipeline (kernel + rootfs + security baseline). The builder-VM
-    // sizing args are kept on the signature so callers don't break,
-    // but they're inert until direct-launch is wired up for the
-    // no-KVM Linux path.
+    // Firecracker asset pipeline (kernel + rootfs + security baseline). The
+    // builder-VM sizing args are inert until direct-launch is wired up for
+    // the no-KVM Linux path.
     let total = 4;
 
     // Step 1: Firecracker (+ jailer from same release tarball)

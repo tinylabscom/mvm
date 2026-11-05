@@ -1973,8 +1973,7 @@ fn test_run_forward_default_false() {
 
 // ---- machine stop tests ----
 
-// `mvmctl down` was removed; `machine stop` is the sole stop path.
-// It requires exactly one of: a positional VM name, or `--all`.
+// `machine stop` requires exactly one of: a positional VM name, or `--all`.
 
 #[test]
 fn machine_stop_named_and_all_parse() {
@@ -5486,12 +5485,6 @@ fn test_up_network_custom() {
         clap::error::ErrorKind::InvalidSubcommand
     );
 }
-
-// The `mvmctl template *` namespace was removed outright. The two
-// tests previously here covered `template init …` preset/prompt
-// parsing — equivalent coverage now lives on
-// `mvmctl init <DIR> --preset/--prompt` (smart-dispatch in
-// `commands/env/init.rs`). See `test_init_*` below.
 
 #[test]
 fn test_init_scaffold_dir() {
