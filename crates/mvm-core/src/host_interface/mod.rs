@@ -12,6 +12,7 @@ pub mod local;
 pub mod policy;
 pub mod preflight;
 pub mod state;
+pub mod store;
 #[cfg(test)]
 mod tests;
 
