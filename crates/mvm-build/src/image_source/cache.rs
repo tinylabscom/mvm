@@ -715,7 +715,10 @@ fn write_record(
         manifest_sha256: manifest_sha256.clone(),
     };
     let path = dir.join(ENTRY_RECORD_NAME);
-    let body = serde_json::to_vec_pretty(&record).expect("an entry record always serializes");
+    let body = serde_json::to_vec_pretty(&record).map_err(|e| LocalImageCacheError::Input {
+        path: dir.join(ENTRY_RECORD_NAME),
+        detail: format!("serializing {ENTRY_RECORD_NAME}: {e}"),
+    })?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

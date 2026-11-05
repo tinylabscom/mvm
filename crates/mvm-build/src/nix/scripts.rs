@@ -6,15 +6,6 @@ use std::collections::BTreeMap;
 
 fn script_source(name: &str) -> Option<&'static str> {
     match name {
-        "ensure_builder_artifacts" => Some(include_str!(
-            "../../resources/builder_scripts/ensure_builder_artifacts.sh.tera"
-        )),
-        "launch_firecracker_vsock" => Some(include_str!(
-            "../../resources/builder_scripts/launch_firecracker_vsock.sh.tera"
-        )),
-        "refresh_builder_rootfs" => Some(include_str!(
-            "../../resources/builder_scripts/refresh_builder_rootfs.sh.tera"
-        )),
         "extract_artifacts_vsock_disk" => Some(include_str!(
             "../../resources/builder_scripts/extract_artifacts_vsock_disk.sh.tera"
         )),
@@ -31,9 +22,6 @@ fn script_source(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 fn script_names() -> &'static [&'static str] {
     &[
-        "ensure_builder_artifacts",
-        "launch_firecracker_vsock",
-        "refresh_builder_rootfs",
         "extract_artifacts_vsock_disk",
         "run_nix_build_host",
         "extract_artifacts_host",
@@ -104,46 +92,11 @@ mod tests {
     fn test_missing_var_fails() {
         let mut ctx = BTreeMap::new();
         ctx.insert("run_dir", "/tmp".to_string());
-        // launch_firecracker_vsock requires more vars than just run_dir.
-        let err = render_script("launch_firecracker_vsock", &ctx).unwrap_err();
+        // run_nix_build_host requires more vars than just run_dir.
+        let err = render_script("run_nix_build_host", &ctx).unwrap_err();
         let msg = format!("{err:#}");
         eprintln!("{msg}");
-        assert!(msg.contains("launch_firecracker_vsock"));
+        assert!(msg.contains("run_nix_build_host"));
         assert!(msg.contains("missing template variable"));
-    }
-
-    #[test]
-    fn test_smoke_render_launch_firecracker_vsock() {
-        let mut ctx = BTreeMap::new();
-        ctx.insert("run_dir", "/tmp/mvm".to_string());
-        ctx.insert("socket", "/tmp/mvm/firecracker.socket".to_string());
-        ctx.insert("config", "/tmp/mvm/fc-builder.json".to_string());
-        ctx.insert("log", "/tmp/mvm/firecracker.log".to_string());
-        ctx.insert("pid", "/tmp/mvm/fc.pid".to_string());
-        ctx.insert("out_disk", "/tmp/mvm/build-out.ext4".to_string());
-        ctx.insert("vsock_uds", "/tmp/mvm/builder.vsock".to_string());
-
-        let rendered =
-            render_script("launch_firecracker_vsock", &ctx).expect("render should succeed");
-        assert!(rendered.contains("/tmp/mvm"));
-        assert!(rendered.contains("/tmp/mvm/firecracker.socket"));
-        assert!(rendered.contains("/tmp/mvm/fc-builder.json"));
-    }
-
-    #[test]
-    fn test_refresh_builder_rootfs_renders_agent_service() {
-        let mut ctx = BTreeMap::new();
-        ctx.insert("builder_dir", "/var/lib/mvm/builder".to_string());
-        ctx.insert("agent_src", "/tmp/mvm-builder-agent".to_string());
-        ctx.insert("agent_dst", "/usr/local/bin/mvm-builder-agent".to_string());
-        ctx.insert(
-            "agent_service",
-            "/etc/systemd/system/mvm-builder-agent.service".to_string(),
-        );
-
-        let rendered =
-            render_script("refresh_builder_rootfs", &ctx).expect("render should succeed");
-        assert!(rendered.contains("/etc/systemd/system/mvm-builder-agent.service"));
-        assert!(!rendered.to_ascii_lowercase().contains("ssh"));
     }
 }

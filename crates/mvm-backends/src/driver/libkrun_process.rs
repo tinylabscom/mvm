@@ -222,19 +222,16 @@ pub fn ensure_libkrun_runtime_source_supported(config: &VmStartConfig) -> Result
 /// and an initramfs; non-verity boots set `rootfs_path` directly and, when a
 /// runtime overlay is present, attach it as a plain read-only `/dev/vdb`.
 pub fn attach_workload_rootfs(mut krun: KrunContext, config: &VmStartConfig) -> KrunContext {
-    if libkrun_verity_enabled(config) {
+    if let Some(verity_path) = config
+        .verity_path
+        .clone()
+        .filter(|_| libkrun_verity_enabled(config))
+    {
         krun.initramfs_path =
             libkrun_effective_initrd(config).map(|p| p.to_string_lossy().into_owned());
         krun = krun
             .add_disk("root", config.rootfs_path.clone(), true)
-            .add_disk(
-                "root-verity",
-                config
-                    .verity_path
-                    .clone()
-                    .expect("verity-enabled libkrun boot must carry a verity sidecar"),
-                true,
-            );
+            .add_disk("root-verity", verity_path, true);
         if let Some((overlay_path, overlay_verity_path, _)) = libkrun_runtime_overlay(config) {
             krun = krun.add_disk("runtime", overlay_path, true).add_disk(
                 "runtime-verity",
