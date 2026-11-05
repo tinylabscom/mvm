@@ -402,3 +402,69 @@ the work is decomposed:
   preflight checks run concurrently so this invariant is compatible with the
   cold and warm launch budgets.
 
+## Demo narrative and validation script
+
+The customer-facing story is:
+
+> Keep the mission running, even when you can no longer trust one of its AI
+> workloads.
+
+Do not lead with microVMs or a remote-wipe button. Lead with the operational
+dilemma: Winriver wants intelligence at the edge, but a compromised AI must
+not become a bridge into the rest of the mission. Position MVM as the
+execution and containment layer, not as the entire tactical communications
+network or fleet-management platform.
+
+The first demo is a **closed mission network with a closed control loop**:
+three simulated edge nodes—ship, aircraft, and ground vehicle—communicate
+through authorized mailbox/message-box operations without public Internet or
+cloud dependency. This is networked closed-loop operation, not a claim that
+physically air-gapped platforms can communicate without an approved transfer
+path.
+
+### 8–10 minute sequence
+
+1. **Establish the mission.** Each node runs an isolated advisory AI task over
+   synthetic sensor observations. The aircraft sends an approved observation
+   to the ship; the ship sends an approved summary to the ground vehicle.
+   This proves useful collaboration without unrestricted connectivity.
+2. **Cut the uplink.** Disconnect one node from headquarters. It continues
+   preauthorized local processing under its offline lease. The console shows
+   it as disconnected, not remotely contained or wiped.
+3. **Introduce a deterministic compromise.** A planted malicious input causes
+   the ground workload to attempt an unauthorized mailbox operation,
+   outbound connection, or sensitive-data request. Do not rely on a live model
+   deciding to behave maliciously.
+4. **Show the boundary holding.** The host interface denies the operation and
+   records the request in the assurance/audit view. Other nodes continue their
+   mission.
+5. **Contain and recover.** The operator quarantines the suspect workload,
+   revokes its authority, terminates it, and launches a replacement from an
+   approved image. The replacement receives a new execution epoch and fresh
+   capabilities; stale messages and credentials are rejected.
+6. **Close with evidence.** Show a timeline containing admission, policy,
+   approved launch, mailbox activity, denied request, assurance finding,
+   containment, termination, and replacement.
+
+The emotional high point is the unaffected nodes continuing the mission, not a
+red wipe animation. The policy card beside each workload should show:
+
+- assigned synthetic data it may read;
+- approved mailbox destinations and reporting service;
+- advisory output only, not executable platform commands;
+- resource and lifetime budget;
+- absence of the reporting service's raw credential;
+- response on suspected compromise: deny, contain, terminate, and replace.
+
+The demo must distinguish what is already implemented from integration work:
+workload isolation, controlled egress/credential handling, signed launch
+provenance, protected images, and mailbox security primitives are foundations;
+multi-node dashboarding, live mailbox delivery, quarantine workflow,
+authenticated inter-platform messaging, and remote recovery require end-to-end
+verification before being presented as shipped capabilities.
+
+The first demo promises **contain, terminate, and rebuild**. It does not
+promise verified physical wipe. A remote command cannot immediately affect a
+disconnected node, and revocation takes effect only where current revocation
+state is known or an offline lease has expired.
+
