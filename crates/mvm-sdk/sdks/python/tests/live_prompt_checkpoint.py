@@ -45,7 +45,7 @@ def main() -> int:
         checkpoint_id = answer["checkpoint_id"]
         assert isinstance(checkpoint_id, str) and checkpoint_id, answer
         checkpoint.verify_lineage(checkpoint_id)
-        run("vm", "checkpoint", "fork", checkpoint_id, "--new-id", child)
+        run("machine", "restore", checkpoint_id, "--as", child)
         restored = mvm.Machine(child).prompt("second")
         assert restored["delivered"] is True, restored
         assert restored["exit_code"] == 0, restored
