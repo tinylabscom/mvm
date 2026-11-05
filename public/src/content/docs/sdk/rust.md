@@ -131,9 +131,11 @@ use mvm_client::{connect, MvmClient, Target};
 let local = connect(Target::Local)?;          // == mvm_client::LocalBackend::new()
 
 // Remote — a hosted fleet or a local sidecar over REST (feature `remote`).
+// The token comes from your own config; mvm reads no env var for it.
+let my_fleet_token = String::from("<token from your own config>");
 let remote = connect(Target::Gateway {
     base_url: "https://fleet.example.com".into(),
-    token: std::env::var("MVM_TOKEN")?,
+    token: my_fleet_token,
 })?;
 
 for m in remote.list_machines(Default::default()).await? {
@@ -141,9 +143,10 @@ for m in remote.list_machines(Default::default()).await? {
 }
 ```
 
-The **studio** desktop app is this pattern: a `GatewayBackend` by default, or the
-in-process `LocalBackend` when built `--features local` with
-`MVM_STUDIO_BACKEND=local` — one `dyn MvmClient` behind its Tauri commands.
+The **studio** desktop app uses the in-process `LocalBackend` only
+(`connect(Target::Local)`); its gateway target is retired. Studio reads no
+backend selector: its one startup guard refuses a `MVM_STUDIO_TARGET` set to
+anything other than `local`, rather than redirecting it to this host.
 
 ```toml
 # a frontend that drives machines. `LocalBackend` is unconditional; the
