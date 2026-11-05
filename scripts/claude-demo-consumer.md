@@ -93,7 +93,11 @@ intent file nor a PID observation is proof that a model ran or did not run.
 
 ## Evidence and recovery
 
-Private `/tmp/mvm-claude-consumer-*` evidence preserves actual stdout/stderr,
+Evidence goes to a fresh private `mvm-claude-consumer-*` directory under
+`--results-dir` (absolute, existing, not group/world writable; default `/tmp`).
+Before exit every file there is scanned for secret-looking shapes; a hit is
+recorded by file and pattern name only, and forces `demo_acceptance` false.
+The directory preserves actual stdout/stderr,
 the exact command vectors, release/artifact assertions, and canonical audit
 verifier/show results. A particular joke is not asserted. Passing requires:
 
