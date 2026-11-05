@@ -20,7 +20,9 @@ jobs:
     name: BDD conformance
     # ubuntu-24.04 until the 26.04 runner failures are fixed
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # A cold tagged build took 16 minutes to compile and the help-surface
+    # scenarios another 7; leave time for the remaining conformance suite.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 

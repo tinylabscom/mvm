@@ -4,7 +4,8 @@
 use anyhow::Result;
 
 use super::super::super::env::builder_vm::{
-    assert_workload_kernel_supports_verity, ensure_default_microvm_image, prepare_workload_kernel,
+    assert_workload_kernel_supports_verity, ensure_default_microvm_image,
+    prepare_workload_kernel_for_launch,
 };
 use super::OciProvenanceSink;
 use crate::ui;
@@ -44,7 +45,7 @@ pub(in crate::commands) fn resolve_launch_image_source(
     // surfacing only after a full pull + rootfs materialization. The
     // rootfs boots verity-sealed, so the kernel must carry dm-verity;
     // the builder kernel (which drops it) is never a stand-in.
-    let kernel_path = prepare_workload_kernel()?;
+    let kernel_path = prepare_workload_kernel_for_launch()?;
     // Enforce that invariant host-side: a kernel with no dm-verity
     // support would panic the guest in early init opening
     // /dev/mapper/control, with no host signal. Fail fast instead.
