@@ -50,8 +50,8 @@ Repository observation, local manifest production, source/cache primitives and
 read-only ext4 contract validation are platform-neutral library capabilities.
 Builder orchestration, artifact acquisition and VM runtime modules are exposed
 only on Unix hosts; Windows support does not include executing builder jobs.
-Unix public module paths remain unchanged through reexports. The remaining opt-ins are `manifest-verify`,
-`contributor-bootstrap`, and `release-channel`; native libkrun linkage remains
+Unix public module paths remain unchanged through reexports. The remaining opt-ins are `manifest-verify`
+and `release-channel`; native libkrun linkage remains
 behind the `libkrun-sys` crate's own feature. Platform-specific operations still
 run only on supported hosts.
 
