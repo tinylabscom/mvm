@@ -157,6 +157,22 @@ fn size_digest_key_architecture_and_independent_trust_are_mandatory() {
 }
 
 #[test]
+fn a_flipped_archive_byte_of_the_same_size_is_a_digest_refusal() {
+    let (directory, bytes, trust, key_id) = fixture();
+    let application = descriptor(&bytes, &key_id, |_| {});
+    let mut tampered = bytes.clone();
+    let middle = tampered.len() / 2;
+    tampered[middle] ^= 1;
+    assert_eq!(tampered.len(), bytes.len());
+    let source = directory.path().join("input.mvmpkg");
+    std::fs::write(&source, &tampered).unwrap();
+    assert!(matches!(
+        verify_application_bundle(&application, &source, &trust),
+        Err(ApplicationBundleError::Digest)
+    ));
+}
+
+#[test]
 fn archive_bounds_and_nonregular_inputs_refuse_before_verification() {
     let (directory, bytes, trust, key_id) = fixture();
     let source = directory.path().join("input.mvmpkg");
