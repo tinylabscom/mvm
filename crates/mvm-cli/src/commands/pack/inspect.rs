@@ -144,42 +144,51 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
         return crate::json_out::emit_json(&info);
     }
     if verify_only {
-        println!("Verified {} ({})", info.reference, info.manifest_sha256);
-        println!("Signer identity: {}", info.signer_identity);
-        println!("Signer issuer: {}", info.signer_issuer);
+        println!(
+            "Verified {} ({})",
+            safe(&info.reference),
+            safe(&info.manifest_sha256)
+        );
+        println!("Signer identity: {}", safe(&info.signer_identity));
+        println!("Signer issuer: {}", safe(&info.signer_issuer));
         for line in trust_status_lines(official, revocation_required) {
             println!("{line}");
         }
         println!("Signature proves publisher identity and integrity, not safety.");
         return Ok(());
     }
-    println!("Pack: {}", info.reference);
-    println!("Description: {}", info.description);
-    println!("Manifest SHA-256: {}", info.manifest_sha256);
-    println!("Signer identity: {}", info.signer_identity);
-    println!("Signer issuer: {}", info.signer_issuer);
+    println!("Pack: {}", safe(&info.reference));
+    println!("Description: {}", safe(&info.description));
+    println!("Manifest SHA-256: {}", safe(&info.manifest_sha256));
+    println!("Signer identity: {}", safe(&info.signer_identity));
+    println!("Signer issuer: {}", safe(&info.signer_issuer));
     for line in trust_status_lines(official, revocation_required) {
         println!("{line}");
     }
-    println!("Publisher issuer: {}", info.publisher_issuer);
+    println!("Publisher issuer: {}", safe(&info.publisher_issuer));
     println!(
         "Accepted signing identities: {}",
-        info.accepted_signing_identities.join(", ")
+        safe_join(&info.accepted_signing_identities)
     );
-    println!("Policy files: {}", info.policy_files.join(", "));
+    println!("Policy files: {}", safe_join(&info.policy_files));
     for policy in &info.policy_documents {
         println!(
             "Policy {}: {}",
-            policy.path,
+            safe(&policy.path),
             serde_json::to_string(&policy.text)?
         );
     }
     if let Some(image) = &info.image_manifest {
-        println!("Image source manifest: {image}");
+        println!("Image source manifest: {}", safe(image));
     }
     println!("Payload files: {}", info.files.len());
     for file in &info.files {
-        println!("  {}  {}  {} bytes", file.sha256, file.path, file.size);
+        println!(
+            "  {}  {}  {} bytes",
+            safe(file.sha256.as_str()),
+            safe(&file.path),
+            file.size
+        );
     }
     println!("Signature proves publisher identity and integrity, not safety.");
     Ok(())
@@ -300,49 +309,86 @@ fn inspect_application(
     if verify_only {
         println!(
             "Verified application descriptor and bundle archive: {} ({})",
-            info.reference, info.manifest_sha256
+            safe(&info.reference),
+            safe(&info.manifest_sha256)
         );
     } else {
-        println!("Application: {}", info.reference);
-        println!("Description: {}", info.description);
-        println!("Manifest SHA-256: {}", info.manifest_sha256);
+        println!("Application: {}", safe(&info.reference));
+        println!("Description: {}", safe(&info.description));
+        println!("Manifest SHA-256: {}", safe(&info.manifest_sha256));
     }
-    println!("Signer identity: {}", info.signer_identity);
-    println!("Signer issuer: {}", info.signer_issuer);
+    println!("Signer identity: {}", safe(&info.signer_identity));
+    println!("Signer issuer: {}", safe(&info.signer_issuer));
     for line in trust_status_lines(application.reference().namespace() == "mvm", false) {
         println!("{line}");
     }
-    println!("Guest architecture: {}", info.guest_arch);
+    println!("Guest architecture: {}", safe(&info.guest_arch));
     println!(
         "Bundle archive SHA-256: {}",
-        info.bundle.archive_sha256.as_str()
+        safe(info.bundle.archive_sha256.as_str())
     );
     println!("Bundle archive size: {} bytes", info.bundle.archive_size);
-    println!("Bundle author key: {}", info.bundle.key_id.0);
+    println!("Bundle author key: {}", safe(&info.bundle.key_id.0));
     if let Some(launch) = &info.launch {
-        println!("Entrypoint: {}", launch.entrypoint.join(" "));
-        if let Some(dir) = &launch.working_dir {
-            println!("Working directory: {dir}");
-        }
-        if let (Some(vcpus), Some(mem)) = (launch.vcpus, launch.mem_mib) {
-            println!("Resources: {vcpus} vCPU, {mem} MiB");
-        }
-        match launch.egress_allowed {
-            Some(true) => println!(
-                "Policy: egress allowed to [{}]",
-                launch.allow_hosts.join(", ")
-            ),
-            Some(false) => println!("Policy: no network egress"),
-            None => {}
+        for line in launch_lines(launch) {
+            println!("{line}");
         }
     }
     if let Some(warning) = &info.arch_warning {
-        crate::ui::warn(warning);
+        crate::ui::warn(&safe(warning));
     }
     println!(
         "Verification covers the descriptor and archive, not extracted-file custody or launch admission."
     );
     Ok(())
+}
+
+/// Neutralize terminal control characters (ESC, CR, newline, C1 and the
+/// rest) in a publisher-supplied string, which a signature does not make safe
+/// to print raw.
+fn safe(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_debug().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+fn safe_join(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| safe(item))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Text lines for the launch summary; each argv element is quoted separately.
+fn launch_lines(launch: &LaunchSummary) -> Vec<String> {
+    let argv: Vec<String> = launch
+        .entrypoint
+        .iter()
+        .map(|arg| format!("\"{}\"", safe(arg)))
+        .collect();
+    let mut lines = vec![format!("Entrypoint: {}", argv.join(" "))];
+    if let Some(dir) = &launch.working_dir {
+        lines.push(format!("Working directory: {}", safe(dir)));
+    }
+    if let (Some(vcpus), Some(mem)) = (launch.vcpus, launch.mem_mib) {
+        lines.push(format!("Resources: {vcpus} vCPU, {mem} MiB"));
+    }
+    match launch.egress_allowed {
+        Some(true) => lines.push(format!(
+            "Policy: egress allowed to [{}]",
+            safe_join(&launch.allow_hosts)
+        )),
+        Some(false) => lines.push("Policy: no network egress".to_owned()),
+        None => {}
+    }
+    lines
 }
 
 /// Human-readable trust status. `official` is only passed after the pack and
@@ -366,7 +412,41 @@ fn trust_status_lines(official: bool, revocation_required: bool) -> [&'static st
 
 #[cfg(test)]
 mod tests {
-    use super::{application_info, trust_status_lines};
+    use super::{LaunchSummary, application_info, launch_lines, safe, trust_status_lines};
+
+    const HOSTILE: &str = "a\x1b[2Jb\rc\nd\u{9b}e";
+
+    fn assert_no_control(text: &str) {
+        assert!(
+            !text.chars().any(char::is_control),
+            "raw control in {text:?}"
+        );
+    }
+
+    #[test]
+    fn safe_escapes_every_control_character() {
+        let out = safe(HOSTILE);
+        assert_no_control(&out);
+        assert!(out.contains("\\u{1b}") && out.contains("\\r") && out.contains("\\n"));
+        assert!(out.contains("\\u{9b}"));
+    }
+
+    #[test]
+    fn hostile_launch_fields_never_print_a_control_character() {
+        let launch = LaunchSummary {
+            entrypoint: vec![HOSTILE.into(), "ok".into()],
+            working_dir: Some(HOSTILE.into()),
+            vcpus: Some(1),
+            mem_mib: Some(128),
+            egress_allowed: Some(true),
+            allow_hosts: vec![HOSTILE.into()],
+        };
+        let lines = launch_lines(&launch);
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            assert_no_control(line);
+        }
+    }
 
     #[test]
     fn application_info_keeps_descriptor_and_bundle_identities_distinct() {
