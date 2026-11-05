@@ -108,16 +108,14 @@ pub fn run_flake_check(
 /// no-host-nix invariant, so the caller's other path is its in-VM shell run.
 pub fn try_typed_flake_check(vms_root: &Path, flake_path: &str) -> FlakeCheckDispatch {
     let socket = resolve_running_builder_socket(vms_root);
-    let reachable = socket.as_deref().is_some_and(|s| {
+    let Some(socket) = socket.filter(|s| {
         matches!(
             probe_builderd_readiness(s, READINESS_PROBE_TIMEOUT),
             BuilderdReadiness::Ready { .. }
         )
-    });
-    if !reachable {
+    }) else {
         return FlakeCheckDispatch::Fellback;
-    }
-    let socket = socket.expect("reachable implies a resolved socket");
+    };
     FlakeCheckDispatch::Took(run_flake_check(&socket, flake_path, FLAKE_CHECK_OP_TIMEOUT))
 }
 
@@ -228,14 +226,13 @@ pub fn try_typed_build(
     output_dir: Option<&str>,
 ) -> BuildDispatch {
     let socket = resolve_running_builder_socket(vms_root);
-    let reachable = socket.as_deref().is_some_and(|s| {
+    let socket = socket.filter(|s| {
         matches!(
             probe_builderd_readiness(s, READINESS_PROBE_TIMEOUT),
             BuilderdReadiness::Ready { .. }
         )
     });
-    if reachable {
-        let socket = socket.expect("reachable implies a resolved socket");
+    if let Some(socket) = socket {
         BuildDispatch::Took(run_build(
             &socket,
             flake_ref,
@@ -251,6 +248,19 @@ pub fn try_typed_build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_routes_fall_back_when_no_builder_socket_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            try_typed_flake_check(tmp.path(), "."),
+            FlakeCheckDispatch::Fellback
+        ));
+        assert!(matches!(
+            try_typed_build(tmp.path(), ".", "attr", None),
+            BuildDispatch::Fellback
+        ));
+    }
 
     #[test]
     fn render_build_event_passes_log_text_through_verbatim() {

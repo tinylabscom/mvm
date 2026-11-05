@@ -626,7 +626,9 @@ pub fn run_with_builder_fallback<T>(
             }
         }
     }
-    Err(last_err.expect("builder_attempt_order is never empty"))
+    Err(last_err.unwrap_or_else(|| BuilderVmError::VmmFailed {
+        detail: "no builder backend was attempted: the attempt order was empty".to_string(),
+    }))
 }
 
 /// True when `e`'s anyhow chain carries a [VMM-level
@@ -686,7 +688,9 @@ pub fn run_with_builder_fallback_anyhow<T>(
             }
         }
     }
-    Err(last_err.expect("builder_attempt_order is never empty"))
+    Err(last_err.unwrap_or_else(|| {
+        anyhow::anyhow!("no builder backend was attempted: the attempt order was empty")
+    }))
 }
 
 // ──────────────────────────────────────────────────────────────────
