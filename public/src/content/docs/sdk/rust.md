@@ -124,8 +124,7 @@ Two `LocalBackend` limits are worth knowing before you build against it:
 `connect(Target)` returns a `Box<dyn MvmClient>` and hides the transport, so one
 piece of UI/service code drives either this host or a remote fleet:
 
-```rust,ignore
-// illustrative: `my_fleet_token` comes from the caller's configuration.
+```rust
 use mvm_client::{connect, MvmClient, Target};
 
 // In-process — this host's microVMs (auto-selected VMM). No daemon required.
