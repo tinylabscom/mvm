@@ -460,13 +460,13 @@ impl SubstitutionService {
         let action = destination
             .as_deref()
             .map(|d| {
-                crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, d).clone()
+                crate::supervisor::redactor::resolve_redaction(&self.redaction_policy, d).clone()
             })
             .unwrap_or_default();
         let replacement_action = destination
             .as_deref()
             .map(|d| {
-                crate::supervisor::reversible_replacement_resolve::resolve(
+                crate::supervisor::reversible_replacement::resolve_replacement(
                     &self.reversible_replacement_policy,
                     d,
                 )

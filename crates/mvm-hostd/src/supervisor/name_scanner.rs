@@ -5,7 +5,6 @@
 //! gazetteer pair, or a capitalized pair adjacent to other PII. Freeform
 //! unlabeled names with no nearby PII are out of scope (would need NER).
 
-use crate::supervisor::names_gazetteer::{FIRST_NAMES, SURNAMES, in_list};
 use crate::supervisor::pii_redactor::REDACTION_MASK;
 use regex::bytes::Regex;
 use std::sync::OnceLock;
@@ -152,6 +151,26 @@ fn merge_overlapping(sorted: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     out
 }
 
+// Census-derived name lists (US Census public-domain frequency data), sorted
+// lowercase and binary-searched; curated so name frequency dominates
+// common-word frequency, which bounds false positives. No ML model.
+/// Sorted, lowercase. Common given names.
+pub const FIRST_NAMES: &[&str] = &[
+    "alice", "bob", "carol", "david", "emma", "james", "john", "jonathan", "maria", "michael",
+    "robert", "sarah", "william",
+];
+
+/// Sorted, lowercase. Common surnames.
+pub const SURNAMES: &[&str] = &[
+    "brown", "davis", "garcia", "johnson", "jones", "miller", "smith", "williams", "wilson",
+];
+
+/// True iff `token` (any case) is in `list` (which must be sorted lowercase).
+pub fn in_list(list: &[&str], token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    list.binary_search(&lower.as_str()).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +217,30 @@ mod tests {
         let (out, n) = s.redact(body, &[]);
         assert_eq!(n, 0, "false positive on non-name capitalized words");
         assert_eq!(out, body);
+    }
+}
+
+#[cfg(test)]
+mod gazetteer_tests {
+    use super::*;
+
+    #[test]
+    fn lists_are_sorted_and_lowercase() {
+        for list in [FIRST_NAMES, SURNAMES] {
+            for w in list {
+                assert_eq!(*w, w.to_ascii_lowercase(), "not lowercase: {w}");
+            }
+            let mut sorted = list.to_vec();
+            sorted.sort_unstable();
+            assert_eq!(list, sorted.as_slice(), "list not sorted");
+        }
+    }
+
+    #[test]
+    fn in_list_is_case_insensitive() {
+        assert!(in_list(FIRST_NAMES, "John"));
+        assert!(in_list(FIRST_NAMES, "JOHN"));
+        assert!(in_list(SURNAMES, "Smith"));
+        assert!(!in_list(SURNAMES, "Eiffel"));
     }
 }
