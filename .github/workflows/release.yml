@@ -263,6 +263,19 @@ jobs:
       # fails at "cargo zigbuild failed for mvm-host-vm-init".
       - uses: ./.github/actions/install-zigbuild
 
+      # Dependency units only. Workspace crate outputs and cargo-installed
+      # binaries are never restored into a shipped artifact, so every mvm
+      # crate in the release is compiled in this run. Only dispatch runs write
+      # the entry (a tag push restores what a dispatch on main wrote), which
+      # keeps tag refs out of the shared cache budget.
+      - name: Restore dependency build cache
+        uses: ./.github/actions/rust-cache
+        with:
+          key: release-${{ matrix.build_target }}
+          save: ${{ github.event_name == 'workflow_dispatch' }}
+          workspace-crates: "false"
+          cache-bin: "false"
+
       - name: Build release binary
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
@@ -676,6 +689,17 @@ jobs:
           path: |
             staging/*.tar.gz
             staging/*.sha256
+
+      # The cache save runs after the last step. The nested cross-compile
+      # target and the libkrun tier output hold workspace-built binaries that
+      # the dependency-only cache must not carry, so drop them first.
+      - name: Drop workspace-built outputs before the cache is saved
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          rm -rf target/*/build/mvm-cli-nested-target \
+            target/*/*/build/mvm-cli-nested-target \
+            target/*/release/libkrun-tier
 
   archive-install-smoke:
     needs: build
