@@ -183,38 +183,6 @@ fn oci_runtime_source(
     }
 }
 
-#[cfg(test)]
-mod oci_runtime_tests {
-    use super::*;
-    use mvm_build::artifact_acquisition::DistributionChannel;
-    use mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode;
-
-    #[test]
-    fn image_run_prepares_from_the_running_binarys_own_source() {
-        assert_eq!(
-            oci_runtime_source(
-                DistributionChannel::Release,
-                RuntimeOverlayAcquireMode::DownloadPublishedArtifact
-            ),
-            OciRuntimeSource::Release
-        );
-        assert_eq!(
-            oci_runtime_source(
-                DistributionChannel::Source,
-                RuntimeOverlayAcquireMode::DownloadPublishedArtifact
-            ),
-            OciRuntimeSource::Checkout
-        );
-        assert_eq!(
-            oci_runtime_source(
-                DistributionChannel::Release,
-                RuntimeOverlayAcquireMode::BuildFromSourceCheckout
-            ),
-            OciRuntimeSource::Checkout
-        );
-    }
-}
-
 /// The image a launch boots when the caller named none: a verified runtime pack
 /// if one is cached for this host, else the bundled default microVM built in the
 /// builder VM.
@@ -253,4 +221,36 @@ fn resolve_default_image_source(prod: bool) -> Result<crate::exec::ImageSource> 
         label: "default-microvm".to_string(),
         unpacked_oci_root: None,
     })
+}
+
+#[cfg(test)]
+mod oci_runtime_tests {
+    use super::*;
+    use mvm_build::artifact_acquisition::DistributionChannel;
+    use mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode;
+
+    #[test]
+    fn image_run_prepares_from_the_running_binarys_own_source() {
+        assert_eq!(
+            oci_runtime_source(
+                DistributionChannel::Release,
+                RuntimeOverlayAcquireMode::DownloadPublishedArtifact
+            ),
+            OciRuntimeSource::Release
+        );
+        assert_eq!(
+            oci_runtime_source(
+                DistributionChannel::Source,
+                RuntimeOverlayAcquireMode::DownloadPublishedArtifact
+            ),
+            OciRuntimeSource::Checkout
+        );
+        assert_eq!(
+            oci_runtime_source(
+                DistributionChannel::Release,
+                RuntimeOverlayAcquireMode::BuildFromSourceCheckout
+            ),
+            OciRuntimeSource::Checkout
+        );
+    }
 }
