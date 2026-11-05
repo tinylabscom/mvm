@@ -15,6 +15,10 @@ Inspected source: `e78c96f5e6c73fe1134b8ccf50d19221a8e09fa9`.
 The [approved direction][direction] is default-deny delegation to an already
 enrolled principal for one tenant, operation, exact plan/input identities and
 policy revision. It did not authorize commissioning or activation.
+Security-scope decision: an attacker-controlled, unconfined same-UID frontend
+remains in scope (option B). Independently enforced custody must protect the
+issuer identity, mutable state and writable resources. No particular mechanism
+or new privilege is approved by that choice.
 
 ## Decision and alternatives
 
@@ -101,9 +105,8 @@ observations, not macOS 26/HVF qualification or authorization to migrate a key.
 The adversary includes arbitrary code in an untrusted same-UID owner/frontend
 or its proxies: file modification, old protocol records, disconnect/restart,
 holder termination and native item update, deletion, replacement or ACL
-changes. An unconfined instance of such a role stays in scope unless an
-approved mechanism makes its confinement mandatory. Do not assume it
-cooperates with library locks or a sandbox applied to a different process.
+changes. An unconfined instance of such a role remains in scope. Do not assume
+it cooperates with library locks or a sandbox applied to a different process.
 
 The cold-owner contract keeps the host and its administrator trusted; it does
 not claim universal defense against unrelated unconfined host malware.
@@ -345,28 +348,24 @@ fresh empty ledger. No owner death or missing journal clears quarantine.
 The issuer could remain software under this different isolation model; this
 does not authorize native import or establish its independent expected pin.
 
-This alternative requires an explicit policy choice: enumerate **all**
-untrusted frontend/owner/child/proxy roles and make their preparse confinement
-mandatory, leaving unrelated unconfined host software trusted. Arbitrary code
-inside those confined roles remains adversarial, not cooperative. If an
-attacker-controlled unconfined frontend must remain supported, Seatbelt on
+This alternative is not selected. It would require enumerating **all**
+untrusted frontend/owner/child/proxy roles and making their preparse confinement
+mandatory, leaving unrelated unconfined host software trusted. The selected
+threat model retains an attacker-controlled unconfined frontend; Seatbelt on
 other roles cannot protect same-UID named provider files from it. Keeping
-that file-based model would require a distinct protected principal/provisioning
+that file-based model requires a distinct protected principal/provisioning
 boundary; otherwise return a different demonstrated custody mechanism for
 review. Neither is established here. No complete approved profile, bootstrap
-coverage or resource/journal mediation is established either. Do not treat
-the cold-owner trusted-host sentence as approval of that policy choice or as
-evidence that confinement already exists.
+coverage or resource/journal mediation is established either.
 
 **Recommendation: keep the positive profile disabled. Retain the epoch
 algorithm only as an incomplete candidate and resolve these authority
 decisions before implementing a positive path:**
 
-1. Decide whether all attacker roles are mandatorily confined under the
-   trusted-host model above, or an attacker-controlled unconfined frontend
-   remains in scope. In the former case approve the exact role profiles,
-   bootstrap and complete mediation; in the latter identify a protected
-   principal/provisioning boundary rather than treating file permissions as one.
+1. With the unconfined same-UID frontend in scope, identify and qualify an
+   independently enforced principal/provisioning and resource boundary.
+   File permissions, another role's Seatbelt profile and a different Keychain
+   update API do not provide it.
 2. Identify the independently recorded expected host public identity and an
    existing protected path delivering it to the verified holder.
 3. For native-item custody, decide whether import, software-copy retirement,
