@@ -14,7 +14,7 @@ issue and read only what it links.
    priority, and acceptance evidence.
 2. Read only the ADRs and contracts linked by that issue. They own durable
    decisions and interfaces.
-3. Use Graft to locate the implementation and determine its blast radius.
+3. Use Trail to locate the implementation and determine its blast radius.
 4. Use the pull request to record the implementation and verification. Use
    `Closes #N` only when the PR completes the issue's last unchecked checkbox;
    otherwise link it with `Part of #N`. An issue may only close once every

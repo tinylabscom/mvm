@@ -169,7 +169,7 @@ if [ "${KEEP_REMOTE_PATCHES:-0}" != "1" ]; then
     rsync -a -e "$SSH" \
         --exclude='/.git' --exclude='/target' --exclude='/.mvm-test' \
         --exclude='/.venv' --exclude='/.ruff_cache' --exclude='/out' \
-        --exclude='/output' --exclude='/artifacts' --exclude='/graft/.cache' \
+        --exclude='/output' --exclude='/artifacts' --exclude='/.trail' \
         --exclude='/.lima' --exclude='/.claude' --exclude='node_modules' \
         "$SRC_ROOT/" "$TARGET:$REMOTE_DIR/"
 fi

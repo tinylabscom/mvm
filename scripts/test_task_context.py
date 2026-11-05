@@ -45,6 +45,7 @@ class TaskContextTests(unittest.TestCase):
         output = TASK_CONTEXT.render(issue, [], [], "one source span")
 
         self.assertIn("None linked; do not infer architecture", output)
+        self.assertIn("## Trail orientation", output)
         self.assertIn("one source span", output)
 
 
