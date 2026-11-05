@@ -126,9 +126,8 @@ pub(super) fn kvm_check(plat: Platform, in_vm: bool) -> Check {
     }
 
     // macOS host: /dev/kvm doesn't exist anywhere in the stack — the
-    // backend is libkrun or HVF driven by Hypervisor.framework. Lima is
-    // gone; reporting KVM as missing on macOS would be a stale artifact
-    // from that era.
+    // backend is libkrun or HVF driven by Hypervisor.framework, so
+    // reporting KVM as missing would be wrong.
     Check {
         name: "kvm",
         category: "platform",

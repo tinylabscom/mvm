@@ -174,8 +174,7 @@ fn workflow_filter_drops_irrelevant_failed_checks() {
 
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].name, "platform");
-    // The previously-failing `cargo` check is now invisible, so
-    // `all_ok` over the filtered set is `true`.
+    // The `cargo` check is filtered out, so `all_ok` over the set is `true`.
     let all_ok_filtered = filtered.iter().all(|c| c.ok);
     assert!(all_ok_filtered);
 }

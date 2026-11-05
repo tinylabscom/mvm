@@ -711,9 +711,9 @@ ls -lh "$IMAGES_DIR/{name}.$(uname -m).elf"
     ))?;
 
     // If --output was given, copy the ELF to the requested host path. The
-    // legacy Mvmfile build path has no supported host-copy mechanism since
-    // the Lima host-VM layer was retired; fail closed with an actionable
-    // message rather than leaving the ELF stranded in the Linux environment.
+    // legacy Mvmfile build path has no supported host-copy mechanism; fail
+    // closed with an actionable message rather than leaving the ELF stranded
+    // in the Linux environment.
     if output.is_some() {
         anyhow::bail!(
             "--output is not supported on the legacy Mvmfile build path (the ELF was \

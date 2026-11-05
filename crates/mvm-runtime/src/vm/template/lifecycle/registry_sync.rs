@@ -8,7 +8,6 @@ use mvm_core::template::{template_current_symlink, template_dir, template_revisi
 use tracing::{instrument, warn};
 
 use super::artifacts::{Checksums, current_revision_id, sha256_hex};
-use super::require_local_template_fs;
 use crate::vm::template::registry::TemplateRegistry;
 
 /// Download a template revision's artifacts from the registry to a local directory.
@@ -80,7 +79,6 @@ pub fn registry_download_revision(
 
 #[instrument(skip_all, fields(template_id = id))]
 pub fn template_push(id: &str, revision: Option<&str>) -> Result<()> {
-    require_local_template_fs()?;
     let registry = TemplateRegistry::from_env()?.context("Template registry not configured")?;
     registry.require_configured()?;
 
@@ -144,7 +142,6 @@ pub fn template_push(id: &str, revision: Option<&str>) -> Result<()> {
 
 #[instrument(skip_all, fields(template_id = id))]
 pub fn template_pull(id: &str, revision: Option<&str>) -> Result<()> {
-    require_local_template_fs()?;
     let registry = TemplateRegistry::from_env()?.context("Template registry not configured")?;
     registry.require_configured()?;
 
@@ -194,8 +191,6 @@ pub fn template_pull(id: &str, revision: Option<&str>) -> Result<()> {
 
 #[instrument(skip_all, fields(template_id = id))]
 pub fn template_verify(id: &str, revision: Option<&str>) -> Result<()> {
-    require_local_template_fs()?;
-
     let rev = match revision {
         Some(r) => r.to_string(),
         None => current_revision_id(id)?,

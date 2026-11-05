@@ -1,10 +1,9 @@
 // mvm-runtime — VM lifecycle orchestration + concrete `VmBackend` implementations.
 //
 // The leaf substrate (`config`, `shell`, `linux_env`, `ui`, `runtime_meta`,
-// `cow`) lives under `base` (folded in from the former Lima-era `mvm-base`
-// crate). The `pub use base::*` re-exports below preserve the old
-// `mvm::{config, shell, linux_env, ui, shell_mock}` paths so the mvmd
-// contract surface (consumed via `mvmctl::runtime::*`) keeps resolving.
+// `cow`) lives under `base`. The `pub use base::*` re-exports below keep the
+// `{config, shell, linux_env, ui, shell_mock}` paths resolving for the mvmd
+// contract surface (consumed via `mvmctl::runtime::*`).
 //
 // Concrete `VmBackend` implementations:
 //

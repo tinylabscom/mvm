@@ -7,9 +7,8 @@
 //! - `cmd.<verb>.completed` / `cmd.<verb>.failed` — fired after.
 //!
 //! These complement (don't replace) the per-command `LocalAuditKind`
-//! emissions and the `plan.*` chain. Read-only commands
-//! (`ls`, `logs`, `audit tail`) didn't previously emit anything; with
-//! this wrap, every invocation has at least one audit footprint.
+//! emissions and the `plan.*` chain. Every invocation, including read-only
+//! commands (`ls`, `logs`, `audit tail`), leaves at least one audit footprint.
 //!
 //! ## Best-effort posture
 //!
