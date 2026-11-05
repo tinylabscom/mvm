@@ -94,7 +94,7 @@ use default_microvm::DefaultMicrovmVariant;
 use default_microvm::workload_config_carries_dm_verity;
 pub(crate) use default_microvm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
-    prepare_workload_kernel,
+    prepare_workload_kernel, prepare_workload_kernel_for_launch,
 };
 #[cfg(test)]
 use default_microvm::{evict_incompatible_workload_kernel, missing_workload_kernel_message};
