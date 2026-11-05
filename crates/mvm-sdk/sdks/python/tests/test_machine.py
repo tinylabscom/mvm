@@ -31,6 +31,16 @@ def _exited(code: int, stdout: bytes = b"", stderr: bytes = b"") -> dict:
     return {"events": events, "done": True, "outcome": {"kind": "exited", "code": code}}
 
 
+def test_prompt_returns_checkpoint_failure_without_losing_answer(hostlib) -> None:
+    expected = {"delivered": True, "journal_cursor": 2, "checkpoint_failed": True, "stdout_b64": _b64(b"answer")}
+    hostlib.reply("machine.prompt", expected)
+    result = mvm.Machine("devbox").prompt("hello", checkpoint=True, idempotency_key="key")
+    assert result == expected
+    assert hostlib.request("machine.prompt") == {
+        "id": "devbox", "prompt_b64": _b64(b"hello"), "checkpoint": True, "idempotency_key": "key",
+    }
+
+
 def test_run_boots_runs_the_command_and_stops_the_machine(hostlib) -> None:
     hostlib.reply(
         "machine.run",

@@ -9,11 +9,11 @@ use mvm_core::checkpoint::CheckpointKeyDomain;
 use mvm_core::plan::ExecutionPlan;
 
 /// What a capture of `name` seals from the plan it was admitted under.
-pub(super) struct AdmittedCapture {
+pub struct AdmittedCapture {
     /// The permission set, so a later restore can bound a child against it.
-    pub(super) grants: Option<Grants>,
+    pub grants: Option<Grants>,
     /// The admitted tenant's key domain, or the host's for a VM with no plan.
-    pub(super) key_domain: CheckpointKeyDomain,
+    pub key_domain: CheckpointKeyDomain,
 }
 
 impl AdmittedCapture {
@@ -39,13 +39,13 @@ impl AdmittedCapture {
 
 /// The admitted state a capture of `name` seals, read off its persisted plan.
 ///
-/// Degrades the same way [`bind_checkpoint_created`](super::bind_checkpoint_created) does, and safely for the
+/// Degrades the same way checkpoint audit binding does, and safely for the
 /// same reason: a VM with no readable plan also gets no chain-signed
 /// `checkpoint.created` entry, so the record it produces has nothing to anchor
 /// its content-address and every fork of it is refused before the grants are
 /// consulted at all.
-pub(super) fn admitted_capture_for(name: &str) -> Result<AdmittedCapture> {
-    let path = super::super::plan_persist::plan_path(name)?;
+pub fn admitted_capture_for(name: &str) -> Result<AdmittedCapture> {
+    let path = mvm_hostd::audit::plan_persist::plan_path(name)?;
     // A VM that never had a plan legitimately has no grant to seal, and that is
     // the only tolerated absence. Every other failure — a corrupt plan, one at
     // loose permissions, one that will not parse — is refused rather than
@@ -56,7 +56,7 @@ pub(super) fn admitted_capture_for(name: &str) -> Result<AdmittedCapture> {
     if !path.exists() {
         return AdmittedCapture::from_plan(None);
     }
-    let plan = super::super::plan_persist::read_plan_at(&path).with_context(|| {
+    let plan = mvm_hostd::audit::plan_persist::read_plan_at(&path).with_context(|| {
         format!(
             "reading {name}'s admitted plan to seal its grants into the checkpoint; \
              refusing to seal a checkpoint whose permission set cannot be determined"

@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 12
+ABI_MINOR: Final = 13
 
 
 class Classification(str, Enum):

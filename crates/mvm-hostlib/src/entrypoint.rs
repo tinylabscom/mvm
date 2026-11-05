@@ -123,7 +123,7 @@ pub(crate) trait EntrypointOps: Send + Sync {
     ) -> Result<CallResult>;
     fn stop(&self, id: &SessionId) -> Result<()>;
     fn info(&self, id: &SessionId) -> Result<SessionRecord>;
-    fn prompt(&self, prompt: AgentPrompt) -> Result<PromptAnswer>;
+    fn prompt(&self, prompt: AgentPrompt, checkpoint: bool) -> Result<PromptAnswer>;
 }
 
 /// What one prompt produced.
@@ -134,6 +134,7 @@ pub(crate) enum PromptAnswer {
     Delivered {
         journal_cursor: u64,
         result: CallResult,
+        step: Option<mvm_client::agent_prompt::StepRecord>,
     },
     /// A prompt under the same retry key was already accepted.
     Duplicate { journal_cursor: u64 },
@@ -254,21 +255,29 @@ impl EntrypointOps for LocalEntrypoint {
         mvm_client::entrypoint::session_info(id.as_str())
     }
 
-    /// No step checkpointer: capturing a `vm_full` step is owned by the
-    /// command line's checkpoint machinery, so a prompt sent from here is
-    /// recorded and audited but is not a replayable step.
-    fn prompt(&self, prompt: AgentPrompt) -> Result<PromptAnswer> {
+    fn prompt(&self, prompt: AgentPrompt, checkpoint: bool) -> Result<PromptAnswer> {
         Self::with_existing_vm(prompt.vm_name(), || {
             let mut output = CapturedOutput::default();
+            let checkpointer = mvm_client::checkpoint::prompt_step::VmFullStepCheckpointer;
+            if checkpoint {
+                mvm_client::snapshot::ensure_host_snapshot_key()?;
+            }
             Ok(
-                match mvm_client::agent_prompt::send_prompt(&prompt, &mut output, None)? {
+                match mvm_client::agent_prompt::send_prompt(
+                    &prompt,
+                    &mut output,
+                    checkpoint.then_some(
+                        &checkpointer as &dyn mvm_client::agent_prompt::StepCheckpointer,
+                    ),
+                )? {
                     PromptOutcome::Delivered {
                         journal_cursor,
                         call,
-                        ..
+                        step,
                     } => PromptAnswer::Delivered {
                         journal_cursor,
                         result: CallResult::new(call, output),
+                        step: checkpoint.then_some(step),
                     },
                     PromptOutcome::Duplicate { journal_cursor } => {
                         PromptAnswer::Duplicate { journal_cursor }
@@ -354,6 +363,9 @@ pub(crate) struct MachinePromptRequest {
     idempotency_key: Option<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// Opt in to capture a full-VM checkpoint after delivery.
+    #[serde(default)]
+    checkpoint: bool,
 }
 
 /// Names a session.
@@ -445,6 +457,12 @@ pub(crate) struct MachinePromptReply {
     /// that shape rather than a second, nested one.
     #[serde(flatten)]
     answer: Option<EntrypointCallReply>,
+    /// Checkpoint ID when the delivered step was committed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_id: Option<String>,
+    /// True when the step did not commit a checkpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_failed: Option<bool>,
 }
 
 impl From<PromptAnswer> for MachinePromptReply {
@@ -453,15 +471,30 @@ impl From<PromptAnswer> for MachinePromptReply {
             PromptAnswer::Delivered {
                 journal_cursor,
                 result,
+                step,
             } => Self {
                 journal_cursor,
                 delivered: true,
                 answer: Some(EntrypointCallReply::from(result)),
+                checkpoint_id: match &step {
+                    Some(mvm_client::agent_prompt::StepRecord::Committed { checkpoint }) => {
+                        Some(checkpoint.as_str().to_string())
+                    }
+                    _ => None,
+                },
+                checkpoint_failed: step.map(|step| {
+                    matches!(
+                        step,
+                        mvm_client::agent_prompt::StepRecord::NotCaptured { .. }
+                    )
+                }),
             },
             PromptAnswer::Duplicate { journal_cursor } => Self {
                 journal_cursor,
                 delivered: false,
                 answer: None,
+                checkpoint_id: None,
+                checkpoint_failed: None,
             },
         }
     }
@@ -572,9 +605,10 @@ fn answer(ops: &dyn EntrypointOps, method: &str, request: &[u8]) -> Result<Outco
         }
         MACHINE_PROMPT => {
             let r: MachinePromptRequest = parse(request)?;
+            let checkpoint = r.checkpoint;
             let prompt = agent_prompt(r)?;
             Outcome::ok(&MachinePromptReply::from(
-                ops.prompt(prompt).map_err(backend_error)?,
+                ops.prompt(prompt, checkpoint).map_err(backend_error)?,
             ))
         }
         other => return Err(Outcome::invalid_input(&format!("unknown method `{other}`"))),
@@ -1018,7 +1052,7 @@ mod tests {
             self.note(format!("info {id}"))?;
             Ok(self.record())
         }
-        fn prompt(&self, prompt: AgentPrompt) -> Result<PromptAnswer> {
+        fn prompt(&self, prompt: AgentPrompt, checkpoint: bool) -> Result<PromptAnswer> {
             self.note(format!(
                 "prompt {} {} {}",
                 prompt.vm_name(),
@@ -1028,6 +1062,9 @@ mod tests {
             Ok(PromptAnswer::Delivered {
                 journal_cursor: 2,
                 result: self.result(),
+                step: checkpoint.then_some(mvm_client::agent_prompt::StepRecord::NotCaptured {
+                    reason: "private backend detail".into(),
+                }),
             })
         }
     }
@@ -1094,6 +1131,39 @@ mod tests {
         assert_eq!(body["exit_code"], 0);
         assert_eq!(body["stdout_b64"], b64(b"two files changed"));
         assert_eq!(ops.calls(), ["prompt agent-vm review retry-1"]);
+    }
+
+    #[test]
+    fn checkpoint_failure_does_not_hide_the_delivered_answer() {
+        let ops = Recording::answering(exited(0, b"answer", b""));
+        let request = serde_json::json!({
+            "id": "agent-vm",
+            "prompt_b64": b64(b"hello"),
+            "checkpoint": true,
+        });
+        let outcome = dispatch(&ops, MACHINE_PROMPT, request.to_string().as_bytes());
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        let body = reply(&outcome);
+        assert_eq!(body["delivered"], true);
+        assert_eq!(body["stdout_b64"], b64(b"answer"));
+        assert_eq!(body["checkpoint_failed"], true);
+        assert!(body.get("checkpoint_id").is_none());
+        assert!(!body.to_string().contains("private backend detail"));
+    }
+
+    #[test]
+    fn committed_prompt_returns_checkpoint_id_and_answer() {
+        let reply = MachinePromptReply::from(PromptAnswer::Delivered {
+            journal_cursor: 7,
+            result: exited(0, b"answer", b""),
+            step: Some(mvm_client::agent_prompt::StepRecord::Committed {
+                checkpoint: mvm_core::checkpoint::CheckpointId::new("ckpt-step"),
+            }),
+        });
+        assert_eq!(reply.checkpoint_id.as_deref(), Some("ckpt-step"));
+        assert_eq!(reply.checkpoint_failed, Some(false));
+        assert!(reply.delivered);
+        assert!(reply.answer.is_some());
     }
 
     #[test]

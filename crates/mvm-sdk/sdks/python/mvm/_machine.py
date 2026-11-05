@@ -10,6 +10,7 @@ replies into Python values. A refusal from the library arrives as the typed
 
 from __future__ import annotations
 
+import base64
 import secrets
 import sys
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from mvm._hostabi.methods import (
     MACHINE_INVENTORY,
     MACHINE_LOGS,
     MACHINE_PAUSE,
+    MACHINE_PROMPT,
     MACHINE_RECONFIGURE,
     MACHINE_RESUME,
     MACHINE_RM,
@@ -368,6 +370,28 @@ class Machine:
     def inspect(self) -> dict[str, Any]:
         """The machine's current state."""
         return _hostlib.call(MACHINE_INSPECT, {"id": self.name})
+
+    def prompt(
+        self, text: str, *, checkpoint: bool = False, session_id: str | None = None,
+        request_id: str | None = None, idempotency_key: str | None = None,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
+        """Send a prompt; opt in to checkpointing and inspect its separate result.
+
+        A delivered prompt can have ``checkpoint_failed`` set even when the agent
+        succeeded. A retry under the same key does not resend an accepted prompt.
+        """
+        _require_non_empty_str(text, "text")
+        if not isinstance(checkpoint, bool):
+            raise ValueError("checkpoint must be a bool")
+        request = _launch_request(
+            id=self.name, prompt_b64=base64.b64encode(text.encode()).decode("ascii"),
+            checkpoint=checkpoint, session_id=_optional_str(session_id, "session_id"),
+            request_id=_optional_str(request_id, "request_id"),
+            idempotency_key=_optional_str(idempotency_key, "idempotency_key"),
+            timeout_secs=_optional_positive(timeout, "timeout"),
+        )
+        return _hostlib.call(MACHINE_PROMPT, request)
 
     def pause(
         self, *, primed_barrier: bool = False, primed_timeout: int | None = None

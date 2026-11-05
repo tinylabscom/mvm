@@ -37,6 +37,21 @@ This verifies metadata lineage, not snapshot blob bytes, runtime compatibility
 or permission to restore. Loading the existing host anchor may initialize its
 identity when an audit directory exists.
 
+## Prompt-step checkpoints (Linux/Firecracker)
+
+On a running machine with a plan that grants prompts, call
+`mvm.Machine(name).prompt("first", checkpoint=True)` to request an opt-in
+`vm_full` step checkpoint. The reply has the agent's answer even if checkpoint
+capture fails: check `checkpoint_failed` before using `checkpoint_id`. A
+duplicate idempotency key does not send another prompt. An ID alone does not
+verify lineage or authorize restore; call `mvm.checkpoint.verify_lineage(id)`
+and restore under current admission.
+
+The host-library path to an **existing HVF machine is currently refused**
+before prompt delivery. This SDK operation is live-witnessed on
+Linux/Firecracker, not yet supported through hostlib on macOS/HVF. The CLI's
+native workflow is a different call path; it does not establish SDK parity.
+
 ## Quick start
 
 ```python
