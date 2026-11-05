@@ -194,6 +194,34 @@ fn download_payload_file(url: &str, target: &Path, size: u64, release: bool) -> 
     Ok(())
 }
 
+/// Parse a reference as a user types it: `ns/name`, `ns/name@version`, or
+/// `ns/name:latest`. The registry publishes exact versions only, so `:latest`
+/// is the unversioned form and any other tag is refused with the fix.
+pub fn parse_user_reference(value: &str) -> Result<PackReference> {
+    let canonical = match value.rsplit_once(':') {
+        Some((coordinate, "latest")) if !value.contains('@') => coordinate,
+        Some((_, _)) if !value.contains('@') => {
+            bail!(
+                "pack tags other than `latest` are not published; pin a version with `@version` ({value:?})"
+            )
+        }
+        _ => value,
+    };
+    canonical
+        .parse()
+        .with_context(|| format!("invalid pack reference {value:?}"))
+}
+
+/// Warning for a pack built for a different architecture than the host, or
+/// `None` when they agree.
+pub fn arch_mismatch_warning(reference: &str, guest_arch: &str, host_arch: &str) -> Option<String> {
+    (guest_arch != host_arch).then(|| {
+        format!(
+            "{reference} is built for {guest_arch} but this host is {host_arch}, so it will not run here; pull a version published for {host_arch}"
+        )
+    })
+}
+
 /// What `mvmctl pull` did, for the caller to render.
 #[derive(Debug)]
 pub struct PullSummary {
@@ -233,9 +261,7 @@ impl VerifiedPull {
 /// written only after installation succeeds. Applications independently verify
 /// their bundle under local consumer trust before installation and pin commit.
 pub fn pull(reference_arg: &str) -> Result<PullOutcome> {
-    let requested: PackReference = reference_arg
-        .parse()
-        .with_context(|| format!("invalid pack reference {reference_arg:?}"))?;
+    let requested = parse_user_reference(reference_arg)?;
     let config = PackRegistryConfig::load();
     let index = fetch_index(&config)?;
     let mut seen = BTreeMap::new();
@@ -533,6 +559,31 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn latest_tag_is_the_unversioned_reference() {
+        assert_eq!(
+            parse_user_reference("mvm/python:latest")
+                .unwrap()
+                .to_string(),
+            "mvm/python"
+        );
+        assert_eq!(
+            parse_user_reference("mvm/python@1.2.3")
+                .unwrap()
+                .to_string(),
+            "mvm/python@1.2.3"
+        );
+        let err = parse_user_reference("mvm/python:stable").unwrap_err();
+        assert!(err.to_string().contains("@version"), "{err}");
+    }
+
+    #[test]
+    fn arch_warning_only_fires_on_mismatch() {
+        assert!(arch_mismatch_warning("mvm/x", "x86_64", "x86_64").is_none());
+        let warning = arch_mismatch_warning("mvm/x", "x86_64", "aarch64").unwrap();
+        assert!(warning.contains("x86_64") && warning.contains("aarch64"));
     }
 
     #[test]
