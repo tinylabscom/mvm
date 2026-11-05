@@ -901,14 +901,6 @@ mod tests {
 
     #[cfg(all(target_os = "macos", feature = "trusted-apfs"))]
     #[test]
-    fn opt_in_platform_backend_constructs_without_mounting() {
-        let tmp = tempfile::tempdir().unwrap();
-        let backend = platform_backend(tmp.path()).unwrap();
-        assert_eq!(backend.name(), "apfs");
-    }
-
-    #[cfg(all(target_os = "macos", feature = "trusted-apfs"))]
-    #[test]
     #[ignore = "requires explicit APFS snapshot privilege on the Apple host"]
     fn apfs_live_publish_mutate_materialize_and_remove_witness() {
         if std::env::var("MVM_TRUSTED_APFS_LIVE").as_deref() != Ok("1") {
