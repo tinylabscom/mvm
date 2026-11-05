@@ -980,7 +980,7 @@ mod tests {
         let launch = home.path().join("launch.json");
         std::fs::write(
             &launch,
-            r#"{"entrypoint":{"command":["echo"],"env":{"DEBUG":"1"}}}"#,
+            r#"{"artifact_format_version":"1.1","entrypoint":{"kind":"command","command":["echo"],"env":{"DEBUG":{"kind":"literal","value":"1"}}}}"#,
         )
         .unwrap();
         let mut args = RunArgs {

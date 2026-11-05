@@ -1,4 +1,4 @@
-# Launch-plan compatibility fixture
+# Launch-plan contract fixture
 
 `workload.json` follows the command-entrypoint subset of mvmforge's
 [`schema/workload-ir-v0.json`](https://github.com/tinylabscom/mvmforge/blob/f594eaef21b6b1c1cc226e6fc79ef9717f07fc52/schema/workload-ir-v0.json).
