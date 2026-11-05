@@ -34,10 +34,27 @@ host-agent service becomes a signing or native-spawn oracle.
 | Add a new generic signer/lifecycle daemon | Reject. It adds another receiver and authority boundary without solving independent authorization. |
 | Add a closed delegated profile to the existing key holder and compose it with original-child custody | Recommend. Reuse framing, native identity custody and consume-before-effect patterns, but implement the missing authorization and protected state explicitly. |
 
+Design two candidate custody routes against the same unconfined same-UID
+attacker. Use a separately enforced OS principal as the reference boundary for
+issuer identity, mutable state and writable resources. Also evaluate the
+existing holder route, but accept it only if native tests demonstrate equivalent
+protection of all three and the independently expected issuer pin. Sharing a UID,
+file modes, another role's sandbox or a requester-supplied identity is not
+equivalence. Both routes must enforce the same closed operations, peer binding,
+restart/quarantine rules and adversarial acceptance cases below.
+
+Commission at most one qualified route per host. Its selection and issuer
+identity must be protected from the untrusted frontend; a missing or failing
+route refuses instead of switching to the other, an old key or legacy signing.
+Changing routes requires separately authorized commissioning and proof that
+old resources stay quarantined. Designing both routes does not establish either.
+
 This is not an assertion that the existing helper already enforces this
 profile. New delegated requests must not reach its legacy dispatcher.
-No new credential, privileged service, elevation or generic backend framework
-is part of this first mode.
+The separate-principal route may require new privilege or provisioning; its
+design is in scope, but deploying it, adding credentials or introducing a
+privileged service needs a separate explicit authority decision. No generic
+backend framework is part of this mode.
 
 ## Existing pieces and the gaps they do not fill
 
@@ -373,13 +390,12 @@ decisions before implementing a positive path:**
    For confined software custody, identify the designated retained provider
    copy and prove that all attacker roles lack direct/proxy access. A public-key
    comparison alone is not extraction resistance under either option.
-4. Identify an existing enforced resource boundary covering every path above
+4. Identify an independently enforced resource boundary covering every path above
    and, for the epoch candidate, prove old-epoch exclusion without a surviving
    negative ledger. The persistent-journal alternative instead refuses the
    affected managed namespace on lost/corrupt/uncertain journal state; it
    cannot rebuild an empty ledger or infer retirement. Without one of those
-   complete boundaries, the stated threat model and no-new-privilege/service
-   constraints do not yet have a viable positive mechanism.
+   complete boundaries, neither candidate route has a viable positive mechanism.
 
 An alternative persistent native-authority model is reviewable only with an
 actual existing entitled role/provisioning path that denies unauthorized
@@ -388,7 +404,8 @@ expected issuer pin, and enforces resource quarantine across restart. An
 assumed access-group entitlement or stronger state API is not that path.
 Introducing credentials, services or privileges, narrowing the same-UID
 adversary, allowing old-resource reuse, or weakening absorbing quarantine
-requires a new explicit scope/authority decision; none is selected here.
+requires a new explicit scope/authority decision. Designing a separate-principal
+route does not approve its provisioning or deployment.
 Operational commissioning remains separately gated even if those design
 decisions are later resolved.
 
