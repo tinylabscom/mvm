@@ -276,6 +276,23 @@ jobs:
           workspace-crates: "false"
           cache-bin: "false"
 
+      # The embedded guest payload is cross-compiled into a content-addressed
+      # store keyed by each binary's source closure, Cargo.lock and the pinned
+      # toolchain, and every entry is checked against the SHA-256 recorded when
+      # it was written before build.rs embeds it; a mismatched entry is rebuilt.
+      # The key names the target architecture, not the runner OS, so the two
+      # aarch64 jobs share one entry. The outer key is only a coarse lookup:
+      # an older store restored through the prefix simply misses on the binaries
+      # whose inputs changed.
+      - name: Restore the embedded payload store
+        id: embed_cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/.cache/mvm/embed
+          key: embed-${{ startsWith(matrix.build_target, 'aarch64') && 'aarch64' || 'x86_64' }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'crates/**/Cargo.toml', 'crates/**/*.rs') }}
+          restore-keys: |
+            embed-${{ startsWith(matrix.build_target, 'aarch64') && 'aarch64' || 'x86_64' }}-
+
       - name: Build release binary
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
@@ -289,6 +306,13 @@ jobs:
           else
             cargo build --profile release-min --target "${BUILD_TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
           fi
+
+      - name: Save the embedded payload store
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.embed_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.cache/mvm/embed
+          key: ${{ steps.embed_cache.outputs.cache-primary-key }}
 
       # The per-VM host processes mvmctl spawns at runtime (one process per
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
