@@ -159,8 +159,9 @@ impl ContextState {
             }
             // Store output and the full error aggregate BEFORE embedder
             // setup, request parsing, resolution, callbacks or boot.
-            self.operation = Some(OwnedTransientResult::prepare(CapturedOutput::default()));
-            let operation = self.operation.as_mut().expect("stored invocation");
+            let operation = self
+                .operation
+                .insert(OwnedTransientResult::prepare(CapturedOutput::default()));
             match crate::declared() {
                 Ok(()) => crate::entrypoint::run_owned(request, operation),
                 Err(outcome) => {

@@ -65,8 +65,8 @@ pub(crate) fn materialize_mount_volumes(
     }
     let lookups = indexed_lookups
         .into_iter()
-        .map(|lookup| lookup.expect("every mount fingerprint has one cache lookup"))
-        .collect::<Vec<_>>();
+        .map(|lookup| lookup.context("a mount fingerprint has no cache lookup"))
+        .collect::<Result<Vec<_>>>()?;
     sub.finish(SubPhase::MountCacheLookup);
     let materialized = lookups.iter().any(|lookup| lookup.is_miss());
     if materialized {

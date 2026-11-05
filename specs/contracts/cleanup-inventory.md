@@ -837,6 +837,24 @@ table used to list was checked against `crates/`, `xtask/`, `scripts/`, `src/`, 
 | `MVM_FC_ASSET_BASE`, `MVM_FC_ASSET_ROOTFS`, `MVM_FC_ASSET_KERNEL` | only reader is `crates/mvm-build/resources/builder_scripts/download_builder_artifacts.sh.tera`, which is registered in `nix/scripts.rs` but never rendered outside the template-list test, so no run reads them. Rows removed from `reference/cli-commands.md` |
 | `MVM_BUILDER_AGENT_BIN`, `MVM_DEV_FLAKE_URL` | no reader, and no public doc names them any more |
 | `MVM_SRC` | a shell variable the generated builder-VM build script assigns itself (`crates/mvm-build/src/builder_vm_runtime.rs:436`), not an environment input; not in public docs |
+| Name | First doc site | Removal statement |
+|---|---|---|
+| `MVM_ACK_UNRESTRICTED_NETWORK` | `public/src/content/docs/guides/fleet-stream-edges.md:61` | no removal statement |
+| `MVM_ASSURANCE_BOOT_CONFIG` | `public/src/content/docs/guides/assurance-runtime.md:57` | no removal statement |
+| `MVM_BUILDER_AGENT_BIN` | `public/src/content/docs/reference/cli-commands.md:2835` | no removal statement |
+| `MVM_DEV_FLAKE_URL` | `public/src/content/docs/reference/cli-commands.md:2833` | no removal statement |
+| `MVM_EGRESS_BENCH` | `public/src/content/docs/guides/networking.md:201` | no removal statement |
+| `MVM_RUNTIME_ARCH` | `public/src/content/docs/guides/assurance-runtime.md:64` | no removal statement |
+| `MVM_RUNTIME_ARCHIVE` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
+| `MVM_RUNTIME_CHECKSUM` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
+| `MVM_RUNTIME_INITRAMFS` | `public/src/content/docs/guides/assurance-runtime.md:60` | no removal statement |
+| `MVM_RUNTIME_ROOT_HASH` | `public/src/content/docs/guides/assurance-runtime.md:62` | no removal statement |
+| `MVM_RUNTIME_SIGNATURE_BUNDLE` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
+| `MVM_RUNTIME_VERITY` | `public/src/content/docs/guides/assurance-runtime.md:60` | no removal statement |
+| `MVM_RUNTIME_VERSION` | `public/src/content/docs/guides/assurance-runtime.md:63` | no removal statement |
+| `MVM_SRC` | `public/src/content/docs/reference/cli-commands.md:2834` | no removal statement |
+| `MVM_STUDIO_BACKEND` | `public/src/content/docs/sdk/rust.md:146` | no removal statement |
+| `MVM_TOKEN` | `public/src/content/docs/sdk/rust.md:136` | no removal statement |
 <!-- env:end -->
 
 ### 3.5 Backend x platform x feature combinations

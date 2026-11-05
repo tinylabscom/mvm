@@ -440,6 +440,12 @@ fn package_install_refusal(install: &crate::install_layout::PackageInstall) -> S
     )
 }
 
+/// Borrow a path as UTF-8 for passing to an external command's argv.
+fn utf8_arg(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))
+}
+
 /// Extract the archive and install the binary, adjacent helpers, and resources.
 fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Result<()> {
     let archive_name = format!("mvmctl-{}.tar.gz", target);
@@ -447,14 +453,7 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
 
     let output = run_host(
         "tar",
-        &[
-            "xzf",
-            archive_path
-                .to_str()
-                .expect("archive path must be valid UTF-8"),
-            "-C",
-            tmp_dir.to_str().expect("tmp dir path must be valid UTF-8"),
-        ],
+        &["xzf", utf8_arg(&archive_path)?, "-C", utf8_arg(tmp_dir)?],
     )?;
 
     if !output.status.success() {
@@ -496,14 +495,7 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
             }
             return Err(e);
         }
-        if let Err(e) = run_host(
-            "sudo",
-            &[
-                "chmod",
-                "+x",
-                current_exe.to_str().expect("exe path must be valid UTF-8"),
-            ],
-        ) {
+        if let Err(e) = run_host("sudo", &["chmod", "+x", utf8_arg(current_exe)?]) {
             tracing::warn!("failed to chmod during update: {e}");
         }
         // Post-swap smoke test: verify installed binary before removing the backup.
@@ -513,16 +505,7 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
             }
             anyhow::bail!("New binary failed smoke test; restored previous version. ({e})");
         }
-        if let Err(e) = run_host(
-            "sudo",
-            &[
-                "rm",
-                "-f",
-                backup_path
-                    .to_str()
-                    .expect("backup path must be valid UTF-8"),
-            ],
-        ) {
+        if let Err(e) = run_host("sudo", &["rm", "-f", utf8_arg(&backup_path)?]) {
             tracing::warn!("failed to rm during update: {e}");
         }
     } else {
@@ -561,16 +544,7 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
         ui::info("Updating resources...");
 
         if needs_sudo {
-            if let Err(e) = run_host(
-                "sudo",
-                &[
-                    "rm",
-                    "-rf",
-                    dest_resources
-                        .to_str()
-                        .expect("resources path must be valid UTF-8"),
-                ],
-            ) {
+            if let Err(e) = run_host("sudo", &["rm", "-rf", utf8_arg(&dest_resources)?]) {
                 tracing::warn!("failed to remove old resources directory: {e}");
             }
             let output = run_host(
@@ -578,12 +552,8 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
                 &[
                     "cp",
                     "-r",
-                    new_resources
-                        .to_str()
-                        .expect("new resources path must be valid UTF-8"),
-                    dest_resources
-                        .to_str()
-                        .expect("dest resources path must be valid UTF-8"),
+                    utf8_arg(&new_resources)?,
+                    utf8_arg(&dest_resources)?,
                 ],
             )?;
             require_resource_copy_success(output.status.success())?;
@@ -619,14 +589,7 @@ fn install_release_host_binaries(
         let dest = install_dir.join(hostbin);
         if needs_sudo {
             run_sudo_cp(&src, &dest)?;
-            let output = run_host(
-                "sudo",
-                &[
-                    "chmod",
-                    "+x",
-                    dest.to_str().expect("helper path must be valid UTF-8"),
-                ],
-            )?;
+            let output = run_host("sudo", &["chmod", "+x", utf8_arg(&dest)?])?;
             if !output.status.success() {
                 anyhow::bail!("sudo chmod failed for {}", dest.display());
             }
@@ -663,16 +626,7 @@ pub(crate) fn prepare_release_host_binaries() -> Result<()> {
     verify_signature(&tag, &archive_name, &archive_path)?;
     let output = run_host(
         "tar",
-        &[
-            "xzf",
-            archive_path
-                .to_str()
-                .expect("archive path must be valid UTF-8"),
-            "-C",
-            tmp.path()
-                .to_str()
-                .expect("temporary path must be valid UTF-8"),
-        ],
+        &["xzf", utf8_arg(&archive_path)?, "-C", utf8_arg(tmp.path())?],
     )?;
     anyhow::ensure!(output.status.success(), "failed to extract host helpers");
     let extracted = tmp.path().join(format!("mvmctl-{target}"));
@@ -774,16 +728,7 @@ fn prepare_source_host_binaries(
     );
     let output = run_host(
         "tar",
-        &[
-            "xzf",
-            archive_path
-                .to_str()
-                .expect("archive path must be valid UTF-8"),
-            "-C",
-            tmp_dir
-                .to_str()
-                .expect("temporary path must be valid UTF-8"),
-        ],
+        &["xzf", utf8_arg(&archive_path)?, "-C", utf8_arg(tmp_dir)?],
     )?;
     anyhow::ensure!(
         output.status.success(),
@@ -877,14 +822,7 @@ fn sign_installed_binaries(
 }
 
 fn run_sudo_mv(from: &Path, to: &Path) -> Result<()> {
-    let output = run_host(
-        "sudo",
-        &[
-            "mv",
-            from.to_str().expect("source path must be valid UTF-8"),
-            to.to_str().expect("dest path must be valid UTF-8"),
-        ],
-    )?;
+    let output = run_host("sudo", &["mv", utf8_arg(from)?, utf8_arg(to)?])?;
     if !output.status.success() {
         anyhow::bail!("sudo mv failed");
     }
@@ -892,14 +830,7 @@ fn run_sudo_mv(from: &Path, to: &Path) -> Result<()> {
 }
 
 fn run_sudo_cp(from: &Path, to: &Path) -> Result<()> {
-    let output = run_host(
-        "sudo",
-        &[
-            "cp",
-            from.to_str().expect("source path must be valid UTF-8"),
-            to.to_str().expect("dest path must be valid UTF-8"),
-        ],
-    )?;
+    let output = run_host("sudo", &["cp", utf8_arg(from)?, utf8_arg(to)?])?;
     if !output.status.success() {
         anyhow::bail!("sudo cp failed");
     }
@@ -1266,10 +1197,22 @@ fn run_updated_binary_preparation(exe: &Path) -> bool {
 mod tests {
     use super::{
         Preparation, UpdateAction, decide_update, prepare_after_update, source_helper_commit,
-        source_helper_commit_for, source_helper_marker_matches, validate_source_helper_bundle,
-        validate_source_helper_identity,
+        source_helper_commit_for, source_helper_marker_matches, utf8_arg,
+        validate_source_helper_bundle, validate_source_helper_identity,
     };
     use mvm_build::artifact_acquisition::DistributionChannel;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_path_is_an_error_not_a_panic() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff"));
+        assert!(utf8_arg(bad).is_err());
+        assert_eq!(
+            utf8_arg(std::path::Path::new("/tmp/ok")).unwrap(),
+            "/tmp/ok"
+        );
+    }
 
     /// An updated binary has no assembled guest runtime of its own version and
     /// nothing to fall back to, so the update gets it ready instead of asking.

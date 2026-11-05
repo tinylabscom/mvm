@@ -145,8 +145,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      # Fetch separately. Neither the checker artifact nor an earlier attempt
-      # can replace the original producer subjects.
+      # Fetch separately. The checker artifact cannot replace the original
+      # producer subjects; failed-job reruns may reuse a pinned prior attempt.
       - name: Fetch original and checked inputs into isolated directories
         env:
           GH_TOKEN: ${{ github.token }}
@@ -790,7 +790,7 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Collect exact current-attempt release inputs without overlays
+      - name: Collect exact same-run release inputs without overlays
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_ID: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_id }}

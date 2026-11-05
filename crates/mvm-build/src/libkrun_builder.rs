@@ -2516,7 +2516,7 @@ pub fn spawn_vsock_response_listener(
         mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
     );
 
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("vsock-builder-response".to_string())
         .spawn(move || {
             let connect_deadline = Duration::from_secs(60);
@@ -2539,8 +2539,10 @@ pub fn spawn_vsock_response_listener(
             // its recv_timeout before the thread finished). That's
             // fine — the response was observational anyway.
             let _ = tx.send(result);
-        })
-        .expect("std::thread::Builder::spawn never fails on unix");
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "vsock response listener thread did not start");
+    }
 
     rx
 }
@@ -2560,7 +2562,7 @@ fn spawn_vsock_socket_observer(
 
     let (tx, rx) = mpsc::channel();
     let socket_path = mvm_core::config::vm_vsock_port_socket_at(vm_state_dir, port);
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name(format!("vsock-socket-observer-{port}"))
         .spawn(move || {
             let poll_interval = Duration::from_millis(100);
@@ -2575,8 +2577,10 @@ fn spawn_vsock_socket_observer(
                 std::thread::sleep(poll_interval);
             };
             let _ = tx.send(result);
-        })
-        .expect("std::thread::Builder::spawn never fails on unix");
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, port, "vsock socket observer thread did not start");
+    }
 
     rx
 }

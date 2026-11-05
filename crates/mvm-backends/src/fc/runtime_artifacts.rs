@@ -61,7 +61,7 @@ fn from_config(json: &str) -> Result<RuntimeArtifacts> {
     }
     config
         .drives
-        .sort_by_key(|drive| canonical_slot(&drive.drive_id).expect("validated drive ID"));
+        .sort_by_key(|drive| canonical_slot(&drive.drive_id).ok());
     // These are configuration observations, not a measurement of loaded RAM.
     // Admission compares their exact paths to a protected retained generation
     // and verifies that generation independently. Writable devices cannot
