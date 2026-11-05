@@ -3215,6 +3215,12 @@ fn remove_machine_all_on_empty_store_is_a_noop() {
 
 #[test]
 fn remove_machine_batch_declines_without_confirmation_and_keeps_all_specs() {
+    if !crate::test_boot_payload::in_fresh_test_process(
+        module_path!(),
+        "remove_machine_batch_declines_without_confirmation_and_keeps_all_specs",
+    ) {
+        return;
+    }
     let _state = IsolatedMachineState::new();
     for name in ["web", "db"] {
         seed_machine_spec(name);
