@@ -410,8 +410,8 @@ The customer-facing story is:
 > workloads.
 
 Do not lead with microVMs or a remote-wipe button. Lead with the operational
-dilemma: Winriver wants intelligence at the edge, but a compromised AI must
-not become a bridge into the rest of the mission. Position MVM as the
+dilemma: the customer wants intelligence at the edge, but a compromised AI
+must not become a bridge into the rest of the mission. Position MVM as the
 execution and containment layer, not as the entire tactical communications
 network or fleet-management platform.
 
