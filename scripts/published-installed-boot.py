@@ -163,7 +163,8 @@ def lane(args):
     # No archive shortcut or inherited runtime overrides can enter this witness.
     env = {k: v for k, v in os.environ.items() if not k.startswith("MVM_")}
     state_file = args.out / "smoke-home.txt"
-    env.update(MVM_SMOKE_KEEP="1", MVM_SMOKE_OUT=str(args.out / "smoke"),
+    env.update(MVM_SMOKE_KEEP="1", MVM_SMOKE_COLD_FIRST="1",
+               MVM_SMOKE_OUT=str(args.out / "smoke"),
                MVM_SMOKE_STATE_FILE=str(state_file))
     transcript = args.out / "smoke/transcript.log"
     # Deletion authority comes only from this wrapper-created root, NEVER the

@@ -85,6 +85,25 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     )
 }
 
+/// Prepare an image on the first launch; later launches reuse its cache entry.
+pub(in crate::commands) fn acquire_run_image(
+    cache_root: &Path,
+    reference: &str,
+    prod: bool,
+) -> Result<ResolvedOciRunImage> {
+    ensure_prod_digest_pin(reference, prod)?;
+    ensure_prod_registry_reference_policy(reference, prod)?;
+    mvm_client::launch::runtime_overlay::require_prepared_oci_guest_runtime(cache_root)?;
+    resolve_run_image_with(
+        cache_root,
+        reference,
+        prod,
+        super::materialize::inject_runtime_and_materialize,
+        &CosignCommandVerifier,
+        RunImageAcquisition::Allow,
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RunImageAcquisition {
     PreparedOnly,
@@ -1710,6 +1729,16 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
             !message.contains("connect") && !message.contains("registry request"),
             "launch attempted registry access: {message}"
         );
+    }
+
+    #[test]
+    fn first_run_attempts_to_acquire_an_uncached_image() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let err = acquire_run_image(tmp.path(), "127.0.0.1:1/library/not-cached:latest", false)
+            .expect_err("the registry is not listening");
+        let message = format!("{err:#}");
+        assert!(!message.contains("mvmctl image pull"), "{message}");
     }
 
     #[test]

@@ -204,6 +204,11 @@ fn prepare_versioned_source_oci_guest_runtime(
         mvm_runtime::ui::admit_cold_build("the OCI guest runtime").map_err(anyhow::Error::msg)?;
         mvm_runtime::ui::activity::println_above(&format!("[mvm] {COLD_SOURCE_RUNTIME_NOTICE}"));
     }
+    let phase = mvm_runtime::ui::activity::start(if cold {
+        "Compiling the guest runtime from local sources"
+    } else {
+        "Installing the cached guest runtime for OCI"
+    });
     let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
         cache_root,
         version,
@@ -213,6 +218,7 @@ fn prepare_versioned_source_oci_guest_runtime(
     .context("prepare the source-built guest runtime for OCI")?;
     mvm_build::runtime_pieces::install_oci_guest_runtime(cache_root, version, arch, &runtime)
         .context("install the OCI guest runtime from this checkout's guest runtime")?;
+    phase.finish();
     Ok(())
 }
 
