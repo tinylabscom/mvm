@@ -6,12 +6,11 @@
 #
 # A throwaway HOME under /tmp stands in for a machine that has never had mvm.
 # The installer runs the way the README runs it — piped into `sh`, with the
-# builder VM bootstrap it performs by default — pinned to `version` when one
-# is given, otherwise choosing the release the one-liner would choose today.
-# Then the README's quick start runs from that HOME: `mvmctl image pull alpine`
-# and `mvmctl machine run --image alpine -- echo <token>`, with nothing set and
-# nothing warmed. A launch reads only the local cache, so a smoke that skipped
-# the pull would test nothing a user does. The first run of the image boots
+# optional builder VM bootstrap — pinned to `version` when one is given,
+# otherwise choosing the release the one-liner would choose today.
+# The published-install witness skips bootstrap and image pull, then runs
+# `mvmctl machine run --image alpine -- echo <token>` from that HOME.
+# The first run of the image boots
 # cold and leaves a standby behind. The run's stdin is redirected from
 # /dev/null, and it must print the token on stdout within its time budget.
 #
@@ -65,6 +64,8 @@
 #   MVM_SMOKE_GUEST_RUNTIME        the release's guest runtime archive
 #                                  (mvm-guest-bins-v<version>.tar.gz) to stage
 #                                  beside the unpacked mvmctl; archive mode only
+#   MVM_SMOKE_COLD_FIRST           set to 1 to skip installer bootstrap and
+#                                  image pull before the first machine run
 #   MVM_SMOKE_OUT                  directory for the transcript and VM logs;
 #                                  default: a new directory under /tmp
 #   MVM_SMOKE_INSTALL_BUDGET_SECS  install + bootstrap budget; default 1200
@@ -300,7 +301,7 @@ install_with_installer() {
   section "install ($([ -n "$VERSION" ] && printf 'MVM_VERSION=%s ' "$VERSION")sh install.sh)"
   # shellcheck disable=SC2016 # the inner shell expands its own "$1"
   if bounded "$INSTALL_BUDGET" "$ROOT/install.out" "$ROOT/install.err" \
-    env ${VERSION:+"MVM_VERSION=$VERSION"} sh -c 'cat "$1" | sh' sh "$ROOT/install.sh"; then
+    env ${VERSION:+"MVM_VERSION=$VERSION"} ${MVM_SMOKE_COLD_FIRST:+"MVM_SKIP_BOOTSTRAP=1"} sh -c 'cat "$1" | sh' sh "$ROOT/install.sh"; then
     install_status=0
   else
     install_status=$?
@@ -343,7 +344,11 @@ install_from_archive() {
 
   # Like the installer, a failed bootstrap is left for the first command to
   # recover from; one that outlives its budget is not.
-  if bounded "$INSTALL_BUDGET" "$ROOT/install.out" "$ROOT/install.err" mvmctl bootstrap; then
+  if [ "${MVM_SMOKE_COLD_FIRST:-}" = "1" ]; then
+    install_status=0
+    : > "$ROOT/install.out"
+    : > "$ROOT/install.err"
+  elif bounded "$INSTALL_BUDGET" "$ROOT/install.out" "$ROOT/install.err" mvmctl bootstrap; then
     install_status=0
   else
     install_status=$?
@@ -375,7 +380,7 @@ fi
 if grep -q 'bootstrap failed' "$ROOT/install.err"; then
   log "note: the installer's bootstrap failed; the first command must recover on its own"
 fi
-if [ -n "$GUEST_RUNTIME" ]; then
+if [ -n "$GUEST_RUNTIME" ] && [ "${MVM_SMOKE_COLD_FIRST:-}" != "1" ]; then
   runtime_name="$(basename "$GUEST_RUNTIME")"
   grep -q "Guest runtime $runtime_name ready (installed beside mvmctl)" "$ROOT/install.out" "$ROOT/install.err" \
     || fail "bootstrap did not adopt the unpublished guest runtime $runtime_name staged beside mvmctl"
@@ -499,8 +504,10 @@ prepare_step() {
   [ "$prepare_status" -ne 124 ] || fail "'$*' did not finish within ${PREPARE_BUDGET}s"
   [ "$prepare_status" -eq 0 ] || fail "'$*' exited $prepare_status"
 }
-prepare_step pull mvmctl image pull "$IMAGE"
-prepare_step pull-egress mvmctl image pull "$EGRESS_IMAGE"
+if [ "${MVM_SMOKE_COLD_FIRST:-}" != "1" ]; then
+  prepare_step pull mvmctl image pull "$IMAGE"
+  prepare_step pull-egress mvmctl image pull "$EGRESS_IMAGE"
+fi
 
 TOKEN="mvm-fresh-install-$(date +%s)-$$"
 section "first command (mvmctl machine run --image $IMAGE -- echo $TOKEN </dev/null)"
@@ -508,6 +515,9 @@ boot_and_expect "first command" "$RUN_BUDGET" "$TOKEN" run \
   mvmctl machine run --image "$IMAGE" -- echo "$TOKEN"
 RUN_ELAPSED="$STEP_ELAPSED"
 boot_pass cold
+if [ "${MVM_SMOKE_COLD_FIRST:-}" = "1" ]; then
+  prepare_step pull-egress mvmctl image pull "$EGRESS_IMAGE"
+fi
 
 CACHES_FIRST="$OUT/download-caches-after-first.txt"
 CACHES_SECOND="$OUT/download-caches-after-second.txt"

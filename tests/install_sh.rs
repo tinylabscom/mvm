@@ -1207,15 +1207,20 @@ fn fresh_install_refuses_a_missing_signature_bundle() {
 }
 
 #[test]
-fn install_sh_runs_machine_readiness_bootstrap_by_default_and_honors_optout() {
+fn install_sh_skips_full_bootstrap_by_default_and_honors_opt_in() {
     let release = Release::new("v9.9.9");
     let (base, _stop) = serve_releases(&[&release]);
 
-    let run = |skip_bootstrap: bool| -> String {
+    let run = |prewarm: bool, skip_bootstrap: bool| -> String {
         let host = Host::new();
         let log = host.root.join("invocations.log");
         let mut command = host.installer(&base, "v9.9.9");
         command.env("MVM_TEST_INVOCATION_LOG", &log);
+        if prewarm {
+            command.env("MVM_BOOTSTRAP_ON_INSTALL", "1");
+        } else {
+            command.env_remove("MVM_BOOTSTRAP_ON_INSTALL");
+        }
         if !skip_bootstrap {
             command.env_remove("MVM_SKIP_BOOTSTRAP");
         }
@@ -1226,15 +1231,18 @@ fn install_sh_runs_machine_readiness_bootstrap_by_default_and_honors_optout() {
         std::fs::read_to_string(&log).unwrap_or_default()
     };
 
-    // Default: install.sh runs `mvmctl bootstrap`.
+    // A fresh install leaves launch preparation to the first machine run.
     assert!(
-        run(false).contains("bootstrap"),
-        "default install must prepare infrastructure via `mvmctl bootstrap`"
+        !run(false, false).contains("bootstrap"),
+        "default install must not perform a full bootstrap"
     );
-    // Preferred opt-out suppresses the whole readiness bootstrap.
     assert!(
-        !run(true).contains("bootstrap"),
-        "MVM_SKIP_BOOTSTRAP=1 must skip bootstrap"
+        run(true, false).contains("bootstrap"),
+        "explicit prewarm must bootstrap"
+    );
+    assert!(
+        !run(true, true).contains("bootstrap"),
+        "MVM_SKIP_BOOTSTRAP=1 must override prewarming"
     );
 }
 

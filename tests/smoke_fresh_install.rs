@@ -180,6 +180,26 @@ fn a_failed_preparation_step_fails_before_the_first_command() {
 }
 
 #[test]
+fn cold_first_boot_runs_before_any_image_pull() {
+    let smoke = Smoke::new();
+    let mvmctl = fake_mvmctl("1.2.3", ECHO_TOKEN).replace(
+        "  machine) shift 2",
+        "  image) [ \"$3\" != alpine ] || { echo 'premature alpine pull' >&2; exit 1; } ;;\n  machine) shift 2",
+    );
+    let installer = stand_in_installer(smoke.dir.path(), &mvmctl, 0);
+
+    let output = smoke.run(&installer, Some("v1.2.3"), &[("MVM_SMOKE_COLD_FIRST", "1")]);
+
+    assert!(output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    let first = transcript.find("=== first command").unwrap();
+    assert!(
+        !transcript[..first].contains("=== prepare:"),
+        "{transcript}"
+    );
+}
+
+#[test]
 fn a_first_command_that_prints_the_token_passes() {
     let smoke = Smoke::new();
     let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", ECHO_TOKEN), 0);

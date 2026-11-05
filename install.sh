@@ -43,7 +43,8 @@
 #   MVM_TRUSTED_COSIGN_SHA256 trusted bootstrap-cosign hash override (rotation only)
 #   MVM_SKIP_HASH_VERIFY   set to 1 to skip the release-manifest checksum (emergency only)
 #   MVM_SKIP_CODESIGN      set to 1 to skip macOS codesign
-#   MVM_SKIP_BOOTSTRAP     set to 1 to skip preparing the builder VM
+#   MVM_BOOTSTRAP_ON_INSTALL set to 1 to prewarm launch artifacts during install
+#   MVM_SKIP_BOOTSTRAP     set to 1 to override prewarming
 #   MVM_UPDATE_API_URL     override https://api.github.com (tests)
 #   MVM_UPDATE_DOWNLOAD_URL override https://github.com (tests)
 #   MVM_COSIGN_DOWNLOAD_URL override the pinned cosign release base (tests)
@@ -1214,22 +1215,17 @@ case ":$PATH:" in
   *) say "Add to PATH:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 
-# Prepare the builder VM and workload kernel ahead of the first machine run
-# instead of paying their one-time download/build cost on the launch path. Opt out with
-# MVM_SKIP_BOOTSTRAP=1 (bandwidth-limited, headless, or CI installs).
-# `mvmctl bootstrap` also honors the finer MVM_SKIP_DEV_IMAGE_PREFETCH knob.
-# Non-fatal and outside the atomic step: the binaries are already verified, and
-# what bootstrap prepares lives in the mvm state directory rather than in the
-# release directory, so a network failure here is no reason to roll back.
-if [ "${MVM_SKIP_BOOTSTRAP:-}" != "1" ]; then
-  say "Preparing the builder VM and workload kernel for your first machine run (skip with MVM_SKIP_BOOTSTRAP=1)..."
+# Keep installation bounded to verified release assets. Explicitly opt in to
+# prewarming everything; the first machine run prepares what it needs.
+if [ "${MVM_BOOTSTRAP_ON_INSTALL:-}" = "1" ] && [ "${MVM_SKIP_BOOTSTRAP:-}" != "1" ]; then
+  say "Prewarming the builder VM and workload kernel..."
   if "$INSTALL_DIR/mvmctl" bootstrap; then
     say "Builder VM and workload kernel ready."
   else
     warn "bootstrap failed — the first machine command will retry, or re-run 'mvmctl bootstrap' now."
   fi
 else
-  say "Skipping bootstrap — run 'mvmctl bootstrap' before your first machine command for a ready first run."
+  say "Installed. Your first machine run prepares any missing launch artifacts automatically."
 fi
 
 say "Run 'mvmctl doctor' to check your host."

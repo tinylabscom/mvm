@@ -15,26 +15,20 @@ your audience actually has.
 ## 1. Run an OCI Image
 
 Start with the [native local demo](/getting-started/native-demo/): no `mvmd`,
-remote credentials, persistent volumes, or source build. Prepare the runtime
-and capture a pinned image reference, then launch:
+remote credentials, persistent volumes, or source build. Launch directly:
 
 ```bash
 mvmctl doctor --workflow cli-run
-mvmctl bootstrap
-mvmctl image pull alpine
-MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref)"
 mvmctl machine run --name local-demo --profile dev \
-  --image "${MVM_DEMO_IMAGE:?Run preparation in this terminal first}" \
+  --image alpine \
   --cpus 1 --memory 256M --timeout 30 \
   -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'
 ```
 
-`bootstrap` also creates the host snapshot key that warm standbys are
-encrypted under, at `~/.mvm/keys/local.key`, when the host has none; keep a
-copy of it.
-
-Preparation owns downloads and materialization: `machine run` is cache-only,
-and a missing image fails quickly and names the command that prepares it.
+The first run fetches missing launch artifacts and caches them. You can run
+`mvmctl bootstrap` and `mvmctl image pull alpine` ahead of time to prewarm
+them. Bootstrap also creates the host snapshot key used for encrypted warm
+standbys at `~/.mvm/keys/local.key`; keep a copy of it.
 The named foreground run above is transient and cold; it tears down on exit
 and requests no standby. The digest pin identifies prepared content; it is
 not a publisher signature or production-policy approval.

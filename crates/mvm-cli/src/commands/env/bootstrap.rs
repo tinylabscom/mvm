@@ -225,6 +225,25 @@ fn prewarm_pieces_from_source(
     Ok(())
 }
 
+pub(in crate::commands) fn prepare_source_launch_pieces() -> Result<()> {
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let source = mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root()
+        .context("the source guest runtime needs an mvm source checkout")?;
+    mvm_client::launch::runtime_overlay::acquire_runtime_overlay(
+        &mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireParams {
+            cache_root: &cache_root,
+            expected_version: env!("CARGO_PKG_VERSION"),
+            arch: mvm_core::arch::GuestArch::host(),
+            source_checkout_root: &source,
+        },
+    )?;
+    prewarm_pieces_from_source(
+        &cache_root,
+        env!("CARGO_PKG_VERSION"),
+        mvm_core::arch::GuestArch::host(),
+    )
+}
+
 /// Run exactly one acquisition for `source`: a source build never downloads,
 /// and a published runtime is assembled from its own archive only.
 fn prepare_runtime_pieces_with<'a, S, R>(

@@ -4,7 +4,7 @@
 use anyhow::Result;
 
 use super::super::super::env::builder_vm::{
-    assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
+    assert_workload_kernel_supports_verity, ensure_default_microvm_image, prepare_workload_kernel,
 };
 use super::OciProvenanceSink;
 use crate::ui;
@@ -44,13 +44,14 @@ pub(in crate::commands) fn resolve_launch_image_source(
     // surfacing only after a full pull + rootfs materialization. The
     // rootfs boots verity-sealed, so the kernel must carry dm-verity;
     // the builder kernel (which drops it) is never a stand-in.
-    let kernel_path = ensure_workload_kernel()?;
+    let kernel_path = prepare_workload_kernel()?;
     // Enforce that invariant host-side: a kernel with no dm-verity
     // support would panic the guest in early init opening
     // /dev/mapper/control, with no host signal. Fail fast instead.
     assert_workload_kernel_supports_verity(&kernel_path)?;
-    let cached =
-        super::super::super::image::resolve_or_pull_run_image(&oci_cache_root, reference, prod)?;
+    prepare_launch_pieces_for_image()?;
+    prepare_oci_runtime_for_image(&oci_cache_root)?;
+    let cached = super::super::super::image::acquire_run_image(&oci_cache_root, reference, prod)?;
     ui::info(&format!(
         "Using OCI image {} ({})",
         cached.reference, cached.resolved_digest
@@ -91,6 +92,97 @@ pub(in crate::commands) fn resolve_launch_image_source(
     })
 }
 
+fn prepare_launch_pieces_for_image() -> Result<()> {
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = mvm_core::arch::GuestArch::host().to_string();
+    let overlay =
+        mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.to_string());
+    let initramfs = mvm_fs::initramfs::InitramfsResolver::new(
+        mvm_build::runtime_pieces::initramfs_cache_root(&cache_root),
+        version,
+    );
+    let overlay_dir = overlay.layout(&arch).artifact_dir;
+    let initramfs_dir = mvm_build::runtime_pieces::initramfs_cache_root(&cache_root)
+        .join(version)
+        .join(&arch);
+    // A present but invalid cache entry is evidence of tampering or a failed
+    // installation, not permission to replace it with another artifact.
+    let overlay_ready = if overlay_dir.exists() {
+        overlay.resolve(&arch)?;
+        true
+    } else {
+        false
+    };
+    let initramfs_ready = if initramfs_dir.exists() {
+        initramfs.resolve(&arch)?;
+        true
+    } else {
+        false
+    };
+    if overlay_ready && initramfs_ready {
+        return Ok(());
+    }
+    ui::info("Preparing runtime overlay and initramfs for first launch...");
+    match oci_runtime_source(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode(),
+    ) {
+        OciRuntimeSource::Checkout => {
+            super::super::super::env::bootstrap::prepare_source_launch_pieces()
+        }
+        OciRuntimeSource::Release => {
+            crate::release_guest_runtime::prepare_launch_pieces_for_running_binary(&cache_root)
+        }
+    }
+}
+
+fn prepare_oci_runtime_for_image(oci_cache_root: &std::path::Path) -> Result<()> {
+    use mvm_client::launch::runtime_overlay::{
+        require_prepared_oci_guest_runtime, runtime_overlay_acquire_mode,
+    };
+
+    if require_prepared_oci_guest_runtime(oci_cache_root).is_ok() {
+        return Ok(());
+    }
+    ui::info("Preparing OCI guest runtime for first image run (cached for future runs)...");
+    match oci_runtime_source(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        runtime_overlay_acquire_mode(),
+    ) {
+        OciRuntimeSource::Checkout => {
+            mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(oci_cache_root)
+        }
+        OciRuntimeSource::Release => {
+            crate::release_guest_runtime::prepare_oci_for_running_binary(oci_cache_root)
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OciRuntimeSource {
+    Checkout,
+    Release,
+}
+
+fn oci_runtime_source(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    mode: mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode,
+) -> OciRuntimeSource {
+    use mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode;
+    match (channel, mode) {
+        (_, RuntimeOverlayAcquireMode::BuildFromSourceCheckout)
+        | (
+            mvm_build::artifact_acquisition::DistributionChannel::Source,
+            RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
+        ) => OciRuntimeSource::Checkout,
+        (
+            mvm_build::artifact_acquisition::DistributionChannel::Release,
+            RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
+        ) => OciRuntimeSource::Release,
+    }
+}
+
 /// The image a launch boots when the caller named none: a verified runtime pack
 /// if one is cached for this host, else the bundled default microVM built in the
 /// builder VM.
@@ -129,4 +221,36 @@ fn resolve_default_image_source(prod: bool) -> Result<crate::exec::ImageSource> 
         label: "default-microvm".to_string(),
         unpacked_oci_root: None,
     })
+}
+
+#[cfg(test)]
+mod oci_runtime_tests {
+    use super::*;
+    use mvm_build::artifact_acquisition::DistributionChannel;
+    use mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode;
+
+    #[test]
+    fn image_run_prepares_from_the_running_binarys_own_source() {
+        assert_eq!(
+            oci_runtime_source(
+                DistributionChannel::Release,
+                RuntimeOverlayAcquireMode::DownloadPublishedArtifact
+            ),
+            OciRuntimeSource::Release
+        );
+        assert_eq!(
+            oci_runtime_source(
+                DistributionChannel::Source,
+                RuntimeOverlayAcquireMode::DownloadPublishedArtifact
+            ),
+            OciRuntimeSource::Checkout
+        );
+        assert_eq!(
+            oci_runtime_source(
+                DistributionChannel::Release,
+                RuntimeOverlayAcquireMode::BuildFromSourceCheckout
+            ),
+            OciRuntimeSource::Checkout
+        );
+    }
 }

@@ -141,7 +141,6 @@ from your normal terminal. You do **not** need Nix on the host for normal use.
 After installation, the shortest current image-backed path is:
 
 ```bash
-mvmctl image pull alpine
 mvmctl run --image alpine -- uname -a
 ```
 
