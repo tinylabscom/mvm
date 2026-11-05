@@ -16,7 +16,9 @@ contract. Issue comments own approval provenance and delivery status.
 Tests named below are in two classes. A test written in code format
 exists in the tree today and covers the pure lifecycle table only. A test
 written in plain text is **planned**: it names a test to be written and exists
-nowhere yet. Planned names may change when written; the requirement stays.
+nowhere yet. The planned names are a fixed list: renaming, adding or dropping one is an
+edit to this spec, not a detail of the test that implements it. Planned does
+not mean witnessed.
 
 **Mocks do not close #4655.** A mock owner, a fake clock, a stub signer or the
 pure lifecycle table can show that a refusal rule is coded; none shows that a
@@ -25,6 +27,20 @@ real cold HVF owner keeps the original VMM child through a real frontend exit.
 scenarios and for every row marked HVF below, and both Firecracker-only
 scenario gates stay until those pass. Host-only tests, gated compilation and
 foreground diagnostic runs are not that evidence.
+
+## Decisions
+
+Recorded from the maintainer on #4655.
+
+1. The recovery surface stays recovery-only. Start is strictly separate, and a
+   start needs a fresh admission against a signed plan; recovery never starts.
+2. The planned test names below are pinned. They stay marked planned until a
+   test of that name passes; a rename is a spec edit.
+3. After the owner dies there is no recovery, only quarantine. The only way
+   back is a freshly admitted start. No PID resurrection and no reuse of the
+   old operation or generation.
+4. Resource bounds (R2) rely on the accepted in-process bound and claim no hard
+   OS limits.
 
 ## Boundaries
 
