@@ -263,12 +263,11 @@ jobs:
       # fails at "cargo zigbuild failed for mvm-host-vm-init".
       - uses: ./.github/actions/install-zigbuild
 
-      # Dependency units only. Workspace crate outputs and cargo-installed
-      # binaries are never restored into a shipped artifact, so every mvm
-      # crate in the release is compiled in this run. Only dispatch runs write
-      # the entry (a tag push restores what a dispatch on main wrote), which
-      # keeps tag refs out of the shared cache budget.
-      - name: Restore dependency build cache
+      # Manual rehearsals only: a tag push builds everything from source, so a
+      # cache entry can never reach a signed release. Dependency units only;
+      # workspace crate outputs and cargo-installed binaries are not cached.
+      - name: Restore dependency build cache (rehearsal only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: ./.github/actions/rust-cache
         with:
           key: release-${{ matrix.build_target }}
@@ -276,22 +275,18 @@ jobs:
           workspace-crates: "false"
           cache-bin: "false"
 
-      # The embedded guest payload is cross-compiled into a content-addressed
-      # store keyed by each binary's source closure, Cargo.lock and the pinned
-      # toolchain, and every entry is checked against the SHA-256 recorded when
-      # it was written before build.rs embeds it; a mismatched entry is rebuilt.
-      # The key names the target architecture, not the runner OS, so the two
-      # aarch64 jobs share one entry. The outer key is only a coarse lookup:
-      # an older store restored through the prefix simply misses on the binaries
-      # whose inputs changed.
-      - name: Restore the embedded payload store
+      # Manual rehearsals only. The embedded guest payload is cross-compiled
+      # into a content-addressed store; build.rs checks each entry against the
+      # SHA-256 recorded beside it and treats a missing or mismatched digest as
+      # a miss. Exact key only (no prefix fallback). The key names the target
+      # architecture, not the runner OS, so the two aarch64 jobs share an entry.
+      - name: Restore the embedded payload store (rehearsal only)
         id: embed_cache
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/cache/restore@v5
         with:
           path: ~/.cache/mvm/embed
           key: embed-${{ startsWith(matrix.build_target, 'aarch64') && 'aarch64' || 'x86_64' }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'crates/**/Cargo.toml', 'crates/**/*.rs') }}
-          restore-keys: |
-            embed-${{ startsWith(matrix.build_target, 'aarch64') && 'aarch64' || 'x86_64' }}-
 
       - name: Build release binary
         env:
@@ -393,16 +388,24 @@ jobs:
         shell: bash
         run: brew install make llvm lld flex bison gnu-sed gnu-tar xz
 
-      # The upstream half of the tier (libkrun and libkrunfw built from pinned
-      # commits) depends only on the build script, its patch and the runner
-      # image, so it is restored rather than rebuilt. The script re-checks the
-      # restored tree against its own pins and recorded digests before using it
-      # and rebuilds from source if anything differs; the supervisor is always
-      # compiled from this checkout. Only dispatch runs write the entry, as with
-      # the Rust cache.
-      - name: Restore the libkrun upstream tree
-        id: libkrun_cache
+      # The kernel source tarball is checked against the SHA-256 pinned in the
+      # build script after it is restored, exactly like a download, so this
+      # cache is used by every run, tag pushes included.
+      - name: Restore the pinned kernel source tarball
+        id: kernel_cache
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/libkrunfw-kernel
+          key: libkrunfw-kernel-${{ hashFiles('scripts/release/build-libkrun-tier.sh') }}
+
+      # The built upstream tree (libkrun and libkrunfw) is restored only for a
+      # manual rehearsal. A tag push builds it from source: the integrity
+      # record lives inside the cache entry, so it cannot vouch against a
+      # poisoned entry, and a signed release must not depend on one.
+      - name: Restore the libkrun upstream tree (rehearsal only)
+        id: libkrun_cache
+        if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' }}
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/libkrun-upstream
@@ -413,7 +416,8 @@ jobs:
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
           MVM_GNU_MAKE: gmake
-          MVM_LIBKRUN_UPSTREAM_CACHE: ${{ runner.temp }}/libkrun-upstream
+          MVM_LIBKRUN_UPSTREAM_CACHE: ${{ github.event_name == 'workflow_dispatch' && format('{0}/libkrun-upstream', runner.temp) || '' }}
+          MVM_LIBKRUNFW_KERNEL_CACHE: ${{ runner.temp }}/libkrunfw-kernel
         shell: bash
         run: |
           llvm_prefix="$(brew --prefix llvm)"
@@ -425,6 +429,13 @@ jobs:
           export PATH="${llvm_prefix}/bin:${lld_prefix}/bin:${flex_prefix}/bin:${bison_prefix}/bin:${gnu_sed_prefix}/libexec/gnubin:${gnu_tar_prefix}/libexec/gnubin:${PATH}"
           scripts/release/build-libkrun-tier.sh \
             "target/${BUILD_TARGET}/release/libkrun-tier" "${BUILD_TARGET}"
+
+      - name: Save the pinned kernel source tarball
+        if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' && steps.kernel_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/libkrunfw-kernel
+          key: ${{ steps.kernel_cache.outputs.cache-primary-key }}
 
       - name: Save the libkrun upstream tree
         if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' && steps.libkrun_cache.outputs.cache-hit != 'true' }}
