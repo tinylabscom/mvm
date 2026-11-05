@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import stat
 import subprocess
 import sys
@@ -24,6 +25,37 @@ PROMPT = b"tell me a joke\n"
 MODEL = "claude-haiku-4-5-20251001"
 BUDGET = {"max_requests": 1, "max_spend_microusd": 500000, "model": MODEL}
 UNBOUND = "00000000-0000-0000-0000-000000000000"
+
+
+# Only pattern names are ever reported, never matched text.
+# shortcut: heuristic shapes, not a DLP engine; extend when a new credential shape appears.
+SECRET_PATTERNS = {
+    "anthropic-key": re.compile(rb"sk-ant-[A-Za-z0-9_-]{16,}"),
+    "api-key-shaped": re.compile(rb"\bsk-[A-Za-z0-9]{20,}"),
+    "bearer-token": re.compile(rb"(?i)bearer\s+[A-Za-z0-9._~+/=-]{20,}"),
+    "key-assignment": re.compile(
+        rb"(?i)(?:api[_-]?key|secret|token)[\"']?\s*[=:]\s*[\"']?[A-Za-z0-9_./+=-]{20,}"),
+    "cloud-or-vcs-token": re.compile(rb"\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{30,})"),
+}
+
+
+def scan_for_secrets(directory):
+    """Return sorted (file, pattern-name) hits for secret-looking bytes; never the bytes."""
+    hits = set()
+    for path in Path(directory).rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            data = path.read_bytes()
+            hits.update((path.name, name) for name, rx in SECRET_PATTERNS.items() if rx.search(data))
+    return sorted(hits)
+
+
+def evidence_dir(results_dir):
+    """Fresh private run directory under the caller-supplied absolute results dir."""
+    parent = Path(results_dir)
+    require(parent.is_absolute() and parent.is_dir() and not parent.is_symlink(),
+            "--results-dir must be an existing absolute directory")
+    require(not parent.stat().st_mode & 0o022, "--results-dir must not be group/world writable")
+    return Path(tempfile.mkdtemp(prefix="mvm-claude-consumer-", dir=parent))
 
 
 def live_prerequisites(args):
@@ -265,13 +297,14 @@ def main():
     parser.add_argument("--authorize-model-request", action="store_true")
     parser.add_argument("--budget-usd", required=True)
     parser.add_argument("--archive-url", required=True)
+    parser.add_argument("--results-dir", default="/tmp")
     parser.add_argument("--run-timeout", type=int, default=180)
     for name in ("runtime-version", "runtime-archive-sha256", "runtime-overlay-roothash",
                  "rootfs-sha256", "rootfs-roothash", "kernel-sha256"):
         parser.add_argument("--" + name, required=True)
     args = parser.parse_args()
     os.umask(0o077)
-    evidence = Path(tempfile.mkdtemp(prefix="mvm-claude-consumer-", dir="/tmp"))
+    evidence = evidence_dir(args.results_dir)
     report = {"status": "blocked", "commands": [], "demo_acceptance": False,
               "model_request_attempted": False, "guest_boot_witnessed": False,
               "custody_verified": False, "credential_cleanup_attempted": False}
@@ -302,6 +335,12 @@ def main():
                 "Retain consumer HOME, original CLI owner and all evidence. "
                 "Do not retry, signal a numeric PID, or delete credentials based on process absence.")
     finally:
+        persist(evidence, report)
+        leaks = scan_for_secrets(evidence)
+        report["secret_scan"] = {"clean": not leaks, "hits": [list(hit) for hit in leaks]}
+        if leaks:
+            report.update(status="blocked", demo_acceptance=False,
+                          blocker="secret-looking value in evidence; quarantine the results dir")
         persist(evidence, report)
     print(json.dumps({"status": report["status"], "evidence": str(evidence),
                       "demo_acceptance": report["demo_acceptance"]}))

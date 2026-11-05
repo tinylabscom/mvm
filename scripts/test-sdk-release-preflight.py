@@ -21,7 +21,8 @@ class PreflightTests(unittest.TestCase):
     def test_workspace_compatibility_and_independent_sdk_version(self):
         release = preflight.validate_metadata(ROOT, "workflow_dispatch", "", True)
         self.assertEqual(release["version"], "0.15.2")
-        self.assertEqual(release["runtime_version"], "0.27.0")
+        workspace = preflight.tomllib.loads((ROOT / "Cargo.toml").read_text())
+        self.assertEqual(release["runtime_version"], workspace["workspace"]["package"]["version"])
         self.assertNotEqual(release["version"], release["runtime_version"])
         preflight.validate_metadata(ROOT, "release", "sdk-v" + release["version"], False)
         with self.assertRaises(ValueError):
