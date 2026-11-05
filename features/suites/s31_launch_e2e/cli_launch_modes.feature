@@ -286,7 +286,8 @@ Feature: every README-documented CLI launch mode boots a real guest
   # rather than what it happens to be here.
   @live
   Scenario: a vCPU request beyond the backend ceiling is clamped and reported
-    Given an Alpine warm parent with 9999 CPUs and 512M memory is ready
+    # Keep this scenario focused on the launch-time clamp. Warming a 9999-vCPU
+    # standby exercises the separate host-limited pause/capture path first.
     When I launch "machine run --image alpine --cpus 9999 -- sh -c 'echo clamped-and-booted'"
     Then the launch succeeds
     And the output mentions "supports at most"
