@@ -121,6 +121,66 @@ mod tests {
     }
 
     #[test]
+    fn the_timeline_follows_a_workload_across_a_replacement() {
+        use crate::audit::session::{EventFilter, workload_events};
+        let (home, audit) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let emitter =
+            AuditEmitter::with_dir(SigningKey::from_bytes(&[9; 32]), audit.path()).unwrap();
+        let old = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-old")
+            .workload("suspect")
+            .build();
+        let new = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-new")
+            .workload("suspect")
+            .build();
+        let other = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-other")
+            .workload("bystander")
+            .build();
+        emitter.emit_admitted(&old, "host:test").unwrap();
+        emitter.emit_admitted(&other, "host:test").unwrap();
+        quarantine_workload(home.path(), &emitter, &old, "compromise").unwrap();
+        emitter
+            .emit_refused(&old, "host_interface", "workload suspect is quarantined")
+            .unwrap();
+        replace_workload(home.path(), &emitter, &old).unwrap();
+        emitter.emit_admitted(&new, "host:test").unwrap();
+        emitter.emit_launched(&new, "firecracker").unwrap();
+
+        let lines: Vec<String> = std::fs::read_to_string(audit.path().join("local.jsonl"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let events = workload_events(&lines, "suspect", &EventFilter::default()).unwrap();
+        let names: Vec<_> = events
+            .iter()
+            .map(|e| e.envelope.entry.event.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "plan.admitted",
+                "workload.quarantined",
+                "plan.admission_refused",
+                "workload.replaced",
+                "plan.admitted",
+                "plan.launched",
+            ],
+            "launch, containment, denial and replacement in chain order; the bystander is absent"
+        );
+        let plans: std::collections::BTreeSet<_> = events
+            .iter()
+            .map(|e| e.envelope.entry.plan_id.as_str())
+            .collect();
+        assert_eq!(plans.len(), 2, "the history spans the old and the new plan");
+    }
+
+    #[test]
     fn a_long_reason_is_bounded() {
         assert_eq!(bounded(&"x".repeat(10_000)).len(), MAX_REASON_BYTES);
     }
