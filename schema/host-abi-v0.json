@@ -2760,6 +2760,20 @@
           ],
           "description": "Set when the agent, not the workload, ended the call."
         },
+        "checkpoint_failed": {
+          "description": "True when the step did not commit a checkpoint.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "checkpoint_id": {
+          "description": "Checkpoint ID when the delivered step was committed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "delivered": {
           "description": "False when a prompt under the same retry key was already accepted and nothing was sent.",
           "type": "boolean"
@@ -2808,6 +2822,11 @@
       "additionalProperties": false,
       "description": "A `machine.prompt` request.",
       "properties": {
+        "checkpoint": {
+          "default": false,
+          "description": "Opt in to capture a full-VM checkpoint after delivery.",
+          "type": "boolean"
+        },
         "id": {
           "description": "The running machine whose agent is prompted.",
           "type": "string"

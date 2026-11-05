@@ -23,6 +23,15 @@ afterEach(() => {
 
 const STATE = { id: "id-devbox", name: "devbox", status: "stopped" };
 
+it("returns a prompt answer even when checkpointing fails", () => {
+  const result = { delivered: true, journal_cursor: 2, checkpoint_failed: true, stdout_b64: "YW5zd2Vy" };
+  host.on("machine.prompt", result);
+  expect(new mvm.Machine("devbox").prompt("hello", { checkpoint: true, idempotencyKey: "key" })).toEqual(result);
+  expect(host.requests("machine.prompt")).toEqual([{
+    id: "devbox", prompt_b64: "aGVsbG8=", checkpoint: true, idempotency_key: "key",
+  }]);
+});
+
 describe("Machine.run", () => {
   it("boots, runs the command, returns its output, and stops the machine", () => {
     host

@@ -10,8 +10,10 @@ use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::client::MvmError;
 use mvm_runtime::checkpoint::checked_workspace_blob_name;
 
+pub mod admitted;
 pub mod anchor;
 pub mod fs_quick;
+pub mod prompt_step;
 
 // Types and the liveness probe commands need without naming the runtime.
 pub use mvm_hostd::audit::bind::{

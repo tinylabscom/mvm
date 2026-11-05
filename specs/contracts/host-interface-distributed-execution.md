@@ -467,4 +467,3 @@ The first demo promises **contain, terminate, and rebuild**. It does not
 promise verified physical wipe. A remote command cannot immediately affect a
 disconnected node, and revocation takes effect only where current revocation
 state is known or an offline lease has expired.
-

@@ -25,6 +25,7 @@ import {
   MACHINE_INVENTORY,
   MACHINE_LOGS,
   MACHINE_PAUSE,
+  MACHINE_PROMPT,
   MACHINE_RECONFIGURE,
   MACHINE_RESUME,
   MACHINE_RM,
@@ -387,6 +388,33 @@ export class Machine {
 
   inspect(): MachineState {
     return call(MACHINE_INSPECT, { id: this.name }) as MachineState;
+  }
+
+  /**
+   * Send a prompt, optionally checkpointing the delivered step.
+   * A successful answer can still have `checkpoint_failed`; an accepted retry
+   * key does not resend the prompt.
+   */
+  prompt(text: string, options: {
+    checkpoint?: boolean;
+    sessionId?: string;
+    requestId?: string;
+    idempotencyKey?: string;
+    timeout?: number;
+  } = {}): Record<string, unknown> {
+    if (typeof text !== "string" || !text) throw new TypeError("text must be a non-empty string");
+    if (options.checkpoint !== undefined && typeof options.checkpoint !== "boolean") {
+      throw new TypeError("checkpoint must be a boolean");
+    }
+    const request: Record<string, unknown> = {
+      id: this.name, prompt_b64: Buffer.from(text, "utf8").toString("base64"),
+      checkpoint: options.checkpoint ?? false,
+    };
+    if (options.sessionId !== undefined) request.session_id = options.sessionId;
+    if (options.requestId !== undefined) request.request_id = options.requestId;
+    if (options.idempotencyKey !== undefined) request.idempotency_key = options.idempotencyKey;
+    if (options.timeout !== undefined) request.timeout_secs = requireCount(options.timeout, "timeout");
+    return call(MACHINE_PROMPT, request) as Record<string, unknown>;
   }
 
   /** Pause this machine, sealing a snapshot where its backend uses one. */
