@@ -264,7 +264,7 @@ The migration must not regress the HVF path:
   `virtio-queue`'s `QueueState` (`state()`/`set_state()`) over
   re-deriving ring state — correct-by-construction for the ring half.
 - **Cross-platform builds.** These deps are host-side and std-only.
-  `just check-linux` (zigbuild `x86_64`/`aarch64-unknown-linux-gnu`) must
+  `just check::linux` (zigbuild `x86_64`/`aarch64-unknown-linux-gnu`) must
   stay green, and the `aarch64-unknown-linux-musl` embedded host-vm bins
   — which do not touch this code — must stay unaffected.
 
