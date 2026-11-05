@@ -1,12 +1,16 @@
 # PS06 canonical-builder authority
 
-Status: **B provisioning/ownership spike recommendation. No installed provider,
-commissioned issuer, enabled owner factory or native qualification is claimed.**
+Status: **B implementation acceptance contract under review. No installed
+provider, commissioned issuer, enabled owner factory or native qualification
+is claimed by this document.**
 
 The maintainer selected the B direction: protect authority and writable resources
 from an attacker-controlled, unconfined process under the developer's UID.
-The selected next step was a bounded provisioning/ownership spike, not permission
-to install services, create accounts or migrate production keys.
+The one-week native target is the designated Mac/HVF demo host. The separately
+approved disposable setup covers two non-login principals, private roots, reviewed
+launchd jobs, a new demo issuer/pin receipt and bounded native HVF tests. It does
+not cover production keys, existing VM state or live Linux execution. Exact host
+effects and rollback are reviewed before privileged actions.
 
 Accountable design and integration owner: the PS06 builder-authority delivery
 lane in the [maintainer-assigned completion session][ownership]. This lane owns
@@ -19,6 +23,47 @@ main `b81235e7fe4ac2b0a57a1cef575b77e9ba7d7485`.
 The [earlier delegation approval][direction] did not authorize provisioning or
 activation. The concrete deployment and issuer choices below are recommendations
 for review, not a claim that the earlier no-new-service constraint allowed them.
+
+## One-week acceptance and backend contract
+
+Qualify one exact canonical-Flake build invocation with protected B authority and
+original-owner completion on the designated Mac using HVF. Demonstrate the real
+boundary and tamper/replay/crash refusal, not merely a mocked policy response.
+Manual reviewed demo provisioning may precede the distributable app/package UX;
+it must use the same protected role/code/state boundaries, not root execution
+for ordinary builds or same-user helper fallback.
+
+The authority state machine, admission, single-use grants, audit and quarantine
+are backend-neutral. Host-OS provisioning/peer identity and hypervisor native
+ownership are independent adapters. Mach audit tokens and SMAppService belong
+only to the macOS host adapter; HVF instance records belong only to the HVF
+execution adapter. A Linux host adapter must establish its own protected
+principals and authenticated peer boundary.
+
+Reuse `BuilderVm`, `DriverBuilderVm<D: VmmDriver>` and `VmmDriver` rather than
+introducing a second general driver framework. The owned-execution facet must
+retain a backend-native owner and terminal evidence through launch, cancellation
+and completion. Evidence is constructed only by the trusted native adapter,
+bound to the original backend/instance/lifetime, and is not deserialized from an
+RPC response, public PID or claimed success status. Trait erasure must not erase
+uncertainty, turn missing evidence into success, or widen admission purpose.
+
+An adapter must supply exact-object read-only/writable input custody,
+original-child lifetime ownership, bounded stop and backend-native finalization.
+Gate missing capabilities before launch; never fall back to generic boot,
+path reopen, detach/attach or another backend. A caller-supplied capability flag
+is not evidence that the implementation satisfies those requirements.
+
+| Backend | Acceptance boundary |
+| --- | --- |
+| HVF on the designated Mac | Native positive build and negative security/lifecycle witnesses are required for the one-week demo. Existing `OwnedInstance`/`ConfirmedExit` semantics remain intact. |
+| Firecracker on Linux | Shared trait/adapter and conformance source work; live native acceptance is deferred and must be labeled unqualified. Current `FcRunningVm` is detached/PID tracked, so its successful `wait` does not supply original-owner evidence. |
+| Other backends | Use the extension contract; explicitly refuse the protected operation until the required native custody and evidence adapter exists. Generic builder support alone is insufficient. |
+
+Compilation, mocked trait tests and Linux adapter unit tests are distinct from
+native Firecracker qualification. No SSH or live Linux work follows from this
+Mac-only scope. Artifact reproduction, release signing/publication and the full
+released PS06 consumer/demo acceptance remain separate from this one build.
 
 ## Boundary and alternatives
 
@@ -73,11 +118,13 @@ code-signed registrar application and its launchd helpers:
 /Library/Application Support/MVM/MVM Provider.app
   Contents/MacOS/
   Contents/Library/LaunchDaemons/
-/var/db/mvm/authority
-/var/db/mvm/runtime
+/private/var/db/mvm/authority
+/private/var/db/mvm/runtime
 ```
 
 These are proposed installation paths, not existing installed components.
+Use the canonical macOS `/private/var` ancestry rather than silently exempting
+the system `/var` symlink from installer path checks.
 The administrator owns the application, deployment receipt and every code-path
 ancestor. Neither caller nor runtime UID can replace them. Each state root and
 its ancestors exclude the caller UID; runtime cannot read or modify authority
@@ -189,8 +236,8 @@ Provision/revoke administration is separate from delegated builder requests.
 | `ObserveBuilder` | Return a bounded authenticated observation, including uncertainty. Never reserve again, recreate an owner or redeliver a birth allowance. |
 | `AdmitBuilderPlan` | Derive/verify and sign only the canonical plan independently admitted for this reservation. No forwarding to legacy `SignPlan`. |
 | `PrepareBuilderEndpoint` | Construct the exact fixed FlowMux builder role/configuration from retained admission. No arbitrary registration or raw host key. |
-| `CommitBuilderBirth` | Separately consume one `Endpoint` or `OriginalHvfVmm` allowance, serialized against revocation/expiry, with a finite per-role activation deadline. |
-| `BindOriginalHvf` | Bind actual original supervisor/native incarnation and retained connection evidence. No caller-authored PID or pre-birth native generation. |
+| `CommitBuilderBirth` | Separately consume one `Endpoint` or `OriginalVmm` allowance for the exact admitted backend, serialized against revocation/expiry, with a finite per-role activation deadline. |
+| `BindOriginalInstance` | Bind the backend adapter's actual original supervisor/native incarnation and retained connection evidence. No caller-authored PID, cross-backend substitution or pre-birth native generation. |
 | `AuthorizeOriginalStop` | Authorize only the bound original instance's closed stop request and fresh connection challenge. No signal-by-PID, adoption or replacement. |
 | `AppendBuilderAudit` | Construct phase-correct canonical events from retained admission and verified evidence, never arbitrary bytes or caller-selected event names. |
 | `CloseBuilder` | Check the entire compound native/guest/output/audit completion policy before durable terminal success. A response is not `ConfirmedExit`. |
@@ -230,6 +277,8 @@ the referenced paths already implement a protected provider.
 | [Host-agent launch](https://github.com/tinylabscom/mvm/blob/85336a3c30570bbecd78e2044c32aef6e31a313b/crates/mvm-vmm/src/host/host_agent_spawn.rs#L119-L198) | Reference bounded readiness and worker supervision only. Its invoking-user home, raw-key loader and buildable/overrideable executable discovery are not provider authority. |
 | [Caller proof adapter](https://github.com/tinylabscom/mvm/blob/85336a3c30570bbecd78e2044c32aef6e31a313b/crates/mvm-hostd/src/caller_identity/mod.rs#L28-L72) | Reuse purpose-separated possession verification where selected; not provider custody, authenticated IPC or grant issuance. |
 | [Local host interface](https://github.com/tinylabscom/mvm/blob/85336a3c30570bbecd78e2044c32aef6e31a313b/crates/mvm-core/src/host_interface/local.rs#L69-L112) | Policy/preflight vocabulary only. Default readiness, in-memory node state and permissive resource/secret checks cannot stand in for protected admission. Node-state quarantine is not invocation quarantine. |
+| [Driver custody seam](https://github.com/tinylabscom/mvm/blob/85336a3c30570bbecd78e2044c32aef6e31a313b/crates/mvm-vmm/src/driver/traits.rs#L140-L206) | Reuse the backend dispatch and fail-closed `boot_custodied` pattern. `RunningVm`'s generic status/wait and currently HVF-shaped `KernelStopOutcome` do not already define a backend-neutral original-owner proof. |
+| [Firecracker disk custody](https://github.com/tinylabscom/mvm/blob/85336a3c30570bbecd78e2044c32aef6e31a313b/crates/mvm-backends/src/driver/fc.rs#L1318-L1404) | Reuse held disk validation/handoff, but add real native-owner retention before protected Firecracker launch can be supported. Detached/PID-file tracking and workload-sidecar wait cannot implement that contract by renaming a type. |
 | [Original HVF child](https://github.com/tinylabscom/mvm/blob/85336a3c30570bbecd78e2044c32aef6e31a313b/crates/mvm-backends/src/driver/hvf.rs#L567-L752) | Retain actual child, descriptor inheritance, readiness and rollback mechanics. Add the builder-specific validator/owner composition; do not weaken cold-entrypoint admission. |
 | [Restore-file custody](https://github.com/tinylabscom/mvm/blob/85336a3c30570bbecd78e2044c32aef6e31a313b/crates/mvm-vmm/src/host/restore_image.rs#L212-L353) | Reuse read-only file validation, unlinking and child-only descriptor inheritance once preparation is protected from all attacker roles. Current helper alone explicitly does not provide hostile same-user isolation. |
 | [Writable disks](https://github.com/tinylabscom/mvm/blob/85336a3c30570bbecd78e2044c32aef6e31a313b/crates/mvm-vmm/src/driver/prepared_disks.rs#L260-L399) | Preserve exact held backing/sidecar identity, alias rejection and last-close exclusion for output/store disks. |
