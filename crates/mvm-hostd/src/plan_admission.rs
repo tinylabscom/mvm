@@ -95,16 +95,35 @@ mod bundle_environment;
 mod canonical_kernel;
 mod display_grants;
 mod final_gates;
-mod host_trust;
 mod nonce_ledger;
 mod registry_pack;
 mod verb_grant_sidecar;
 
 use assurance_runtime::{AssuranceRuntimeBinding, verify_selected_runtime};
-use host_trust::{host_grant_ceiling, host_trusted_plan_signers};
 pub use nonce_ledger::InMemoryNonceLedger;
 use registry_pack::verify_registry_pack_assets;
 use verb_grant_sidecar::mint_verb_grant_sidecar;
+
+/// The external plan signers this host trusts, from operator config.
+///
+/// Read from config rather than taken as a parameter for the same reason as
+/// the grant ceiling: admission's trust root must not be widen-able by the
+/// caller asking for admission. A malformed pin fails the whole read, so the
+/// set in force is exactly the set the operator wrote.
+fn host_trusted_plan_signers() -> Result<Vec<(String, VerifyingKey)>> {
+    mvm_core::user_config::load(None).trusted_plan_signer_keys()
+}
+
+/// The bound this host puts on what any workload may be granted.
+///
+/// Read from the operator's config, never from the plan under admission. The
+/// two have different trust roots: whoever authors a plan also authors its
+/// grants, so a ceiling the plan could carry would be a bound the bounded party
+/// writes. There is no parameter for it here for the same reason — a caller
+/// cannot hand admission a wider ceiling than the host configured.
+fn host_grant_ceiling() -> GrantCeiling {
+    mvm_core::user_config::load(None).grant_ceiling()
+}
 
 pub use bundle_environment::BundleEnvironmentRefused;
 pub use mvm_core::time::{Clock, SystemClock};

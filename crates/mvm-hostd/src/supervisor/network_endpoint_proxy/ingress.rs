@@ -49,9 +49,9 @@ impl SubstitutionService {
         profile_key: &str,
     ) -> crate::supervisor::ingress_transform::IngressTransformer {
         let redaction =
-            crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, profile_key)
+            crate::supervisor::redactor::resolve_redaction(&self.redaction_policy, profile_key)
                 .clone();
-        let replacement = crate::supervisor::reversible_replacement_resolve::resolve(
+        let replacement = crate::supervisor::reversible_replacement::resolve_replacement(
             &self.reversible_replacement_policy,
             profile_key,
         )

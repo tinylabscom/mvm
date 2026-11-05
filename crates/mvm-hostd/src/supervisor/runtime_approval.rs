@@ -24,7 +24,6 @@
 //! approver a service starts with until one is configured.
 
 mod broker;
-mod limiter;
 mod supervisor;
 
 pub use broker::{ApprovalBroker, BrokerError, SocketBroker};

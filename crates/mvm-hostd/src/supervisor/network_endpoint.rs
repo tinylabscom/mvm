@@ -1363,7 +1363,7 @@ mod tests {
         let (service, _handed) = assemble(&cfg).unwrap();
         let token = "Xa9Kf2pQ7vL0mZ3rT8wB1nC4yH6dJ5sG2eU0iO9";
         let body = format!("k={token} e").into_bytes();
-        let action = crate::supervisor::redaction_resolve::resolve(
+        let action = crate::supervisor::redactor::resolve_redaction(
             // SAFETY: assemble built the service from cfg.redaction; we re-resolve
             // the same policy here to assert the opt-in took effect end-to-end.
             &cfg.redaction,
