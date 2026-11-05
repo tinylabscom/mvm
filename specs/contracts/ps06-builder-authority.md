@@ -1,8 +1,8 @@
 # PS06 canonical-builder authority
 
-Status: **Proposed implementation contract; not an installed delegation or
-an enabled owner factory.** Native qualification and operational permissions
-remain separate from design review.
+Status: **Blocked architecture decision packet; not an implementation-ready
+positive-path contract, installed delegation or enabled owner factory.**
+Native qualification remains separate from design review.
 
 Accountable design and integration owner: the PS06 builder-authority delivery
 lane in the [maintainer-assigned completion session][ownership]. This owner
@@ -72,26 +72,91 @@ key-holder role**, not the builder, CLI request parser, enrollment routine or
 `SignPlan`. It installs one exact delegation after independent authorization
 of that action. It is not a network service and has no general sign-bytes API.
 
-### Selected custody proposal and the decision it requires
+### Custody evidence and supported threat model
 
 The issuer is the existing Ed25519 host key currently loaded from
 `mvm_keys_dir()/host-signer.ed25519`, not the enrolled caller key and not a
-new key pair. The selected proposal is to commission those same 32 key bytes
-into a macOS Keychain generic-password item owned by the existing signer-helper
-role. Use Security.framework `SecItemAdd`/`SecItemCopyMatching`/`SecItemUpdate`
-with a `SecAccess` trusted-application requirement restricted to the verified
-signer-helper application. This is software Ed25519 held in the helper's
-memory after native retrieval, not a claim of Secure Enclave Ed25519 support.
-Do not combine this ACL model with an assumed data-protection access-group
-entitlement or the caller store's current default generic-password access.
+new key pair. It is currently a software file, not an already protected native
+identity. Importing its bytes, retiring readable copies and adapting existing
+readers require separate explicit authorization; none is implied here.
 
-**Explicit custody decision required before implementation of a positive path:**
-approve or reject importing the existing issuer into this protected item,
-retiring owner-readable software copies and adapting that issuer's existing
-readers. The earlier default-deny design approval did not approve this migration.
-The packet selects the mechanism for review; it does not execute or authorize
-the migration. If rejected, this topology needs a different reviewed isolation
-mechanism, not a software fallback advertised as native custody.
+**Reject generic-password trusted-read ACLs as mutable-state integrity.**
+Authorized synthetic probes on macOS 27.0.1 used an explicit temporary Keychain
+and a `SecAccessCreate` trusted-application requirement. A different ad-hoc
+signed same-UID program could not read the item (`-25293`), but legacy update
+and delete returned success. With the correctly scoped `SecItemUpdate`
+`kSecMatchSearchList`, both trusted and untrusted updates returned success.
+Trusted effect readback confirmed the synthetic bytes changed from 17 to 51
+under the trusted control, then to 68 under the untrusted update; after the
+untrusted deletion, trusted lookup returned `-25300`. Changing the state API
+does not remove the legacy mutation path.
+
+Legacy ACL replacement timed out after 25 seconds and its owned process was
+killed; a modern ACL-change attempt with UI failure requested returned `-128`.
+Neither result proves resistance to all ACL overrides or private-key
+extraction. The enumerated search lists and available domain defaults were
+unchanged and temporary Keychains were deleted. These are bounded synthetic
+observations, not macOS 26/HVF qualification or authorization to migrate a key.
+
+The adversary includes arbitrary code in an untrusted same-UID owner/frontend
+or its proxies: file modification, old protocol records, disconnect/restart,
+holder termination and native item update, deletion, replacement or ACL
+changes. An unconfined instance of such a role stays in scope unless an
+approved mechanism makes its confinement mandatory. Do not assume it
+cooperates with library locks or a sandbox applied to a different process.
+
+The cold-owner contract keeps the host and its administrator trusted; it does
+not claim universal defense against unrelated unconfined host malware.
+That is distinct from assuming an untrusted frontend is trusted host software
+merely because it runs unconfined. Any program the attacker role can launch,
+modify or proxy through is part of that role's attack surface. Administrator
+backup restoration is outside the claimed antirollback boundary. Holder code,
+bootstrap provenance, memory and expected identity need independent protection
+against the stated roles. A pathname, `0600`, same UID, requester-supplied code
+hash or singleton exclusion supplies none. Absent an enforced boundary, the
+positive profile stays disabled.
+
+### Issuer integrity and independent expected identity
+
+Before any issuer operation under either custody option, derive its public
+key and compare all 32 bytes with an independently expected host public
+identity. Missing, ambiguous, substituted or mismatching material refuses;
+never enroll the retrieved key as the new expectation or recreate a missing
+key. A prospective native item may hold the same software Ed25519 bytes, but
+that alone makes it neither non-extractable nor exclusively held.
+
+For the native-item option, unexpected ACL changes refuse, and neither a
+software file nor another item/legacy proxy is a fallback. For the confined
+software option below, the one designated provider-owned key file may remain;
+every attacker role must be denied that file, alternate copies and all legacy
+signing ingress. Native import and native ACL guarantees are not prerequisites
+of an option that does not use native storage.
+
+The required source of trust is the trusted host administrator, independently
+of the delegated requester, using an existing independently authenticated
+deployment path with requester-nonwritable bootstrap custody to the verified
+holder. The expectation cannot come from the commissioning candidate, adjacent
+owner-writable public-key file, item attributes or a self-signature made by
+the retrieved key. This packet has identified neither such a protected path
+nor its independently recorded host-specific public identity. Identifying and
+verifying both is a blocking design decision, not a new CLI field or permission
+inferred from operator authentication.
+
+Pinning detects replacement with a different private key; it does not stop an
+attacker extracting the expected key and signing elsewhere or replacing it
+with the same bytes. The starting trust assumption is that the existing issuer
+has not already been extracted by an attacker. Neither migration nor a new
+profile recalls a previously extracted copy. If that assumption cannot be
+accepted without rotation, refuse: generating or rotating an issuer is outside
+this mode.
+
+The native-item option must retire attacker-readable software copies, adapt
+its readers and independently exclude unauthorized read, export and ACL
+replacement. The confined software option may retain the designated protected
+provider copy and trusted host administration, but must deny every attacker
+role direct or proxy access. Neither option permits a legacy signing bypass.
+No Secure Enclave Ed25519 support or already entitled native access group is
+assumed.
 
 ### Exact-grant commissioning ceremony
 
@@ -114,20 +179,21 @@ invalidates confirmation and starts a new ceremony. Cancellation installs
 nothing; headless invocation without this explicit commissioning authority
 refuses. Do not add an unattended `--yes` bypass.
 
-Only after confirmation may the holder import an explicitly approved existing
-key, create the protected grant record and acknowledge durable installation.
-Key import, grant installation and issuer retirement have distinct receipts;
-failure cannot silently generate a replacement key or activate a partial grant.
-Native authorization authenticates the operator; the fixed candidate digest
-binds the exact action that operator approved. Neither alone is sufficient.
+Only after confirmation and resolution of the custody/resource decisions below
+may the holder establish the selected custody option, install the exact
+current-epoch grant and acknowledge installation. Native-item custody additionally
+requires explicitly approved existing-key import/retirement; confined software
+custody retains only its designated protected provider copy. Those custody
+transitions and grant installation have distinct receipts; failure cannot
+generate a replacement key or activate a partial grant. Native authorization
+authenticates the operator; the fixed candidate digest binds the exact action
+that operator approved. Neither establishes the issuer pin or resource isolation.
 
-The first implementation is macOS/HVF only. A native-custody qualification
-must prove that the delegated owner cannot read the issuer key, alter protected
-policy/replay state, or invoke a legacy signing path, directly or through a
-proxy. Same UID, private directories, `0600`, a public key, a pathname or a
-bare executable hash do not establish that boundary. If the platform mechanism
-cannot meet it, this profile remains disabled; do not replace it with a
-requester-writable file store.
+The first implementation is macOS/HVF only. Fresh commissioning is mandatory
+after **every** holder restart, even a clean shutdown. Operator approval never
+reauthorizes an old epoch's writable resource, clears quarantine, restores a
+session or overrides a failed custody check. There is no unattended recovery
+or commissioning fallback.
 
 One installed grant contains:
 
@@ -149,55 +215,183 @@ eligible-principal list or grant contents that are used to authorize itself.
 The native confirmation must identify the operation and exact binding being
 installed. Enrollment alone never creates a grant.
 
-### Authoritative state and restart policy
+### Authenticated epoch state: evaluated candidate, not a complete model
 
-For the first mode, permit one commissioned builder operation per holder
-incarnation. Store policy revision, issuer identity, grant, reservation,
-revocation and resource/terminal decisions in one bounded native Keychain
-state item, separate from the issuer-key item. The state item is at most
-64 KiB and has the same restricted application ACL. The holder serializes
-mutations, increments its state revision and replaces the whole item with one
-`SecItemUpdate`; a readback must match before it acknowledges. No distributed
-transaction across separate grant/revocation files is assumed.
+The concrete volatile-authority candidate below avoids trusting native-item
+mutability for policy/replay integrity. It is **not selected as a complete
+restart model or sufficient to enable a positive factory**: the independent
+issuer and resource boundaries below are missing. It presupposes the
+host-global exclusive holder lease, acquired before authority access and held
+through retirement. Its singleton property excludes competing holders; it
+authenticates neither callers nor stored state.
 
-At each holder start, generate a fresh unpredictable issuance epoch in memory.
-**Every previously installed grant and session is invalid after any restart.**
-New commissioning is required; neither a record readback nor an old signed
-grant restores authority. An existing record can preserve refusal evidence but
-cannot reactivate the old epoch. A second holder must not share an active
-operation; exclusive startup and one holder per commissioned namespace are
-part of the native qualification, not a best-effort process-name check.
+Permit one commissioned operation per holder incarnation. Before commissioning,
+generate an unpredictable 256-bit epoch and independent 256-bit HMAC-SHA-256
+key with the OS CSPRNG. Keep both, the full current state and its high-water
+revision solely in protected holder memory; never export, persist, inherit or
+derive the MAC key from the readable record or issuer. This ephemeral
+symmetric integrity secret is not a new enrolled or signing identity. Memory
+isolation and verified holder bootstrap are prerequisites, not consequences
+of using HMAC.
 
-All writable resources of that operation live in the fresh epoch's managed
-namespace and are registered before any child effect. Reuse from a prior epoch
-refuses even if its record is absent or appears terminal. Restart therefore
-does not depend on reconstructing which pre-crash write reached disk. A new
-operation uses newly created writable images, with held `create_new` custody
-and distinct actual file identities; it cannot rename an old image into the
-new namespace. Read-only published inputs remain separately authenticated.
-This intentionally gives up cross-restart writable-store cache reuse in the
-first mode; it does not introduce per-worktree builder VMs.
+Use one at-most-64-KiB canonical typed record containing format/domain, epoch,
+independently pinned issuer identity, policy revision, distinct grant and
+operation IDs, grant, reservation, both role-birth consumptions, revocation,
+resource identities, quarantine and terminal decisions, and state revision.
+The MAC covers the domain-separated complete encoding and its length; reject
+noncanonical encodings, unknown fields, duplicates, overflow and oversize.
+The persisted record, including a Keychain item if used, is attacker-mutable
+evidence, never the source from which active authority is reconstructed.
 
-The supported rollback adversary is an untrusted owner/frontend that can alter
-its own files, submit old protocol records or restart/disconnect, but cannot
-modify the native-custody items or the trusted OS. It is not a defense against
-an administrator restoring the OS/keychain from backup. Within one holder
-incarnation, reject any revision below the in-memory high-water state and any
-native readback mismatch. After restart, the fresh volatile epoch invalidates
-all old positive authority regardless of the restored record. Missing/corrupt
-state never clears resource refusal. Stronger host-administrator antirollback
-would need a separate hardware/remote freshness decision and is not claimed.
+Serialize every transition in the holder. Validate it against the retained
+state, irreversibly consume/revoke/quarantine in memory, advance the checked
+revision, authenticate and persist the complete replacement, then require
+exact-byte readback before acknowledging or releasing its corresponding
+effect. Retain the expected record bytes as well as the high-water revision:
+an old record at the same revision cannot substitute another state. Each
+authority transition checks the retained current head; an old signature or a
+successful item lookup never suffices. Any missing, changed, invalid-MAC,
+wrong-epoch or stale record, or failed write/readback, latches refusal for
+further positive effects in that incarnation. Do not reload, decrement,
+retry an uncertain birth, or roll back revocation. Preserve only existing
+original-custody stop/accounting obligations.
 
-Grant records and operation records have different identifiers even though
-their authoritative transition is in that one item. Signed grant bytes alone
-do not prove currency or non-consumption. Reservation, birth authorization,
-revocation and terminal replacement each require native update plus readback
-before their corresponding acknowledgement or effect.
+An external write after readback cannot create authority because only retained
+state authorizes effects. Readback is not proof that a mutable native item
+cannot later be deleted or proof of durable quarantine after a crash. Native
+item update alone supplies no claimed filesystem synchronization guarantee.
+The durable reservation/birth/terminal rules elsewhere in this packet remain
+requirements; this algorithm does not certify a persistence implementation.
 
-Replacing a grant first durably revokes its predecessor. It cannot authorize
-a second launch for the predecessor's operation, clear resource quarantine or
-extend an active invocation. Replacement after uncertain birth requires a
-distinct, independently authorized operation with disjoint permitted resources.
+Every restart destroys the old epoch/MAC key and begins with no active grant,
+session, reconnect right or admissible writable resource. Never recover those
+from disk, even from a valid issuer signature or apparently terminal record.
+Fresh independent commissioning creates only a new operation with new
+resources. Absent/corrupt/restored records cannot mean "unused" or "safe".
+Loss of the quarantine ledger must therefore be harmless to exclusion:
+**all prior-epoch writable resources remain forever inadmissible**, including
+ones whose existence or terminal state cannot be reconstructed. This gives
+up cross-restart writable-store cache reuse, not the existing one-use,
+revocation or absorbing-quarantine rules. It adds no owner-death containment.
+
+Replacing a grant first commits revocation of its predecessor under this
+transition rule. It cannot reset either consumed birth, clear quarantine or
+extend an invocation. After uncertain birth, the one-operation incarnation
+cannot commission a replacement; a new incarnation still cannot use any old
+writable resource. Only the original live owner can supply the compound
+completion evidence for a terminal transition; an ACK is not retirement.
+
+### Resource interlocks and the remaining design decision
+
+Epoch authentication prevents forged policy and rollback only while the
+holder's memory is protected. It does not prevent resource reuse. Before any
+positive path, one independently enforced custody boundary must cover:
+
+- Creation: actual fresh writable storage, with no prior writable contents or
+  aliases; register its actual held identity and operation before any child
+  effect. `create_new`, a new inode or a random directory name alone is not
+  protection against a same-UID writer.
+- Consumption and mutation: every attach, open/reopen, writable descriptor or
+  mapping, clone/copy/restore and child handoff must be mediated by that
+  boundary. Bind actual objects, not supplied filenames. Deny external direct
+  writes and copied old stores, not just a second cooperative provider call.
+- Names and lifetime: rename, hardlink, unlink, replacement, truncation and
+  deletion cannot escape quarantine or make a held object newly admissible.
+  No alternate name, VM name, volume or lost record resets its provenance.
+- Restart and retirement: without recovering any old grant or negative ledger,
+  admit only resources freshly created inside the new protected boundary.
+  Old objects, including still-writing orphaned objects, stay inadmissible
+  through every attach, cleanup and cache path. Terminal retirement requires
+  original-owner compound evidence and durable commit, never marker deletion.
+
+No such writable-resource interlock is established by the current source or
+the synthetic Keychain tests. A sandbox on the verified owner alone does not
+restrict an arbitrary unsandboxed same-UID frontend. A held descriptor or
+advisory lock does not deny that frontend direct access to named writable
+images. Fresh commissioning plus HMAC therefore cannot presently meet the
+cross-restart quarantine contract; do not adopt it as a complete solution.
+
+### Alternative: mandatory role confinement on a trusted host
+
+A concrete alternative OS boundary is macOS kernel Seatbelt enforcement:
+install a fixed deny-default profile with the public `sandbox_init` entry
+point before untrusted parsing in every untrusted frontend, owner and supporting
+child role. The parameterized SPI is not selected: it was not declared by the
+probe's public SDK header. The candidate uses a fixed trusted template, with
+bounded validation/escaping and trusted canonicalization of bootstrap-derived
+paths; the request cannot supply profile text or permission-bearing paths.
+The probe checked a character allowlist and received canonical paths from its
+trusted parent; it did not prove production path canonicalization or coverage.
+Installation failure refuses before authority access. Verified
+bootstrap controls launch/loading, installs the role profile and retains the
+exact process lifetime; the holder admits only those bootstrap-bound
+processes. Matching a signed executable that somebody launched unconfined
+cannot satisfy that admission rule. Child inheritance and the fixed exec
+allowlist must prevent leaving the profile; arbitrary helper/proxy execution,
+task/debug access and inherited authority-bearing aliases must be excluded.
+This names a proposed OS boundary, not an existing or qualified profile.
+
+Under that model, a provider-only ordinary-file journal and expected-issuer
+pin namespace can obtain integrity from kernel denial of access by all
+attacker roles, not from mode bits. The same profiles must deny direct issuer
+file access, Keychain/securityd mutation routes and legacy signing proxies.
+Resource profiles must allow only each invocation's admitted objects and deny
+old image opens, rename/link/delete/replacement and arbitrary descriptor
+handoff; every trusted lifecycle path must consult the provider's journal
+before attach, reuse or cleanup. Serialized journal replacement requires
+file synchronization, atomic replacement and parent-directory synchronization
+before ACK/effect; absent/corrupt/uncertain state refuses, never initializes a
+fresh empty ledger. No owner death or missing journal clears quarantine.
+The issuer could remain software under this different isolation model; this
+does not authorize native import or establish its independent expected pin.
+
+This alternative requires an explicit policy choice: enumerate **all**
+untrusted frontend/owner/child/proxy roles and make their preparse confinement
+mandatory, leaving unrelated unconfined host software trusted. Arbitrary code
+inside those confined roles remains adversarial, not cooperative. If an
+attacker-controlled unconfined frontend must remain supported, Seatbelt on
+other roles cannot protect same-UID named provider files from it. Keeping
+that file-based model would require a distinct protected principal/provisioning
+boundary; otherwise return a different demonstrated custody mechanism for
+review. Neither is established here. No complete approved profile, bootstrap
+coverage or resource/journal mediation is established either. Do not treat
+the cold-owner trusted-host sentence as approval of that policy choice or as
+evidence that confinement already exists.
+
+**Recommendation: keep the positive profile disabled. Retain the epoch
+algorithm only as an incomplete candidate and resolve these authority
+decisions before implementing a positive path:**
+
+1. Decide whether all attacker roles are mandatorily confined under the
+   trusted-host model above, or an attacker-controlled unconfined frontend
+   remains in scope. In the former case approve the exact role profiles,
+   bootstrap and complete mediation; in the latter identify a protected
+   principal/provisioning boundary rather than treating file permissions as one.
+2. Identify the independently recorded expected host public identity and an
+   existing protected path delivering it to the verified holder.
+3. For native-item custody, decide whether import, software-copy retirement,
+   reader adaptation and ACL-override protection are feasible and authorized.
+   For confined software custody, identify the designated retained provider
+   copy and prove that all attacker roles lack direct/proxy access. A public-key
+   comparison alone is not extraction resistance under either option.
+4. Identify an existing enforced resource boundary covering every path above
+   and, for the epoch candidate, prove old-epoch exclusion without a surviving
+   negative ledger. The persistent-journal alternative instead refuses the
+   affected managed namespace on lost/corrupt/uncertain journal state; it
+   cannot rebuild an empty ledger or infer retirement. Without one of those
+   complete boundaries, the stated threat model and no-new-privilege/service
+   constraints do not yet have a viable positive mechanism.
+
+An alternative persistent native-authority model is reviewable only with an
+actual existing entitled role/provisioning path that denies unauthorized
+read, update, delete, replacement and ACL override, independently protects the
+expected issuer pin, and enforces resource quarantine across restart. An
+assumed access-group entitlement or stronger state API is not that path.
+Introducing credentials, services or privileges, narrowing the same-UID
+adversary, allowing old-resource reuse, or weakening absorbing quarantine
+requires a new explicit scope/authority decision; none is selected here.
+Operational commissioning remains separately gated even if those design
+decisions are later resolved.
 
 ## Closed provider operations
 
@@ -270,10 +464,13 @@ possession signature as including an audit token it does not contain.
 The credential operation itself authenticates the same sender/transcript
 against the installed grant; it cannot sign an arbitrary forwarded challenge.
 
-Mach send rights may be transferred, but a forwarded message has the
-forwarder's kernel audit trailer and therefore fails the retained sender
-binding. Reconnect authenticates again with a fresh challenge; it can observe
-or stop the original retained operation, never create another birth permit.
+Mach send rights may be transferred, but a message sent by a different,
+unauthorized process fails the retained immediate-sender binding. An authorized
+process relaying attacker-controlled data does not fail merely because a trailer
+exists: preventing that proxy path is a separate trusted-code, authority and
+confinement obligation. Reconnect authenticates again with a fresh challenge;
+it can observe or stop the original retained operation, never create another
+birth permit.
 Unexpected port/descriptor transfers and out-of-line payloads refuse. Verify
 these properties on the supported macOS release, including exec/PID-reuse and
 authorized-proxy races, before enabling the channel.
@@ -314,6 +511,36 @@ signing payloads and retains protected grant/audit state. Neither process sends
 private keys to the other. No request to run a program is delegated to the
 signer helper.
 
+### Kernel-held single-holder lease
+
+The first-mode proposal permits one delegated builder holder per host, not one
+independent holder per caller-selected tenant or path. Before reading issuer
+material, reading/modifying authority state or commissioning, acquire a
+non-listening IPv4 TCP socket bound to `0.0.0.0:65056`. This tuple is a proposed
+fixed implementation constant, not an enabled service or a caller option.
+Set and verify `SO_REUSEADDR=0` and `SO_REUSEPORT=0`; do not listen, accept,
+connect or send data. This is a kernel exclusion lease, not an RPC endpoint.
+
+The native profile must approve that exact tuple. Any bind failure refuses,
+including collision with an unrelated program. Never select another address,
+family or port, terminate an occupant, unlink a file, or infer that a PID is
+safe to replace. Filesystem and Mach-bootstrap namespace substitutions do not
+change this host-global tuple. Privileged modification of the host's kernel
+network domain remains outside the trusted-host threat model.
+
+Keep the original socket description until the holder has stopped serving
+authority and its retained session has reached terminal or absorbing
+quarantine. Set close-on-exec before other threads or children can run; never
+export this descriptor or use a public descriptor number as authority.
+Inherited aliases may keep the port busy after a process exits: that is
+fail-closed unavailability, not permission to force-release it. A new holder
+must itself acquire the same tuple and then start a new issuance epoch.
+
+This lease supplies only single-holder exclusion. It supplies neither caller
+authentication nor journal integrity, and cannot replace original VMM/endpoint
+custody. The actual production tuple, socket options, dual-stack interactions
+and inherited-description behavior need native qualification.
+
 ## Original-owner custody and local inputs
 
 Before the first child effect:
@@ -331,36 +558,61 @@ Before the first child effect:
    original HVF child through a distinct builder-only validator. Do not weaken
    `require_cold_config` or erase the native owner behind generic `VmmDriver`.
 
-### Sealed consumed-input object
+### Immutable consumed-input object
 
 `FrozenInputs` alone is not immutable and is not the consumption capability.
-The trusted commissioning preparation uses the existing staging/packing rules
-to make the exact job/input transport in a private temporary file. For this
-first mode, reject external symlinks, special files and any source filtering
-that changes the approved tree; do not widen the source allowlist.
+**Reject the named-file/unlink construction:** another same-UID process can
+open a writer before unlink and retain it after the preparer closes its own
+writers. Read-only receiver descriptors do not revoke that alias.
 
-After packing, flush and synchronize the complete transport. Open a separate
-read-only descriptor, close every writable description, unlink the temporary
-name and retain only the read-only description plus its measured size/digest
-and canonical tree/job manifest. Finish this before spawning any child that
-could inherit a writable alias. The provider independently hashes the actual
-read-only object against the commissioned measurements. A descriptor number
-or a claim that a path was frozen is not verification.
+The replacement candidate is an anonymous, read-only Mach memory-entry object.
+Commissioning still uses the existing canonical staging/packing rules and
+rejects external symlinks, special files or filtering that changes the approved
+tree. Before admission, the holder copies the bounded raw transport into its
+own private anonymous VM allocation. This is a fixed copy/hash operation, not
+a Nix/filesystem/archive parser or a general memory service in the key holder.
+The source may be mutable; its pathname or sender's “read-only” claim is not
+authority. Only the resulting frozen object can be admitted.
 
-The proposed internal `AdmittedBuilderTransport` owns this object and its
-read leases; it has no public path-based constructor. The original VMM receives
-that same object through the fixed bootstrap descriptor allowlist and attaches
-it read-only. It does not rebuild the input disk from `FrozenInputs::path()`
-after admission. No writable copy is released to the owner, endpoint or guest.
-Any transport regeneration requires new measurement/admission.
+The custodian sets `VM_INHERIT_NONE` before filling the allocation and never
+creates or exports a writable memory-entry right. Logical length and page
+rounding are overflow-checked against an explicit finite input-media budget
+before allocation; padding is initialized and never exposes host memory.
+After the bounded copy completes, reduce the original mapping's maximum
+protection to `VM_PROT_READ`, create only a `VM_PROT_READ` memory-entry right,
+and unmap the original writer. No child, mapping or right may retain writable
+access. Native hardened-runtime/task-access restrictions must exclude
+untrusted debugger/task-port access to this custodian.
 
-This selects macOS anonymous, unlinked read-only file custody, not Linux
-`memfd` sealing. Native qualification must prove that received handles cannot
-be reopened with write access through `/dev/fd`, resurrected by a pathname or
-modified through an inherited alias. If those checks fail, stop for a different
-custody mechanism; before/after rehash alone is not an acceptable substitute.
-The separately admitted kernel/runtime and local-built health files retain
-their own fixed-role verified read handles.
+The commissioned media digest is computed from the final logical bytes.
+The trusted keyless commissioning verifier derives the tree/job manifest from
+that frozen object and checks the independently selected source and job
+identities; before/after hashes of a different staging pathname are not enough.
+The holder independently hashes the same frozen object against the exact
+operator-authorized media measurement. Grant confirmation precedes admission
+and cannot silently replace those measurements with a caller's new hashes.
+
+The proposed internal `AdmittedBuilderTransport` owns the exact memory-entry
+send right, logical size, digest and retained read leases. It has no public
+path-based constructor. The holder retains its original right and supplies
+that same object through the authenticated original-VMM bootstrap, rather
+than accepting an owner-supplied replacement object. Only fixed startup
+transfers admit this right; ordinary control messages still reject unexpected
+port/descriptor transfers.
+
+The HVF block-input adapter must read directly from the read-only mapping,
+respect logical length and reject writes. Do not convert it back to a named
+file, accept a writable mapping, rebuild it from `FrozenInputs::path()`, or
+accept a private writable copy as the original object. Any regenerated
+transport requires new measurement and admission.
+
+This is not an assertion that the current path/FD-based disk adapter consumes
+Mach memory entries. That adapter and the exact authenticated bootstrap are
+required implementation work. Native qualification must test cross-process
+transfer, write/derivation attempts, preparation-time aliases, fork/debug
+access, whole-media bounds and actual VMM reads. A one-page primitive pass
+does not qualify that composition. The separately admitted kernel/runtime
+and local-built health files retain their own fixed-role verified custody.
 
 Only the approved canonical Flake job is accepted. Diagnostic mode also binds
 the expected revision and existing actual-graph/input-observation checks.
