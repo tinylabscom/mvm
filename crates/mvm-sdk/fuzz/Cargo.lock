@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-agentd"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-compiler"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "flate2",
  "globset",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -729,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-host-services"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "mvm-agentd",
  "mvm-core",
@@ -777,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-macho-sign"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "plist",
  "sha1",
@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "base64",
  "flate2",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-setpriv"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "libc",
 ]

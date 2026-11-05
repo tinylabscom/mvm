@@ -65,6 +65,8 @@ fn try_mvm_hostd_egress_tcp_connect(ctx: ProbeContext) -> Result<u32, u32> {
     // treated as a `*mut sock_common` for the fields we read.
     let sk: *mut sock_common = ctx.arg(0).ok_or(1u32)?;
 
+    // SAFETY: `sk` is the kernel's own argument to tcp_connect; the read goes through
+    // bpf_probe_read_kernel, which faults safely rather than dereferencing directly.
     let family: u16 = unsafe { bpf_probe_read_kernel(&(*sk).skc_family) }.map_err(|_| 1u32)?;
 
     if family != AF_INET {
@@ -89,5 +91,7 @@ fn try_mvm_hostd_egress_tcp_connect(ctx: ProbeContext) -> Result<u32, u32> {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
+    // SAFETY: the verifier rejects any program that reaches a panic, so this is
+    // unreachable in a loaded program.
     unsafe { core::hint::unreachable_unchecked() }
 }

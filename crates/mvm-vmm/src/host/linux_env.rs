@@ -104,6 +104,7 @@ fn auto_start_allowed() -> bool {
 
 fn is_stdin_tty() -> bool {
     use std::os::unix::io::AsRawFd as _;
+    // SAFETY: isatty takes an integer descriptor and touches no memory.
     unsafe { libc::isatty(std::io::stdin().as_raw_fd()) == 1 }
 }
 

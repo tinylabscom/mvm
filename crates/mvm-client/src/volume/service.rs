@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use mvm_core::crypto::policy::validate_mount_path;
 use mvm_core::naming::validate_vm_name;
+use mvm_core::util::atomic_io::FileLock;
 use mvm_runtime::image::RuntimeVolume;
 use mvm_runtime::vm::volume_registry::{
     HostSnapshotSource, LocalVolumeEncryption, LocalVolumeEntry, LocalVolumeKind, LocalVolumeState,
@@ -19,6 +20,7 @@ use super::dto::{
 };
 use super::lease::{self, AttachmentLeaseCatalog, AttachmentLeaseRecord, LaunchLease, LeaseIntent};
 use super::lifecycle;
+use super::ownership::{self, CreatedRegistration};
 
 /// Verifies that a host path lives on encrypted backing storage.
 ///
@@ -96,6 +98,11 @@ impl LaunchPreparation {
     /// owner's stop path releases them later.
     pub fn commit(&mut self) {
         self.lease.commit();
+    }
+
+    /// Catalog keys of the leases this launch took.
+    pub fn lease_keys(&self) -> &[String] {
+        self.lease.keys()
     }
 
     /// Move original image custody out for the one actual backend start.
@@ -248,6 +255,7 @@ impl LocalVolumeService {
                 source_path: source_dir.to_string_lossy().into_owned(),
                 fingerprint: fingerprint.to_string(),
             }),
+            &_lock,
         )
     }
 
@@ -288,6 +296,7 @@ impl LocalVolumeService {
             .fingerprint = fingerprint.to_string();
         let refreshed = entry.clone();
         registry.save(owner)?;
+        ownership::advance_epoch(owner, &_lock)?;
         Ok(attachment_record(owner, &refreshed))
     }
 
@@ -369,7 +378,41 @@ impl VolumeService for LocalVolumeService {
     }
 
     fn prepare_attachment(&self, request: &AttachmentRequest) -> Result<AttachmentRecord> {
+        let lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        self.prepare_attachment_locked(request, &lock)
+    }
+
+    fn detach(&self, owner: &str, guest_path: &str) -> Result<AttachmentRecord> {
+        let lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        detach_locked(owner, guest_path, &lock)
+    }
+
+    fn list_attachments(&self, owner: &str) -> Result<Vec<AttachmentRecord>> {
+        validate_vm_name(owner).with_context(|| format!("invalid VM name: {owner:?}"))?;
+        let registry = VolumeMountRegistry::load(owner)?;
+        Ok(registry
+            .iter()
+            .map(|(_, entry)| attachment_record(owner, entry))
+            .collect())
+    }
+
+    fn acquire_launch_lease(&self, request: &LaunchLeaseRequest) -> Result<LaunchPreparation> {
         let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        self.acquire_launch_lease_locked(request)
+    }
+
+    fn release_owner_leases(&self, owner: &str) -> Result<ReleaseOutcome> {
+        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        lease::release_keys_for_owner(owner, None)
+    }
+}
+
+impl LocalVolumeService {
+    fn prepare_attachment_locked(
+        &self,
+        request: &AttachmentRequest,
+        lock: &FileLock,
+    ) -> Result<AttachmentRecord> {
         let catalog = lifecycle::recover_local_volume_catalog()?;
         let entry = catalog
             .get(request.volume.as_str())
@@ -421,33 +464,14 @@ impl VolumeService for LocalVolumeService {
             entry.kind.clone(),
             VolumeMountSource::ManagedCatalog,
             None,
+            lock,
         )
     }
 
-    fn detach(&self, owner: &str, guest_path: &str) -> Result<AttachmentRecord> {
-        validate_vm_name(owner).with_context(|| format!("invalid VM name: {owner:?}"))?;
-        let mut registry = VolumeMountRegistry::load(owner)?;
-        let dropped = registry
-            .remove(guest_path)
-            .with_context(|| format!("VM {owner:?} has no volume mount at {guest_path:?}"))?;
-        registry.save(owner)?;
-        mvm_core::audit_emit!(VmVolumeRemove, vm: owner, "volume={} guest={}" ,
-            dropped.volume_name, dropped.guest_path
-        );
-        Ok(attachment_record(owner, &dropped))
-    }
-
-    fn list_attachments(&self, owner: &str) -> Result<Vec<AttachmentRecord>> {
-        validate_vm_name(owner).with_context(|| format!("invalid VM name: {owner:?}"))?;
-        let registry = VolumeMountRegistry::load(owner)?;
-        Ok(registry
-            .iter()
-            .map(|(_, entry)| attachment_record(owner, entry))
-            .collect())
-    }
-
-    fn acquire_launch_lease(&self, request: &LaunchLeaseRequest) -> Result<LaunchPreparation> {
-        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
+    fn acquire_launch_lease_locked(
+        &self,
+        request: &LaunchLeaseRequest,
+    ) -> Result<LaunchPreparation> {
         let registry = VolumeMountRegistry::load(&request.owner)?;
         if registry.is_empty() {
             enforce_profile_access(&request.explicit, request.profile)?;
@@ -597,11 +621,6 @@ impl VolumeService for LocalVolumeService {
             }
         }
     }
-
-    fn release_owner_leases(&self, owner: &str) -> Result<ReleaseOutcome> {
-        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
-        lease::release_keys_for_owner(owner, None)
-    }
 }
 
 /// Refuse any writable volume in the launch when the admitted profile does
@@ -645,6 +664,7 @@ fn register_attachment(
     kind: LocalVolumeKind,
     source: VolumeMountSource,
     host_snapshot: Option<HostSnapshotSource>,
+    lock: &FileLock,
 ) -> Result<AttachmentRecord> {
     // Same policy check the guest agent runs; canonicalizes the guest path.
     let canonical_guest = validate_mount_path(&request.guest_path)
@@ -662,10 +682,169 @@ fn register_attachment(
     };
     registry.add(entry.clone())?;
     registry.save(&request.owner)?;
+    ownership::advance_epoch(&request.owner, lock)?;
     mvm_core::audit_emit!(VmVolumeAdd, vm: &request.owner, "volume={} host={} guest={} ro={}" ,
         entry.volume_name, entry.host_path, entry.guest_path, entry.read_only
     );
     Ok(attachment_record(&request.owner, &entry))
+}
+
+fn detach_locked(owner: &str, guest_path: &str, lock: &FileLock) -> Result<AttachmentRecord> {
+    validate_vm_name(owner).with_context(|| format!("invalid VM name: {owner:?}"))?;
+    let mut registry = VolumeMountRegistry::load(owner)?;
+    let dropped = registry
+        .remove(guest_path)
+        .with_context(|| format!("VM {owner:?} has no volume mount at {guest_path:?}"))?;
+    registry.save(owner)?;
+    ownership::advance_epoch(owner, lock)?;
+    mvm_core::audit_emit!(VmVolumeRemove, vm: owner, "volume={} guest={}" ,
+        dropped.volume_name, dropped.guest_path
+    );
+    Ok(attachment_record(owner, &dropped))
+}
+
+/// What settling a transient attempt's receipt did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionRelease {
+    /// Everything the attempt created is gone.
+    Released,
+    /// Cleanup could not prove the resources are still the attempt's own, so
+    /// it left them in place.
+    Retained(String),
+}
+
+impl LocalVolumeService {
+    /// Register the volumes a transient attempt declared, all under one hold
+    /// of the lifecycle lock, and record exactly the registrations it created
+    /// in the attempt's receipt. A refusal part-way, or a receipt that cannot
+    /// be written, unwinds the registrations made so far before returning.
+    pub(crate) fn register_session_volumes(
+        &self,
+        owner: &str,
+        requests: &[AttachmentRequest],
+        root: &Path,
+    ) -> Result<()> {
+        let lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        let mut created = Vec::with_capacity(requests.len());
+        let outcome = requests
+            .iter()
+            .try_for_each(|request| {
+                let record = self.prepare_attachment_locked(request, &lock)?;
+                created.push(CreatedRegistration {
+                    volume: record.volume,
+                    guest_path: record.guest_path,
+                });
+                Ok(())
+            })
+            .and_then(|()| {
+                let epoch = ownership::read_epoch(owner)?;
+                let registered = created.clone();
+                ownership::update_receipt(root, owner, &lock, |receipt| {
+                    receipt.epoch = epoch;
+                    receipt.created = registered;
+                })
+            });
+        if let Err(error) = outcome {
+            for registration in created.iter().rev() {
+                if let Err(unwind) = detach_locked(owner, &registration.guest_path, &lock) {
+                    tracing::warn!(error = %unwind, machine = owner, "unwinding a refused volume batch failed");
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Whether `owner` holds any registration or lease at all.
+    fn holds_volume_resources(&self, owner: &str) -> Result<bool> {
+        let registered = !VolumeMountRegistry::load(owner)?.is_empty();
+        let leased = AttachmentLeaseCatalog::load()?
+            .leases
+            .values()
+            .any(|lease| lease.vm_name == owner);
+        Ok(registered || leased)
+    }
+
+    /// Release only the leases a transient attempt recorded. With no receipt
+    /// there is no proof which leases are its own, so any lease the owner
+    /// holds is left in place.
+    pub(crate) fn release_session_leases(
+        &self,
+        owner: &str,
+        root: &Path,
+    ) -> Result<SessionRelease> {
+        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        match ownership::load_receipt(root, owner) {
+            Ok(Some(receipt)) => {
+                lease::release_keys_for_owner(owner, Some(&receipt.lease_keys))?;
+                Ok(SessionRelease::Released)
+            }
+            Ok(None) if !self.holds_volume_resources(owner)? => Ok(SessionRelease::Released),
+            Ok(None) => Ok(SessionRelease::Retained("no ownership receipt".into())),
+            Err(error) => Ok(SessionRelease::Retained(format!(
+                "ownership receipt unreadable: {error:#}"
+            ))),
+        }
+    }
+
+    /// Undo a transient attempt using its receipt, and only its receipt.
+    ///
+    /// A missing or unreadable receipt, or registrations changed since the
+    /// attempt wrote it, retain everything: the resources may no longer be the
+    /// attempt's own, and a wrong guess destroys someone else's data.
+    pub(crate) fn release_session(&self, owner: &str, root: &Path) -> Result<SessionRelease> {
+        let lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        let sidecar = crate::secret::refs::sidecar_path(root, owner)?;
+        let receipt = match ownership::load_receipt(root, owner) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => {
+                let holds = self.holds_volume_resources(owner)? || sidecar.exists();
+                return Ok(if holds {
+                    SessionRelease::Retained("no ownership receipt".into())
+                } else {
+                    SessionRelease::Released
+                });
+            }
+            Err(error) => {
+                return Ok(SessionRelease::Retained(format!(
+                    "ownership receipt unreadable: {error:#}"
+                )));
+            }
+        };
+        match receipt.matches_current_epoch(owner) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(SessionRelease::Retained(
+                    "volume registrations changed since launch".into(),
+                ));
+            }
+            Err(error) => {
+                return Ok(SessionRelease::Retained(format!(
+                    "registration epoch unreadable: {error:#}"
+                )));
+            }
+        }
+        let current = ownership::file_digest(&sidecar)?;
+        if current != receipt.secret_refs_sha256 {
+            return Ok(SessionRelease::Retained(
+                "secret references changed since launch".into(),
+            ));
+        }
+        let registry = VolumeMountRegistry::load(owner)?;
+        for registration in &receipt.created {
+            if registry
+                .mounts
+                .get(&registration.guest_path)
+                .is_some_and(|entry| entry.volume_name == registration.volume)
+            {
+                detach_locked(owner, &registration.guest_path, &lock)?;
+            }
+        }
+        lease::release_keys_for_owner(owner, Some(&receipt.lease_keys))?;
+        crate::secret::refs::clear_refs(root, owner)?;
+        ownership::remove_receipt(root, owner, &lock)?;
+        Ok(SessionRelease::Released)
+    }
 }
 
 fn attachment_record(owner: &str, entry: &VolumeMountEntry) -> AttachmentRecord {

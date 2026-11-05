@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed same-run runtime transport. Does not sign, publish or boot."""
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -112,6 +112,14 @@ def tag_source(env, version):
 def artifact_name(source, kind):
     base = UPLOAD_PRODUCERS[kind][0]
     return f"{base}-attempt-{source.run_attempt}"
+
+
+def artifact_source(source, kind, name):
+    match = (re.fullmatch(rf"{re.escape(UPLOAD_PRODUCERS[kind][0])}-attempt-([1-9][0-9]*)", name)
+             if isinstance(name, str) else None)
+    if not match or int(match[1]) > source.run_attempt:
+        raise ValueError("runtime artifact is not from this or a prior run attempt")
+    return replace(source, run_attempt=int(match[1]))
 
 
 def payload_names(version, kind):
@@ -240,6 +248,10 @@ def upload_record(env, version, kind, hashes):
 
 
 def validate_upload_record(record, source, kind, hashes):
+    attempt = record.get("run_attempt") if isinstance(record, dict) else None
+    if type(attempt) is not int or not 0 < attempt <= source.run_attempt:
+        raise ValueError("upload context is not from this or a prior run attempt")
+    source = replace(source, run_attempt=attempt)
     expected = upload_record({
         "GITHUB_REPOSITORY": REPOSITORY,
         "GITHUB_REPOSITORY_ID": str(source.repository_id),
@@ -446,12 +458,12 @@ def download_archive(endpoint, archive, *, max_bytes=None):
         stream.close()
 
 
-def retrieve_artifact(source, transfer):
+def retrieve_artifact(source, transfer, metadata=None):
     if type(transfer.artifact_id) is not int or transfer.artifact_id <= 0:
         raise ValueError("artifact ID must be an actual positive numeric upload ID")
     endpoint = f"repos/{REPOSITORY}/actions/artifacts/{transfer.artifact_id}"
     digest = sha256(transfer.digest)
-    metadata = gh_json(endpoint)
+    metadata = gh_json(endpoint) if metadata is None else metadata
     validate_artifact(metadata, source, (transfer.artifact_id, digest, transfer.name),
                       max_bytes=transfer.max_bytes)
     with tempfile.TemporaryDirectory(prefix="mvm-runtime-transfer-") as temporary:
@@ -469,10 +481,16 @@ def retrieve_artifact(source, transfer):
 def fetch(args, source):
     if not re.fullmatch(r"[1-9][0-9]*", args.artifact_id):
         raise ValueError("artifact ID must be the actual numeric upload ID")
+    metadata = gh_json(f"repos/{REPOSITORY}/actions/artifacts/{args.artifact_id}")
+    producer = artifact_source(source, args.kind, metadata.get("name"))
     retrieve_artifact(source, ArtifactTransfer(
-        int(args.artifact_id), args.artifact_digest, artifact_name(source, args.kind),
+        int(args.artifact_id), args.artifact_digest, artifact_name(producer, args.kind),
         payload_names(source.version, args.kind) + (UPLOAD_CONTEXT,), args.out_dir,
-    ))
+    ), metadata)
+    # The name, pinned ZIP and embedded context must agree on the producer attempt.
+    record = json.loads((args.out_dir / UPLOAD_CONTEXT).read_text(), object_pairs_hook=no_duplicate_keys)
+    if record.get("run_attempt") != producer.run_attempt:
+        raise ValueError("runtime artifact name and producer attempt differ")
     return verify_directory(source, args.out_dir, args.kind)
 
 
@@ -540,33 +558,38 @@ def collect_release(source, args):
     if (type(listed.get("total_count")) is not int
             or listed["total_count"] != len(artifacts) or len(artifacts) > 100):
         raise ValueError("release artifact listing is incomplete or exceeds its bound")
-    selected_names = [f"mvmctl-{target}-attempt-{source.run_attempt}"
-                      for target in RELEASE_TARGETS]
-    selected_names.append(f"distro-packages-attempt-{source.run_attempt}")
     selected = {}
-    for name in selected_names:
-        matches = [artifact for artifact in artifacts if artifact.get("name") == name]
+    for base in [*(f"mvmctl-{target}" for target in RELEASE_TARGETS), "distro-packages"]:
+        matches = []
+        for artifact in artifacts:
+            name = artifact.get("name")
+            match = (re.fullmatch(rf"{re.escape(base)}-attempt-([1-9][0-9]*)", name)
+                     if isinstance(name, str) else None)
+            if match and int(match[1]) <= source.run_attempt:
+                matches.append((int(match[1]), artifact))
+        if not matches:
+            raise ValueError(f"missing release artifact from this or a prior attempt: {base}")
+        latest = max(attempt for attempt, _ in matches)
+        matches = [artifact for attempt, artifact in matches if attempt == latest]
         if len(matches) != 1:
-            raise ValueError(f"missing or ambiguous current-attempt release artifact: {name}")
-        selected[name] = matches[0]
+            raise ValueError(f"ambiguous release artifact: {base}-attempt-{latest}")
+        selected[base] = matches[0]
     # The publishing directory itself must also be fresh. Files from unrelated
     # artifacts, earlier attempts, validator tools and transport records never
     # enter this directory.
     args.out_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
     with tempfile.TemporaryDirectory(prefix="mvm-release-inputs-") as temporary:
         temporary = Path(temporary)
-        for index, (name, metadata) in enumerate(selected.items()):
+        for index, (base, metadata) in enumerate(selected.items()):
             target = temporary / str(index)
-            if name.startswith("mvmctl-"):
-                release_target = name.removeprefix("mvmctl-").removesuffix(
-                    f"-attempt-{source.run_attempt}"
-                )
+            if base.startswith("mvmctl-"):
+                release_target = base.removeprefix("mvmctl-")
                 archive = f"mvmctl-{release_target}.tar.gz"
                 members = (archive, archive + ".sha256")
             else:
                 members = lambda path: package_members(source.version, path)
             names = retrieve_artifact(source, ArtifactTransfer(
-                metadata["id"], metadata.get("digest", ""), name, members, target,
+                metadata["id"], metadata.get("digest", ""), metadata["name"], members, target,
                 MAX_RELEASE_TRANSFER_BYTES,
             ))
             hashes = checksum_pairs(target, names)
@@ -574,10 +597,15 @@ def collect_release(source, args):
         if not re.fullmatch(r"[1-9][0-9]*", args.candidate_id):
             raise ValueError("candidate ID is missing")
         candidate = temporary / "candidate"
+        candidate_metadata = gh_json(f"repos/{REPOSITORY}/actions/artifacts/{args.candidate_id}")
+        producer = artifact_source(source, "signed", candidate_metadata.get("name"))
         retrieve_artifact(source, ArtifactTransfer(
-            int(args.candidate_id), args.candidate_digest, artifact_name(source, "signed"),
+            int(args.candidate_id), args.candidate_digest, artifact_name(producer, "signed"),
             runtime_names(source.version) + (UPLOAD_CONTEXT,), candidate,
-        ))
+        ), candidate_metadata)
+        record = json.loads((candidate / UPLOAD_CONTEXT).read_text(), object_pairs_hook=no_duplicate_keys)
+        if record.get("run_attempt") != producer.run_attempt:
+            raise ValueError("runtime artifact name and producer attempt differ")
         if verify_directory(source, candidate, "signed") != pins:
             raise ValueError("downloaded candidate differs from the checked output pins")
         # Only the four retained files, never the validator or CI context.

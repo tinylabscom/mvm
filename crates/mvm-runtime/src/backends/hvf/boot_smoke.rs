@@ -194,6 +194,7 @@ pub fn boot_smoke() -> Result<BootProof, HvfError> {
 /// `ram` must point to at least `GUEST_RAM_SIZE` writable, page-aligned bytes
 /// with the program already loaded at offset 0.
 unsafe fn run_guest(ram: *mut u8) -> Result<BootProof, HvfError> {
+    // SAFETY: per this function's contract `ram` is valid, page-aligned guest RAM.
     unsafe {
         let rc = hv_vm_create(core::ptr::null_mut());
         if rc != HV_SUCCESS {
@@ -212,6 +213,7 @@ unsafe fn run_guest(ram: *mut u8) -> Result<BootProof, HvfError> {
 /// Must be called between `hv_vm_create` and `hv_vm_destroy`, with `ram` as in
 /// [`run_guest`].
 unsafe fn run_vcpu(ram: *mut u8) -> Result<BootProof, HvfError> {
+    // SAFETY: per this function's contract the VM is open and `ram` is the loaded guest RAM.
     unsafe {
         let flags = HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC;
         let rc = hv_vm_map(ram.cast(), 0, GUEST_RAM_SIZE, flags);

@@ -91,6 +91,7 @@ pub fn console_smoke() -> Result<ConsoleProof, HvfError> {
 /// Must run between `hv_vm_create`/`hv_vm_destroy`; `ram` is the guest RAM with
 /// the program loaded at offset 0.
 unsafe fn run_with_uart(ram: *mut u8) -> Result<ConsoleProof, HvfError> {
+    // SAFETY: per this function's contract the VM is open and `ram` is the loaded guest RAM.
     unsafe {
         let flags = HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC;
         let rc = hv_vm_map(ram.cast(), 0, GUEST_RAM_SIZE, flags);
@@ -132,6 +133,8 @@ unsafe fn drive(
     exit: *mut hv_vcpu_exit_t,
     uart: &mut Pl011,
 ) -> Result<(usize, hv_exit_reason_t), HvfError> {
+    // SAFETY: `vcpu` and `exit` are live HVF handles supplied by the caller, who holds
+    // the VM open for the duration.
     unsafe {
         let mut mmio_writes = 0usize;
         loop {

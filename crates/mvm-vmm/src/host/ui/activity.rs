@@ -342,6 +342,7 @@ fn terminal_width() -> usize {
         // SAFETY: TIOCGWINSZ only writes the `winsize` struct passed to it; a
         // non-terminal fd makes the call fail, which falls through below.
         let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        // SAFETY: `size` is a live winsize that TIOCGWINSZ writes within.
         let rc = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) };
         if rc == 0 && size.ws_col > 0 {
             return usize::from(size.ws_col);

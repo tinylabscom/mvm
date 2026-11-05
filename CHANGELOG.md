@@ -2,6 +2,64 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.27.0] — 2026-11-04
+
+### Added
+- Expose checkpoint lineage verification to SDKs
+- **crypto**: Add purpose-bound recovery possession proof
+
+### Changed
+- **scripts**: Remove the retired linux-gate VMM scripts
+- Remove local editor and agent state
+- Deny unreachable_pub in xtask, mvm-core, mvm-capture, mvm-build, mvm-cli
+- **hostd**: Delete unused LifecycleHooks, EventBus and blocking DNS audit emitters
+- **runtime**: Drop unused security re-exports kept for backward compatibility
+- **core,contract,runtime**: Return errors instead of panicking on reachable inputs
+
+### Documentation
+- **contracts**: Record the section 3 applied state at 3d17ff9fdd
+- **trail**: Note on merging near-identical gate scripts
+- **cli**: Say pack update installs an application like pack pull
+- Sync CLI reference and guides with the shipped surface
+- **cli**: Add reference rows for 41 documented-nowhere subcommands
+- **unsafe**: State the invariant at first-party unsafe sites
+
+### Fixed
+- **hvf**: Bound and validate supervisor status diagnostics
+- Refuse overrides of host-provisioned egress variables
+- **hvf**: Keep waking vCPUs until a stop lands; sample stuck supervisors in e2e
+- Centralize and protect the machine input journal
+- **hvf**: Serialize vCPU exits with destruction
+- **hvf**: Notify the cancellation driver on completion
+- Return typed errors instead of panicking on empty workloads, bare image references and unnamed persistent requests
+- **exec**: The CLI's own proxy variables are not an --env override
+- Refuse torn machine input journals
+- **hvf**: Preserve exit requests across vCPU exits
+- **docs**: Restore release conformance witnesses
+- **runtime**: Keep endpoint wait failure irreversible
+- **client**: Register transient request volumes under a durable ownership receipt
+- **agentd,vmm,hostd**: Turn reachable panic paths into typed errors
+- **cli,build,backends,capture,hostlib**: Turn reachable panic paths into typed errors
+- **release**: Reuse pinned artifacts across failed-job reruns
+
+### Other
+- Shrink mvm-hostd: consolidate fragmented modules, remove forwarding shims (#4839 slice 1)
+- **hvf**: Mark the sub-phases of the live standby fork
+- **hvf**: Say how far the supervisor got when its exit stays unconfirmed
+
+### Refactored
+- Narrow unreachable pub items in xtask, mvm-conformance, root tests and stragglers
+- **runtime**: Drop the driver::spec forwarding module
+- **hostd**: Deduplicate supervisor byte searches
+- **scripts**: One host-authority gate for the agent and builderd
+- Share one lowercase-hex encoder from mvm-contract
+
+### Testing
+- **cli**: Witness policy denial at the signed application environment boundary
+- Verify snapshot lineage and fork isolation
+- **fc**: Isolate the systemd launch fixture environment
+- **build**: Isolate last-close lock lifetime probes
+
 ## [0.26.1] — 2026-11-02
 
 Supersedes 0.26.0, which was tagged but never published.

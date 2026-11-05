@@ -118,7 +118,9 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
     })?;
     let action = reconcile_machine_spec(existing.as_ref(), &desired, args.create_flags.force)?;
     let spec = match action {
-        SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
+        SpecReconcile::Reuse => {
+            existing.context("machine spec reconciliation chose reuse without an existing spec")?
+        }
         SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
     };
     Ok((spec, action))
@@ -185,7 +187,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     let started_at = spec
         .last_started_at
         .clone()
-        .expect("mark_machine_started always stamps last_started_at");
+        .context("machine start did not stamp last_started_at")?;
     if let Err(err) = overwrite_machine_spec(&spec) {
         tracing::warn!(error = %err, machine = %spec.name, "updating machine start metadata failed (non-fatal)");
     }
@@ -193,7 +195,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         resolved_digest: spec
             .resolved_digest
             .clone()
-            .expect("mark_machine_started always stamps resolved_digest"),
+            .context("machine start did not stamp resolved_digest")?,
         started_at,
         init_commands_executed: spec.init.len(),
     };

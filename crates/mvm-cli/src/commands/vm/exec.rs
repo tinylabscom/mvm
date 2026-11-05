@@ -1350,7 +1350,7 @@ impl ReceiptInput {
             profile: args
                 .profile
                 .to_possible_value()
-                .expect("value enum")
+                .context("profile has no command-line name")?
                 .get_name()
                 .to_string(),
             network_posture: policy.posture_label(),

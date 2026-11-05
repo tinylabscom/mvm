@@ -506,6 +506,8 @@ fn spawn_tool(
         // Child: become the tool. Every step is async-signal-safe; any
         // failure ends in _exit, never a return into the forked address
         // space with two threads' locks held.
+        // SAFETY: this is the forked child; every call below is async-signal-safe and
+        // operates on descriptors this process owns. Failure ends in `_exit`.
         unsafe {
             if libc::setsid() < 0 {
                 libc::_exit(EXIT_SPAWN);

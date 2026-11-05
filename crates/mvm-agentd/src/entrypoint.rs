@@ -998,6 +998,7 @@ fn make_fd3_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedF
 
     // SAFETY: pipe returned success; both fds are valid and ours to own.
     let read = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) };
+    // SAFETY: pipe returned success; fds[1] is a valid descriptor owned by no one else.
     let write = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) };
     Ok((read, write))
 }

@@ -212,6 +212,7 @@ fn stage_file_to_disk(s: &mvm_agentd::vsock::StageFile) -> std::io::Result<()> {
 fn read_peak_rss_kib() -> Option<u64> {
     // SAFETY: getrusage only writes the provided rusage struct.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: getrusage only writes the rusage struct passed to it.
     let rc = unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
     (rc == 0 && usage.ru_maxrss > 0).then_some(usage.ru_maxrss as u64)
 }

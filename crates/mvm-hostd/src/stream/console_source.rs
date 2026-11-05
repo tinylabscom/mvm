@@ -295,10 +295,9 @@ fn poll_once(path: &Path, state: &mut FollowState, broker: &SharedBroker) -> boo
         });
     }
 
-    let open = state
-        .open
-        .as_mut()
-        .expect("populated by the stale branch above");
+    let Some(open) = state.open.as_mut() else {
+        return false;
+    };
     if len <= open.offset {
         return false;
     }

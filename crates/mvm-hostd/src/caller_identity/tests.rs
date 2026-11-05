@@ -235,6 +235,45 @@ fn loaded_and_late_key_types_have_zeroizing_drop_contracts() {
     zeroizes_on_drop::<Zeroizing<Vec<u8>>>();
 }
 
+#[test]
+fn synthetic_credential_proves_only_exact_recovery_enrollment() {
+    use mvm_core::crypto::recovery_possession::RecoveryChallenge;
+    use mvm_core::protocol::hvf_owner::{
+        RecoveryBinding, RecoveryOperation, RecoveryPhase, UntrustedRecoveryRequest,
+    };
+    let credential = CallerCredential {
+        installation: Uuid::from_u128(1),
+        key: SigningKey::from_bytes(&[17; 32]),
+    };
+    let identity = credential.identity();
+    let request = UntrustedRecoveryRequest {
+        version: 1,
+        binding: RecoveryBinding {
+            operation_id: [1; 32],
+            request_digest: [2; 32],
+            controlling_principal: identity.public_key,
+            tenant_id: "synthetic-tenant".into(),
+            owner_incarnation: [3; 32],
+            phase: RecoveryPhase::BeforeAdmission {
+                proposed_plan_digest: [4; 32],
+            },
+        },
+        sequence: std::num::NonZeroU64::new(u64::MAX).unwrap(),
+        action: RecoveryOperation::CancelStop {},
+    };
+    let challenge = RecoveryChallenge::fresh(request, identity, 100).unwrap();
+    let proof = credential.prove_recovery(&challenge, 100).unwrap();
+    assert_eq!(
+        proof.verify(&challenge, 100).unwrap().challenge(),
+        &challenge
+    );
+    let mut swapped = challenge.clone();
+    swapped.identity.installation = Uuid::from_u128(2);
+    assert!(credential.prove_recovery(&swapped, 100).is_err());
+    assert!(proof.verify(&swapped, 100).is_err());
+    assert!(credential.prove_recovery(&challenge, 130).is_err());
+}
+
 #[cfg(all(feature = "native-caller-identity", target_os = "macos"))]
 #[test]
 fn repeated_native_construction_shares_the_bounded_lane_without_store_access() {

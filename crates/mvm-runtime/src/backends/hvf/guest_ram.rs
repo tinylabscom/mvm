@@ -180,6 +180,8 @@ impl GuestRam {
         // Discard clean anonymous and private-COW pages after scrubbing the
         // resident pages. Anonymous pages will be zero-filled if faulted
         // again; private file-backed pages revert to their source file.
+        // SAFETY: the range is this mapping's own `len` bytes starting at its base;
+        // MADV_DONTNEED on it cannot touch memory the mapping does not own.
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         unsafe {
             let _ = libc::madvise(self.as_ptr().cast(), self.len, libc::MADV_DONTNEED);

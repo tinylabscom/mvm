@@ -49,6 +49,26 @@ impl CallerCredential {
     ) -> std::result::Result<RegistrationProof, DelegationError> {
         RegistrationProof::sign(&self.key, &self.identity(), challenge, now)
     }
+
+    /// Recovery possession only; no peer authentication or lifecycle authority.
+    ///
+    /// # Errors
+    /// Refuses a different enrollment, invalid claims or stale challenge.
+    pub fn prove_recovery(
+        &self,
+        challenge: &mvm_core::crypto::recovery_possession::RecoveryChallenge,
+        now: u64,
+    ) -> std::result::Result<
+        mvm_core::crypto::recovery_possession::RecoveryProof,
+        mvm_core::crypto::recovery_possession::RecoveryProofError,
+    > {
+        mvm_core::crypto::recovery_possession::RecoveryProof::sign(
+            &self.key,
+            &self.identity(),
+            challenge,
+            now,
+        )
+    }
 }
 
 /// Payload-free failures: native error text never enters diagnostics.

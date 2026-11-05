@@ -1275,8 +1275,7 @@ impl MvmClient for LocalBackend {
             // Release the stopped owner's volume-attachment leases (re-sealing
             // any just-in-time unlocked volume). Best-effort: the stop itself
             // already succeeded.
-            use crate::volume::VolumeService as _;
-            if let Err(e) = crate::volume::LocalVolumeService::new().release_owner_leases(&id.0) {
+            if let Err(e) = self.release_stopped_leases(&id.0) {
                 tracing::warn!(error = %e, machine = %id.0, "releasing volume leases after stop failed");
             }
             remove_stopped_runtime_state(&id.0)?;

@@ -206,7 +206,9 @@ fn read_os_proc_stat(pid: u32) -> Sample {
     let stime: u64 = fields[12].parse().unwrap_or(0);
     let rss_pages: u64 = fields[21].parse().unwrap_or(0);
 
+    // SAFETY: sysconf takes an integer name and touches no memory.
     let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    // SAFETY: sysconf takes an integer name and touches no memory.
     let pagesize = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
     let to_us = |jiffies: u64| jiffies.saturating_mul(1_000_000) / clk_tck;
 

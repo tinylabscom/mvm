@@ -129,12 +129,12 @@ pub(super) fn boot_transient_vm(
                 .resolved
                 .template_id
                 .as_deref()
-                .expect("snapshot_eligible only true for ImageSource::Template");
+                .context("snapshot launch without a template id")?;
             let snap = attempt
                 .resolved
                 .snap_info
                 .as_ref()
-                .expect("snapshot_eligible requires snap_info.is_some()");
+                .context("snapshot launch without snapshot info")?;
             ui::info(&format!(
                 "Restoring transient VM '{vm_name}' from template '{tmpl}' snapshot..."
             ));

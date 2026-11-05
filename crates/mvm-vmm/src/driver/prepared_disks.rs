@@ -110,6 +110,7 @@ impl SudoWritableHandoff {
         // A sudo-launched Firecracker's /proc/<pid>/fd is not ordinarily
         // readable by the invoking user. Inspect objects through the same
         // privilege boundary as the writer; never treat EACCES as success.
+        // SAFETY: geteuid has no arguments and cannot fail.
         if unsafe { libc::geteuid() } == 0 {
             self.verify_writer_descriptors_at(std::path::Path::new(&format!("/proc/{pid}/fd")))
         } else {

@@ -359,6 +359,7 @@ fn reap_or_track(
         PidClassification::LiveOwned => *dir_has_live_owner = true,
         PidClassification::Orphan => {
             if !dry_run {
+                // SAFETY: kill takes integer arguments and touches no memory.
                 unsafe {
                     libc::kill(pid, libc::SIGTERM);
                 }

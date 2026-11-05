@@ -33,6 +33,7 @@
 pub mod dto;
 mod lease;
 mod lifecycle;
+pub(crate) mod ownership;
 mod service;
 mod snapshot;
 #[cfg(test)]
@@ -49,7 +50,7 @@ pub use mvm_runtime::image::RuntimeVolume;
 pub use mvm_runtime::machine::persist::load_machine_spec;
 pub use service::{
     DenyAllHostEncryptionProbe, HostEncryptionProbe, LaunchPreparation, LocalVolumeService,
-    VolumeService, default_block_volume_root, probe_from_fn,
+    SessionRelease, VolumeService, default_block_volume_root, probe_from_fn,
 };
 
 #[cfg(test)]

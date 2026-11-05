@@ -291,6 +291,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::test_support::isolated_lock_probe;
 
     const SIZE: u64 = 16 * 1024 * 1024;
 
@@ -347,68 +348,74 @@ mod tests {
 
     #[test]
     fn a_contended_volume_lock_refuses_before_creating_the_image() {
-        let scratch = tempfile::tempdir().unwrap();
-        let image = scratch.path().join("data.img");
-        let owner =
-            acquire_sidecar_lock_within(&sidecar_lock_path(&image), LockWait::none()).unwrap();
+        isolated_lock_probe(|| {
+            let scratch = tempfile::tempdir().unwrap();
+            let image = scratch.path().join("data.img");
+            let owner =
+                acquire_sidecar_lock_within(&sidecar_lock_path(&image), LockWait::none()).unwrap();
 
-        rw(&image).expect_err("the original owner still holds the lock");
+            rw(&image).expect_err("the original owner still holds the lock");
 
-        assert!(
-            !image.try_exists().unwrap(),
-            "a refused contender must not create the owner's image"
-        );
-        drop(owner);
-        let initialized = rw(&image).expect("initialize after the owner releases");
-        validate_ext4(initialized.path()).expect("the successful initializer formats ext4");
-        assert_eq!(mode(&image), 0o600);
+            assert!(
+                !image.try_exists().unwrap(),
+                "a refused contender must not create the owner's image"
+            );
+            drop(owner);
+            let initialized = rw(&image).expect("initialize after the owner releases");
+            validate_ext4(initialized.path()).expect("the successful initializer formats ext4");
+            assert_eq!(mode(&image), 0o600);
+        });
     }
 
     #[test]
     fn a_contender_reuses_the_owners_initialized_bytes_after_release() {
         use std::io::Write as _;
 
-        let scratch = tempfile::tempdir().unwrap();
-        let image = scratch.path().join("data.img");
-        std::fs::write(&image, []).unwrap();
-        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let owner =
-            acquire_sidecar_lock_within(&sidecar_lock_path(&image), LockWait::none()).unwrap();
-        rw(&image).expect_err("contender observes an unfinished image under another lock");
+        isolated_lock_probe(|| {
+            let scratch = tempfile::tempdir().unwrap();
+            let image = scratch.path().join("data.img");
+            std::fs::write(&image, []).unwrap();
+            std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let owner =
+                acquire_sidecar_lock_within(&sidecar_lock_path(&image), LockWait::none()).unwrap();
+            rw(&image).expect_err("contender observes an unfinished image under another lock");
 
-        // The owner finishes initialization before allowing a contender to retry.
-        let backing = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&image)
-            .unwrap();
-        sparse_create_locked_image(&backing, &image, SIZE).unwrap();
-        drop(backing);
-        format_new_ext4(&image).unwrap();
-        let mut writer = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&image)
-            .unwrap();
-        writer.write_all(b"owner-written bytes").unwrap();
-        writer.sync_all().unwrap();
-        drop(writer);
-        let expected = std::fs::read(&image).unwrap();
+            // The owner finishes initialization before allowing a contender to retry.
+            let backing = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&image)
+                .unwrap();
+            sparse_create_locked_image(&backing, &image, SIZE).unwrap();
+            drop(backing);
+            format_new_ext4(&image).unwrap();
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&image)
+                .unwrap();
+            writer.write_all(b"owner-written bytes").unwrap();
+            writer.sync_all().unwrap();
+            drop(writer);
+            let expected = std::fs::read(&image).unwrap();
 
-        rw(&image).expect_err("a complete image still requires its owner's lock");
-        assert_eq!(std::fs::read(&image).unwrap(), expected);
-        let readonly =
-            ensure_persistent_volume_image_within(&image, SIZE, true, LockWait::none()).unwrap();
-        assert!(readonly._lock.is_none(), "read-only behavior is unchanged");
-        drop(readonly);
-        drop(owner);
+            rw(&image).expect_err("a complete image still requires its owner's lock");
+            assert_eq!(std::fs::read(&image).unwrap(), expected);
+            let readonly =
+                ensure_persistent_volume_image_within(&image, SIZE, true, LockWait::none())
+                    .unwrap();
+            assert!(readonly._lock.is_none(), "read-only behavior is unchanged");
+            drop(readonly);
+            drop(owner);
 
-        let _contender = rw(&image).expect("recheck current image state after acquiring the lock");
-        assert_eq!(
-            std::fs::read(&image).unwrap(),
-            expected,
-            "a former contender must not reuse an earlier needs-format decision"
-        );
-        assert_eq!(mode(&image), 0o600);
+            let _contender =
+                rw(&image).expect("recheck current image state after acquiring the lock");
+            assert_eq!(
+                std::fs::read(&image).unwrap(),
+                expected,
+                "a former contender must not reuse an earlier needs-format decision"
+            );
+            assert_eq!(mode(&image), 0o600);
+        });
     }
 
     #[test]
@@ -447,21 +454,23 @@ mod tests {
 
     #[test]
     fn an_existing_image_others_can_access_is_refused_and_left_alone() {
-        let scratch = tempfile::tempdir().unwrap();
-        let image = scratch.path().join("data.img");
-        std::fs::write(&image, b"").unwrap();
-        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let message = rw(&image).unwrap_err().to_string();
-        assert!(message.contains("chmod 600"), "{message}");
-        assert_eq!(mode(&image), 0o644, "never chmodded");
-        assert_eq!(
-            std::fs::metadata(&image).unwrap().len(),
-            0,
-            "never formatted"
-        );
+        isolated_lock_probe(|| {
+            let scratch = tempfile::tempdir().unwrap();
+            let image = scratch.path().join("data.img");
+            std::fs::write(&image, b"").unwrap();
+            std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let message = rw(&image).unwrap_err().to_string();
+            assert!(message.contains("chmod 600"), "{message}");
+            assert_eq!(mode(&image), 0o644, "never chmodded");
+            assert_eq!(
+                std::fs::metadata(&image).unwrap().len(),
+                0,
+                "never formatted"
+            );
 
-        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let _lock = rw(&image).expect("an owner-only image is admitted");
+            std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let _lock = rw(&image).expect("an owner-only image is admitted");
+        });
     }
 
     #[test]
@@ -481,23 +490,46 @@ mod tests {
     fn materialized_guard_transfers_original_resources_without_reacquisition() {
         use std::os::fd::AsRawFd;
 
-        let scratch = tempfile::tempdir().unwrap();
-        let image = scratch.path().join("data.img");
-        let held = rw(&image).unwrap();
-        let original_fd = held._lock.as_ref().unwrap().backing().as_raw_fd();
-        let (path, image) = held.into_image().unwrap();
-        assert_eq!(path, scratch.path().join("data.img"));
-        assert_eq!(image.backing().as_raw_fd(), original_fd);
-        assert!(
-            mvm_core::util::writable_image::LockedWritableImage::open(
-                &path,
-                &sidecar_lock_path(&path),
-            )
-            .is_err(),
-            "the original writer resource remains locked after transfer"
-        );
-        drop(image);
-        let _restarted = rw(&path).unwrap();
+        isolated_lock_probe(|| {
+            let scratch = tempfile::tempdir().unwrap();
+            let image = scratch.path().join("data.img");
+            let held = rw(&image).unwrap();
+            let original_fd = held._lock.as_ref().unwrap().backing().as_raw_fd();
+            let (path, image) = held.into_image().unwrap();
+            assert_eq!(path, scratch.path().join("data.img"));
+            assert_eq!(image.backing().as_raw_fd(), original_fd);
+            assert!(
+                mvm_core::util::writable_image::LockedWritableImage::open(
+                    &path,
+                    &sidecar_lock_path(&path),
+                )
+                .is_err(),
+                "the original writer resource remains locked after transfer"
+            );
+            drop(image);
+            let _restarted = rw(&path).unwrap();
+        });
+    }
+
+    #[test]
+    fn dropping_a_volume_guard_does_not_release_a_duplicate_writers_locks() {
+        isolated_lock_probe(|| {
+            let scratch = tempfile::tempdir().unwrap();
+            let path = scratch.path().join("data.img");
+            let held = rw(&path).unwrap();
+            let image = held._lock.as_ref().unwrap();
+            let backing = image.backing().try_clone().unwrap();
+            let sidecar = image.sidecar().try_clone().unwrap();
+
+            drop(held);
+            rw(&path).expect_err("a duplicate writer still owns the sidecar and backing");
+            drop(sidecar);
+            rw(&path).expect_err("the duplicate backing alone still excludes another writer");
+            validate_ext4(&path).expect("refused contenders leave the initialized image intact");
+            drop(backing);
+
+            let _restarted = rw(&path).expect("reacquire only after the last writer closes");
+        });
     }
 
     #[test]

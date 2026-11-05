@@ -63,6 +63,30 @@ fn parse_owned_run(argv: &[String]) -> Result<MachineRunArgs, clap::Error> {
 }
 
 #[test]
+fn exec_refuses_a_torn_journal_before_command_or_shell_dispatch() {
+    let _state = IsolatedMachineState::new();
+    let dir = config::machine_state_dir("torn-exec");
+    std::fs::create_dir_all(&dir).expect("machine directory");
+    let path = dir.join("input-journal.jsonl");
+    let torn = b"{\"event\":\"started\"";
+    std::fs::write(&path, torn).expect("torn journal");
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "exec", "torn-exec"]).expect("CLI");
+
+    for argv in [
+        vec!["exec", "torn-exec"],
+        vec!["exec", "torn-exec", "--", "echo", "hello"],
+    ] {
+        let args = Args {
+            action: parse(&argv).expect("machine exec"),
+        };
+        let error = run(&cli, args, &MvmConfig::default()).expect_err("torn journal");
+        assert!(format!("{error:#}").contains("unterminated"), "{error:#}");
+        assert_eq!(std::fs::read(&path).expect("unchanged"), torn);
+        assert!(!dir.join("input-artifacts").exists());
+    }
+}
+
+#[test]
 fn named_transient_with_registered_volume_explains_the_mount_is_not_attached() {
     let warning = transient_volume_warning("dirvol-test", 1);
 

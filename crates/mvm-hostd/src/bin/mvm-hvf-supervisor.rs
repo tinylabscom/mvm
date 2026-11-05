@@ -70,6 +70,7 @@ impl Drop for EmptyReplayName {
     fn drop(&mut self) {
         // SAFETY: own exclusive random name; unlink never follows a disk path.
         if let Some(name) = &self.0 {
+            // SAFETY: `name` is a NUL-terminated string that outlives the call.
             unsafe {
                 libc::shm_unlink(name.as_ptr());
             }
@@ -180,6 +181,7 @@ fn read_config_input(fd: i32, hint: Option<&std::ffi::OsStr>) -> anyhow::Result<
                 && stat.st_mode & libc::S_IFMT == 0
                 && stat.st_mode & 0o777 == 0o600
                 && stat.st_nlink == 0
+                // SAFETY: geteuid has no arguments and cannot fail.
                 && stat.st_uid == unsafe { libc::geteuid() }
                 && usize::try_from(stat.st_size)? == rounded,
             "invalid anonymous config replay descriptor"

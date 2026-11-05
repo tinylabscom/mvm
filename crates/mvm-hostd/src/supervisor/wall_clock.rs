@@ -209,14 +209,12 @@ pub struct WallClockGuard {
 /// The thread is deliberately not joined: on the firing path it never returns
 /// (the killer ends the process), and on the normal path it observes the
 /// dropped sender and exits on its own.
-#[must_use]
-pub fn arm(timer: WallClockTimer) -> WallClockGuard {
+pub fn arm(timer: WallClockTimer) -> std::io::Result<WallClockGuard> {
     let (done, finished) = channel();
     std::thread::Builder::new()
         .name("mvm-wall-clock".to_string())
-        .spawn(move || timer.run(&finished))
-        .expect("spawning the wall-clock timer thread");
-    WallClockGuard { _done: done }
+        .spawn(move || timer.run(&finished))?;
+    Ok(WallClockGuard { _done: done })
 }
 
 impl WallClockGuard {
@@ -347,12 +345,14 @@ pub fn arm_for_supervisor(
         .context("a plan with a wall-clock bound needs an audit chain to record its kill")?;
 
     let timer = WallClockTimer::for_plan(Arc::new(plan), emitter, killer)
-        .expect("a nonzero exec_secs always yields a timer");
+        .context("a nonzero exec_secs should yield a wall-clock timer")?;
     tracing::info!(
         bound_secs = timer.bound().as_secs(),
         "arming the wall-clock timer"
     );
-    Ok(Some(arm(timer)))
+    Ok(Some(
+        arm(timer).context("spawning the wall-clock timer thread")?,
+    ))
 }
 
 #[cfg(test)]
@@ -715,7 +715,7 @@ mod tests {
         let timer =
             WallClockTimer::for_plan(plan_with_bound(3600), emitter(dir.path()), Box::new(killer))
                 .expect("timer");
-        arm(timer).finished();
+        arm(timer).unwrap().finished();
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(kills.load(Ordering::SeqCst), 0);
     }

@@ -166,6 +166,8 @@ pub fn read_process_memory_snapshot(pid: u32) -> Result<ProcessMemorySnapshot> {
 #[cfg(target_os = "macos")]
 pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
     let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
+    // SAFETY: `info.as_mut_ptr()` addresses a writable rusage_info_v4 sized for
+    // RUSAGE_INFO_V4; proc_pid_rusage only writes within it.
     let rc = unsafe {
         libc::proc_pid_rusage(
             pid as libc::c_int,
@@ -177,6 +179,7 @@ pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("proc_pid_rusage(RUSAGE_INFO_V4) for pid {pid}"));
     }
+    // SAFETY: proc_pid_rusage returned 0, so it fully initialised `info`.
     let info = unsafe { info.assume_init() };
     Ok(info.ri_phys_footprint)
 }

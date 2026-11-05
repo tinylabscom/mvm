@@ -272,12 +272,12 @@ impl FirecrackerIO {
                         .blocks
                         .iter()
                         .find(|block| block.slot == slot)
-                        .expect("bound slot")
+                        .with_context(|| format!("no block device declared for slot {slot:?}"))?
                         .source
                         .clone();
-                    (source, image)
+                    Ok((source, image))
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         )?;
         if disks.is_empty() {
             return Ok(None);

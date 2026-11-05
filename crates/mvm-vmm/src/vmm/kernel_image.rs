@@ -15,17 +15,25 @@ pub struct Arm64ImageHeader {
     pub image_size: u64,
 }
 
+/// The `N` header bytes at `offset`, or the truncation error.
+fn field<const N: usize>(image: &[u8], offset: usize) -> Result<[u8; N], &'static str> {
+    image
+        .get(offset..offset + N)
+        .and_then(|b| b.try_into().ok())
+        .ok_or("image too small for arm64 header")
+}
+
 /// Parse and validate the header of an arm64 `Image`.
 pub fn parse(image: &[u8]) -> Result<Arm64ImageHeader, &'static str> {
     if image.len() < 64 {
         return Err("image too small for arm64 header");
     }
-    let magic = u32::from_le_bytes(image[56..60].try_into().unwrap());
+    let magic = u32::from_le_bytes(field(image, 56)?);
     if magic != IMAGE_MAGIC {
         return Err("not an arm64 Image (bad magic at offset 56)");
     }
-    let text_offset = u64::from_le_bytes(image[8..16].try_into().unwrap());
-    let image_size = u64::from_le_bytes(image[16..24].try_into().unwrap());
+    let text_offset = u64::from_le_bytes(field(image, 8)?);
+    let image_size = u64::from_le_bytes(field(image, 16)?);
     Ok(Arm64ImageHeader {
         text_offset,
         image_size,
@@ -56,6 +64,12 @@ mod tests {
         let mut b = header_bytes(0, 0);
         b[56] = 0;
         assert!(parse(&b).is_err());
+    }
+
+    #[test]
+    fn field_refuses_a_read_past_the_end_and_an_overflowing_offset() {
+        assert!(field::<8>(&[0u8; 8], 1).is_err());
+        assert_eq!(field::<8>(&[7u8; 8], 0), Ok([7u8; 8]));
     }
 
     #[test]

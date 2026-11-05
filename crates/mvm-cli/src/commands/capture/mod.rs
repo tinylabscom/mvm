@@ -134,10 +134,10 @@ fn run_verify(args: VerifyArgs) -> Result<()> {
     let mut result: mvm_capture::resolve::ResolutionResult =
         serde_json::from_str(&text).context("parsing canonical IR")?;
 
-    let manifest_dir = args
-        .manifest_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().expect("current directory"));
+    let manifest_dir = match args.manifest_dir.clone() {
+        Some(dir) => dir,
+        None => std::env::current_dir().context("reading the current directory")?,
+    };
     let out_dir = args
         .out_dir
         .clone()

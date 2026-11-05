@@ -577,6 +577,7 @@ pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
 }
 
 pub(crate) fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
+    // SAFETY: kill takes integer arguments and touches no memory.
     unsafe { libc::kill(pid, sig) };
 }
 

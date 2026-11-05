@@ -17,10 +17,18 @@ impl LocalBackend {
             .clone()
             .unwrap_or_else(generated_transient_name);
         self.ensure_transient_name_free(&name)?;
-        self.validate_and_record_secret_refs(&name, &request.secret_refs)?;
+        crate::volume::ownership::begin_session(&self.session_root(), &name)
+            .map_err(|e| crate::local::backend_err(format!("{e:#}")))?;
 
         let mut phase = Phase::TransientBoot;
-        let result = match self.attach_lease_and_boot(&name, &request, true).await {
+        let prepared = self
+            .register_transient_volumes(&name, &request)
+            .and_then(|()| self.record_transient_secret_refs(&name, &request.secret_refs));
+        let booted = match prepared {
+            Ok(()) => self.attach_lease_and_boot(&name, &request, true).await,
+            Err(e) => Err(e),
+        };
+        let result = match booted {
             Ok(outcome) => {
                 phase = Phase::TransientCommand;
                 match self.start_requested_command(outcome, &request) {
