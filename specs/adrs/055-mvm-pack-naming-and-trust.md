@@ -74,7 +74,39 @@ extension-pack protocol keeps its qualified name. Internal Rust modules may
 migrate incrementally from `registry_pack` to workload-pack naming after public
 behavior is stable.
 
-Pack policy is a signed, versioned payload. Effective grants are bounded by
+A pack exists so a user can run official, expected software: a publisher
+signs the exact bits together with the policy those bits are meant to run
+under, and the user runs them knowing both are what the publisher released. The
+signature authenticates who published it and that nothing changed; it says
+nothing about whether the software is safe (above). The pack's policy is the
+publisher's statement of what the software needs and what it must never do. It
+is one layer among several, and it composes with the user's and other
+policies rather than replacing them.
+
+Pack policy is a signed, versioned payload. It takes part in the single
+precedence rule set of the product requirements document (Composable), not a
+pack-specific one:
+
+- **A pack's ceilings and denies bind the user.** A signed ceiling cannot be
+  widened locally, and a deny from any layer beats an allow from any other.
+- **A pack's grants are requests.** Allowed hosts, secret bindings, shares,
+  environment names and tools take effect only when a host-owner layer (host,
+  organization, user, invocation) grants them. The effective permission is the
+  grant intersected with every layer's ceiling, the pack's and application's
+  included.
+- **Layers compose in a fixed order**: host constraints, organization policy,
+  user policy, the signed pack and application, then the invocation's flags.
+  Where layers conflict on a non-security choice the last peer wins; on a
+  security limit the narrowest wins.
+- **A pack never carries an escape hatch.** Host-directory mounts and other
+  hatches exist only in user-authored layers.
+- **Pinning a version is the user's choice.** Versions are immutable and
+  signed, so an older version stays runnable for as long as its signature
+  verifies and it is not revoked. Revocation is for a pack that must stop
+  running (compromise, a defective release), not a way to retire superseded
+  versions.
+
+Effective grants are bounded by
 the pack, application, explicit invocation, user policy and host constraints.
 Pack-authored secret bindings are requests, not authority: execution names
 the stored binding and destination and requires an explicit invocation grant.
