@@ -229,17 +229,14 @@ pub(in crate::commands) fn prepare_source_launch_pieces() -> Result<()> {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let source = mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root()
         .context("the source guest runtime needs an mvm source checkout")?;
-    if mvm_build::guest_runtime::cached_source_guest_runtime(
-        &cache_root,
-        env!("CARGO_PKG_VERSION"),
-        mvm_core::arch::GuestArch::host(),
-        &source,
-    )?
-    .is_none()
-    {
-        mvm_runtime::ui::admit_cold_build("the guest runtime for the first image run")
-            .map_err(anyhow::Error::msg)?;
-    }
+    mvm_client::launch::runtime_overlay::acquire_runtime_overlay(
+        &mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireParams {
+            cache_root: &cache_root,
+            expected_version: env!("CARGO_PKG_VERSION"),
+            arch: mvm_core::arch::GuestArch::host(),
+            source_checkout_root: &source,
+        },
+    )?;
     prewarm_pieces_from_source(
         &cache_root,
         env!("CARGO_PKG_VERSION"),
