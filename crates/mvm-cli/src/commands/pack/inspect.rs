@@ -45,9 +45,7 @@ struct VerifiedFile {
 }
 
 pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<()> {
-    let reference: PackReference = reference_arg
-        .parse()
-        .with_context(|| format!("invalid pack reference {reference_arg:?}"))?;
+    let reference: PackReference = crate::pack_registry::parse_user_reference(reference_arg)?;
     let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path())?;
     let publisher = load_publisher_policy_or_official_default(
         &mvm_core::config::registry_pack_publisher_policy_path(),
@@ -200,6 +198,39 @@ struct ApplicationInfo {
     verification_scope: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     bundle_manifest: Option<mvm_core::plan::bundle::BundleManifest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch: Option<LaunchSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arch_warning: Option<String>,
+}
+
+/// What the signed bundle says the application runs and may do, lifted from
+/// its manifest so `pack info` answers it without a second command.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+struct LaunchSummary {
+    entrypoint: Vec<String>,
+    working_dir: Option<String>,
+    vcpus: Option<u32>,
+    mem_mib: Option<u32>,
+    egress_allowed: Option<bool>,
+    allow_hosts: Vec<String>,
+}
+
+fn launch_summary(manifest: &mvm_core::plan::bundle::BundleManifest) -> Option<LaunchSummary> {
+    let environment = manifest.environment()?;
+    let resources = manifest.resources.as_ref();
+    Some(LaunchSummary {
+        entrypoint: environment.entrypoint.argv.clone(),
+        working_dir: environment.entrypoint.working_dir.clone(),
+        vcpus: resources.map(|r| r.vcpus),
+        mem_mib: resources.map(|r| r.mem_mib),
+        egress_allowed: manifest.security_posture().map(|p| p.allows_egress),
+        allow_hosts: environment
+            .policy
+            .as_ref()
+            .map(|policy| policy.allow_hosts.clone())
+            .unwrap_or_default(),
+    })
 }
 
 fn application_info(
@@ -218,6 +249,12 @@ fn application_info(
         bundle: manifest.application.bundle.clone(),
         verification_scope: "descriptor_and_bundle_archive",
         bundle_manifest: None,
+        launch: None,
+        arch_warning: crate::pack_registry::arch_mismatch_warning(
+            &manifest.reference.to_string(),
+            &manifest.application.guest_arch,
+            mvm_build::builder_vm::host_arch_tag(),
+        ),
     }
 }
 
@@ -255,6 +292,7 @@ fn inspect_application(
         application.manifest_sha256(),
         application.signer(),
     );
+    info.launch = launch_summary(&verified_archive.bundle().manifest);
     info.bundle_manifest = Some(verified_archive.bundle().manifest.clone());
     if json {
         return crate::json_out::emit_json(&info);
@@ -279,8 +317,28 @@ fn inspect_application(
         "Bundle archive SHA-256: {}",
         info.bundle.archive_sha256.as_str()
     );
-    println!("Bundle archive size: {}", info.bundle.archive_size);
+    println!("Bundle archive size: {} bytes", info.bundle.archive_size);
     println!("Bundle author key: {}", info.bundle.key_id.0);
+    if let Some(launch) = &info.launch {
+        println!("Entrypoint: {}", launch.entrypoint.join(" "));
+        if let Some(dir) = &launch.working_dir {
+            println!("Working directory: {dir}");
+        }
+        if let (Some(vcpus), Some(mem)) = (launch.vcpus, launch.mem_mib) {
+            println!("Resources: {vcpus} vCPU, {mem} MiB");
+        }
+        match launch.egress_allowed {
+            Some(true) => println!(
+                "Policy: egress allowed to [{}]",
+                launch.allow_hosts.join(", ")
+            ),
+            Some(false) => println!("Policy: no network egress"),
+            None => {}
+        }
+    }
+    if let Some(warning) = &info.arch_warning {
+        crate::ui::warn(warning);
+    }
     println!(
         "Verification covers the descriptor and archive, not extracted-file custody or launch admission."
     );
@@ -349,6 +407,27 @@ mod tests {
         assert!(info.get("files").is_none());
         assert!(info.get("policy_documents").is_none());
         assert!(info.get("launch_authorized").is_none());
+        assert!(info.get("launch").is_none());
+    }
+
+    #[test]
+    fn launch_summary_is_absent_without_an_environment_member() {
+        let manifest = mvm_core::plan::bundle::BundleManifest {
+            schema_version: 5,
+            publisher: "p".into(),
+            key_id: mvm_core::plan::bundle::KeyId("b".repeat(32)),
+            arch: "x86_64".into(),
+            kernel_version: None,
+            profile: None,
+            workload_label: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            labels: Default::default(),
+            artifacts: vec![],
+            members: vec![],
+            verity: None,
+            resources: None,
+        };
+        assert_eq!(super::launch_summary(&manifest), None);
     }
 
     #[test]
