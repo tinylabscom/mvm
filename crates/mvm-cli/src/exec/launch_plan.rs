@@ -1,4 +1,4 @@
-//! Parser for the two JSON documents mvmforge produces.
+//! Parser for compiled launch artifacts and Workload IR manifests.
 //!
 //! Unknown metadata is tolerated within supported format versions. Entrypoint
 //! kinds, environment values, and orchestration requirements are validated
@@ -6,21 +6,18 @@
 
 use super::*;
 
-/// Permissive deserialization shapes for the two JSON documents mvmforge
-/// produces:
+/// Permissive deserialization shapes for the two supported input documents:
 ///
 /// 1. **LaunchPlan artifact** (`<artifact-dir>/launch.json` from
-///    `mvmforge compile`): top-level `entrypoint` + `env`, plus
+///    the compiler): top-level `entrypoint` + `env`, plus
 ///    `flake_attribute` / `workload_id` / `artifact_format_version`
 ///    metadata. This is the canonical handoff to mvm.
-/// 2. **Workload IR manifest** (`mvmforge emit` stdout, also accepted by
-///    `mvmforge compile` as input): top-level `apps[]` with
-///    `apps[].entrypoints[]` (or legacy `apps[].entrypoint`). Useful for
-///    callers that wire the emitter to `mvmctl run` without compiling.
+/// 2. **Workload IR manifest** (top-level `apps[]` with
+///    `apps[].entrypoints[]`): useful for callers that wire the emitter
+///    to `mvmctl run` without compiling.
 ///
-/// `deny_unknown_fields` is intentionally NOT set so newer mvmforge
-/// releases that add optional metadata don't break parsing. Unsupported
-/// versions and known execution requirements are rejected explicitly.
+/// Unknown optional compiler metadata does not affect execution;
+/// unsupported versions and known requirements are rejected explicitly.
 #[derive(Debug, Deserialize)]
 struct RawLaunchPlan {
     #[serde(default)]
@@ -76,11 +73,9 @@ struct RawMesh {
     expected_peers: Vec<String>,
 }
 
-/// Read and parse an mvmforge document from disk.
+/// Read and parse a compiled launch artifact or Workload IR from disk.
 ///
-/// Accepts either the LaunchPlan artifact (`mvmforge compile`'s `launch.json`)
-/// or the Workload IR manifest (`mvmforge emit` stdout). The shape is
-/// auto-detected. v1 supports single-app workloads only — IR with multiple
+/// The shape is auto-detected. v1 supports single-app workloads only — IR with multiple
 /// `apps[]` entries is rejected.
 pub fn load_launch_plan(path: &Path) -> Result<LaunchEntrypoint> {
     let bytes =
@@ -106,15 +101,15 @@ fn parse_launch_plan(raw: RawLaunchPlan, source: &str) -> Result<LaunchEntrypoin
         env: top_env,
         apps,
     } = raw;
-    if let Some(version) = artifact_format_version {
+    if let Some(version) = artifact_format_version.as_deref() {
         anyhow::ensure!(
-            matches!(version.as_str(), "1.0" | "1.1"),
-            "launch plan '{source}': unsupported artifact_format_version; expected 1.0 or 1.1"
+            version == "1.1",
+            "launch plan '{source}': unsupported artifact_format_version; expected 1.1"
         );
     }
-    if let Some(version) = schema_version {
+    if let Some(version) = schema_version.as_deref() {
         anyhow::ensure!(
-            mvm_contract::ir::validate_schema_version(&version).is_ok(),
+            mvm_contract::ir::validate_schema_version(version).is_ok(),
             "launch plan '{source}': schema mismatch; unsupported IR schema_version"
         );
     }
@@ -124,10 +119,22 @@ fn parse_launch_plan(raw: RawLaunchPlan, source: &str) -> Result<LaunchEntrypoin
         "launch plan '{source}': addon/mesh orchestration is not supported by command wrappers"
     );
     match (top_entrypoint, apps.is_empty()) {
-        (Some(entrypoint), true) => parse_launch_artifact(entrypoint, top_env, source),
-        (None, false) => parse_workload_ir(apps, source),
+        (Some(entrypoint), true) => {
+            anyhow::ensure!(
+                artifact_format_version.is_some(),
+                "launch plan '{source}': artifact_format_version 1.1 is required"
+            );
+            parse_launch_artifact(entrypoint, top_env, source)
+        }
+        (None, false) => {
+            anyhow::ensure!(
+                schema_version.is_some(),
+                "launch plan '{source}': Workload IR schema_version is required"
+            );
+            parse_workload_ir(apps, source)
+        }
         (Some(_), false) => anyhow::bail!(
-            "launch plan '{source}': both top-level `entrypoint` and `apps[]` present — pick one shape (mvmforge launch.json artifact or Workload IR manifest)",
+            "launch plan '{source}': both top-level `entrypoint` and `apps[]` present — pick one shape (compiled launch.json artifact or Workload IR manifest)",
         ),
         (None, true) => anyhow::bail!(
             "launch plan '{source}': missing both top-level `entrypoint` (mvmforge launch.json artifact) and `apps[]` (Workload IR manifest)",
@@ -135,26 +142,21 @@ fn parse_launch_plan(raw: RawLaunchPlan, source: &str) -> Result<LaunchEntrypoin
     }
 }
 
-/// Parse the LaunchPlan artifact shape emitted by `mvmforge compile`.
+/// Parse the compiled LaunchPlan artifact shape.
 fn parse_launch_artifact(
     entrypoint: RawLaunchEntrypoint,
     top_env: BTreeMap<String, serde_json::Value>,
     source: &str,
 ) -> Result<LaunchEntrypoint> {
     anyhow::ensure!(
-        entrypoint
-            .kind
-            .as_deref()
-            .is_none_or(|kind| kind == "command"),
+        entrypoint.kind.as_deref() == Some("command"),
         "launch plan '{source}': only kind=command entrypoints are supported; function dispatch requires invoke"
     );
     if entrypoint.command.first().is_none_or(String::is_empty) {
         anyhow::bail!("launch plan '{source}': entrypoint.command must be non-empty");
     }
-    let working_dir = entrypoint
-        .working_dir
-        .or_else(|| entrypoint.kind.as_ref().map(|_| "/app".to_owned()));
-    // mvmforge: top-level env is merged under (overridden by) entrypoint.env.
+    let working_dir = Some(entrypoint.working_dir.unwrap_or_else(|| "/app".to_owned()));
+    // Top-level env is merged under (overridden by) entrypoint.env.
     let mut merged = top_env;
     for (k, v) in entrypoint.env {
         merged.insert(k, v);
@@ -195,27 +197,27 @@ fn parse_workload_ir(apps: Vec<RawLaunchApp>, source: &str) -> Result<LaunchEntr
         addons.is_empty(),
         "launch plan '{source}': addon orchestration is not supported by command wrappers"
     );
-    let entrypoint = match (entrypoint, entrypoints) {
-        (Some(entrypoint), None) => entrypoint,
-        (None, Some(mut entries)) if entries.len() == 1 => entries.remove(0),
+    anyhow::ensure!(
+        entrypoint.is_none(),
+        "launch plan '{source}': apps[].entrypoint is unsupported; use apps[].entrypoints[]"
+    );
+    let entrypoint = match entrypoints {
+        Some(mut entries) if entries.len() == 1 => entries.remove(0),
         _ => anyhow::bail!(
-            "launch plan '{source}': schema mismatch; expected exactly one apps[].entrypoints[] entry or a legacy entrypoint, not both"
+            "launch plan '{source}': schema mismatch; expected exactly one apps[].entrypoints[] entry"
         ),
     };
     parse_launch_artifact(entrypoint, app_env, source)
 }
 
-/// Reuse the canonical IR literal type, retaining bare strings for legacy plans.
-/// Secret references require the secret-delivery path, not shell exports.
+/// Reuse the canonical IR literal type; secret references require the
+/// secret-delivery path, not shell exports.
 fn resolve_literal_env(
     env: BTreeMap<String, serde_json::Value>,
     source: &str,
 ) -> Result<BTreeMap<String, String>> {
     env.into_iter()
         .map(|(key, value)| {
-            if let serde_json::Value::String(value) = value {
-                return Ok((key, value));
-            }
             anyhow::ensure!(
                 value.get("kind").and_then(serde_json::Value::as_str) != Some("secret_ref"),
                 "launch plan '{source}': secret_ref environment values are not supported by command wrappers"
@@ -226,7 +228,7 @@ fn resolve_literal_env(
                     "launch plan '{source}': secret_ref environment values are not supported by command wrappers"
                 ),
                 Err(_) => anyhow::bail!(
-                    "launch plan '{source}': schema mismatch; env values must be strings or kind=literal objects"
+                    "launch plan '{source}': schema mismatch; env values must be kind=literal objects"
                 ),
             }
         })
@@ -268,13 +270,71 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ambiguous_or_multiple_entrypoints() {
+    fn launch_plan_rejects_legacy_singular_app_entrypoints() {
         for app in [
-            r#"{"entrypoint":{"command":["true"]},"entrypoints":[{"kind":"command","command":["true"]}]}"#,
-            r#"{"entrypoints":[]}"#,
-            r#"{"entrypoints":[{"command":["true"]},{"command":["false"]}]}"#,
+            r#"{"entrypoint":{"command":["true"]}}"#,
+            r#"{"entrypoint":{"command":["false"]},"entrypoints":[{"kind":"command","command":["true"]}]}"#,
         ] {
-            let err = parse_str(&format!(r#"{{"apps":[{app}]}}"#)).unwrap_err();
+            let err =
+                parse_str(&format!(r#"{{"schema_version":"0.1","apps":[{app}]}}"#)).unwrap_err();
+            assert!(err.to_string().contains("apps[].entrypoint"), "{err}");
+        }
+    }
+
+    #[test]
+    fn launch_plan_rejects_untagged_commands() {
+        for plan in [
+            r#"{"artifact_format_version":"1.1","entrypoint":{"command":["true"]}}"#,
+            r#"{"schema_version":"0.1","apps":[{"entrypoints":[{"command":["true"]}]}]}"#,
+        ] {
+            let err = parse_str(plan).unwrap_err();
+            assert!(err.to_string().contains("kind=command"), "{err}");
+        }
+    }
+
+    #[test]
+    fn launch_plan_requires_current_document_versions() {
+        for (plan, expected) in [
+            (
+                r#"{"entrypoint":{"kind":"command","command":["true"]}}"#,
+                "artifact_format_version",
+            ),
+            (
+                r#"{"artifact_format_version":"1.0","entrypoint":{"kind":"command","command":["true"]}}"#,
+                "artifact_format_version",
+            ),
+            (
+                r#"{"apps":[{"entrypoints":[{"kind":"command","command":["true"]}]}]}"#,
+                "schema_version",
+            ),
+        ] {
+            let err = parse_str(plan).unwrap_err();
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn launch_plan_rejects_string_environment_values_without_echoing_them() {
+        for plan in [
+            r#"{"artifact_format_version":"1.1","entrypoint":{"kind":"command","command":["true"]},"env":{"TOKEN":"sensitive-marker"}}"#,
+            r#"{"artifact_format_version":"1.1","entrypoint":{"kind":"command","command":["true"],"env":{"TOKEN":"sensitive-marker"}}}"#,
+            r#"{"schema_version":"0.1","apps":[{"entrypoints":[{"kind":"command","command":["true"]}],"env":{"TOKEN":"sensitive-marker"}}]}"#,
+            r#"{"schema_version":"0.1","apps":[{"entrypoints":[{"kind":"command","command":["true"],"env":{"TOKEN":"sensitive-marker"}}]}]}"#,
+        ] {
+            let err = parse_str(plan).unwrap_err().to_string();
+            assert!(err.contains("kind=literal"), "{err}");
+            assert!(!err.contains("sensitive-marker"), "{err}");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_or_multiple_entrypoints() {
+        for app in [
+            r#"{"entrypoints":[]}"#,
+            r#"{"entrypoints":[{"kind":"command","command":["true"]},{"kind":"command","command":["false"]}]}"#,
+        ] {
+            let err =
+                parse_str(&format!(r#"{{"schema_version":"0.1","apps":[{app}]}}"#)).unwrap_err();
             assert!(err.to_string().contains("exactly one"), "{err}");
         }
     }
@@ -283,36 +343,39 @@ mod tests {
     fn rejects_unsupported_kinds_secrets_and_versions_without_echoing_values() {
         for (plan, expected) in [
             (
-                r#"{"entrypoint":{"kind":"function","command":["true"]}}"#,
+                r#"{"artifact_format_version":"1.1","entrypoint":{"kind":"function","command":["true"]}}"#,
                 "kind=command",
             ),
             (
-                r#"{"entrypoint":{"kind":"future","command":["true"]}}"#,
+                r#"{"artifact_format_version":"1.1","entrypoint":{"kind":"future","command":["true"]}}"#,
                 "kind=command",
             ),
-            (r#"{"entrypoint":{"command":[""]}}"#, "non-empty"),
             (
-                r#"{"schema_version":"99","entrypoint":{"command":["true"]}}"#,
+                r#"{"artifact_format_version":"1.1","entrypoint":{"kind":"command","command":[""]}}"#,
+                "non-empty",
+            ),
+            (
+                r#"{"artifact_format_version":"1.1","schema_version":"99","entrypoint":{"kind":"command","command":["true"]}}"#,
                 "schema mismatch",
             ),
             (
-                r#"{"artifact_format_version":"99","entrypoint":{"command":["true"]}}"#,
+                r#"{"artifact_format_version":"99","entrypoint":{"kind":"command","command":["true"]}}"#,
                 "artifact_format_version",
             ),
             (
-                r#"{"entrypoint":{"command":["true"],"env":{"TOKEN":{"kind":"secret_ref","ref":{"name":"sensitive-marker"}}}}}"#,
+                r#"{"artifact_format_version":"1.1","entrypoint":{"kind":"command","command":["true"],"env":{"TOKEN":{"kind":"secret_ref","ref":{"name":"sensitive-marker"}}}}}"#,
                 "secret_ref",
             ),
             (
-                r#"{"entrypoint":{"command":["true"],"env":{"TOKEN":{"kind":"literal","value":42}}}}"#,
+                r#"{"artifact_format_version":"1.1","entrypoint":{"kind":"command","command":["true"],"env":{"TOKEN":{"kind":"literal","value":42}}}}"#,
                 "schema mismatch",
             ),
             (
-                r#"{"entrypoint":{"command":["true"]},"addons":[{}]}"#,
+                r#"{"artifact_format_version":"1.1","entrypoint":{"kind":"command","command":["true"]},"addons":[{}]}"#,
                 "orchestration",
             ),
             (
-                r#"{"entrypoint":{"command":["true"]},"mesh":{"enabled":true}}"#,
+                r#"{"artifact_format_version":"1.1","entrypoint":{"kind":"command","command":["true"]},"mesh":{"enabled":true}}"#,
                 "orchestration",
             ),
         ] {
@@ -377,28 +440,31 @@ mod tests {
     #[test]
     fn launch_plan_minimal_app() {
         let plan = r#"{
+            "schema_version": "0.1",
             "apps": [
-                { "entrypoint": { "command": ["python", "-m", "hello"] } }
+                { "entrypoints": [{ "kind": "command", "command": ["python", "-m", "hello"] }] }
             ]
         }"#;
         let ep = parse_str(plan).unwrap();
         assert_eq!(ep.command, vec!["python", "-m", "hello"]);
-        assert!(ep.working_dir.is_none());
+        assert_eq!(ep.working_dir.as_deref(), Some("/app"));
         assert!(ep.env.is_empty());
     }
 
     #[test]
     fn launch_plan_with_working_dir_and_env() {
         let plan = r#"{
+            "schema_version": "0.1",
             "apps": [
                 {
                     "name": "hello",
-                    "entrypoint": {
+                    "entrypoints": [{
+                        "kind": "command",
                         "command": ["python", "main.py"],
                         "working_dir": "/app",
-                        "env": { "PORT": "8080" }
-                    },
-                    "env": { "LOG_LEVEL": "info" }
+                        "env": { "PORT": { "kind": "literal", "value": "8080" } }
+                    }],
+                    "env": { "LOG_LEVEL": { "kind": "literal", "value": "info" } }
                 }
             ]
         }"#;
@@ -419,9 +485,10 @@ mod tests {
     #[test]
     fn launch_plan_rejects_multi_app() {
         let plan = r#"{
+            "schema_version": "0.1",
             "apps": [
-                { "name": "a", "entrypoint": { "command": ["x"] } },
-                { "name": "b", "entrypoint": { "command": ["y"] } }
+                { "name": "a", "entrypoints": [{ "kind": "command", "command": ["x"] }] },
+                { "name": "b", "entrypoints": [{ "kind": "command", "command": ["y"] }] }
             ]
         }"#;
         let err = parse_str(plan).unwrap_err();
@@ -433,7 +500,8 @@ mod tests {
     #[test]
     fn launch_plan_rejects_empty_command() {
         let plan = r#"{
-            "apps": [ { "entrypoint": { "command": [] } } ]
+            "schema_version": "0.1",
+            "apps": [ { "entrypoints": [{ "kind": "command", "command": [] }] } ]
         }"#;
         let err = parse_str(plan).unwrap_err();
         assert!(err.to_string().contains("non-empty"));
@@ -442,13 +510,18 @@ mod tests {
     #[test]
     fn launch_plan_entrypoint_env_overrides_app_env() {
         let plan = r#"{
+            "schema_version": "0.1",
             "apps": [
                 {
-                    "entrypoint": {
+                    "entrypoints": [{
+                        "kind": "command",
                         "command": ["true"],
-                        "env": { "X": "from-entrypoint" }
-                    },
-                    "env": { "X": "from-app", "Y": "y" }
+                        "env": { "X": { "kind": "literal", "value": "from-entrypoint" } }
+                    }],
+                    "env": {
+                        "X": { "kind": "literal", "value": "from-app" },
+                        "Y": { "kind": "literal", "value": "y" }
+                    }
                 }
             ]
         }"#;
@@ -458,12 +531,12 @@ mod tests {
     }
 
     #[test]
-    fn launch_plan_accepts_mvmforge_artifact_shape() {
-        // The JSON `mvmforge compile` actually writes to launch.json: top-level
-        // `entrypoint`, plus toolchain metadata fields we ignore.
+    fn launch_plan_accepts_compiled_artifact_shape() {
+        // The compiler writes launch.json with a top-level entrypoint and
+        // toolchain metadata that the command wrapper does not consume.
         let plan = r#"{
-            "artifact_format_version": "1.0",
-            "flake_attribute": "mvmforge.workload",
+            "artifact_format_version": "1.1",
+            "flake_attribute": "mvm.workload",
             "flake_path": ".",
             "ir_hash": "deadbeef",
             "ir_schema_version": "0.1",
@@ -471,9 +544,10 @@ mod tests {
             "workload_id": "hello",
             "image": { "kind": "nix_packages", "packages": ["python312"] },
             "entrypoint": {
+                "kind": "command",
                 "command": ["python", "-m", "hello"],
                 "working_dir": "/app",
-                "env": { "PORT": "8080" }
+                "env": { "PORT": { "kind": "literal", "value": "8080" } }
             },
             "env": {},
             "mounts": [],
@@ -488,18 +562,17 @@ mod tests {
 
     #[test]
     fn launch_plan_artifact_rejects_empty_command() {
-        let plan = r#"{ "entrypoint": { "command": [] } }"#;
+        let plan = r#"{ "artifact_format_version": "1.1", "entrypoint": { "kind": "command", "command": [] } }"#;
         let err = parse_str(plan).unwrap_err();
         assert!(err.to_string().contains("non-empty"));
     }
 
     #[test]
     fn launch_plan_refuses_an_env_key_that_is_not_one_shell_assignment() {
-        let artifact = r#"{ "entrypoint": { "command": ["true"], "env": { "A;touch /x": "1" } } }"#;
+        let artifact = r#"{ "artifact_format_version": "1.1", "entrypoint": { "kind": "command", "command": ["true"], "env": { "A;touch /x": { "kind": "literal", "value": "1" } } } }"#;
         let err = parse_str(artifact).unwrap_err();
         assert!(err.to_string().contains("env key"), "{err}");
-        let ir =
-            r#"{ "apps": [{ "entrypoint": { "command": ["true"] }, "env": { "A B": "1" } }] }"#;
+        let ir = r#"{ "schema_version": "0.1", "apps": [{ "entrypoints": [{ "kind": "command", "command": ["true"] }], "env": { "A B": { "kind": "literal", "value": "1" } } }] }"#;
         let err = parse_str(ir).unwrap_err();
         assert!(err.to_string().contains("env key"), "{err}");
     }
@@ -507,11 +580,16 @@ mod tests {
     #[test]
     fn launch_plan_artifact_top_env_merged_under_entrypoint_env() {
         let plan = r#"{
+            "artifact_format_version": "1.1",
             "entrypoint": {
+                "kind": "command",
                 "command": ["true"],
-                "env": { "X": "from-entrypoint" }
+                "env": { "X": { "kind": "literal", "value": "from-entrypoint" } }
             },
-            "env": { "X": "from-top", "Y": "y" }
+            "env": {
+                "X": { "kind": "literal", "value": "from-top" },
+                "Y": { "kind": "literal", "value": "y" }
+            }
         }"#;
         let ep = parse_str(plan).unwrap();
         assert_eq!(ep.env.get("X").map(String::as_str), Some("from-entrypoint"));
@@ -520,11 +598,12 @@ mod tests {
 
     #[test]
     fn launch_plan_ignores_unknown_top_level_fields() {
-        // mvmforge ships `version`, `workload.id`, etc. — we don't care about them.
+        // Optional producer metadata cannot change the command wrapper.
         let plan = r#"{
+            "schema_version": "0.1",
             "version": "v0",
             "workload": { "id": "hello" },
-            "apps": [ { "entrypoint": { "command": ["true"] } } ],
+            "apps": [ { "entrypoints": [{ "kind": "command", "command": ["true"] }] } ],
             "future_field": 42
         }"#;
         assert!(parse_str(plan).is_ok());
@@ -536,8 +615,10 @@ mod tests {
         // top-level `entrypoint` is ambiguous — refuse rather than silently
         // pick one.
         let plan = r#"{
-            "apps": [ { "entrypoint": { "command": ["x"] } } ],
-            "entrypoint": { "command": ["y"] }
+            "artifact_format_version": "1.1",
+            "schema_version": "0.1",
+            "apps": [ { "entrypoints": [{ "kind": "command", "command": ["x"] }] } ],
+            "entrypoint": { "kind": "command", "command": ["y"] }
         }"#;
         let err = parse_str(plan).unwrap_err();
         assert!(err.to_string().contains("both"));
@@ -556,7 +637,7 @@ mod tests {
         let path = dir.join("launch.json");
         std::fs::write(
             &path,
-            r#"{ "apps": [ { "entrypoint": { "command": ["echo", "hi"] } } ] }"#,
+            r#"{ "schema_version": "0.1", "apps": [ { "entrypoints": [{ "kind": "command", "command": ["echo", "hi"] }] } ] }"#,
         )
         .unwrap();
         let ep = load_launch_plan(&path).unwrap();

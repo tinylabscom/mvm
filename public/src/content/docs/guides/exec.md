@@ -222,14 +222,15 @@ Only the entrypoint is consumed in v1; image selection still comes from
 
 ```json
 {
-  "artifact_format_version": "1.0",
+  "artifact_format_version": "1.1",
   "workload_id": "hello",
   "entrypoint": {
+    "kind": "command",
     "command": ["python", "main.py"],
     "working_dir": "/app",
-    "env": { "PORT": "8080" }
+    "env": { "PORT": { "kind": "literal", "value": "8080" } }
   },
-  "env": { "LOG_LEVEL": "info" }
+  "env": { "LOG_LEVEL": { "kind": "literal", "value": "info" } }
 }
 ```
 
@@ -237,19 +238,27 @@ Only the entrypoint is consumed in v1; image selection still comes from
 
 ```json
 {
+  "schema_version": "0.1",
   "apps": [
     {
       "name": "hello",
-      "entrypoint": {
+      "entrypoints": [{
+        "kind": "command",
         "command": ["python", "main.py"],
         "working_dir": "/app",
-        "env": { "PORT": "8080" }
-      },
-      "env": { "LOG_LEVEL": "info" }
+        "env": { "PORT": { "kind": "literal", "value": "8080" } }
+      }],
+      "env": { "LOG_LEVEL": { "kind": "literal", "value": "info" } }
     }
   ]
 }
 ```
+
+Use artifact format `1.1` or a supported Workload IR `schema_version`.
+Older unversioned documents, artifact `1.0`, singular `apps[].entrypoint`,
+untagged commands, and string-valued env maps are not accepted. Generate
+current typed input with `mvmctl dev compile` or update those fields before
+running.
 
 For long-running workloads, prefer `mvmctl machine run --flake <artifact-dir>`:
 the SDK bakes the entrypoint into the generated flake's
@@ -261,7 +270,7 @@ that belongs in `mvmd`, not in `mvmctl machine run`. Env precedence (lowest →
 highest):
 
 1. `apps[].env`
-2. `apps[].entrypoint.env`
+2. `apps[].entrypoints[0].env`
 3. CLI `--env` (always wins)
 
 `--launch-plan` is mutually exclusive with a trailing argv.

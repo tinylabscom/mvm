@@ -2213,15 +2213,13 @@ is the canonical producer today.
 ```
 
 These examples show the consumed execution fields, not complete build inputs.
-Legacy singular `apps[].entrypoint` and string-valued env maps are still
-accepted. Do not supply both `entrypoint` and `entrypoints` on an app.
-Exactly one command entrypoint is supported; tagged commands default
-`working_dir` to `/app` when omitted. Legacy untagged commands retain their
-existing behavior (no directory change when omitted).
-
-Supported explicit versions are artifact `1.0`/`1.1` and IR versions
-accepted by the canonical compiler's version validator (currently `0.0`–`0.2`).
-Unversioned legacy documents remain accepted. Function entrypoints,
+Exactly one `kind=command` entry in `apps[].entrypoints[]` is supported;
+`working_dir` defaults to `/app` when omitted. Artifact `1.1` requires
+`artifact_format_version`; Workload IR requires `schema_version` accepted
+by the canonical compiler's version validator (currently `0.0`–`0.2`).
+Unversioned documents, artifact `1.0`, singular `apps[].entrypoint`,
+untagged commands, and string-valued env maps are refused; migrate to
+the typed shapes above. Function entrypoints,
 `secret_ref` env values, nonempty addon lists, and enabled/nonempty mesh
 requirements are rejected rather than silently ignored. Unknown metadata
 within supported versions is tolerated.
