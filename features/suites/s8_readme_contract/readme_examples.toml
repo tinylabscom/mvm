@@ -22,10 +22,6 @@
 # ── Transient machines ───────────────────────────────────────────────────────
 
 [[example]]
-command = "mvmctl image pull alpine"
-witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
-
-[[example]]
 command = "mvmctl image pull python:3.12"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
 
@@ -92,10 +88,6 @@ command = "mvmctl machine inspect web"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
 
 # ── Host setup ───────────────────────────────────────────────────────────────
-
-[[example]]
-command = "mvmctl bootstrap"
-witness = "suites/s31_launch_e2e/documented_setup.feature::bootstrap succeeds and reports a ready host"
 
 [[example]]
 command = "mvmctl doctor --workflow cli-run"
