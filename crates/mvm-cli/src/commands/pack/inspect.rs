@@ -346,7 +346,7 @@ fn inspect_application(
 /// Neutralize terminal control characters (ESC, CR, newline, C1 and the
 /// rest) in a publisher-supplied string, which a signature does not make safe
 /// to print raw.
-fn safe(text: &str) -> String {
+pub(crate) fn safe(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_control() {
