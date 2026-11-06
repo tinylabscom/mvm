@@ -48,6 +48,8 @@ use std::path::PathBuf;
 use crate::parallel::par_map;
 
 pub const BLOCK_SIZE: u32 = 4096;
+/// Longest directory entry name: the dirent's `name_len` is one byte.
+const MAX_NAME_LEN: usize = 255;
 const BLOCK_SIZE_USIZE: usize = BLOCK_SIZE as usize;
 const INODE_SIZE: u16 = 256;
 const EXT4_MAGIC: u16 = 0xEF53;
@@ -112,6 +114,13 @@ pub enum Ext4Error {
     /// during the verified walk, so publishing the image under that identity
     /// would poison a content-addressed cache.
     HostFileChanged(PathBuf),
+    /// A path component is longer than the 255 bytes a directory entry's
+    /// one-byte name length can carry. Only the length is reported; the name
+    /// is caller-controlled and unbounded.
+    NameTooLong { len: usize },
+    /// A directory holds more subdirectories than the 16-bit link count can
+    /// record. A capacity limit of this writer, like an oversized xattr set.
+    TooManySubdirectories { ino: u32 },
 }
 
 impl std::fmt::Display for Ext4Error {
@@ -141,6 +150,14 @@ impl std::fmt::Display for Ext4Error {
                 "inode {ino}'s extended attributes exceed the in-inode xattr area \
                  (an external xattr block is not implemented)"
             ),
+            Ext4Error::NameTooLong { len } => write!(
+                f,
+                "a path component of {len} bytes exceeds the {MAX_NAME_LEN}-byte directory entry name limit"
+            ),
+            Ext4Error::TooManySubdirectories { ino } => write!(
+                f,
+                "directory inode {ino} has more subdirectories than a 16-bit link count can record"
+            ),
             Ext4Error::HostFileChanged(path) => write!(
                 f,
                 "host file {} changed while its image was being emitted",
@@ -164,6 +181,7 @@ impl Ext4Error {
             Ext4Error::TooLarge { .. }
                 | Ext4Error::FileTooFragmented { .. }
                 | Ext4Error::XattrTooLarge { .. }
+                | Ext4Error::TooManySubdirectories { .. }
         )
     }
 }
@@ -745,7 +763,12 @@ where
         }
         planned[pi].children.push((edge.name, edge.child, edge.ft));
         if edge.ft == FT_DIR {
-            planned[pi].links += 1;
+            planned[pi].links = planned[pi]
+                .links
+                .checked_add(1)
+                .ok_or(EmitImageError::Build(Ext4Error::TooManySubdirectories {
+                    ino: planned[pi].ino,
+                }))?;
         }
     }
     for p in planned.iter_mut() {
@@ -766,18 +789,14 @@ where
                 p.size = nblocks as u64 * BLOCK_SIZE as u64;
                 nblocks
             }
-            Kind::File => p.size.div_ceil(BLOCK_SIZE as u64) as u32,
+            Kind::File => file_blocks(p.size)?,
             Kind::Symlink => {
                 // Fast symlink: a target that fits strictly inside the 60-byte
                 // i_block lives there with no data block. The boundary is `< 60`,
                 // not `<= 60`: a 60-byte target fills i_block exactly, and readers
                 // treat `i_size >= 60` as a slow symlink read from a data block —
                 // so an inline 60-byte target reads back truncated.
-                if p.size < 60 {
-                    0
-                } else {
-                    p.size.div_ceil(BLOCK_SIZE as u64) as u32
-                }
+                if p.size < 60 { 0 } else { file_blocks(p.size)? }
             }
         };
         p.block_count = nblocks;
@@ -932,6 +951,13 @@ fn dir_block_count(children: &[(String, u32, u8)]) -> u32 {
     dir_block_layout(children)
         .last()
         .map_or(1, |&last| last + 1)
+}
+
+/// Data blocks a `size`-byte file or slow symlink occupies. A size past what
+/// the 32-bit block count can address is a capacity limit, not a truncation.
+fn file_blocks<E>(size: u64) -> Result<u32, EmitImageError<E>> {
+    let blocks = size.div_ceil(BLOCK_SIZE as u64);
+    u32::try_from(blocks).map_err(|_| EmitImageError::Build(Ext4Error::TooLarge { blocks }))
 }
 
 fn dirent_len(name_len: usize) -> usize {
@@ -1327,6 +1353,9 @@ fn normalize(path: &str) -> Result<String, Ext4Error> {
         if seg.is_empty() || seg == "." || seg == ".." || seg.contains('\0') {
             return Err(Ext4Error::BadPath(path.to_string()));
         }
+        if seg.len() > MAX_NAME_LEN {
+            return Err(Ext4Error::NameTooLong { len: seg.len() });
+        }
     }
     Ok(trimmed.to_string())
 }
@@ -1537,5 +1566,52 @@ mod tests {
             EmitImageError::Emit(reason) => assert_eq!(reason, "synthetic sink failure"),
             other => panic!("expected sink failure, got {other:?}"),
         }
+    }
+
+    fn dir(path: String) -> super::Node {
+        super::Node::Dir {
+            path,
+            mode: 0o755,
+            xattrs: Vec::new(),
+            owner: super::Owner::ROOT,
+        }
+    }
+
+    #[test]
+    fn a_path_component_past_the_dirent_name_limit_is_refused() {
+        let at_limit = vec![dir(format!("/{}", "a".repeat(255)))];
+        build_image(at_limit, &BuildOptions::default()).expect("255 bytes is valid");
+
+        let over = vec![dir(format!("/{}", "a".repeat(256)))];
+        let err = build_image(over, &BuildOptions::default()).expect_err("256 bytes is refused");
+        assert!(matches!(err, super::Ext4Error::NameTooLong { len: 256 }));
+        assert!(!err.to_string().contains("aaaa"), "the name is not echoed");
+    }
+
+    #[test]
+    fn more_subdirectories_than_a_link_count_holds_is_a_typed_capacity_error() {
+        let mut nodes = vec![dir("/d".into())];
+        nodes.extend((0..65_534).map(|i| dir(format!("/d/{i}"))));
+        let err = build_image(nodes, &BuildOptions::default()).expect_err("overflows u16 links");
+        assert!(matches!(
+            err,
+            super::Ext4Error::TooManySubdirectories { .. }
+        ));
+        assert!(err.is_capacity_limit());
+    }
+
+    #[test]
+    fn a_host_file_past_the_block_count_range_is_refused_not_truncated() {
+        let nodes = vec![super::Node::FileFromHost {
+            path: "/huge".into(),
+            mode: 0o644,
+            source: "/nonexistent".into(),
+            len: 1 << 50,
+            expected_sha256: None,
+            xattrs: Vec::new(),
+            owner: super::Owner::ROOT,
+        }];
+        let err = build_image(nodes, &BuildOptions::default()).expect_err("too many blocks");
+        assert!(matches!(err, super::Ext4Error::TooLarge { .. }), "{err:?}");
     }
 }
