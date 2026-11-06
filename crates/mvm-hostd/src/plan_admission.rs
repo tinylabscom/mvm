@@ -3718,6 +3718,43 @@ mod tests {
         )
     }
 
+    /// The launch budgets are 300 ms cold and 50 ms warm for everything the
+    /// preflight adds. This times only the host-interface gate (node record,
+    /// policy and ledger reads, and the concurrent checks), not synthesis,
+    /// signing or the boot. It asserts the median, which is stable on a loaded
+    /// runner, and prints the 99th percentile for the record; run with
+    /// `--nocapture` to read both.
+    #[test]
+    fn host_interface_preflight_stays_inside_the_launch_budgets() {
+        use std::time::{Duration, Instant};
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let plan = synthesize_plan(&fixture_input("vm-timing")).expect("fixture plan");
+
+        let cold = Instant::now();
+        host_gates::admit_host_interface(&plan).expect("the default node admits");
+        let cold = cold.elapsed();
+
+        let mut warm: Vec<Duration> = (0..300)
+            .map(|_| {
+                let t = Instant::now();
+                host_gates::admit_host_interface(&plan).expect("admits");
+                t.elapsed()
+            })
+            .collect();
+        warm.sort();
+        let (p50, p99) = (warm[warm.len() / 2], warm[warm.len() * 99 / 100]);
+        println!("host-interface preflight: cold {cold:?}, warm p50 {p50:?}, p99 {p99:?}");
+
+        assert!(
+            cold < Duration::from_millis(300),
+            "cold {cold:?} exceeds the 300 ms budget"
+        );
+        assert!(
+            p50 < Duration::from_millis(50),
+            "warm p50 {p50:?} exceeds the 50 ms budget"
+        );
+    }
+
     #[test]
     fn host_interface_with_no_local_state_admits_unchanged() {
         admit_with_host_interface_files(&[]).expect("the permissive local default admits");
