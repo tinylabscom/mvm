@@ -515,9 +515,10 @@ def package_members(version, archive):
         names = package.namelist()
     packages = [name for name in names if name.endswith((".deb", ".rpm"))]
     expected_arches = set()
+    pkgver = version.replace("-", "~")
     for name in packages:
-        deb = re.fullmatch(r"mvmctl_" + re.escape(version) + r"-1_(amd64|arm64)\.deb", name)
-        rpm = re.fullmatch(r"mvmctl-" + re.escape(version)
+        deb = re.fullmatch(r"mvmctl_" + re.escape(pkgver) + r"-1_(amd64|arm64)\.deb", name)
+        rpm = re.fullmatch(r"mvmctl-" + re.escape(pkgver)
                            + r"-[A-Za-z0-9._+~]+\.(x86_64|aarch64)\.rpm", name)
         if deb:
             expected_arches.add(("deb", deb[1]))
