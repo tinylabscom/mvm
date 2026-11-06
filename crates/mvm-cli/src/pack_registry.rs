@@ -698,6 +698,76 @@ mod tests {
         assert_eq!(hits.len(), 2);
     }
 
+    fn file_registry(manifest: &[u8]) -> (tempfile::TempDir, PackRegistryConfig) {
+        let registry = tempfile::tempdir().unwrap();
+        let pack = registry.path().join("packs/runtime/python/1.2.3");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join(MANIFEST_FILE), manifest).unwrap();
+        std::fs::write(pack.join(SIGNATURE_FILE), b"not a signature").unwrap();
+        std::fs::write(
+            registry.path().join("index.json"),
+            serde_json::to_vec(&catalog()).unwrap(),
+        )
+        .unwrap();
+        let config = PackRegistryConfig {
+            registry_url: format!("file://{}", registry.path().display()),
+        };
+        (registry, config)
+    }
+
+    #[test]
+    fn catalog_hash_binds_the_exact_manifest_bytes() {
+        let manifest = br#"{"files":[]}"#;
+        let (_registry, config) = file_registry(manifest);
+        let reference: PackReference = "runtime/python@1.2.3".parse().unwrap();
+        let mut reformatted = manifest.to_vec();
+        reformatted.push(b'\n');
+        let error = pull_one(&config, &reference, &Sha256Hex::from_bytes(&reformatted))
+            .expect_err("a re-serialised manifest is not the advertised one");
+        assert!(
+            format!("{error:#}").contains("digest mismatch"),
+            "{error:#}"
+        );
+        // Matching bytes get past the catalog check and are then refused on
+        // their own merits, so the check above is the one that fired.
+        let error = pull_one(&config, &reference, &Sha256Hex::from_bytes(manifest))
+            .expect_err("an unsigned manifest is not admitted");
+        assert!(
+            !format!("{error:#}").contains("digest mismatch"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn catalog_discovery_and_a_matching_hash_enroll_and_admit_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let manifest = br#"{"files":[]}"#;
+        let (_registry, config) = file_registry(manifest);
+        let index = fetch_index(&config).unwrap();
+        assert_eq!(search_index(&index, Some("python")).len(), 1);
+        pull_one(
+            &config,
+            &"runtime/python@1.2.3".parse().unwrap(),
+            &Sha256Hex::from_bytes(manifest),
+        )
+        .expect_err("the catalog hash alone admits nothing");
+        let left: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert!(left.is_empty(), "discovery wrote host state: {left:?}");
+    }
+
+    #[test]
+    fn an_explicit_older_version_resolves_while_a_newer_one_is_published() {
+        let entry = entry("runtime", "python", &["1.2.3", "1.10.0"]);
+        let requested: PackReference = "runtime/python@1.2.3".parse().expect("reference");
+        let resolved = resolve_version(&entry, &requested).expect("older version");
+        assert_eq!(resolved.to_string(), "runtime/python@1.2.3");
+    }
+
     #[test]
     fn resolve_version_takes_the_highest_published_version_when_unpinned() {
         let entry = entry("runtime", "python", &["1.2.3", "1.10.0", "1.2.10"]);
