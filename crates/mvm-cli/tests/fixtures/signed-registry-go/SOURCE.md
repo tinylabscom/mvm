@@ -1,6 +1,12 @@
-These files come from `tinylabscom/mvm-templates` commit
-`d60f4ea5a34aab5b3e7dac54ed8bf8e1f66fe76c`, under
-`packs/runtime/go/1.0.0/`. The public publish workflow signed the manifest.
+These files are the published `runtime/go@1.0.0` pack from `tinylabscom/mvm-packs`,
+as committed by the publish workflow in commit
+`b4ad28e46ea0b77651c134eb6b3f9af610952ae0` (`packs/runtime/go/1.0.0/`).
+The Sigstore bundle is signed by
+`https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main`,
+the current official publisher identity. It is a byte-for-byte copy.
+The manifest and `pack/group.toml` are byte-identical to the same pack on
+`mvm-packs` main, which still carries a bundle signed under the former
+`mvm-templates` identity.
 
 The manifest SHA-256 is
 `ce1ac86f67e6a9df7a1b1a46d63384fa20a30848fdd7e5967d2293bfb5ceec50`.
