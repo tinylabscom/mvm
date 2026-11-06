@@ -10,7 +10,7 @@ use crate::pack_registry;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
-    /// The pack to pull: `namespace/name`, optionally `@version`
+    /// The pack to pull: `namespace/name`, optionally `@version` or `:latest`
     #[arg(value_name = "ns/name[@version]")]
     pub reference: String,
     /// Emit machine-readable JSON to stdout
@@ -58,6 +58,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             use mvm_core::registry_pack::AuthenticatedRegistryManifest;
             let application = installed.application();
             let reference = application.reference().to_string();
+            if let Some(warning) = crate::pack_registry::arch_mismatch_warning(
+                &reference,
+                &application.manifest().application.guest_arch,
+                mvm_build::builder_vm::host_arch_tag(),
+            ) {
+                crate::ui::warn(&warning);
+            }
             let digest = application.manifest_sha256().as_str();
             if args.json {
                 return crate::json_out::emit_json(&installed_application_json(

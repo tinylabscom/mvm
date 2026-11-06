@@ -194,6 +194,34 @@ fn download_payload_file(url: &str, target: &Path, size: u64, release: bool) -> 
     Ok(())
 }
 
+/// Parse a reference as a user types it: `ns/name`, `ns/name@version`, or
+/// `ns/name:latest`. The registry publishes exact versions only, so `:latest`
+/// is the unversioned form and any other tag is refused with the fix.
+pub fn parse_user_reference(value: &str) -> Result<PackReference> {
+    let canonical = match value.rsplit_once(':') {
+        Some((coordinate, "latest")) if !value.contains('@') => coordinate,
+        Some((_, _)) if !value.contains('@') => {
+            bail!(
+                "pack tags other than `latest` are not published; pin a version with `@version` ({value:?})"
+            )
+        }
+        _ => value,
+    };
+    canonical
+        .parse()
+        .with_context(|| format!("invalid pack reference {value:?}"))
+}
+
+/// Warning for a pack built for a different architecture than the host, or
+/// `None` when they agree.
+pub fn arch_mismatch_warning(reference: &str, guest_arch: &str, host_arch: &str) -> Option<String> {
+    (guest_arch != host_arch).then(|| {
+        format!(
+            "{reference} is built for {guest_arch} but this host is {host_arch}, so it will not run here; pull a version published for {host_arch}"
+        )
+    })
+}
+
 /// What `mvmctl pull` did, for the caller to render.
 #[derive(Debug)]
 pub struct PullSummary {
@@ -233,9 +261,7 @@ impl VerifiedPull {
 /// written only after installation succeeds. Applications independently verify
 /// their bundle under local consumer trust before installation and pin commit.
 pub fn pull(reference_arg: &str) -> Result<PullOutcome> {
-    let requested: PackReference = reference_arg
-        .parse()
-        .with_context(|| format!("invalid pack reference {reference_arg:?}"))?;
+    let requested = parse_user_reference(reference_arg)?;
     let config = PackRegistryConfig::load();
     let index = fetch_index(&config)?;
     let mut seen = BTreeMap::new();
@@ -536,6 +562,31 @@ mod tests {
     }
 
     #[test]
+    fn latest_tag_is_the_unversioned_reference() {
+        assert_eq!(
+            parse_user_reference("mvm/python:latest")
+                .unwrap()
+                .to_string(),
+            "mvm/python"
+        );
+        assert_eq!(
+            parse_user_reference("mvm/python@1.2.3")
+                .unwrap()
+                .to_string(),
+            "mvm/python@1.2.3"
+        );
+        let err = parse_user_reference("mvm/python:stable").unwrap_err();
+        assert!(err.to_string().contains("@version"), "{err}");
+    }
+
+    #[test]
+    fn arch_warning_only_fires_on_mismatch() {
+        assert!(arch_mismatch_warning("mvm/x", "x86_64", "x86_64").is_none());
+        let warning = arch_mismatch_warning("mvm/x", "x86_64", "aarch64").unwrap();
+        assert!(warning.contains("x86_64") && warning.contains("aarch64"));
+    }
+
+    #[test]
     fn search_filters_by_coordinate_and_description() {
         let index = vec![
             entry("runtime", "python", &["1.2.3"]),
@@ -550,6 +601,76 @@ mod tests {
         assert_eq!(hits[0].coordinate(), "runtime/python");
         let hits = search_index(&index, Some("the"));
         assert_eq!(hits.len(), 2);
+    }
+
+    fn file_registry(manifest: &[u8]) -> (tempfile::TempDir, PackRegistryConfig) {
+        let registry = tempfile::tempdir().unwrap();
+        let pack = registry.path().join("packs/runtime/python/1.2.3");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join(MANIFEST_FILE), manifest).unwrap();
+        std::fs::write(pack.join(SIGNATURE_FILE), b"not a signature").unwrap();
+        std::fs::write(
+            registry.path().join("index.json"),
+            serde_json::to_vec(&catalog()).unwrap(),
+        )
+        .unwrap();
+        let config = PackRegistryConfig {
+            registry_url: format!("file://{}", registry.path().display()),
+        };
+        (registry, config)
+    }
+
+    #[test]
+    fn catalog_hash_binds_the_exact_manifest_bytes() {
+        let manifest = br#"{"files":[]}"#;
+        let (_registry, config) = file_registry(manifest);
+        let reference: PackReference = "runtime/python@1.2.3".parse().unwrap();
+        let mut reformatted = manifest.to_vec();
+        reformatted.push(b'\n');
+        let error = pull_one(&config, &reference, &Sha256Hex::from_bytes(&reformatted))
+            .expect_err("a re-serialised manifest is not the advertised one");
+        assert!(
+            format!("{error:#}").contains("digest mismatch"),
+            "{error:#}"
+        );
+        // Matching bytes get past the catalog check and are then refused on
+        // their own merits, so the check above is the one that fired.
+        let error = pull_one(&config, &reference, &Sha256Hex::from_bytes(manifest))
+            .expect_err("an unsigned manifest is not admitted");
+        assert!(
+            !format!("{error:#}").contains("digest mismatch"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn catalog_discovery_and_a_matching_hash_enroll_and_admit_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let manifest = br#"{"files":[]}"#;
+        let (_registry, config) = file_registry(manifest);
+        let index = fetch_index(&config).unwrap();
+        assert_eq!(search_index(&index, Some("python")).len(), 1);
+        pull_one(
+            &config,
+            &"runtime/python@1.2.3".parse().unwrap(),
+            &Sha256Hex::from_bytes(manifest),
+        )
+        .expect_err("the catalog hash alone admits nothing");
+        let left: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert!(left.is_empty(), "discovery wrote host state: {left:?}");
+    }
+
+    #[test]
+    fn an_explicit_older_version_resolves_while_a_newer_one_is_published() {
+        let entry = entry("runtime", "python", &["1.2.3", "1.10.0"]);
+        let requested: PackReference = "runtime/python@1.2.3".parse().expect("reference");
+        let resolved = resolve_version(&entry, &requested).expect("older version");
+        assert_eq!(resolved.to_string(), "runtime/python@1.2.3");
     }
 
     #[test]
