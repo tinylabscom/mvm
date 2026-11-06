@@ -3,7 +3,7 @@
 Backing: preview
 Validation: none — this records measurements taken on one commit; it is not a claim of enforcement.
 
-Measured at `152ed1cebf1009da677f2298fab8209a49ffe671` (origin/main, 2026-10-31). It owns no status: the issues
+Measured at `152ed1cebf1009da677f2298fab8209a49ffe671` (origin/main, 2026-10-31); §1 and §2 were re-verified at `dcc9acc2a59266a3e4c73c4d201b9e17e6914b34` (origin/main, 2026-11-05). It owns no status: the issues
 do. Every number below comes from the command printed beside it. Scope is the
 three #4839 checklist boxes named in §0; it does not touch #3731.
 
@@ -19,11 +19,12 @@ three #4839 checklist boxes named in §0; it does not touch #3731.
 
 - `list_projects` shows the `mvm` graph at branch `main`. `check_index_coverage` on five paths (`crates/mvm-cli/src/commands/mod.rs`, `mvm-hostd/src/bin/mvm-broker.rs`, `mvm-builder-guest/src/bin/mvm-host-vm-init.rs`, `mvm-agentd/src/bin/mvm-guest-agent/main.rs`, `crates/mvm-core/images.lock`) reports `indexed_at` 2026-10-08, `index_mode: fast`, and:
   `mvm-hostd/src/bin` and `mvm-agentd/src/bin` are **excluded subtrees**; the other three have no recorded coverage and `metadata_changed`/`not_tracked` freshness.
-- Conclusion: the graph is three weeks stale and excludes the `src/bin` directories that hold most binaries, so it cannot verify the binary list. The lists below are derived from `cargo metadata`, `images.lock`, ADR-001 and CLAUDE.md instead. Re-running this with a fresh full-mode index is the open gap.
+- On 2026-11-05 the `codebase-memory-mcp` server failed to connect (`CONNECT_TIMEOUT`), so no graph query or coverage check could be re-run; nothing in §1 rests on the graph.
+- Conclusion: the graph was three weeks stale and excludes the `src/bin` directories that hold most binaries, so it cannot verify the binary list. The lists below are derived from `cargo metadata`, `images.lock`, ADR-001 and CLAUDE.md instead. Re-running this with a fresh full-mode index is the open gap.
 
 ### 1.2 Packages and binaries
 
-- `cargo metadata --no-deps --format-version 1` -> **32 packages**, **54 `bin` targets** in 14 packages (the rest are library-only).
+- `cargo metadata --no-deps --format-version 1` -> **28 packages** (all workspace members; CLAUDE.md's "31 packages" is stale), **54 `bin` targets** in 14 packages (unchanged since the first measurement) (the rest are library-only).
 
 | Package | Bins | Binaries |
 |---|---|---|
@@ -48,6 +49,8 @@ Roles (from CLAUDE.md, cross-checked against the table): host CLI `mvmctl`; host
 
 - `crates/mvm-core/images.lock` (`schema_version = 2`): image set `image-set/v0.2.4` from `tinylabscom/mvm-images` with a pinned `manifest_sha256`; `[compatibility] builder_boot_abi = 1`; sections `[image_set]`, `[compatibility]`, `[boot_image]`, `[stage0_kernel]` (aarch64 and x86_64 seeds), `[legacy]` (`boot-image/v0.1.5`). Command: `grep -nE '^\[|^(name|release_tag|builder_boot_abi)' crates/mvm-core/images.lock`.
 - Image set is the Linux layer only (ADR-054); overlay, SDK sidecars and initramfs are retired roles that `mvmctl` assembles from the guest runtime archive shipped with each release.
+- Release artifacts (`.github/workflows/release.yml`): `mvmctl-<target>.tar.gz` (+ `.sha256`, bundle) for `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (built against musl; Intel macOS is deferred, matrix lines 208-229), each carrying `libmvm_hostlib`; `mvm-guest-bins-v<version>.tar.gz` + `.sha256` + bundles (built by `guest-bins.yml` via `mvmctl dev guest-bins`); deb/rpm packages; signed `checksums-sha256.txt`.
+- Guest-bins members (`cli-commands.md` "Guest Binaries", `GUEST_BINS_MANIFEST_FILE` in `crates/mvm-build/src/guest_runtime.rs`): per arch `bin/` (`mvm-guest-agent`, `mvm-guest-netinit`, `mvm-seccomp-apply`, `mvm-display-bridge`, `mvm-runner`, `mvm-egress-client`, `mvm-addon-dns`, `mvm-exit-report`, `mvm-ping`, `mvm-oci-entrypoint`, `mvm-setpriv`), `initramfs/mvm-guest-agent`, `lib/{glibc,musl}/` (`libmvm_host_services.so`, GPU shims), plus `sdk-py/mvm/` and `manifest.json`.
 - Contracts: signed `ExecutionPlan`; `.mvmpkg` bundle (`mvm_core::plan::bundle`); image-set contract; builder boot ABI 0/1/2; base-image contract 0/1; C ABIs `mvm_hostlib_*` (ABI 1.7 per CLAUDE.md) and `libmvm_host_services.so`; guest-agent vsock protocol.
 
 ### 1.4 Targets and features
@@ -57,26 +60,39 @@ Roles (from CLAUDE.md, cross-checked against the table): host CLI `mvmctl`; host
 
 ### 1.5 Security invariants
 
-- The ADR-001 claims table (`specs/adrs/001-microvm-security-posture.md`, the table headed `| # | Claim | Witnesses | Authority | Status |`) has **21 numbered rows**. CLAUDE.md's text says "rows 1–19" and names claims 1–20; the table is authoritative (and has 21). That prose lag is a doc discrepancy to fix, not a code one.
+- The ADR-001 claims table (`specs/adrs/001-microvm-security-posture.md`, the table headed `| # | Claim | Witnesses | Authority | Status |`) has **21 numbered rows** (re-checked 2026-11-05: rows 1-21 at `specs/adrs/001-microvm-security-posture.md` lines 947-967). CLAUDE.md's text says "rows 1–19" and names claims 1–20; the table is authoritative (and has 21). That prose lag is a doc discrepancy to fix, not a code one.
+- `xtask` registers 88 distinct `check-*` names (`grep -oE '"check-[a-z0-9-]+"' xtask/src/main.rs | sort -u | wc -l`); the CI gate list is derived from the workflows, not from `check-all`. Local entry points: `just ci`, `just check::gated`, `just lints::fmt-check`, `just lints::clippy`, `just tests::doc`.
 - Standing invariants: no NIC in any workload or builder VM (`check-single-network-path`); no SSH in microVMs; host Nix never used; vsock-only auditable data plane.
 
 ## 2. Child workstreams
 
-Owners: every issue below has no assignee (`gh issue view <n> --json assignees` returned none), so each owner is `unassigned`. Mapping is to the #4839 checklist sections (`gh issue view 4839 --json body`); open linked issues are listed with their current titles.
+Owners: `gh issue view 4839 --json assignees` returns none, so every owner is `unassigned` until a maintainer names one. Box numbers are the line of the checkbox in the #4839 body (`gh issue view 4839 --json body`); all 78 unchecked boxes are mapped. "Blocked" names what must land first. Status lives in the issues, not here.
 
-| # | Workstream (umbrella section) | Depends on | Open issues | Acceptance | Validation |
+| WS | Boxes (body line) | Doable now? | Depends on / blocked by | Acceptance | Validation |
 |---|---|---|---|---|---|
-| W1 | Baseline and ownership (§1) | none | #4839 | release baseline recorded; branches/PRs inventoried; this doc | `check-adr-coverage`, `check-witness-citations`, `check-asserted-absence` |
-| W2 | Remove slop/duplication (§2) | W1 | #4926 Retire the singular-entrypoint compatibility path | no narration/history comments; retained invariant comments | `rg` for banned patterns; `cargo clippy --workspace -- -D warnings` |
-| W3 | Dependencies and crates/features (§3) | W1 | #4542 Consolidate small workspace crates | each dep/feature has a consumer or is removed | `cargo metadata`; `cargo run -p xtask -- check-all` |
-| W4 | Release compilation (§4) | W1 | none open | repeated-compile causes measured and fixed | `cargo build --release --timings` |
-| W5 | Toolchain/dev/CI paths (§5) | W1 | #4657, #4840, #4875, #4764, #4714 | bounded local feedback and CI latency; hermetic pair-image tests; pinned toolchain | `just ci`; workflow runs |
-| W6a | Capability surface (§6) | W1 | #4926 | §3 of this doc reviewed per flag/env knob; obsolete ones retired with callers | `mvmctl --help` recursion; `rg` of knob |
-| W6b | Thin CLI over mvm-client (§6, shared with #3731) | W6a | #3730, #4412, #4413, #4414, #4415, #4416 | zero production CLI reaches inventoried | `check-thin-cli` |
-| W6c | Rust/tests/docs simplification (§6) | W2 | #4230, #3716 | misleading tests replaced by outcome tests | `cargo nextest run --workspace` |
-| W7 | Demo critical path | none | #4507, #4508, #4509, #4510, #4511, #4655, #4391, #4764 | demo issues closed (deadline in the umbrella) | per issue |
+| W1 Baseline | 369, 370 | yes (this document) | none | §1-§2 re-verified against the current commit; every row cites a command | `cargo metadata --no-deps --format-version 1`; `cargo run -q -p xtask -- check-spec-hygiene` |
+| W2 Slop and duplication | 374, 375, 376, 377 | yes, per crate | W1 | no narration or history comments; one authority per helper; narrowed public APIs | `just lints::clippy`; `cargo nextest run --workspace` |
+| W3 Dependencies and crates | 386 | yes | W1; #4542 | each first-party crate and feature has a consumer or is removed end to end | `cargo metadata`; `just check::gated` |
+| W4 Release compilation | 394, 396 | needs a release build | W1; a quiet host | cache and rerun causes measured; fix shown in the real release workflow | `cargo build --release --timings`; release workflow run |
+| W5 Toolchain, dev, CI | 400, 405 | partly | #4840 (box 400) coordinated with #4657 and #4412; box 405 needs W3 | local validation matches the owning CI gates; platform, WASM, fuzz, eBPF, supply-chain coverage kept | `just ci`; workflow runs |
+| W6a Rust review | 412 | yes, per change | W2, W3 | ownership, cancellation, cleanup and panic paths reviewed for touched code | `cargo nextest run --workspace` |
+| W6b Tests | 413 | yes | W2 | existence/text tests replaced by outcome tests; BDD kept | `cargo nextest run --workspace`; `cargo test -p mvm-conformance --features bdd` |
+| W6c Docs | 415, 463 | after W2-W6b | all code workstreams | docs, CLI reference, recipes and CI match behaviour | `python3 scripts/gen-cli-surface-inventory.py --bin target/debug/mvmctl --check`; `check-doc-links` |
+| W7 Thin CLI over MvmClient | 219, 220, 221, 223, 224, 245, 247 | yes, library side first | #3730, #4412-#4416 | zero production CLI reaches; typed client plus hostlib/SDK parity; Studio runs without subprocess backfill | `check-thin-cli`; `check-no-cli-shellout`; client public-API tests |
+| W8 HVF recovery lifetime | 246, 254, 255, 256, 257 | box 254 needs the approved contract (`specs/contracts/hvf-entrypoint-owner.md`) | #4655; boxes 255-257 blocked by 254, then 257 by the landed product implementation | recovery receiver contract verified; failure-path evidence; Firecracker-only gates removed after landing | per-box focused tests; macOS HVF run |
+| W9 Secrets | 235 | yes | `specs/contracts/secret-store-kms-contract.md` | library-owned local provider seam with authorization, audit and secret-safe types | `cargo nextest run -p mvm-core -p mvm-client` |
+| W10 Demo critical path | 133, 140-151, 156, 157, 158, 427 | no | each blocked by its owning issue (#4764 release, #4655, #4511, #4510, #4509, #4508, #4507, #4391, mvm-packs#84/#77/#76/#31); 133 and 157 need a live HVF run, 158 needs all twelve | final-candidate HVF witness with correlated allow/deny audit | per issue |
+| W11 PS-06 Firecracker | 443, 444, 445, 446, 447, 448 | 443 yes; 448 is a design decision | 444-447 blocked by 448 (process-host design) and by a released Linux producer | persistent lifecycle, metadata preserved, genuine producer witnessed | Linux KVM host runs |
+| W12 Image and pack trust | 328, 329, 330, 331, 332, 333 | verification only | mvm-images#49/#64, #4100, #4764; 333 needs publication across architectures | image identity distinct from application identity; revocation authorities separate; atomic publication | `check-claim-catalog`; release verification workflow |
+| W13 Accepted contracts (ADR review) | 347, 348, 349, 350, 351, 353, 354, 355, 357 | yes, as doc-and-witness reconciliation | #3422-#3426, #4184 (347); #4788 (348); #4577 (357) | each ADR clause maps to a retained, fresh witness | `check-adr-coverage`; `check-witness-citations`; `check-asserted-absence` |
+| W14 Studio and MVMD | 338, 339 | coordination only | Studio PR 29; MVMD repository | adapter and contract boundaries preserved, nothing duplicated | cross-repository review |
+| W15 Protected goals and security posture | 301, 302, 321 | 321 yes; 302 needs a quiet host and a KVM or HVF machine | W1 (321); applicable backends (302) | claims mapped to enforcement and witnesses; cold and warm startup evidence recorded | `check-claim-catalog`; bench commands |
+| W16 Legacy retirement | 267, 268, 269 | yes, per interface | W1; consumer proof per item | each removed interface named with callers, docs, fixtures and CI updated together | `rg` of the removed name; `just ci` |
+| W17 Umbrella completion | 158, 210, 460, 461, 462 | no | all above | every child complete or linked to a disposition; final before/after evidence | `cargo fmt --all --check`; `cargo test --workspace`; `cargo clippy --workspace -- -D warnings`; `just check::gated` |
 
-Open issues referenced anywhere in the umbrella body: 40 (`gh issue view` on every `#NNNN` in the body; 80 refs, 37 merged).
+Count: 78 boxes in `/tmp/boxes.txt` at the time of writing; box 158 appears in both W10 and W17 by design.
+
+Open issues referenced in the umbrella body were 40 at the first measurement (`gh issue view` on every `#NNNN`); re-run before relying on that.
 
 ## 3. Capability and flag inventory
 

@@ -178,11 +178,26 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .context("building a runtime for the pack registry fetch")
 }
 
-/// Existing synchronous bridge for synchronous registry callers.
-pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    runtime()
-        .expect("building a single-thread runtime for one registry fetch")
-        .block_on(future)
+/// Synchronous bridge for synchronous registry callers. Safe to call from
+/// inside a tokio runtime: the future then runs on a scoped helper thread with
+/// its own runtime, because a runtime cannot be entered from within another.
+pub fn block_on<F>(future: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    let run = || {
+        runtime()
+            .expect("building a single-thread runtime for one registry fetch")
+            .block_on(future)
+    };
+    if tokio::runtime::Handle::try_current().is_err() {
+        return run();
+    }
+    std::thread::scope(|scope| match scope.spawn(run).join() {
+        Ok(output) => output,
+        Err(panic) => std::panic::resume_unwind(panic),
+    })
 }
 
 async fn fetch_text(url: &str) -> Result<String> {
@@ -239,6 +254,11 @@ mod tests {
 
     fn parse(value: &serde_json::Value) -> Result<Vec<PackIndexEntry>> {
         parse_index(&value.to_string(), "local test catalog")
+    }
+
+    #[tokio::test]
+    async fn block_on_does_not_panic_inside_a_tokio_runtime() {
+        assert_eq!(block_on(async { 7 }), 7);
     }
 
     #[test]

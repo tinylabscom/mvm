@@ -349,6 +349,49 @@ mod tests {
     }
 
     #[test]
+    fn an_image_set_signer_cannot_sign_an_application_descriptor() {
+        let policy = publisher_policy();
+        let reference = "runtime/python@1.2.3".parse().unwrap();
+        let bytes = application_bytes();
+        let signers = crate::release_trust::accepted_image_set_identities("0.1.0")
+            .into_iter()
+            .chain(crate::release_trust::accepted_release_identities("0.1.0"));
+        for identity in signers {
+            let result = adopt_with(
+                &PackAdoption {
+                    requested: &reference,
+                    manifest_bytes: &bytes,
+                    signature_bundle: identity.as_bytes(),
+                    publisher_policy: &policy,
+                },
+                |_, bundle, trust| {
+                    let identity = std::str::from_utf8(bundle).unwrap();
+                    trust
+                        .accepted_identities
+                        .iter()
+                        .any(|allowed| allowed == identity)
+                        .then(|| VerifiedSigner {
+                            identity: identity.to_string(),
+                            issuer: trust.issuer.clone(),
+                        })
+                        .ok_or_else(|| {
+                            RegistryPackVerificationError::SignatureInvalid(
+                                "not the namespace publisher".to_string(),
+                            )
+                        })
+                },
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(RegistryPackVerificationError::SignatureInvalid(_))
+                ),
+                "{identity}"
+            );
+        }
+    }
+
+    #[test]
     fn strict_dispatch_refuses_unknown_hybrid_duplicate_and_malformed_descriptors() {
         let policy = publisher_policy();
         let reference = "runtime/python@1.2.3".parse().unwrap();
