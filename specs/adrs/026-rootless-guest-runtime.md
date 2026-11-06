@@ -5,7 +5,7 @@
 Proposed. Formalizes a posture the codebase already half-implements — the agent
 runs as an unprivileged uid through the first-party static
 `/sbin/mvm-setpriv --no-new-privs` helper, each service runs under its own uid,
-and `/etc/{passwd,group,nsswitch.conf}` are read-only bind mounts — and pins
+and the rootfs is a read-only dm-verity mount, so `/etc/{passwd,group,nsswitch.conf}` cannot be rewritten — and pins
 down the stronger property the product overview asserts: the runtime
 itself never runs as root, and there is no usable root account inside the
 guest. The build-time no-setuid-root check and the runtime euid witness
@@ -76,9 +76,10 @@ also requires a build-time scan proving that the production rootfs contains no
 setuid-root binary and no `su`/`sudo`/`doas`; that scan has not shipped and is
 deferred with the runtime-euid witness below. Until it does, this ADR does not
 claim that image contents satisfy that stronger property.
-`/etc/{passwd,group,nsswitch.conf}` stay read-only bind mounts and the root
+`/etc/{passwd,group,nsswitch.conf}` stay unwritable by the workload and the root
 entry carries no usable login. The dm-verity-sealed read-only rootfs prevents
-a workload from changing the image contents at runtime.
+a workload from changing the image contents at runtime; the only writer is the
+pre-drop provisioner, which appends a non-root entry and mints no uid 0.
 
 ### 3. Claim numbering is deferred to the implementing change
 

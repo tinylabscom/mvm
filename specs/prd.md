@@ -187,8 +187,8 @@ use a `/data/cache` convention rather than a new allowed root.
 
 - **In the guest.** What ships is the narrower guarantee: no guest binary can
   elevate to uid 0 (claim 2). Services run as their own unprivileged uids
-  through `mvm-setpriv --no-new-privs`, and the passwd, group and nsswitch
-  files are read-only bind mounts. The stronger requirement, that the runtime
+  through `mvm-setpriv --no-new-privs`, and the rootfs is a read-only
+  dm-verity mount, so passwd, group and nsswitch cannot be rewritten. The stronger requirement, that the runtime
   never runs as root and there is no usable root account, is ADR-026, still
   `Proposed`. It is a requirement here, not a claim; do not promote it until
   its build-time no-setuid check and runtime euid witness exist.

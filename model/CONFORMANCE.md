@@ -78,7 +78,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-10` | `build` | No untrusted workload reaches the network unless policy-admitted | `fn:policy_default_is_deny_all`, `fn:run_net_default_is_deny_all`, `fn:private_link_local_loopback_ula_metadata_are_forbidden`, `fn:emits_resolved_query_with_ip_list`, `fn:admitted_projection_is_one_object_graph_for_every_network_surface`, `ci:single-network-path`, `ci:fuzz_dns_codec`, `fn:assert_vsock_only_device_model`, `fn:fork_restore_refuses_nic`, `fn:verify_and_resume_refuses_nic_on_restore`, `fn:private_range_is_denied_by_default_and_readmitted_only_by_a_grant_naming_it`, `fn:metadata_and_the_absolute_ranges_are_never_readmitted`, `fn:a_name_that_resolves_inward_is_refused_as_the_address_it_reached`, `fn:an_embedded_ipv4_form_is_classified_by_the_address_it_reaches`, `fn:the_forward_leg_gets_the_gate_s_answer_not_a_fresh_lookup` |
+| `MVM-SEC-10` | `build` | No untrusted workload reaches the network unless policy-admitted | `fn:a_flow_no_rule_admits_is_refused_and_audited_under_the_default_policy`, `fn:open_tcp_to_unknown_host_is_refused_by_default_deny_gate`, `fn:policy_default_is_deny_all`, `fn:run_net_default_is_deny_all`, `fn:private_link_local_loopback_ula_metadata_are_forbidden`, `fn:emits_resolved_query_with_ip_list`, `fn:admitted_projection_is_one_object_graph_for_every_network_surface`, `ci:single-network-path`, `ci:fuzz_dns_codec`, `fn:assert_vsock_only_device_model`, `fn:fork_restore_refuses_nic`, `fn:verify_and_resume_refuses_nic_on_restore`, `fn:private_range_is_denied_by_default_and_readmitted_only_by_a_grant_naming_it`, `fn:metadata_and_the_absolute_ranges_are_never_readmitted`, `fn:a_name_that_resolves_inward_is_refused_as_the_address_it_reached`, `fn:an_embedded_ipv4_form_is_classified_by_the_address_it_reaches`, `fn:the_forward_leg_gets_the_gate_s_answer_not_a_fresh_lookup` |
 
 ## fuzz_surface
 
@@ -90,13 +90,13 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-02` | `build` | No guest binary can elevate to uid 0 | `fn:set_no_new_privs`, `fn:set_no_new_privs_actually_sets_the_kernel_bit`, `fn:virtiofs_mount_flags_keep_workspace_read_only`, `ci:check-abi-layout` |
+| `MVM-SEC-02` | `build` | No guest binary can elevate to uid 0 | `fn:drops_identity_groups_capabilities_and_enables_no_new_privs`, `fn:set_no_new_privs_actually_sets_the_kernel_bit`, `fn:rejects_a_drop_without_no_new_privs`, `fn:never_writes_a_uid_zero_entry`, `fn:the_rootfs_is_always_mounted_read_only`, `fn:the_workload_identity_is_never_root`, `ci:check-abi-layout` |
 
 ## host_services
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-12` | `build` | Every host-side service binding is plan-gated and audited | `fn:unbound_service_returns_not_bound`, `fn:service_call_rejects_unknown_envelope_fields` |
+| `MVM-SEC-12` | `build` | Every host-side service binding is plan-gated and audited | `fn:unbound_service_returns_not_bound`, `fn:a_policy_refusal_is_audited_without_the_argument_value`, `fn:service_call_rejects_unknown_envelope_fields` |
 
 ## host_shares
 
@@ -145,7 +145,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-03` | `build` | A tampered rootfs ext4 fails to boot | `ci:verified-boot-artifacts`, `ci:check-abi-layout`, `fn:verify_and_resume_rejects_tampered_mem`, `fn:a_fresh_release_install_assembles_every_piece_from_its_own_archive` |
+| `MVM-SEC-03` | `build` | A tampered rootfs ext4 fails to boot | `ci:verified-boot-artifacts`, `ci:check-abi-layout`, `fn:verify_and_resume_rejects_tampered_mem`, `fn:a_fresh_release_install_assembles_every_piece_from_its_own_archive`, `fn:a_single_flipped_byte_in_any_block_no_longer_matches_the_recorded_root`, `fn:seal_detects_post_format_rootfs_tamper` |
 
 ## workload_input
 
