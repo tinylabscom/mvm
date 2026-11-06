@@ -1069,40 +1069,48 @@ pub fn session_events(
         .collect()
 }
 
-/// Every event naming `workload` in its `workload` label, across all sessions.
+/// Every event of `workload`, across all sessions.
 ///
-/// A replacement runs under a new plan, so its history is not one session. The
-/// launch, refusal and containment events carry the label; an event that does
-/// not is not selected, which is why the timeline is a view of those events
-/// and not a claim to be every entry the workload ever caused.
+/// A replacement runs under a new plan, so its history is not one session. An
+/// entry belongs to the workload when it carries the `workload` label, or when
+/// it shares a plan with an entry that does: the launch event is labelled, so
+/// the denials, exits and flow events the host records under that same plan
+/// come with it. Entries on a plan that never carried the label are not
+/// selected, so this is a view of the workload's own plans, not a search of
+/// the whole chain for anything that mentions it.
 pub fn workload_events(
     lines: &[String],
     workload: &str,
     filter: &EventFilter,
 ) -> Result<Vec<SessionEvent>> {
-    lines
+    let mut decoded = Vec::with_capacity(lines.len());
+    for (seq, line) in lines.iter().enumerate() {
+        let envelope: SignedEnvelope = serde_json::from_str(line)
+            .map_err(|error| anyhow::anyhow!("decoding audit line {seq}: {error}"))?;
+        decoded.push((seq, envelope));
+    }
+    let labelled =
+        |e: &SignedEnvelope| e.entry.labels.get("workload").map(String::as_str) == Some(workload);
+    let plans: std::collections::BTreeSet<&str> = decoded
         .iter()
-        .enumerate()
-        .filter_map(|(seq, line)| {
-            let envelope: SignedEnvelope = match serde_json::from_str(line) {
-                Ok(envelope) => envelope,
-                Err(error) => {
-                    return Some(Err(anyhow::anyhow!("decoding audit line {seq}: {error}")));
-                }
-            };
-            let entry = &envelope.entry;
-            let keep = entry.labels.get("workload").map(String::as_str) == Some(workload)
+        .filter(|(_, e)| labelled(e))
+        .map(|(_, e)| e.entry.plan_id.as_str())
+        .collect();
+    Ok(decoded
+        .iter()
+        .filter(|(_, e)| {
+            (labelled(e) || plans.contains(e.entry.plan_id.as_str()))
                 && filter
                     .kind
                     .as_deref()
-                    .is_none_or(|kind| mvm_core::util::glob::glob_match(kind, &entry.event))
-                && filter.range.contains(&entry.timestamp);
-            keep.then_some(Ok(SessionEvent {
-                seq: seq as u64,
-                envelope,
-            }))
+                    .is_none_or(|kind| mvm_core::util::glob::glob_match(kind, &e.entry.event))
+                && filter.range.contains(&e.entry.timestamp)
         })
-        .collect()
+        .map(|(seq, e)| SessionEvent {
+            seq: *seq as u64,
+            envelope: e.clone(),
+        })
+        .collect())
 }
 
 /// Resolve what an operator typed to one session's plan id: the full id, the
