@@ -971,6 +971,7 @@ fn close_call_session_checked(
             backend,
             exit_code: end.exit_code,
             completed: end.completed,
+            posture: None,
         },
     )?;
     Ok(())
