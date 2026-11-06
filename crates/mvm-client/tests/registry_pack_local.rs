@@ -49,10 +49,20 @@ fn isolated_home(root: &Path) -> (TestEnv, RegistryPackPublisherPolicy) {
     env.isolate_mvm_home(root.join("home"));
     env.set("MVM_PACK_REGISTRY", "https://invalid.invalid/no-fallback");
     let policy = RegistryPackPublisherPolicy::new(vec![
-        RegistryPackPublisher::new("runtime", "https://token.actions.githubusercontent.com", vec![IDENTITY.to_string()]).unwrap(),
-        RegistryPackPublisher::new("agent", "https://token.actions.githubusercontent.com",
-            vec!["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main".to_string()]).unwrap(),
-    ]).unwrap();
+        RegistryPackPublisher::new(
+            "runtime",
+            "https://token.actions.githubusercontent.com",
+            vec![IDENTITY.to_string()],
+        )
+        .unwrap(),
+        RegistryPackPublisher::new(
+            "agent",
+            "https://token.actions.githubusercontent.com",
+            vec![mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+        )
+        .unwrap(),
+    ])
+    .unwrap();
     store::save_publisher_policy(
         &mvm_core::config::registry_pack_publisher_policy_path(),
         &policy,
