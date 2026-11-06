@@ -722,6 +722,38 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
         script.contains("--no-build") && script.contains("--no-strip"),
         "cargo-deb must neither build nor strip: the packaged bytes are the tarball's"
     );
+    assert!(
+        script.contains("bash scripts/distro-package-version.sh")
+            && packages.contains("bash scripts/distro-package-version.sh"),
+        "package creation and the install smoke must name prereleases by the same rule"
+    );
+}
+
+#[test]
+fn distro_package_version_orders_prereleases_before_stable() {
+    for (version, expected) in [
+        ("0.27.0", "0.27.0"),
+        ("0.27.0-rc.3", "0.27.0~rc.3"),
+        ("0.27.0-alpha-beta.1", "0.27.0~alpha~beta.1"),
+    ] {
+        let output = Command::new("bash")
+            .args(["scripts/distro-package-version.sh", version])
+            .output()
+            .expect("convert package version");
+        assert!(output.status.success(), "{version}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            expected,
+            "{version}"
+        );
+    }
+    for invalid in ["", "v0.27.0-rc.3"] {
+        let output = Command::new("bash")
+            .args(["scripts/distro-package-version.sh", invalid])
+            .output()
+            .expect("reject invalid version");
+        assert!(!output.status.success(), "{invalid:?}");
+    }
 }
 
 /// The packaging dry run runs independently of a tag push. It must not mistake

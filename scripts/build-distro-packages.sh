@@ -42,9 +42,7 @@ case "${target}" in
   aarch64-unknown-linux-gnu) build_target=aarch64-unknown-linux-musl; host_arch=aarch64 ;;
   *) echo "build-distro-packages: no package for target ${target}" >&2; exit 2 ;;
 esac
-case "${version}" in
-  v*|"") echo "build-distro-packages: version must be bare, got '${version}'" >&2; exit 2 ;;
-esac
+package_version="$(bash scripts/distro-package-version.sh "${version}")"
 [ -f "${tarball}" ] || { echo "build-distro-packages: ${tarball} not found" >&2; exit 1; }
 runtime_name="mvm-guest-bins-v${version}.tar.gz"
 [ "$(basename "${runtime}")" = "${runtime_name}" ] \
@@ -92,11 +90,11 @@ mkdir -p "${out_dir}"
 # --no-strip: the packaged binaries must stay byte-identical to the tarball's,
 # whose digests the signed manifest already records.
 deb="$(cargo deb --no-build --no-strip --target "${build_target}" \
-  --deb-version "${version}-1" --output "${out_dir}" | tail -n 1)"
+  --deb-version "${package_version}-1" --output "${out_dir}" | tail -n 1)"
 rpm_dir="$(mktemp -d)"
 trap 'rm -rf "${unpack}" "${rpm_dir}"' EXIT
 cargo generate-rpm --target "${build_target}" --auto-req disabled \
-  --set-metadata "version = \"${version}\"" --output "${rpm_dir}/"
+  --set-metadata "version = \"${package_version}\"" --output "${rpm_dir}/"
 rpms=("${rpm_dir}"/*.rpm)
 [ "${#rpms[@]}" -eq 1 ] || { echo "build-distro-packages: expected one .rpm, got ${rpms[*]}" >&2; exit 1; }
 cp "${rpms[0]}" "${out_dir}/"

@@ -277,9 +277,10 @@ jobs:
           VERSION: ${{ needs.package.outputs.version }}
         run: |
           set -euo pipefail
+          package_version="$(bash scripts/distro-package-version.sh "${VERSION}")"
           case "${IMAGE}" in
-            debian:*|ubuntu:*) package="mvmctl_${VERSION}-1_${DEB_ARCH}.deb" ;;
-            *)                 package="mvmctl-${VERSION}-1.${ARCH}.rpm" ;;
+            debian:*|ubuntu:*) package="mvmctl_${package_version}-1_${DEB_ARCH}.deb" ;;
+            *)                 package="mvmctl-${package_version}-1.${ARCH}.rpm" ;;
           esac
           [ -f "distro-packages/${package}" ] || {
             echo "::error::${package} was not built; have: $(ls distro-packages)" >&2
