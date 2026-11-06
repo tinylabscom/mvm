@@ -64,15 +64,6 @@ pub fn load_policy_at(home: &Path) -> Result<HostPolicy, HostInterfaceError> {
     load_or_default(&dir_at(home).join("policy.json"))
 }
 
-pub fn save_node_record_at(home: &Path, record: &NodeRecord) -> std::io::Result<()> {
-    let dir = dir_at(home);
-    crate::private_fs::ensure_private_dir(&dir)?;
-    let tmp = dir.join("node.json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(record)?)?;
-    crate::private_fs::set_mode(&tmp, 0o600)?;
-    std::fs::rename(tmp, dir.join("node.json"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,16 +87,5 @@ mod tests {
             load_node_record_at(d.path()),
             Err(HostInterfaceError::Denied(Denial::StateUnreadable(_)))
         ));
-    }
-
-    #[test]
-    fn saved_record_round_trips() {
-        let d = tempfile::tempdir().unwrap();
-        let r = NodeRecord {
-            state: NodeState::Quarantined,
-            ..Default::default()
-        };
-        save_node_record_at(d.path(), &r).unwrap();
-        assert_eq!(load_node_record_at(d.path()).unwrap(), r);
     }
 }
