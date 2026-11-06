@@ -90,7 +90,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-build | `src/provenance_mark.rs` | 1 | storage tool | debugfs read of image provenance mark | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-build | `src/qemu_builder.rs` | 6 | hypervisor | QEMU builder: timeout-wrapped boot, zstd, mkfs.ext4, debugfs | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-build | `src/runtime_overlay.rs` | 1 | network fetch | curl download of a release artifact | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; embedder refusal | embedder-refused |
-| mvm-build | `src/stage0.rs` | 1 | archive tool | native tar -xJf of the Stage 0 root tarball (pure-Rust path is the alternative) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
+| mvm-build | `src/stage0.rs` | 1 | archive tool | native tar -xJf of the Stage 0 root tarball (pure-Rust path is the alternative) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-builder-guest | `src/bin/mvm-host-vm-init.rs` | 15 | builder init | builder VM PID 1: busybox/mount/network setup, nix-store, mkfs, workload netns, agent fork | builder VM | CH | - | RAW_SITES (builder) | guest-side |
 | mvm-builder-guest | `src/bin/mvm-host-vm-init/boot_stage.rs` | 1 | builder init | exec the next boot stage | builder VM | CH | - | RAW_SITES (builder) | guest-side |
 | mvm-builder-guest | `src/bin/mvm-host-vm-init/builder_hooks.rs` | 4 | builder init | fsck and loop-device hooks | builder VM | CH | - | RAW_SITES (builder) | guest-side |
@@ -176,9 +176,9 @@ Totals: 192 production sites in 99 files.
 | bounded-user-adapter | 1 | 1 |
 | cli-only | 32 | 22 |
 | embedder-refused | 11 | 8 |
-| fixed-argv-utility | 20 | 10 |
+| fixed-argv-utility | 21 | 11 |
 | guest-side | 66 | 30 |
-| open-review | 21 | 5 |
+| open-review | 20 | 4 |
 | required-host-primitive | 38 | 22 |
 | test-only | 3 | 1 |
 
@@ -189,6 +189,7 @@ Reviewed library-reachable sites (disposition, then why):
 | `mvm-build/src/builder_vm_image.rs` | fixed-argv-utility | `prepopulate_with_mkfs`: program is the e2fsprogs `mkfs.ext4` path from `find_host_mkfs_ext4` (fixed candidate list), argv is a fixed flag list plus typed paths and a block count, no shell, status checked and mapped to `BuilderVmError`. Formats the builder's own store image from a digest-verified seed; no caller-supplied text reaches argv. No wall-clock bound. |
 | `mvm-build/src/builder_vm_runtime.rs` | fixed-argv-utility | `debugfs_cat`: read-only `debugfs -R` on the builder store image; the request now comes from `debugfs_cat_request`, which refuses a relative path or one with whitespace or control characters (tested). Callers pass two constant guest paths. Output is a local diagnostic log read; no wall-clock or size bound. |
 | `mvm-build/src/provenance_mark.rs` | fixed-argv-utility | `debugfs_cat`: same read-only `debugfs -R` through `debugfs_cat_request`; the callers (`read_mark_from_ext4`) pass the two constant `/mvm/provenance.*` paths and verify the result against the embedded key before use. No wall-clock or size bound on debugfs output. |
+| `mvm-build/src/stage0.rs` | fixed-argv-utility | `extract_nix_store_tarball_with_native_tar`: fixed `tar -xJf <tarball> -C <dir> --strip-components 1` on the Stage 0 root tarball, which is a bootstrap seed digest-verified before extraction; any failure clears the partial extract and falls back to the in-process extractor (`extract_nix_store_tarball_pure_rust`), so the spawn is an optimisation with a typed error and a pure-Rust alternative. No wall-clock bound. |
 | `mvm-client/src/secret/source.rs` | bounded-user-adapter | `SecretSourceResolver::run_cli`: the program is one of two fixed names (`Cli::OnePassword`, `Cli::Bitwarden`) found only in trusted directories (`find_trusted`: absolute, canonical, not under an untrusted root, owner and mode checked); argv is a fixed subcommand plus typed references; environment is scrubbed with only that CLI's own session variables re-admitted by exact name (`helper_command_with`); stdin null; stdout capped at `MAX_SOURCE_BYTES` and stderr at 4 KiB by `spawn_bounded_reader`; a wall-clock timeout kills the child (`CliTimedOut`); errors carry at most 200 characters of the first stderr line and never the value. It cannot run `mvmctl` (`check-no-cli-shellout`). |
 | `mvm-core/src/crypto/key_rotation.rs` | fixed-argv-utility | `rotate_luks_slot`: fixed `cryptsetup luksChangeKey`; both passphrases go through 0600 tempfiles named in argv, never argv text or env; stdin is null; failure carries cryptsetup stderr only (no key bytes). Requires a live LUKS device by contract. No wall-clock bound. |
 | `mvm-core/src/host_storage_encryption.rs` | fixed-argv-utility | `detect_macos`/`detect_linux`: read-only `diskutil info`, `findmnt --json`, `tune2fs -l` and `lsblk --inverse` probes with fixed argv; the only variable argument is a path or a `/dev/` device that `detect_linux` checks with `starts_with("/dev/")` before `tune2fs` and `lsblk` (after `--`). The runner is injected, and tests pin fail-closed behaviour (`missing_tools_fail_closed`, `failed_findmnt_never_inspects_a_device`, `failed_diskutil_refuses_even_with_encrypted_stdout`). A failed or absent probe means not-encrypted. No wall-clock bound. |
