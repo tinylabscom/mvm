@@ -33,6 +33,10 @@ pub enum InitramfsBuildError {
     #[error("cargo initramfs build failed: {reason}")]
     CargoBuildFailed { reason: String },
 
+    /// The agent does not fit the cpio archive's 32-bit header fields.
+    #[error(transparent)]
+    Cpio(#[from] crate::rootfs_inject::CpioError),
+
     /// An initramfs image does not hash to its own sidecar.
     #[error("checksum mismatch for {name}: expected sha256 {expected}, computed {actual}")]
     ChecksumMismatch {
@@ -388,7 +392,7 @@ pub fn assemble_initramfs_artifact(
     version: &str,
     out_dir: &Path,
 ) -> Result<(), InitramfsBuildError> {
-    let cpio = initramfs_cpio(agent_bytes);
+    let cpio = initramfs_cpio(agent_bytes)?;
     let image = gzip_deterministic(&cpio)?;
     std::fs::create_dir_all(out_dir)?;
     std::fs::write(
@@ -417,11 +421,11 @@ pub fn assemble_initramfs_artifact(
 /// devtmpfs itself, so the kernel creates the device nodes. `pub` as the
 /// determinism contract surface (the conformance suite builds it twice
 /// and compares bytes).
-pub fn initramfs_cpio(agent_bytes: &[u8]) -> Vec<u8> {
-    crate::rootfs_inject::build_newc_cpio(&[
+pub fn initramfs_cpio(agent_bytes: &[u8]) -> Result<Vec<u8>, InitramfsBuildError> {
+    Ok(crate::rootfs_inject::build_newc_cpio(&[
         crate::rootfs_inject::CpioEntry::dir("."),
         crate::rootfs_inject::CpioEntry::file("./init", 0o755, agent_bytes.to_vec()),
-    ])
+    ])?)
 }
 
 /// Gzip at the maximum level with no name/timestamp header — the
@@ -818,7 +822,7 @@ mod tests {
         GzDecoder::new(std::fs::File::open(&artifact.image_path).unwrap())
             .read_to_end(&mut cpio)
             .unwrap();
-        assert_eq!(cpio, initramfs_cpio(b"sealed-agent"));
+        assert_eq!(cpio, initramfs_cpio(b"sealed-agent").unwrap());
         assert!(
             !cpio
                 .windows(b"addons-agent".len())
@@ -848,7 +852,7 @@ mod tests {
         GzDecoder::new(std::fs::File::open(&refreshed.image_path).unwrap())
             .read_to_end(&mut refreshed_cpio)
             .unwrap();
-        assert_eq!(refreshed_cpio, initramfs_cpio(b"sealed-agent"));
+        assert_eq!(refreshed_cpio, initramfs_cpio(b"sealed-agent").unwrap());
         assert_eq!(
             std::fs::read_to_string(cache.path().join("1.2.3/x86_64/SOURCE_FINGERPRINT")).unwrap(),
             runtime.digest
@@ -1664,8 +1668,8 @@ mod tests {
 
     #[test]
     fn initramfs_cpio_is_byte_deterministic_across_builds() {
-        let a = initramfs_cpio(b"agent-bytes");
-        let b = initramfs_cpio(b"agent-bytes");
+        let a = initramfs_cpio(b"agent-bytes").unwrap();
+        let b = initramfs_cpio(b"agent-bytes").unwrap();
         assert_eq!(a, b, "same agent bytes must produce the same cpio");
         assert_eq!(sha256_hex(&a), sha256_hex(&b));
         assert_epoch_zero_metadata(&a);
@@ -1677,7 +1681,7 @@ mod tests {
 
     #[test]
     fn initramfs_cpio_layout_is_dot_and_init_only() {
-        let cpio = initramfs_cpio(b"agent-bytes");
+        let cpio = initramfs_cpio(b"agent-bytes").unwrap();
         assert_eq!(
             newc_names(&cpio),
             vec![
@@ -1707,7 +1711,7 @@ mod tests {
             &mut uncompressed,
         )
         .unwrap();
-        assert_eq!(uncompressed, initramfs_cpio(b"agent-bytes"));
+        assert_eq!(uncompressed, initramfs_cpio(b"agent-bytes").unwrap());
         assert_eq!(hash.trim(), sha256_hex(&uncompressed));
         assert_eq!(size.trim().parse::<usize>().unwrap(), image.len());
         assert_eq!(version.trim(), "0.18.0");
