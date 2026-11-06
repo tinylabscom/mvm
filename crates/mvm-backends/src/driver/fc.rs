@@ -1318,9 +1318,14 @@ impl VmmDriver for FcDriver {
     fn boot_custodied(
         &self,
         spec: &VmmSpec,
-        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        files: mvm_vmm::driver::prepared_disks::PreparedBootFiles<'_>,
     ) -> Result<Box<dyn RunningVm>> {
+        files.require_no_data()?;
+        let mvm_vmm::driver::prepared_disks::PreparedBootFiles {
+            kernel,
+            writable: disks,
+            ..
+        } = files;
         disks.validate_spec(spec)?;
         if disks.is_empty() {
             return match kernel {

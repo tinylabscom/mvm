@@ -90,6 +90,32 @@ pub struct PreparedWritableDisks {
     disks: Vec<PreparedDisk>,
 }
 
+/// Original prepared files for one boot, not admission or native ownership proof.
+#[derive(Debug)]
+#[must_use = "retain prepared files through the selected boot handoff"]
+pub struct PreparedBootFiles<'a> {
+    /// Borrowed original kernel; its producer retains custody through launch.
+    pub kernel: Option<&'a crate::host::restore_image::VerifiedRestoreFile>,
+    /// Owned original writable backing/sidecar pairs.
+    pub writable: PreparedWritableDisks,
+    /// Owned private read-only input DATA file, when explicitly supplied.
+    pub data: Option<crate::driver::readonly_data::PreparedReadOnlyDataDisk>,
+}
+
+impl PreparedBootFiles<'_> {
+    /// Refuse DATA custody before an unsupported backend can dispatch or reopen.
+    ///
+    /// # Errors
+    /// Returns an error whenever this request contains a protected DATA file.
+    pub fn require_no_data(&self) -> Result<()> {
+        ensure!(
+            self.data.is_none(),
+            "backend does not support protected read-only DATA descriptor handoff"
+        );
+        Ok(())
+    }
+}
+
 /// Original descriptions compacted for a sudo-launched Firecracker.
 #[derive(Debug)]
 pub struct SudoWritableHandoff {
@@ -805,7 +831,14 @@ mod tests {
         let disks = PreparedWritableDisks::empty();
 
         let error = driver
-            .boot_custodied(&spec, Some(&kernel), disks)
+            .boot_custodied(
+                &spec,
+                PreparedBootFiles {
+                    kernel: Some(&kernel),
+                    writable: disks,
+                    data: None,
+                },
+            )
             .err()
             .expect("recorded verified route");
         assert_eq!(error.to_string(), "verified dispatch witness");
@@ -813,7 +846,14 @@ mod tests {
         assert_eq!(driver.ordinary.load(Ordering::SeqCst), 0);
 
         let error = driver
-            .boot_custodied(&spec, None, PreparedWritableDisks::empty())
+            .boot_custodied(
+                &spec,
+                PreparedBootFiles {
+                    kernel: None,
+                    writable: PreparedWritableDisks::empty(),
+                    data: None,
+                },
+            )
             .err()
             .expect("recorded ordinary route");
         assert_eq!(error.to_string(), "ordinary dispatch witness");
@@ -838,7 +878,14 @@ mod tests {
                 .unwrap();
                 let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
                 let error = driver
-                    .boot_custodied(&spec, kernel, disks)
+                    .boot_custodied(
+                        &spec,
+                        PreparedBootFiles {
+                            kernel,
+                            writable: disks,
+                            data: None,
+                        },
+                    )
                     .err()
                     .expect("unsupported handoff");
                 assert!(error.to_string().contains("prepared writable descriptor"));
@@ -881,7 +928,14 @@ mod tests {
             )
             .unwrap();
             let error = driver
-                .boot_custodied_with_data(&spec, kernel, PreparedWritableDisks::empty(), Some(data))
+                .boot_custodied(
+                    &spec,
+                    PreparedBootFiles {
+                        kernel,
+                        writable: PreparedWritableDisks::empty(),
+                        data: Some(data),
+                    },
+                )
                 .err()
                 .expect("unsupported DATA handoff");
             assert!(error.to_string().contains("read-only DATA descriptor"));
@@ -889,7 +943,14 @@ mod tests {
         assert_eq!(driver.ordinary.load(Ordering::SeqCst), 0);
         assert_eq!(driver.verified.load(Ordering::SeqCst), 0);
         let error = driver
-            .boot_custodied_with_data(&spec, None, PreparedWritableDisks::empty(), None)
+            .boot_custodied(
+                &spec,
+                PreparedBootFiles {
+                    kernel: None,
+                    writable: PreparedWritableDisks::empty(),
+                    data: None,
+                },
+            )
             .err()
             .expect("ordinary dispatch witness");
         assert_eq!(error.to_string(), "ordinary dispatch witness");

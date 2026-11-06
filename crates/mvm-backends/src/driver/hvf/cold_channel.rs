@@ -106,6 +106,30 @@ impl BootInputFiles<'_> {
     }
 }
 
+pub(super) fn boot_prepared(
+    spec: &VmmSpec,
+    files: mvm_vmm::driver::prepared_disks::PreparedBootFiles<'_>,
+) -> Result<Box<dyn mvm_vmm::driver::traits::RunningVm>> {
+    files.writable.validate_spec(spec)?;
+    if let Some(data) = &files.data {
+        data.validate_spec(spec)?;
+    }
+    boot_with_custody(
+        spec,
+        None,
+        None,
+        SupervisorLaunchPolicy::legacy(),
+        BootInputFiles {
+            kernel: files.kernel,
+            images: None,
+            writable: Some(&files.writable),
+            data: files.data.as_ref(),
+        },
+    )
+    .map(|vm| Box::new(vm) as Box<dyn mvm_vmm::driver::traits::RunningVm>)
+    .map_err(anyhow::Error::new)
+}
+
 pub(super) fn boot_with_custody(
     spec: &VmmSpec,
     handoff: Option<&HandoffConfig>,
@@ -697,6 +721,67 @@ mod tests {
     use super::super::{KernelImage, PID_FILE_NAME, relay_supervisor_config};
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn readonly_data_is_refused_by_every_unsupported_backend_before_recipe_dispatch() {
+        use mvm_vmm::driver::prepared_disks::{PreparedBootFiles, PreparedWritableDisks};
+        use mvm_vmm::driver::readonly_data::{DataDiskExpectation, PreparedReadOnlyDataDisk};
+        use mvm_vmm::driver::traits::VmmDriver;
+        let drivers: [Box<dyn VmmDriver>; 4] = [
+            Box::new(crate::driver::FcDriver::new()),
+            Box::new(crate::driver::QemuDriver::new()),
+            Box::new(crate::driver::LibkrunDriver::new()),
+            Box::new(crate::mock::MockDriver::default()),
+        ];
+        for driver in drivers {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("input.img");
+            let bytes = [17; 512];
+            std::fs::write(&path, bytes).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            let mut spec = spec_with(
+                KernelImage::Bundled,
+                vec![],
+                (0..3)
+                    .map(|slot| mvm_vmm::driver::spec::BlockDev {
+                        slot,
+                        source: path.clone(),
+                        read_only: true,
+                        ephemeral: false,
+                    })
+                    .collect(),
+            );
+            let data = PreparedReadOnlyDataDisk::bind(
+                &spec,
+                file,
+                DataDiskExpectation {
+                    len: 512,
+                    sha256: mvm_core::plan::bundle::sha256_hex(&bytes),
+                },
+            )
+            .unwrap();
+            // Also refuse on a bad writer recipe if a DATA guard regresses:
+            // this fixture must never reach any backend's native boot machinery.
+            spec.blocks[1].read_only = false;
+            let error = driver
+                .boot_custodied(
+                    &spec,
+                    PreparedBootFiles {
+                        kernel: None,
+                        writable: PreparedWritableDisks::empty(),
+                        data: Some(data),
+                    },
+                )
+                .err()
+                .expect("unsupported DATA handoff must refuse");
+            assert!(
+                error.to_string().contains("read-only DATA descriptor"),
+                "{} dispatched beyond its DATA guard: {error:#}",
+                driver.name(),
+            );
+        }
+    }
 
     #[test]
     fn readonly_data_projects_original_fd_inherits_only_selected_child_and_refuses_cold_owner() {

@@ -183,45 +183,27 @@ pub trait VmmDriver: Send + Sync {
         anyhow::bail!("backend does not support verified kernel descriptor handoff")
     }
 
-    /// Boot through the existing driver while retaining prepared writable files.
+    /// Boot through the existing driver while retaining original prepared files.
     ///
     /// Empty resources preserve the verified-kernel or ordinary boot route.
     /// A driver must explicitly implement nonempty handoff; the default refuses
     /// before either boot method rather than discarding files or reopening paths.
+    /// This data-plane input grants no builder ownership or admission.
     #[cfg(unix)]
     fn boot_custodied(
         &self,
         spec: &VmmSpec,
-        kernel: Option<&crate::host::restore_image::VerifiedRestoreFile>,
-        disks: crate::driver::prepared_disks::PreparedWritableDisks,
+        files: crate::driver::prepared_disks::PreparedBootFiles<'_>,
     ) -> Result<Box<dyn RunningVm>> {
+        files.require_no_data()?;
         anyhow::ensure!(
-            disks.is_empty(),
+            files.writable.is_empty(),
             "backend does not support prepared writable descriptor handoff"
         );
-        match kernel {
+        match files.kernel {
             Some(kernel) => self.boot_verified_kernel(spec, kernel),
             None => self.boot(spec),
         }
-    }
-
-    /// Fresh launch with an exact private read-only input DATA file.
-    ///
-    /// This data-plane seam grants no builder ownership or admission. Unsupported
-    /// backends refuse before dispatch; absence preserves writable custody behavior.
-    #[cfg(unix)]
-    fn boot_custodied_with_data(
-        &self,
-        spec: &VmmSpec,
-        kernel: Option<&crate::host::restore_image::VerifiedRestoreFile>,
-        disks: crate::driver::prepared_disks::PreparedWritableDisks,
-        data: Option<crate::driver::readonly_data::PreparedReadOnlyDataDisk>,
-    ) -> Result<Box<dyn RunningVm>> {
-        anyhow::ensure!(
-            data.is_none(),
-            "backend does not support protected read-only DATA descriptor handoff"
-        );
-        self.boot_custodied(spec, kernel, disks)
     }
 
     /// Boot the clean, pre-workload standby parent `req` describes and return

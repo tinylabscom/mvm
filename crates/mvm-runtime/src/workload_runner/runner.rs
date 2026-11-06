@@ -565,7 +565,14 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                         Some(kernel) => kernel.boot_custodied(&self.driver, &spec, disks),
                         None => {
                             disks.validate_spec(&spec)?;
-                            self.driver.boot_custodied(&spec, None, disks)
+                            self.driver.boot_custodied(
+                                &spec,
+                                mvm_vmm::driver::prepared_disks::PreparedBootFiles {
+                                    kernel: None,
+                                    writable: disks,
+                                    data: None,
+                                },
+                            )
                         }
                     }
                 }

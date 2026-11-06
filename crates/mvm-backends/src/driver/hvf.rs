@@ -891,52 +891,9 @@ impl VmmDriver for HvfDriver {
     fn boot_custodied(
         &self,
         spec: &VmmSpec,
-        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        files: mvm_vmm::driver::prepared_disks::PreparedBootFiles<'_>,
     ) -> Result<Box<dyn RunningVm>> {
-        disks.validate_spec(spec)?;
-        boot_with_custody(
-            spec,
-            None,
-            None,
-            SupervisorLaunchPolicy::legacy(),
-            BootInputFiles {
-                kernel,
-                images: None,
-                writable: Some(&disks),
-                data: None,
-            },
-        )
-        .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
-        .map_err(anyhow::Error::new)
-    }
-
-    fn boot_custodied_with_data(
-        &self,
-        spec: &VmmSpec,
-        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
-        data: Option<mvm_vmm::driver::readonly_data::PreparedReadOnlyDataDisk>,
-    ) -> Result<Box<dyn RunningVm>> {
-        let Some(data) = data else {
-            return self.boot_custodied(spec, kernel, disks);
-        };
-        disks.validate_spec(spec)?;
-        data.validate_spec(spec)?;
-        boot_with_custody(
-            spec,
-            None,
-            None,
-            SupervisorLaunchPolicy::legacy(),
-            BootInputFiles {
-                kernel,
-                images: None,
-                writable: Some(&disks),
-                data: Some(&data),
-            },
-        )
-        .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
-        .map_err(anyhow::Error::new)
+        cold_channel::boot_prepared(spec, files)
     }
 
     fn spawn_standby_parent(
