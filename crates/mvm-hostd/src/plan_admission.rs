@@ -3734,6 +3734,18 @@ mod tests {
     }
 
     #[test]
+    fn host_interface_refuses_only_the_quarantined_workload() {
+        let name = "vm-host-interface";
+        let ledger = format!(r#"{{"{name}":{{"epoch":1,"quarantined":true}}}}"#);
+        let err = admit_with_host_interface_files(&[("workloads.json", &ledger)])
+            .expect_err("a quarantined workload must not boot");
+        assert!(err.to_string().contains("quarantined"), "{err}");
+        let other = r#"{"some-other-workload":{"epoch":1,"quarantined":true}}"#;
+        admit_with_host_interface_files(&[("workloads.json", other)])
+            .expect("quarantining another workload must not block this one");
+    }
+
+    #[test]
     fn host_interface_refuses_expired_policy_and_unpinned_image() {
         let expired =
             admit_with_host_interface_files(&[("policy.json", r#"{"version":1,"not_after":1}"#)])

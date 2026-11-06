@@ -35,6 +35,7 @@ pub mod audit;
 pub mod audit_signer;
 pub mod broker;
 pub mod caller_identity;
+pub mod containment;
 /// Attended display input on a running machine, rebuilt from the host's own record of the run.
 pub mod display;
 pub mod drive;

@@ -16,6 +16,7 @@ pub mod state;
 pub mod store;
 #[cfg(test)]
 mod tests;
+pub mod workload;
 
 pub use error::{Denial, HostInterfaceError};
 pub use policy::{

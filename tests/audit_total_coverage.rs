@@ -325,6 +325,10 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("exec", AuditPosture::InteractiveOrControl),
     ("shell", AuditPosture::InteractiveOrControl),
     ("stop", AuditPosture::Emits("VmStop")),
+    // Containment records before stopping; a failed stop leaves the workload
+    // quarantined. Replacement records before advancing the workload epoch.
+    ("quarantine", AuditPosture::Emits("workload.quarantined")),
+    ("replace", AuditPosture::Emits("workload.replaced")),
     ("set-timeout", AuditPosture::Emits("VmTtlSet")),
     // Verify a signed `.mvmpkg` and preview its posture. Read-only: no
     // install, no boot, no audit-chain emission.
@@ -594,6 +598,7 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("tail", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
     ("show", AuditPosture::ReadOnly),
+    ("timeline", AuditPosture::ReadOnly),
     // Lists sessions from a verified chain; writes nothing.
     ("sessions", AuditPosture::ReadOnly),
     ("posture", AuditPosture::ReadOnly),
@@ -995,6 +1000,10 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-326 chain-structure event: `trust audit prune` records the
         // removal in the chain before deleting the segments it names.
         "chain.pruned",
+        // Per-workload containment: `machine quarantine` and `machine replace`
+        // each write a chain-signed entry (see `mvm_hostd::containment`).
+        "workload.quarantined",
+        "workload.replaced",
         // Top-level command audit envelopes.
         "cmd.agent-session",
         "cmd.build",

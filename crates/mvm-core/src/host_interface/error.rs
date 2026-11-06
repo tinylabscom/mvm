@@ -30,6 +30,8 @@ pub enum Denial {
     SecretProvider,
     #[error("required hardware attestation unavailable (assurance: {0:?})")]
     AttestationRequired(super::policy::Assurance),
+    #[error("workload {0} is quarantined")]
+    WorkloadQuarantined(String),
     #[error("offline lease invalid: {0}")]
     LeaseInvalid(&'static str),
     #[error("offline lease expired")]

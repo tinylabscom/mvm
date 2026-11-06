@@ -1069,6 +1069,42 @@ pub fn session_events(
         .collect()
 }
 
+/// Every event naming `workload` in its `workload` label, across all sessions.
+///
+/// A replacement runs under a new plan, so its history is not one session. The
+/// launch, refusal and containment events carry the label; an event that does
+/// not is not selected, which is why the timeline is a view of those events
+/// and not a claim to be every entry the workload ever caused.
+pub fn workload_events(
+    lines: &[String],
+    workload: &str,
+    filter: &EventFilter,
+) -> Result<Vec<SessionEvent>> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(seq, line)| {
+            let envelope: SignedEnvelope = match serde_json::from_str(line) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    return Some(Err(anyhow::anyhow!("decoding audit line {seq}: {error}")));
+                }
+            };
+            let entry = &envelope.entry;
+            let keep = entry.labels.get("workload").map(String::as_str) == Some(workload)
+                && filter
+                    .kind
+                    .as_deref()
+                    .is_none_or(|kind| mvm_core::util::glob::glob_match(kind, &entry.event))
+                && filter.range.contains(&entry.timestamp);
+            keep.then_some(Ok(SessionEvent {
+                seq: seq as u64,
+                envelope,
+            }))
+        })
+        .collect()
+}
+
 /// Resolve what an operator typed to one session's plan id: the full id, the
 /// id without its `sha256:` prefix, or a unique prefix of at least eight hex
 /// characters. Ambiguity is refused rather than guessed.
