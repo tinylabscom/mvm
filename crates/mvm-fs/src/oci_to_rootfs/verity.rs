@@ -38,6 +38,8 @@
 
 use crate::oci_to_rootfs::error::OciUnpackError;
 use crate::oci_to_rootfs::ext4::MaterializedRootfs;
+#[cfg(target_os = "linux")]
+use mvm_core::bounded_run::RunBounds;
 use std::path::{Path, PathBuf};
 use tracing::instrument;
 
@@ -320,12 +322,33 @@ fn prepare_sidecar(sidecar: &Path) -> Result<(), OciUnpackError> {
     Ok(())
 }
 
+/// Wall-clock limit for one `veritysetup format`.
+#[cfg(target_os = "linux")]
+const VERITYSETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// Bytes of each stream kept; the `Root hash:` line is well inside this.
+#[cfg(target_os = "linux")]
+const VERITYSETUP_KEEP_BYTES: usize = 64 * 1024;
+#[cfg(target_os = "linux")]
+const VERITYSETUP_ERROR_CHARS: usize = 2000;
+
 #[cfg(target_os = "linux")]
 fn run_veritysetup_format(
     rootfs: &Path,
     sidecar: &Path,
     options: &VeritysetupOptions,
 ) -> Result<String, OciUnpackError> {
+    let bounds = RunBounds::new(VERITYSETUP_TIMEOUT, VERITYSETUP_KEEP_BYTES);
+    run_veritysetup_format_bounded(rootfs, sidecar, options, bounds)
+}
+
+#[cfg(target_os = "linux")]
+fn run_veritysetup_format_bounded(
+    rootfs: &Path,
+    sidecar: &Path,
+    options: &VeritysetupOptions,
+    bounds: RunBounds,
+) -> Result<String, OciUnpackError> {
+    use mvm_core::bounded_run::{BoundedRunError, excerpt, run_bounded};
     let binary: &Path = options
         .veritysetup_binary
         .as_deref()
@@ -339,18 +362,19 @@ fn run_veritysetup_format(
         .arg(format!("--uuid={}", options.uuid))
         .arg(rootfs)
         .arg(sidecar);
-    let exec = cmd
-        .output()
-        .map_err(|e| OciUnpackError::VeritysetupFailed {
-            reason: format!("spawn `{}`: {e}", binary.display()),
-        })?;
+    let exec = run_bounded(cmd, bounds).map_err(|e| OciUnpackError::VeritysetupFailed {
+        reason: match e {
+            BoundedRunError::Spawn(e) => format!("spawn `{}`: {e}", binary.display()),
+            other => format!("`{}` {other}", binary.display()),
+        },
+    })?;
     if !exec.status.success() {
-        let stderr = String::from_utf8_lossy(&exec.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
         return Err(OciUnpackError::VeritysetupFailed {
             reason: format!(
-                "exit {:?}; stderr={stderr}; stdout={stdout}",
-                exec.status.code()
+                "exit {:?}; stderr={}; stdout={}",
+                exec.status.code(),
+                excerpt(&exec.stderr, VERITYSETUP_ERROR_CHARS),
+                excerpt(&exec.stdout, VERITYSETUP_ERROR_CHARS)
             ),
         });
     }
@@ -401,11 +425,60 @@ fn write_roothash_file(path: &Path, roothash: &str) -> Result<(), OciUnpackError
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(not(target_os = "linux"))]
     use tempfile::TempDir;
 
     fn defaults() -> VeritysetupOptions {
         VeritysetupOptions::default()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fake_veritysetup(dir: &TempDir, body: &str) -> VeritysetupOptions {
+        let path = dir.path().join("fake-veritysetup");
+        mvm_core::bounded_run::test_support::write_executable_script(&path, body);
+        VeritysetupOptions {
+            veritysetup_binary: Some(path),
+            ..defaults()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_hung_veritysetup_is_a_typed_timeout() {
+        let dir = TempDir::new().unwrap();
+        let options = fake_veritysetup(&dir, "exec sleep 30");
+        let bounds = RunBounds::new(std::time::Duration::from_millis(200), 1024);
+        let err = run_veritysetup_format_bounded(Path::new("r"), Path::new("s"), &options, bounds)
+            .unwrap_err();
+        let OciUnpackError::VeritysetupFailed { reason } = err else {
+            panic!("wrong error")
+        };
+        assert!(reason.contains("did not finish within"), "{reason}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_chatty_failing_veritysetup_yields_a_capped_error() {
+        let dir = TempDir::new().unwrap();
+        let options = fake_veritysetup(&dir, "head -c 10485760 /dev/zero | tr '\\0' v; exit 2");
+        let bounds = RunBounds::new(std::time::Duration::from_secs(30), VERITYSETUP_KEEP_BYTES);
+        let err = run_veritysetup_format_bounded(Path::new("r"), Path::new("s"), &options, bounds)
+            .unwrap_err();
+        let OciUnpackError::VeritysetupFailed { reason } = err else {
+            panic!("wrong error")
+        };
+        assert!(reason.len() < 8 * 1024, "{}", reason.len());
+        assert!(reason.contains(mvm_core::bounded_run::TRUNCATED_MARK));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_successful_veritysetup_still_yields_its_root_hash() {
+        let dir = TempDir::new().unwrap();
+        let options = fake_veritysetup(&dir, "echo 'Root hash:      abc123'");
+        let bounds = RunBounds::new(std::time::Duration::from_secs(10), 1024);
+        let hash = run_veritysetup_format_bounded(Path::new("r"), Path::new("s"), &options, bounds)
+            .unwrap();
+        assert_eq!(hash, "abc123");
     }
 
     #[test]

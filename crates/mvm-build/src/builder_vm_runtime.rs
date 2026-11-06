@@ -982,15 +982,46 @@ fn locate_debugfs() -> Option<PathBuf> {
     which::which("debugfs").ok()
 }
 
+/// Wall-clock limit and capture cap for one debugfs read. A diagnostic log
+/// can be large; the cap bounds what is shown, not what the image holds.
+const DEBUGFS_BOUNDS: mvm_core::bounded_run::RunBounds =
+    mvm_core::bounded_run::RunBounds::new(std::time::Duration::from_secs(60), 1024 * 1024);
+
+/// The single `-R` request that reads `guest_path`. debugfs splits a request
+/// on whitespace and treats a newline as another request, so a path carrying
+/// either, or a relative one, would read something other than one file.
+fn debugfs_cat_request(guest_path: &str) -> Result<String, String> {
+    if !guest_path.starts_with('/')
+        || guest_path.len() == 1
+        || guest_path
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(format!(
+            "refusing to build a debugfs request for guest path {guest_path:?}"
+        ));
+    }
+    Ok(format!("cat {guest_path}"))
+}
+
 fn debugfs_cat(debugfs: &Path, image: &Path, guest_path: &str) -> Result<Option<String>, String> {
-    let request =
-        crate::provenance_mark::debugfs_cat_request(guest_path).map_err(|e| format!("{e:#}"))?;
-    let output = mvm_core::env_hygiene::helper_command(debugfs)
-        .args(["-R", &request])
-        .arg(image)
-        .output()
-        .map_err(|e| format!("spawn {}: {e}", debugfs.display()))?;
+    debugfs_cat_bounded(debugfs, image, guest_path, DEBUGFS_BOUNDS)
+}
+
+fn debugfs_cat_bounded(
+    debugfs: &Path,
+    image: &Path,
+    guest_path: &str,
+    bounds: mvm_core::bounded_run::RunBounds,
+) -> Result<Option<String>, String> {
+    use mvm_core::bounded_run::{excerpt, run_bounded};
+    let request = debugfs_cat_request(guest_path)?;
+    let mut cmd = mvm_core::env_hygiene::helper_command(debugfs);
+    cmd.args(["-R", &request]).arg(image);
+    let output =
+        run_bounded(cmd, bounds).map_err(|e| format!("spawn {}: {e}", debugfs.display()))?;
     if output.status.success() {
+        // A diagnostic log: the capped prefix is what is shown.
         return Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()));
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1000,7 +1031,7 @@ fn debugfs_cat(debugfs: &Path, image: &Path, guest_path: &str) -> Result<Option<
     Err(format!(
         "status {:?}; stderr: {}",
         output.status.code(),
-        stderr.trim()
+        excerpt(&output.stderr, 1000)
     ))
 }
 
@@ -1417,6 +1448,66 @@ pub fn builder_vm_timeout() -> Result<Duration, BuilderVmError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    fn fake_debugfs(dir: &tempfile::TempDir, body: &str) -> PathBuf {
+        let path = dir.path().join("fake-debugfs");
+        mvm_core::bounded_run::test_support::write_executable_script(&path, body);
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_debugfs_is_a_typed_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = fake_debugfs(&dir, "exec sleep 30");
+        let bounds =
+            mvm_core::bounded_run::RunBounds::new(std::time::Duration::from_millis(200), 1024);
+        let err = debugfs_cat_bounded(&tool, Path::new("img"), "/a", bounds).unwrap_err();
+        assert!(err.contains("did not finish within"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn debugfs_output_and_error_text_are_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = fake_debugfs(&dir, "head -c 10485760 /dev/zero | tr '\\0' d");
+        let shown = debugfs_cat_bounded(&big, Path::new("img"), "/a", DEBUGFS_BOUNDS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(shown.len(), DEBUGFS_BOUNDS.max_stdout);
+        let noisy = fake_debugfs(&dir, "head -c 10485760 /dev/zero | tr '\\0' e >&2; exit 1");
+        let err = debugfs_cat_bounded(&noisy, Path::new("img"), "/a", DEBUGFS_BOUNDS).unwrap_err();
+        assert!(err.len() < 4 * 1024, "{}", err.len());
+        assert!(err.contains(mvm_core::bounded_run::TRUNCATED_MARK));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn debugfs_normal_output_and_missing_file_are_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = fake_debugfs(&dir, "printf 'log line'");
+        assert_eq!(
+            debugfs_cat_bounded(&ok, Path::new("img"), "/a", DEBUGFS_BOUNDS).unwrap(),
+            Some("log line".to_string())
+        );
+        let missing = fake_debugfs(&dir, "echo 'File not found by ext2_lookup' >&2; exit 1");
+        assert_eq!(
+            debugfs_cat_bounded(&missing, Path::new("img"), "/a", DEBUGFS_BOUNDS).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_debugfs_request_names_exactly_one_absolute_path() {
+        assert_eq!(
+            debugfs_cat_request("/out/mvm-host-vm-init.lifecycle.log").unwrap(),
+            "cat /out/mvm-host-vm-init.lifecycle.log"
+        );
+        for bad in ["", "/", "a/b", "/a b", "/a\nrm /b", "/a\tb"] {
+            assert!(debugfs_cat_request(bad).is_err(), "{bad:?}");
+        }
+    }
+
     #[test]
     fn non_native_observation_renderer_uses_one_locked_consuming_build() {
         let script = super::render_flake_cmd_sh_observed(

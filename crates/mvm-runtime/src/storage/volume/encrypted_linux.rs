@@ -27,7 +27,7 @@
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use mvm_core::volume::{VolumeError, VolumeName};
 use zeroize::Zeroizing;
@@ -219,20 +219,41 @@ fn write_key_tempfile(bytes: &[u8]) -> Result<tempfile::NamedTempFile, VolumeErr
     Ok(tf)
 }
 
+/// Wall-clock limit for one `cryptsetup`/`mount`/`mkfs.ext4` step. LUKS key
+/// derivation and a large mkfs are the slow cases; ten minutes is far past both.
+const STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Bytes of each stream kept from a step.
+const STEP_KEEP_BYTES: usize = 64 * 1024;
+/// Characters of a failed step's stderr quoted in the error.
+const STEP_ERROR_CHARS: usize = 1000;
+
 /// Run a built command, mapping a missing binary or non-zero exit to a
 /// fail-closed [`VolumeError`]. stdin is `/dev/null` so cryptsetup never blocks
 /// on an interactive prompt (we always pass `--key-file`).
-fn check(mut cmd: Command, what: &str) -> Result<(), VolumeError> {
-    let out = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?; // a missing binary → io::Error → VolumeError::Io (fail-closed)
+fn check(cmd: Command, what: &str) -> Result<(), VolumeError> {
+    check_bounded(
+        cmd,
+        what,
+        mvm_core::bounded_run::RunBounds::new(STEP_TIMEOUT, STEP_KEEP_BYTES),
+    )
+}
+
+fn check_bounded(
+    cmd: Command,
+    what: &str,
+    bounds: mvm_core::bounded_run::RunBounds,
+) -> Result<(), VolumeError> {
+    use mvm_core::bounded_run::{BoundedRunError, excerpt, run_bounded};
+    let out = run_bounded(cmd, bounds).map_err(|e| match e {
+        // A missing binary → io::Error → VolumeError::Io (fail-closed)
+        BoundedRunError::Spawn(e) | BoundedRunError::Wait(e) => VolumeError::Io(e),
+        timed_out => VolumeError::Other(format!("{what} {timed_out}")),
+    })?;
     if !out.status.success() {
         return Err(VolumeError::Other(format!(
             "{what} exited {}: {}",
             out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
+            excerpt(&out.stderr, STEP_ERROR_CHARS)
         )));
     }
     Ok(())
@@ -246,6 +267,50 @@ mod tests {
     /// file can be fed to `attach`). `VolumeHandle::new` is `pub(crate)`.
     fn handle_at(name: &str, path: PathBuf) -> VolumeHandle {
         VolumeHandle::new(VolumeName::new(name).unwrap(), path)
+    }
+
+    fn fake_step(dir: &Path, body: &str) -> Command {
+        let path = dir.join("fake-step");
+        mvm_core::bounded_run::test_support::write_executable_script(&path, body);
+        mvm_core::env_hygiene::helper_command(path)
+    }
+
+    #[test]
+    fn a_hung_step_is_a_typed_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bounds =
+            mvm_core::bounded_run::RunBounds::new(std::time::Duration::from_millis(200), 1024);
+        let err = check_bounded(
+            fake_step(tmp.path(), "exec sleep 30"),
+            "cryptsetup luksOpen",
+            bounds,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("did not finish within"), "{err}");
+    }
+
+    #[test]
+    fn a_chatty_failing_step_yields_a_capped_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bounds = mvm_core::bounded_run::RunBounds::new(
+            std::time::Duration::from_secs(30),
+            STEP_KEEP_BYTES,
+        );
+        let cmd = fake_step(
+            tmp.path(),
+            "head -c 10485760 /dev/zero | tr '\\0' c >&2; exit 1",
+        );
+        let err = check_bounded(cmd, "mount", bounds).unwrap_err().to_string();
+        assert!(err.len() < 4 * 1024, "{}", err.len());
+        assert!(err.contains(mvm_core::bounded_run::TRUNCATED_MARK));
+    }
+
+    #[test]
+    fn a_quiet_successful_step_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bounds =
+            mvm_core::bounded_run::RunBounds::new(std::time::Duration::from_secs(10), 1024);
+        check_bounded(fake_step(tmp.path(), "exit 0"), "mount", bounds).unwrap();
     }
 
     #[test]

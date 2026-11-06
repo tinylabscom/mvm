@@ -40,6 +40,7 @@ xattr = { workspace = true }
 
 [dev-dependencies]
 am-fs-ext4 = "0.4"
+mvm-core = { workspace = true, features = ["test-support"] }
 base64.workspace = true
 criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = { workspace = true }
