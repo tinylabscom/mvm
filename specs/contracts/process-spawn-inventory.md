@@ -84,7 +84,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-build | `src/builder_vm_image.rs` | 1 | storage tool | host mkfs of the builder store image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-build | `src/builder_vm_runtime.rs` | 1 | storage tool | debugfs read of a builder image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-build | `src/builder_vm_transport.rs` | 1 | toolchain | cargo build of the network endpoint binary | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; embedder refusal | embedder-refused |
-| mvm-build | `src/embed_toolchain.rs` | 8 | toolchain | probe rustup/cargo/rustc/zig/python3 for the pinned embed toolchain | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub | open-review |
+| mvm-build | `src/embed_toolchain.rs` | 8 | toolchain | probe rustup/cargo/rustc/zig/python3 for the pinned embed toolchain | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub | embedder-refused-by-caller |
 | mvm-build | `src/guest_agent_build.rs` | 3 | toolchain | cargo / rustup build of guest binaries from this tree | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-build | `src/libkrun_builder.rs` | 3 | hypervisor supervisor | cargo build of helpers, libkrun builder supervisor (explicit libkrun only) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-build | `src/provenance_mark.rs` | 1 | storage tool | debugfs read of image provenance mark | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
@@ -176,9 +176,10 @@ Totals: 192 production sites in 99 files.
 | bounded-user-adapter | 1 | 1 |
 | cli-only | 32 | 22 |
 | embedder-refused | 11 | 8 |
+| embedder-refused-by-caller | 8 | 1 |
 | fixed-argv-utility | 21 | 11 |
 | guest-side | 66 | 30 |
-| open-review | 20 | 4 |
+| open-review | 12 | 3 |
 | required-host-primitive | 38 | 22 |
 | test-only | 3 | 1 |
 
@@ -188,6 +189,7 @@ Reviewed library-reachable sites (disposition, then why):
 |---|---|---|
 | `mvm-build/src/builder_vm_image.rs` | fixed-argv-utility | `prepopulate_with_mkfs`: program is the e2fsprogs `mkfs.ext4` path from `find_host_mkfs_ext4` (fixed candidate list), argv is a fixed flag list plus typed paths and a block count, no shell, status checked and mapped to `BuilderVmError`. Formats the builder's own store image from a digest-verified seed; no caller-supplied text reaches argv. No wall-clock bound. |
 | `mvm-build/src/builder_vm_runtime.rs` | fixed-argv-utility | `debugfs_cat`: read-only `debugfs -R` on the builder store image; the request now comes from `debugfs_cat_request`, which refuses a relative path or one with whitespace or control characters (tested). Callers pass two constant guest paths. Output is a local diagnostic log read; no wall-clock or size bound. |
+| `mvm-build/src/embed_toolchain.rs` | embedder-refused-by-caller | The module is shared with `build.rs` and the CLI payload build, which are not library paths. The only non-CLI caller is `rustc_has_target`, reached from `guest_agent_build::ensure_rust_targets` after `zigbuild_tools`, whose first statement is `refuse_toolchain_spawn` (`CliSpawn::GuestRuntimeToolchain`); a library embedder is refused before any `rustup`, `cargo`, `rustc`, `zig` or `python3` probe runs. The module cannot call that function itself because `build.rs` includes it without `mvm-vmm`. |
 | `mvm-build/src/provenance_mark.rs` | fixed-argv-utility | `debugfs_cat`: same read-only `debugfs -R` through `debugfs_cat_request`; the callers (`read_mark_from_ext4`) pass the two constant `/mvm/provenance.*` paths and verify the result against the embedded key before use. No wall-clock or size bound on debugfs output. |
 | `mvm-build/src/stage0.rs` | fixed-argv-utility | `extract_nix_store_tarball_with_native_tar`: fixed `tar -xJf <tarball> -C <dir> --strip-components 1` on the Stage 0 root tarball, which is a bootstrap seed digest-verified before extraction; any failure clears the partial extract and falls back to the in-process extractor (`extract_nix_store_tarball_pure_rust`), so the spawn is an optimisation with a typed error and a pure-Rust alternative. No wall-clock bound. |
 | `mvm-client/src/secret/source.rs` | bounded-user-adapter | `SecretSourceResolver::run_cli`: the program is one of two fixed names (`Cli::OnePassword`, `Cli::Bitwarden`) found only in trusted directories (`find_trusted`: absolute, canonical, not under an untrusted root, owner and mode checked); argv is a fixed subcommand plus typed references; environment is scrubbed with only that CLI's own session variables re-admitted by exact name (`helper_command_with`); stdin null; stdout capped at `MAX_SOURCE_BYTES` and stderr at 4 KiB by `spawn_bounded_reader`; a wall-clock timeout kills the child (`CliTimedOut`); errors carry at most 200 characters of the first stderr line and never the value. It cannot run `mvmctl` (`check-no-cli-shellout`). |

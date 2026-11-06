@@ -357,7 +357,7 @@ def guard(rel, kinds, places, fns):
 # Ratchet: sites a library-reachable process may start that are not yet shown
 # to be required, refused or CLI-only. It may only go down; raising it needs a
 # written reason in the contract doc.
-OPEN_REVIEW_CEILING = 20
+OPEN_REVIEW_CEILING = 12
 # Library-reachable spawn files that were read and judged. Each entry is
 # (disposition, reason); the reason names the functions a reviewer can open.
 # A file listed here that is no longer open-review by derivation is an error.
@@ -374,6 +374,7 @@ REVIEWED = {
     "mvm-core/src/platform/platform.rs": ("fixed-argv-utility", "`macos_major_version` runs `sw_vers -productVersion` (fixed argv, parsed to a number, 0 on failure). `has_host_nix` runs `nix --version` as a presence probe; it has no callers in the tree, so no build or run path reaches it (a deletion candidate, not an exception to the host-Nix rule)."),
     "mvm-client/src/secret/source.rs": ("bounded-user-adapter", "`SecretSourceResolver::run_cli`: the program is one of two fixed names (`Cli::OnePassword`, `Cli::Bitwarden`) found only in trusted directories (`find_trusted`: absolute, canonical, not under an untrusted root, owner and mode checked); argv is a fixed subcommand plus typed references; environment is scrubbed with only that CLI's own session variables re-admitted by exact name (`helper_command_with`); stdin null; stdout capped at `MAX_SOURCE_BYTES` and stderr at 4 KiB by `spawn_bounded_reader`; a wall-clock timeout kills the child (`CliTimedOut`); errors carry at most 200 characters of the first stderr line and never the value. It cannot run `mvmctl` (`check-no-cli-shellout`)."),
     "mvm-build/src/stage0.rs": ("fixed-argv-utility", "`extract_nix_store_tarball_with_native_tar`: fixed `tar -xJf <tarball> -C <dir> --strip-components 1` on the Stage 0 root tarball, which is a bootstrap seed digest-verified before extraction; any failure clears the partial extract and falls back to the in-process extractor (`extract_nix_store_tarball_pure_rust`), so the spawn is an optimisation with a typed error and a pure-Rust alternative. No wall-clock bound."),
+    "mvm-build/src/embed_toolchain.rs": ("embedder-refused-by-caller", "The module is shared with `build.rs` and the CLI payload build, which are not library paths. The only non-CLI caller is `rustc_has_target`, reached from `guest_agent_build::ensure_rust_targets` after `zigbuild_tools`, whose first statement is `refuse_toolchain_spawn` (`CliSpawn::GuestRuntimeToolchain`); a library embedder is refused before any `rustup`, `cargo`, `rustc`, `zig` or `python3` probe runs. The module cannot call that function itself because `build.rs` includes it without `mvm-vmm`."),
 }
 
 REQUIRED_CLASSES = ("hypervisor", "helper bin", "systemd-run", "net (nft)", "codesign", "factory", "process control")
