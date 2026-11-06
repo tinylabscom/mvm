@@ -171,6 +171,7 @@ impl PlanFixture {
             ingress: Vec::new(),
             network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,
+            execution_epoch: 1,
             plan_id: PlanId(self.plan_id),
             plan_version: 1,
             tenant: TenantId(self.tenant),
