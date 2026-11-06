@@ -6,7 +6,8 @@
 #
 # <target> is the archive's target name (x86_64-unknown-linux-gnu or
 # aarch64-unknown-linux-gnu); it decides the package architecture. <version>
-# is the version the packages claim, without a leading `v`. The tarball's
+# is the version the packages claim, without a leading `v`; a pre-release
+# hyphen becomes `~` in the package version (mvmctl_0.27.0~rc.2-1_amd64.deb). The tarball's
 # mvmctl must report it, so a package cannot be labelled with a version its
 # contents are not — checked by running mvmctl only when the host can.
 # <guest-runtime> is the release's mvm-guest-bins-v<version>.tar.gz, with its
@@ -45,6 +46,12 @@ esac
 case "${version}" in
   v*|"") echo "build-distro-packages: version must be bare, got '${version}'" >&2; exit 2 ;;
 esac
+# A semver pre-release (0.27.0-rc.2) is not a valid RPM Version, and dpkg
+# would sort it after the final release. `~` sorts before everything in both
+# rpm and dpkg, so 0.27.0~rc.2 < 0.27.0. Stable versions pass through as is.
+[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.]+)?$ ]] \
+  || { echo "build-distro-packages: '${version}' is not a semver version" >&2; exit 2; }
+pkgver="${version//-/\~}"
 [ -f "${tarball}" ] || { echo "build-distro-packages: ${tarball} not found" >&2; exit 1; }
 runtime_name="mvm-guest-bins-v${version}.tar.gz"
 [ "$(basename "${runtime}")" = "${runtime_name}" ] \
@@ -92,11 +99,11 @@ mkdir -p "${out_dir}"
 # --no-strip: the packaged binaries must stay byte-identical to the tarball's,
 # whose digests the signed manifest already records.
 deb="$(cargo deb --no-build --no-strip --target "${build_target}" \
-  --deb-version "${version}-1" --output "${out_dir}" | tail -n 1)"
+  --deb-version "${pkgver}-1" --output "${out_dir}" | tail -n 1)"
 rpm_dir="$(mktemp -d)"
 trap 'rm -rf "${unpack}" "${rpm_dir}"' EXIT
 cargo generate-rpm --target "${build_target}" --auto-req disabled \
-  --set-metadata "version = \"${version}\"" --output "${rpm_dir}/"
+  --set-metadata "version = \"${pkgver}\"" --output "${rpm_dir}/"
 rpms=("${rpm_dir}"/*.rpm)
 [ "${#rpms[@]}" -eq 1 ] || { echo "build-distro-packages: expected one .rpm, got ${rpms[*]}" >&2; exit 1; }
 cp "${rpms[0]}" "${out_dir}/"
