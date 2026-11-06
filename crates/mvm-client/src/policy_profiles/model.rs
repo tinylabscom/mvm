@@ -259,7 +259,7 @@ impl ToolsSection {
 pub struct ToolDetail {
     /// Exact absolute executable path in the guest for declared-command
     /// mediation. A command with no path is refused, while an MCP-only tool
-    /// may omit it. Composition cannot redirect a previously named path.
+    /// may omit it. Composition cannot redirect a path an earlier layer named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,
     /// Argv patterns permitted for this tool, glob-style and matched against

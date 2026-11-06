@@ -3,7 +3,7 @@
 //!
 //! No pack class has a release-fetch today, so every class refuses explicitly
 //! rather than pretending to do something. The builder image, the one class
-//! that used to have one, is a member of the signed image set this build's
+//! with a fetch of its own, is a member of the signed image set this build's
 //! image lock pins: `mvmctl bootstrap` fetches it and verifies it against that
 //! root, and a CLI release no longer carries it as a pack.
 

@@ -46,9 +46,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// persistently failing listener cannot spin.
 ///
 /// This is not a stop-polling cadence. The loop blocks in `accept` and is woken
-/// by [`StreamServerHandle::shutdown`] connecting to its own socket. It used to
-/// poll a nonblocking listener on a 25 ms tick, which put a mean 12.5 ms on
-/// every transient teardown — and unlike the other polls of its kind, backoff
+/// by [`StreamServerHandle::shutdown`] connecting to its own socket. Polling a nonblocking listener on a 25 ms tick
+/// would put a mean 12.5 ms on every transient teardown — and unlike the other polls of its kind, backoff
 /// could not help it: the loop idles for the whole life of the VM, so it was
 /// always already sitting at the ceiling when the stop arrived.
 const ACCEPT_RETRY_INTERVAL: Duration = Duration::from_millis(25);

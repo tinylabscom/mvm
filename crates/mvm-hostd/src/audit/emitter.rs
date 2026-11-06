@@ -213,9 +213,9 @@ pub struct AuditEmitter {
 impl Drop for AuditEmitter {
     /// Shut the cached runtime down without blocking.
     ///
-    /// Caching the runtime removed a per-entry construction, but it also moved
-    /// where the runtime is *dropped*: it used to die inside the synchronous
-    /// emit that built it, and now it dies with the emitter. An emitter
+    /// Caching the runtime removes a per-entry construction, but it also moves
+    /// where the runtime is *dropped*: with the emitter, not inside the
+    /// synchronous emit that built it. An emitter
     /// constructed from inside someone else's async context therefore drops
     /// its runtime there, and a blocking drop from async is a tokio panic by
     /// design —

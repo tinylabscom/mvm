@@ -821,8 +821,7 @@ mod tests {
         assert_eq!(blocks[1].source, PathBuf::from("/vol/data.img"));
     }
 
-    /// The inverse of what this used to assert, and the property that matters
-    /// now: a user volume never becomes a virtio-fs share. A granted directory
+    /// The property that matters: a user volume never becomes a virtio-fs share. A granted directory
     /// is materialized into an image and attached as virtio-blk, so the only
     /// share a workload spec can carry is the dev-tier root.
     #[test]

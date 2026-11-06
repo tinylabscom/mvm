@@ -222,9 +222,9 @@ const JSON_BYTE_ARRAY_WORST_CASE: usize = 4;
 /// around that body is binary — `SealedFrame::encode` — so the ciphertext
 /// crosses no second JSON encoding.
 ///
-/// It used to. When the envelope was JSON as well, this was `4 * 4` and the
-/// cap below was a quarter of what it is now, because a `Vec<u8>` ciphertext
-/// was itself re-encoded as an integer array. Sizing against a single hop
+/// A JSON envelope would need `4 * 4` here and a cap a quarter of the current
+/// one, because a `Vec<u8>` ciphertext would itself be re-encoded as an
+/// integer array. Sizing against a single hop
 /// while the wire charged for two is what let a stdout chunk pass the
 /// handler's own [`MAX_FRAME_SIZE`] check and then fail the identical check on
 /// the envelope.

@@ -1056,11 +1056,10 @@ mod tests {
     /// A relative *path* stays refused, because it resolves against a working
     /// directory the same request may be setting.
     ///
-    /// This used to assert that a bare `echo` was refused, under the name
-    /// `build_command_rejects_relative_argv0` — but a bare name is not a
+    /// A bare `echo` is accepted: a bare name is not a
     /// relative path, and refusing it is what stopped the README's own SDK
     /// example (`commands.start(["python", ...])`, `exec("uname", "-sr")`)
-    /// from running at all. A bare name now resolves; see
+    /// from running at all. A bare name resolves; see
     /// `a_bare_command_name_resolves_through_the_search_path`.
     #[test]
     fn build_command_rejects_a_relative_path_argv0() {
