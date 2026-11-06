@@ -81,6 +81,10 @@ pub(in crate::commands) fn run(args: &Args) -> Result<()> {
 }
 
 fn run_wrapper(args: &Args, stdin_bytes: Vec<u8>) -> Result<i32> {
+    run_wrapper_to(args, stdin_bytes, Stdio::inherit(), Stdio::inherit())
+}
+
+fn run_wrapper_to(args: &Args, stdin_bytes: Vec<u8>, stdout: Stdio, stderr: Stdio) -> Result<i32> {
     let cfg = NoVmConfig::from_args(args)?;
     if cfg.format != "json" && cfg.format != "msgpack" {
         bail!(
@@ -135,8 +139,8 @@ fn run_wrapper(args: &Args, stdin_bytes: Vec<u8>) -> Result<i32> {
         _ => unreachable!("language was validated above"),
     }
     cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::inherit());
-    cmd.stderr(Stdio::inherit());
+    cmd.stdout(stdout);
+    cmd.stderr(stderr);
 
     let mut child = cmd
         .spawn()
@@ -216,15 +220,57 @@ mod tests {
         assert_eq!(cfg.source_path, "/tmp/src");
     }
 
+    /// Runs the embedded Python wrapper for real: the config must be read from
+    /// `MVM_WRAPPER_CONFIG_PATH` (the module only exists under the source
+    /// path it names), a result must come back as the function's JSON, and a
+    /// failure must surface as an envelope line on stderr with a nonzero exit.
     #[test]
-    fn embedded_wrappers_contain_envelope_marker() {
-        assert!(ONESHOT_PY.contains("MVM_ENVELOPE: "));
-        assert!(ONESHOT_MJS.contains("MVM_ENVELOPE: "));
-    }
+    fn the_python_wrapper_honours_its_config_and_reports_failures_as_envelopes() {
+        if mvm_core::env_hygiene::helper_command("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: python3 is not on PATH");
+            return;
+        }
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("greeter.py"),
+            "def ok(*a, **k):\n    return {'greeting': 'hi'}\n\n\
+             def boom(*a, **k):\n    raise RuntimeError('boom')\n",
+        )
+        .unwrap();
+        let run = |function: &str| {
+            let out = tempfile::NamedTempFile::new().unwrap();
+            let err = tempfile::NamedTempFile::new().unwrap();
+            let mut args = empty_args();
+            args.language = Some("python".to_string());
+            args.module = Some("greeter".to_string());
+            args.function = Some(function.to_string());
+            args.source_path = Some(src.path().display().to_string());
+            let code = run_wrapper_to(
+                &args,
+                b"[[],{}]".to_vec(),
+                Stdio::from(out.reopen().unwrap()),
+                Stdio::from(err.reopen().unwrap()),
+            )
+            .unwrap();
+            (
+                code,
+                std::fs::read_to_string(out.path()).unwrap(),
+                std::fs::read_to_string(err.path()).unwrap(),
+            )
+        };
 
-    #[test]
-    fn embedded_wrappers_honor_env_override() {
-        assert!(ONESHOT_PY.contains("MVM_WRAPPER_CONFIG_PATH"));
-        assert!(ONESHOT_MJS.contains("MVM_WRAPPER_CONFIG_PATH"));
+        let (code, stdout, _) = run("ok");
+        assert_eq!(code, 0, "{stdout}");
+        assert!(stdout.contains("\"greeting\""), "{stdout}");
+
+        let (code, stdout, stderr) = run("boom");
+        assert_ne!(code, 0, "{stderr}");
+        assert!(stdout.is_empty(), "{stdout}");
+        assert!(stderr.contains("MVM_ENVELOPE: "), "{stderr}");
+        assert!(stderr.contains("boom"), "{stderr}");
     }
 }
