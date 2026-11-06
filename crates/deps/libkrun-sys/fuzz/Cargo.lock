@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "libkrun-sys"
-version = "0.27.0-rc.2"
+version = "0.27.0-rc.3"
 dependencies = [
  "libc",
  "mvm-core",
@@ -577,7 +577,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mvm-contract"
-version = "0.27.0-rc.2"
+version = "0.27.0-rc.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.27.0-rc.2"
+version = "0.27.0-rc.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-macho-sign"
-version = "0.27.0-rc.2"
+version = "0.27.0-rc.3"
 dependencies = [
  "plist",
  "sha1",
