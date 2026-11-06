@@ -377,6 +377,14 @@ REVIEWED = {
     "mvm-build/src/embed_toolchain.rs": ("embedder-refused-by-caller", "The module is shared with `build.rs` and the CLI payload build, which are not library paths. The only non-CLI caller is `rustc_has_target`, reached from `guest_agent_build::ensure_rust_targets` after `zigbuild_tools`, whose first statement is `refuse_toolchain_spawn` (`CliSpawn::GuestRuntimeToolchain`); a library embedder is refused before any `rustup`, `cargo`, `rustc`, `zig` or `python3` probe runs. The module cannot call that function itself because `build.rs` includes it without `mvm-vmm`."),
 }
 
+# What is missing for each file that stays open-review. Every open-review file
+# must have an entry, so a new open site cannot appear without naming its gap.
+OPEN_NOTES = {
+    "mvm-vmm/src/host/shell/exec.rs": "`run_host(cmd, args)` runs a caller-named program, and `run_on_vm*`/`run_in_vm*` hand a caller-built script to `bash -c` (host bash on native Linux and for custom VM names). About 20 files build those scripts as interpolated strings (largest: `mvm-backends/src/fc/host.rs`, `mvm-runtime/src/image.rs`, `mvm-backends/src/fc/observe.rs`, `mvm-build/src/backend/host.rs`, `mvm-runtime/src/build_env.rs`). Missing: a per-caller review of quoting and untrusted input, or typed replacements, and a wall-clock bound.",
+    "mvm-vmm/src/host/linux_env.rs": "`NativeEnv::{run, run_visible, run_capture}` run `bash -c <script>` for every `LinuxEnv` caller. Same gap as `shell/exec.rs`: the scripts are built by callers, so safety is a property of each caller, not of this wrapper.",
+    "mvm-runtime/src/host_shell.rs": "`HostShellEnvironment` implements `ShellEnvironment` by running `bash -c <script>` on the host (the Linux nix-build fallback). It is the seam for the `dev_build` scripts; the gap is the same: no typed command form and no wall-clock bound, and the scripts' interpolated inputs are not individually reviewed.",
+}
+
 REQUIRED_CLASSES = ("hypervisor", "helper bin", "systemd-run", "net (nft)", "codesign", "factory", "process control")
 
 
@@ -453,6 +461,11 @@ def render():
         out += ["", "Reviewed library-reachable sites (disposition, then why):", "",
                 "| File | Disposition | Reason |", "|---|---|---|"]
         out += ["| `%s` | %s | %s |" % (k, v[0], v[1]) for k, v in sorted(REVIEWED.items())]
+    gaps = sorted({r[0] + "/" + r[1] for r in rows if r[9] == "open-review"})
+    if set(gaps) != set(OPEN_NOTES):
+        sys.exit("OPEN_NOTES must name exactly the open-review files; have %s, need %s" % (sorted(OPEN_NOTES), gaps))
+    out += ["", "Still open-review, and the concrete missing piece:", "", "| File | Missing |", "|---|---|"]
+    out += ["| `%s` | %s |" % (k, OPEN_NOTES[k]) for k in gaps]
     if dc["open-review"] > OPEN_REVIEW_CEILING:
         sys.exit("open-review spawn sites rose to %d (ceiling %d): classify the new site as required, "
                  "refused for an embedder or CLI-only, or justify raising OPEN_REVIEW_CEILING"
