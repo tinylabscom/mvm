@@ -345,13 +345,42 @@ def guard(rel, kinds, places, fns):
         pl = {places.get((rel, f)) or next((w for (gf, _), w in places.items() if gf == rel and None in fns), None) for f in fns}
         g.append("RAW_SITES (" + "/".join(sorted(p for p in pl if p)) + ")" if pl - {None} else "UNCLASSIFIED raw spawn")
     src = open(os.path.join(ROOT, rel)).read()
-    if "refuse_cli_spawn" in src or "CliSpawn::" in src:
+    if "refuse_cli_spawn" in src or "CliSpawn::" in src or "refuse_toolchain_spawn" in src:
         g.append("embedder refusal")
     if "network_endpoint" in rel or "gpu_endpoint" in rel:
         g.append("check-single-network-path")
     if crate_of(rel) in ("mvm-client", "mvm-hostlib", "mvm-sdk"):
         g.append("check-no-cli-shellout")
     return "; ".join(g)
+
+
+# Ratchet: sites a library-reachable process may start that are not yet shown
+# to be required, refused or CLI-only. It may only go down; raising it needs a
+# written reason in the contract doc.
+OPEN_REVIEW_CEILING = 42
+REQUIRED_CLASSES = ("hypervisor", "helper bin", "systemd-run", "net (nft)", "codesign", "factory", "process control")
+
+
+def disposition(cls, auth, linked, guard_text):
+    """required-host-primitive | embedder-refused | cli-only | guest-side | test-only | open-review.
+
+    open-review is the honest remainder: a program the client closure can
+    start that is neither the product's own VMM/role process nor refused for
+    a library embedder. The process-boundary decision permits fixed-argv
+    utilities, but each is listed until its path is shown to be typed,
+    admitted and bounded; none is claimed to be a violation here.
+    """
+    if auth.startswith("dev harness"):
+        return "test-only"
+    if auth in ("guest", "builder VM"):
+        return "guest-side"
+    if linked == "-" or auth.startswith("CLI"):
+        return "cli-only"
+    if "embedder refusal" in guard_text:
+        return "embedder-refused"
+    if cls.startswith(REQUIRED_CLASSES) or cls == "hypervisor supervisor":
+        return "required-host-primitive"
+    return "open-review"
 
 
 def render():
@@ -379,17 +408,27 @@ def render():
         kinds = [x["kind"] for x in v]
         t = "".join(ch for ch in t if ch in linked)
         t = t or "-"
-        rows.append((c, k.split("/", 1)[1], len(v), cls, why, auth, linked, t, guard(f, kinds, places, {x["fn"] for x in v})))
+        g = guard(f, kinds, places, {x["fn"] for x in v})
+        rows.append((c, k.split("/", 1)[1], len(v), cls, why, auth, linked, t, g, disposition(cls, auth, linked, g)))
     rows.sort(key=lambda r: (r[0], r[1]))
     cc = collections.Counter()
     for r in rows:
         cc[r[0]] += r[2]
-    out = ["| Crate | Module (under `src/` unless a crate root file) | Sites | Class | Purpose | Authority | Linked | Traced | Guard |",
-           "|---|---|--:|---|---|---|:-:|:-:|---|"]
+    out = ["| Crate | Module (under `src/` unless a crate root file) | Sites | Class | Purpose | Authority | Linked | Traced | Guard | Disposition |",
+           "|---|---|--:|---|---|---|:-:|:-:|---|---|"]
     for r in rows:
-        out.append("| %s | `%s` | %d | %s | %s | %s | %s | %s | %s |" % r)
+        out.append("| %s | `%s` | %d | %s | %s | %s | %s | %s | %s | %s |" % r)
     out += ["", "Totals: %d production sites in %d files." % (sum(cc.values()), len(rows)), "",
             "| Crate | Sites |", "|---|--:|"] + ["| %s | %d |" % kv for kv in sorted(cc.items())]
+    dc, df = collections.Counter(), collections.Counter()
+    for r in rows:
+        dc[r[9]] += r[2]
+        df[r[9]] += 1
+    out += ["", "| Disposition | Sites | Files |", "|---|--:|--:|"] + ["| %s | %d | %d |" % (d, dc[d], df[d]) for d in sorted(dc)]
+    if dc["open-review"] > OPEN_REVIEW_CEILING:
+        sys.exit("open-review spawn sites rose to %d (ceiling %d): classify the new site as required, "
+                 "refused for an embedder or CLI-only, or justify raising OPEN_REVIEW_CEILING"
+                 % (dc["open-review"], OPEN_REVIEW_CEILING))
     kinds = collections.Counter(s["kind"] for s in sites)
     out += ["", "By construct: " + ", ".join("`%s` %d" % kv for kv in sorted(kinds.items())) + "."]
     return "\n".join(out)
