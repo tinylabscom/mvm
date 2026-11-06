@@ -2510,24 +2510,20 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
         include_bytes!("../crates/mvm-cli/tests/fixtures/signed-registry-go/pack/group.toml");
     std::fs::write(pack.join("files/pack/group.toml"), policy).expect("signed policy");
     let registry_url = format!("file://{}", registry.path().display());
-    // This historical signed fixture predates the official publisher move;
-    // trust its exact signer only in this isolated test home.
+    // Trust the fixture's exact signer only in this isolated test home.
     let publisher = mvm_core::registry_pack::RegistryPackPublisher::new(
         "runtime",
-        "https://token.actions.githubusercontent.com",
-        vec![
-            "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main"
-                .to_string(),
-        ],
+        mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER,
+        vec![mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
     )
-    .expect("historical fixture publisher");
+    .expect("fixture publisher");
     let publishers = mvm_core::registry_pack::RegistryPackPublisherPolicy::new(vec![publisher])
         .expect("fixture publisher policy");
     mvm_core::registry_pack_store::save_publisher_policy(
         &home.path().join("registry/publishers.toml"),
         &publishers,
     )
-    .expect("trust the historical fixture in the isolated home");
+    .expect("trust the fixture signer in the isolated home");
 
     let pulled = mvmctl_isolated(home.path())
         .env("MVM_PACK_REGISTRY", &registry_url)
