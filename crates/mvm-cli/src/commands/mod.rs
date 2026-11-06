@@ -20,7 +20,7 @@ mod image;
 mod machine;
 mod manifest;
 mod ops;
-mod pack;
+pub(crate) mod pack;
 mod plugin;
 mod policy;
 /// Supervisor warm-pool: the `mvmctl pool warm/status` command + the launch glue
