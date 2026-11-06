@@ -737,6 +737,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
     ("pack", AuditPosture::DelegatesToSub(PACK_SUB)),
+    ("new-pack", AuditPosture::InteractiveOrControl),
     // Plan 200 — beginner microVM workflows.
     ("machine", AuditPosture::DelegatesToSub(MACHINE_SUB)),
     // Operational surfaces.
