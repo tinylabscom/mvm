@@ -22,15 +22,11 @@
 # ── Transient machines ───────────────────────────────────────────────────────
 
 [[example]]
-command = "mvmctl image pull alpine"
-witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
-
-[[example]]
 command = "mvmctl image pull python:3.12"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
 
 [[example]]
-command = "mvmctl machine run --name local-demo --profile dev --image \"${MVM_DEMO_IMAGE:?Run preparation in this terminal first}\" --cpus 1 --memory 256M --timeout 30 -- /bin/sh -c 'printf \"hello from a microVM\\n\"; /bin/uname -s'"
+command = "mvmctl machine run --name local-demo --profile dev --image alpine --cpus 1 --memory 256M --timeout 30 -- /bin/sh -c 'printf \"hello from a microVM\\n\"; /bin/uname -s'"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented local demo run boots a cached image and leaves no record"
 
 [[example]]
@@ -92,10 +88,6 @@ command = "mvmctl machine inspect web"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
 
 # ── Host setup ───────────────────────────────────────────────────────────────
-
-[[example]]
-command = "mvmctl bootstrap"
-witness = "suites/s31_launch_e2e/documented_setup.feature::bootstrap succeeds and reports a ready host"
 
 [[example]]
 command = "mvmctl doctor --workflow cli-run"

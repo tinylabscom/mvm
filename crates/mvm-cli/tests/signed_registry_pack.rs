@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use mvm_client::policy_profiles::{LayerOrigin, PolicyRef, PolicyStore};
 use mvm_core::registry_pack::{
-    LEGACY_PACK_SIGNING_CUTOFF, RegistryPackPublisher, RegistryPackPublisherPolicy,
+    OFFICIAL_PACK_SIGNING_IDENTITY, RegistryPackPublisher, RegistryPackPublisherPolicy,
 };
 use mvm_core::registry_pack_store::{
     load_pack_lockfile, open_installed_registry_pack, save_publisher_policy,
@@ -16,8 +16,6 @@ const MANIFEST: &[u8] = include_bytes!("fixtures/signed-registry-go/manifest.jso
 const BUNDLE: &[u8] = include_bytes!("fixtures/signed-registry-go/manifest.sigstore.json");
 const GROUP: &[u8] = include_bytes!("fixtures/signed-registry-go/pack/group.toml");
 const MANIFEST_SHA256: &str = "ce1ac86f67e6a9df7a1b1a46d63384fa20a30848fdd7e5967d2293bfb5ceec50";
-const HISTORICAL_PUBLISHER_IDENTITY: &str =
-    "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main";
 const PYTHON_MANIFEST: &[u8] = include_bytes!("fixtures/signed-registry-python/manifest.json");
 const PYTHON_BUNDLE: &[u8] =
     include_bytes!("fixtures/signed-registry-python/manifest.sigstore.json");
@@ -82,15 +80,15 @@ fn isolated_registry(temp: &TempDir, manifest: &[u8], group: &[u8]) -> TestEnv {
     let publisher = RegistryPackPublisher::new(
         "runtime",
         "https://token.actions.githubusercontent.com",
-        vec![HISTORICAL_PUBLISHER_IDENTITY.to_string()],
+        vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
     )
-    .expect("historical publisher identity");
+    .expect("official publisher identity");
     let policy = RegistryPackPublisherPolicy::new(vec![publisher]).expect("publisher policy");
     save_publisher_policy(
         &mvm_core::config::registry_pack_publisher_policy_path(),
         &policy,
     )
-    .expect("save explicit historical fixture trust");
+    .expect("save explicit fixture trust");
     env
 }
 
@@ -153,7 +151,7 @@ fn isolated_signed_dependency_registry(
         RegistryPackPublisher::new(
             "agent",
             "https://token.actions.githubusercontent.com",
-            vec![HISTORICAL_PUBLISHER_IDENTITY.to_string()],
+            vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
         )
         .expect("parent publisher identity"),
         RegistryPackPublisher::new(
@@ -173,30 +171,20 @@ fn isolated_signed_dependency_registry(
 }
 
 #[test]
-fn the_builtin_default_bounds_trust_in_the_historical_fixture_identity() {
+fn the_builtin_default_trusts_the_current_publisher_identity() {
     let temp = TempDir::new().expect("tempdir");
     let _env = isolated_registry(&temp, MANIFEST, GROUP);
     std::fs::remove_file(mvm_core::config::registry_pack_publisher_policy_path())
         .expect("remove explicit fixture trust");
 
-    let cutoff = chrono::DateTime::parse_from_rfc3339(LEGACY_PACK_SIGNING_CUTOFF)
-        .expect("built-in cutoff is RFC 3339")
-        .with_timezone(&chrono::Utc);
-    let result = mvm_cli::pack_registry::pull("runtime/go");
+    let mvm_cli::pack_registry::PullOutcome::Installed(summary) =
+        mvm_cli::pack_registry::pull("runtime/go").expect("current publisher is trusted")
+    else {
+        panic!("signed fixture must install")
+    };
+    assert_eq!(summary.manifest_sha256, MANIFEST_SHA256);
     let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lockfile");
-    if chrono::Utc::now() < cutoff {
-        let mvm_cli::pack_registry::PullOutcome::Installed(summary) =
-            result.expect("former publisher is trusted before the cutoff")
-        else {
-            panic!("legacy fixture must install")
-        };
-        assert_eq!(summary.manifest_sha256, MANIFEST_SHA256);
-        assert_eq!(lock.pins().len(), 1);
-    } else {
-        let error = result.expect_err("former publisher must be refused after the cutoff");
-        assert!(format!("{error:#}").contains("signature"));
-        assert!(lock.pins().is_empty());
-    }
+    assert_eq!(lock.pins().len(), 1);
 }
 
 #[test]
@@ -206,7 +194,7 @@ fn published_signed_pack_pulls_pins_and_loads_without_network() {
     let mvm_cli::pack_registry::PullOutcome::Installed(summary) =
         mvm_cli::pack_registry::pull("runtime/go").expect("signed pull")
     else {
-        panic!("legacy policy must install")
+        panic!("signed policy must install")
     };
     assert_eq!(summary.reference.to_string(), "runtime/go@1.0.0");
     assert_eq!(summary.manifest_sha256, MANIFEST_SHA256);
@@ -276,7 +264,7 @@ fn a_signed_profile_include_fetches_verifies_and_pins_its_dependency() {
     let mvm_cli::pack_registry::PullOutcome::Installed(parent) =
         mvm_cli::pack_registry::pull("agent/claude").expect("signed dependency pull")
     else {
-        panic!("legacy dependency root must install")
+        panic!("signed dependency root must install")
     };
     assert_eq!(parent.reference.to_string(), "agent/claude@1.0.1");
     assert_eq!(parent.files, 1);
@@ -304,7 +292,7 @@ fn a_signed_profile_include_fetches_verifies_and_pins_its_dependency() {
         assert_eq!(
             verified.signer().identity,
             if reference.namespace() == "agent" {
-                HISTORICAL_PUBLISHER_IDENTITY
+                OFFICIAL_PACK_SIGNING_IDENTITY
             } else {
                 PYTHON_BRANCH_PUBLISHER_IDENTITY
             },

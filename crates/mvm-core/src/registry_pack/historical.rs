@@ -281,7 +281,11 @@ mod tests {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../mvm-cli/tests/fixtures/signed-registry-go");
         let manifest = std::fs::read(fixture.join("manifest.json")).unwrap();
-        let bundle = std::fs::read(fixture.join("manifest.sigstore.json")).unwrap();
+        let bundle = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../mvm-cli/tests/fixtures/signed-registry-go-legacy/manifest.sigstore.json"),
+        )
+        .unwrap();
         let requested = reference("runtime/go@1.0.0");
         let policy = official_publisher_policy();
         let adoption = PackAdoption {
