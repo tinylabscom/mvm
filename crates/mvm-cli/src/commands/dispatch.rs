@@ -42,7 +42,10 @@ impl TopLevelCommand for Commands {
             Commands::Manifest(a) => manifest::run(cli, a, cfg),
             Commands::Image(a) => image::run(cli, a, cfg),
             Commands::Pack(a) => pack::run(cli, a, cfg),
-            Commands::NewPack(a) => new_pack::run(a),
+            Commands::NewPack(a) => {
+                eprintln!("note: `mvmctl new-pack` is deprecated; use `mvmctl pack new`");
+                pack::new::run(a)
+            }
             Commands::Machine(a) => machine::run(cli, a, cfg),
             Commands::Storage(a) => storage::run(cli, a, cfg),
             Commands::ShellInit(a) => env::shell_init::run(cli, a, cfg),

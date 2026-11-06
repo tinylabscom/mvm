@@ -28,8 +28,10 @@ fn create(root: &Path, reference: &PackReference) -> Result<PathBuf> {
     if reference.version().is_some() {
         bail!("use namespace/name without a version; the draft starts at 0.1.0");
     }
-    if namespace == "mvm" {
-        bail!("mvm is reserved for official packs; choose another namespace");
+    // The registry's publishing identity is trusted by default for these namespaces, so a
+    // submitted pack must not land in them (mvm-packs #103).
+    if matches!(namespace, "mvm" | "agent" | "runtime") {
+        bail!("{namespace} is reserved for first-party packs; choose another namespace");
     }
     let valid = |part: &str| {
         part.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
@@ -102,7 +104,7 @@ mod tests {
     fn creates_unprivileged_draft_and_refuses_overwrite() {
         let root = tempfile::tempdir().expect("temp directory");
         fs::create_dir(root.path().join("pack-sources")).expect("source root");
-        let source = create(root.path(), &reference("runtime/example")).expect("create draft");
+        let source = create(root.path(), &reference("acme/example")).expect("create draft");
         assert!(
             fs::read_to_string(source.join("pack.toml"))
                 .expect("pack metadata")
@@ -118,22 +120,24 @@ mod tests {
                 .expect("readme")
                 .contains("never include values")
         );
-        assert!(create(root.path(), &reference("runtime/example")).is_err());
-        assert!(create(root.path(), &reference("runtime/example@1.0.0")).is_err());
-        assert!(create(root.path(), &reference("mvm/example")).is_err());
+        assert!(create(root.path(), &reference("acme/example")).is_err());
+        assert!(create(root.path(), &reference("acme/example@1.0.0")).is_err());
+        for reserved in ["mvm", "agent", "runtime"] {
+            assert!(create(root.path(), &reference(&format!("{reserved}/example"))).is_err());
+        }
     }
 
     #[test]
     fn refuses_non_registry_checkout_and_symlinked_namespace() {
         let root = tempfile::tempdir().expect("temp directory");
-        assert!(create(root.path(), &reference("runtime/example")).is_err());
+        assert!(create(root.path(), &reference("acme/example")).is_err());
         let sources = root.path().join("pack-sources");
         fs::create_dir(&sources).expect("source root");
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(root.path(), sources.join("runtime"))
+            std::os::unix::fs::symlink(root.path(), sources.join("acme"))
                 .expect("symlink namespace");
-            assert!(create(root.path(), &reference("runtime/example")).is_err());
+            assert!(create(root.path(), &reference("acme/example")).is_err());
             assert!(!root.path().join("pack").exists());
         }
     }

@@ -284,6 +284,7 @@ const PACK_SYSTEM_SUB: &[(&str, AuditPosture)] = &[
 
 const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
+    ("new", AuditPosture::InteractiveOrControl),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
     ("list", AuditPosture::ReadOnly),
     ("info", AuditPosture::ReadOnly),
