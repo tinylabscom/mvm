@@ -465,7 +465,7 @@ mod tests {
     fn local_lint_runs_check_all() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let lints = std::fs::read_to_string(root.join("just/lints/mod.just")).unwrap();
-        let justfile = std::fs::read_to_string(root.join("justfile")).unwrap();
+        let justfile = std::fs::read_to_string(root.join("Justfile")).unwrap();
         assert!(lints.contains("xtask -- check-all"));
         assert!(justfile.contains("just lints::policy"));
     }
