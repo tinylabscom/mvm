@@ -30,6 +30,16 @@ pub enum Denial {
     SecretProvider,
     #[error("required hardware attestation unavailable (assurance: {0:?})")]
     AttestationRequired(super::policy::Assurance),
+    #[error("offline lease invalid: {0}")]
+    LeaseInvalid(&'static str),
+    #[error("offline lease expired")]
+    LeaseExpired,
+    #[error("operation {0} is not allowed by the offline lease")]
+    LeaseOpNotAllowed(&'static str),
+    #[error("command sequence {got} replays or reorders (last accepted {last})")]
+    ReplayedCommand { got: u64, last: u64 },
+    #[error("fresh reauthentication required before authorization returns")]
+    ReauthRequired,
     #[error("host-interface state unreadable: {0}")]
     StateUnreadable(String),
     #[error("required check {0} did not complete")]
