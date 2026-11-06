@@ -41,19 +41,17 @@ access. Existing operator policy still applies; this workflow does not disable
 security checks or silently switch to another backend if the native backend
 is unavailable.
 
-The first run downloads the kernel and image and caches them for later runs.
-The guest runtime shipped with the CLI is prepared by `mvmctl bootstrap`, not
-by the launch: a release binary that has not bootstrapped refuses the launch
-and names that command. The first run may take longer than
+The first run downloads the kernel and image, prepares the guest runtime
+shipped with the CLI, and caches them for later runs. It may take longer than
 launching an already-prepared workload; keep that acquisition time separate
 from prepared-startup measurements. This is a local **development-profile**
 demonstration, not a sealed production workload or a replacement for the
 production OCI trust policy. Verification and normal launch admission remain
 enabled.
 
-## Prepare the runtime and pin the image
+## Prewarm or pin the image (optional)
 
-Run `mvmctl bootstrap` once per installed version, then save a digest-pinned image reference:
+To move acquisition ahead of the run and save a digest-pinned image reference:
 
 ```bash
 mvmctl bootstrap

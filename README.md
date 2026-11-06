@@ -54,12 +54,9 @@ mvmctl machine run --name local-demo --profile dev \
   -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'
 ```
 
-The first run fetches the kernel and image; subsequent runs reuse the cache. A
-launch never downloads or assembles the guest runtime itself: a release binary
-that has not run `mvmctl bootstrap` since it was installed refuses the launch
-and names that command, and a source build assembles the runtime from its tree
-on first use. Run `mvmctl bootstrap` (and optionally `mvmctl image pull alpine`)
-before the first run.
+The first run fetches the kernel and image and prepares the release guest runtime;
+subsequent runs reuse the cache. `mvmctl bootstrap` and `mvmctl image pull alpine`
+can prewarm these artifacts ahead of time.
 
 The named foreground run above is transient and cold: its workload VM is torn
 down on exit, with no persistent volume or standby requested. It needs no
