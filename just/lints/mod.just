@@ -14,6 +14,10 @@ model:
     cargo run -p xtask -- check-honesty
     cargo run -p xtask -- check-deferrals
 
+# Every policy gate the lint-policy CI job runs (`xtask check-all`)
+policy:
+    cargo run -p xtask -- check-all
+
 # Regenerate everything the model owns: model/CONFORMANCE.md.
 model-write:
     cargo run -p xtask -- check-conformance --write

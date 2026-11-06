@@ -71,6 +71,7 @@ jobs:
     timeout-minutes: 30
     outputs:
       version: ${{ steps.source.outputs.version }}
+      pkgver: ${{ steps.source.outputs.pkgver }}
     steps:
       - uses: actions/checkout@v6
 
@@ -200,6 +201,8 @@ jobs:
             version="${RELEASE_TAG#v}"
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          # Same mapping as scripts/build-distro-packages.sh: package file names carry it.
+          echo "pkgver=${version//-/\~}" >> "${GITHUB_OUTPUT}"
           echo "packaging version ${version}"
 
       - name: Build the packages
@@ -275,11 +278,12 @@ jobs:
           ARCH: ${{ matrix.arch }}
           DEB_ARCH: ${{ matrix.deb_arch }}
           VERSION: ${{ needs.package.outputs.version }}
+          PKGVER: ${{ needs.package.outputs.pkgver }}
         run: |
           set -euo pipefail
           case "${IMAGE}" in
-            debian:*|ubuntu:*) package="mvmctl_${VERSION}-1_${DEB_ARCH}.deb" ;;
-            *)                 package="mvmctl-${VERSION}-1.${ARCH}.rpm" ;;
+            debian:*|ubuntu:*) package="mvmctl_${PKGVER}-1_${DEB_ARCH}.deb" ;;
+            *)                 package="mvmctl-${PKGVER}-1.${ARCH}.rpm" ;;
           esac
           [ -f "distro-packages/${package}" ] || {
             echo "::error::${package} was not built; have: $(ls distro-packages)" >&2

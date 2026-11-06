@@ -271,6 +271,7 @@ witness_kinds = ["fn"]
 suite = "oci_provenance"
 statement = "OCI image provenance is recorded in the chain-signed audit log"
 witnesses = [
+    "fn:oci_provenance_event_is_chain_signed_with_required_labels",
     "fn:prod_pull_requires_digest_pin_before_network",
     "fn:prod_run_image_requires_digest_pin_before_network",
 ]

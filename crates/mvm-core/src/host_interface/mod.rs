@@ -8,6 +8,7 @@
 //! contract, the fail-closed preflight and the state/epoch rules.
 
 pub mod error;
+pub mod lease;
 pub mod local;
 pub mod policy;
 pub mod preflight;
