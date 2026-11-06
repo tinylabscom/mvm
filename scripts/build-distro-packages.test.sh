@@ -48,10 +48,10 @@ for v in 0.27.0 0.27.0-rc.3; do
   build "$v" "${work}/out-$v" || fail "build of $v failed"
 done
 
-ls "${work}/out-0.27.0" | grep -qx 'mvmctl_0.27.0-1_amd64.deb' || fail "stable deb name changed"
-ls "${work}/out-0.27.0" | grep -qx 'mvmctl-0.27.0-1.x86_64.rpm' || fail "stable rpm name changed"
-ls "${work}/out-0.27.0-rc.3" | grep -qx 'mvmctl_0.27.0~rc.3-1_amd64.deb' || fail "rc deb not mapped"
-ls "${work}/out-0.27.0-rc.3" | grep -qx 'mvmctl-0.27.0~rc.3-1.x86_64.rpm' || fail "rc rpm not mapped"
+[ -f "${work}/out-0.27.0/mvmctl_0.27.0-1_amd64.deb" ] || fail "stable deb name changed"
+[ -f "${work}/out-0.27.0/mvmctl-0.27.0-1.x86_64.rpm" ] || fail "stable rpm name changed"
+[ -f "${work}/out-0.27.0-rc.3/mvmctl_0.27.0~rc.3-1_amd64.deb" ] || fail "rc deb not mapped"
+[ -f "${work}/out-0.27.0-rc.3/mvmctl-0.27.0~rc.3-1.x86_64.rpm" ] || fail "rc rpm not mapped"
 
 if command -v dpkg >/dev/null; then
   dpkg --compare-versions 0.27.0~rc.2 lt 0.27.0 || fail "dpkg: rc must sort before final"
