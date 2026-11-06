@@ -201,8 +201,9 @@ and cite #4100 for the direction, never the reverse.
   `a_download_mode_host_refuses_an_unprepared_sidecar`). `mvmctl machine run
   --image` prepares the overlay, initramfs and OCI guest runtime before it
   dispatches (`resolve_launch_image_source`), announced on its own line, so
-  that path needs no `mvmctl bootstrap`; the refusal above is what other
-  launch paths still show. What #4794 proposes and is not shipped is moving
+  that path needs no `mvmctl bootstrap`. This statement does not cover a
+  launch with no image reference, which resolves its default image through a
+  separate path. What #4794 proposes and is not shipped is moving
   preparation inside the launch layer itself; if it lands, preparation must
   stay a separately reported lane that prepared-launch measurements exclude,
   and those witnesses change deliberately.
