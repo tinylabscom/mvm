@@ -1,0 +1,46 @@
+# Documented MVM_* names with no reader in this tree. Read by `xtask check-documented-env`;
+# the list may only shrink: an entry that resolves or is no longer documented fails the gate.
+
+[[allow]]
+name = "MVM_ASSURANCE_BOOT_CONFIG"
+reason = "operator-set input of the inline script in guides/assurance-runtime.md; the page's own script is the reader"
+
+[[allow]]
+name = "MVM_DEMO_IMAGE"
+reason = "shell variable the walkthrough in getting-started/native-demo.md assigns and reuses; not a product knob"
+
+[[allow]]
+name = "MVM_RUNTIME_ARCH"
+reason = "operator-set input of the inline script in guides/assurance-runtime.md"
+
+[[allow]]
+name = "MVM_RUNTIME_ARCHIVE"
+reason = "operator-set input of the inline script in guides/assurance-runtime.md"
+
+[[allow]]
+name = "MVM_RUNTIME_CHECKSUM"
+reason = "operator-set input of the inline script in guides/assurance-runtime.md"
+
+[[allow]]
+name = "MVM_RUNTIME_INITRAMFS"
+reason = "operator-set input of the inline script in guides/assurance-runtime.md"
+
+[[allow]]
+name = "MVM_RUNTIME_ROOT_HASH"
+reason = "operator-set input of the inline script in guides/assurance-runtime.md"
+
+[[allow]]
+name = "MVM_RUNTIME_SIGNATURE_BUNDLE"
+reason = "operator-set input of the inline script in guides/assurance-runtime.md"
+
+[[allow]]
+name = "MVM_RUNTIME_VERITY"
+reason = "operator-set input of the inline script in guides/assurance-runtime.md"
+
+[[allow]]
+name = "MVM_RUNTIME_VERSION"
+reason = "operator-set input of the inline script in guides/assurance-runtime.md"
+
+[[allow]]
+name = "MVM_STUDIO_TARGET"
+reason = "read by the studio desktop app in its own repository, which refuses a non-local value; documented in sdk/rust.md"

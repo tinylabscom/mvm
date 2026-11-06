@@ -213,12 +213,13 @@ stop_smoke_processes() {
 }
 
 remove_smoke_root() {
-  attempt=0
-  while [ "$attempt" -lt 5 ]; do
-    rm -rf "$ROOT" 2>/dev/null
+  attempt=1
+  while [ "$attempt" -le 5 ]; do
+    rm -rf "$ROOT"
     [ ! -e "$ROOT" ] && return 0
+    [ "$attempt" -lt 5 ] || break
+    sleep "$attempt"
     attempt=$((attempt + 1))
-    sleep 1
   done
   holders="$(smoke_pids | tr '\n' ' ')"
   if [ -z "$holders" ] && command -v lsof >/dev/null 2>&1; then
