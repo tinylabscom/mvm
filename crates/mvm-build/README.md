@@ -41,7 +41,7 @@ provenance so admission can bind the files that are later booted.
 | Builder VM | `builder_vm`, `builder_orchestrator`, `persistent_builder`, `builderd`, `builder_protocol` |
 | Guest images | `rootfs`, `initramfs`, `rootfs_inject`, `oci_runtime_inject` |
 | Toolchain | `nix`, `app_deps`, `embed_toolchain`, `guest_agent_build` |
-| Networking | `builder_route`, `egress_proxy`, `egress_readiness` |
+| Networking | `builder_route`, `egress_readiness` |
 | Integrity | `provenance`, `runtime_identity`, `cache`, `cache_install` |
 
 ## Features

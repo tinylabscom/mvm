@@ -58,6 +58,7 @@ pub mod caller_identity;
 pub mod checkpoint;
 pub mod codesign;
 pub mod connect;
+pub mod containment;
 pub mod display_input;
 pub mod drive;
 pub mod egress_denials;

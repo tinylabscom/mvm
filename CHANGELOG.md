@@ -2,6 +2,32 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.27.0-rc.3] — 2026-11-06
+
+v0.27.0-rc.1 and v0.27.0-rc.2 did not publish. rc.1 was stopped by the BDD gate, which caught a first-run cached-kernel regression. rc.2 was stopped in distro-packages, which rejected the hyphenated pre-release RPM version. rc.3 carries both fixes.
+
+### Added
+- **cli**: Pack index tags, platform and size, with a pre-download arch warning
+- **core**: Add signed offline leases, a command replay gate and a reconnect gate
+- **cli**: Scaffold registry policy packs with new-pack
+- **core**: Contain and replace a single workload under a fresh epoch
+
+### Documentation
+- **adr-001**: Audit claim witnesses and cite claim 14's provenance test
+
+### Fixed
+- **release**: Build .deb/.rpm for pre-release tags
+- **hostd**: Point the eBPF loader at the folded EgressEvent type
+- **mvm-fs**: Ext4 layout underflowed when the inode count, not the data, set the group count
+
+### Testing
+- Sign pack fixtures under the current publisher identity (unblocks CI)
+- **cli**: Remove obsolete publisher override
+- **cli**: Outcome tests in place of self-asserting and source-text tests
+- **hostd**: Script the three-node contain, terminate and rebuild demo
+- **hostd**: Time the host-interface preflight against the launch budgets
+- **cli**: Decide 'installed' by a marker, not a path guess, in the rollback test
+
 ## [0.27.0-rc.2] — 2026-11-05
 
 ### Fixed

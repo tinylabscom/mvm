@@ -111,6 +111,10 @@ pub(in crate::commands) enum AuditAction {
     /// Show a session's audit entries, across every segment, from a chain
     /// that verifies.
     Show(sessions::ShowArgs),
+    /// Show one workload's evidence across replacements: its launches,
+    /// refusals, quarantine and replacement, in chain order, from a chain that
+    /// verifies.
+    Timeline(sessions::TimelineArgs),
     /// Run a read-only security-posture self-test. Reports the live
     /// state of the host's mitigations (host
     /// signer present, audit chain verifiable, allowlists populated,
@@ -431,6 +435,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             ack,
         } => audit_prune(&tenant, through, ack),
         AuditAction::Show(args) => sessions::audit_show(&args),
+        AuditAction::Timeline(args) => sessions::audit_timeline(&args),
         AuditAction::Posture { json } => super::audit_posture::run(json),
         AuditAction::Provenance { action } => match action {
             ProvenanceAction::Export {

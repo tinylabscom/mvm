@@ -108,7 +108,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-14` | `build` | OCI image provenance is recorded in the chain-signed audit log | `fn:prod_pull_requires_digest_pin_before_network`, `fn:prod_run_image_requires_digest_pin_before_network` |
+| `MVM-SEC-14` | `build` | OCI image provenance is recorded in the chain-signed audit log | `fn:oci_provenance_event_is_chain_signed_with_required_labels`, `fn:prod_pull_requires_digest_pin_before_network`, `fn:prod_run_image_requires_digest_pin_before_network` |
 
 ## prod_console
 

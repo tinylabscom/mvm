@@ -12,7 +12,7 @@ use super::{Cli, pull, search};
 mod author;
 pub(in crate::commands) mod build;
 mod download;
-mod inspect;
+pub(crate) mod inspect;
 mod list;
 mod prune;
 mod registry;

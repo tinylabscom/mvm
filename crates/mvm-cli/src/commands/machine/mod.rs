@@ -60,7 +60,10 @@ use super::vm::host_signer::{host_signer_id, load_or_init};
 use super::vm::{console, down};
 use crate::ui;
 use checkpoint::{ForkVmFullMachineInput, fork_vm_full_machine};
-use lifecycle::{exec_machine, run_restart, run_start, shell_machine, stop_machine};
+use lifecycle::{
+    exec_machine, quarantine_machine, replace_machine, run_restart, run_start, shell_machine,
+    stop_machine,
+};
 use manifest_source::{absolutize_manifest_volume_spec, load_machine_manifest_source};
 #[cfg(test)]
 use receipt::verify_machine_start_receipt;
@@ -116,6 +119,12 @@ pub(in crate::commands) enum MachineAction {
     /// Patch a persistent machine's config and relaunch it
     #[command(display_order = 5)]
     Reconfigure(MachineReconfigureArgs),
+    /// Contain a suspect workload: refuse its relaunch, then stop it
+    #[command(display_order = 5)]
+    Quarantine(MachineQuarantineArgs),
+    /// Authorize a quarantined workload's replacement under a fresh epoch
+    #[command(display_order = 5)]
+    Replace(MachineReplaceArgs),
     /// Remove one or more persistent named machine specs (or --all)
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
@@ -191,6 +200,8 @@ impl MachineAction {
             | MachineAction::Start(_)
             | MachineAction::Restart(_)
             | MachineAction::Stop(_)
+            | MachineAction::Quarantine(_)
+            | MachineAction::Replace(_)
             | MachineAction::Reconfigure(_)
             | MachineAction::Rm(_)
             | MachineAction::Ls(_)
@@ -1005,6 +1016,25 @@ pub(in crate::commands) struct MachineStopArgs {
     pub yes: bool,
 }
 
+/// Quarantine one workload by machine name.
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineQuarantineArgs {
+    /// Machine name of the suspect workload.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// Why it is being contained; recorded in the signed audit log.
+    #[arg(long, default_value = "operator quarantine")]
+    pub reason: String,
+}
+
+/// Authorize a replacement for a quarantined workload.
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineReplaceArgs {
+    /// Machine name of the workload to replace.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+}
+
 /// Patch a persistent machine's config and relaunch it. Only the flags
 /// passed change; every other field is inherited (patch semantics).
 #[derive(ClapArgs, Debug, Clone)]
@@ -1520,6 +1550,8 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
+        MachineAction::Quarantine(args) => quarantine_machine(cli, args, cfg),
+        MachineAction::Replace(args) => replace_machine(&args),
         MachineAction::Reconfigure(args) => run_reconfigure(args),
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
         MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),

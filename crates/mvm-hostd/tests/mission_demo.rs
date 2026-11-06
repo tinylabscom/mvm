@@ -1,0 +1,477 @@
+//! The mission demo, scripted: three nodes (aircraft, ship, ground vehicle),
+//! one deterministic compromise, and an evidence timeline.
+//!
+//! What is real: the launch gate (`LocalHostInterface` preflight plus the
+//! per-workload ledger), quarantine and replacement with chain-signed audit
+//! entries, the signed offline lease, the command replay gate, the reconnect
+//! challenge, and the sealed mailbox envelope with its capability, replay and
+//! execution-epoch checks. Each node writes its own signed audit chain.
+//!
+//! What is simulated, on purpose: the mailbox transport (an envelope is handed
+//! from one node to the next in memory — no vsock service or relay carries it,
+//! that runtime is tracked separately) and the VMs (a launch is gated and
+//! audited, but nothing boots). Run with `--nocapture` to read the timeline.
+
+use ed25519_dalek::SigningKey;
+use mvm_contract::protocol::mailbox::{
+    AuthorizationDomainId, AuthorizationDomainRouteLabel, BootId, CapabilityId,
+    CapabilityOperations, CausationId, CiphertextPadding, ContentType, CorrelationId, DeliveryId,
+    DestinationRouteToken, EncryptionAlgorithm, EncryptionContext, ExecutionEpoch as MbEpoch,
+    MailboxAddress, MailboxCapabilityGrant, MailboxEnvelopeHeader, MailboxId, MailboxMessageKind,
+    MailboxOperation, MailboxRoutingFrame, MessageId, OrderingScope, PrincipalId, ProtocolVersion,
+    ReplayNonce, ReplyRoute, RevocationId, SequenceNumber, SignatureAlgorithm, TenantId,
+    TransportBindingId,
+};
+use mvm_core::crypto::aead::Key;
+use mvm_core::host_interface::{
+    Assurance, ExecutionEpoch, HostInterface, HostInterfaceError, HostPolicy, LaunchRequest,
+    NodeState,
+    lease::{CommandGate, LeaseOp, OfflineLease, Reconnect, SignedLease, answer_challenge},
+    local::LocalHostInterface,
+    workload::WorkloadLedger,
+};
+use mvm_core::mailbox::{
+    InMemoryReplayProtector, MailboxError, OpenContext, SealRequest, open_envelope, seal_envelope,
+    sign_capability,
+};
+use mvm_core::plan::ExecutionPlan;
+use mvm_hostd::audit::{
+    emitter::AuditEmitter,
+    session::{EventFilter, workload_events},
+};
+use mvm_hostd::containment::{quarantine_workload, replace_workload};
+use mvm_hostd::supervisor::verify_audit_chain;
+
+const NOW: u64 = 1_000;
+
+fn now() -> u64 {
+    NOW
+}
+
+/// One simulated node: its own state directory, audit chain and host interface.
+struct Node {
+    name: &'static str,
+    home: tempfile::TempDir,
+    audit: tempfile::TempDir,
+    audit_key: SigningKey,
+    identity: SigningKey,
+    emitter: AuditEmitter,
+    host: LocalHostInterface,
+    launches: std::cell::Cell<u32>,
+}
+
+impl Node {
+    fn new(name: &'static str, seed: u8) -> Self {
+        let audit = tempfile::tempdir().unwrap();
+        let audit_key = SigningKey::from_bytes(&[seed; 32]);
+        let emitter = AuditEmitter::with_dir(audit_key.clone(), audit.path()).unwrap();
+        Self {
+            name,
+            home: tempfile::tempdir().unwrap(),
+            audit,
+            audit_key,
+            identity: SigningKey::from_bytes(&[seed.wrapping_add(100); 32]),
+            emitter,
+            host: LocalHostInterface::new(name, HostPolicy::default(), Assurance::Software, now),
+            launches: std::cell::Cell::new(0),
+        }
+    }
+
+    fn plan(&self, workload: &str) -> ExecutionPlan {
+        let n = self.launches.get();
+        self.launches.set(n + 1);
+        mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id(format!("plan-{}-{workload}-{n}", self.name))
+            .workload(workload)
+            .build()
+    }
+
+    /// Gate one launch through the ledger and the preflight, then audit it.
+    fn launch(&self, workload: &str) -> Result<(), HostInterfaceError> {
+        let plan = self.plan(workload);
+        let verdict = WorkloadLedger::load_at(self.home.path())
+            .and_then(|l| l.authorize_local_start(workload).map_err(Into::into))
+            .and_then(|()| {
+                self.host.authorize_workload(&LaunchRequest {
+                    workload_id: workload.into(),
+                    image_digest: plan.image.sha256.clone(),
+                    epoch: self.host.current_epoch(),
+                })
+            });
+        match &verdict {
+            Ok(_) => {
+                self.emitter.emit_admitted(&plan, "host:demo").unwrap();
+                self.emitter.emit_launched(&plan, "simulated").unwrap();
+            }
+            Err(e) => self
+                .emitter
+                .emit_refused(&plan, "host_interface", &e.to_string())
+                .unwrap(),
+        }
+        verdict.map(|_| ())
+    }
+
+    /// Record a refused action (mailbox, egress, secret) against a workload.
+    fn record_denial(&self, workload: &str, stage: &str, reason: &str) {
+        let plan = self.plan(workload);
+        self.emitter.emit_refused(&plan, stage, reason).unwrap();
+    }
+
+    fn chain(&self) -> std::path::PathBuf {
+        self.audit.path().join("local.jsonl")
+    }
+
+    fn lines(&self) -> Vec<String> {
+        std::fs::read_to_string(self.chain())
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn timeline(&self, workload: &str) -> Vec<String> {
+        workload_events(&self.lines(), workload, &EventFilter::default())
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                let en = e.envelope.entry;
+                let detail = en
+                    .labels
+                    .get("reason")
+                    .or_else(|| en.labels.get("epoch"))
+                    .cloned()
+                    .unwrap_or_default();
+                format!("{} {:<26} {detail}", en.plan_id, en.event)
+            })
+            .collect()
+    }
+}
+
+// ---- mailbox fixtures: one ship -> aircraft channel -------------------------
+
+fn domain() -> AuthorizationDomainId {
+    AuthorizationDomainId::from_bytes([1; 32])
+}
+fn tenant() -> TenantId {
+    TenantId::from_bytes([19; 32])
+}
+fn ship_principal() -> PrincipalId {
+    PrincipalId::from_bytes([2; 32])
+}
+fn aircraft_principal() -> PrincipalId {
+    PrincipalId::from_bytes([3; 32])
+}
+fn issuer() -> PrincipalId {
+    PrincipalId::from_bytes([12; 32])
+}
+fn content_type() -> ContentType {
+    ContentType::parse("application/vnd.mvm.prompt", 1).unwrap()
+}
+fn address() -> MailboxAddress {
+    MailboxAddress {
+        tenant: tenant(),
+        authorization_domain: domain(),
+        mailbox: MailboxId::from_bytes([4; 32]),
+        recipient: aircraft_principal(),
+    }
+}
+
+/// A sealed ship->aircraft message sent at `epoch` with message id `id`.
+fn header(epoch: u64, id: u8) -> MailboxEnvelopeHeader {
+    MailboxEnvelopeHeader {
+        protocol_version: ProtocolVersion::V1,
+        signature_algorithm: SignatureAlgorithm::ED25519,
+        tenant: tenant(),
+        authorization_domain: domain(),
+        sender: ship_principal(),
+        recipient: aircraft_principal(),
+        mailbox: address().mailbox,
+        sender_boot: BootId::from_bytes([5; 32]),
+        execution_epoch: MbEpoch::new(epoch).unwrap(),
+        message_id: MessageId::from_bytes([id; 32]),
+        correlation_id: CorrelationId::from_bytes([7; 32]),
+        causation_id: CausationId::from_bytes([8; 32]),
+        kind: MailboxMessageKind::Call,
+        reply_to: Some(ReplyRoute {
+            address: address(),
+            capability_id: CapabilityId::from_bytes([14; 32]),
+        }),
+        ordering_scope: OrderingScope::parse("interactive").unwrap(),
+        sequence: SequenceNumber::new(u64::from(id)).unwrap(),
+        issued_at_unix_ms: 1_000,
+        expires_at_unix_ms: 2_000,
+        nonce: ReplayNonce::from_bytes([id; 16]),
+        content_type: content_type(),
+        capability_id: CapabilityId::from_bytes([10; 32]),
+        policy_epoch: 4,
+        encryption: EncryptionContext {
+            algorithm: EncryptionAlgorithm::AES_256_GCM,
+            key_id: [11; 32],
+        },
+        plaintext_len: 5,
+    }
+}
+
+fn routing() -> MailboxRoutingFrame {
+    MailboxRoutingFrame {
+        protocol_version: ProtocolVersion::V1,
+        authorization_domain_route_label: AuthorizationDomainRouteLabel::from_bytes([15; 32]),
+        destination_route_token: DestinationRouteToken::from_bytes([16; 32]),
+        delivery_id: DeliveryId::from_bytes([17; 32]),
+        ciphertext_len: 0,
+        padding: CiphertextPadding::Exact,
+        expires_at_unix_ms: 2_000,
+        hop_limit: 8,
+        transport_binding_id: TransportBindingId::from_bytes([18; 32]),
+    }
+}
+
+fn grant(operations: &[MailboxOperation]) -> MailboxCapabilityGrant {
+    MailboxCapabilityGrant {
+        protocol_version: ProtocolVersion::V1,
+        signature_algorithm: SignatureAlgorithm::ED25519,
+        capability_id: CapabilityId::from_bytes([10; 32]),
+        issuer: issuer(),
+        subject: ship_principal(),
+        address: address(),
+        operations: CapabilityOperations::from_operations(operations),
+        message_kinds: vec![MailboxMessageKind::Call, MailboxMessageKind::Reply],
+        content_types: vec![content_type()],
+        max_payload_bytes: 1024,
+        max_messages_per_minute: 60,
+        max_outstanding_calls: 8,
+        max_queue_contribution_bytes: 4096,
+        minimum_execution_epoch: MbEpoch::new(1).unwrap(),
+        maximum_execution_epoch: MbEpoch::new(9).unwrap(),
+        policy_epoch: 4,
+        not_before_unix_ms: 900,
+        expires_at_unix_ms: 3_000,
+        revocation_id: RevocationId::from_bytes([13; 32]),
+        delegation_depth: 0,
+    }
+}
+
+/// What the aircraft knows when it opens: the sender's current epoch.
+fn context(current_epoch: u64) -> OpenContext {
+    OpenContext {
+        expected_tenant: tenant(),
+        expected_authorization_domain: domain(),
+        expected_mailbox: address().mailbox,
+        expected_sender: ship_principal(),
+        expected_recipient: aircraft_principal(),
+        acting_principal: ship_principal(),
+        expected_capability_issuer: issuer(),
+        current_execution_epoch: MbEpoch::new(current_epoch).unwrap(),
+        current_policy_epoch: 4,
+        required_operation: MailboxOperation::Send,
+        now_unix_ms: 1_500,
+        accepted_content_types: vec![content_type()],
+        revoked_capabilities: vec![],
+    }
+}
+
+struct Channel {
+    sender_key: SigningKey,
+    authority_key: SigningKey,
+    encryption_key: Key,
+    replay: InMemoryReplayProtector,
+}
+
+impl Channel {
+    fn new() -> Self {
+        Self {
+            sender_key: SigningKey::from_bytes(&[21; 32]),
+            authority_key: SigningKey::from_bytes(&[22; 32]),
+            encryption_key: Key::from_bytes([23; 32]),
+            replay: InMemoryReplayProtector::default(),
+        }
+    }
+
+    /// Ship seals at `sent_epoch`; the aircraft opens knowing `current_epoch`
+    /// under a capability that grants `operations`.
+    fn deliver(
+        &mut self,
+        sent_epoch: u64,
+        current_epoch: u64,
+        id: u8,
+        operations: &[MailboxOperation],
+    ) -> Result<Vec<u8>, MailboxError> {
+        let capability = sign_capability(grant(operations), &self.authority_key).unwrap();
+        let envelope = seal_envelope(
+            SealRequest {
+                routing: routing(),
+                header: header(sent_epoch, id),
+                plaintext: b"hello",
+            },
+            &self.encryption_key,
+            &self.sender_key,
+        )
+        .unwrap();
+        open_envelope(
+            &envelope,
+            &capability,
+            &context(current_epoch),
+            &self.encryption_key,
+            &self.sender_key.verifying_key(),
+            &self.authority_key.verifying_key(),
+            &mut self.replay,
+        )
+    }
+}
+
+#[test]
+fn contain_terminate_and_rebuild() {
+    let (aircraft, ship, ground) = (
+        Node::new("aircraft", 1),
+        Node::new("ship", 2),
+        Node::new("ground", 3),
+    );
+    let mut channel = Channel::new();
+    let send = [MailboxOperation::Send, MailboxOperation::Receive];
+
+    // Act 1: each node launches its workloads under the preflight; the ship's
+    // analyst and the aircraft collaborate over an approved mailbox.
+    for node in [&aircraft, &ship, &ground] {
+        node.launch("nav").expect("a clean node launches");
+    }
+    ship.launch("analyst").expect("analyst launches");
+    assert_eq!(
+        channel
+            .deliver(1, 1, 1, &send)
+            .expect("approved message opens"),
+        b"hello"
+    );
+
+    // Act 2: the ship loses its uplink and keeps doing preauthorized local
+    // work under a signed lease; it cannot use secrets or egress.
+    let ops = SigningKey::from_bytes(&[50; 32]);
+    let trusted = vec![("ops".to_string(), ops.verifying_key())];
+    let lease = SignedLease::sign(
+        OfflineLease {
+            node_id: "ship".into(),
+            policy_version: 4,
+            issued_at: 100,
+            not_after: 5_000,
+            allowed: vec![LeaseOp::LocalLaunch, LeaseOp::Mailbox],
+            max_queued_messages: 32,
+        },
+        "ops",
+        &ops,
+    )
+    .unwrap()
+    .verify(&trusted, "ship", NOW, 1)
+    .expect("the ship holds a valid lease");
+    lease
+        .permits(LeaseOp::LocalLaunch, NOW)
+        .expect("local work continues");
+    lease
+        .permits(LeaseOp::Mailbox, NOW)
+        .expect("mailbox continues");
+    ship.launch("nav")
+        .expect("the ship launches offline under the lease");
+    assert!(lease.permits(LeaseOp::Egress, NOW).is_err());
+
+    // Act 3: the analyst is compromised (deterministically). It tries to send
+    // without the Send grant, and to use a secret the lease does not allow.
+    let denied = channel
+        .deliver(1, 1, 2, &[MailboxOperation::Receive])
+        .expect_err("a sender without the Send operation is refused");
+    ship.record_denial("analyst", "mailbox", &format!("send refused: {denied}"));
+    let secret = lease
+        .permits(LeaseOp::SecretUse, NOW)
+        .expect_err("secrets are outside the lease");
+    ship.record_denial("analyst", "secret", &secret.to_string());
+    assert!(
+        matches!(channel.deliver(1, 1, 1, &send), Err(MailboxError::Replay)),
+        "replaying an already-opened message is refused as a replay"
+    );
+
+    // Act 4: only the suspect is contained, on the command of the control
+    // plane; a replayed copy of that command is rejected.
+    let mut commands = CommandGate::new(ExecutionEpoch(1));
+    commands
+        .accept(ExecutionEpoch(1), 1)
+        .expect("first command accepted");
+    assert!(
+        commands.accept(ExecutionEpoch(1), 1).is_err(),
+        "replayed command refused"
+    );
+    let suspect = ship.plan("analyst");
+    quarantine_workload(
+        ship.home.path(),
+        &ship.emitter,
+        &suspect,
+        "planted compromise",
+    )
+    .unwrap();
+    // Terminate is the existing stop path; here the VM is simulated.
+    assert!(
+        ship.launch("analyst").is_err(),
+        "the quarantined workload cannot relaunch"
+    );
+    ship.launch("nav")
+        .expect("the bystander on the same node is unaffected");
+    aircraft.launch("nav").expect("other nodes are unaffected");
+
+    // Act 5: the replacement gets fresh authority; the old epoch stays dead.
+    let epoch = replace_workload(ship.home.path(), &ship.emitter, &suspect).unwrap();
+    assert_eq!(epoch.0, 2);
+    ship.launch("analyst").expect("the replacement launches");
+    assert!(
+        matches!(
+            channel.deliver(1, 2, 3, &send),
+            Err(MailboxError::StaleExecutionEpoch)
+        ),
+        "a message from the replaced workload's epoch is rejected as a stale epoch"
+    );
+    assert!(
+        channel.deliver(2, 2, 4, &send).is_ok(),
+        "the replacement's own epoch is accepted"
+    );
+
+    // The ship reconnects: nothing is authorized until a fresh challenge is
+    // answered under the ship's own key.
+    let (mut link, nonce) = Reconnect::begin();
+    assert!(!link.is_authorized());
+    let answer = answer_challenge(&ship.identity, &nonce);
+    link.complete(
+        &ship.identity.verifying_key(),
+        &answer,
+        NodeState::Active,
+        4,
+        4,
+    )
+    .expect("a fresh answer reauthorizes");
+    assert!(link.is_authorized());
+
+    // Act 6: the evidence. The chain verifies, and one ordered view shows the
+    // launch, the denials, the containment and the replacement.
+    for node in [&aircraft, &ship, &ground] {
+        verify_audit_chain(&node.chain(), &node.audit_key.verifying_key())
+            .unwrap_or_else(|e| panic!("{} chain must verify: {e:?}", node.name));
+    }
+    let timeline = ship.timeline("analyst");
+    println!("\n--- evidence timeline: ship / analyst ---");
+    for line in &timeline {
+        println!("{line}");
+    }
+    let events: Vec<&str> = timeline
+        .iter()
+        .map(|l| l.split_whitespace().nth(1).unwrap())
+        .collect();
+    assert_eq!(
+        events,
+        [
+            "plan.admitted",
+            "plan.launched",
+            "plan.admission_refused", // mailbox send without the grant
+            "plan.admission_refused", // secret outside the lease
+            "workload.quarantined",
+            "plan.admission_refused", // relaunch while quarantined
+            "workload.replaced",
+            "plan.admitted",
+            "plan.launched",
+        ]
+    );
+}

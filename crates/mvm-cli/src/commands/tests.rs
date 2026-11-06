@@ -124,6 +124,24 @@ fn workload_pack_search_and_pull_aliases_parse() {
 }
 
 #[test]
+fn new_pack_scaffolding_command_parses() {
+    let parsed =
+        Cli::try_parse_from(["mvmctl", "new-pack", "runtime/example"]).expect("new-pack parse");
+    assert!(matches!(
+        parsed.command,
+        Commands::NewPack(new_pack::Args { reference })
+            if reference.coordinate_string() == "runtime/example"
+    ));
+    assert!(Cli::try_parse_from(["mvmctl", "new-pack"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "new-pack", "../example"]).is_err());
+    let help = Cli::try_parse_from(["mvmctl", "new-pack", "--help"])
+        .expect_err("help exits after rendering")
+        .to_string();
+    assert!(help.contains("namespace/name"));
+    assert!(help.contains("unpublished policy-pack"));
+}
+
+#[test]
 fn workload_pack_management_and_system_commands_parse() {
     for argv in [
         ["mvmctl", "pack", "ls", "--json"].as_slice(),

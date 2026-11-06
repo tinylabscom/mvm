@@ -412,6 +412,7 @@ impl AuditEmitter {
     /// nothing and settles the question from the chain alone.
     pub fn emit_admitted(&self, plan: &ExecutionPlan, signer_id: &str) -> Result<()> {
         let mut labels = vec![
+            ("workload".to_string(), plan.workload.0.clone()),
             ("signer_id".to_string(), signer_id.to_string()),
             ("authorizer_principal".to_string(), signer_id.to_string()),
             (
@@ -437,6 +438,7 @@ impl AuditEmitter {
             plan,
             "plan.admission_refused",
             [
+                ("workload".to_string(), plan.workload.0.clone()),
                 ("stage".to_string(), stage.to_string()),
                 ("reason".to_string(), reason.to_string()),
                 (
@@ -574,7 +576,10 @@ impl AuditEmitter {
         self.emit(
             plan,
             "plan.launched",
-            [("backend".to_string(), backend.to_string())],
+            [
+                ("workload".to_string(), plan.workload.0.clone()),
+                ("backend".to_string(), backend.to_string()),
+            ],
         )
     }
 
