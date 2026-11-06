@@ -3681,8 +3681,4 @@ mod tests {
         );
         assert!(!dest.join("rootfs.ext4").exists());
     }
-
-    // SAFETY: serialized by HOME_TEST_LOCK.
-    #[allow(unused)]
-    fn placeholder_for_trailing_env_remove() {}
 }

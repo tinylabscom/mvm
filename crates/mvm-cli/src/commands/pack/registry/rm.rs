@@ -1,6 +1,6 @@
 //! `mvmctl pack registry rm`.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use mvm_core::registry_pack::PackReference;
 use mvm_core::registry_pack::application_bundle::names_installed_application;
@@ -41,11 +41,14 @@ fn remove(
     Ok(Some(lines))
 }
 
+/// The same spellings `pack pull`, `pack info` and `pack verify` accept, so
+/// `ns/name:latest` removes the pin it installed.
+fn parse_reference(arg: &str) -> Result<PackReference> {
+    crate::pack_registry::parse_user_reference(arg)
+}
+
 pub(in crate::commands) fn run(args: RmArgs) -> Result<()> {
-    let reference: PackReference = args
-        .reference
-        .parse()
-        .with_context(|| format!("invalid pack reference {:?}", args.reference))?;
+    let reference = parse_reference(&args.reference)?;
     let cache = mvm_core::config::registry_pack_cache_dir();
     let lock = mvm_core::config::pack_lockfile_path();
     match remove(&cache, &lock, &reference)? {
@@ -104,5 +107,15 @@ mod tests {
 
         assert_eq!(remove(&cache, &lock, &reference).unwrap(), None);
         assert_eq!(load_pack_lockfile(&lock).unwrap().pins().len(), 1);
+    }
+
+    #[test]
+    fn rm_accepts_the_latest_spelling_pull_and_info_accept() {
+        let (_home, cache, lock) = setup(br#"{"kind":"application"}"#);
+        let reference = parse_reference("agent/claude:latest").unwrap();
+
+        assert!(remove(&cache, &lock, &reference).unwrap().is_some());
+        assert!(load_pack_lockfile(&lock).unwrap().pins().is_empty());
+        assert!(parse_reference("agent/claude:stable").is_err());
     }
 }

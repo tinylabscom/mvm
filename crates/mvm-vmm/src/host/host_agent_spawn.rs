@@ -560,7 +560,7 @@ impl Drop for HostAgentServicesGuard {
 
 /// Whether the host-agent daemon path is selected. **Default: enabled** — the
 /// per-tenant daemon is the default for an admitted libkrun/hvf workload, so
-/// `host.audit.v1` is available on a plain boot (no `MVM_GATEWAY_BRIDGE`).
+/// `host.audit.v1` is available on a plain boot.
 /// `MVM_HOST_AGENT_DAEMON=0` is the opt-out escape hatch back to the per-VM
 /// broker fork during the transition; the fork is removed once the daemon path
 /// has soaked. Any value other than `0` leaves the daemon on.
