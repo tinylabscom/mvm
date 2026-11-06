@@ -122,10 +122,6 @@ pub mod builderd_client;
 pub use mvm_builder_guest::builderd_protocol;
 #[cfg(unix)]
 pub mod cache;
-/// The lib half of the retired `mvm-egress-proxy` bin, which no builder VM
-/// installs or runs any more; see the module docs.
-#[cfg(unix)]
-pub mod egress_proxy;
 #[cfg(unix)]
 pub use mvm_builder_guest::egress_readiness;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
