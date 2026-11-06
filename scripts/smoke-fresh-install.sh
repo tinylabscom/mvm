@@ -158,13 +158,27 @@ TRANSCRIPT="$OUT/transcript.log"
 BOOT_RESULTS="$OUT/boot-results.jsonl"
 : > "$BOOT_RESULTS"
 
+remove_smoke_root() {
+  attempt=1
+  while [ "$attempt" -le 5 ]; do
+    if rm -rf "$ROOT"; then return 0; fi
+    [ "$attempt" -lt 5 ] || break
+    # A detached standby refill can still write under this isolated HOME.
+    # Reconcile its external state; a pool-lifecycle event would replace this retry.
+    sleep "$attempt"
+    attempt=$((attempt + 1))
+  done
+  printf '[smoke] could not remove throwaway HOME at %s\n' "$SMOKE_HOME" >&2
+  return 1
+}
+
 cleanup() {
   status=$?
   if [ "${MVM_SMOKE_KEEP:-}" = "1" ]; then
     printf '[smoke] kept the throwaway HOME at %s\n' "$SMOKE_HOME" >&2
   else
     case "$ROOT" in
-      /tmp/mvm-fresh.*|/private/tmp/mvm-fresh.*) rm -rf "$ROOT" ;;
+      /tmp/mvm-fresh.*|/private/tmp/mvm-fresh.*) remove_smoke_root || status=1 ;;
     esac
   fi
   exit "$status"
