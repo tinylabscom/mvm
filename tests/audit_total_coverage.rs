@@ -999,6 +999,10 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-326 chain-structure event: `trust audit prune` records the
         // removal in the chain before deleting the segments it names.
         "chain.pruned",
+        // Per-workload containment: `machine quarantine` and `machine replace`
+        // each write a chain-signed entry (see `mvm_hostd::containment`).
+        "workload.quarantined",
+        "workload.replaced",
         // Top-level command audit envelopes.
         "cmd.agent-session",
         "cmd.build",
