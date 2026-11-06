@@ -181,6 +181,48 @@ mod tests {
     }
 
     #[test]
+    fn the_timeline_includes_unlabelled_events_on_the_workloads_own_plans_only() {
+        use crate::audit::session::{EventFilter, workload_events};
+        let audit = tempfile::tempdir().unwrap();
+        let emitter =
+            AuditEmitter::with_dir(SigningKey::from_bytes(&[9; 32]), audit.path()).unwrap();
+        let mine = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-mine")
+            .workload("suspect")
+            .build();
+        let theirs = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-theirs")
+            .workload("bystander")
+            .build();
+        emitter.emit_admitted(&mine, "host:test").unwrap();
+        // Carries no workload label, like a flow or exit event on the same plan.
+        emitter.emit_verb_denied(&mine, "exec").unwrap();
+        emitter.emit_admitted(&theirs, "host:test").unwrap();
+        emitter.emit_verb_denied(&theirs, "exec").unwrap();
+
+        let lines: Vec<String> = std::fs::read_to_string(audit.path().join("local.jsonl"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let names: Vec<_> = workload_events(&lines, "suspect", &EventFilter::default())
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.envelope.entry.plan_id, e.envelope.entry.event))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("plan-mine".to_string(), "plan.admitted".to_string()),
+                ("plan-mine".to_string(), "verb_denied".to_string()),
+            ],
+            "the same-plan event comes along; the other workload's plan does not"
+        );
+    }
+
+    #[test]
     fn a_long_reason_is_bounded() {
         assert_eq!(bounded(&"x".repeat(10_000)).len(), MAX_REASON_BYTES);
     }
