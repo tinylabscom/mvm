@@ -92,6 +92,7 @@ pub enum CpioError {
 }
 
 /// A length or count as a newc header value, or the field that overflows it.
+#[deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 fn newc_field(field: &'static str, len: usize) -> Result<u32, CpioError> {
     u32::try_from(len).map_err(|_| CpioError::FieldTooLarge {
         field,
@@ -101,6 +102,7 @@ fn newc_field(field: &'static str, len: usize) -> Result<u32, CpioError> {
 
 /// The `(ino, filesize, namesize)` header values for one entry. Pure, so the
 /// overflow edges are testable without allocating the oversized entry.
+#[deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 fn entry_fields(
     index: usize,
     name_len: usize,
@@ -119,6 +121,7 @@ fn entry_fields(
 ///
 /// [`CpioError::FieldTooLarge`] when an entry's size, name length or position,
 /// or the archive's total length, exceeds what a newc header can express.
+#[deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 pub fn build_newc_cpio(entries: &[CpioEntry]) -> Result<Vec<u8>, CpioError> {
     let mut out = Vec::new();
     // A unique inode per entry keeps them distinct (the kernel uses it for
@@ -153,6 +156,7 @@ pub fn build_newc_cpio(entries: &[CpioEntry]) -> Result<Vec<u8>, CpioError> {
 /// (padded to 4), then the data (padded to 4). `rdev` is `(major, minor)` for
 /// device nodes and `(0, 0)` otherwise. `fields` is `(ino, filesize, namesize)`,
 /// already checked to fit.
+#[deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 fn write_entry(
     out: &mut Vec<u8>,
     fields: (u32, u32, u32),
