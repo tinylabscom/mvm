@@ -215,12 +215,6 @@ pub fn cached_kernel_path(cache_dir: &Path, arch: &str, variant: &str) -> PathBu
     kernel_cache_dir(cache_dir, arch, variant).join("vmlinux")
 }
 
-/// Workload-kernel cache labels a launch may select. `workload` is the
-/// sealed default; `workload-k8s` is the in-guest-orchestrator variant.
-/// Kept in one place so the build command, the cache layout, and the
-/// launch override agree on the spelling.
-pub const WORKLOAD_KERNEL_LABELS: &[&str] = &["workload", "workload-k8s"];
-
 /// Pure half of [`workload_kernel_label`]: map the raw env value to a
 /// label. `None`/empty means the default; an unknown label is refused
 /// (falling back to the default) so a typo boots the sealed kernel rather
@@ -360,7 +354,7 @@ pub fn resolve_kernel(
 
 #[cfg(test)]
 mod tests {
-    use super::{WORKLOAD_KERNEL_LABELS, parse_workload_kernel_label};
+    use super::parse_workload_kernel_label;
 
     #[test]
     fn workload_kernel_label_defaults_and_trims() {
@@ -381,18 +375,6 @@ mod tests {
         // failing loud enough to wake an operator.
         for bad in ["k8s", "WORKLOAD-K8S", "workload_k8s", "../workload"] {
             assert_eq!(parse_workload_kernel_label(Some(bad)), "workload", "{bad}");
-        }
-    }
-
-    #[test]
-    fn workload_kernel_labels_are_static_and_lowercase() {
-        assert_eq!(WORKLOAD_KERNEL_LABELS, &["workload", "workload-k8s"]);
-        for label in WORKLOAD_KERNEL_LABELS {
-            assert!(
-                label
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-            );
         }
     }
 
