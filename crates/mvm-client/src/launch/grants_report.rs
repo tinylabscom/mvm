@@ -116,70 +116,9 @@ fn degradation_warning(requested: &Grants, enforced: &EnforcedGrants) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admission::admit_plan_tests::admitted_libkrun;
     use mvm_contract::grants::CpuGrant;
     use mvm_contract::protocol::resource_controls::EnforcedTier;
-    use mvm_hostd::plan_admission::InMemoryNonceLedger;
-
-    use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
-    use crate::admission::{AdmitPlanForBootParams, admit_plan_for_boot};
-
-    /// Admit a real plan carrying `grants` and return its context plus the
-    /// audit dir the chain was written to. The signer, chain and plan are the
-    /// production ones — the only thing injected is where they live.
-    fn admitted_with_grants(
-        vm_name: &str,
-        grants: Option<mvm_contract::grants::Grants>,
-    ) -> (AdmissionContext, tempfile::TempDir, tempfile::TempDir) {
-        let keys_dir = tempfile::tempdir().expect("keys dir");
-        let audit_dir = tempfile::tempdir().expect("audit dir");
-        let rootfs_dir = tempfile::tempdir().expect("rootfs dir");
-        let rootfs = rootfs_dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
-        let ledger = InMemoryNonceLedger::new();
-        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            tools: Default::default(),
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
-            vm_name,
-            backend_name: "libkrun",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
-            runtime_config: None,
-            cpus: 2,
-            mem_mib: 512,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
-            keys_dir: Some(keys_dir.path()),
-            audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants,
-            // The gate measures a declared bound against a real tier's
-            // mechanisms; admitting without one refuses rather than guessing.
-            backend_kind: Some(mvm_core::protocol::vm_backend::BackendKind::Libkrun),
-            entrypoint: ResolvedEntrypoint::unresolved("this test resolves no entrypoint"),
-        })
-        .expect("admission succeeds");
-        (ctx, keys_dir, audit_dir)
-    }
 
     /// The defect: a boot on the CLI's own path emitted `plan.admitted` and
     /// `plan.launched` and never said what bounded it. Asserted against the
@@ -196,7 +135,7 @@ mod tests {
         // Linux-only. The fixture therefore exercises a genuinely enforceable
         // grant on both Linux and macOS.
         let (ctx, _keys, audit_dir) =
-            admitted_with_grants("vm-grants-enforced", Some(wall_clock_grant()));
+            admitted_libkrun("vm-grants-enforced", Some(wall_clock_grant()));
 
         // Read back through the libkrun runner itself, not a double: this is the
         // backend the plan was admitted for, and its `apply_grants` reads the
@@ -263,7 +202,7 @@ mod tests {
         env.isolate_mvm_home(home.path());
 
         let vm = "vm-grants-apply-fails";
-        let (ctx, _keys, audit_dir) = admitted_with_grants(vm, Some(wall_clock_grant()));
+        let (ctx, _keys, audit_dir) = admitted_libkrun(vm, Some(wall_clock_grant()));
         let mock = mvm_runtime::MockBackend::new().with_failing_apply_grants();
         let started = started_on_mock(&mock, vm);
 
@@ -307,7 +246,7 @@ mod tests {
         env.isolate_mvm_home(home.path());
 
         let vm = "vm-grants-declared";
-        let (ctx, _keys, audit_dir) = admitted_with_grants(vm, Some(wall_clock_grant()));
+        let (ctx, _keys, audit_dir) = admitted_libkrun(vm, Some(wall_clock_grant()));
         let mock = mvm_runtime::MockBackend::new();
         let started = started_on_mock(&mock, vm);
 
