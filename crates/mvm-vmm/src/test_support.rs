@@ -5,6 +5,9 @@ use std::os::unix::net::UnixListener;
 #[cfg(any(test, feature = "test-support"))]
 use std::path::Path;
 
+#[cfg(test)]
+pub(crate) use mvm_core::util::test_env::isolated_lock_probe;
+
 #[cfg(any(test, feature = "test-support"))]
 fn is_permission_denied_io(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::PermissionDenied

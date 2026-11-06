@@ -205,6 +205,25 @@ pub trait VmmDriver: Send + Sync {
         }
     }
 
+    /// Fresh launch with an exact private read-only input DATA file.
+    ///
+    /// This data-plane seam grants no builder ownership or admission. Unsupported
+    /// backends refuse before dispatch; absence preserves writable custody behavior.
+    #[cfg(unix)]
+    fn boot_custodied_with_data(
+        &self,
+        spec: &VmmSpec,
+        kernel: Option<&crate::host::restore_image::VerifiedRestoreFile>,
+        disks: crate::driver::prepared_disks::PreparedWritableDisks,
+        data: Option<crate::driver::readonly_data::PreparedReadOnlyDataDisk>,
+    ) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            data.is_none(),
+            "backend does not support protected read-only DATA descriptor handoff"
+        );
+        self.boot_custodied(spec, kernel, disks)
+    }
+
     /// Boot the clean, pre-workload standby parent `req` describes and return
     /// its pool record. The parent runs no entrypoint and holds no secret or
     /// plan — nothing on this seam (`StandbyParentSpawn` in, `StandbyHandle`

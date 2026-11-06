@@ -316,17 +316,20 @@ fn record_signed_marker(exe: &std::path::Path) {
 /// serializes concurrent launches (codesign --force rewrites the shared binary
 /// in place). Mirrors the libkrun supervisor's `ensure_self_signed`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn set_writable_cloexec(
+fn set_disk_cloexec(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
     enabled: bool,
 ) -> anyhow::Result<()> {
-    for disk in &cfg.writable_disk_fds {
-        for fd in [disk.backing, disk.sidecar] {
-            // SAFETY: preflight established these exact live descriptors. Only
-            // their close-on-exec flag changes; ownership stays with the caller.
-            let result = unsafe { libc::fcntl(fd, libc::F_SETFD, i32::from(enabled)) };
-            anyhow::ensure!(result >= 0, "updating writable descriptor inheritance");
-        }
+    for fd in cfg
+        .writable_disk_fds
+        .iter()
+        .flat_map(|disk| [disk.backing, disk.sidecar])
+        .chain(cfg.readonly_data_disk_fds.iter().map(|disk| disk.fd))
+    {
+        // SAFETY: preflight established these exact live descriptors. Only
+        // their close-on-exec flag changes; ownership stays with the caller.
+        let result = unsafe { libc::fcntl(fd, libc::F_SETFD, i32::from(enabled)) };
+        anyhow::ensure!(result >= 0, "updating disk descriptor inheritance");
     }
     Ok(())
 }
@@ -406,8 +409,8 @@ fn ensure_self_signed(
         .args(std::env::args_os().skip(1))
         .env("MVM_HVF_SIGNED", "1");
     diagnostics.configure_reexec(&mut command);
-    if let Err(error) = set_writable_cloexec(cfg, false) {
-        eprintln!("mvm-hvf-supervisor: retaining writable descriptors failed: {error}");
+    if let Err(error) = set_disk_cloexec(cfg, false) {
+        eprintln!("mvm-hvf-supervisor: retaining disk descriptors failed: {error}");
         std::process::exit(1);
     }
     let err = command.exec();
@@ -560,14 +563,17 @@ extern "C" fn on_resume_signal(_: libc::c_int) {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn restore_image_from(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+    files: Option<[std::fs::File; 2]>,
 ) -> anyhow::Result<Option<mvm_runtime::backends::hvf::snapshot::RestoreImage>> {
-    use mvm_vmm::host::restore_image::adopt_inherited;
-    let Some(fds) = cfg.restore_descriptors()? else {
+    use anyhow::Context;
+    if cfg.restore_descriptors()?.is_none() {
+        anyhow::ensure!(files.is_none(), "unexpected owned restore files");
         return Ok(None);
-    };
+    }
+    let [ram, frame] = files.context("restore files were not adopted at startup")?;
     Ok(Some(mvm_runtime::backends::hvf::snapshot::RestoreImage {
-        ram: adopt_inherited(fds.ram)?,
-        frame: adopt_inherited(fds.frame)?,
+        ram,
+        frame,
     }))
 }
 
@@ -640,9 +646,9 @@ fn run() -> anyhow::Result<()> {
             }
             // SAFETY: unchanged legacy launcher diagnostics ownership contract.
             diagnostics = unsafe { StartupReporter::inherited() };
-            // Unrelated signing helpers must not inherit writable custody. The
+            // Unrelated signing helpers must not inherit disk custody. The
             // reexec itself retains it explicitly immediately before exec.
-            set_writable_cloexec(&cfg, true)?;
+            set_disk_cloexec(&cfg, true)?;
             ensure_self_signed(&mut diagnostics, &cfg);
             mvm_hostd::supervisor::caller_registration::adopt_startup_files(&cfg)?
         }
@@ -669,6 +675,8 @@ fn run() -> anyhow::Result<()> {
     // Declared before the disk devices so reverse drop order flushes and destroys
     // every disk before either lock description can be released.
     let mut writable_files = files.take_writable();
+    let mut readonly_data_files = files.take_readonly_data();
+    let restore_files = files.take_restore();
     let (held_kernel, mut checked_images, registered_startup) = match mode {
         StartupMode::Checked => {
             let startup =
@@ -709,9 +717,8 @@ fn run() -> anyhow::Result<()> {
 
     let _ = FAILURE_RECORD_DIR.set(state_dir.to_path_buf());
     diagnostics.stage(StartupStage::StartupInputs);
-    // Adopt the verified saved state before anything else can open a file, so
-    // no descriptor number is reused out from under it.
-    let restore = restore_image_from(&cfg)?;
+    // Startup already owns the exact files; never readopt their locator numbers.
+    let restore = restore_image_from(&cfg, restore_files)?;
     let ready_marker = restore
         .as_ref()
         .and(cfg.pid_file.parent())
@@ -760,11 +767,17 @@ fn run() -> anyhow::Result<()> {
     let mut disks = Vec::with_capacity(cfg.disks.len());
     let mut observed_disks = Vec::new();
     for (index, d) in cfg.disks.iter().enumerate() {
-        let held = checked_images
+        let checked = checked_images
             .as_mut()
             .map(|images| images.take_disk(index))
             .transpose()?
             .flatten();
+        let data = readonly_data_files.take_disk(index)?;
+        anyhow::ensure!(
+            checked.is_none() || data.is_none(),
+            "DATA cannot substitute a boot role"
+        );
+        let held = checked.or(data);
         let img = if let Some(file) = held {
             mvm_runtime::backends::hvf::DiskImage::readonly_file(file)?
         } else if d.read_only {
