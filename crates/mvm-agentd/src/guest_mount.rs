@@ -244,6 +244,11 @@ pub fn mount_early_filesystems() -> Result<()> {
     Ok(())
 }
 
+/// Flags for every rootfs mount shape. Read-only is what keeps a guest
+/// process from rewriting `/etc/passwd` to mint a uid-0 entry.
+#[cfg(target_os = "linux")]
+const ROOTFS_MOUNT_FLAGS: libc::c_ulong = libc::MS_RDONLY;
+
 /// Mount the rootfs, returning the staging path (`/mnt/root`).
 ///
 /// Three mount shapes, selected by the config's optional fields: a
@@ -280,7 +285,7 @@ pub fn mount_rootfs(rootfs: &RootfsConfig) -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         if let Some(tag) = &rootfs.virtiofs_tag {
-            mount(tag, ROOTFS_STAGING, "virtiofs", libc::MS_RDONLY, "")?;
+            mount(tag, ROOTFS_STAGING, "virtiofs", ROOTFS_MOUNT_FLAGS, "")?;
         } else if let Some(roothash) = &rootfs.roothash {
             validate_roothash(roothash, "rootfs.roothash")?;
             let hash_dev = rootfs.hash_dev.as_deref().ok_or_else(|| {
@@ -293,13 +298,13 @@ pub fn mount_rootfs(rootfs: &RootfsConfig) -> Result<PathBuf> {
             dm_version(fd)?;
             setup_verity_target(fd, "root", &rootfs.data_dev, hash_dev, roothash)?;
             let root_dm = resolved_dm_device("root")?;
-            mount(&root_dm, ROOTFS_STAGING, "ext4", libc::MS_RDONLY, "")?;
+            mount(&root_dm, ROOTFS_STAGING, "ext4", ROOTFS_MOUNT_FLAGS, "")?;
         } else {
             mount(
                 &rootfs.data_dev,
                 ROOTFS_STAGING,
                 "ext4",
-                libc::MS_RDONLY,
+                ROOTFS_MOUNT_FLAGS,
                 "",
             )?;
         }
@@ -1859,6 +1864,19 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
     #[test]
     fn validate_roothash_accepts_64_lowercase_hex() {
         assert!(validate_roothash(FAKE_HASH, "test").is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_rootfs_is_always_mounted_read_only() {
+        assert_ne!(ROOTFS_MOUNT_FLAGS & libc::MS_RDONLY, 0);
+        assert_eq!(ROOTFS_MOUNT_FLAGS & libc::MS_REMOUNT, 0);
+    }
+
+    #[test]
+    fn the_workload_identity_is_never_root() {
+        assert_ne!(WORKLOAD_UID, 0);
+        assert_ne!(WORKLOAD_GID, 0);
     }
 
     #[test]
