@@ -4,7 +4,7 @@ All notable changes to mvm are documented in this file.
 
 ## [0.27.0-rc.3] — 2026-11-06
 
-v0.27.0-rc.1 and v0.27.0-rc.2 did not publish. rc.1 was stopped by the BDD gate, which caught a first-run cached-kernel regression. rc.2 was stopped in distro-packages, which rejected the hyphenated pre-release RPM version. rc.3 carries both fixes and is the first release candidate of 0.27.0 to publish.
+v0.27.0-rc.1 and v0.27.0-rc.2 did not publish. rc.1 was stopped by the BDD gate, which caught a first-run cached-kernel regression. rc.2 was stopped in distro-packages, which rejected the hyphenated pre-release RPM version. rc.3 carries both fixes.
 
 ### Added
 - **cli**: Pack index tags, platform and size, with a pre-download arch warning
