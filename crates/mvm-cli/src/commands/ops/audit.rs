@@ -1424,7 +1424,11 @@ fn chain_summary(
         .and_then(|lines| {
             mvm_client::audit::chain::session::list_sessions(&lines, Default::default()).ok()
         })
-        .map(|(sessions, ledger)| format!(", {} sessions, {} seals", sessions.len(), ledger.seals));
+        .map(|(sessions, ledger)| {
+            let (n, k) = (sessions.len() as u64, ledger.seals);
+            let plural = |n: u64| if n == 1 { "" } else { "s" };
+            format!(", {n} session{}, {k} seal{}", plural(n), plural(k))
+        });
     format!(
         "VERIFIED chain: {entries} entries{}",
         extra.unwrap_or_default()
@@ -2349,7 +2353,7 @@ mod chain_summary_tests {
             .unwrap();
         assert_eq!(
             chain_summary(&dir, "local", &signer.verifying, &outcome),
-            "VERIFIED chain: 3 entries, 1 sessions, 1 seals"
+            "VERIFIED chain: 3 entries, 1 session, 1 seal"
         );
     }
 }

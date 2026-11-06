@@ -169,7 +169,12 @@ def assert_verified_audit(result, home, inspected_entries):
         "[mvm] No readable off-host witness configured (MVM_AUDIT_WITNESS), so a rewrite "
         "by this host is undetectable from here.",
     ]
-    if result.returncode != 0 or result.stderr or result.stdout.decode("utf-8").splitlines() != expected:
+    lines = result.stdout.decode("utf-8").splitlines()
+    summary = re.fullmatch(
+        rf"VERIFIED chain: {inspected_entries + 1} entries(, \d+ sessions?, \d+ seals?)?",
+        lines[-1] if lines else "",
+    )
+    if result.returncode != 0 or result.stderr or lines[:-1] != expected or not summary:
         raise ValueError("canonical audit verification did not cover the exact inspection tail")
     return inspected_entries + 1
 

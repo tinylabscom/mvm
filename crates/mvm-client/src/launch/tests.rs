@@ -342,6 +342,48 @@ async fn a_transient_runs_boot_records_land_before_its_seal_and_are_covered_by_i
 }
 
 #[tokio::test]
+async fn a_transient_run_that_did_not_complete_records_no_boot_records_and_is_sealed_failed() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let request = transient_request(&home.rootfs())
+        .name("t-boot-failed")
+        .build()
+        .expect("request");
+    let outcome = client.launch(request).await.expect("launch");
+    let signed_plan_json = serde_json::to_string(outcome.admitted.signed()).expect("signed plan");
+    let before = home.audit_text().lines().count();
+
+    record_transient_exit(TransientExitAudit {
+        signed_plan_json: &signed_plan_json,
+        vm_name: "t-boot-failed",
+        backend: "mock",
+        exit_code: None,
+        completed: false,
+        posture: Some(crate::admission::BootPosture::block()),
+    })
+    .expect("record transient exit");
+
+    let events: Vec<String> = home
+        .audit_text()
+        .lines()
+        .skip(before)
+        .map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).expect("entry");
+            v["entry"]["event"].as_str().unwrap_or_default().to_string()
+        })
+        .collect();
+    assert_eq!(events, ["plan.exited", "session.sealed"]);
+    let signer = mvm_hostd::audit::host_keypair::load_or_init().expect("host signer");
+    let verified = mvm_hostd::audit::session::verify_session(
+        &mvm_core::config::mvm_audit_dir(),
+        "local",
+        &outcome.plan_id,
+        &signer.verifying,
+    );
+    assert_eq!(verified.late_entries, 0, "{verified:?}");
+}
+
+#[tokio::test]
 async fn a_transient_command_exit_is_sealed_from_its_admitted_plan() {
     let home = Isolated::new();
     let client = mock_client();

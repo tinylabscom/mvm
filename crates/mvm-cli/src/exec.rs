@@ -785,7 +785,7 @@ fn run_inner(
             backend: backend.name(),
             exit_code: reported_exit_code,
             completed: workload_completed,
-            posture: posture.map(std::cell::Cell::get),
+            posture: posture.filter(|_| result.is_ok()).map(std::cell::Cell::get),
         }
     });
     let stopped = teardown_transient_vm(
