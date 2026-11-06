@@ -130,6 +130,9 @@ authors = ["mvm contributors"]
 # Member crates inherit this policy via `lints.workspace = true`.
 [workspace.lints.clippy]
 too_many_arguments = "deny"
+# A guard held across an `.await` deadlocks the executor thread that polls it.
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
 
 [workspace.dependencies]
 # Async runtime.
