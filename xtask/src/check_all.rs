@@ -400,4 +400,73 @@ mod tests {
             );
         }
     }
+
+    /// Gate names a workflow invokes through `xtask`, as `xtask -- check-x`
+    /// or `xtask check-x`.
+    fn workflow_gate_references() -> Vec<(String, String)> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows");
+        let mut refs = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("read .github/workflows") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().is_none_or(|e| e != "yml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read workflow");
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            for (i, _) in text.match_indices("xtask") {
+                let rest = text[i + "xtask".len()..].trim_start_matches([' ', '-']);
+                if let Some(tail) = rest.strip_prefix("check-") {
+                    let end = tail
+                        .find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+                        .unwrap_or(tail.len());
+                    let name = tail[..end].trim_end_matches('-');
+                    if !name.is_empty() {
+                        refs.push((file.clone(), format!("check-{name}")));
+                    }
+                }
+            }
+        }
+        refs
+    }
+
+    /// A workflow cannot name a gate that no longer exists.
+    #[test]
+    fn every_gate_a_workflow_runs_is_dispatched() {
+        let dispatched = dispatched_gates();
+        for (file, gate) in workflow_gate_references() {
+            assert!(
+                dispatched.contains(&gate),
+                "{file} runs `xtask {gate}`, which main.rs does not dispatch"
+            );
+        }
+    }
+
+    /// An exclusion that says "runs in workflow X" must be run by one, so
+    /// the gate is not left outside both `check-all` and CI.
+    #[test]
+    fn every_exclusion_is_run_by_a_workflow() {
+        let referenced: Vec<String> = workflow_gate_references()
+            .into_iter()
+            .map(|(_, g)| g)
+            .collect();
+        for (gate, reason) in NOT_IN_LINT_LANE {
+            if matches!(*gate, "check-all" | "check-agent-notes") {
+                continue;
+            }
+            assert!(
+                referenced.iter().any(|r| r == gate),
+                "{gate} is excluded from check-all ({reason}) but no workflow runs it"
+            );
+        }
+    }
+
+    /// `just lint` (and so `just ci`) must run the same driver CI does.
+    #[test]
+    fn local_lint_runs_check_all() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let lints = std::fs::read_to_string(root.join("just/lints/mod.just")).unwrap();
+        let justfile = std::fs::read_to_string(root.join("justfile")).unwrap();
+        assert!(lints.contains("xtask -- check-all"));
+        assert!(justfile.contains("just lints::policy"));
+    }
 }

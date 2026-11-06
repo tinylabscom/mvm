@@ -120,6 +120,7 @@ lint SUBSET="all":
         just lints::clippy
         just lints::clippy-bdd
         just lints::model
+        just lints::policy
         just check::toolchain
         ;;
       *)
