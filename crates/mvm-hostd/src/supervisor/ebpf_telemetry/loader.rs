@@ -262,7 +262,7 @@ fn ebpf_worker(
                             std::net::Ipv4Addr::from(u32::from_be(raw.daddr)),
                             u16::from_be(raw.dport),
                         ));
-                        let _ = events.send(TelemetryEvent::Egress(super::events::EgressEvent {
+                        let _ = events.send(TelemetryEvent::Egress(super::EgressEvent {
                             destination,
                             bytes: 0,
                             latency_us: None,
