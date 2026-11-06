@@ -325,6 +325,10 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("exec", AuditPosture::InteractiveOrControl),
     ("shell", AuditPosture::InteractiveOrControl),
     ("stop", AuditPosture::Emits("VmStop")),
+    // Containment records before stopping; a failed stop leaves the workload
+    // quarantined. Replacement records before advancing the workload epoch.
+    ("quarantine", AuditPosture::Emits("workload.quarantined")),
+    ("replace", AuditPosture::Emits("workload.replaced")),
     ("set-timeout", AuditPosture::Emits("VmTtlSet")),
     // Verify a signed `.mvmpkg` and preview its posture. Read-only: no
     // install, no boot, no audit-chain emission.
@@ -594,6 +598,7 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("tail", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
     ("show", AuditPosture::ReadOnly),
+    ("timeline", AuditPosture::ReadOnly),
     // Lists sessions from a verified chain; writes nothing.
     ("sessions", AuditPosture::ReadOnly),
     ("posture", AuditPosture::ReadOnly),
