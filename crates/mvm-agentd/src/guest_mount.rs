@@ -1873,6 +1873,18 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
         assert_eq!(ROOTFS_MOUNT_FLAGS & libc::MS_REMOUNT, 0);
     }
 
+    /// Every mount `mount_rootfs` issues takes its flags from the shared
+    /// constant, so a call site cannot quietly mount read-write.
+    #[test]
+    fn every_rootfs_mount_call_site_uses_the_read_only_flags() {
+        let source = include_str!("guest_mount.rs");
+        let start = source.find("pub fn mount_rootfs").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let mounts = body.matches("mount(").count();
+        assert!(mounts >= 3, "expected the three mount shapes: {body}");
+        assert_eq!(mounts, body.matches("ROOTFS_MOUNT_FLAGS").count(), "{body}");
+    }
+
     #[test]
     fn the_workload_identity_is_never_root() {
         assert_ne!(WORKLOAD_UID, 0);
