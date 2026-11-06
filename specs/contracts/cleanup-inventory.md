@@ -537,7 +537,6 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_BUILDER_KERNEL` | live-read | `crates/mvm-runtime/examples/hvf-builder-transport.rs:24` | 1 | NO | - |
 | `MVM_BUILDER_LOCK_WAIT_SECS` | live-read | `crates/mvm-build/src/builder_vm_runtime/image_lock.rs:191` | 1 | yes | yes |
 | `MVM_BUILDER_MEM_MIB` | live-read | `crates/mvm-runtime/examples/hvf-builder-transport.rs:92` | 1 | NO | - |
-| `MVM_BUILDER_MODE` | live-read | `crates/mvm-build/src/pipeline/orchestrator.rs:34` | 1 | yes | - |
 | `MVM_BUILDER_ROOTFS` | live-read | `crates/mvm-runtime/examples/hvf-builder-transport.rs:29` | 1 | NO | - |
 | `MVM_BUILDER_STORE_GC_GIB` | live-read | `crates/mvm-build/src/builder_vm_runtime.rs:120` | 1 | NO | - |
 | `MVM_BUILDER_VM_BOOTSTRAP_ACTIVE` | live-read | `crates/mvm-build/src/builder_vm_bootstrap.rs:42` | 1 | NO | - |
