@@ -1434,6 +1434,42 @@ mod tests {
     }
 
     #[test]
+    fn a_default_image_is_deterministic_and_sized_to_its_tree() {
+        let tree = || {
+            (0..300u32)
+                .map(|i| super::Node::File {
+                    path: format!("/f{i}"),
+                    mode: 0o644,
+                    data: vec![i as u8; 5_000],
+                    xattrs: Vec::new(),
+                    owner: super::Owner::ROOT,
+                })
+                .collect::<Vec<_>>()
+        };
+        let a = build_image(tree(), &BuildOptions::default()).expect("image");
+        let b = build_image(tree(), &BuildOptions::default()).expect("image");
+        assert_eq!(a, b, "two builds of one tree must be byte-identical");
+        // 300 files of 2 blocks each, plus the metadata of the one group.
+        let data_blocks = 300 * 2;
+        let blocks = a.len() / super::BLOCK_SIZE_USIZE;
+        assert!(
+            blocks >= data_blocks,
+            "{blocks} blocks < {data_blocks} of data"
+        );
+        assert!(
+            blocks < data_blocks + 200,
+            "{blocks} blocks: the image carries slack beyond its metadata"
+        );
+        let inodes = u32_at(&a, 1024);
+        assert!(inodes >= 300 + 11, "{inodes} inode slots for 300 files");
+        assert_eq!(
+            u32_at(&a, 1024 + 0x0C),
+            0,
+            "a default image has no free blocks"
+        );
+    }
+
+    #[test]
     fn a_default_image_has_no_free_space() {
         let image =
             build_image(one_file(vec![7; 10_000]), &BuildOptions::default()).expect("image");
