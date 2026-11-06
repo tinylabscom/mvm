@@ -424,18 +424,6 @@ impl WorkerPool {
         thread::sleep(grace.min(Duration::from_secs(30)));
     }
 
-    /// How many callers are parked waiting for a slot.
-    ///
-    /// The queue cap is enforced against this number, so it is the only
-    /// thing that says whether a caller has actually reached the queue.
-    /// Without it an observer can only infer it from elapsed time, and a
-    /// time guess is either too short (spurious failure on a loaded host)
-    /// or too long (every run pays for the worst case).
-    pub fn queued_waiters(&self) -> usize {
-        let st = self.state.lock().expect("worker pool state mutex poisoned");
-        st.pending_waiters
-    }
-
     /// Snapshot of slot states for observability / tests.
     pub fn snapshot(&self) -> Vec<SlotSnapshot> {
         let st = self.state.lock().expect("worker pool state mutex poisoned");
