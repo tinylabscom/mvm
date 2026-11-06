@@ -19,8 +19,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use mvm_contract::assurance::{
-    AssuranceId, EvidenceRef, HostObservation, MvmBinding, SessionGrant, Sha256Digest,
-    TrialOutcome, TrialVerdict,
+    AssuranceId, EvidenceRef, HostObservation, MvmBinding, SessionGrant, Sha256Digest, TrialVerdict,
 };
 use mvm_core::plan::ExecutionPlan;
 use sha2::{Digest, Sha256};
@@ -530,12 +529,6 @@ pub fn audit_citations_resolve(binding: &MvmBinding, chain_path: &Path) -> Resul
         }
     }
     Ok(true)
-}
-
-/// Whether an outcome is one a campaign may publish as a claim.
-#[must_use]
-pub fn is_publishable_claim(outcome: TrialOutcome) -> bool {
-    outcome.is_certifying_claim()
 }
 
 /// A sink that records through the audit-signer, for a process holding no

@@ -84,11 +84,6 @@ pub type SleepFn = Box<dyn Fn(&str, &VmRegistration) -> Result<(), String> + Sen
 /// `idle_timeout_secs=0` opts out, a scratch box tags a tighter bound.
 pub const IDLE_TIMEOUT_TAG: &str = "idle_timeout_secs";
 
-/// Env var carrying the global idle timeout (whole seconds). Unset or
-/// unparseable → idle-sleep is off (opt-in), so a plain `mvmctl start` is
-/// unchanged unless the operator asks for density.
-pub const IDLE_TIMEOUT_ENV: &str = "MVM_IDLE_TIMEOUT";
-
 /// Idle-sleep configuration the reaper consults per tick. Held as
 /// `Option` on [`Reaper`] so the default (TTL-only) path is byte-for-byte
 /// the pre-idle behavior — mvmd and any other consumer that builds a
@@ -100,15 +95,6 @@ pub struct IdleConfig {
     /// [`IDLE_TIMEOUT_TAG`] override. `None` = no global default (idle
     /// fires only for VMs carrying the per-VM tag).
     pub default_timeout: Option<Duration>,
-}
-
-/// Read the global idle timeout from [`IDLE_TIMEOUT_ENV`] (whole
-/// seconds). `None` when unset, empty, unparseable, or zero — zero means
-/// "off", matching the opt-in posture.
-pub fn global_idle_timeout_from_env() -> Option<Duration> {
-    let raw = std::env::var(IDLE_TIMEOUT_ENV).ok()?;
-    let secs: u64 = raw.trim().parse().ok()?;
-    (secs > 0).then(|| Duration::from_secs(secs))
 }
 
 /// Resolve the effective idle timeout for one record: the per-VM
@@ -293,7 +279,6 @@ pub fn deregister_only_teardown() -> TeardownFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::util::test_env::TestEnv;
     use mvm_runtime::vm::name_registry::RegisterParams;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -723,21 +708,5 @@ mod tests {
         ));
         // Left running for the next tick to retry — not paused.
         assert!(!reg.lookup("vm1").unwrap().paused);
-    }
-
-    #[test]
-    fn global_idle_timeout_from_env_parses_and_treats_zero_as_off() {
-        let mut env = TestEnv::new();
-        env.set(IDLE_TIMEOUT_ENV, "45");
-        assert_eq!(
-            global_idle_timeout_from_env(),
-            Some(Duration::from_secs(45))
-        );
-        env.set(IDLE_TIMEOUT_ENV, "0");
-        assert_eq!(global_idle_timeout_from_env(), None);
-        env.set(IDLE_TIMEOUT_ENV, "garbage");
-        assert_eq!(global_idle_timeout_from_env(), None);
-        env.remove(IDLE_TIMEOUT_ENV);
-        assert_eq!(global_idle_timeout_from_env(), None);
     }
 }
