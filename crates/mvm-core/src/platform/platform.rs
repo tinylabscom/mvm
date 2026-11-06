@@ -134,40 +134,6 @@ impl Platform {
         LIBKRUN_LIB_PATHS.iter().any(|p| Path::new(p).exists())
     }
 
-    /// Whether Nix is available on the host and can build Linux targets.
-    ///
-    /// Host-side Nix is no longer the normal mvm build boundary; the
-    /// project builder VM owns Nix eval/build work. This probe remains
-    /// for direct debug paths and legacy callers only.
-    pub fn has_host_nix(self) -> bool {
-        static HOST_NIX: OnceLock<bool> = OnceLock::new();
-        *HOST_NIX.get_or_init(|| {
-            // Try PATH first.
-            // allow(host-nix): debug/legacy-only detection probe; has_host_nix() has zero callers on the normal build/run path, which routes every nix invocation through the builder VM.
-            if crate::env_hygiene::helper_command("nix")
-                .args(["--version"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-            {
-                return true;
-            }
-            // Check common Nix install locations (freshly installed Nix may
-            // not be on PATH if the shell profile hasn't been sourced yet)
-            for path in &[
-                "/nix/var/nix/profiles/default/bin/nix",
-                "/run/current-system/sw/bin/nix",
-            ] {
-                if Path::new(path).exists() {
-                    return true;
-                }
-            }
-            false
-        })
-    }
-
     /// Whether this platform is WSL2.
     pub fn is_wsl(self) -> bool {
         matches!(self, Platform::Wsl2)

@@ -178,6 +178,15 @@ fn cleanup_stopped_vm_state(
     cleanup()
 }
 
+fn send_ctrl_alt_del_script(socket: &str) -> String {
+    let socket = shell_quote(socket);
+    format!(
+        r#"sudo curl -s -X PUT --unix-socket {socket} \
+            --data '{{"action_type": "SendCtrlAltDel"}}' \
+            "http://localhost/actions" 2>/dev/null || true"#
+    )
+}
+
 pub fn stop_vm(name: &str) -> Result<()> {
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms, name);
@@ -214,12 +223,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
     // power-button handler, so the former unconditional 2s sleep-then-kill made
     // every `down` cost two seconds for nothing — escalate to a hard kill the
     // moment the short graceful window lapses instead of always waiting it out.
-    if let Err(e) = run_in_vm(&format!(
-        r#"sudo curl -s -X PUT --unix-socket {socket} \
-            --data '{{"action_type": "SendCtrlAltDel"}}' \
-            "http://localhost/actions" 2>/dev/null || true"#,
-        socket = socket,
-    )) {
+    if let Err(e) = run_in_vm(&send_ctrl_alt_del_script(&socket)) {
         warn!("failed to send graceful shutdown to VM: {e}");
     }
 
@@ -273,6 +277,22 @@ pub fn stop_all_vms() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_graceful_stop_script_keeps_a_hostile_socket_path_one_inert_word() {
+        for v in [
+            "/v/PWN a/fc.sock",
+            "/v/PWN'; touch /tmp/PWN; '/s",
+            "/v/PWN$(touch /tmp/PWN)/s",
+            "/v/PWN`touch /tmp/PWN`/s",
+            "/v/PWN\nrm -rf /s",
+        ] {
+            let script = send_ctrl_alt_del_script(v);
+            let quoted = shell_quote(v);
+            assert!(script.contains(&quoted), "{script}");
+            assert!(!script.replace(&quoted, "Q").contains("PWN"), "{script}");
+        }
+    }
+
     use super::*;
 
     // ---- await_graceful_exit (Firecracker `stop_vm` shutdown escalation) ----

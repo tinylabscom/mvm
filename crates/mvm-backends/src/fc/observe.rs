@@ -65,7 +65,7 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
     let abs_dir = format!("{}/{}", abs_vms, name);
 
     // Check VM directory exists
-    let dir_exists = run_in_vm_stdout(&format!("[ -d '{}' ] && echo yes || echo no", abs_dir))?;
+    let dir_exists = run_in_vm_stdout(&dir_exists_script(&abs_dir))?;
     if dir_exists.trim() != "yes" {
         anyhow::bail!(
             "VM directory not found: {}. The VM '{}' may not exist.",
@@ -92,19 +92,7 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
     };
 
     // Layer 1: FC process alive?
-    let pid_check = run_in_vm_stdout(&format!(
-        r#"if [ -f '{dir}/fc.pid' ]; then
-            pid=$(cat '{dir}/fc.pid')
-            if [ -f "/proc/$pid/comm" ] && [ "$(cat /proc/$pid/comm)" = "firecracker" ]; then
-                echo "alive:$pid"
-            else
-                echo "dead:$pid"
-            fi
-        else
-            echo "nopid"
-        fi"#,
-        dir = abs_dir,
-    ))?;
+    let pid_check = run_in_vm_stdout(&pid_check_script(&abs_dir))?;
     let pid_check = pid_check.trim();
     if let Some(pid_str) = pid_check.strip_prefix("alive:") {
         result.fc_alive = true;
@@ -129,10 +117,7 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
 
     // Layer 2: FC API responsive?
     if result.fc_alive {
-        let api_output = run_in_vm_stdout(&format!(
-            "sudo curl -sf --unix-socket '{socket}' 'http://localhost/machine-config' 2>/dev/null || echo FAIL",
-            socket = super::fc_api_socket_path(&abs_dir),
-        ))?;
+        let api_output = run_in_vm_stdout(&api_probe_script(&super::fc_api_socket_path(&abs_dir)))?;
         let api_output = api_output.trim();
         if api_output != "FAIL" {
             result.fc_api_responsive = true;
@@ -144,10 +129,7 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
 
     // Layer 3: Vsock socket exists?
     let vsock_path = firecracker_vsock_uds_path(&abs_dir);
-    let sock_check = run_in_vm_stdout(&format!(
-        "[ -S '{vsock}' ] && echo yes || echo no",
-        vsock = vsock_path,
-    ))?;
+    let sock_check = run_in_vm_stdout(&socket_probe_script(&vsock_path))?;
     result.vsock_exists = sock_check.trim() == "yes";
     if !result.vsock_exists && result.fc_alive {
         result.suggestions.push(
@@ -156,10 +138,7 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
     }
 
     // Layer 4: Console log warnings
-    let console_tail = run_in_vm_stdout(&format!(
-        "tail -n 200 '{dir}/console.log' 2>/dev/null || true",
-        dir = abs_dir,
-    ))?;
+    let console_tail = run_in_vm_stdout(&tail_script(200, &format!("{abs_dir}/console.log")))?;
     for line in console_tail.lines() {
         for pattern in CONSOLE_WARNING_PATTERNS {
             if line.contains(pattern) {
@@ -176,10 +155,7 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
     }
 
     // Layer 5: FC log errors
-    let fc_log_tail = run_in_vm_stdout(&format!(
-        "tail -n 100 '{dir}/firecracker.log' 2>/dev/null || true",
-        dir = abs_dir,
-    ))?;
+    let fc_log_tail = run_in_vm_stdout(&tail_script(100, &format!("{abs_dir}/firecracker.log")))?;
     for line in fc_log_tail.lines() {
         if line.contains("ERROR") {
             result.fc_log_errors.push(line.trim().to_string());
@@ -257,10 +233,7 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
 /// List all running VMs by scanning `<mvm_home>/vms/*/run-info.json`.
 #[instrument(skip_all)]
 pub fn list_vms() -> Result<Vec<RunInfo>> {
-    let output = run_in_vm_stdout(&format!(
-        "for f in {dir}/*/run-info.json; do [ -f \"$f\" ] && cat \"$f\"; done 2>/dev/null || true",
-        dir = abs_vms_dir(),
-    ))?;
+    let output = run_in_vm_stdout(&list_run_info_script(&abs_vms_dir()))?;
 
     let mut vms = Vec::new();
     for line in output.lines() {
@@ -283,11 +256,55 @@ pub fn list_vms() -> Result<Vec<RunInfo>> {
     Ok(vms)
 }
 
-/// Allocate the next free slot index by scanning existing VMs.
-pub fn allocate_slot(name: &str) -> Result<VmSlot> {
-    let q_name = shell_quote(name);
-    let q_json_name = shell_quote(&serde_json::to_string(name)?);
-    let output = run_in_vm_stdout(&format!(
+/// Single-quote a directory prefix so a glob appended to it still expands.
+fn q(path: &str) -> String {
+    shell_quote(path)
+}
+
+fn dir_exists_script(abs_dir: &str) -> String {
+    format!("[ -d {} ] && echo yes || echo no", q(abs_dir))
+}
+
+fn pid_check_script(abs_dir: &str) -> String {
+    let pid_file = q(&format!("{abs_dir}/fc.pid"));
+    format!(
+        r#"if [ -f {pid_file} ]; then
+            pid=$(cat {pid_file})
+            if [ -f "/proc/$pid/comm" ] && [ "$(cat /proc/$pid/comm)" = "firecracker" ]; then
+                echo "alive:$pid"
+            else
+                echo "dead:$pid"
+            fi
+        else
+            echo "nopid"
+        fi"#
+    )
+}
+
+fn api_probe_script(socket: &str) -> String {
+    format!(
+        "sudo curl -sf --unix-socket {} 'http://localhost/machine-config' 2>/dev/null || echo FAIL",
+        q(socket)
+    )
+}
+
+fn socket_probe_script(path: &str) -> String {
+    format!("[ -S {} ] && echo yes || echo no", q(path))
+}
+
+fn tail_script(lines: u32, file: &str) -> String {
+    format!("tail -n {lines} {} 2>/dev/null || true", q(file))
+}
+
+fn list_run_info_script(vms_dir: &str) -> String {
+    format!(
+        "for f in {}/*/run-info.json; do [ -f \"$f\" ] && cat \"$f\"; done 2>/dev/null || true",
+        q(vms_dir)
+    )
+}
+
+fn allocate_slot_script(vms_dir: &str, name: &str, json_name: &str) -> String {
+    format!(
         r#"
         set -e
         mkdir -p {dir}
@@ -311,10 +328,32 @@ pub fn allocate_slot(name: &str) -> Result<VmSlot> {
           exit 2
         ) 9>{dir}/.slot.lock
         "#,
-        dir = abs_vms_dir(),
-        name = q_name,
-        json_name = q_json_name,
-    ))?;
+        dir = q(vms_dir),
+        name = q(name),
+    )
+}
+
+fn read_run_info_script(vms_dir: &str, name: &str) -> String {
+    format!("cat {}/{}/run-info.json", q(vms_dir), q(name))
+}
+
+fn release_reservation_script(vms_dir: &str, name: &str) -> String {
+    format!(
+        r#"
+        run_info={dir}/{name}/run-info.json
+        if [ -f "$run_info" ] && grep -q '"slot_reserved":true' "$run_info"; then
+          rm -f "$run_info"
+        fi
+        "#,
+        dir = q(vms_dir),
+        name = q(name),
+    )
+}
+
+/// Allocate the next free slot index by scanning existing VMs.
+pub fn allocate_slot(name: &str) -> Result<VmSlot> {
+    let q_json_name = shell_quote(&serde_json::to_string(name)?);
+    let output = run_in_vm_stdout(&allocate_slot_script(&abs_vms_dir(), name, &q_json_name))?;
 
     let index = output
         .lines()
@@ -326,8 +365,7 @@ pub fn allocate_slot(name: &str) -> Result<VmSlot> {
 
 /// Recreate a slot from a previously reserved VM directory.
 pub fn read_reserved_slot(name: &str) -> Result<VmSlot> {
-    let q_name = shell_quote(name);
-    let output = run_in_vm_stdout(&format!("cat {}/{}/run-info.json", abs_vms_dir(), q_name))?;
+    let output = run_in_vm_stdout(&read_run_info_script(&abs_vms_dir(), name))?;
     let value: serde_json::Value =
         serde_json::from_str(output.trim()).with_context(|| format!("parse slot for {name}"))?;
     let index = value
@@ -339,24 +377,75 @@ pub fn read_reserved_slot(name: &str) -> Result<VmSlot> {
 }
 
 pub(super) fn release_slot_reservation(slot: &VmSlot) -> Result<()> {
-    let q_name = shell_quote(&slot.name);
-    run_in_vm(&format!(
-        r#"
-        run_info={dir}/{name}/run-info.json
-        if [ -f {run_info} ] && grep -q '"slot_reserved":true' {run_info}; then
-          rm -f {run_info}
-        fi
-        "#,
-        dir = abs_vms_dir(),
-        name = q_name,
-        run_info = "$run_info",
-    ))
-    .map(|_| ())
+    run_in_vm(&release_reservation_script(&abs_vms_dir(), &slot.name)).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every value that reaches a script must come out as one quoted word:
+    /// after the quoted form is removed, no trace of the hostile text remains.
+    fn hostile_values() -> Vec<String> {
+        [
+            "PWN a b",
+            "PWN'; touch /tmp/PWN; '",
+            "PWN$(touch /tmp/PWN)",
+            "PWN`touch /tmp/PWN`",
+            "PWN\ntouch /tmp/PWN",
+            "PWN;touch /tmp/PWN",
+            "PWN\"x",
+            "PWN|PWN&PWN>PWN",
+        ]
+        .iter()
+        .map(|v| format!("/h/{v}"))
+        .collect()
+    }
+
+    fn assert_inert(build: impl Fn(&str) -> String) {
+        for v in hostile_values() {
+            let script = build(&v);
+            assert!(
+                script.contains(&shell_quote(&v)),
+                "{v:?} not quoted in {script}"
+            );
+            let rest = script.replace(&shell_quote(&v), "Q");
+            assert!(!rest.contains("PWN"), "{v:?} leaks outside quotes: {rest}");
+        }
+    }
+
+    #[test]
+    fn diagnose_scripts_keep_a_hostile_directory_one_inert_word() {
+        assert_inert(dir_exists_script);
+        assert_inert(api_probe_script);
+        assert_inert(socket_probe_script);
+        assert_inert(|v| tail_script(200, v));
+        assert_inert(list_run_info_script);
+        assert_inert(|v| read_run_info_script(v, "ok"));
+        assert_inert(|v| read_run_info_script("/ok", v));
+        assert_inert(|v| release_reservation_script(v, "ok"));
+        assert_inert(|v| release_reservation_script("/ok", v));
+        assert_inert(|v| allocate_slot_script(v, "ok", "'\"ok\"'"));
+        assert_inert(|v| allocate_slot_script("/ok", v, "'\"ok\"'"));
+        for v in hostile_values() {
+            let script = pid_check_script(&v);
+            let quoted = shell_quote(&format!("{v}/fc.pid"));
+            assert!(script.contains(&quoted));
+            assert!(!script.replace(&quoted, "Q").contains("PWN"));
+        }
+    }
+
+    #[test]
+    fn ordinary_scripts_keep_their_shape() {
+        assert_eq!(
+            tail_script(100, "/v/a/console.log"),
+            "tail -n 100 '/v/a/console.log' 2>/dev/null || true"
+        );
+        assert_eq!(
+            read_run_info_script("/v", "a"),
+            "cat '/v'/'a'/run-info.json"
+        );
+    }
 
     #[test]
     fn console_warning_patterns_detect_kernel_panic() {
