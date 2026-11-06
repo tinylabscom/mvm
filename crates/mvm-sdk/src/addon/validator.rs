@@ -83,26 +83,6 @@ fn collect_errors(node: Node, source: &[u8], errors: &mut Vec<NixSyntaxError>) {
     }
 }
 
-/// Resolve a byte offset to a 1-based `(line, column)` pair. Useful
-/// for surfacing tree-sitter parse errors with the same shape as the
-/// rest of the toolchain's diagnostic surfaces.
-pub fn line_column(source: &str, byte_offset: usize) -> (usize, usize) {
-    let mut line = 1usize;
-    let mut col = 1usize;
-    for (i, ch) in source.char_indices() {
-        if i >= byte_offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,14 +112,5 @@ mod tests {
         let bad = "{ broken syntax }} let in";
         let errs = validate(bad).expect_err("malformed Nix should fail");
         assert!(!errs.is_empty(), "expected at least one syntax error");
-    }
-
-    #[test]
-    fn line_column_resolves_offsets() {
-        let src = "abc\ndef\nghi";
-        assert_eq!(line_column(src, 0), (1, 1));
-        assert_eq!(line_column(src, 4), (2, 1));
-        assert_eq!(line_column(src, 5), (2, 2));
-        assert_eq!(line_column(src, 8), (3, 1));
     }
 }
