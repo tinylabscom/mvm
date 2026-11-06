@@ -200,6 +200,52 @@ fn cold_first_boot_runs_before_any_image_pull() {
 }
 
 #[test]
+fn cleanup_retries_a_transient_concurrent_write_without_losing_the_boot_verdict() {
+    let smoke = Smoke::new();
+    let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", ECHO_TOKEN), 0);
+    let bin = smoke.dir.path().join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let rm = bin.join("rm");
+    std::fs::write(
+        &rm,
+        r#"#!/bin/sh
+if [ "$1" = -rf ]; then
+  case "$2" in
+    /tmp/mvm-fresh.*|/private/tmp/mvm-fresh.*)
+      if [ ! -f "$MVM_TEST_RM_ONCE" ]; then
+        printf '%s\n' "$2" > "$MVM_TEST_RM_ONCE"
+        echo 'simulated concurrent write during removal' >&2
+        exit 1
+      fi ;;
+  esac
+fi
+exec /bin/rm "$@"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&rm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let marker = smoke.dir.path().join("first-rm");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+
+    let output = smoke.run(
+        &installer,
+        Some("v1.2.3"),
+        &[
+            ("PATH", &path),
+            ("MVM_TEST_RM_ONCE", marker.to_str().unwrap()),
+        ],
+    );
+
+    assert!(output.status.success(), "{}", combined(&output));
+    assert!(
+        combined(&output).contains("simulated concurrent write"),
+        "the retry must be exercised"
+    );
+    assert!(!std::path::Path::new(std::fs::read_to_string(marker).unwrap().trim()).exists());
+    assert!(smoke.transcript().contains("PASS: mvmctl 1.2.3 installed"));
+}
+
+#[test]
 fn a_first_command_that_prints_the_token_passes() {
     let smoke = Smoke::new();
     let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", ECHO_TOKEN), 0);
