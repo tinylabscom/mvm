@@ -2544,7 +2544,7 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
     assert_eq!(details["manifest_sha256"], digest);
     assert_eq!(
         details["signer_identity"],
-        mvm_core::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
+        mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
     );
     assert_eq!(
         details["signer_issuer"],
@@ -2580,7 +2580,7 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
     assert_eq!(verification["manifest_sha256"], digest);
     assert_eq!(
         verification["signer_identity"],
-        mvm_core::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
+        mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
     );
     assert_eq!(verification["official_status"], "not_established");
 
