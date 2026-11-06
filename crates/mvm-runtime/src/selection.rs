@@ -187,5 +187,10 @@ mod tests {
             mvm_core::vm_backend::BackendKind::Wasm,
             "capability-aware selection must never pick the opt-in wasm tier"
         );
+        assert_ne!(
+            backend.kind(),
+            mvm_core::vm_backend::BackendKind::WebLinux,
+            "capability-aware selection must never pick the opt-in browser tier"
+        );
     }
 }
