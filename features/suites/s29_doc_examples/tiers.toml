@@ -193,6 +193,11 @@ path = "init"
 tier = "exec"
 
 [[command]]
+path = "new-pack"
+tier = "exec"
+fixture = "pack-sources"
+
+[[command]]
 path = "machine apply"
 tier = "parse"
 reason = "the bare documented form prompts on a terminal; --yes/--dry-run need a machine with a registered workspace volume — the s26 BDD scenarios exercise both hermetically, exec-tier fixtures are follow-on"
