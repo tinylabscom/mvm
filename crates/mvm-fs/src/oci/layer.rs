@@ -189,10 +189,6 @@ impl OciLayerFetcher {
         }
     }
 
-    pub fn with_options_and_auth(options: LayerFetchOptions, auth: RegistryAuthConfig) -> Self {
-        Self::with_config_and_auth(Default::default(), options, auth)
-    }
-
     pub fn with_config_and_auth(
         config: ClientConfig,
         options: LayerFetchOptions,
