@@ -2093,14 +2093,14 @@ mod tests {
             publisher_policy: &policy,
         };
         let verified = adopt_registry_pack(&adoption).unwrap();
-        assert_eq!(verified.signer().identity, LEGACY_PACK_SIGNING_IDENTITY);
+        assert_eq!(verified.signer().identity, OFFICIAL_PACK_SIGNING_IDENTITY);
         assert_eq!(verified.signer().issuer, OFFICIAL_PACK_SIGNING_ISSUER);
 
         let wrong_policy = RegistryPackPublisherPolicy::new(vec![
             RegistryPackPublisher::new(
                 "runtime",
                 OFFICIAL_PACK_SIGNING_ISSUER,
-                vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+                vec![LEGACY_PACK_SIGNING_IDENTITY.to_string()],
             )
             .unwrap(),
         ])

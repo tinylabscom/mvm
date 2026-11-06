@@ -181,7 +181,6 @@ covered = [
     "mvmctl machine run --manifest my-app",
     "mvmctl machine run --manifest my-tpl -- /bin/true",
     "mvmctl machine run --name debug --image alpine -- echo hi",
-    '''mvmctl machine run --name local-demo --profile dev --image "${MVM_DEMO_IMAGE:?Run preparation in this terminal first}" --cpus 1 --memory 256M --timeout 30 -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'''',
     '''mvmctl machine run --name local-demo --profile dev --image alpine --cpus 1 --memory 256M --timeout 30 -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'''',
     "mvmctl machine run --name worker --image myworker --host-service host.kv.v1",
     "mvmctl machine run --profile standard --image alpine --mount ./state.img:/data/state:1G:rw -- sh -c 'echo kept > /data/state/note'",
