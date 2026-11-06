@@ -1,7 +1,7 @@
 //! Host-process mechanics for the HVF backend.
 //!
-//! Not a `VmBackend` impl — the lifecycle that used to live beside these
-//! helpers moved to `mvm-runtime`'s workload runner, and the `VmmDriver` half
+//! Not a `VmBackend` impl — the lifecycle lives in `mvm-runtime`'s
+//! workload runner, and the `VmmDriver` half
 //! is [`super::hvf`]. What is left here is everything the host does *around*
 //! the guest: resolve `mvm-hvf-supervisor`, wait on its PID file, enumerate the
 //! console sockets and workload disks, and answer whether this platform can run

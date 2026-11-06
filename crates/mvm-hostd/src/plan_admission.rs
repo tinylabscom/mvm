@@ -2283,8 +2283,8 @@ mod admitted_environment_tests {
     }
 
     /// A different kernel than the plan pinned is refused: same plan, same
-    /// image, a kernel swapped underneath — the substitution that used to be
-    /// invisible because nothing in the plan described the environment.
+    /// image, a kernel swapped underneath — a substitution that would be
+    /// invisible if nothing in the plan described the environment.
     #[test]
     fn substituted_kernel_is_refused() {
         let tmp = tempfile::tempdir().expect("tempdir");

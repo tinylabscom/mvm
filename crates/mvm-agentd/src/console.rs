@@ -933,8 +933,8 @@ mod tests {
     // `Winsize`'s layout is pinned by the `const _` contract next to the
     // struct: a compile-time assertion that also covers alignment and every
     // field offset, and that holds for cross-compiled targets which never
-    // run this host test suite. The runtime size check that used to live
-    // here was strictly weaker and is gone.
+    // run this host test suite. A runtime size check would be strictly
+    // weaker, so there is none.
 
     #[test]
     fn test_console_error_display() {

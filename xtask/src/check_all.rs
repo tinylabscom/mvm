@@ -77,6 +77,10 @@ pub(crate) const GATES: &[Gate] = &[
         crate::check_no_spec_refs_in_comments::run,
     ),
     (
+        "check-no-history-in-comments",
+        crate::check_no_history_in_comments::run,
+    ),
+    (
         "check-no-string-backend-dispatch",
         crate::check_no_string_backend_dispatch::run,
     ),

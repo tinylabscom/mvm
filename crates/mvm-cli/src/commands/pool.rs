@@ -364,8 +364,7 @@ pub(crate) struct WarmParams<'a> {
     ///
     /// Every other input to the parent's shape is derived from this one value:
     /// template, kernel, vCPUs, memory, image digest and egress enablement all
-    /// come out of [`compat_for_launch`]. They used to be separate fields, which
-    /// let a caller record a compat key describing something other than what
+    /// come out of [`compat_for_launch`]. Separate fields would let a caller record a compat key describing something other than what
     /// booted — a pool that fills and never drains, with no error anywhere.
     pub launch: &'a VmStartConfig,
 }

@@ -746,8 +746,7 @@ mod tests {
 
     #[test]
     fn an_empty_image_cannot_reach_a_request_at_all() {
-        // This used to be a `build()` refusal on a `String` field. It is now
-        // unrepresentable: the request names a parsed source, so the only way
+        // An empty image is unrepresentable, not a `build()` refusal: the request names a parsed source, so the only way
         // to express an empty one is to fail the parse first.
         assert_eq!(
             "  ".parse::<RootfsSource>().unwrap_err(),

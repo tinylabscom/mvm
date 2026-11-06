@@ -933,8 +933,8 @@ mod tests {
         // Typo / removed backend / accidental value: log a warning
         // and fall through to auto-detect (the caller's job).
         //
-        // This used to use "firecracker" as its example of an unrecognised
-        // value, which stopped being one when the Firecracker builder landed.
+        // "firecracker" is a recognised builder, so the unrecognised value must
+        // be something no backend will ever be named.
         with_env(Some("not-a-vmm"), || {
             assert_eq!(resolve_env_override(), None);
         });

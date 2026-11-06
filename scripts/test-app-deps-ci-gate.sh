@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Plan 73 Followup D — `app-deps-audit` CI gate.
+# `app-deps-audit` CI gate.
 #
-# ADR-014 §"CI gate" calls for a workflow lane that exercises the
+# The design calls for a workflow lane that exercises the
 # application-dep install pipeline end-to-end on every PR. The full
 # end-to-end shape (real `nix build` driving the libkrun/cloud-hypervisor
 # builder VM, real `uv pip install` + `pip-audit`) requires a working
-# builder VM, which Plan 72 W4/W5 is still mid-cutover for. Until that
-# lands, this script exercises everything around the VM-driven slice:
+# builder VM, which is not available in CI yet. Until then, this script exercises everything around the VM-driven slice:
 #
 #   1. `mvmctl compile examples/python/hello-app-with-deps/app.py` —
 #      validates the decorator parser accepts `dependencies=
@@ -39,13 +38,13 @@
 #      carries a high-severity finding, then assert the prod gate
 #      (`apply_install_gate(..., Prod)`) refuses it. Drives the
 #      `mvm-app-deps-fixture-tool` example bin which is the same
-#      seal/verify path the orchestrator uses; exercises ADR-014
-#      §"Gate semantics" prod-rejection end-to-end.
+#      seal/verify path the orchestrator uses; exercises the
+#      prod-rejection gate end-to-end.
 #
 # What this script DOES NOT cover (named so future readers know):
 #
 #   - `mvmctl build --deps examples/python/hello-app-with-deps/` ⇒
-#     real builder VM round-trip. Needs Plan 72 cutover.
+#     real builder VM round-trip. Needs a working builder VM in CI.
 #   - `mvmctl machine run --prod examples/python/hello-app-with-deps/` ⇒
 #     supervisor admission claim 9 enforcement against a real volume.
 #     No boot path puts a deps volume into the plan yet, so a live run

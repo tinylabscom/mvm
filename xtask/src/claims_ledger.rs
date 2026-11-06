@@ -159,8 +159,8 @@ pub(crate) use crate::fs_walk::for_each_file;
 /// The exact names a `ci:` witness may resolve to: a job key, or a token
 /// written in parentheses inside a step name.
 ///
-/// This used to be a substring search over the whole file, so a witness
-/// matched a mention in a comment as happily as a live job — `ci:fuzz`
+/// A substring search over the whole file would let a witness
+/// match a mention in a comment as happily as a live job — `ci:fuzz`
 /// resolved against the word "fuzz" anywhere in any workflow, including the
 /// prose explaining why the job exists. A deleted job kept its witness green.
 ///

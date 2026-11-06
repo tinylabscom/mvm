@@ -1005,8 +1005,8 @@ fn admit(
     // between them acts on the one before it, so syncing each separately
     // bought no ordering. The batch covers the admission record, its decision
     // record, the grant, the shares, the asset identities, the policy
-    // resolution and the egress destinations: all entries that used to
-    // trigger their own fsync now share the single flush. A failed write
+    // resolution and the egress destinations: all entries that would
+    // each trigger their own fsync share the single flush. A failed write
     // inside the batch is an error here; a failed sync is an error wherever
     // the caller waits for it, which is here unless it asked to sync beside
     // the boot.
@@ -1036,8 +1036,8 @@ fn admit(
             .emit_asset_identities(admitted.plan())
             .context("recording admitted asset identities in the audit chain")?;
         // Policy resolution and egress destinations are non-fatal records
-        // that used to live outside the batch, each triggering its own
-        // fsync. Folding them in saves two serial F_FULLFSYNCs (~15ms on
+        // that sit in the batch rather than syncing each on its own.
+        // Folding them in saves two serial F_FULLFSYNCs (~15ms on
         // Apple silicon, ~84ms on KVM arrays) with no ordering loss.
         emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
         if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {

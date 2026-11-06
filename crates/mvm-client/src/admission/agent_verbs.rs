@@ -24,9 +24,9 @@ pub fn image_is_sealed(rootfs_path: &std::path::Path) -> bool {
 /// verbs. An interactive PTY (`ConsoleOpen`) or ad-hoc command (`Exec`) needs
 /// DevOnly verbs, and a dev profile stays permissive by contract.
 ///
-/// Deliberately not a function of the image. This used to also require the
-/// image's sidecar to say `sealed`, so an OCI image stayed interactively
-/// reachable — but `is_dev_profile` already expresses that, and keying it on
+/// Deliberately not a function of the image. Requiring the image's sidecar to say
+/// `sealed` would leave an OCI image interactively reachable — but
+/// `is_dev_profile` already expresses that, and keying it on
 /// the image made the tier a property of the artifact rather than of the run.
 /// One image now runs in either tier, and which one it gets is decided by the
 /// admitted profile.
@@ -192,8 +192,8 @@ mod tests {
         assert!(!grant_eligible(true, true, true));
     }
 
-    /// The same run is decided identically whatever image it boots. This used to
-    /// depend on the image sidecar's `sealed` bit, which made an OCI image
+    /// The same run is decided identically whatever image it boots. Depending on
+    /// the image sidecar's `sealed` bit would make an OCI image
     /// permanently interactive and a sealed image permanently not — the tier was
     /// a property of the artifact instead of the run.
     #[test]

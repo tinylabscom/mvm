@@ -146,7 +146,7 @@ const BUILDER_PROBE_DIAL: &str = r"TcpStream::connect(?:_timeout)?\(\s*&proxy_ad
 const BUILDER_DIAL_TOKENS: &[&str] = &["TcpStream::connect(", "TcpStream::connect_timeout("];
 const BUILDER_LISTEN_TOKENS: &[&str] = &["TcpListener::bind(", "UdpSocket::bind("];
 
-/// The guest-side proxy that used to front dependency installs, dialing
+/// The retired guest-side proxy that fronted dependency installs, dialing
 /// upstream itself. The host-binary manifests are what put a binary into
 /// `mvmctl`'s embedded payload and the builder rootfs, so a name here must
 /// never reappear in one.
