@@ -357,11 +357,25 @@ def guard(rel, kinds, places, fns):
 # Ratchet: sites a library-reachable process may start that are not yet shown
 # to be required, refused or CLI-only. It may only go down; raising it needs a
 # written reason in the contract doc.
-OPEN_REVIEW_CEILING = 42
+OPEN_REVIEW_CEILING = 28
+# Library-reachable spawn files that were read and judged. Each entry is
+# (disposition, reason); the reason names the functions a reviewer can open.
+# A file listed here that is no longer open-review by derivation is an error.
+REVIEWED = {
+    "mvm-build/src/builder_vm_image.rs": ("fixed-argv-utility", "`prepopulate_with_mkfs`: program is the e2fsprogs `mkfs.ext4` path from `find_host_mkfs_ext4` (fixed candidate list), argv is a fixed flag list plus typed paths and a block count, no shell, status checked and mapped to `BuilderVmError`. Formats the builder's own store image from a digest-verified seed; no caller-supplied text reaches argv. No wall-clock bound."),
+    "mvm-build/src/builder_vm_runtime.rs": ("fixed-argv-utility", "`debugfs_cat`: read-only `debugfs -R` on the builder store image; the request now comes from `debugfs_cat_request`, which refuses a relative path or one with whitespace or control characters (tested). Callers pass two constant guest paths. Output is a local diagnostic log read; no wall-clock or size bound."),
+    "mvm-build/src/provenance_mark.rs": ("fixed-argv-utility", "`debugfs_cat`: same read-only `debugfs -R` through `debugfs_cat_request`; the callers (`read_mark_from_ext4`) pass the two constant `/mvm/provenance.*` paths and verify the result against the embedded key before use. No wall-clock or size bound on debugfs output."),
+    "mvm-core/src/crypto/key_rotation.rs": ("fixed-argv-utility", "`rotate_luks_slot`: fixed `cryptsetup luksChangeKey`; both passphrases go through 0600 tempfiles named in argv, never argv text or env; stdin is null; failure carries cryptsetup stderr only (no key bytes). Requires a live LUKS device by contract. No wall-clock bound."),
+    "mvm-fs/src/oci_to_rootfs/ext4.rs": ("fixed-argv-utility", "`build_mke2fs_command`/`run_mke2fs`: program is `mke2fs` or an explicit `Mke2fsOptions` path, argv is fixed flags plus typed label, uuid, hash seed, block size and paths as separate args (no shell), deterministic-time env set, exit checked. Linux only. No wall-clock bound; the error text embeds mke2fs stdout and stderr unbounded."),
+    "mvm-fs/src/oci_to_rootfs/verity.rs": ("fixed-argv-utility", "`run_veritysetup_format`: `veritysetup format` with typed options as `--flag=value` args and two paths, no shell, exit checked, `Root hash:` line parsed or an error. Linux only. No wall-clock bound."),
+    "mvm-runtime/src/storage/backend.rs": ("fixed-argv-utility", "`dmsetup_linux::check_available`: `dmsetup --version` availability probe, fixed argv, result mapped to `StorageError::BackendUnavailable`."),
+    "mvm-runtime/src/storage/volume/encrypted_linux.rs": ("fixed-argv-utility", "`attach`/`detach`/`format_image`/`close_mapper` through one `check` helper: fixed programs (`cryptsetup`, `mount`, `umount`, `mkfs.ext4`), argv is fixed subcommands plus typed volume paths and a mapper name derived from a validated `VolumeName`; the data key goes only through a 0600 tempfile; stdin null; non-zero exit fails closed with stderr (no key bytes). Linux only, needs root-capable host. No wall-clock bound."),
+}
+
 REQUIRED_CLASSES = ("hypervisor", "helper bin", "systemd-run", "net (nft)", "codesign", "factory", "process control")
 
 
-def disposition(cls, auth, linked, guard_text):
+def disposition(key, cls, auth, linked, guard_text):
     """required-host-primitive | embedder-refused | cli-only | guest-side | test-only | open-review.
 
     open-review is the honest remainder: a program the client closure can
@@ -380,6 +394,8 @@ def disposition(cls, auth, linked, guard_text):
         return "embedder-refused"
     if cls.startswith(REQUIRED_CLASSES) or cls == "hypervisor supervisor":
         return "required-host-primitive"
+    if key in REVIEWED:
+        return REVIEWED[key][0]
     return "open-review"
 
 
@@ -409,7 +425,7 @@ def render():
         t = "".join(ch for ch in t if ch in linked)
         t = t or "-"
         g = guard(f, kinds, places, {x["fn"] for x in v})
-        rows.append((c, k.split("/", 1)[1], len(v), cls, why, auth, linked, t, g, disposition(cls, auth, linked, g)))
+        rows.append((c, k.split("/", 1)[1], len(v), cls, why, auth, linked, t, g, disposition(k, cls, auth, linked, g)))
     rows.sort(key=lambda r: (r[0], r[1]))
     cc = collections.Counter()
     for r in rows:
@@ -425,6 +441,13 @@ def render():
         dc[r[9]] += r[2]
         df[r[9]] += 1
     out += ["", "| Disposition | Sites | Files |", "|---|--:|--:|"] + ["| %s | %d | %d |" % (d, dc[d], df[d]) for d in sorted(dc)]
+    unused = [k for k in REVIEWED if k.replace("mvm-", "mvm-", 1) not in {r[0] + "/" + r[1] for r in rows}]
+    if unused:
+        sys.exit("REVIEWED entries without a spawn row:\n  " + "\n  ".join(unused))
+    if REVIEWED:
+        out += ["", "Reviewed library-reachable sites (disposition, then why):", "",
+                "| File | Disposition | Reason |", "|---|---|---|"]
+        out += ["| `%s` | %s | %s |" % (k, v[0], v[1]) for k, v in sorted(REVIEWED.items())]
     if dc["open-review"] > OPEN_REVIEW_CEILING:
         sys.exit("open-review spawn sites rose to %d (ceiling %d): classify the new site as required, "
                  "refused for an embedder or CLI-only, or justify raising OPEN_REVIEW_CEILING"

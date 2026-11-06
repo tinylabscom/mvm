@@ -296,11 +296,27 @@ fn locate_debugfs() -> Option<std::path::PathBuf> {
     which::which("debugfs").ok()
 }
 
+/// The single `-R` request that reads `guest_path`. debugfs splits a request
+/// on whitespace and treats a newline as another request, so a path carrying
+/// either, or a relative one, would read something other than one file.
+pub(crate) fn debugfs_cat_request(guest_path: &str) -> Result<String> {
+    if !guest_path.starts_with('/')
+        || guest_path.len() == 1
+        || guest_path
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        anyhow::bail!("refusing to build a debugfs request for guest path {guest_path:?}");
+    }
+    Ok(format!("cat {guest_path}"))
+}
+
 /// `debugfs -R "cat <guest_path>" <image>`; `Ok(None)` when the guest
 /// path is absent from the image.
 fn debugfs_cat(debugfs: &Path, image: &Path, guest_path: &str) -> Result<Option<String>> {
+    let request = debugfs_cat_request(guest_path)?;
     let output = mvm_core::env_hygiene::helper_command(debugfs)
-        .args(["-R", &format!("cat {guest_path}")])
+        .args(["-R", &request])
         .arg(image)
         .output()
         .with_context(|| format!("spawn debugfs for {guest_path}"))?;
@@ -321,6 +337,17 @@ fn debugfs_cat(debugfs: &Path, image: &Path, guest_path: &str) -> Result<Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_debugfs_request_names_exactly_one_absolute_path() {
+        assert_eq!(
+            debugfs_cat_request("/mvm/provenance.json").unwrap(),
+            "cat /mvm/provenance.json"
+        );
+        for bad in ["", "/", "mvm/provenance.json", "/a b", "/a\nrm /b", "/a\tb"] {
+            assert!(debugfs_cat_request(bad).is_err(), "{bad:?}");
+        }
+    }
 
     fn test_key() -> SigningKey {
         SigningKey::from_bytes(&[42; 32])

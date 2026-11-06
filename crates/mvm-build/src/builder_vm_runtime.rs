@@ -983,8 +983,10 @@ fn locate_debugfs() -> Option<PathBuf> {
 }
 
 fn debugfs_cat(debugfs: &Path, image: &Path, guest_path: &str) -> Result<Option<String>, String> {
+    let request =
+        crate::provenance_mark::debugfs_cat_request(guest_path).map_err(|e| format!("{e:#}"))?;
     let output = mvm_core::env_hygiene::helper_command(debugfs)
-        .args(["-R", &format!("cat {guest_path}")])
+        .args(["-R", &request])
         .arg(image)
         .output()
         .map_err(|e| format!("spawn {}: {e}", debugfs.display()))?;

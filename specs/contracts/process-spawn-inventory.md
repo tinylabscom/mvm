@@ -81,13 +81,13 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-backends | `src/fc/idle_pool.rs` | 1 | process control | setsid-detached idle standby holder | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-build | `src/builder_egress_process.rs` | 1 | mvmctl self re-exec | start `mvmctl __builder-egress-supervisor` | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-build | `src/builder_vm_bootstrap.rs` | 1 | mvmctl self re-exec | run the bootstrap helper to prepare the builder image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
-| mvm-build | `src/builder_vm_image.rs` | 1 | storage tool | host mkfs of the builder store image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
-| mvm-build | `src/builder_vm_runtime.rs` | 1 | storage tool | debugfs read of a builder image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
+| mvm-build | `src/builder_vm_image.rs` | 1 | storage tool | host mkfs of the builder store image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
+| mvm-build | `src/builder_vm_runtime.rs` | 1 | storage tool | debugfs read of a builder image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-build | `src/builder_vm_transport.rs` | 1 | toolchain | cargo build of the network endpoint binary | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-build | `src/embed_toolchain.rs` | 8 | toolchain | probe rustup/cargo/rustc/zig/python3 for the pinned embed toolchain | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub | open-review |
 | mvm-build | `src/guest_agent_build.rs` | 3 | toolchain | cargo / rustup build of guest binaries from this tree | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-build | `src/libkrun_builder.rs` | 3 | hypervisor supervisor | cargo build of helpers, libkrun builder supervisor (explicit libkrun only) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
-| mvm-build | `src/provenance_mark.rs` | 1 | storage tool | debugfs read of image provenance mark | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
+| mvm-build | `src/provenance_mark.rs` | 1 | storage tool | debugfs read of image provenance mark | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-build | `src/qemu_builder.rs` | 6 | hypervisor | QEMU builder: timeout-wrapped boot, zstd, mkfs.ext4, debugfs | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-build | `src/runtime_overlay.rs` | 1 | network fetch | curl download of a release artifact | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-build | `src/stage0.rs` | 1 | archive tool | native tar -xJf of the Stage 0 root tarball (pure-Rust path is the alternative) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
@@ -124,13 +124,13 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-cli | `src/update.rs` | 2 | mvmctl self re-exec | `--version` smoke test and `bootstrap` of the freshly installed mvmctl | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-client | `src/secret/source.rs` | 1 | password manager | run the user's configured secret-source CLI (op, etc.) to read a credential | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; check-no-cli-shellout | open-review |
 | mvm-conformance | `src/vmm_reaper.rs` | 3 | test harness | ps / kill / sudo to reap leaked VMMs in conformance runs | dev harness, not shipped | - | - | `helper_command` env scrub | test-only |
-| mvm-core | `src/crypto/key_rotation.rs` | 1 | storage tool | cryptsetup luksChangeKey | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub | open-review |
+| mvm-core | `src/crypto/key_rotation.rs` | 1 | storage tool | cryptsetup luksChangeKey | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-core | `src/env_hygiene.rs` | 3 | factory | the sanctioned Command constructor: scrubs denied env, then everything above calls it | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub; RAW_SITES (on_host) | required-host-primitive |
 | mvm-core | `src/host_storage_encryption.rs` | 4 | host probe | diskutil / findmnt / tune2fs / lsblk encryption-at-rest probes | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub | open-review |
 | mvm-core | `src/platform/platform.rs` | 2 | host probe | sw_vers and nix presence probe | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub | open-review |
 | mvm-core | `src/spawn_scope.rs` | 4 | systemd-run | wrap a VMM spawn in a systemd transient scope; kill and systemctl show | library: caller's process (CLI, daemon, embedder) | CHS | C | `helper_command` env scrub | required-host-primitive |
-| mvm-fs | `src/oci_to_rootfs/ext4.rs` | 1 | storage tool | mke2fs to materialize an OCI rootfs (Linux) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
-| mvm-fs | `src/oci_to_rootfs/verity.rs` | 1 | storage tool | veritysetup format of a rootfs (Linux) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
+| mvm-fs | `src/oci_to_rootfs/ext4.rs` | 1 | storage tool | mke2fs to materialize an OCI rootfs (Linux) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
+| mvm-fs | `src/oci_to_rootfs/verity.rs` | 1 | storage tool | veritysetup format of a rootfs (Linux) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-hostd | `src/bin/mvm-host-agent.rs` | 2 | helper bin | re-exec self as a worker process | host daemon bin | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/bin/mvm-hvf-supervisor.rs` | 3 | codesign / self re-exec | ad-hoc codesign of the binary, then re-exec self signed | per-VM supervisor bin | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/bin/mvm-network-endpoint.rs` | 1 | helper bin | keeper re-execs the endpoint binary for a long-lived VM | per-VM endpoint bin | CH | - | `helper_command` env scrub | required-host-primitive |
@@ -139,8 +139,8 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-hostd | `src/supervisor/services/spawn.rs` | 1 | helper bin | ProcessSpawner: start a signed, integrity-checked host service binary | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-runtime | `src/host_shell.rs` | 3 | shell script | bash -c for ShellEnvironment host commands | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
 | mvm-runtime | `src/microvm/run_info.rs` | 1 | process control | kill of a recorded VM pid | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
-| mvm-runtime | `src/storage/backend.rs` | 1 | storage tool | dmsetup thin-pool operations | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
-| mvm-runtime | `src/storage/volume/encrypted_linux.rs` | 7 | storage tool | cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
+| mvm-runtime | `src/storage/backend.rs` | 1 | storage tool | dmsetup thin-pool operations | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
+| mvm-runtime | `src/storage/volume/encrypted_linux.rs` | 7 | storage tool | cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-setpriv | `src/lib.rs` | 1 | guest helper | privilege-drop-and-exec of the target command | guest | CHS | - | RAW_SITES (guest) | guest-side |
 | mvm-vmm | `src/driver/prepared_disks.rs` | 1 | systemd-run / sudo | inventory a Firecracker process's descriptors through sudo find on Linux | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub | required-host-primitive |
 | mvm-vmm | `src/host/aux_bin.rs` | 2 | helper bin | `--contract-version` probe of a helper; cargo build of helpers from source | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; embedder refusal | embedder-refused |
@@ -175,10 +175,24 @@ Totals: 192 production sites in 99 files.
 |---|--:|--:|
 | cli-only | 32 | 22 |
 | embedder-refused | 11 | 8 |
+| fixed-argv-utility | 14 | 8 |
 | guest-side | 66 | 30 |
-| open-review | 42 | 16 |
+| open-review | 28 | 8 |
 | required-host-primitive | 38 | 22 |
 | test-only | 3 | 1 |
+
+Reviewed library-reachable sites (disposition, then why):
+
+| File | Disposition | Reason |
+|---|---|---|
+| `mvm-build/src/builder_vm_image.rs` | fixed-argv-utility | `prepopulate_with_mkfs`: program is the e2fsprogs `mkfs.ext4` path from `find_host_mkfs_ext4` (fixed candidate list), argv is a fixed flag list plus typed paths and a block count, no shell, status checked and mapped to `BuilderVmError`. Formats the builder's own store image from a digest-verified seed; no caller-supplied text reaches argv. No wall-clock bound. |
+| `mvm-build/src/builder_vm_runtime.rs` | fixed-argv-utility | `debugfs_cat`: read-only `debugfs -R` on the builder store image; the request now comes from `debugfs_cat_request`, which refuses a relative path or one with whitespace or control characters (tested). Callers pass two constant guest paths. Output is a local diagnostic log read; no wall-clock or size bound. |
+| `mvm-build/src/provenance_mark.rs` | fixed-argv-utility | `debugfs_cat`: same read-only `debugfs -R` through `debugfs_cat_request`; the callers (`read_mark_from_ext4`) pass the two constant `/mvm/provenance.*` paths and verify the result against the embedded key before use. No wall-clock or size bound on debugfs output. |
+| `mvm-core/src/crypto/key_rotation.rs` | fixed-argv-utility | `rotate_luks_slot`: fixed `cryptsetup luksChangeKey`; both passphrases go through 0600 tempfiles named in argv, never argv text or env; stdin is null; failure carries cryptsetup stderr only (no key bytes). Requires a live LUKS device by contract. No wall-clock bound. |
+| `mvm-fs/src/oci_to_rootfs/ext4.rs` | fixed-argv-utility | `build_mke2fs_command`/`run_mke2fs`: program is `mke2fs` or an explicit `Mke2fsOptions` path, argv is fixed flags plus typed label, uuid, hash seed, block size and paths as separate args (no shell), deterministic-time env set, exit checked. Linux only. No wall-clock bound; the error text embeds mke2fs stdout and stderr unbounded. |
+| `mvm-fs/src/oci_to_rootfs/verity.rs` | fixed-argv-utility | `run_veritysetup_format`: `veritysetup format` with typed options as `--flag=value` args and two paths, no shell, exit checked, `Root hash:` line parsed or an error. Linux only. No wall-clock bound. |
+| `mvm-runtime/src/storage/backend.rs` | fixed-argv-utility | `dmsetup_linux::check_available`: `dmsetup --version` availability probe, fixed argv, result mapped to `StorageError::BackendUnavailable`. |
+| `mvm-runtime/src/storage/volume/encrypted_linux.rs` | fixed-argv-utility | `attach`/`detach`/`format_image`/`close_mapper` through one `check` helper: fixed programs (`cryptsetup`, `mount`, `umount`, `mkfs.ext4`), argv is fixed subcommands plus typed volume paths and a mapper name derived from a validated `VolumeName`; the data key goes only through a 0600 tempfile; stdin null; non-zero exit fails closed with stderr (no key bytes). Linux only, needs root-capable host. No wall-clock bound. |
 
 By construct: `Command::new` 60, `SYS_execve` 1, `helper_command` 118, `helper_command_with` 3, `libc::fork` 1, `openpty` 2, `raw:execve` 1, `raw:execveat_raw` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
