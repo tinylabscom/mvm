@@ -3783,6 +3783,36 @@ mod tests {
     }
 
     #[test]
+    fn host_interface_refuses_a_plan_from_before_a_replacement() {
+        // The ledger says epoch 2; a plan synthesized before the replacement
+        // (or issued by a control plane that never saw it) still carries 1.
+        let (_env, home) = host_with_ceiling(Default::default());
+        let hi = home.path().join("host-interface");
+        std::fs::create_dir_all(&hi).unwrap();
+        std::fs::write(
+            hi.join("workloads.json"),
+            r#"{"vm-epoch":{"epoch":2,"quarantined":false}}"#,
+        )
+        .unwrap();
+        let mut stale = synthesize_plan(&fixture_input("vm-epoch")).unwrap();
+        assert_eq!(
+            stale.execution_epoch, 2,
+            "synthesis reads the current epoch"
+        );
+        stale.execution_epoch = 1;
+        let err = host_gates::admit_host_interface(&stale)
+            .expect_err("a plan at an older epoch must not admit");
+        assert!(err.to_string().contains("stale execution epoch"), "{err}");
+        stale.execution_epoch = 2;
+        host_gates::admit_host_interface(&stale).expect("the current epoch admits");
+        stale.execution_epoch = 3;
+        assert!(
+            host_gates::admit_host_interface(&stale).is_err(),
+            "an epoch the host never issued is refused too"
+        );
+    }
+
+    #[test]
     fn host_interface_refuses_expired_policy_and_unpinned_image() {
         let expired =
             admit_with_host_interface_files(&[("policy.json", r#"{"version":1,"not_after":1}"#)])

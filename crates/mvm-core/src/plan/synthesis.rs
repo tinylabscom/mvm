@@ -761,6 +761,17 @@ pub fn workload_seccomp_tier(
 /// call site's `now()` and lasts `VALIDITY_WINDOW_MINUTES`. The caller
 /// signs the returned plan via [`crate::plan::sign_plan`] before passing
 /// it to the supervisor — the signature covers the derived id.
+/// The workload's current execution epoch on this host, from the local
+/// containment ledger. A fresh host, or a workload never replaced, is epoch 1.
+/// An unreadable ledger is an error: synthesizing at a guessed epoch could
+/// mint a plan the admission check then accepts for a contained workload.
+fn current_local_epoch(workload: &str) -> Result<u64> {
+    let home = std::path::PathBuf::from(crate::config::mvm_home());
+    let ledger = crate::host_interface::workload::WorkloadLedger::load_at(&home)
+        .map_err(|e| anyhow::anyhow!("reading the workload ledger: {e}"))?;
+    Ok(ledger.entry(workload).epoch.0)
+}
+
 pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     let nonce = fresh_nonce();
     let now = Utc::now();
@@ -851,6 +862,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         network_limits: Default::default(),
         ingress: input.ingress.clone(),
         schema_version: SCHEMA_VERSION,
+        execution_epoch: current_local_epoch(input.vm_name)?,
         // Placeholder — overwritten below with the content-address once every
         // load-bearing field is set. The derivation excludes `plan_id`, so this
         // seed value never influences the result.
