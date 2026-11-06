@@ -1259,6 +1259,18 @@ fn alive(pid: &str) -> bool {
         .success()
 }
 
+/// Kills the exact process a fixture recorded in `pidfile` when the test ends,
+/// however it ends, so a failing assertion cannot leave a detached writer.
+struct KillOnDrop(PathBuf);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Ok(pid) = std::fs::read_to_string(&self.0) {
+            let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+        }
+    }
+}
+
 /// The throwaway root the transcript names.
 fn smoke_root(smoke: &Smoke) -> PathBuf {
     let transcript = smoke.transcript();
@@ -1279,6 +1291,7 @@ fn a_standby_left_writing_into_the_home_is_stopped_before_the_root_is_removed() 
     for (body_ok, code) in [(true, 0), (false, 1)] {
         let smoke = Smoke::new();
         let pidfile = smoke.dir.path().join("standby.pid");
+        let _guard = KillOnDrop(pidfile.clone());
         let run = if body_ok {
             ECHO_TOKEN.to_string()
         } else {
@@ -1304,29 +1317,46 @@ fn a_standby_left_writing_into_the_home_is_stopped_before_the_root_is_removed() 
     }
 }
 
-/// A writer the smoke cannot prove is its own is left alone, the leftovers are
-/// named on stderr, and the verdict is still the smoke's.
+/// A root that will not come off, whatever the reason: an `rm` that always
+/// fails stands in for it, so the path is taken every time and no race decides it.
+/// The leftovers are named once on stderr and the verdict is still the smoke's.
 #[test]
 fn a_root_that_cannot_be_removed_is_named_and_keeps_the_verdict() {
-    let smoke = Smoke::new();
-    let pidfile = smoke.dir.path().join("writer.pid");
-    let writer = "exec python3 -c \"import os, time\nd = os.environ['D']\ni = 0\nend = time.time() + 40\nwhile time.time() < end:\n    i += 1\n    os.makedirs(d, exist_ok=True)\n    open(d + '/' + str(i), 'w').close()\"";
-    let body = format!(
-        "{}\n{ECHO_TOKEN}",
-        detached_once(smoke.dir.path(), &pidfile, writer, true)
-    );
-    let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", &body), 0);
+    for (body_ok, code) in [(true, 0), (false, 1)] {
+        let smoke = Smoke::new();
+        let bin = smoke.dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let calls = smoke.dir.path().join("rm.calls");
+        let rm = bin.join("rm");
+        std::fs::write(
+            &rm,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\nexit 1\n", calls.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let run = if body_ok {
+            ECHO_TOKEN.to_string()
+        } else {
+            fail_from_run(4, "egress broke")
+        };
+        let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", &run), 0);
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
 
-    let output = smoke.run(&installer, Some("v1.2.3"), &[]);
-    let root = smoke_root(&smoke);
-    let pid = std::fs::read_to_string(&pidfile).unwrap();
-    let _ = Command::new("kill").args(["-9", pid.trim()]).status();
-    let text = combined(&output);
-    let _ = std::fs::remove_dir_all(&root);
+        let output = smoke.run(&installer, Some("v1.2.3"), &[("PATH", &path)]);
+        let root = smoke_root(&smoke);
+        let text = combined(&output);
+        let leftover_exists = root.exists();
+        let _ = std::fs::remove_dir_all(&root);
 
-    assert_eq!(output.status.code(), Some(0), "{text}");
-    assert!(
-        text.contains(&format!("[smoke] cleanup incomplete: {}", root.display())),
-        "{text}"
-    );
+        assert_eq!(output.status.code(), Some(code), "{text}");
+        assert!(leftover_exists, "the stub rm must leave the root: {text}");
+        let marker = format!("[smoke] cleanup incomplete: {}", root.display());
+        assert_eq!(text.matches(&marker).count(), 1, "{text}");
+        assert!(
+            std::fs::read_to_string(&calls)
+                .unwrap()
+                .contains(root.to_str().unwrap()),
+            "rm must have been asked to remove the root"
+        );
+    }
 }
