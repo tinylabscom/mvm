@@ -194,6 +194,19 @@ and cite #4100 for the direction, never the reverse.
   that pointer; a release published before the archive existed is a
   different binary and keeps booting its own pinned set's copies.
   Fetch-when-unchanged is deleted with its module and environment variable.
+  Two layers are meant here. The launch layer in `mvm-client` acquires nothing
+  and refuses an unprepared runtime
+  (`launch_refuses_an_unprepared_published_runtime_without_acquiring_it`,
+  `required_overlay_cache_miss_names_explicit_bootstrap`,
+  `a_download_mode_host_refuses_an_unprepared_sidecar`). `mvmctl machine run
+  --image` prepares the overlay, initramfs and OCI guest runtime before it
+  dispatches (`resolve_launch_image_source`), announced on its own line, so
+  that path needs no `mvmctl bootstrap`. This statement does not cover a
+  launch with no image reference, which resolves its default image through a
+  separate path. What #4794 proposes and is not shipped is moving
+  preparation inside the launch layer itself; if it lands, preparation must
+  stay a separately reported lane that prepared-launch measurements exclude,
+  and those witnesses change deliberately.
   `mvmctl image dev ensure` without a selected checkout installs the pinned
   set's dev members, which are Linux layer.
 
