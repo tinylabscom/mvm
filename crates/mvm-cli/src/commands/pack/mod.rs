@@ -30,7 +30,7 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum PackAction {
     /// List installed workload packs
     Ls(registry::LsArgs),
-    /// Draft an unpublished policy pack for registry review
+    /// Draft an unpublished application pack (binary embedded in a .mvmpkg) for registry review
     New(new::Args),
     /// Remove an installed workload pack and its lock pin
     Rm {

@@ -155,7 +155,7 @@ fn deprecated_new_pack_alias_still_parses() {
         .expect_err("help exits after rendering")
         .to_string();
     assert!(help.contains("namespace/name"));
-    assert!(help.contains("unpublished policy-pack"));
+    assert!(help.contains("unpublished application pack"));
 }
 
 #[test]

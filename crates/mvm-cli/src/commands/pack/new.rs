@@ -1,4 +1,4 @@
-//! Create an unpublished policy-pack source for a reviewed registry pull request.
+//! Create an unpublished application-pack source for a reviewed registry pull request.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,10 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
     let root = std::env::current_dir().context("resolving current directory")?;
     let source = create(&root, &args.reference)?;
     println!("Draft created in {}", source.display());
-    println!("Edit the policy and README, then open a reviewed pull request to publish it.");
+    println!(
+        "Pin your .mvmpkg (source, sha256, size, key_id) in pack.toml, then open a reviewed pull request. \
+         A pack must embed its application binary; a policy alone cannot be signed."
+    );
     Ok(())
 }
 
@@ -67,28 +70,14 @@ fn create(root: &Path, reference: &PackReference) -> Result<PathBuf> {
             source.display()
         )
     })?;
-    fs::create_dir(source.join("pack"))
-        .with_context(|| format!("creating payload directory in {}", source.display()))?;
     fs::write(
         source.join("pack.toml"),
-        "version = \"0.1.0\"\ndescription = \"Describe what this policy permits.\"\n",
+        "version = \"0.1.0\"\ndescription = \"Describe the application this pack runs.\"\n\n\
+         [application]\nschema_version = 1\nguest_arch = \"aarch64\"\n\n\
+         [application.bundle]\nsource = \"https://example.invalid/REPLACE.mvmpkg\"\n\
+         archive_sha256 = \"REPLACE\"\narchive_size = 0\nkey_id = \"REPLACE\"\n",
     )
     .with_context(|| format!("writing pack.toml in {}", source.display()))?;
-    fs::write(
-        source.join("pack/group.toml"),
-        "description = \"Describe what this policy permits.\"\nrequired = false\n\n\
-         [network]\nallow = []\n",
-    )
-    .with_context(|| format!("writing group.toml in {}", source.display()))?;
-    fs::write(
-        source.join("pack/README.md"),
-        format!(
-            "## Purpose\n\nDescribe when to use `{namespace}/{name}`.\n\n\
-             ## Setup\n\nDescribe any credentials an operator may choose to configure; never include values.\n\n\
-             ## Use\n\nDescribe a real use case. This policy pack is not a runnable image.\n"
-        ),
-    )
-    .with_context(|| format!("writing README.md in {}", source.display()))?;
     Ok(source)
 }
 
@@ -111,15 +100,11 @@ mod tests {
                 .contains("version = \"0.1.0\"")
         );
         assert!(
-            fs::read_to_string(source.join("pack/group.toml"))
-                .expect("group policy")
-                .contains("allow = []")
+            fs::read_to_string(source.join("pack.toml"))
+                .expect("pack metadata")
+                .contains("[application.bundle]")
         );
-        assert!(
-            fs::read_to_string(source.join("pack/README.md"))
-                .expect("readme")
-                .contains("never include values")
-        );
+        assert_eq!(fs::read_dir(&source).expect("source dir").count(), 1);
         assert!(create(root.path(), &reference("acme/example")).is_err());
         assert!(create(root.path(), &reference("acme/example@1.0.0")).is_err());
         for reserved in ["mvm", "agent", "runtime"] {

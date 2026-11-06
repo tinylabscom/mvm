@@ -189,7 +189,7 @@ pub(in crate::commands) enum Commands {
     /// Manage versioned packs (list/rollback/prune/download/update)
     #[command(display_order = 9)]
     Pack(pack::Args),
-    /// Deprecated alias of `mvmctl pack new`: draft an unpublished policy pack for registry review
+    /// Deprecated alias of `mvmctl pack new`: draft an unpublished application pack (binary embedded in a .mvmpkg) for registry review
     #[command(display_order = 9, hide = true)]
     NewPack(pack::new::Args),
     /// Run an image or a signed `.mvmpkg` (alias of `machine run`)

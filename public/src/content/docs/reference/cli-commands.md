@@ -2398,7 +2398,7 @@ bytes before adoption or installation. This untrusted discovery hash does not
 replace publisher signatures or existing authenticated installed pins.
 
 From a checkout of the pack registry, `mvmctl pack new acme/example` creates
-an unpublished policy-pack source at `pack-sources/acme/example/`. The `mvm`,
+an unpublished application-pack source (pin its `.mvmpkg`; a policy alone cannot be signed) at `pack-sources/acme/example/`. The `mvm`,
 `agent` and `runtime` namespaces are reserved for first-party packs. The old
 spelling `mvmctl new-pack` still works for one release and prints a notice. The draft
 starts with no network access or secret bindings. Edit its metadata, policy, and
@@ -2408,7 +2408,7 @@ paths.
 
 | Command                                                   | Description                                                                                                                                                       |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mvmctl pack new ns/name` | Scaffold an unpublished policy-pack draft in the current registry checkout; refuse existing paths and the reserved first-party namespaces (`mvm`, `agent`, `runtime`) |
+| `mvmctl pack new ns/name` | Scaffold an unpublished application-pack draft (a `pack.toml` with an `[application]` bundle to fill in) in the current registry checkout; refuse existing paths and the reserved first-party namespaces (`mvm`, `agent`, `runtime`) |
 | `mvmctl new-pack ns/name` | Deprecated alias of `mvmctl pack new`; prints a notice |
 | `mvmctl pack ls [--json]`                                 | List pinned registry products with their kind (`application` or `policy`) and whether each is installed                                                                                                          |
 | `mvmctl pack rm ns/name[@version]`                        | Remove a registry product's cache entry and lock pin; a supplied version must match the pin. An application's installed bundle stays in the shared bundle store                                                                           |
