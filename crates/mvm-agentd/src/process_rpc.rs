@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -63,6 +63,16 @@ impl Default for Caps {
     }
 }
 
+/// Lock `mutex`, recovering from poisoning. Every lock in this module guards
+/// plain state whose invariant holds between statements (an append to a byte
+/// buffer, an insert into the registry map, an `Option` set once, a counter):
+/// a thread that panicked holding one cannot have left it torn, and the guest
+/// agent must keep serving every other process rather than panic on each
+/// later call.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 // ============================================================================
 // Registry
 // ============================================================================
@@ -96,7 +106,7 @@ impl DrainLatch {
     }
 
     fn mark_finished(&self) {
-        let mut n = self.outstanding.lock().expect("drain latch mutex");
+        let mut n = lock(&self.outstanding);
         *n = n.saturating_sub(1);
         if *n == 0 {
             self.finished.notify_all();
@@ -122,7 +132,7 @@ impl DrainLatch {
             return;
         }
         let deadline = Instant::now() + cap;
-        let mut n = self.outstanding.lock().expect("drain latch mutex");
+        let mut n = lock(&self.outstanding);
         while *n > 0 {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 self.gave_up.store(true, Ordering::Release);
@@ -131,7 +141,7 @@ impl DrainLatch {
             let (guard, timeout) = self
                 .finished
                 .wait_timeout(n, remaining)
-                .expect("drain latch condvar");
+                .unwrap_or_else(PoisonError::into_inner);
             n = guard;
             if timeout.timed_out() {
                 self.gave_up.store(true, Ordering::Release);
@@ -201,36 +211,36 @@ impl Registry {
     }
 
     fn gc_inplace(&self, now: Instant) {
-        let mut map = self.inner.lock().expect("registry mutex");
+        let mut map = lock(&self.inner);
         map.retain(|_, rec| {
-            let reap = rec.reap_after.lock().expect("reap_after mutex");
+            let reap = lock(&rec.reap_after);
             !matches!(*reap, Some(t) if now >= t)
         });
     }
 
     fn lookup(&self, token: &str) -> Option<Arc<ProcessRecord>> {
-        let map = self.inner.lock().expect("registry mutex");
+        let map = lock(&self.inner);
         map.get(token).cloned()
     }
 
     fn insert(&self, token: String, record: Arc<ProcessRecord>) {
-        let mut map = self.inner.lock().expect("registry mutex");
+        let mut map = lock(&self.inner);
         map.insert(token, record);
     }
 
     fn live_count(&self) -> usize {
-        let map = self.inner.lock().expect("registry mutex");
+        let map = lock(&self.inner);
         map.iter()
-            .filter(|(_, r)| r.terminal.lock().expect("terminal mutex").is_none())
+            .filter(|(_, r)| lock(&r.terminal).is_none())
             .count()
     }
 
     /// Snapshot for `ProcList`.
     pub fn snapshot(&self) -> Vec<ProcInfo> {
-        let map = self.inner.lock().expect("registry mutex");
+        let map = lock(&self.inner);
         map.iter()
             .map(|(token, rec)| {
-                let terminal = rec.terminal.lock().expect("terminal mutex");
+                let terminal = lock(&rec.terminal);
                 let state = match *terminal {
                     Some(t) => t.to_state(),
                     None => ProcState::Running,
@@ -497,7 +507,7 @@ fn spawn_drain<R: Read + Send + 'static>(
                     // Also to guest capture, past the buffer's cap: the
                     // VM's collector keeps what nobody polled for.
                     crate::telemetry_capture::offer_stdio(stream, &chunk[..n]);
-                    let mut b = buf.lock().expect("drain buf mutex");
+                    let mut b = lock(&buf);
                     let room = cap.saturating_sub(b.len());
                     if room == 0 {
                         continue;
@@ -595,7 +605,7 @@ pub fn handle_proc_start(
     });
 
     if !initial_stdin.is_empty()
-        && let Some(ref mut s) = *record.stdin.lock().expect("stdin mutex")
+        && let Some(ref mut s) = *lock(&record.stdin)
     {
         let _ = s.write_all(initial_stdin);
     }
@@ -623,7 +633,7 @@ pub fn handle_proc_signal(registry: &Registry, pid_token: &str, signum: i32) -> 
             message: format!("no such pid_token: {pid_token}"),
         };
     };
-    let child_guard = record.child.lock().expect("child mutex");
+    let child_guard = lock(&record.child);
     let Some(child) = child_guard.as_ref() else {
         return ProcResult::Error {
             kind: ProcErrorKind::Other,
@@ -677,7 +687,7 @@ pub fn handle_proc_send_input(
             message: format!("no such pid_token: {pid_token}"),
         };
     };
-    let mut stdin_guard = record.stdin.lock().expect("stdin mutex");
+    let mut stdin_guard = lock(&record.stdin);
     let Some(ref mut stdin) = *stdin_guard else {
         return ProcResult::Error {
             kind: ProcErrorKind::Other,
@@ -701,7 +711,7 @@ pub fn handle_proc_send_input(
 
 fn drain_into_events(record: &ProcessRecord) -> Vec<ProcWaitEvent> {
     let mut events = Vec::new();
-    let mut out = record.stdout_buf.lock().expect("stdout mutex");
+    let mut out = lock(&record.stdout_buf);
     if !out.is_empty() {
         let drained = std::mem::take(&mut *out);
         events.extend(
@@ -713,7 +723,7 @@ fn drain_into_events(record: &ProcessRecord) -> Vec<ProcWaitEvent> {
         );
     }
     drop(out);
-    let mut err = record.stderr_buf.lock().expect("stderr mutex");
+    let mut err = lock(&record.stderr_buf);
     if !err.is_empty() {
         let drained = std::mem::take(&mut *err);
         events.extend(
@@ -762,8 +772,8 @@ fn check_output_backpressure(
     caps: &Caps,
     watch: &mut BackpressureWatch,
 ) -> Option<ProcWaitEvent> {
-    let out_len = record.stdout_buf.lock().map(|b| b.len()).unwrap_or(0);
-    let err_len = record.stderr_buf.lock().map(|b| b.len()).unwrap_or(0);
+    let out_len = lock(&record.stdout_buf).len();
+    let err_len = lock(&record.stderr_buf).len();
     let total = out_len.saturating_add(err_len);
     let threshold = output_backpressure_threshold(caps);
 
@@ -787,14 +797,9 @@ fn check_output_backpressure(
 /// Try to reap the child non-blocking. Returns `Some(terminal)` if
 /// the child has exited, `None` if it's still running.
 fn try_reap(record: &ProcessRecord, reap_grace: Duration) -> Option<TerminalState> {
-    let mut child_guard = record.child.lock().expect("child mutex");
+    let mut child_guard = lock(&record.child);
     let Some(child) = child_guard.as_mut() else {
-        return record
-            .terminal
-            .lock()
-            .expect("terminal mutex")
-            .as_ref()
-            .copied();
+        return lock(&record.terminal).as_ref().copied();
     };
     match crate::child_wait::try_wait(child) {
         Ok(Some(status)) => {
@@ -815,9 +820,8 @@ fn try_reap(record: &ProcessRecord, reap_grace: Duration) -> Option<TerminalStat
                     TerminalState::Exited(-1)
                 }
             };
-            *record.terminal.lock().expect("terminal mutex") = Some(terminal);
-            *record.reap_after.lock().expect("reap_after mutex") =
-                Some(Instant::now() + reap_grace);
+            *lock(&record.terminal) = Some(terminal);
+            *lock(&record.reap_after) = Some(Instant::now() + reap_grace);
             *child_guard = None;
             Some(terminal)
         }
@@ -843,7 +847,7 @@ pub fn handle_proc_wait<W: FnMut(ProcWaitEvent)>(
             message: format!("no such pid_token: {pid_token}"),
         };
     };
-    if let Some(terminal) = *record.terminal.lock().expect("terminal mutex") {
+    if let Some(terminal) = *lock(&record.terminal) {
         // Same ordering hazard as the reap path below: a caller that arrives
         // after the terminal state was recorded but before the pipes drained
         // would otherwise see the output vanish.
@@ -892,9 +896,8 @@ pub fn handle_proc_wait<W: FnMut(ProcWaitEvent)>(
             && Instant::now() >= d
         {
             let _ = handle_proc_signal(registry, pid_token, 9);
-            *record.terminal.lock().expect("terminal mutex") = Some(TerminalState::TimedOut);
-            *record.reap_after.lock().expect("reap_after mutex") =
-                Some(Instant::now() + caps.reap_grace);
+            *lock(&record.terminal) = Some(TerminalState::TimedOut);
+            *lock(&record.reap_after) = Some(Instant::now() + caps.reap_grace);
             for ev in drain_into_events(&record) {
                 emit(ev);
             }
@@ -1601,5 +1604,36 @@ mod tests {
             check_output_backpressure(&high_again, &caps, &mut watch).is_some(),
             "rising edge after a fall must re-emit"
         );
+    }
+
+    /// Panic on another thread while it holds `mutex`, leaving it poisoned.
+    fn poison<T: Send>(mutex: &std::sync::Mutex<T>) {
+        let joined = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = mutex.lock().unwrap();
+                    panic!("handler panicked while holding the lock");
+                })
+                .join()
+        });
+        assert!(joined.is_err());
+        assert!(mutex.is_poisoned());
+    }
+
+    #[test]
+    fn a_poisoned_registry_keeps_serving_lookups() {
+        let registry = super::Registry::new();
+        poison(&registry.inner);
+        assert!(registry.lookup("missing").is_none());
+        assert_eq!(registry.live_count(), 0);
+    }
+
+    #[test]
+    fn a_poisoned_drain_latch_still_counts_down_and_releases_waiters() {
+        let latch = super::DrainLatch::new(1);
+        poison(&latch.outstanding);
+        latch.mark_finished();
+        latch.wait_for_eof(std::time::Duration::from_secs(5));
+        assert!(!latch.gave_up.load(std::sync::atomic::Ordering::Acquire));
     }
 }

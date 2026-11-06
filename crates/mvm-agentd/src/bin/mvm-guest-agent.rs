@@ -287,7 +287,7 @@ impl ControlOperations for NativeControlOperations {
         init::apply_activation(environment, boot)?;
         if init::is_pid1() {
             let boot = Arc::clone(boot);
-            std::thread::spawn(move || {
+            let _ = mvm_agentd::detached::spawn_named("entrypoint-validation", move || {
                 init_entrypoint_validation(&boot);
                 init_warm_pool(&boot);
             });
@@ -1095,7 +1095,7 @@ fn main() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0);
-    std::thread::spawn(move || {
+    let _ = mvm_agentd::detached::spawn_named("boot-beacon", move || {
         mvm_agentd::host_beacon::report_boot_beacon(beacon_boot_unix_ms);
     });
 
@@ -1107,7 +1107,7 @@ fn main() {
     // `/etc/mvm/entrypoint`.
     if !init::is_pid1() {
         let bs = Arc::clone(&boot_state);
-        std::thread::spawn(move || {
+        let _ = mvm_agentd::detached::spawn_named("entrypoint-validation", move || {
             init_entrypoint_validation(&bs);
             init_warm_pool(&bs);
         });
@@ -1179,16 +1179,21 @@ fn main() {
 
     if !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
         let monitor_state = Arc::clone(&state);
-        std::thread::spawn(move || monitoring_loop(monitor_state));
+        let _ =
+            mvm_agentd::detached::spawn_named("monitoring", move || monitoring_loop(monitor_state));
 
         #[cfg(target_os = "linux")]
         if let Some(listener) = attribution_listener {
-            std::thread::spawn(move || mvm_agentd::tool_attribution::serve(listener));
+            let _ = mvm_agentd::detached::spawn_named("tool-attribution", move || {
+                mvm_agentd::tool_attribution::serve(listener)
+            });
         }
 
         #[cfg(target_os = "linux")]
         if let Some(listener) = decision_listener {
-            std::thread::spawn(move || mvm_agentd::tool_decision_socket::serve(listener));
+            let _ = mvm_agentd::detached::spawn_named("tool-decision", move || {
+                mvm_agentd::tool_decision_socket::serve(listener)
+            });
         }
 
         // Defer integration and probe scans to background threads, but only
@@ -1196,12 +1201,14 @@ fn main() {
         {
             let bs = Arc::clone(&boot_state);
             let s = Arc::clone(&integration_state);
-            std::thread::spawn(move || init_integrations(&bs, &s));
+            let _ = mvm_agentd::detached::spawn_named("init-integrations", move || {
+                init_integrations(&bs, &s)
+            });
         }
         {
             let bs = Arc::clone(&boot_state);
             let s = Arc::clone(&probe_state);
-            std::thread::spawn(move || init_probes(&bs, &s));
+            let _ = mvm_agentd::detached::spawn_named("init-probes", move || init_probes(&bs, &s));
         }
 
         // Telemetry initializes in this post-activation zone: the capture
