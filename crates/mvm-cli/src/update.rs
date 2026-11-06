@@ -2486,7 +2486,9 @@ mod tests {
     /// A release that passes the pre-install smoke test and then fails once it
     /// sits at the installed path must be rolled back, leaving the previous
     /// binary runnable and no backup behind. The fixture answers `--version`
-    /// only while it runs from the extraction directory.
+    /// only while no `.installed` marker sits beside it; the test puts that
+    /// marker in the install directory, so the binary breaks exactly once it is
+    /// installed, whatever the temporary directory's path looks like.
     #[test]
     fn a_release_that_fails_its_post_install_smoke_test_is_rolled_back() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2495,7 +2497,7 @@ mod tests {
         let archive = build_release_archive_with_binary(
             tmp.path(),
             "unit-test",
-            "#!/bin/sh\ncase \"$0\" in */work/*) echo 'mvmctl 9.9.9';; *) echo broken >&2; exit 1;; esac\n",
+            "#!/bin/sh\nif [ -e \"$(dirname \"$0\")/.installed\" ]; then echo broken >&2; exit 1; fi\necho 'mvmctl 9.9.9'\n",
             false,
             false,
         );
@@ -2503,6 +2505,7 @@ mod tests {
 
         let install_dir = tmp.path().join("install");
         std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(install_dir.join(".installed"), b"").unwrap();
         let current_exe = install_dir.join("mvmctl");
         let previous = "#!/bin/sh\necho 'mvmctl 0.1.0'\n";
         std::fs::write(&current_exe, previous).unwrap();
