@@ -414,20 +414,8 @@ pub fn pool_dir(tenant_id: &str, pool_id: &str) -> String {
     format!("{}/{}", tenant_pools_dir(tenant_id), pool_id)
 }
 
-pub fn pool_config_path(tenant_id: &str, pool_id: &str) -> String {
-    format!("{}/pool.json", pool_dir(tenant_id, pool_id))
-}
-
 pub fn pool_artifacts_dir(tenant_id: &str, pool_id: &str) -> String {
     format!("{}/artifacts", pool_dir(tenant_id, pool_id))
-}
-
-pub fn pool_instances_dir(tenant_id: &str, pool_id: &str) -> String {
-    format!("{}/instances", pool_dir(tenant_id, pool_id))
-}
-
-pub fn pool_snapshots_dir(tenant_id: &str, pool_id: &str) -> String {
-    format!("{}/snapshots", pool_dir(tenant_id, pool_id))
 }
 
 /// Directory for pool-level configuration data (mounted as config drive).

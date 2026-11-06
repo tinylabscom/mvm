@@ -74,18 +74,6 @@ pub fn tenant_dir(id: &str) -> String {
     format!("{}/{}", TENANT_BASE, id)
 }
 
-pub fn tenant_config_path(id: &str) -> String {
-    format!("{}/tenant.json", tenant_dir(id))
-}
-
-pub fn tenant_secrets_path(id: &str) -> String {
-    format!("{}/secrets.json", tenant_dir(id))
-}
-
-pub fn tenant_audit_log_path(id: &str) -> String {
-    format!("{}/audit.log", tenant_dir(id))
-}
-
 pub fn tenant_pools_dir(id: &str) -> String {
     format!("{}/pools", tenant_dir(id))
 }

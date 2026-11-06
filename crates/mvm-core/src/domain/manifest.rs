@@ -393,11 +393,6 @@ impl Manifest {
         self.image.is_some()
     }
 
-    /// True when this manifest selects a wasm module as its build source.
-    pub fn is_wasm_source(&self) -> bool {
-        self.wasm.is_some()
-    }
-
     /// Typed machine-oriented view of the manifest. Only image-backed
     /// manifests produce one; flake-backed manifests return `None`.
     pub fn machine_workflow(&self) -> Option<ManifestMachineWorkflow> {
