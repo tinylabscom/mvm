@@ -126,8 +126,8 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-conformance | `src/vmm_reaper.rs` | 3 | test harness | ps / kill / sudo to reap leaked VMMs in conformance runs | dev harness, not shipped | - | - | `helper_command` env scrub | test-only |
 | mvm-core | `src/crypto/key_rotation.rs` | 1 | storage tool | cryptsetup luksChangeKey | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-core | `src/env_hygiene.rs` | 3 | factory | the sanctioned Command constructor: scrubs denied env, then everything above calls it | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub; RAW_SITES (on_host) | required-host-primitive |
-| mvm-core | `src/host_storage_encryption.rs` | 4 | host probe | diskutil / findmnt / tune2fs / lsblk encryption-at-rest probes | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub | open-review |
-| mvm-core | `src/platform/platform.rs` | 2 | host probe | sw_vers and nix presence probe | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub | open-review |
+| mvm-core | `src/host_storage_encryption.rs` | 4 | host probe | diskutil / findmnt / tune2fs / lsblk encryption-at-rest probes | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub | fixed-argv-utility |
+| mvm-core | `src/platform/platform.rs` | 2 | host probe | sw_vers and nix presence probe | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub | fixed-argv-utility |
 | mvm-core | `src/spawn_scope.rs` | 4 | systemd-run | wrap a VMM spawn in a systemd transient scope; kill and systemctl show | library: caller's process (CLI, daemon, embedder) | CHS | C | `helper_command` env scrub | required-host-primitive |
 | mvm-fs | `src/oci_to_rootfs/ext4.rs` | 1 | storage tool | mke2fs to materialize an OCI rootfs (Linux) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
 | mvm-fs | `src/oci_to_rootfs/verity.rs` | 1 | storage tool | veritysetup format of a rootfs (Linux) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
@@ -175,9 +175,9 @@ Totals: 192 production sites in 99 files.
 |---|--:|--:|
 | cli-only | 32 | 22 |
 | embedder-refused | 11 | 8 |
-| fixed-argv-utility | 14 | 8 |
+| fixed-argv-utility | 20 | 10 |
 | guest-side | 66 | 30 |
-| open-review | 28 | 8 |
+| open-review | 22 | 6 |
 | required-host-primitive | 38 | 22 |
 | test-only | 3 | 1 |
 
@@ -189,6 +189,8 @@ Reviewed library-reachable sites (disposition, then why):
 | `mvm-build/src/builder_vm_runtime.rs` | fixed-argv-utility | `debugfs_cat`: read-only `debugfs -R` on the builder store image; the request now comes from `debugfs_cat_request`, which refuses a relative path or one with whitespace or control characters (tested). Callers pass two constant guest paths. Output is a local diagnostic log read; no wall-clock or size bound. |
 | `mvm-build/src/provenance_mark.rs` | fixed-argv-utility | `debugfs_cat`: same read-only `debugfs -R` through `debugfs_cat_request`; the callers (`read_mark_from_ext4`) pass the two constant `/mvm/provenance.*` paths and verify the result against the embedded key before use. No wall-clock or size bound on debugfs output. |
 | `mvm-core/src/crypto/key_rotation.rs` | fixed-argv-utility | `rotate_luks_slot`: fixed `cryptsetup luksChangeKey`; both passphrases go through 0600 tempfiles named in argv, never argv text or env; stdin is null; failure carries cryptsetup stderr only (no key bytes). Requires a live LUKS device by contract. No wall-clock bound. |
+| `mvm-core/src/host_storage_encryption.rs` | fixed-argv-utility | `detect_macos`/`detect_linux`: read-only `diskutil info`, `findmnt --json`, `tune2fs -l` and `lsblk --inverse` probes with fixed argv; the only variable argument is a path or a `/dev/` device that `detect_linux` checks with `starts_with("/dev/")` before `tune2fs` and `lsblk` (after `--`). The runner is injected, and tests pin fail-closed behaviour (`missing_tools_fail_closed`, `failed_findmnt_never_inspects_a_device`, `failed_diskutil_refuses_even_with_encrypted_stdout`). A failed or absent probe means not-encrypted. No wall-clock bound. |
+| `mvm-core/src/platform/platform.rs` | fixed-argv-utility | `macos_major_version` runs `sw_vers -productVersion` (fixed argv, parsed to a number, 0 on failure). `has_host_nix` runs `nix --version` as a presence probe; it has no callers in the tree, so no build or run path reaches it (a deletion candidate, not an exception to the host-Nix rule). |
 | `mvm-fs/src/oci_to_rootfs/ext4.rs` | fixed-argv-utility | `build_mke2fs_command`/`run_mke2fs`: program is `mke2fs` or an explicit `Mke2fsOptions` path, argv is fixed flags plus typed label, uuid, hash seed, block size and paths as separate args (no shell), deterministic-time env set, exit checked. Linux only. No wall-clock bound; the error text embeds mke2fs stdout and stderr unbounded. |
 | `mvm-fs/src/oci_to_rootfs/verity.rs` | fixed-argv-utility | `run_veritysetup_format`: `veritysetup format` with typed options as `--flag=value` args and two paths, no shell, exit checked, `Root hash:` line parsed or an error. Linux only. No wall-clock bound. |
 | `mvm-runtime/src/storage/backend.rs` | fixed-argv-utility | `dmsetup_linux::check_available`: `dmsetup --version` availability probe, fixed argv, result mapped to `StorageError::BackendUnavailable`. |

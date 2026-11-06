@@ -357,7 +357,7 @@ def guard(rel, kinds, places, fns):
 # Ratchet: sites a library-reachable process may start that are not yet shown
 # to be required, refused or CLI-only. It may only go down; raising it needs a
 # written reason in the contract doc.
-OPEN_REVIEW_CEILING = 28
+OPEN_REVIEW_CEILING = 22
 # Library-reachable spawn files that were read and judged. Each entry is
 # (disposition, reason); the reason names the functions a reviewer can open.
 # A file listed here that is no longer open-review by derivation is an error.
@@ -370,6 +370,8 @@ REVIEWED = {
     "mvm-fs/src/oci_to_rootfs/verity.rs": ("fixed-argv-utility", "`run_veritysetup_format`: `veritysetup format` with typed options as `--flag=value` args and two paths, no shell, exit checked, `Root hash:` line parsed or an error. Linux only. No wall-clock bound."),
     "mvm-runtime/src/storage/backend.rs": ("fixed-argv-utility", "`dmsetup_linux::check_available`: `dmsetup --version` availability probe, fixed argv, result mapped to `StorageError::BackendUnavailable`."),
     "mvm-runtime/src/storage/volume/encrypted_linux.rs": ("fixed-argv-utility", "`attach`/`detach`/`format_image`/`close_mapper` through one `check` helper: fixed programs (`cryptsetup`, `mount`, `umount`, `mkfs.ext4`), argv is fixed subcommands plus typed volume paths and a mapper name derived from a validated `VolumeName`; the data key goes only through a 0600 tempfile; stdin null; non-zero exit fails closed with stderr (no key bytes). Linux only, needs root-capable host. No wall-clock bound."),
+    "mvm-core/src/host_storage_encryption.rs": ("fixed-argv-utility", "`detect_macos`/`detect_linux`: read-only `diskutil info`, `findmnt --json`, `tune2fs -l` and `lsblk --inverse` probes with fixed argv; the only variable argument is a path or a `/dev/` device that `detect_linux` checks with `starts_with(\"/dev/\")` before `tune2fs` and `lsblk` (after `--`). The runner is injected, and tests pin fail-closed behaviour (`missing_tools_fail_closed`, `failed_findmnt_never_inspects_a_device`, `failed_diskutil_refuses_even_with_encrypted_stdout`). A failed or absent probe means not-encrypted. No wall-clock bound."),
+    "mvm-core/src/platform/platform.rs": ("fixed-argv-utility", "`macos_major_version` runs `sw_vers -productVersion` (fixed argv, parsed to a number, 0 on failure). `has_host_nix` runs `nix --version` as a presence probe; it has no callers in the tree, so no build or run path reaches it (a deletion candidate, not an exception to the host-Nix rule)."),
 }
 
 REQUIRED_CLASSES = ("hypervisor", "helper bin", "systemd-run", "net (nft)", "codesign", "factory", "process control")
