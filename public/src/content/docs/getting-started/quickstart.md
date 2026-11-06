@@ -25,9 +25,11 @@ mvmctl machine run --name local-demo --profile dev \
   -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'
 ```
 
-The first run fetches missing launch artifacts and caches them. You can run
-`mvmctl bootstrap` and `mvmctl image pull alpine` ahead of time to prewarm
-them. Bootstrap also creates the host snapshot key used for encrypted warm
+The first run fetches the kernel and image and caches them. A launch only uses
+the guest runtime that `mvmctl bootstrap` prepared: a release binary that has
+not bootstrapped since it was installed refuses the launch and names that
+command (a source build assembles the runtime from its tree instead). Run
+`mvmctl bootstrap` first, and optionally `mvmctl image pull alpine`. Bootstrap also creates the host snapshot key used for encrypted warm
 standbys at `~/.mvm/keys/local.key`; keep a copy of it.
 The named foreground run above is transient and cold; it tears down on exit
 and requests no standby. The digest pin identifies prepared content; it is
