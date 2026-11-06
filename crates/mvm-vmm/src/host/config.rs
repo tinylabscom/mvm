@@ -8,11 +8,6 @@ use serde::{Deserialize, Serialize};
 /// hostname `mvm-dev` are deliberately *not* this constant — they exist
 /// on every host regardless of whether a builder VM is running.
 pub const VM_NAME: &str = "mvm-builder";
-pub const TAP_DEV: &str = "tap0";
-pub const TAP_IP: &str = mvm_core::dev_network::DEFAULT_GATEWAY_IP;
-pub const MASK_SHORT: &str = "/30";
-pub const GUEST_IP: &str = mvm_core::dev_network::DEFAULT_GUEST_IP;
-pub const FC_MAC: &str = "06:00:AC:10:00:02";
 /// Firecracker assets root. `~` expands against whichever shell
 /// runs the script — on Linux+KVM that's the host user; on macOS
 /// 26+ it's the Apple Container dev VM's user (commands route
@@ -20,11 +15,6 @@ pub const FC_MAC: &str = "06:00:AC:10:00:02";
 /// applies, the Firecracker backend isn't available — every script
 /// that would write here fails at the binary-invocation step.
 pub const MICROVM_DIR: &str = "~/microvm";
-
-// --- Multi-VM bridge networking ---
-pub const BRIDGE_DEV: &str = "br-mvm";
-pub const BRIDGE_IP: &str = mvm_core::dev_network::DEFAULT_GATEWAY_IP;
-pub const BRIDGE_CIDR: &str = mvm_core::dev_network::DEFAULT_GATEWAY_CIDR;
 
 /// Per-VM network + filesystem identity, derived from a slot index.
 #[derive(Debug, Clone)]
@@ -56,14 +46,6 @@ impl VmSlot {
             vm_dir: vm_dir.display().to_string(),
         }
     }
-}
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct MvmState {
-    pub kernel: String,
-    pub rootfs: String,
-    #[serde(default)]
-    pub fc_pid: Option<u32>,
 }
 
 /// A host:guest port mapping for port forwarding.
@@ -109,20 +91,6 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
 
     #[test]
-    fn test_constants_non_empty() {
-        assert!(!VM_NAME.is_empty());
-        assert!(!mvm_core::config::fc_version().is_empty());
-        assert!(!mvm_core::config::ARCH.is_empty());
-        assert!(!TAP_DEV.is_empty());
-        assert!(!TAP_IP.is_empty());
-        assert!(!GUEST_IP.is_empty());
-        assert!(!FC_MAC.is_empty());
-        assert!(!BRIDGE_DEV.is_empty());
-        assert!(!BRIDGE_IP.is_empty());
-        assert!(!BRIDGE_CIDR.is_empty());
-    }
-
-    #[test]
     fn test_vm_slot_new_index_0() {
         let slot = VmSlot::new("gw", 0);
         assert_eq!(slot.name, "gw");
@@ -157,55 +125,6 @@ mod tests {
             mvm_core::config::fc_version().starts_with('v'),
             "FC_VERSION should start with 'v'"
         );
-    }
-
-    #[test]
-    fn test_ip_addresses_are_in_same_subnet() {
-        // TAP_IP and GUEST_IP should share the 172.16.0.x prefix
-        assert!(TAP_IP.starts_with("172.16.0."));
-        assert!(GUEST_IP.starts_with("172.16.0."));
-    }
-
-    #[test]
-    fn test_mvm_state_json_roundtrip() {
-        let state = MvmState {
-            kernel: "vmlinux-5.10.217".to_string(),
-            rootfs: "ubuntu-24.04.ext4".to_string(),
-            fc_pid: Some(12345),
-        };
-
-        let json = serde_json::to_string(&state).unwrap();
-        let parsed: MvmState = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.kernel, "vmlinux-5.10.217");
-        assert_eq!(parsed.rootfs, "ubuntu-24.04.ext4");
-        assert_eq!(parsed.fc_pid, Some(12345));
-    }
-
-    #[test]
-    fn test_mvm_state_json_without_pid() {
-        let json = r#"{"kernel":"k","rootfs":"r"}"#;
-        let state: MvmState = serde_json::from_str(json).unwrap();
-        assert_eq!(state.fc_pid, None);
-    }
-
-    #[test]
-    fn test_mvm_state_json_ignores_legacy_ssh_key_field() {
-        // Old on-disk state files may still carry the retired ssh_key field;
-        // parsing must not fail-closed on it.
-        let json = r#"{"kernel":"k","rootfs":"r","ssh_key":"stale","fc_pid":7}"#;
-        let state: MvmState = serde_json::from_str(json).unwrap();
-        assert_eq!(state.kernel, "k");
-        assert_eq!(state.rootfs, "r");
-        assert_eq!(state.fc_pid, Some(7));
-    }
-
-    #[test]
-    fn test_mvm_state_default() {
-        let state = MvmState::default();
-        assert!(state.kernel.is_empty());
-        assert!(state.rootfs.is_empty());
-        assert_eq!(state.fc_pid, None);
     }
 
     #[test]
