@@ -379,13 +379,6 @@ impl Node {
         }
     }
 
-    /// The same node, owned by `owner`.
-    #[must_use]
-    pub fn with_owner(mut self, owner: Owner) -> Self {
-        self.set_owner(owner);
-        self
-    }
-
     /// The node's extended attributes (empty for symlinks).
     fn xattrs(&self) -> &[Xattr] {
         match self {

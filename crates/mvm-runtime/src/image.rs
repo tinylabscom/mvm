@@ -251,15 +251,6 @@ pub fn parse_config(path: &Path) -> Result<MvmImageConfig> {
     Ok(config)
 }
 
-/// Parse a runtime config file (for `mvm start --config`).
-pub fn parse_runtime_config(path: &str) -> Result<RuntimeConfig> {
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
-    let config: RuntimeConfig =
-        toml::from_str(&content).with_context(|| format!("Failed to parse {}", path))?;
-    Ok(config)
-}
-
 // ---------------------------------------------------------------------------
 // Service unit generation
 // ---------------------------------------------------------------------------

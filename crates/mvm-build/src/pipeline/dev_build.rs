@@ -1057,19 +1057,6 @@ fn detect_runner(build_dir: &str) -> Option<String> {
     is_executable.then(|| build_dir.to_string())
 }
 
-/// Return the Nix Linux system identifier for the current architecture.
-pub fn linux_system() -> &'static str {
-    nix_system()
-}
-
-fn nix_system() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "aarch64-linux"
-    } else {
-        "x86_64-linux"
-    }
-}
-
 #[cfg(test)]
 mod typed_export_tests {
     use super::*;
@@ -1288,16 +1275,6 @@ mod tests {
             dir.ends_with("/dev/builds/abc123def456ghi789"),
             "got: {}",
             dir
-        );
-    }
-
-    #[test]
-    fn test_nix_system() {
-        let system = nix_system();
-        assert!(
-            system == "aarch64-linux" || system == "x86_64-linux",
-            "unexpected system: {}",
-            system
         );
     }
 

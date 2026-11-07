@@ -748,14 +748,6 @@ pub fn linux_builder_vm_readiness_for(
     Ok(())
 }
 
-/// Live readiness check using the runtime platform + sysfs probe.
-/// `mvmctl doctor` and the future workload-nesting dispatch both call
-/// this to surface clean errors before mid-build.
-pub fn linux_builder_vm_readiness() -> Result<(), BuilderVmError> {
-    let plat = current();
-    linux_builder_vm_readiness_for(plat, plat.has_nested_kvm())
-}
-
 #[cfg(test)]
 mod tests {
     /// A backend declining an operation is a reason to try the next one.
