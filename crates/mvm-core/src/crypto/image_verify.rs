@@ -463,7 +463,26 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
 /// For callers that must hash an already-open descriptor rather than reopen a
 /// path: a check over a name can be satisfied by one file and the use handed
 /// another.
-pub fn sha256_reader(mut reader: impl io::Read) -> io::Result<String> {
+pub fn sha256_reader(reader: impl io::Read) -> io::Result<String> {
+    let (digest, read_total) = sha256_reader_counted(reader)?;
+    // Reported here rather than at the call sites because this is the function
+    // that actually reads the bytes; a caller that forgot to report would make
+    // a launch look cheaper than it was, which is the direction that hides
+    // regressions.
+    crate::launch_trace::record_artifact_bytes_hashed(read_total);
+    Ok(digest)
+}
+
+/// [`sha256_reader`] for material the launch generated itself, which is not an
+/// artifact and so is not counted as artifact hashing.
+///
+/// Reading a cached artifact through this would blind the prepared-cold lane,
+/// so use it only on bytes minted in this process.
+pub fn sha256_generated_bytes(bytes: &[u8]) -> io::Result<String> {
+    sha256_reader_counted(bytes).map(|(digest, _)| digest)
+}
+
+fn sha256_reader_counted(mut reader: impl io::Read) -> io::Result<(String, u64)> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
     let mut read_total: u64 = 0;
@@ -475,12 +494,7 @@ pub fn sha256_reader(mut reader: impl io::Read) -> io::Result<String> {
         read_total += n as u64;
         hasher.update(&buf[..n]);
     }
-    // Reported here rather than at the call sites because this is the function
-    // that actually reads the bytes; a caller that forgot to report would make
-    // a launch look cheaper than it was, which is the direction that hides
-    // regressions.
-    crate::launch_trace::record_artifact_bytes_hashed(read_total);
-    Ok(hex::encode(hasher.finalize()))
+    Ok((hex::encode(hasher.finalize()), read_total))
 }
 
 /// SHA-256 of a file, cached in a `<path>.sha256cache` sidecar that this host
@@ -645,6 +659,25 @@ fn write_sha256_sidecar(sidecar: &Path, hex: &str, seal: &str) -> io::Result<()>
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Generated material hashes identically but is not artifact hashing; an
+    /// artifact read still is. Process-global counter, so this relies on
+    /// nextest's process-per-test isolation.
+    #[test]
+    fn generated_bytes_are_not_counted_as_artifact_hashing() {
+        let bytes = vec![7u8; 36_864];
+        let before = crate::launch_trace::recorded_acquisition().artifact_bytes_hashed;
+        let generated = sha256_generated_bytes(&bytes).unwrap();
+        assert_eq!(
+            crate::launch_trace::recorded_acquisition().artifact_bytes_hashed,
+            before
+        );
+        assert_eq!(generated, sha256_reader(bytes.as_slice()).unwrap());
+        assert_eq!(
+            crate::launch_trace::recorded_acquisition().artifact_bytes_hashed,
+            before + 36_864
+        );
+    }
 
     /// Hashing an open reader gives the same digest as hashing the file by
     /// path, across a buffer boundary, and the empty input hashes to the

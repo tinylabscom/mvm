@@ -42,13 +42,6 @@ impl TrustedSnapshotService {
         }
     }
 
-    /// Open the explicitly enabled host platform backend.
-    pub fn from_platform(root: impl AsRef<Path>) -> Result<Self> {
-        let backend = mvm_fs::trusted_snapshot::platform_backend(root)
-            .context("open platform trusted snapshot backend")?;
-        Ok(Self::new(Arc::from(backend)))
-    }
-
     /// Stage and seal a publication, then return its opaque claim handle.
     ///
     /// The handle is inserted only after sealing succeeds. A failed stage or

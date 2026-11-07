@@ -2,6 +2,22 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.27.0-rc.4] — 2026-11-06
+
+### Changed
+- SDK runtime compatibility follows the workspace version
+- Remove dead configuration surface and gate documented env vars
+
+### Documentation
+- **adr-054**: State both layers of first-run runtime preparation
+
+### Fixed
+- **cli**: Pack rm accepts the :latest spelling pull, info and verify accept
+- **release**: Reconcile detached standby during smoke cleanup
+
+### Testing
+- **plan**: Reuse shared plan fixtures
+
 ## [0.27.0-rc.3] — 2026-11-06
 
 v0.27.0-rc.1 and v0.27.0-rc.2 did not publish. rc.1 was stopped by the BDD gate, which caught a first-run cached-kernel regression. rc.2 was stopped in distro-packages, which rejected the hyphenated pre-release RPM version. rc.3 carries both fixes.

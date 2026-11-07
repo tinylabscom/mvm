@@ -46,11 +46,8 @@ use serde::{Deserialize, Serialize};
 use mvm_build::builder_backend_select::{
     BuilderBackendChoice, auto_detect_default, resolve_env_override,
 };
-use mvm_build::builder_protocol::HostVmResponseRead;
 use mvm_build::builder_vm::BuilderJob;
-use mvm_build::libkrun_builder::{
-    DISPATCH_SOCK_MARKER, LibkrunPersistentHostVm, PersistentVmHandle,
-};
+use mvm_build::libkrun_builder::{LibkrunPersistentHostVm, PersistentVmHandle};
 use mvm_build::persistent_builder::{
     DispatchOutcome, PersistentBuilderSupervisor, SessionDiskTransport, current_unix_secs,
     guest_artifact_dir, read_dispatch_artifacts, repack_dispatch_input,
@@ -911,14 +908,6 @@ fn read_supervisor_pid(vm_state_dir: &Path) -> u32 {
         std::thread::sleep(Duration::from_millis(100));
     }
     0
-}
-
-// Used in the `start` doc string; pulled in here just so the
-// unused-import lint stays silent in the cfg-feature-gated
-// signatures.
-const _MARKER_CONST: &str = DISPATCH_SOCK_MARKER;
-fn _force_read_use(r: HostVmResponseRead) -> HostVmResponseRead {
-    r
 }
 
 #[cfg(test)]

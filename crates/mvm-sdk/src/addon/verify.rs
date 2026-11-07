@@ -9,17 +9,6 @@
 //! compile pipeline's `archive_dir`, (b) the registry client gaining a
 //! real `tarball()` implementation. Both land in a follow-up phase.
 
-use crate::addon::registry::ResolvedVersion;
-
-/// Verify that a local source tree reproduces the registry's
-/// canonical-form sha256 byte-for-byte.
-pub fn verify_local_against_registry(
-    _local_dir: &std::path::Path,
-    _registry_version: &ResolvedVersion,
-) -> Result<(), VerifyError> {
-    Err(VerifyError::NotYetImplemented)
-}
-
 #[derive(Debug)]
 pub enum VerifyError {
     /// Local rebuild produced a different sha256 than the registry.
