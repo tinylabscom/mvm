@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_core::config::vms_dir;
 use mvm_core::vm_backend::VmStartConfig;
 use mvm_vmm::host::hvf_supervisor::HvfDisk;
 
@@ -118,10 +117,6 @@ fn hvf_supervisor_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
         "mvm-hostd",
     )
     .signed_with(mvm_vmm::host::codesign::RequiredEntitlement::Hypervisor)
-}
-
-pub fn vms_root() -> PathBuf {
-    vms_dir()
 }
 
 /// The per-VM gating endpoint is the sole egress gate on hvf (claim-10
