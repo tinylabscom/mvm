@@ -628,35 +628,6 @@ impl AnyBackend {
         self.inner().claim_standby(handle, claim)
     }
 
-    /// Fill the warm pool through the backend's real spawn-and-capture path: boot
-    /// a clean factory parent, capture its whole live state into the caller's
-    /// checkpoint store, and release it, so a pool slot costs disk rather than a
-    /// resident VM. Routes exactly like
-    /// [`claim_standby_via_runner`](Self::claim_standby_via_runner) — the
-    /// runner-backed workload backends (Firecracker, libkrun, hvf) reach the
-    /// runner, the mock lifecycle double services it in memory, and non-workload
-    /// backends (qemu, wasm) fail closed. Refusing the same backends both halves
-    /// refuse is what keeps a pool from being filled for a backend that could
-    /// never claim from it.
-    pub fn spawn_standby_via_runner(
-        &self,
-        ctx: &crate::workload_runner::SpawnContext<'_>,
-        spec: &mvm_core::vm_backend::StandbySpec,
-    ) -> std::result::Result<mvm_core::vm_backend::StandbyHandle, mvm_core::vm_backend::StandbyError>
-    {
-        self.spawn_standby_via_runner_owned(ctx, spec)
-            .map_err(|error| {
-                match error.downcast::<mvm_core::vm_backend::StandbyError>() {
-                    Ok(error) => error,
-                    // An unconfirmed native error retains its original aggregate
-                    // on Drop. This compatibility string does not permit retry.
-                    Err(error) => {
-                        mvm_core::vm_backend::StandbyError::SpawnFailed(format!("{error:#}"))
-                    }
-                }
-            })
-    }
-
     /// Host-only launch-error boundary. Concrete HVF launch failures retain
     /// their original child and runtime lifecycle lease as typed error custody.
     pub fn spawn_standby_via_runner_owned(
@@ -2263,49 +2234,6 @@ mod tests {
                 assert!(
                     matches!(err, StandbyError::Unsupported { .. }),
                     "{name} must fail closed: {err}"
-                );
-            }
-        }
-
-        /// The spawn half must refuse exactly the backends the claim half does,
-        /// or a pool could be filled for a backend that can never claim from it.
-        #[test]
-        fn spawn_fails_closed_for_the_same_non_workload_backends() {
-            use crate::workload_runner::SpawnContext;
-
-            let s = Scaffold::new();
-            let spec = mvm_core::vm_backend::StandbySpec {
-                id: "parent-a".into(),
-                template_id: None,
-                kernel_path: "/img/kernel".into(),
-                kernel_sha256: "a".repeat(64),
-                vcpus: 2,
-                mem_mib: 512,
-                signing_key_path: "/keys/host-signer.ed25519".into(),
-                signer_id: "host:test".into(),
-                binding_nonce: "b".repeat(64),
-                control_socket: "/tmp/does-not-exist.sock".into(),
-                vm_state_dir: "/tmp/does-not-exist".into(),
-                image_path: None,
-                image_sha256: None,
-                root_strategy: Default::default(),
-                vsock_egress: false,
-            };
-
-            for name in ["qemu", "wasm", "apple-container"] {
-                let backend = AnyBackend::from_hypervisor(name);
-                let err = backend
-                    .spawn_standby_via_runner(
-                        &SpawnContext {
-                            checkpoints: &s.checkpoints,
-                            launch: None,
-                        },
-                        &spec,
-                    )
-                    .expect_err("a non-workload backend has no warm pool to fill");
-                assert!(
-                    matches!(err, StandbyError::Unsupported { .. }),
-                    "{name} must fail closed on spawn: {err}"
                 );
             }
         }

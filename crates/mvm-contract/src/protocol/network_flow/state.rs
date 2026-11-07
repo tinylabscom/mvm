@@ -31,7 +31,7 @@
 
 use alloc::collections::BTreeMap;
 
-use super::frame::{Direction, SESSION_STREAM_ID};
+use super::frame::Direction;
 use super::limits::{
     INITIAL_STREAM_CREDIT, MAX_INGRESS_LISTENERS, MAX_STREAM_CREDIT, MAX_TCP_FLOWS,
     MAX_UDP_ASSOCIATIONS,
@@ -657,12 +657,6 @@ impl Default for SessionValidator {
     fn default() -> Self {
         Self::new([])
     }
-}
-
-/// The stream ID a session frame must use.
-#[must_use]
-pub const fn session_stream_id() -> u32 {
-    SESSION_STREAM_ID
 }
 
 #[cfg(test)]

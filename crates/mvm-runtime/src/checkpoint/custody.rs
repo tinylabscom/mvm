@@ -229,11 +229,6 @@ impl CheckpointStore {
         self
     }
 
-    /// Whether captures into this store are sealed.
-    pub fn protects_captures(&self) -> bool {
-        self.custody.is_some()
-    }
-
     pub(super) fn custody(&self) -> Option<&dyn CheckpointKeyCustody> {
         self.custody.as_deref()
     }

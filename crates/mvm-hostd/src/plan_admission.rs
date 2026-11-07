@@ -1867,24 +1867,6 @@ pub fn apply_admitted_grants_or_undo_launch(
     )
 }
 
-/// Share admitted-grants policy with an original-owner rollback operation.
-pub fn apply_admitted_grants_with_owned_rollback(
-    backend: &AnyBackend,
-    vm_id: &VmId,
-    admitted: &AdmittedPlan,
-    emitter: Option<&crate::audit::emitter::AuditEmitter>,
-    rollback: impl FnOnce() -> Result<()>,
-) -> Result<EnforcedGrants> {
-    apply_admitted_grants_with_rollback(
-        backend,
-        vm_id,
-        admitted,
-        emitter,
-        rollback,
-        FailureAuditPolicy::OwnedAfterConfirmedRollback,
-    )
-}
-
 fn apply_admitted_grants_with_rollback(
     backend: &AnyBackend,
     vm_id: &VmId,

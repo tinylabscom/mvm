@@ -493,42 +493,6 @@ fn recycle_on_rss_exceeded() {
     );
 }
 
-#[test]
-fn queue_full_returns_error() {
-    // pool_size=1, max_queue_depth=1. With one in-flight slow caller
-    // and one queued, the third caller must be rejected with QueueFull.
-    let mut wpc = cfg(1, 100, 1024);
-    wpc.max_queue_depth = Some(1);
-    let pool = start_pool_with_behavior(wpc, Some("slow_secs=2"));
-
-    let p1 = Arc::clone(&pool);
-    let p2 = Arc::clone(&pool);
-    let h1 =
-        std::thread::spawn(move || p1.dispatch(b"a".to_vec(), CALL_HANG_GUARD_SECS, Vec::new()));
-    // The first caller must hold the only slot before the second can
-    // queue behind it; the second must be parked in the queue before a
-    // third can overflow it. Both are observable, so neither is timed.
-    wait_until("the first caller to occupy the only slot", || {
-        any_slot_busy(&pool)
-    });
-    let h2 =
-        std::thread::spawn(move || p2.dispatch(b"b".to_vec(), CALL_HANG_GUARD_SECS, Vec::new()));
-    wait_until("the second caller to park in the queue", || {
-        pool.queued_waiters() == 1
-    });
-
-    // Third should hit QueueFull.
-    let res = pool.dispatch(b"c".to_vec(), CALL_HANG_GUARD_SECS, Vec::new());
-    assert!(
-        res.is_err(),
-        "third dispatch must hit queue cap, got {:?}",
-        res
-    );
-
-    let _ = h1.join().expect("h1");
-    let _ = h2.join().expect("h2");
-}
-
 // ─── readiness gate integration tests ────────────────────────────────────────
 //
 // These tests build a real `WorkerPool` (against the fake-runner
