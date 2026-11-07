@@ -107,8 +107,13 @@ pub(crate) fn findings(workspace: &Path) -> Result<Vec<String>> {
     // This module is compiled only for tests and the explicit test-support feature.
     // Its current-exe spawn runs the exact test binary, not the application CLI.
     let test_env_is_gated =
-        std::fs::read_to_string(workspace.join("crates/mvm-core/src/util/mod.rs"))?
-            .contains("#[cfg(any(test, feature = \"test-support\"))]\npub mod test_env;");
+        match std::fs::read_to_string(workspace.join("crates/mvm-core/src/util/mod.rs")) {
+            Ok(source) => {
+                source.contains("#[cfg(any(test, feature = \"test-support\"))]\npub mod test_env;")
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => return Err(err.into()),
+        };
     for_each_file(&workspace.join("crates"), None, &mut |path, text| {
         let rel = path
             .strip_prefix(workspace)
