@@ -11,6 +11,8 @@ itself never runs as root, and there is no usable root account inside the
 guest. The build-time no-setuid-root check and the runtime euid witness
 this ADR requires do not exist yet.
 
+Open follow-ups that bear on this posture and stay visible here: [#2101](https://github.com/tinylabscom/mvm/issues/2101) (the OCI workload process runs with `NoNewPrivs=0` and a full capability bounding set), [#4612](https://github.com/tinylabscom/mvm/issues/4612) (Firecracker canonical custody review follow-ups) and [#4819](https://github.com/tinylabscom/mvm/issues/4819) (binding the claim-time layout check to the descriptors Firecracker holds open). The stronger runtime-never-root claim above is not promoted from the narrower shipped anti-escalation guarantee.
+
 ## Context
 
 mvm's existing anti-escalation posture is narrow: no guest binary can
