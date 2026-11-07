@@ -2682,13 +2682,12 @@ proves identity and integrity, not safety.
 
 The workload pack commands `pack ls`, `pack rm`, and `pack update ns/name[@version]`
 use the signed registry-pack cache and lockfile. Existing `pack registry`
-commands remain available. The former system-cache commands are now grouped
-under `pack system`; their original `pack list`, `pack rollback`, `pack prune`,
-`pack download KIND`, and `pack update KIND` spellings remain compatible.
-`pack update` selects the system cache only for the exact class names
-`builder`, `runtime`, `dev-image`, and `extension`; a namespaced reference
-selects a workload pack. Other targets are rejected. This command migration
-does not change pack trust or establish any pack as official.
+commands remain available. The system-cache commands live only under
+`pack system` (`list`, `rollback`, `prune`); the earlier top-level spellings
+`pack list`, `pack rollback`, `pack prune`, `pack download` and `pack update KIND`
+were removed. `pack update` takes a namespaced workload-pack reference; other
+targets are rejected. This command migration does not change pack trust or
+establish any pack as official.
 
 #### Install a signed local candidate
 
