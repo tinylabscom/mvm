@@ -384,19 +384,6 @@ const fn host_library_error(
 /// half-alive.
 pub const STATUS_OK: i32 = mvm_host_services::MVM_HSVC_OK;
 
-/// The status → error-type mapping, in registry order. `MVM_HSVC_OK` has
-/// no entry: it is not a failure.
-pub fn status_mapping() -> impl Iterator<Item = (i32, &'static str)> {
-    REGISTRY
-        .iter()
-        .filter_map(|e| e.status.map(|status| (status, e.name)))
-}
-
-/// The code → error-type mapping, in registry order.
-pub fn code_mapping() -> impl Iterator<Item = (&'static str, &'static str)> {
-    all().filter_map(|e| e.code.map(|code| (code, e.name)))
-}
-
 /// Every error type: the host-services family, Tier C's, then the host
 /// library's.
 pub fn all() -> impl Iterator<Item = &'static SdkErrorType> {
@@ -416,48 +403,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    #[test]
-    fn every_status_maps_to_exactly_one_type() {
-        let mut seen = BTreeSet::new();
-        for (status, name) in status_mapping() {
-            assert!(
-                seen.insert(status),
-                "status {status} mapped twice (at {name})"
-            );
-        }
-        // Every non-OK MVM_HSVC_* code must be reachable, or a broker
-        // failure would surface as an untyped fallback.
-        let expected: BTreeSet<i32> = (1..=8).collect();
-        assert_eq!(seen, expected, "status coverage gap");
-    }
-
-    /// Every code a host-library error body can carry has exactly one type,
-    /// so no failure the library reports surfaces as an untyped fallback.
-    #[test]
-    fn every_host_library_code_maps_to_exactly_one_type() {
-        use mvm_core::error_codes as c;
-        let codes: Vec<&str> = code_mapping().map(|(code, _)| code).collect();
-        let unique: BTreeSet<&str> = codes.iter().copied().collect();
-        assert_eq!(codes.len(), unique.len(), "a code is mapped twice");
-        let expected: BTreeSet<&str> = [
-            c::NOT_FOUND,
-            c::INVALID_SPEC,
-            c::BACKEND_ERROR,
-            c::UNAUTHORIZED,
-            c::CONFLICT,
-            c::REJECTED,
-            c::UNAVAILABLE,
-            c::RECOVERY_REQUIRED,
-            c::INVALID_INPUT,
-            c::ABI_NOT_NEGOTIATED,
-            c::EMBEDDER,
-            c::INTERNAL,
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(unique, expected);
-    }
-
     /// A type is keyed by a status or by a code, never both: the two maps
     /// answer different transports.
     #[test]
@@ -469,14 +414,6 @@ mod tests {
                 e.name
             );
         }
-    }
-
-    #[test]
-    fn ok_is_not_an_error_type() {
-        assert!(
-            !status_mapping().any(|(status, _)| status == mvm_host_services::MVM_HSVC_OK),
-            "MVM_HSVC_OK must not map to an error type"
-        );
     }
 
     #[test]

@@ -215,12 +215,6 @@ impl EffectiveAuthority {
         self.tools.contains(&tool)
     }
 
-    /// Whether `scope` may be read.
-    #[must_use]
-    pub fn permits_scope(&self, scope: ObservationScope) -> bool {
-        self.scopes.contains(&scope)
-    }
-
     /// Tools in stable order.
     #[must_use]
     pub fn tools(&self) -> Vec<ToolId> {

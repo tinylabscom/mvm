@@ -120,15 +120,6 @@ pub struct BackendLaunchTrace {
 }
 
 impl BackendLaunchTrace {
-    /// The recorded duration of one phase, if the launch ran it.
-    #[must_use]
-    pub fn phase_ms(&self, name: &str) -> Option<f64> {
-        self.phases
-            .iter()
-            .find(|phase| phase.name == name)
-            .map(|phase| phase.ms)
-    }
-
     /// Sum of every recorded phase. The phases partition `start`, so this
     /// should track the caller's own span for the same call; a large gap means
     /// a phase is unmarked.
@@ -419,45 +410,6 @@ mod tests {
         rec.mark("preflight");
         rec.mark("boot_confirm");
         assert!(rec.finish().is_none());
-    }
-
-    #[test]
-    fn marks_become_ordered_named_spans() {
-        let mut rec = LaunchTraceRecorder::with_enabled("hvf", true);
-        std::thread::sleep(Duration::from_millis(15));
-        rec.mark("preflight");
-        rec.mark("boot_confirm");
-        let trace = rec.finish().expect("enabled recorder yields a trace");
-
-        assert_eq!(trace.backend, "hvf");
-        assert_eq!(
-            trace
-                .phases
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<&str>>(),
-            vec!["preflight", "boot_confirm"]
-        );
-        let preflight = trace.phase_ms("preflight").expect("preflight recorded");
-        assert!(preflight >= 15.0, "preflight measured {preflight}ms");
-        // The second mark closes a span that began at the first, so it does not
-        // re-count the sleep.
-        let confirm = trace
-            .phase_ms("boot_confirm")
-            .expect("boot_confirm recorded");
-        assert!(
-            confirm < preflight,
-            "spans must not overlap: {confirm} vs {preflight}"
-        );
-        assert!((trace.total_ms() - (preflight + confirm)).abs() < 1e-9);
-    }
-
-    #[test]
-    fn an_unrecorded_phase_reads_as_absent() {
-        let mut rec = LaunchTraceRecorder::with_enabled("hvf", true);
-        rec.mark("preflight");
-        let trace = rec.finish().unwrap();
-        assert_eq!(trace.phase_ms("boot_confirm"), None);
     }
 
     #[test]

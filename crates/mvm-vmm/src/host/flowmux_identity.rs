@@ -192,8 +192,12 @@ impl FlowMuxIdentityMaterial {
     /// Write a fresh identity and return the digest of the exact assembled
     /// buffer, so a fork can bind the replacement without reopening its path.
     pub fn write_drive_measured(&self, path: &Path) -> Result<String> {
-        self.guest
-            .write_drive_with_digest(path, &IdentityDriveContents::default())
+        let image = self
+            .guest
+            .write_drive_image(path, &IdentityDriveContents::default())?;
+        Ok(mvm_core::crypto::image_verify::sha256_generated_bytes(
+            &image,
+        )?)
     }
 
     /// Build the identity drive carrying `contents` alongside this boot's keys.
@@ -221,14 +225,16 @@ impl GuestIdentityMaterial {
         path: &Path,
         contents: &IdentityDriveContents<'_>,
     ) -> Result<()> {
-        self.write_drive_with_digest(path, contents).map(|_| ())
+        self.write_drive_image(path, contents).map(|_| ())
     }
 
-    fn write_drive_with_digest(
+    /// Write the drive and hand back the exact bytes written, so only a caller
+    /// that binds a digest pays to hash them.
+    fn write_drive_image(
         &self,
         path: &Path,
         contents: &IdentityDriveContents<'_>,
-    ) -> Result<String> {
+    ) -> Result<Vec<u8>> {
         use mvm_fs::ext4::{BuildOptions, Node, Owner, build_image};
 
         if let Some(parent) = path.parent() {
@@ -298,9 +304,7 @@ impl GuestIdentityMaterial {
         // syncing it only added two fsyncs to every cold boot.
         write_private_ephemeral(path, &image)
             .with_context(|| format!("writing the FlowMux identity drive to {}", path.display()))?;
-        Ok(mvm_core::crypto::image_verify::sha256_reader(
-            image.as_slice(),
-        )?)
+        Ok(image)
     }
 }
 
@@ -441,6 +445,18 @@ mod tests {
             b.spawn_config().guest_verifying_key_base64,
             "a per-boot identity must not repeat across boots"
         );
+    }
+
+    #[test]
+    fn writing_an_identity_drive_is_not_artifact_hashing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(IDENTITY_DRIVE_FILE);
+        let material = FlowMuxIdentityMaterial::mint("cold", &host_key()).unwrap();
+        let hashed = || mvm_core::launch_trace::recorded_acquisition().artifact_bytes_hashed;
+        let before = hashed();
+        material.write_drive(&path).unwrap();
+        material.write_drive_measured(&path).unwrap();
+        assert_eq!(hashed(), before);
     }
 
     #[test]

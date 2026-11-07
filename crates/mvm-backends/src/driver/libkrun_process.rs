@@ -14,11 +14,10 @@
 //! progress. Nothing in it is legacy: it is the live path on Linux and on
 //! macOS 13-25.
 
-use anyhow::{Context, Result, anyhow, bail};
-use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig};
-use mvm_core::config::vm_console_log;
+use anyhow::{Context, Result, anyhow};
+use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorBaseConfig};
 use mvm_core::kernel_format::KernelFormat;
-use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbySpec, VmStartConfig};
+use mvm_core::vm_backend::{StandbySpec, VmStartConfig};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -131,39 +130,6 @@ pub fn standby_base_config(spec: &StandbySpec) -> SupervisorBaseConfig {
     }
 }
 
-/// Translate a [`StandbyClaim`] into the `SupervisorAttachConfig`, echoing the
-/// standby's binding nonce. `plan_json`/`bundle_json` decode to `serde_json::Value`
-/// carriers (the same shape `SupervisorConfig.plan` uses).
-pub fn standby_attach_config(
-    claim: &StandbyClaim,
-    binding_nonce: String,
-) -> std::result::Result<SupervisorAttachConfig, StandbyError> {
-    let plan: serde_json::Value = serde_json::from_str(&claim.plan_json)
-        .map_err(|e| StandbyError::ClaimFailed(format!("decode plan_json: {e}")))?;
-    let bundle = match &claim.bundle_json {
-        Some(b) => Some(
-            serde_json::from_str(b)
-                .map_err(|e| StandbyError::ClaimFailed(format!("decode bundle_json: {e}")))?,
-        ),
-        None => None,
-    };
-    let network_policy = Some(
-        serde_json::to_value(&claim.network_policy)
-            .map_err(|e| StandbyError::ClaimFailed(format!("encode network_policy: {e}")))?,
-    );
-    Ok(SupervisorAttachConfig {
-        binding_nonce,
-        rootfs_path: claim.rootfs_path.clone(),
-        tenant_id: claim.tenant_id.clone(),
-        audit_dir: claim.audit_dir.clone(),
-        gateway_audit_socket: claim.gateway_audit_socket.clone(),
-        gateway_events_socket: claim.gateway_events_socket.clone(),
-        plan,
-        bundle,
-        network_policy,
-    })
-}
-
 pub(crate) fn libkrun_kernel_for_host(kernel: &str) -> Result<(String, KernelFormat)> {
     let path = Path::new(kernel);
     if cfg!(target_arch = "x86_64") && path.exists() {
@@ -190,31 +156,6 @@ pub fn libkrun_runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &s
         config.runtime_overlay_verity_path.as_deref()?,
         config.runtime_overlay_roothash.as_deref()?,
     ))
-}
-
-pub fn ensure_libkrun_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
-    // A sealed boot (verity metadata present) must be fully verity capable — a
-    // missing initrd fails closed rather than downgrading to an unverified root —
-    // and carries the dm-verity overlay triple its initramfs mounts. A non-verity
-    // dev boot instead mounts a plain read-only overlay from `/dev/vdb`.
-    let verity_intended = config.roothash.is_some() || config.verity_path.is_some();
-    if verity_intended {
-        if !libkrun_verity_enabled(config) {
-            bail!(
-                "required-overlay libkrun boot requires verity metadata plus an initrd \
-                 (`--initrd` or sibling rootfs.initrd)"
-            );
-        }
-        if libkrun_runtime_overlay(config).is_none() {
-            bail!("required-overlay libkrun boot requires the runtime overlay artifact triple");
-        }
-    } else if mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_none() {
-        bail!(
-            "required-overlay libkrun boot requires the runtime overlay artifact triple \
-             (a non-verity boot mounts it as a plain read-only /dev/vdb)"
-        );
-    }
-    Ok(())
 }
 
 /// Attach the workload rootfs (plus its dm-verity sidecar and the runtime
@@ -276,107 +217,6 @@ fn attach_user_volume(
     )
 }
 
-/// Assemble the per-workload [`KrunContext`]: the workload-independent base
-/// (kernel + resources + vsock + endpoint), shared verbatim with the standby
-/// spawn so the two paths can't drift, plus the cold-path additions —
-/// console capture, the workload rootfs, the
-/// dev-console data ports, and any user-supplied volumes.
-pub fn build_workload_krun_context(
-    config: &VmStartConfig,
-    kernel: &str,
-    kernel_format: KernelFormat,
-    vcpus: u8,
-    cmdline: &str,
-    state_dir: &Path,
-) -> Result<KrunContext> {
-    let mut krun = krun_context_base(
-        &config.name,
-        kernel,
-        vcpus,
-        config.memory_mib,
-        cmdline,
-        state_dir,
-    );
-    krun = krun
-        .with_kernel_format(kernel_format)
-        .with_console_output(vm_console_log(&config.name).display().to_string());
-    krun = attach_workload_rootfs(krun, config);
-
-    // A dev-accessible managed machine (`machine run -t` / `machine shell`)
-    // pre-opens the interactive-console data range. libkrun
-    // binds one host UDS listener per registered port (`listen=true`, host
-    // dials → guest's vsock server), so the agent's dynamic
-    // `CONSOLE_PORT_BASE + session_id` data port is unreachable unless it was
-    // declared here. Left out of `krun_context_base` so the warm-standby base
-    // (no `VmStartConfig` yet) stays unchanged.
-    if config.dev_console {
-        for port in mvm_agentd::vsock::dev_console_data_ports() {
-            krun = krun.add_vsock_port(port);
-        }
-    }
-
-    attach_user_volumes(krun, config)
-}
-
-/// Validate the tenant label and resolve the gateway-bridge audit substrate
-/// (paths).
-///
-/// `tenant_id` flows into the per-VM audit-chain path
-/// (`workload_audit_path`) that the host-services broker spawns against —
-/// even on the legacy/no-bridge path where the substrate stays all-None. So
-/// the tenant is validated here regardless of `plan_json`: an unsafe tenant
-/// (e.g. a path-traversal label) must be refused before `start()` reaches
-/// the broker spawn, independent of whether the gateway bridge is engaged. A
-/// path-injection guard, not just the bridge's input check.
-///
-/// Substrate resolution is gated on `plan_json` — the bridge supervisor's
-/// actual input — NOT on `tenant_id`: a substrate without a plan is what the
-/// supervisor rejects as "cfg.plan missing on bridge path". An admitted
-/// workload carries both `tenant_id` and `plan_json`, so the default
-/// workload path reaches the enforcing bridge; dev/builder starts keep
-/// `plan_json` absent and stay on the legacy `run_supervisor` path with an
-/// all-None substrate. (`compute_audit_substrate` re-validates the tenant —
-/// harmless after the guard above.)
-pub fn resolve_audit_substrate(
-    config: &VmStartConfig,
-) -> Result<mvm_vmm::host::audit_substrate::AuditSubstrate> {
-    if let Some(tenant) = config.tenant_id.as_deref() {
-        mvm_vmm::host::audit_substrate::validate_tenant_id(tenant)?;
-    }
-    Ok(if config.plan_json.is_some() {
-        mvm_vmm::host::audit_substrate::compute_audit_substrate(
-            &config.name,
-            config.tenant_id.as_deref(),
-        )?
-    } else {
-        mvm_vmm::host::audit_substrate::AuditSubstrate::default()
-    })
-}
-
-/// Parse the signed-plan + bundle envelopes from `VmStartConfig`.
-/// `libkrun_sys::SupervisorConfig` carries them as `Option<serde_json::Value>`
-/// so the supervisor can re-verify the envelope without typed coupling
-/// to `mvm_core::plan` at the parse boundary.
-pub fn parse_plan_and_bundle(
-    config: &VmStartConfig,
-) -> Result<(Option<serde_json::Value>, Option<serde_json::Value>)> {
-    let plan = match config.plan_json.as_deref() {
-        Some(s) => Some(
-            serde_json::from_str(s)
-                .map_err(|e| anyhow!("parse VmStartConfig.plan_json as JSON: {e}"))?,
-        ),
-        None => None,
-    };
-    let bundle = match config.bundle_json.as_deref() {
-        Some(s) => Some(
-            serde_json::from_str(s)
-                .map_err(|e| anyhow!("parse VmStartConfig.bundle_json as JSON: {e}"))?,
-        ),
-        None => None,
-    };
-    Ok((plan, bundle))
-}
-
 pub fn supervisor_config_dump_path(state_dir: &Path) -> PathBuf {
     state_dir.join("supervisor-config.json")
 }
@@ -402,76 +242,6 @@ pub fn read_last_bytes_of(path: &Path, max_bytes: u64) -> std::io::Result<String
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-pub fn summarize_supervisor_config(path: &Path) -> String {
-    if !path.exists() {
-        return format!("supervisor-config.json: missing ({})", path.display());
-    }
-    let body = match std::fs::read_to_string(path) {
-        Ok(body) => body,
-        Err(err) => {
-            return format!(
-                "supervisor-config.json: present but unreadable ({}): {err}",
-                path.display()
-            );
-        }
-    };
-    if body.trim().is_empty() {
-        return format!(
-            "supervisor-config.json: present but empty ({})",
-            path.display()
-        );
-    }
-    let value: serde_json::Value = match serde_json::from_str(&body) {
-        Ok(value) => value,
-        Err(err) => {
-            return format!(
-                "supervisor-config.json: present but invalid json ({}): {err}",
-                path.display()
-            );
-        }
-    };
-    let kernel_path = value
-        .pointer("/krun/kernel_path")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<none>");
-    let rootfs_path = value
-        .pointer("/krun/rootfs_path")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<none>");
-    let initramfs_path = value
-        .pointer("/krun/initramfs_path")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<none>");
-    let networking = value
-        .pointer("/krun/networking")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<none>");
-    let disks = value
-        .pointer("/krun/disks")
-        .and_then(serde_json::Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let cmdline = value
-        .pointer("/krun/cmdline")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<none>");
-    let console_output_path = value
-        .pointer("/krun/console_output_path")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<none>");
-    format!(
-        "supervisor-config.json: {}\n  kernel_path={kernel_path}\n  rootfs_path={rootfs_path}\n  initramfs_path={initramfs_path}\n  networking={networking}\n  console_output_path={console_output_path}\n  disks={} [{}]\n  cmdline={cmdline}",
-        path.display(),
-        disks.len(),
-        disks.join(", ")
-    )
-}
-
 pub fn diagnose_log_path(label: &str, path: &Path) -> String {
     if !path.exists() {
         return format!("{label}: missing ({})", path.display());
@@ -492,51 +262,6 @@ pub fn diagnose_log_path(label: &str, path: &Path) -> String {
             path.display()
         ),
     }
-}
-
-pub fn diagnose_vsock_sockets(state_dir: &Path) -> String {
-    let mut sockets = match std::fs::read_dir(state_dir) {
-        Ok(entries) => entries
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let file_name = entry.file_name();
-                let name = file_name.to_str()?;
-                (name.starts_with("vsock-") && name.ends_with(".sock")).then(|| name.to_string())
-            })
-            .collect::<Vec<_>>(),
-        Err(err) => {
-            return format!(
-                "vsock sockets: unreadable state dir ({}): {err}",
-                state_dir.display()
-            );
-        }
-    };
-    sockets.sort();
-    if sockets.is_empty() {
-        format!("vsock sockets: none under {}", state_dir.display())
-    } else {
-        format!(
-            "vsock sockets under {}: {}",
-            state_dir.display(),
-            sockets.join(", ")
-        )
-    }
-}
-
-pub fn libkrun_startup_diagnostics(state_dir: &Path) -> String {
-    let console_log = state_dir.join("console.log");
-    let supervisor_stderr = state_dir.join("supervisor.stderr.log");
-    let supervisor_lifecycle = state_dir.join("supervisor.lifecycle.log");
-    let supervisor_config = supervisor_config_dump_path(state_dir);
-    format!(
-        "libkrun vm state dir: {}\n{}\n{}\n{}\n{}\n{}",
-        state_dir.display(),
-        diagnose_vsock_sockets(state_dir),
-        diagnose_log_path("supervisor.lifecycle.log", &supervisor_lifecycle),
-        summarize_supervisor_config(&supervisor_config),
-        diagnose_log_path("supervisor.stderr.log", &supervisor_stderr),
-        diagnose_log_path("console.log", &console_log),
-    )
 }
 
 // ─── helpers ───────────────────────────────────────────────────────

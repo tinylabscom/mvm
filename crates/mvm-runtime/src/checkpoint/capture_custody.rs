@@ -109,9 +109,6 @@ impl CaptureCustodyFailure {
     pub fn error(&self) -> &anyhow::Error {
         self.primary.as_ref().expect("capture error present")
     }
-    pub fn resume_error(&self) -> Option<&anyhow::Error> {
-        self.resume.as_ref()
-    }
 
     /// Storage release after actual synchronous writer completion, or before
     /// writer invocation. This is not native VM terminal/stop evidence.

@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use mvm_core::template::{template_current_symlink, template_dir, template_revision_dir};
 use tracing::{instrument, warn};
 
-use super::artifacts::{Checksums, current_revision_id, sha256_hex};
+use super::artifacts::{Checksums, sha256_hex};
 use crate::vm::template::registry::TemplateRegistry;
 
 /// Download a template revision's artifacts from the registry to a local directory.
@@ -78,69 +78,6 @@ pub fn registry_download_revision(
 }
 
 #[instrument(skip_all, fields(template_id = id))]
-pub fn template_push(id: &str, revision: Option<&str>) -> Result<()> {
-    let registry = TemplateRegistry::from_env()?.context("Template registry not configured")?;
-    registry.require_configured()?;
-
-    let rev = match revision {
-        Some(r) => r.to_string(),
-        None => current_revision_id(id)?,
-    };
-
-    let template_dir = template_dir(id);
-    let rev_dir = std::path::PathBuf::from(template_revision_dir(id, &rev));
-
-    let files = [
-        (
-            "template.json",
-            std::path::PathBuf::from(format!("{}/template.json", template_dir)),
-        ),
-        ("revision.json", rev_dir.join("revision.json")),
-        ("vmlinux", rev_dir.join("vmlinux")),
-        ("rootfs.ext4", rev_dir.join("rootfs.ext4")),
-        ("fc-base.json", rev_dir.join("fc-base.json")),
-    ];
-
-    // Compute checksums for integrity.
-    let mut sums = std::collections::BTreeMap::new();
-    for (name, path) in &files {
-        let hex = sha256_hex(path)?;
-        sums.insert(name.to_string(), hex);
-    }
-    let checksums = Checksums {
-        schema_version: 1,
-        template_id: id.to_string(),
-        revision_hash: rev.clone(),
-        files: sums,
-    };
-    let checksums_json = serde_json::to_vec_pretty(&checksums)?;
-    // Store checksums locally alongside the revision so `template verify` works offline.
-    mvm_core::atomic_io::atomic_write(&rev_dir.join("checksums.json"), &checksums_json)
-        .with_context(|| {
-            format!(
-                "Failed to write checksums.json for template {} revision {}",
-                id, rev
-            )
-        })?;
-
-    // Upload revision objects first, then current pointer.
-    for (name, path) in &files {
-        let key = registry.key_revision_file(id, &rev, name);
-        let data =
-            std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-        registry.put_bytes(&key, data)?;
-    }
-    registry.put_bytes(
-        &registry.key_revision_file(id, &rev, "checksums.json"),
-        checksums_json,
-    )?;
-    registry.put_text(&registry.key_current(id), &format!("{}\n", rev))?;
-
-    tracing::info!(template = %id, revision = %rev, "Pushed template revision to registry");
-    Ok(())
-}
-
-#[instrument(skip_all, fields(template_id = id))]
 pub fn template_pull(id: &str, revision: Option<&str>) -> Result<()> {
     let registry = TemplateRegistry::from_env()?.context("Template registry not configured")?;
     registry.require_configured()?;
@@ -186,33 +123,5 @@ pub fn template_pull(id: &str, revision: Option<&str>) -> Result<()> {
     std::os::unix::fs::symlink(format!("revisions/{}", rev), &link)?;
 
     tracing::info!(template = %id, revision = %rev, "Pulled template revision from registry");
-    Ok(())
-}
-
-#[instrument(skip_all, fields(template_id = id))]
-pub fn template_verify(id: &str, revision: Option<&str>) -> Result<()> {
-    let rev = match revision {
-        Some(r) => r.to_string(),
-        None => current_revision_id(id)?,
-    };
-    let rev_dir = std::path::PathBuf::from(template_revision_dir(id, &rev));
-    let sums_path = rev_dir.join("checksums.json");
-    let sums_bytes =
-        std::fs::read(&sums_path).with_context(|| format!("Missing {}", sums_path.display()))?;
-    let checksums: Checksums = serde_json::from_slice(&sums_bytes)?;
-
-    for (name, expected_hex) in &checksums.files {
-        let p = rev_dir.join(name);
-        let got = sha256_hex(&p)?;
-        if &got != expected_hex {
-            anyhow::bail!(
-                "checksum mismatch for {} (expected {}, got {})",
-                name,
-                expected_hex,
-                got
-            );
-        }
-    }
-
     Ok(())
 }

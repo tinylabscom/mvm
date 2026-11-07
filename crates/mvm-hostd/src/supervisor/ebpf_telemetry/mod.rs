@@ -35,12 +35,8 @@ pub enum TelemetryEvent {
 }
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 
-use mvm_core::observability::metrics::global;
 use tracing::warn;
-
-use crate::supervisor::audit_recorder::{EventCategory, Recorder, RecorderError};
 
 /// Manages per-VM egress telemetry probes.
 pub struct EbpfTelemetryManager {
@@ -104,53 +100,6 @@ impl EbpfTelemetryManager {
         if let Some(handle) = self.handles.remove(vm_name) {
             self.telemetry.detach(handle);
         }
-    }
-
-    /// Poll pending events from all attached probes and update metrics /
-    /// audit state.
-    pub async fn poll_and_emit(&mut self, recorder: &Recorder) -> Result<(), RecorderError> {
-        let handles: Vec<_> = self.handles.values().collect();
-        for handle in handles {
-            for event in self.telemetry.poll_events(handle) {
-                self.record_event(event, recorder).await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn record_event(
-        &self,
-        event: TelemetryEvent,
-        recorder: &Recorder,
-    ) -> Result<(), RecorderError> {
-        match event {
-            TelemetryEvent::Egress(evt) => {
-                global()
-                    .vsock_egress_events_total
-                    .fetch_add(1, Ordering::Relaxed);
-                global()
-                    .vsock_egress_packets_total
-                    .fetch_add(1, Ordering::Relaxed);
-                global()
-                    .vsock_egress_bytes_total
-                    .fetch_add(evt.bytes, Ordering::Relaxed);
-
-                // Emit an unbound Flow audit event. This is host-observed
-                // telemetry, not a policy decision, so it is recorded without
-                // an ExecutionPlan binding.
-                recorder
-                    .record_unbound(
-                        EventCategory::Flow,
-                        "flow.egress.observed",
-                        [
-                            ("destination".to_string(), evt.destination.to_string()),
-                            ("bytes".to_string(), evt.bytes.to_string()),
-                        ],
-                    )
-                    .await?;
-            }
-        }
-        Ok(())
     }
 }
 
