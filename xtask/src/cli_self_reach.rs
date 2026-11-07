@@ -104,6 +104,11 @@ fn cli_side_dependency(manifest: &str) -> Option<&'static str> {
 
 pub(crate) fn findings(workspace: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
+    // This module is compiled only for tests and the explicit test-support feature.
+    // Its current-exe spawn runs the exact test binary, not the application CLI.
+    let test_env_is_gated =
+        std::fs::read_to_string(workspace.join("crates/mvm-core/src/util/mod.rs"))?
+            .contains("#[cfg(any(test, feature = \"test-support\"))]\npub mod test_env;");
     for_each_file(&workspace.join("crates"), None, &mut |path, text| {
         let rel = path
             .strip_prefix(workspace)
@@ -111,6 +116,9 @@ pub(crate) fn findings(workspace: &Path) -> Result<Vec<String>> {
             .to_string_lossy()
             .replace('\\', "/");
         if rel.ends_with(".rs") {
+            if rel == "crates/mvm-core/src/util/test_env.rs" && test_env_is_gated {
+                return;
+            }
             out.extend(unguarded_cli_reach(&rel, text));
         } else if rel.ends_with("/Cargo.toml") {
             let owner = rel.split('/').nth(1).unwrap_or_default();
@@ -187,6 +195,10 @@ mod tests {
         ] {
             assert!(unguarded_cli_reach(file, src).is_none(), "{file}");
         }
+        assert!(
+            unguarded_cli_reach("crates/mvm-core/src/util/test_env.rs", src).is_some(),
+            "the test-only module must be checked if its feature gate is removed"
+        );
     }
 
     #[test]
