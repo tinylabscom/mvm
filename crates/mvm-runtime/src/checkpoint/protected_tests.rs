@@ -1064,6 +1064,10 @@ fn a_warm_claim_opens_a_protected_parent_and_keeps_nothing_opaque_beside_it() {
 
 #[test]
 fn an_abandoned_protected_capture_and_its_orphaned_objects_are_reclaimed() {
+    mvm_core::util::test_env::isolated_lock_probe(abandoned_protected_capture_fixture);
+}
+
+fn abandoned_protected_capture_fixture() {
     let tmp = tempfile::tempdir().unwrap();
     let store = protected_store(&tmp.path().join("store"));
     let kept = capture_quick(
@@ -1105,6 +1109,10 @@ fn an_abandoned_protected_capture_and_its_orphaned_objects_are_reclaimed() {
 
 #[test]
 fn uncertain_protected_staging_keeps_members_and_defers_orphan_collection() {
+    mvm_core::util::test_env::isolated_lock_probe(uncertain_protected_staging_fixture);
+}
+
+fn uncertain_protected_staging_fixture() {
     let tmp = tempfile::tempdir().unwrap();
     let store = protected_store(&tmp.path().join("store"));
     let kept = capture_quick(

@@ -1276,7 +1276,7 @@ pub(crate) mod admit_plan_tests {
 
     /// A minimal admission that really runs — signs, verifies, burns a nonce.
     /// Callers override only the fields their assertion is about.
-    pub(super) fn pinning_params<'a>(
+    pub(crate) fn pinning_params<'a>(
         rootfs: &'a std::path::Path,
         ledger: &'a InMemoryNonceLedger,
     ) -> AdmitPlanForBootParams<'a> {
@@ -1319,6 +1319,34 @@ pub(crate) mod admit_plan_tests {
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
             assets: Vec::new(),
         }
+    }
+
+    /// Admit a real libkrun plan and retain its signer and audit directories.
+    /// Only where the production signer, chain and plan live is injected.
+    pub(crate) fn admitted_libkrun(
+        vm_name: &str,
+        grants: Option<mvm_contract::grants::Grants>,
+    ) -> (AdmissionContext, tempfile::TempDir, tempfile::TempDir) {
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let rootfs_dir = tempfile::tempdir().expect("rootfs dir");
+        let rootfs = rootfs_dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
+        let ledger = InMemoryNonceLedger::new();
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            vm_name,
+            backend_name: "libkrun",
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            grants,
+            // The gate measures a declared bound against a real tier's
+            // mechanisms; admitting without one refuses rather than guessing.
+            backend_kind: Some(mvm_core::protocol::vm_backend::BackendKind::Libkrun),
+            entrypoint: ResolvedEntrypoint::unresolved("this test resolves no entrypoint"),
+            ..pinning_params(&rootfs, &ledger)
+        })
+        .expect("admission succeeds");
+        (ctx, keys_dir, audit_dir)
     }
 
     #[test]
@@ -1715,43 +1743,13 @@ pub(crate) mod admit_plan_tests {
         let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).unwrap();
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-happy",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
             boot_artifact_identity: Some(&boot_artifact),
-            cpus: 2,
-            mem_mib: 512,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Network,
             secret_release: mvm_core::plan::SecretReleasePolicy::PlanBound,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission");
         assert!(!ctx.admitted.plan_id().0.is_empty());
@@ -1787,43 +1785,12 @@ pub(crate) mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-missing",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: std::path::Path::new("/nonexistent/rootfs.ext4"),
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            ..pinning_params(std::path::Path::new("/nonexistent/rootfs.ext4"), &ledger)
         })
         .expect_err("missing rootfs must fail");
         assert!(
@@ -1874,45 +1841,17 @@ pub(crate) mod admit_plan_tests {
         ] {
             let ledger = InMemoryNonceLedger::new();
             let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-                gpu: false,
-                instructions: Default::default(),
-                outputs: Vec::new(),
                 network_mode: mode,
-                grants: None,
-                backend_kind: None,
-                tenant: "local",
                 vm_name: "vm-transport",
-                runtime_config: None,
-                backend_name: "firecracker",
-                configured_images_dir: None,
-                rootfs_path: &rootfs,
-                kernel_path: None,
-                precomputed_image_sha256: None,
-                boot_artifact_identity: None,
                 cpus: 1,
                 mem_mib: 128,
-                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-                secret_release: mvm_core::plan::SecretReleasePolicy::None,
-                secrets: Vec::new(),
-                caller_commitment: None,
-                ledger: &ledger,
                 keys_dir: Some(keys_dir.path()),
                 audit_dir: Some(audit_dir.path()),
-                policy_dir: None,
-                bundle_pin: None,
-                bundle_posture: None,
-                deps_volume: None,
-                shares: Vec::new(),
-                assets: Vec::new(),
-                redaction: mvm_core::policy::RedactionPolicy::default(),
-                tools: Default::default(),
-                network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-                agent_verb_override: vec![],
                 restrict_agent_verbs: false,
-                services: Vec::new(),
                 entrypoint: crate::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                     "test",
                 ),
+                ..pinning_params(&rootfs, &ledger)
             })
             .expect("admit");
 
@@ -1937,83 +1876,21 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let a1 = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-1",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            services: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            assets: Vec::new(),
-            restrict_agent_verbs: true,
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            ..pinning_params(&rootfs, &ledger)
         })
         .unwrap();
         let a2 = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-2",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .unwrap();
         assert_ne!(a1.admitted.plan_id(), a2.admitted.plan_id());
@@ -2031,43 +1908,12 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), vm_name.as_bytes());
         let ledger = InMemoryNonceLedger::new();
         admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name,
-            backend_name: "firecracker",
-            runtime_config: None,
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir),
             audit_dir: Some(audit_dir),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission")
     }
@@ -2184,43 +2030,13 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"local-default-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-local-default",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             policy_dir: Some(policy_dir.path()),
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission");
 
@@ -2251,43 +2067,14 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"allow-list-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-allow-list",
-            runtime_config: None,
             backend_name: "libkrun",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             network_policy: NetworkPolicy::allow_list(vec![HostPort::new("93.184.216.34", 443)]),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission");
 
@@ -2335,43 +2122,14 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"unrestricted-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-unrestricted",
-            runtime_config: None,
             backend_name: "hvf",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::unrestricted(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission");
 
@@ -2517,32 +2275,11 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            boot_artifact_identity: None,
-            tenant: "local",
             vm_name: "vm-non-shell-granted",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
             shares: vec![mvm_core::plan::HostShareGrant {
                 tag: "uvol0".into(),
                 host_path: share_dir.path().to_string_lossy().into_owned(),
@@ -2552,19 +2289,12 @@ pub(crate) mod admit_plan_tests {
                 encrypted: false,
                 content_sha256: None,
             }],
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
-            grants: None,
-            backend_kind: None,
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec!["python".to_string(), "-m".to_string(), "app".to_string()],
                 shebang: None,
             },
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("a non-shell entrypoint must not be refused");
 
@@ -2588,42 +2318,12 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            boot_artifact_identity: None,
-            tenant: "local",
             vm_name: "vm-shell-ungranted",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
             services: Vec::new(), // no host.stream.v1 grant
-            grants: None,
-            backend_kind: None,
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec![
                     "/bin/sh".to_string(),
@@ -2632,6 +2332,7 @@ pub(crate) mod admit_plan_tests {
                 ],
                 shebang: None,
             },
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("a shell entrypoint must still boot when nothing granted it input");
 
@@ -2648,42 +2349,12 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            boot_artifact_identity: None,
-            tenant: "local",
             vm_name: "vm-shell-granted",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
-            grants: None,
-            backend_kind: None,
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec![
                     "/bin/sh".to_string(),
@@ -2692,6 +2363,7 @@ pub(crate) mod admit_plan_tests {
                 ],
                 shebang: None,
             },
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect_err("a shell entrypoint carrying the grant must be refused");
 
@@ -2736,43 +2408,14 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            boot_artifact_identity: None,
-            tenant: "local",
             vm_name: "vm-entrypoint-unknown",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
-            grants: None,
-            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect_err("an unresolved entrypoint carrying the grant must be refused");
 
@@ -2801,43 +2444,13 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            boot_artifact_identity: None,
-            tenant: "local",
             vm_name: "vm-entrypoint-unknown-ungranted",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("an unresolved entrypoint that asked for nothing must still boot");
 
@@ -2858,42 +2471,13 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            boot_artifact_identity: None,
-            tenant: "local",
             vm_name: "vm-dev-shell",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            assets: Vec::new(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            ledger: &ledger,
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
             restrict_agent_verbs: false,
             services: vec![stream_grant_service()],
-            grants: None,
-            backend_kind: None,
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec![
                     "/bin/sh".to_string(),
@@ -2902,6 +2486,7 @@ pub(crate) mod admit_plan_tests {
                 ],
                 shebang: None,
             },
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("dev-tier runs are out of the shell-entrypoint refusal's scope");
 
@@ -3190,6 +2775,7 @@ mod entrypoint_shape_tests {
 
 #[cfg(test)]
 mod grant_surface_tests {
+    use super::admit_plan_tests::pinning_params;
     use super::*;
     use crate::admission::run_grants::{GrantInputs, resolve_run_grants};
     use mvm_contract::grants::CpuGrant;
@@ -3276,32 +2862,10 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-shares",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
             cpus: 1,
-            mem_mib: 512,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
             shares: vec![
                 share(
                     "uvol0",
@@ -3325,16 +2889,9 @@ allow_hosts = ["localhost:8443"]
                     None,
                 ),
             ],
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
             restrict_agent_verbs: false,
-            services: Vec::new(),
-            grants: None,
             backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission");
 
@@ -3388,46 +2945,18 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-granted",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
             cpus: 4,
-            mem_mib: 512,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             network_policy: resolved.network_policy.clone(),
-            agent_verb_override: vec![],
             // A dev posture: the grant is recorded and, on a tier without a
             // CPU mechanism, warned about rather than refused. The refusal
             // half is `plan_admission`'s to test; this one is about reach.
             restrict_agent_verbs: false,
-            services: Vec::new(),
             grants: resolved.plan_grants.clone(),
             backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission");
 
@@ -3566,43 +3095,15 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-over-ceiling",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
             cpus: 4,
-            mem_mib: 512,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             network_policy: resolved.network_policy.clone(),
-            agent_verb_override: vec![],
             restrict_agent_verbs: false,
-            services: Vec::new(),
             grants: resolved.plan_grants.clone(),
             backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect_err("1500 millicores on a 1000-millicore host must be refused");
         assert!(
@@ -3638,43 +3139,13 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-ungranted",
-            runtime_config: None,
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
-            cpus: 2,
-            mem_mib: 512,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             network_policy: resolved.network_policy.clone(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
             grants: resolved.plan_grants.clone(),
             backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission");
         assert_eq!(ctx.admitted.plan().grants, None);

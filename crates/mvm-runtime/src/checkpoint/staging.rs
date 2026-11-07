@@ -881,6 +881,10 @@ mod tests {
 
     #[test]
     fn the_sweep_reclaims_only_unleased_positive_local_staging() {
+        mvm_core::util::test_env::isolated_lock_probe(sweep_unleased_local_staging_fixture);
+    }
+
+    fn sweep_unleased_local_staging_fixture() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let external = StagedCapture::begin(&store, &CheckpointId::new("external")).unwrap();
@@ -906,6 +910,10 @@ mod tests {
 
     #[test]
     fn malformed_missing_and_replaced_dispositions_are_never_repaired() {
+        mvm_core::util::test_env::isolated_lock_probe(malformed_dispositions_fixture);
+    }
+
+    fn malformed_dispositions_fixture() {
         use std::os::unix::fs::symlink;
         for fault in 0..7 {
             let tmp = tempfile::tempdir().unwrap();
@@ -947,6 +955,10 @@ mod tests {
 
     #[test]
     fn deletion_claim_retains_a_replacement_installed_after_inspection() {
+        mvm_core::util::test_env::isolated_lock_probe(replaced_deletion_claim_fixture);
+    }
+
+    fn replaced_deletion_claim_fixture() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let path = StagedCapture::begin(&store, &CheckpointId::new("local"))
@@ -997,6 +1009,10 @@ mod tests {
 
     #[test]
     fn moved_stage_cannot_authorize_collection_in_a_replacement_store() {
+        mvm_core::util::test_env::isolated_lock_probe(moved_stage_fixture);
+    }
+
+    fn moved_stage_fixture() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let path = StagedCapture::begin(&store, &CheckpointId::new("local"))

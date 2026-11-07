@@ -93,6 +93,7 @@ impl HvfDriver {
                 kernel,
                 images,
                 writable: None,
+                data: None,
             },
         )
         .map(ColdHvfOwner::from_fresh)
@@ -334,6 +335,7 @@ fn relay_supervisor_config_with_handoff(
         kernel_fd: None,
         boot_image_fds: None,
         writable_disk_fds: Vec::new(),
+        readonly_data_disk_fds: Vec::new(),
         cmdline,
         memory_mib: spec.memory_mib,
         vcpus: spec.vcpus,
@@ -539,6 +541,7 @@ fn boot_with_handoff(
             kernel,
             images: None,
             writable: None,
+            data: None,
         },
     )
     .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
@@ -592,7 +595,10 @@ fn boot_retaining_child(
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
     // Diagnostics are optional evidence, never a launch or readiness gate.
     let mut diagnostics = StartupDiagnostics::new().ok();
-    let mut command = if cfg.kernel_fd.is_some() || !cfg.writable_disk_fds.is_empty() {
+    let mut command = if cfg.kernel_fd.is_some()
+        || !cfg.writable_disk_fds.is_empty()
+        || !cfg.readonly_data_disk_fds.is_empty()
+    {
         let mut command = mvm_core::env_hygiene::helper_command(&supervisor);
         (policy.configure_environment)(&mut command);
         StartupDiagnostics::configure(&mut command, diagnostics.as_ref());
@@ -876,23 +882,9 @@ impl VmmDriver for HvfDriver {
     fn boot_custodied(
         &self,
         spec: &VmmSpec,
-        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        files: mvm_vmm::driver::prepared_disks::PreparedBootFiles<'_>,
     ) -> Result<Box<dyn RunningVm>> {
-        disks.validate_spec(spec)?;
-        boot_with_custody(
-            spec,
-            None,
-            None,
-            SupervisorLaunchPolicy::legacy(),
-            BootInputFiles {
-                kernel,
-                images: None,
-                writable: Some(&disks),
-            },
-        )
-        .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
-        .map_err(anyhow::Error::new)
+        cold_channel::boot_prepared(spec, files)
     }
 
     fn spawn_standby_parent(

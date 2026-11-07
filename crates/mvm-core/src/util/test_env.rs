@@ -115,6 +115,133 @@ impl Drop for TestEnv {
     }
 }
 
+/// Run a complete lock-lifetime fixture in its own exact-test process.
+///
+/// Call before opening fixture resources and without holding a [`TestEnv`].
+/// The parent guards the spawn environment; the child releases its guard before
+/// running the fixture so the fixture may acquire its own non-reentrant guard.
+#[cfg(unix)]
+pub fn isolated_lock_probe(probe: impl FnOnce()) {
+    let env = TestEnv::new();
+    const CHILD_ENV: &str = "MVM_TEST_ISOLATED_PRE_EXEC_LOCK_PROBE";
+    let thread = std::thread::current();
+    let name = thread.name().expect("libtest names the probe thread");
+    let completed = format!("completed isolated pre-exec lock probe: {name}");
+    if let Some(child_name) = std::env::var_os(CHILD_ENV) {
+        assert_eq!(
+            child_name,
+            std::ffi::OsStr::new(name),
+            "the isolated child must run only its intended test"
+        );
+        // The single-test child may take its own non-reentrant environment guard.
+        drop(env);
+        probe();
+        eprintln!("{completed}");
+        return;
+    }
+
+    // Any concurrent fork inherits open descriptions, even CLOEXEC ones.
+    // Exec a private test process before opening probe resources so last-close
+    // assertions cannot race another libtest thread's fork-before-exec window.
+    let output =
+        crate::env_hygiene::helper_command(std::env::current_exe().expect("test executable"))
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CHILD_ENV, name)
+            .output()
+            .expect("run the isolated lock probe");
+    assert_isolated_probe_completed(name, &output);
+}
+
+#[cfg(unix)]
+fn assert_isolated_probe_completed(name: &str, output: &std::process::Output) {
+    let completed = format!("completed isolated pre-exec lock probe: {name}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.lines().filter(|line| *line == completed).count() == 1,
+        "isolated lock probe {name} failed:\n{}\n{}",
+        stdout,
+        stderr,
+    );
+}
+
+#[cfg(all(test, unix))]
+mod isolated_lock_probe_tests {
+    use super::{TestEnv, assert_isolated_probe_completed, isolated_lock_probe};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+
+    const NAME: &str = "synthetic::exact_lock_fixture";
+    const COMPLETED: &str =
+        "completed isolated pre-exec lock probe: synthetic::exact_lock_fixture\n";
+
+    fn output(stderr: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn isolated_lock_probe_executes_exact_fixture_without_nested_env_guard() {
+        isolated_lock_probe(|| {
+            let _env = TestEnv::new();
+            let thread = std::thread::current();
+            assert_eq!(
+                std::env::var_os("MVM_TEST_ISOLATED_PRE_EXEC_LOCK_PROBE").as_deref(),
+                thread.name().map(std::ffi::OsStr::new),
+                "only the selected exact child may execute the fixture"
+            );
+            assert_eq!(std::env::var_os("HOME"), std::env::var_os("MVM_HOME"));
+        });
+    }
+
+    #[test]
+    fn isolated_lock_probe_accepts_one_exact_stderr_completion() {
+        assert_isolated_probe_completed(NAME, &output(&format!("noise\n{COMPLETED}after\n")));
+    }
+
+    #[test]
+    #[should_panic(expected = "isolated lock probe synthetic::exact_lock_fixture failed")]
+    fn isolated_lock_probe_refuses_zero_child_success() {
+        let mut result = output("");
+        result.stdout = b"running 0 tests\n\ntest result: ok. 0 passed\n".to_vec();
+        assert_isolated_probe_completed(NAME, &result);
+    }
+
+    #[test]
+    #[should_panic(expected = "isolated lock probe synthetic::exact_lock_fixture failed")]
+    fn isolated_lock_probe_refuses_duplicate_completion() {
+        assert_isolated_probe_completed(NAME, &output(&COMPLETED.repeat(2)));
+    }
+
+    #[test]
+    #[should_panic(expected = "isolated lock probe synthetic::exact_lock_fixture failed")]
+    fn isolated_lock_probe_refuses_stdout_only_completion() {
+        let mut result = output("");
+        result.stdout = COMPLETED.as_bytes().to_vec();
+        assert_isolated_probe_completed(NAME, &result);
+    }
+
+    #[test]
+    #[should_panic(expected = "isolated lock probe synthetic::exact_lock_fixture failed")]
+    fn isolated_lock_probe_refuses_completion_from_another_test() {
+        assert_isolated_probe_completed(
+            NAME,
+            &output("completed isolated pre-exec lock probe: another::test\n"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "isolated lock probe synthetic::exact_lock_fixture failed")]
+    fn isolated_lock_probe_refuses_failed_child_even_with_completion() {
+        let mut result = output(COMPLETED);
+        result.status = ExitStatus::from_raw(1 << 8);
+        assert_isolated_probe_completed(NAME, &result);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::TestEnv;
