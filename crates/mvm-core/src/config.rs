@@ -473,12 +473,6 @@ pub fn mvm_kv_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("kv")
 }
 
-/// Snapshot store for copy-on-write warm-parent materialization:
-/// `<mvm_home>/snapshots`.
-pub fn mvm_snapshots_dir() -> String {
-    format!("{}/snapshots", mvm_home())
-}
-
 /// Custom volume specs from the `MVM_VOLUMES` env var: a comma-separated
 /// list of `--volume` specs (e.g. `~/src:/work:ro,data.img:/data:10G`).
 /// Whitespace around each entry is trimmed and empty entries dropped;
@@ -498,14 +492,6 @@ pub fn mvm_volumes_env() -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Resolve `<deps_volumes_dir>/<volume_hash>` for a single deps
-/// volume. The caller is responsible for verifying the directory
-/// exists and matches its sealed manifest — see
-/// `mvm_core::deps_audit::verify_sealed_volume`.
-pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_deps_volumes_dir()).join(volume_hash)
 }
 
 /// Root directory for content-addressed attested packs promoted by
