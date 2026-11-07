@@ -185,22 +185,6 @@ pub fn write(name: &str, meta: &VmRuntimeMeta) -> Result<()> {
     Ok(())
 }
 
-/// Update just the `observability_target` field of an existing metadata file.
-///
-/// Best-effort: logs a warning and returns `Ok(())` if the file cannot be
-/// read or written. This keeps observability metadata from failing VM start.
-pub fn update_observability_target(name: &str, target: &VmObservabilityTarget) -> Result<()> {
-    let mut meta = match read(name)? {
-        Some(m) => m,
-        None => {
-            tracing::warn!(vm = %name, "runtime_meta: no existing mode.json to update observability target");
-            return Ok(());
-        }
-    };
-    meta.observability_target = Some(target.clone());
-    write(name, &meta)
-}
-
 /// Read the metadata file. Returns `Ok(None)` if the file is missing
 /// (the VM was never started, or the writer skipped due to a
 /// best-effort failure). Errors only on malformed JSON that has

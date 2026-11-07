@@ -241,6 +241,58 @@ mod tests {
         }
     }
 
+    /// The bytes the image must hold at minimum: every tree data block plus
+    /// one metadata prefix per group.
+    fn floor_blocks(l: &Layout, data: u64) -> u64 {
+        data + u64::from(l.groups) * u64::from(l.prefix)
+    }
+
+    #[test]
+    fn the_image_holds_content_and_metadata_and_trims_the_tail() {
+        for (inode_high, data) in [(12, 0u64), (12, 1), (2_731, 71_800), (400_000, 40_000)] {
+            let l = Layout::plan(inode_high, data, 0, 0).unwrap();
+            let last_data = u64::from(l.total_blocks)
+                - u64::from(l.group_start(l.groups - 1))
+                - u64::from(l.prefix);
+            assert!(
+                u64::from(l.total_blocks) >= floor_blocks(&l, data),
+                "{inode_high}/{data}: {} < floor",
+                l.total_blocks
+            );
+            assert!(last_data >= 1);
+            assert!(l.inode_slots >= inode_high);
+            assert_eq!(l.used_inodes, inode_high - 1);
+        }
+    }
+
+    #[test]
+    fn a_tiny_tree_fits_one_group() {
+        let l = Layout::plan(12, 0, 0, 0).unwrap();
+        assert_eq!(l.groups, 1);
+        assert_eq!(l.total_blocks, l.prefix + 1);
+    }
+
+    #[test]
+    fn a_large_tree_fills_whole_groups_and_trims_the_tail() {
+        // 64 GiB of data at 4 KiB blocks.
+        let data = 16 * 1024 * 1024u64;
+        let l = Layout::plan(100_000, data, 0, 0).unwrap();
+        assert!(data_capacity(&l) >= data);
+        assert!(u64::from(l.total_blocks) >= floor_blocks(&l, data));
+        // Slack is under one group's data region: the tail is trimmed.
+        assert!(data_capacity(&l) - data < u64::from(BLOCKS_PER_GROUP));
+    }
+
+    #[test]
+    fn planning_is_a_pure_function_of_its_inputs() {
+        let a = Layout::plan(400_000, 123_456, 77, 99).unwrap();
+        let b = Layout::plan(400_000, 123_456, 77, 99).unwrap();
+        assert_eq!(
+            (a.groups, a.inodes_per_group, a.total_blocks, a.inode_slots),
+            (b.groups, b.inodes_per_group, b.total_blocks, b.inode_slots)
+        );
+    }
+
     #[test]
     fn oversized_request_errors_cleanly() {
         assert!(Layout::plan(12, u64::MAX / 2, 0, 0).is_err());

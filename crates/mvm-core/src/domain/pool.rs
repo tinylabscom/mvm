@@ -418,11 +418,6 @@ pub fn pool_artifacts_dir(tenant_id: &str, pool_id: &str) -> String {
     format!("{}/artifacts", pool_dir(tenant_id, pool_id))
 }
 
-/// Directory for pool-level configuration data (mounted as config drive).
-pub fn pool_config_data_dir(tenant_id: &str, pool_id: &str) -> String {
-    format!("{}/config", pool_dir(tenant_id, pool_id))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,14 +518,6 @@ mod tests {
         let parsed: PoolSpec = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.role, Role::Worker);
         assert_eq!(parsed.runtime_policy.min_running_seconds, 60);
-    }
-
-    #[test]
-    fn test_pool_config_data_dir() {
-        assert_eq!(
-            pool_config_data_dir("acme", "gateways"),
-            "/var/lib/mvm/tenants/acme/pools/gateways/config"
-        );
     }
 
     #[test]

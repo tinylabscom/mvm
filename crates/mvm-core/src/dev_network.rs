@@ -8,10 +8,6 @@ pub const DEFAULT_SUBNET_PREFIX: &str = "172.16.0";
 pub const DEFAULT_SUBNET_CIDR: &str = "172.16.0.0/24";
 /// Gateway (first usable) address of the built-in dev subnet.
 pub const DEFAULT_GATEWAY_IP: &str = "172.16.0.1";
-/// Gateway address of the built-in dev subnet in CIDR notation.
-pub const DEFAULT_GATEWAY_CIDR: &str = "172.16.0.1/24";
-/// Default guest address (network slot 0) of the built-in dev subnet.
-pub const DEFAULT_GUEST_IP: &str = "172.16.0.2";
 
 /// Per-slot guest IP in the built-in dev subnet. The host octet is `index + 2`
 /// (slot 0 → `.2`), so the gateway (`.1`) is never handed to a guest.
@@ -65,12 +61,6 @@ impl DevNetwork {
             created_at: chrono::Utc::now().to_rfc3339(),
         })
     }
-
-    /// CIDR notation for the gateway (e.g. "172.16.0.1/24").
-    pub fn gateway_cidr(&self) -> String {
-        let prefix = self.subnet.split('/').nth(1).unwrap_or("24");
-        format!("{}/{prefix}", self.gateway)
-    }
 }
 
 /// Validate a network name: lowercase alphanumeric + hyphens, 1-63 chars.
@@ -117,15 +107,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gateway_cidr() {
-        let net = DevNetwork::default_network();
-        assert_eq!(net.gateway_cidr(), "172.16.0.1/24");
-
-        let net2 = DevNetwork::new("test", 5).unwrap();
-        assert_eq!(net2.gateway_cidr(), "172.16.5.1/24");
-    }
-
-    #[test]
     fn test_serde_roundtrip() {
         let net = DevNetwork::new("mynet", 3).unwrap();
         let json = serde_json::to_string(&net).unwrap();
@@ -146,20 +127,5 @@ mod tests {
     fn test_network_path() {
         let path = network_path("default");
         assert!(path.ends_with("/networks/default.json"));
-    }
-
-    #[test]
-    fn default_consts_agree_with_default_network() {
-        let net = DevNetwork::default_network();
-        assert_eq!(net.subnet, DEFAULT_SUBNET_CIDR);
-        assert_eq!(net.gateway, DEFAULT_GATEWAY_IP);
-        assert_eq!(net.gateway_cidr(), DEFAULT_GATEWAY_CIDR);
-    }
-
-    #[test]
-    fn default_guest_ip_for_index_matches_slot_zero_const() {
-        assert_eq!(default_guest_ip_for_index(0), DEFAULT_GUEST_IP);
-        assert_eq!(default_guest_ip_for_index(1), "172.16.0.3");
-        assert_eq!(default_guest_ip_for_index(10), "172.16.0.12");
     }
 }

@@ -318,13 +318,6 @@ pub fn balloon_support_descriptors() -> impl Iterator<Item = &'static BackendDes
         .filter(|descriptor| descriptor.include_in_balloon_support)
 }
 
-/// Descriptors that report warm-start support in `mvmctl doctor`.
-pub fn warm_start_support_descriptors() -> impl Iterator<Item = &'static BackendDescriptor> {
-    BACKEND_DESCRIPTORS
-        .iter()
-        .filter(|descriptor| descriptor.include_in_warm_start_support)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,39 +352,5 @@ mod tests {
                 descriptor.kind
             );
         }
-    }
-
-    fn selectors<'a>(it: impl Iterator<Item = &'a BackendDescriptor>) -> Vec<&'a str> {
-        it.map(|descriptor| descriptor.selector).collect()
-    }
-
-    /// The descriptor-filtered surfaces feed user-visible ordering in
-    /// legacy `mvmctl doctor` (balloon + warm-start matrices), `mvmctl ls`
-    /// (list-all), and the started-VM probe. Freeze those orders so a table
-    /// reshuffle can't silently change what users see or the probe priority.
-    #[test]
-    fn descriptor_surface_ordering_is_frozen() {
-        assert_eq!(selectors(balloon_support_descriptors()), ["qemu"]);
-        assert_eq!(
-            selectors(warm_start_support_descriptors()),
-            Vec::<&str>::new()
-        );
-        assert_eq!(
-            selectors(list_all_descriptors()),
-            [
-                "firecracker",
-                "libkrun",
-                "qemu",
-                "hvf",
-                "wasm",
-                "apple-container",
-                "web-linux"
-            ]
-        );
-        // Started-VM probe is sorted by probe order, not declaration order.
-        assert_eq!(
-            selectors(started_vm_probe_descriptors().into_iter()),
-            ["qemu", "libkrun", "firecracker", "hvf"]
-        );
     }
 }

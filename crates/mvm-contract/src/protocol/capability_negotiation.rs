@@ -540,6 +540,28 @@ mod tests {
     }
 
     #[test]
+    fn a_tier_without_vsock_refuses_gpu_and_no_substitute_invents_a_channel() {
+        let required = require(|r| r.gpu = true);
+        for kind in [BackendKind::Wasm, BackendKind::WebLinux, BackendKind::Mock] {
+            let gaps = barren()
+                .negotiate(&required, kind)
+                .expect_err("a tier with no vsock cannot serve the GPU shims");
+            assert_eq!(gaps.len(), 1, "{kind:?}");
+            assert_eq!(gaps[0].capability, "gpu", "{kind:?}");
+            assert!(!gaps[0].is_actionable(), "{kind:?}");
+            assert!(gaps[0].alternative.describe().contains("microVM backend"));
+        }
+        let serving = VmCapabilities {
+            gpu: true,
+            ..VmCapabilities::default()
+        };
+        assert_eq!(
+            serving.negotiate(&required, BackendKind::Firecracker),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn every_gap_is_reported_not_just_the_first() {
         let required = require(|r| {
             r.vsock = true;

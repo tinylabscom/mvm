@@ -148,20 +148,6 @@ impl VmNameRegistry {
         }
     }
 
-    /// Fill or replace the concrete runtime directory for an existing
-    /// reservation. `mvmctl machine run` reserves a name before it has materialized the
-    /// backend state dir; reconcile must see the real dir before launch can be
-    /// reported as successful.
-    pub fn set_vm_dir(&mut self, name: &str, vm_dir: impl Into<String>) -> Result<bool> {
-        match self.vms.get_mut(name) {
-            Some(reg) => {
-                reg.vm_dir = vm_dir.into();
-                Ok(true)
-            }
-            None => Ok(false),
-        }
-    }
-
     /// Record observed guest activity. Returns
     /// `Ok(true)` if updated, `Ok(false)` if the name is unknown.
     /// Callers pass the timestamp explicitly so fixtures stay
@@ -230,22 +216,6 @@ impl VmNameRegistry {
             }
             None => Ok(false),
         }
-    }
-
-    /// Iterate registrations whose tag map contains every entry in `filter`.
-    /// An empty filter matches every registration.
-    pub fn filter_by_tags<'a>(
-        &'a self,
-        filter: &'a BTreeMap<String, String>,
-    ) -> impl Iterator<Item = (&'a str, &'a VmRegistration)> + 'a {
-        self.vms
-            .iter()
-            .filter(move |(_, reg)| {
-                filter
-                    .iter()
-                    .all(|(k, v)| reg.tags.get(k).map(String::as_str) == Some(v.as_str()))
-            })
-            .map(|(name, reg)| (name.as_str(), reg))
     }
 
     /// Deregister a VM by name. Returns the registration if it existed.
@@ -573,25 +543,6 @@ mod tests {
     }
 
     #[test]
-    fn set_vm_dir_fills_existing_reservation() {
-        let mut reg = VmNameRegistry::default();
-        reg.register(RegisterParams::minimal("myvm", "", "default"))
-            .unwrap();
-
-        assert!(reg.set_vm_dir("myvm", "/tmp/mvm/vms/myvm").unwrap());
-
-        let got = reg.lookup("myvm").unwrap();
-        assert_eq!(got.vm_dir, "/tmp/mvm/vms/myvm");
-        assert_eq!(got.network, "default");
-    }
-
-    #[test]
-    fn set_vm_dir_reports_missing_name() {
-        let mut reg = VmNameRegistry::default();
-        assert!(!reg.set_vm_dir("missing", "/tmp/mvm/vms/missing").unwrap());
-    }
-
-    #[test]
     fn test_serde_roundtrip() {
         let mut reg = VmNameRegistry::default();
         reg.register(RegisterParams {
@@ -862,57 +813,6 @@ mod tests {
         // Clearing back to None works too.
         assert!(reg.set_expires_at("vm1", None).unwrap());
         assert!(reg.lookup("vm1").unwrap().expires_at.is_none());
-    }
-
-    #[test]
-    fn filter_by_tags_matches_subset() {
-        let mut reg = VmNameRegistry::default();
-        let mut a_tags = BTreeMap::new();
-        a_tags.insert("job".to_string(), "etl".to_string());
-        a_tags.insert("env".to_string(), "prod".to_string());
-        reg.register(RegisterParams {
-            name: "a",
-            vm_dir: "/tmp/a",
-            network: "default",
-            guest_ip: None,
-            slot_index: 0,
-            tags: a_tags,
-            expires_at: None,
-            auto_resume: true,
-        })
-        .unwrap();
-        let mut b_tags = BTreeMap::new();
-        b_tags.insert("job".to_string(), "etl".to_string());
-        b_tags.insert("env".to_string(), "dev".to_string());
-        reg.register(RegisterParams {
-            name: "b",
-            vm_dir: "/tmp/b",
-            network: "default",
-            guest_ip: None,
-            slot_index: 1,
-            tags: b_tags,
-            expires_at: None,
-            auto_resume: true,
-        })
-        .unwrap();
-
-        // Filter on both keys: only `a` matches.
-        let mut want = BTreeMap::new();
-        want.insert("job".to_string(), "etl".to_string());
-        want.insert("env".to_string(), "prod".to_string());
-        let names: Vec<_> = reg.filter_by_tags(&want).map(|(n, _)| n).collect();
-        assert_eq!(names, vec!["a"]);
-
-        // Filter on shared key only: both match.
-        let mut want = BTreeMap::new();
-        want.insert("job".to_string(), "etl".to_string());
-        let mut names: Vec<_> = reg.filter_by_tags(&want).map(|(n, _)| n).collect();
-        names.sort();
-        assert_eq!(names, vec!["a", "b"]);
-
-        // Empty filter matches all.
-        let want = BTreeMap::new();
-        assert_eq!(reg.filter_by_tags(&want).count(), 2);
     }
 
     #[test]
