@@ -32,7 +32,7 @@ fn create(root: &Path, reference: &PackReference) -> Result<PathBuf> {
         bail!("use namespace/name without a version; the draft starts at 0.1.0");
     }
     // The registry's publishing identity is trusted by default for these namespaces, so a
-    // submitted pack must not land in them (mvm-packs #103).
+    // submitted pack must not land in them.
     if matches!(namespace, "mvm" | "agent" | "runtime") {
         bail!("{namespace} is reserved for first-party packs; choose another namespace");
     }
