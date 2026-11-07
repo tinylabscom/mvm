@@ -161,45 +161,11 @@ pub fn generate_machine_name() -> String {
     format!("{adjective}-{animal}-{suffix:04x}")
 }
 
-/// Generate a TAP device name: tn<net_id>i<ip_offset>.
-/// Max 12 chars, fits within Linux 15-char IFNAMSIZ limit.
-pub fn tap_name(tenant_net_id: u16, ip_offset: u8) -> String {
-    format!("tn{}i{}", tenant_net_id, ip_offset)
-}
-
-/// Deterministic MAC address from tenant_net_id and ip_offset.
-/// Format: 02:xx:xx:xx:xx:xx (locally administered).
-pub fn mac_address(tenant_net_id: u16, ip_offset: u8) -> String {
-    let net_bytes = tenant_net_id.to_be_bytes();
-    format!(
-        "02:fc:{:02x}:{:02x}:00:{:02x}",
-        net_bytes[0], net_bytes[1], ip_offset
-    )
-}
-
 /// Simple random bytes using uuid crate (already a dependency).
 fn rand_bytes() -> [u8; 4] {
     let id = uuid::Uuid::new_v4();
     let bytes = id.as_bytes();
     [bytes[0], bytes[1], bytes[2], bytes[3]]
-}
-
-/// Parse a "tenant/pool" or "tenant/pool/instance" path.
-pub fn parse_pool_path(path: &str) -> Result<(&str, &str)> {
-    let parts: Vec<&str> = path.splitn(3, '/').collect();
-    if parts.len() < 2 {
-        bail!("Expected <tenant>/<pool>, got {:?}", path);
-    }
-    Ok((parts[0], parts[1]))
-}
-
-/// Parse a "tenant/pool/instance" path.
-pub fn parse_instance_path(path: &str) -> Result<(&str, &str, &str)> {
-    let parts: Vec<&str> = path.splitn(4, '/').collect();
-    if parts.len() < 3 {
-        bail!("Expected <tenant>/<pool>/<instance>, got {:?}", path);
-    }
-    Ok((parts[0], parts[1], parts[2]))
 }
 
 #[cfg(test)]
@@ -270,26 +236,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tap_name() {
-        assert_eq!(tap_name(3, 5), "tn3i5");
-        assert_eq!(tap_name(4095, 254), "tn4095i254");
-    }
-
-    #[test]
-    fn test_tap_name_fits_linux_limit() {
-        // Worst case: tn4095i254 = 10 chars, under 15
-        let name = tap_name(4095, 254);
-        assert!(name.len() <= 15, "TAP name too long: {}", name);
-    }
-
-    #[test]
-    fn test_mac_address_format() {
-        let mac = mac_address(3, 5);
-        assert!(mac.starts_with("02:fc:"));
-        assert_eq!(mac.len(), 17);
-    }
-
-    #[test]
     fn test_generate_instance_id_format() {
         let id = generate_instance_id();
         assert!(id.starts_with("i-"));
@@ -304,21 +250,6 @@ mod tests {
             name.split('-').count() == 3,
             "expected adjective-animal-hex, got {name:?}"
         );
-    }
-
-    #[test]
-    fn test_parse_pool_path() {
-        let (t, p) = parse_pool_path("acme/workers").unwrap();
-        assert_eq!(t, "acme");
-        assert_eq!(p, "workers");
-    }
-
-    #[test]
-    fn test_parse_instance_path() {
-        let (t, p, i) = parse_instance_path("acme/workers/i-a3f7b2c1").unwrap();
-        assert_eq!(t, "acme");
-        assert_eq!(p, "workers");
-        assert_eq!(i, "i-a3f7b2c1");
     }
 
     // validate_vm_name

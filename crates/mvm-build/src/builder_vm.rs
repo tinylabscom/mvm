@@ -31,22 +31,6 @@ use serde::{Deserialize, Serialize};
 use crate::guest_libc::GuestLibc;
 use thiserror::Error;
 
-/// Pinned Nix-bearing OCI image. Bumped deliberately; the per-bump
-/// audit (`xtask audit-flake` for flake inputs has a sister
-/// `xtask audit-builder-image` that lands with the bootstrap impl)
-/// re-checks the image's CVE surface.
-///
-/// `nixos/nix` is the upstream Nix project's image; we may switch to
-/// a self-published image once we want to pin an exact substituter
-/// configuration into the image rather than configure it at spawn
-/// time.
-pub const BUILDER_OCI_IMAGE: &str = "docker.io/nixos/nix:2.24.10";
-
-/// SHA-256 digest the bootstrap verifies against after pull.
-/// Empty until the bootstrap impl pins the digest in CI; an empty
-/// expected-digest means "skip verification" (dev-only).
-pub const BUILDER_OCI_DIGEST_SHA256: &str = "";
-
 /// Cache directory for the pulled builder image, relative to the
 /// user's cache root.
 pub const BUILDER_IMAGE_CACHE_SUBDIR: &str = "builder-image";
@@ -1614,23 +1598,6 @@ mod tests {
         let store = tmp.path().join("builder-vm"); // never created
         let r = clear_builder_store_at(&store, false).unwrap();
         assert!(!r.existed && r.bytes_freed == 0);
-    }
-
-    #[test]
-    fn pinned_image_is_namespaced() {
-        // Sanity: pinning a top-level image like `nix:2.24.10` is
-        // ambiguous across registries. The constant must include the
-        // registry + namespace.
-        assert!(
-            BUILDER_OCI_IMAGE.starts_with("docker.io/")
-                || BUILDER_OCI_IMAGE.starts_with("ghcr.io/")
-                || BUILDER_OCI_IMAGE.starts_with("registry."),
-            "image must be fully qualified: {BUILDER_OCI_IMAGE}"
-        );
-        assert!(
-            BUILDER_OCI_IMAGE.contains(':'),
-            "image must carry a tag: {BUILDER_OCI_IMAGE}"
-        );
     }
 
     #[test]

@@ -105,6 +105,21 @@ fn try_acquire(counter: &'static AtomicUsize, limit: usize) -> Option<CounterGua
     }
 }
 
+/// Control-plane requests are never counted against the data-plane bound;
+/// a data-plane request past `limit` is refused.
+fn admit_traffic(
+    plane: TrafficPlane,
+    data_counter: &'static AtomicUsize,
+    limit: usize,
+) -> Result<Option<CounterGuard>, &'static str> {
+    if plane != TrafficPlane::Data {
+        return Ok(None);
+    }
+    try_acquire(data_counter, limit)
+        .map(Some)
+        .ok_or("guest data plane is at its concurrency limit")
+}
+
 use crate::boot::{init_entrypoint_validation, init_integrations, init_probes, init_warm_pool};
 use crate::config::parse_config;
 use crate::globals::{
@@ -520,20 +535,22 @@ fn handle_client_operations(
         }
 
         let limits = ConnectionLimits::default();
-        let _data_guard = if req.verb().traffic_plane() == TrafficPlane::Data {
-            let Some(guard) = try_acquire(&ACTIVE_DATA_REQUESTS, limits.data) else {
+        let _data_guard = match admit_traffic(
+            req.verb().traffic_plane(),
+            &ACTIVE_DATA_REQUESTS,
+            limits.data,
+        ) {
+            Ok(guard) => guard,
+            Err(message) => {
                 send_authenticated_response(
                     &mut file,
                     &mut session,
                     &GuestResponse::Error {
-                        message: "guest data plane is at its concurrency limit".to_string(),
+                        message: message.to_string(),
                     },
                 );
                 return;
-            };
-            Some(guard)
-        } else {
-            None
+            }
         };
 
         let req = match req {
@@ -1928,6 +1945,31 @@ mod tests {
         assert_eq!(limits.total, 64);
         assert_eq!(limits.data, 48);
         assert!(limits.total - limits.data >= 16);
+    }
+
+    #[test]
+    fn a_saturated_data_plane_refuses_data_requests_and_still_admits_control() {
+        static DATA: AtomicUsize = AtomicUsize::new(0);
+        let held: Vec<_> = (0..2)
+            .map(|_| {
+                admit_traffic(TrafficPlane::Data, &DATA, 2)
+                    .expect("slot")
+                    .expect("data requests are counted")
+            })
+            .collect();
+        assert!(matches!(
+            admit_traffic(TrafficPlane::Data, &DATA, 2),
+            Err(message) if message.contains("concurrency limit")
+        ));
+        assert!(
+            matches!(admit_traffic(TrafficPlane::Control, &DATA, 2), Ok(None)),
+            "control traffic must not queue behind a saturated data plane"
+        );
+        drop(held);
+        assert!(matches!(
+            admit_traffic(TrafficPlane::Data, &DATA, 2),
+            Ok(Some(_))
+        ));
     }
 
     #[test]

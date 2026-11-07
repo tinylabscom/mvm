@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use ed25519_dalek::{Signer, SigningKey};
-use mvm_core::protocol::host_signer::HostSignerErrorCode;
 use mvm_core::security::SIG_ALG_ED25519;
 
 #[cfg(test)]
@@ -121,13 +120,6 @@ pub struct SignResult {
 /// (A future enclave path will define a `KeystoreProvider` trait that
 /// both this software path and the enclave path implement.)
 pub type SharedKeystore = Arc<Keystore>;
-
-/// Map an `anyhow::Error` to a typed [`HostSignerErrorCode`]. The
-/// software path is permissive (everything → `InternalError`); a
-/// future enclave path can extend this with `EnclaveError` mapping.
-pub fn classify_error(_err: &anyhow::Error) -> HostSignerErrorCode {
-    HostSignerErrorCode::InternalError
-}
 
 // ============================================================================
 // Tests

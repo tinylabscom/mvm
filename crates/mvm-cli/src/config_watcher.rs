@@ -110,32 +110,11 @@ impl ConfigWatcher {
     }
 }
 
-/// Drain any pending reload events and apply them to `cfg`.
-///
-/// Logs each reload or parse error via tracing.  Returns the (possibly
-/// updated) config.
-pub fn apply_pending_reloads(cfg: MvmConfig, rx: &mpsc::Receiver<ConfigReloadEvent>) -> MvmConfig {
-    let mut current = cfg;
-    while let Ok(event) = rx.try_recv() {
-        match event {
-            ConfigReloadEvent::Reloaded(new_cfg) => {
-                tracing::info!(
-                    path = %mvm_core::user_config::config_path().display(),
-                    "Config reloaded"
-                );
-                current = *new_cfg;
-            }
-            ConfigReloadEvent::ParseError(msg) => {
-                tracing::warn!("Config reload failed: {msg}; keeping previous config");
-            }
-        }
-    }
-    current
-}
-
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "dev-watch")]
     use super::*;
+    #[cfg(feature = "dev-watch")]
     use mvm_core::user_config::MvmConfig;
 
     #[cfg(feature = "dev-watch")]
@@ -220,37 +199,5 @@ mod tests {
             received,
             "No ConfigReloadEvent::ParseError received within 2 s"
         );
-    }
-
-    #[test]
-    fn test_apply_pending_reloads_updates_cfg() {
-        let (tx, rx) = mpsc::channel();
-        let mut cfg = MvmConfig::default();
-
-        let new_cfg = MvmConfig {
-            dev_vm_cpus: 12,
-            ..MvmConfig::default()
-        };
-        tx.send(ConfigReloadEvent::Reloaded(Box::new(new_cfg)))
-            .unwrap();
-
-        cfg = apply_pending_reloads(cfg, &rx);
-        assert_eq!(cfg.dev_vm_cpus, 12);
-    }
-
-    #[test]
-    fn test_apply_pending_reloads_keeps_cfg_on_error() {
-        let (tx, rx) = mpsc::channel();
-        let mut cfg = MvmConfig {
-            dev_vm_cpus: 6,
-            ..MvmConfig::default()
-        };
-
-        tx.send(ConfigReloadEvent::ParseError("bad toml".to_string()))
-            .unwrap();
-
-        cfg = apply_pending_reloads(cfg, &rx);
-        // Config unchanged after parse error.
-        assert_eq!(cfg.dev_vm_cpus, 6);
     }
 }

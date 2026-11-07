@@ -103,11 +103,6 @@ impl HvfPersistentHostVm {
         }
     }
 
-    pub fn with_runtime_overlay(mut self, overlay: impl Into<PathBuf>) -> Self {
-        self.runtime_overlay = Some(overlay.into());
-        self
-    }
-
     /// The builder image's optional seeded Nix store closure. Rides the input
     /// disk so the guest can import it at boot instead of fetching the same
     /// toolchain over the network. Absent for images that carry no seed, which
@@ -439,11 +434,6 @@ impl PersistentHvfSession {
     /// Host socket the dispatch client dials to reach the guest's job loop.
     pub fn dispatch_socket_path(&self) -> PathBuf {
         socket_for(&self.state_dir, GuestService::BuilderDispatch)
-    }
-
-    /// Host socket for the resident builder daemon's typed control plane.
-    pub fn builderd_socket_path(&self) -> PathBuf {
-        socket_for(&self.state_dir, GuestService::BuilderdControl)
     }
 
     /// The supervisor process owning the VM, when the driver can name it.

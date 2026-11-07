@@ -91,16 +91,7 @@ pub enum SnapshotAt {
     AfterWarmup,
 }
 
-impl SnapshotAt {
-    /// The guest marker at or after which a snapshot for this policy is
-    /// eligible. (`AfterWarmup` additionally waits for the host warmup command.)
-    pub const fn trigger_marker(self) -> LifecycleMarker {
-        match self {
-            Self::PreExec => LifecycleMarker::PreExec,
-            Self::Ready | Self::AfterWarmup => LifecycleMarker::Ready,
-        }
-    }
-}
+impl SnapshotAt {}
 
 #[cfg(test)]
 mod tests {
@@ -130,18 +121,5 @@ mod tests {
     #[test]
     fn snapshot_at_defaults_to_ready() {
         assert_eq!(SnapshotAt::default(), SnapshotAt::Ready);
-    }
-
-    #[test]
-    fn snapshot_at_maps_to_its_trigger_marker() {
-        assert_eq!(
-            SnapshotAt::PreExec.trigger_marker(),
-            LifecycleMarker::PreExec
-        );
-        assert_eq!(SnapshotAt::Ready.trigger_marker(), LifecycleMarker::Ready);
-        assert_eq!(
-            SnapshotAt::AfterWarmup.trigger_marker(),
-            LifecycleMarker::Ready
-        );
     }
 }

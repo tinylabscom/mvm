@@ -221,13 +221,20 @@ mod tests {
 
     /// Claim 2 is that no guest write can mint a uid-0 entry. This provisioner
     /// runs as root pre-drop, so the guard that matters is that it only ever
-    /// appends the workload identity and never rewrites a line.
+    /// appends the workload identity and leaves every existing line, the root
+    /// line included, byte for byte as it was.
     #[test]
     fn never_writes_a_uid_zero_entry() {
         let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("etc")).unwrap();
+        let existing = "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534::/:/sbin/nologin\n";
+        fs::write(dir.path().join("etc/passwd"), existing).unwrap();
         provision_in(dir.path(), WORKLOAD_HOME).unwrap();
         let passwd = passwd_of(dir.path());
-        for line in passwd.lines() {
+        let appended = passwd
+            .strip_prefix(existing)
+            .expect("existing lines preserved byte for byte");
+        for line in appended.lines() {
             let uid = line.split(':').nth(2).unwrap_or_default();
             assert_ne!(uid, "0", "provisioner emitted a uid-0 entry: {line}");
         }

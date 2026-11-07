@@ -751,10 +751,6 @@ pub fn allowlist_from_env_var(var_name: &str) -> std::collections::BTreeSet<Stri
 /// allowlist.
 pub const ALLOWLIST_ENV_VAR: &str = "MVM_WEB_SEARCH_ALLOWLIST";
 
-/// Canonical env-var name for the `mvm.web_search` default
-/// provider. Must appear in the allowlist to be reachable.
-pub const DEFAULT_PROVIDER_ENV_VAR: &str = "MVM_WEB_SEARCH_DEFAULT";
-
 /// Canonical env-var name for the operator's Brave Search API key.
 /// When unset (and `"brave"` is on the allowlist), the "allowed
 /// but unregistered" config-drift error fires on first invoke.

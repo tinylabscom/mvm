@@ -56,9 +56,8 @@ use anyhow::{Context, Result, bail};
 
 use mvm_core::crypto::snapshot_encryption;
 use mvm_core::crypto::snapshot_hmac::{
-    EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotFiles,
-    SnapshotIntegrityParams, VMSTATE_FILENAME, VerifyError, files_in, load_or_init_key, seal,
-    verify,
+    EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotIntegrityParams,
+    VMSTATE_FILENAME, VerifyError, files_in, load_or_init_key, seal, verify,
 };
 
 use secrecy::ExposeSecret;
@@ -96,11 +95,6 @@ pub fn prepare_instance_snapshot_dir(vm_name: &str) -> Result<PathBuf> {
     let dir = snapshot_dir(vm_name);
     ensure_dir_with_mode(&dir, 0o700)?;
     Ok(dir)
-}
-
-/// Convenience: build the canonical `SnapshotFiles` for a VM.
-pub fn files_for(vm_name: &str) -> SnapshotFiles {
-    files_in(&snapshot_dir(vm_name))
 }
 
 /// Pause + seal one VM's snapshot under an admitted snapshot `key`. Returns

@@ -761,3 +761,340 @@ fn deeply_nested_frames_within_the_size_bound_are_refused_without_recursion() {
         );
     }
 }
+
+// ── operational contract: admission, dedup, fencing, vocabulary ──────────────
+
+fn contract_keys() -> (SigningKey, SigningKey, Key) {
+    (
+        SigningKey::from_bytes(&[21; 32]),
+        SigningKey::from_bytes(&[22; 32]),
+        Key::from_bytes([23; 32]),
+    )
+}
+
+fn seal_with(
+    header: MailboxEnvelopeHeader,
+    plaintext: &[u8],
+) -> mvm_contract::protocol::mailbox::MailboxEnvelope {
+    let (sender_key, _, encryption_key) = contract_keys();
+    seal_envelope(
+        SealRequest {
+            routing: routing(),
+            header,
+            plaintext,
+        },
+        &encryption_key,
+        &sender_key,
+    )
+    .expect("seal")
+}
+
+fn open_under(
+    envelope: &mvm_contract::protocol::mailbox::MailboxEnvelope,
+    grant: MailboxCapabilityGrant,
+    context: &OpenContext,
+    replay: &mut InMemoryReplayProtector,
+) -> Result<Vec<u8>, MailboxError> {
+    let (sender_key, authority_key, encryption_key) = contract_keys();
+    let capability = sign_capability(grant, &authority_key).expect("sign capability");
+    open_envelope(
+        envelope,
+        &capability,
+        context,
+        &encryption_key,
+        &sender_key.verifying_key(),
+        &authority_key.verifying_key(),
+        replay,
+    )
+}
+
+#[test]
+fn a_refused_message_does_not_consume_its_dedup_identity() {
+    let envelope = seal_with(header(), b"hello");
+    let mut replay = InMemoryReplayProtector::default();
+
+    let mut late = context();
+    late.now_unix_ms = 2_001;
+    assert_eq!(
+        open_under(&envelope, grant(), &late, &mut replay).expect_err("expired"),
+        MailboxError::Expired
+    );
+    let mut wrong_recipient = context();
+    wrong_recipient.expected_recipient = PrincipalId::from_bytes([41; 32]);
+    assert_eq!(
+        open_under(&envelope, grant(), &wrong_recipient, &mut replay).expect_err("refused"),
+        MailboxError::WrongRecipient
+    );
+
+    // Refusals left nothing behind, so the retry of the same stable
+    // identity is accepted exactly once.
+    assert_eq!(
+        open_under(&envelope, grant(), &context(), &mut replay).expect("retry accepted"),
+        b"hello"
+    );
+    assert_eq!(
+        open_under(&envelope, grant(), &context(), &mut replay).expect_err("duplicate"),
+        MailboxError::Replay
+    );
+}
+
+#[test]
+fn a_stable_message_id_retried_into_a_new_epoch_or_boot_is_not_a_duplicate() {
+    let mut replay = InMemoryReplayProtector::default();
+    open_under(
+        &seal_with(header(), b"hello"),
+        grant(),
+        &context(),
+        &mut replay,
+    )
+    .expect("first delivery");
+
+    let mut next_epoch = header();
+    next_epoch.execution_epoch = ExecutionEpoch::new(8).expect("epoch");
+    let mut next_epoch_context = context();
+    next_epoch_context.current_execution_epoch = ExecutionEpoch::new(8).expect("epoch");
+    open_under(
+        &seal_with(next_epoch, b"hello"),
+        grant(),
+        &next_epoch_context,
+        &mut replay,
+    )
+    .expect("same id, newly authorized epoch");
+
+    let mut next_boot = header();
+    next_boot.sender_boot = BootId::from_bytes([55; 32]);
+    open_under(
+        &seal_with(next_boot, b"hello"),
+        grant(),
+        &context(),
+        &mut replay,
+    )
+    .expect("same id, new sender boot");
+}
+
+#[test]
+fn stale_or_foreign_epochs_are_fenced_on_both_sides() {
+    let refuse =
+        |header: MailboxEnvelopeHeader, grant: MailboxCapabilityGrant, context: OpenContext| {
+            open_under(
+                &seal_with(header, b"hello"),
+                grant,
+                &context,
+                &mut InMemoryReplayProtector::default(),
+            )
+            .expect_err("must be fenced")
+        };
+
+    // A message from an epoch the owner has not reached.
+    let mut owner_behind = context();
+    owner_behind.current_execution_epoch = ExecutionEpoch::new(6).expect("epoch");
+    assert_eq!(
+        refuse(header(), grant(), owner_behind),
+        MailboxError::StaleExecutionEpoch
+    );
+
+    // Header and owner agree, but the capability was minted for earlier epochs.
+    let mut beyond_grant = header();
+    beyond_grant.execution_epoch = ExecutionEpoch::new(10).expect("epoch");
+    let mut beyond_grant_context = context();
+    beyond_grant_context.current_execution_epoch = ExecutionEpoch::new(10).expect("epoch");
+    assert_eq!(
+        refuse(beyond_grant, grant(), beyond_grant_context),
+        MailboxError::StaleExecutionEpoch
+    );
+
+    // Policy epoch: stale on the message, on the owner, and on the capability.
+    let mut stale_header = header();
+    stale_header.policy_epoch = 3;
+    assert_eq!(
+        refuse(stale_header, grant(), context()),
+        MailboxError::StalePolicyEpoch
+    );
+    let mut newer_policy = context();
+    newer_policy.current_policy_epoch = 5;
+    assert_eq!(
+        refuse(header(), grant(), newer_policy),
+        MailboxError::StalePolicyEpoch
+    );
+    let mut stale_grant = grant();
+    stale_grant.policy_epoch = 3;
+    assert_eq!(
+        refuse(header(), stale_grant, context()),
+        MailboxError::StalePolicyEpoch
+    );
+}
+
+#[test]
+fn cast_is_admitted_only_when_the_capability_names_it_and_bounds_it() {
+    let mut cast = header();
+    cast.kind = MailboxMessageKind::Cast;
+    cast.reply_to = None;
+    let envelope = seal_with(cast, b"hello");
+
+    // `grant()` authorizes call and reply only.
+    assert_eq!(
+        open_under(
+            &envelope,
+            grant(),
+            &context(),
+            &mut InMemoryReplayProtector::default()
+        )
+        .expect_err("cast not granted"),
+        MailboxError::MessageKindNotAuthorized
+    );
+
+    let mut with_cast = grant();
+    with_cast.message_kinds.push(MailboxMessageKind::Cast);
+    assert_eq!(
+        open_under(
+            &envelope,
+            with_cast.clone(),
+            &context(),
+            &mut InMemoryReplayProtector::default()
+        )
+        .expect("granted cast"),
+        b"hello"
+    );
+
+    with_cast.max_payload_bytes = 4;
+    assert_eq!(
+        open_under(
+            &envelope,
+            with_cast,
+            &context(),
+            &mut InMemoryReplayProtector::default()
+        )
+        .expect_err("over the capability's payload bound"),
+        MailboxError::CapabilityPayloadExceeded
+    );
+}
+
+#[test]
+fn the_delivery_and_message_vocabularies_are_closed() {
+    // The exhaustive matches stop compiling when a variant is added, so a new
+    // outcome (a lossy cast, a "not executed" claim) needs a deliberate edit
+    // here and in the ADR.
+    fn outcome_name(outcome: DeliveryOutcome) -> &'static str {
+        match outcome {
+            DeliveryOutcome::AcceptedEphemeral => "accepted_ephemeral",
+            DeliveryOutcome::AcceptedDurable => "accepted_durable",
+            DeliveryOutcome::Duplicate => "duplicate",
+            DeliveryOutcome::Expired => "expired",
+            DeliveryOutcome::Refused => "refused",
+            DeliveryOutcome::Full => "full",
+            DeliveryOutcome::Unavailable => "unavailable",
+            DeliveryOutcome::Late => "late",
+            DeliveryOutcome::DeadLettered => "dead_lettered",
+        }
+    }
+    fn kind_name(kind: MailboxMessageKind) -> &'static str {
+        match kind {
+            MailboxMessageKind::Call => "call",
+            MailboxMessageKind::Cast => "cast",
+            MailboxMessageKind::Reply => "reply",
+        }
+    }
+    for outcome in [
+        DeliveryOutcome::AcceptedEphemeral,
+        DeliveryOutcome::AcceptedDurable,
+        DeliveryOutcome::Duplicate,
+        DeliveryOutcome::Expired,
+        DeliveryOutcome::Refused,
+        DeliveryOutcome::Full,
+        DeliveryOutcome::Unavailable,
+        DeliveryOutcome::Late,
+        DeliveryOutcome::DeadLettered,
+    ] {
+        let wire = serde_json::to_string(&outcome).expect("encode");
+        assert_eq!(wire, format!("\"{}\"", outcome_name(outcome)));
+        assert_eq!(
+            serde_json::from_str::<DeliveryOutcome>(&wire).unwrap(),
+            outcome
+        );
+    }
+    for kind in [
+        MailboxMessageKind::Call,
+        MailboxMessageKind::Cast,
+        MailboxMessageKind::Reply,
+    ] {
+        let wire = serde_json::to_string(&kind).expect("encode");
+        assert_eq!(wire, format!("\"{}\"", kind_name(kind)));
+        assert_eq!(
+            serde_json::from_str::<MailboxMessageKind>(&wire).unwrap(),
+            kind
+        );
+    }
+    // A timeout is an observation, never a claim about execution; and there
+    // is no lossy cast.
+    for unknown in ["timed_out", "not_executed", "delivered", "cancelled"] {
+        assert!(serde_json::from_str::<DeliveryOutcome>(&format!("\"{unknown}\"")).is_err());
+    }
+    for unknown in ["best_effort_cast", "cast_lossy", "notify"] {
+        assert!(serde_json::from_str::<MailboxMessageKind>(&format!("\"{unknown}\"")).is_err());
+    }
+}
+
+#[test]
+fn a_router_sees_routing_fields_and_opaque_ciphertext_only() {
+    let plaintext = b"a-distinctive-plaintext-marker";
+    let mut message_header = header();
+    message_header.plaintext_len = u32::try_from(plaintext.len()).expect("fits");
+    let envelope = seal_with(message_header, plaintext);
+
+    let keys = |value: serde_json::Value| -> std::collections::BTreeSet<String> {
+        value.as_object().expect("object").keys().cloned().collect()
+    };
+    let expect = |names: &[&str]| -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    };
+    assert_eq!(
+        keys(serde_json::to_value(&envelope).unwrap()),
+        expect(&[
+            "routing",
+            "encryption",
+            "ciphertext_commitment",
+            "ciphertext"
+        ])
+    );
+    assert_eq!(
+        keys(serde_json::to_value(&envelope.routing).unwrap()),
+        expect(&[
+            "protocol_version",
+            "authorization_domain_route_label",
+            "destination_route_token",
+            "delivery_id",
+            "ciphertext_len",
+            "padding",
+            "expires_at_unix_ms",
+            "hop_limit",
+            "transport_binding_id",
+        ])
+    );
+    let wire = encode_envelope(&envelope).expect("encode");
+    assert!(
+        !wire.windows(plaintext.len()).any(|w| w == plaintext),
+        "plaintext must not appear on the wire"
+    );
+}
+
+#[test]
+fn only_the_destination_authority_can_sign_acceptance() {
+    let destination_key = SigningKey::from_bytes(&[31; 32]);
+    let relay_key = SigningKey::from_bytes(&[34; 32]);
+    let receipt = mvm_contract::protocol::mailbox::DestinationReceipt {
+        protocol_version: ProtocolVersion::V1,
+        signature_algorithm: SignatureAlgorithm::ED25519,
+        delivery_id: DeliveryId::from_bytes([32; 32]),
+        message_id: MessageId::from_bytes([6; 32]),
+        address: address(),
+        execution_epoch: ExecutionEpoch::new(7).expect("epoch"),
+        outcome: DeliveryOutcome::AcceptedDurable,
+        observed_at_unix_ms: 1_600,
+        ciphertext_commitment: [33; 32],
+    };
+    let forged = sign_receipt(receipt, &relay_key).expect("sign");
+    assert!(matches!(
+        verify_receipt(&forged, &destination_key.verifying_key()),
+        Err(MailboxError::ReceiptSignatureInvalid)
+    ));
+}

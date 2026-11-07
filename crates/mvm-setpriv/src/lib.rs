@@ -474,6 +474,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_drop_without_no_new_privs() {
+        let error = parse_args(args(&[
+            "--reuid=990",
+            "--regid=990",
+            "--clear-groups",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap_err();
+        assert!(error.contains("no-new-privs"));
+    }
+
+    #[test]
     fn rejects_invalid_uid() {
         let error = parse_args(args(&[
             "--reuid=not-a-uid",

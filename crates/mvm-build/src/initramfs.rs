@@ -109,28 +109,6 @@ pub fn record_source_fingerprint(
     std::fs::write(dir.join(LOCAL_SOURCE_FINGERPRINT_FILE), fingerprint)
 }
 
-/// Record the source fingerprint for a resolved artifact, but only when the
-/// artifact is the version-keyed local build living in that directory.
-///
-/// A pinned-set member's provenance is the signed root, not the checkout, and
-/// its bytes live under `image-set/<root>/…`. Writing a fingerprint beside a
-/// directory the artifact does not live in creates a partial version-keyed
-/// entry (the fingerprint alone), which the resolver then reports as a
-/// missing artifact instead of a missing cache, and the next boot refuses.
-pub fn record_source_fingerprint_for_resolved(
-    cache_root: &Path,
-    version: &str,
-    arch: GuestArch,
-    artifact: &mvm_fs::initramfs::InitramfsArtifact,
-    fingerprint: &str,
-) -> std::io::Result<()> {
-    let local_dir = cache_root.join(version).join(arch.to_string());
-    if !artifact.image_path.starts_with(&local_dir) {
-        return Ok(());
-    }
-    record_source_fingerprint(cache_root, version, arch, fingerprint)
-}
-
 /// Discard a cached artifact that a source checkout did not build.
 ///
 /// Removing rather than ignoring it, so the next resolve takes the build or
@@ -972,64 +950,6 @@ mod tests {
         assert!(
             !is_recoverable_resolve_miss(&wrong_size),
             "a size disagreement must keep refusing"
-        );
-    }
-
-    /// A fingerprint is recorded only when the resolved artifact actually
-    /// lives in the version-keyed directory. A pinned-set member resolves from
-    /// `image-set/<root>/…`; labeling the version-keyed dir beside it would
-    /// leave a partial entry the next resolve reports as a missing artifact.
-    #[test]
-    fn fingerprint_recording_skips_a_set_member_artifact() {
-        let cache = tempfile::tempdir().unwrap();
-        let local_dir = cache.path().join("0.18.1").join("aarch64");
-        std::fs::create_dir_all(&local_dir).unwrap();
-
-        let local = mvm_fs::initramfs::InitramfsArtifact {
-            image_path: local_dir.join("initramfs.cpio.gz"),
-            hash_path: local_dir.join("initramfs.hash"),
-            size_path: local_dir.join("initramfs.size"),
-            version: "0.18.1".into(),
-        };
-        record_source_fingerprint_for_resolved(
-            cache.path(),
-            "0.18.1",
-            GuestArch::Aarch64,
-            &local,
-            "local-fingerprint",
-        )
-        .unwrap();
-        assert!(
-            local_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE).is_file(),
-            "a version-keyed local build is labeled with its fingerprint"
-        );
-
-        let member_dir = cache
-            .path()
-            .join("image-set")
-            .join("deadbeef")
-            .join("0.18.0-rc.2")
-            .join("aarch64");
-        std::fs::create_dir_all(&member_dir).unwrap();
-        let member = mvm_fs::initramfs::InitramfsArtifact {
-            image_path: member_dir.join("initramfs.cpio.gz"),
-            hash_path: member_dir.join("initramfs.hash"),
-            size_path: member_dir.join("initramfs.size"),
-            version: "0.18.0-rc.2".into(),
-        };
-        record_source_fingerprint_for_resolved(
-            cache.path(),
-            "0.18.1",
-            GuestArch::Aarch64,
-            &member,
-            "checkout-fingerprint",
-        )
-        .unwrap();
-        let recorded =
-            std::fs::read_to_string(local_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE)).unwrap();
-        assert!(
-            recorded.contains("local-fingerprint"),
-            "a set member must not be recorded into the version-keyed dir: {recorded}"
         );
     }
 
