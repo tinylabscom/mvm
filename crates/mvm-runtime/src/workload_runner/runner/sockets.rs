@@ -141,4 +141,85 @@ mod tests {
             mvm_contract::stream::DISPLAY_FRAME_PORT
         );
     }
+
+    /// Every Unix socket an HVF boot, restore, handoff or builder session binds
+    /// or dials, resolved by the real path builders under the home the
+    /// documented-surface lane runs in. A socket that does not fit `sun_path`
+    /// cannot be bound at all, and the only symptom is a supervisor that exits
+    /// before it reports ready.
+    #[test]
+    fn every_hvf_socket_fits_under_the_documented_surface_lanes_home() {
+        use crate::workload_runner::standby_boot::{standby_broker_socket, standby_egress_socket};
+        use mvm_core::config::{
+            fits_unix_socket_path, vm_approval_socket_at, vm_hvf_broker_socket,
+            vm_hvf_handoff_socket_at, vm_network_endpoint_socket, vm_state_dir,
+            vm_stream_socket_at,
+        };
+        use mvm_core::util::test_env::TestEnv;
+
+        let mut env = TestEnv::new();
+        let home = "/Users/gha-runner/src/actions-runner/_work/mvm/mvm/.mvm-e2e-40641602843-1-0";
+        env.set("MVM_HOME", home);
+        let names = [
+            "mvm-hvf-builder-1793170789719-33443".to_string(),
+            mvm_core::naming::builder_shell_vm_name("1793170789719-33443"),
+            mvm_core::naming::persistent_builder_vm_name(
+                mvm_core::naming::BuilderVmSlot::Hvf,
+                "1793170789719",
+            ),
+            "bdd-journey-replay".to_string(),
+            "standby-0123456789ab".to_string(),
+        ];
+        let config = VmStartConfig {
+            tenant_id: Some("tenant".into()),
+            gpu: true,
+            dev_console: true,
+            ..VmStartConfig::default()
+        };
+        for name in &names {
+            let state = vm_state_dir(name);
+            let standing = standing_sockets(&state, &config);
+            let mut sockets = vec![
+                ("agent", standing.agent),
+                ("telemetry", standing.telemetry),
+                ("broker", standing.broker.unwrap()),
+                ("gpu", standing.gpu.unwrap()),
+                (
+                    "stop control",
+                    mvm_vmm::host::hvf_control_transport::socket_path(name).unwrap(),
+                ),
+                ("handoff", vm_hvf_handoff_socket_at(&state)),
+                ("standby egress", standby_egress_socket(&state)),
+                ("standby broker", standby_broker_socket(&state)),
+                ("hvf broker", vm_hvf_broker_socket(name)),
+                ("endpoint", vm_network_endpoint_socket(name)),
+                ("approval", vm_approval_socket_at(&state)),
+                ("stream", vm_stream_socket_at(&state)),
+            ];
+            sockets.extend(
+                standing
+                    .console_data
+                    .into_iter()
+                    .map(|(_, path)| ("console data", path)),
+            );
+            sockets.extend(
+                mvm_vmm::host::spec_map::builder_control_sockets(&state, true)
+                    .into_iter()
+                    .map(|(_, path)| ("builder control", path)),
+            );
+            sockets.extend(
+                mvm_build::builderd_client::builderd_control_socket_candidates(&state)
+                    .into_iter()
+                    .map(|path| ("builderd control", path)),
+            );
+            for (what, path) in sockets {
+                assert!(
+                    fits_unix_socket_path(&path),
+                    "{name}: {what} socket {} is {} bytes",
+                    path.display(),
+                    path.as_os_str().len()
+                );
+            }
+        }
+    }
 }
