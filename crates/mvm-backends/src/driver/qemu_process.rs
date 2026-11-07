@@ -4,7 +4,7 @@
 //! `qemu_builder`): boots a user workload microVM via `qemu-system-<arch>` so a
 //! workload can run for dev/test on a host without `/dev/kvm` (TCG fallback) or
 //! where Firecracker isn't wanted. **Firecracker stays the sole production
-//! runtime**; QEMU is opt-in (`--hypervisor qemu` / `MVM_BACKEND=qemu`) and
+//! runtime**; QEMU is opt-in (`--hypervisor qemu` / `MVM_HYPERVISOR=qemu`) and
 //! `auto_select` never picks it.
 //!
 //! Locating the binary, allocating a CID, PID files, and the vsock bridge

@@ -123,8 +123,8 @@ pub fn resolve_local_deployment(path: &Path) -> Result<LocalDeployment> {
 /// `firecracker` (the default `--hypervisor`) delegates to the runtime's
 /// canonical auto-detect ladder: KVM → firecracker, supported Apple Silicon
 /// macOS → hvf, else firecracker (surfaces a clear "not available" error). Any
-/// explicit value is returned as-is. The `MVM_HYPERVISOR` env var (alias
-/// `MVM_BACKEND`) overrides auto-detect — the workload-VMM override mirroring
+/// explicit value is returned as-is. The `MVM_HYPERVISOR` env var
+/// overrides auto-detect — the workload-VMM override mirroring
 /// `MVM_BUILDER_BACKEND` for the builder, so a Linux/KVM host can opt into
 /// `libkrun` instead of the Firecracker default. Single source of truth, shared
 /// by the run/pool paths so they agree on the backend.
@@ -133,15 +133,12 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
         return requested.to_string();
     }
     // Env override (auto-detect mode only — an explicit `--hypervisor` flag
-    // already won above): `MVM_HYPERVISOR=<firecracker|libkrun|hvf|qemu>`, with
-    // the older `MVM_BACKEND` kept as a back-compat alias. Does not change the
-    // platform default.
-    for var in ["MVM_HYPERVISOR", "MVM_BACKEND"] {
-        if let Some(name) = std::env::var_os(var) {
-            let name = name.to_string_lossy().trim().to_ascii_lowercase();
-            if !name.is_empty() {
-                return name;
-            }
+    // already won above): `MVM_HYPERVISOR=<firecracker|libkrun|hvf|qemu>`. Does
+    // not change the platform default.
+    if let Some(name) = std::env::var_os("MVM_HYPERVISOR") {
+        let name = name.to_string_lossy().trim().to_ascii_lowercase();
+        if !name.is_empty() {
+            return name;
         }
     }
     crate::auto_selected_backend_name()
@@ -830,21 +827,16 @@ mod tests {
         assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
     }
 
-    /// `MVM_HYPERVISOR` overrides auto-detect (and `MVM_BACKEND` is the
-    /// back-compat alias); an explicit flag still wins over both. Process-isolated
+    /// `MVM_HYPERVISOR` overrides auto-detect; an explicit flag still wins.
+    /// Process-isolated
     /// under nextest; restored here so a threaded runner doesn't leak it.
     #[test]
-    fn env_overrides_auto_detect_with_alias() {
+    fn env_overrides_auto_detect() {
         let mut env = TestEnv::new();
-        env.remove("MVM_BACKEND");
         env.set("MVM_HYPERVISOR", "libkrun");
         assert_eq!(resolve_effective_hypervisor("firecracker"), "libkrun");
         // An explicit flag wins over the env override.
         assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
-        // The older alias is still honored.
-        env.remove("MVM_HYPERVISOR");
-        env.set("MVM_BACKEND", "hvf");
-        assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
     }
 
     /// On the macOS-26 Apple Silicon tier the auto-detect default is the
@@ -858,7 +850,6 @@ mod tests {
         }
         let mut env = TestEnv::new();
         env.remove("MVM_HYPERVISOR");
-        env.remove("MVM_BACKEND");
         assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
     }
 }

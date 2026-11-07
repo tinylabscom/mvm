@@ -65,7 +65,7 @@ pub(crate) fn libkrun_runner() -> LibkrunRunner {
 
 /// QEMU (Linux dev/test substrate; KVM where present, TCG fallback) driven
 /// through the same unified workload-runner role — qemu's sole workload launch
-/// path (`--hypervisor qemu` / `MVM_BACKEND=qemu`; `auto_select` never picks
+/// path (`--hypervisor qemu` / `MVM_HYPERVISOR=qemu`; `auto_select` never picks
 /// it). NIC-less: the converged boot attaches no slirp user-mode network, so
 /// egress routes to the per-VM gating endpoint over vsock only, through the
 /// per-VM AF_VSOCK↔UNIX bridge. The legacy direct `QemuBackend`
@@ -246,7 +246,7 @@ impl HostTiers {
 ///
 /// Only production-tier backends appear here. Every other backend —
 /// apple-container, qemu, wasm, mock — is opt-in, reachable only
-/// through an explicit `--hypervisor` / `MVM_BACKEND` selection, and must
+/// through an explicit `--hypervisor` / `MVM_HYPERVISOR` selection, and must
 /// never be reachable from this function. Adding a return site for one
 /// silently moves a workload onto a backend the caller did not ask for.
 fn select_kind(tiers: HostTiers) -> catalog::BackendKind {
@@ -289,7 +289,7 @@ pub enum AnyBackend {
     /// QEMU workload runtime — Linux dev/test substrate (KVM where
     /// present, TCG fallback), driven through the unified `WorkloadRunner`
     /// over the driver seam — qemu's sole workload path, selected by
-    /// `--hypervisor qemu` / `MVM_BACKEND=qemu`; `auto_select` never picks
+    /// `--hypervisor qemu` / `MVM_HYPERVISOR=qemu`; `auto_select` never picks
     /// it (Firecracker stays the production runtime). The boot attaches the
     /// universal initramfs and receives `ActivateEnvironment` over vsock
     /// (via the AF_VSOCK↔UNIX bridge), exactly like the other runner
@@ -307,14 +307,14 @@ pub enum AnyBackend {
     Mock(MockBackend),
     /// HVF (Hypervisor.framework on macOS / Apple silicon), driven through the
     /// unified `WorkloadRunner` over the driver seam — hvf's sole workload path,
-    /// selected by `--hypervisor hvf` / `MVM_BACKEND=hvf` and the macOS-26
+    /// selected by `--hypervisor hvf` / `MVM_HYPERVISOR=hvf` and the macOS-26
     /// auto-detect default. NIC-less: egress routes to the per-VM gating endpoint
     /// over vsock only (claim-10 + claims 12/13 at the endpoint); no routable
     /// guest NIC. The destination macOS backend.
     Hvf(HvfRunner),
     /// Host-`wasmtime` claim-free portability tier — see
     /// [`crate::wasm_backend`]. Selectable only via explicit
-    /// `--hypervisor wasm` / `MVM_BACKEND=wasm`; `auto_select` never falls
+    /// `--hypervisor wasm` / `MVM_HYPERVISOR=wasm`; `auto_select` never falls
     /// through here. Always constructible; the real engine only compiles in
     /// behind the `wasm-backend` feature, so a build without it fails
     /// closed with a typed error the first time the backend is actually
@@ -1528,7 +1528,7 @@ mod tests {
     }
 
     /// `auto_select` must never return the wasm portability tier — it is
-    /// opt-in only (explicit `--hypervisor wasm` / `MVM_BACKEND=wasm`), never
+    /// opt-in only (explicit `--hypervisor wasm` / `MVM_HYPERVISOR=wasm`), never
     /// a platform-ladder fallback. `auto_select`'s implementation has exactly
     /// two return sites (Firecracker/Hvf) and neither
     /// construct `Self::Wasm`, so this holds on every platform the ladder

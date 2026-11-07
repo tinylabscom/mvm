@@ -149,11 +149,9 @@ fn select(args: &RunArgs) -> Result<Option<Selected>> {
 /// This host, and the backend the run asks for or the host would pick.
 fn run_platform(args: &RunArgs) -> Platform {
     let requested = args.hypervisor.clone().or_else(|| {
-        ["MVM_HYPERVISOR", "MVM_BACKEND"]
-            .into_iter()
-            .filter_map(std::env::var_os)
+        std::env::var_os("MVM_HYPERVISOR")
             .map(|value| value.to_string_lossy().trim().to_ascii_lowercase())
-            .find(|value| !value.is_empty())
+            .filter(|value| !value.is_empty())
     });
     let backend = requested.as_deref().map_or_else(
         || mvm_client::backend_kind_for(&mvm_client::auto_selected_backend_name()),
