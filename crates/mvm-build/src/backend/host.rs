@@ -9,7 +9,7 @@ use super::{BackendBuildResult, BackendParams, BuilderBackend};
 use crate::nix_manifest::NixManifest;
 use crate::scripts::render_script;
 use crate::shell_scripts;
-use mvm_vmm::host::shell::shell_quote;
+use crate::shell_scripts::q as shell_quote;
 
 /// Host backend: runs `nix build` directly on the host machine.
 ///

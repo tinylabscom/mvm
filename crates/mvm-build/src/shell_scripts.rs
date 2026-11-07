@@ -1,12 +1,16 @@
 //! Scripts the dev and pool build paths hand to a `ShellEnvironment`.
 //!
 //! Every path and value is data: it goes through
-//! [`shell_quote`](mvm_vmm::host::shell::shell_quote), so one containing a
+//! `q`, so one containing a
 //! space, quote, `$(...)`, backtick, newline or `;` stays a single inert word.
 //! A revision name read back from a symlink or a hash read from tool output is
 //! as untrusted as a flake path here.
 
-use mvm_vmm::host::shell::shell_quote as q;
+/// POSIX single-quote form. `mvm-vmm`'s quoter is a unix-only dependency and
+/// these scripts are built on every host, so the one-line idiom lives here.
+pub(crate) fn q(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', r"'\''"))
+}
 
 pub(crate) fn mkdir_p(path: &str) -> String {
     format!("mkdir -p {}", q(path))
