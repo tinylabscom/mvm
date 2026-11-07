@@ -488,7 +488,6 @@ pub(in crate::commands) fn console_interactive(
         attached.kind.audit_label()
     );
 
-    // Set up SIGWINCH handler to forward terminal resizes
     let resize_sender = setup_sigwinch_handler(transport.clone(), session_id);
 
     // Enter raw terminal mode and suppress the Ctrl-C handler so that Ctrl+C

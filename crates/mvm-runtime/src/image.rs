@@ -524,7 +524,6 @@ pub fn build(name_or_path: &str, output: Option<&str>) -> Result<String> {
         )
     };
 
-    // Build the run commands
     let run_commands: String = config
         .run
         .iter()
@@ -538,7 +537,6 @@ pub fn build(name_or_path: &str, output: Option<&str>) -> Result<String> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Build the service injection
     let service_injection: String = config
         .services
         .iter()
