@@ -233,6 +233,14 @@ mod tests {
     }
 
     #[test]
+    fn shell_quote_covers_the_cases_of_the_removed_per_crate_copies() {
+        assert_eq!(shell_quote("path:/work"), "'path:/work'");
+        assert_eq!(shell_quote("a b $c|d"), "'a b $c|d'");
+        assert_eq!(shell_quote("don't"), r"'don'\''t'");
+        assert_eq!(shell_quote("''"), r"''\'''\'''");
+    }
+
+    #[test]
     fn shell_quote_handles_empty_string() {
         assert_eq!(shell_quote(""), "''");
     }

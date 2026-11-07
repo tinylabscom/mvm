@@ -397,7 +397,7 @@ fn command_with_env(cmd: &str, env: &[(String, String)]) -> String {
     }
     let exports = env
         .iter()
-        .map(|(key, value)| format!("{key}={}", crate::exec::shell_quote(value)))
+        .map(|(key, value)| format!("{key}={}", mvm_vmm::host::shell::shell_quote(value)))
         .collect::<Vec<_>>()
         .join(" ");
     format!("{exports} {cmd}")

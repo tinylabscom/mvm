@@ -36,6 +36,7 @@
 //! - Install variant dispatch.
 //! - Stderr streaming.
 
+use mvm_vmm::host::shell::shell_quote;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -798,8 +799,8 @@ fn stage_flake_cmd_sh(
             "\"$OUT_DIR\""
         ),
         out_dir = guest_artifact_dir(transport, &job_id),
-        flake_ref = shell_escape(flake_ref),
-        attr = shell_escape(attr),
+        flake_ref = shell_quote(flake_ref),
+        attr = shell_quote(attr),
         egress_proxy_url = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL,
         no_proxy_loopback = mvm_core::guest_netd::NO_PROXY_LOOPBACK,
     );
@@ -818,23 +819,6 @@ fn stage_flake_cmd_sh(
 /// `vmlinux` and `rootfs.ext4` after a successful dispatch.
 fn artifact_dir_for(job_dir: &std::path::Path, job_id: &str) -> std::path::PathBuf {
     job_dir.join(job_id).join(ARTIFACT_SUBDIR)
-}
-
-/// Minimal POSIX-shell single-quote escape. Sufficient for the
-/// closed flake_ref + attr_path shapes the supervisor accepts;
-/// stricter validation belongs upstream in the IR.
-fn shell_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str(r"'\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 fn host_arch_for_attr() -> &'static str {
@@ -951,19 +935,6 @@ mod tests {
         // Names QEMU's absence and points at the supported backend.
         assert!(msg.contains("QEMU"), "{msg}");
         assert!(msg.contains("libkrun"), "{msg}");
-    }
-
-    #[test]
-    fn shell_escape_wraps_value_in_single_quotes() {
-        assert_eq!(shell_escape("simple"), "'simple'");
-        assert_eq!(shell_escape("path:/work"), "'path:/work'");
-    }
-
-    #[test]
-    fn shell_escape_handles_embedded_single_quote() {
-        // The classic posix workaround: close quote, escaped
-        // literal quote, re-open quote.
-        assert_eq!(shell_escape("don't"), r"'don'\''t'");
     }
 
     #[test]
