@@ -359,14 +359,6 @@ impl EgressGate {
         self.routes.decide(host, port, method, path)
     }
 
-    /// Whether a request to `host:port` must be read to be decided — a route
-    /// there has rules, or refuses by default. An opaque flow to such a
-    /// destination cannot be decided and is refused.
-    #[must_use]
-    pub fn requires_inspection(&self, host: &str, port: u16) -> bool {
-        self.routes.needs_inspection(host, port)
-    }
-
     /// The admitted route whose request rules make an opaque flow impossible
     /// to decide. No rule id exists until the request can be read.
     #[must_use]
@@ -460,11 +452,6 @@ impl EgressGate {
     /// policy-checked, so widening the set never admits an unpinned target.
     pub fn decide_addr(&self, ip: IpAddr, port: u16) -> EgressVerdict {
         self.decide_addr_for_proto(Proto::Tcp, ip, port)
-    }
-
-    /// Decide a UDP datagram to an already-resolved address.
-    pub fn decide_udp_addr(&self, ip: IpAddr, port: u16) -> EgressVerdict {
-        self.decide_addr_for_proto(Proto::Udp, ip, port)
     }
 
     /// Decide a guest connect request — either a numeric `"<ip>:<port>"` or a

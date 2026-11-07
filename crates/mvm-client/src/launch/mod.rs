@@ -1248,16 +1248,6 @@ impl LocalBackend {
         })
     }
 
-    /// Restart a persistent machine: stop it when running (spec kept), then
-    /// start it again from its persisted definition.
-    pub async fn restart_persistent(&self, name: &str) -> Result<MachineState> {
-        if self.machine_running(name) {
-            use mvm_core::client::MvmClient as _;
-            self.stop_machine(&MachineId(name.to_string())).await?;
-        }
-        self.start_persistent(name).await
-    }
-
     /// Remove a machine. For a persistent definition this is the separate
     /// confirmed action that deletes the spec: a RUNNING persistent machine
     /// is refused unless `options.force` explicitly requests the reviewed
@@ -1421,42 +1411,6 @@ impl LocalBackend {
             self.cleanup_transient(name)?;
         }
         Ok(ExitReport { exit_code })
-    }
-
-    /// Stop and clean every transient machine whose registry TTL has lapsed
-    /// at `now` (RFC 3339). Persistent definitions are never touched — their
-    /// TTL semantics stay with the idle reaper. Returns the reaped names.
-    pub fn reap_expired_transients(&self, now_rfc3339: &str) -> Result<Vec<String>> {
-        let Some(now) = mvm_core::util::time::parse_iso8601(now_rfc3339) else {
-            return Err(MvmError::InvalidSpec {
-                reason: format!("invalid RFC 3339 timestamp {now_rfc3339:?}"),
-            });
-        };
-        let registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(
-            &mvm_runtime::vm::name_registry::registry_path(),
-        )
-        .unwrap_or_default();
-        let expired: Vec<String> = registry
-            .vms
-            .iter()
-            .filter(|(name, reg)| {
-                !machine_spec_path(name).exists()
-                    && matches!(
-                        reg.expires_at
-                            .as_deref()
-                            .and_then(mvm_core::util::time::parse_iso8601),
-                        Some(exp) if exp < now
-                    )
-            })
-            .map(|(name, _)| name.clone())
-            .collect();
-        let mut reaped = Vec::with_capacity(expired.len());
-        for name in expired {
-            self.cleanup_transient(&name)?;
-            reaped.push(name);
-        }
-        reaped.sort();
-        Ok(reaped)
     }
 }
 

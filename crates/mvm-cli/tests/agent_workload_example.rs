@@ -142,3 +142,26 @@ fn both_agent_examples_reuse_the_one_pinned_binary_recipe() {
     assert!(!legacy.contains("linux-x64-musl"));
     assert!(!legacy.contains("linux-arm64-musl"));
 }
+
+#[test]
+fn agent_environment_policy_is_exactly_the_one_request_ceiling() {
+    let environment: serde_json::Value =
+        serde_json::from_str(&read(&example_file("environment.json"))).expect("valid JSON");
+    assert_eq!(
+        environment["policy"],
+        serde_json::json!({
+            "allow_hosts": ["api.anthropic.com:443"],
+            "request_budget": {
+                "max_requests": 1,
+                "max_spend_microusd": 500000,
+                "model": "claude-haiku-4-5-20251001"
+            }
+        })
+    );
+
+    let flake = read(&example_file("flake.nix"));
+    assert!(flake.contains("--model claude-haiku-4-5-20251001"));
+    assert!(flake.contains("export CLAUDE_CODE_MAX_OUTPUT_TOKENS=20000"));
+    assert!(flake.contains("export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1"));
+    assert!(!flake.contains("USE_BUILTIN_RIPGREP"));
+}

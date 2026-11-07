@@ -990,26 +990,57 @@ let
   # make-ext4-fs pins the filesystem UUID but not the directory hash seed, so
   # `mkfs.ext4` would draw a random one and two builds of the same tree would
   # differ in the superblock and every checksum that covers it. It takes no
-  # extra mkfs arguments, so it gets an e2fsprogs whose `mkfs.ext4` always
-  # passes the seed. The seed mirrors
+  # extra mkfs arguments either, so it gets an e2fsprogs whose `mkfs.ext4` is
+  # the wrapper below. The seed mirrors
   # `mvm_fs::oci_to_rootfs::ext4::Mke2fsOptions::default().hash_seed`.
+  #
+  # The rootfs is mounted read-only under dm-verity, so the wrapper also
+  # sizes the filesystem to its contents instead of to mke2fs's size-class
+  # defaults (1 KiB blocks, one inode per 4 KiB, 5% reserved blocks, a
+  # journal, resize headroom), all of which are dead weight here:
+  #   -b 4096        data and verity hash blocks are both 4 KiB; the guest
+  #                  reads the block size from the superblock, so the host's
+  #                  seal and the guest's table follow it. With 1 KiB data
+  #                  blocks the hash tree is four times larger.
+  #   -I 256         the inode size stays what it has been.
+  #   -m 0           no blocks reserved for root; nothing writes to the image.
+  #   -N             the tree's entry count (read from the `-d` directory)
+  #                  plus the ten reserved inodes, lost+found, 64 spare and
+  #                  2%, instead of one inode per 4 KiB of image.
+  #   ^has_journal   a read-only mount never replays or writes one.
+  #   ^resize_inode  the image is never grown online, and the reserved GDT
+  #                  blocks keep `resize2fs -M` from shrinking it fully.
   rootfsHashSeed = "00000000-0000-0000-0000-000000000002";
+  mkfsExt4Sized = pkgs.writeShellScript "mkfs-ext4-sized" ''
+    set -eu
+    src=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "-d" ]; then src="$arg"; fi
+      prev="$arg"
+    done
+    if [ -z "$src" ]; then
+      echo "mkfs-ext4-sized: no -d <dir> argument to size the inode table from" >&2
+      exit 1
+    fi
+    entries=$(${pkgs.findutils}/bin/find "$src" | ${pkgs.coreutils}/bin/wc -l)
+    inodes=$((entries + 11 + 64 + entries / 50))
+    exec ${pkgs.e2fsprogs.bin}/bin/mkfs.ext4 \
+      -b 4096 -I 256 -m 0 -N "$inodes" \
+      -O ^has_journal,^resize_inode \
+      -E hash_seed=${rootfsHashSeed} \
+      "$@"
+  '';
   e2fsprogsPinnedHashSeed =
     let
-      pinned =
-        pkgs.runCommand "e2fsprogs-pinned-hash-seed"
-          {
-            nativeBuildInputs = [ pkgs.makeWrapper ];
-          }
-          ''
-            mkdir -p "$out/bin"
-            for tool in ${pkgs.e2fsprogs.bin}/bin/*; do
-              ln -s "$tool" "$out/bin/"
-            done
-            rm "$out/bin/mkfs.ext4"
-            makeWrapper ${pkgs.e2fsprogs.bin}/bin/mkfs.ext4 "$out/bin/mkfs.ext4" \
-              --add-flags "-E hash_seed=${rootfsHashSeed}"
-          '';
+      pinned = pkgs.runCommand "e2fsprogs-pinned-hash-seed" { } ''
+        mkdir -p "$out/bin"
+        for tool in ${pkgs.e2fsprogs.bin}/bin/*; do
+          ln -s "$tool" "$out/bin/"
+        done
+        rm "$out/bin/mkfs.ext4"
+        ln -s ${mkfsExt4Sized} "$out/bin/mkfs.ext4"
+      '';
     in
     pinned // { bin = pinned; };
 

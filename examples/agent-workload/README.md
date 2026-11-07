@@ -145,3 +145,9 @@ mvmctl trust audit tail --chain --lines 50
 The guest can use the credential through the governed proxy; a compromised
 guest could still spend it against its bound destination. Use provider-side
 budgets and revocation in addition to mvm's destination binding and audit.
+
+The packaged `environment.json` also carries a `request_budget` (one request,
+$0.50, model `claude-haiku-4-5-20251001`) that the egress endpoint enforces at
+admission. The `--max-turns 3 --max-budget-usd 0.50` flags in the entrypoint are
+the client's own limits and are not enforced by mvm; the entrypoint pins the
+model and a 20000-token output bound so the client fits the admitted ceiling.

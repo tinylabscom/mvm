@@ -11,8 +11,8 @@
 //! Unlike `Exec` (dev-only), every FS verb here is
 //! prod-safe. The agent starts as uid 901 through
 //! `mvm-setpriv --no-new-privs` and narrows its Linux capability bounding set
-//! through `PR_CAPBSET_DROP`; `/etc/{passwd,group,nsswitch.conf}` are
-//! bind-mounted read-only, and `mvm_core::crypto::policy::PathPolicy` denies
+//! through `PR_CAPBSET_DROP`; the rootfs is mounted read-only, so
+//! `/etc/{passwd,group,nsswitch.conf}` cannot be rewritten, and `mvm_core::crypto::policy::PathPolicy` denies
 //! `/etc/mvm/*` and `/run/mvm-secrets/*` even when canonicalization
 //! resolves a guest-side symlink into them.
 //!

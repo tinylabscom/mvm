@@ -204,4 +204,22 @@ mod tests {
         let b = root_hash(&vec![1u8; 4096 * 3], &salt, 4096, 4096);
         assert_ne!(a, b);
     }
+
+    /// One flipped byte in any data block, first through last of a two-level
+    /// tree, no longer matches the root hash recorded for the untampered image.
+    #[test]
+    fn a_single_flipped_byte_in_any_block_no_longer_matches_the_recorded_root() {
+        let salt = [0u8; 32];
+        let image: Vec<u8> = (0..4096 * 200).map(|i| (i % 251) as u8).collect();
+        let recorded = root_hash(&image, &salt, 4096, 4096);
+        for block in [0, 99, 128, 199] {
+            let mut tampered = image.clone();
+            tampered[block * 4096 + 17] ^= 0x01;
+            assert_ne!(
+                root_hash(&tampered, &salt, 4096, 4096),
+                recorded,
+                "flip in block {block} went undetected"
+            );
+        }
+    }
 }

@@ -81,11 +81,6 @@ impl<H: VcpuHandle> VcpuQuota<H> {
         }
     }
 
-    /// A predicate for `RunHooks::should_throttle`.
-    pub fn throttle_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.hold)
-    }
-
     /// Stop the controller and take its measurement.
     pub fn stop(mut self) -> QuotaAchievement {
         self.halt();

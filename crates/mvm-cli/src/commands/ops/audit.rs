@@ -684,7 +684,7 @@ fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
             id = signed.payload.receipt_id,
         );
     }
-    // Citations are the entries that used to vanish. Showing them is the
+    // Citations are the entries that would otherwise vanish. Showing them is the
     // difference between "there was no egress" and "egress was not exported".
     for cited in &evidence.cited {
         eprintln!(

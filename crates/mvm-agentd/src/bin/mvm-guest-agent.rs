@@ -105,6 +105,21 @@ fn try_acquire(counter: &'static AtomicUsize, limit: usize) -> Option<CounterGua
     }
 }
 
+/// Control-plane requests are never counted against the data-plane bound;
+/// a data-plane request past `limit` is refused.
+fn admit_traffic(
+    plane: TrafficPlane,
+    data_counter: &'static AtomicUsize,
+    limit: usize,
+) -> Result<Option<CounterGuard>, &'static str> {
+    if plane != TrafficPlane::Data {
+        return Ok(None);
+    }
+    try_acquire(data_counter, limit)
+        .map(Some)
+        .ok_or("guest data plane is at its concurrency limit")
+}
+
 use crate::boot::{init_entrypoint_validation, init_integrations, init_probes, init_warm_pool};
 use crate::config::parse_config;
 use crate::globals::{
@@ -287,7 +302,7 @@ impl ControlOperations for NativeControlOperations {
         init::apply_activation(environment, boot)?;
         if init::is_pid1() {
             let boot = Arc::clone(boot);
-            std::thread::spawn(move || {
+            let _ = mvm_agentd::detached::spawn_named("entrypoint-validation", move || {
                 init_entrypoint_validation(&boot);
                 init_warm_pool(&boot);
             });
@@ -520,20 +535,22 @@ fn handle_client_operations(
         }
 
         let limits = ConnectionLimits::default();
-        let _data_guard = if req.verb().traffic_plane() == TrafficPlane::Data {
-            let Some(guard) = try_acquire(&ACTIVE_DATA_REQUESTS, limits.data) else {
+        let _data_guard = match admit_traffic(
+            req.verb().traffic_plane(),
+            &ACTIVE_DATA_REQUESTS,
+            limits.data,
+        ) {
+            Ok(guard) => guard,
+            Err(message) => {
                 send_authenticated_response(
                     &mut file,
                     &mut session,
                     &GuestResponse::Error {
-                        message: "guest data plane is at its concurrency limit".to_string(),
+                        message: message.to_string(),
                     },
                 );
                 return;
-            };
-            Some(guard)
-        } else {
-            None
+            }
         };
 
         let req = match req {
@@ -1095,7 +1112,7 @@ fn main() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0);
-    std::thread::spawn(move || {
+    let _ = mvm_agentd::detached::spawn_named("boot-beacon", move || {
         mvm_agentd::host_beacon::report_boot_beacon(beacon_boot_unix_ms);
     });
 
@@ -1107,7 +1124,7 @@ fn main() {
     // `/etc/mvm/entrypoint`.
     if !init::is_pid1() {
         let bs = Arc::clone(&boot_state);
-        std::thread::spawn(move || {
+        let _ = mvm_agentd::detached::spawn_named("entrypoint-validation", move || {
             init_entrypoint_validation(&bs);
             init_warm_pool(&bs);
         });
@@ -1179,16 +1196,21 @@ fn main() {
 
     if !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
         let monitor_state = Arc::clone(&state);
-        std::thread::spawn(move || monitoring_loop(monitor_state));
+        let _ =
+            mvm_agentd::detached::spawn_named("monitoring", move || monitoring_loop(monitor_state));
 
         #[cfg(target_os = "linux")]
         if let Some(listener) = attribution_listener {
-            std::thread::spawn(move || mvm_agentd::tool_attribution::serve(listener));
+            let _ = mvm_agentd::detached::spawn_named("tool-attribution", move || {
+                mvm_agentd::tool_attribution::serve(listener)
+            });
         }
 
         #[cfg(target_os = "linux")]
         if let Some(listener) = decision_listener {
-            std::thread::spawn(move || mvm_agentd::tool_decision_socket::serve(listener));
+            let _ = mvm_agentd::detached::spawn_named("tool-decision", move || {
+                mvm_agentd::tool_decision_socket::serve(listener)
+            });
         }
 
         // Defer integration and probe scans to background threads, but only
@@ -1196,12 +1218,14 @@ fn main() {
         {
             let bs = Arc::clone(&boot_state);
             let s = Arc::clone(&integration_state);
-            std::thread::spawn(move || init_integrations(&bs, &s));
+            let _ = mvm_agentd::detached::spawn_named("init-integrations", move || {
+                init_integrations(&bs, &s)
+            });
         }
         {
             let bs = Arc::clone(&boot_state);
             let s = Arc::clone(&probe_state);
-            std::thread::spawn(move || init_probes(&bs, &s));
+            let _ = mvm_agentd::detached::spawn_named("init-probes", move || init_probes(&bs, &s));
         }
 
         // Telemetry initializes in this post-activation zone: the capture
@@ -1921,6 +1945,31 @@ mod tests {
         assert_eq!(limits.total, 64);
         assert_eq!(limits.data, 48);
         assert!(limits.total - limits.data >= 16);
+    }
+
+    #[test]
+    fn a_saturated_data_plane_refuses_data_requests_and_still_admits_control() {
+        static DATA: AtomicUsize = AtomicUsize::new(0);
+        let held: Vec<_> = (0..2)
+            .map(|_| {
+                admit_traffic(TrafficPlane::Data, &DATA, 2)
+                    .expect("slot")
+                    .expect("data requests are counted")
+            })
+            .collect();
+        assert!(matches!(
+            admit_traffic(TrafficPlane::Data, &DATA, 2),
+            Err(message) if message.contains("concurrency limit")
+        ));
+        assert!(
+            matches!(admit_traffic(TrafficPlane::Control, &DATA, 2), Ok(None)),
+            "control traffic must not queue behind a saturated data plane"
+        );
+        drop(held);
+        assert!(matches!(
+            admit_traffic(TrafficPlane::Data, &DATA, 2),
+            Ok(Some(_))
+        ));
     }
 
     #[test]

@@ -366,18 +366,6 @@ impl BuilderdClient {
         }
     }
 
-    /// Send a [`BuilderRequest::CancelJob`] for `target` on this
-    /// connection. The terminal [`OperationOutcome::Cancelled`] arrives
-    /// through [`Self::run_operation`]'s event loop; this only writes the
-    /// cancel frame, so a caller can drive it from a separate handle to
-    /// the same session (a signal handler, a deadline watcher).
-    pub fn request_cancel(&mut self, target: OperationId) -> Result<(), BuilderdClientError> {
-        mvm_agentd::vsock::write_frame(&mut self.stream, &BuilderRequest::CancelJob { target })
-            .map_err(|e| BuilderdClientError::Transport {
-                detail: format!("cancel write failed: {e}"),
-            })
-    }
-
     /// Read one frame, mapping a read timeout to
     /// [`BuilderdClientError::Timeout`] and any other read failure to
     /// [`BuilderdClientError::Transport`].
@@ -694,15 +682,6 @@ mod tests {
             matches!(err, BuilderdClientError::Protocol { .. }),
             "{err:?}"
         );
-    }
-
-    #[test]
-    fn request_cancel_writes_a_well_formed_cancel_frame() {
-        let (client_stream, mut server) = UnixStream::pair().expect("pair");
-        let mut client = BuilderdClient::from_stream(client_stream);
-        client.request_cancel(op()).expect("write cancel");
-        let frame = mvm_agentd::vsock::read_frame::<BuilderRequest>(&mut server).expect("read");
-        assert_eq!(frame, BuilderRequest::CancelJob { target: op() });
     }
 
     #[test]

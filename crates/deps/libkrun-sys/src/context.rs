@@ -541,23 +541,6 @@ impl KrunContext {
         self
     }
 
-    /// Declare a virtio-fs share with explicit DAX and read-only flags.
-    pub fn add_virtio_fs_full(
-        mut self,
-        tag: impl Into<String>,
-        host_path: impl Into<String>,
-        shm_size: Option<u64>,
-        read_only: bool,
-    ) -> Self {
-        self.virtio_fs_mounts.push(KrunVirtioFs {
-            tag: tag.into(),
-            host_path: host_path.into(),
-            shm_size,
-            read_only,
-        });
-        self
-    }
-
     /// Route the guest's hvc0 console output to `path`. Pass `None`
     /// (or omit the call) to leave libkrun's default behavior in
     /// place (writes to the calling process's stdout).

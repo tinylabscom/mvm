@@ -33,6 +33,10 @@ pub enum InitramfsBuildError {
     #[error("cargo initramfs build failed: {reason}")]
     CargoBuildFailed { reason: String },
 
+    /// The agent does not fit the cpio archive's 32-bit header fields.
+    #[error(transparent)]
+    Cpio(#[from] crate::rootfs_inject::CpioError),
+
     /// An initramfs image does not hash to its own sidecar.
     #[error("checksum mismatch for {name}: expected sha256 {expected}, computed {actual}")]
     ChecksumMismatch {
@@ -103,28 +107,6 @@ pub fn record_source_fingerprint(
     let dir = cache_root.join(version).join(arch.to_string());
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join(LOCAL_SOURCE_FINGERPRINT_FILE), fingerprint)
-}
-
-/// Record the source fingerprint for a resolved artifact, but only when the
-/// artifact is the version-keyed local build living in that directory.
-///
-/// A pinned-set member's provenance is the signed root, not the checkout, and
-/// its bytes live under `image-set/<root>/…`. Writing a fingerprint beside a
-/// directory the artifact does not live in creates a partial version-keyed
-/// entry (the fingerprint alone), which the resolver then reports as a
-/// missing artifact instead of a missing cache, and the next boot refuses.
-pub fn record_source_fingerprint_for_resolved(
-    cache_root: &Path,
-    version: &str,
-    arch: GuestArch,
-    artifact: &mvm_fs::initramfs::InitramfsArtifact,
-    fingerprint: &str,
-) -> std::io::Result<()> {
-    let local_dir = cache_root.join(version).join(arch.to_string());
-    if !artifact.image_path.starts_with(&local_dir) {
-        return Ok(());
-    }
-    record_source_fingerprint(cache_root, version, arch, fingerprint)
 }
 
 /// Discard a cached artifact that a source checkout did not build.
@@ -388,7 +370,7 @@ pub fn assemble_initramfs_artifact(
     version: &str,
     out_dir: &Path,
 ) -> Result<(), InitramfsBuildError> {
-    let cpio = initramfs_cpio(agent_bytes);
+    let cpio = initramfs_cpio(agent_bytes)?;
     let image = gzip_deterministic(&cpio)?;
     std::fs::create_dir_all(out_dir)?;
     std::fs::write(
@@ -417,11 +399,11 @@ pub fn assemble_initramfs_artifact(
 /// devtmpfs itself, so the kernel creates the device nodes. `pub` as the
 /// determinism contract surface (the conformance suite builds it twice
 /// and compares bytes).
-pub fn initramfs_cpio(agent_bytes: &[u8]) -> Vec<u8> {
-    crate::rootfs_inject::build_newc_cpio(&[
+pub fn initramfs_cpio(agent_bytes: &[u8]) -> Result<Vec<u8>, InitramfsBuildError> {
+    Ok(crate::rootfs_inject::build_newc_cpio(&[
         crate::rootfs_inject::CpioEntry::dir("."),
         crate::rootfs_inject::CpioEntry::file("./init", 0o755, agent_bytes.to_vec()),
-    ])
+    ])?)
 }
 
 /// Gzip at the maximum level with no name/timestamp header — the
@@ -818,7 +800,7 @@ mod tests {
         GzDecoder::new(std::fs::File::open(&artifact.image_path).unwrap())
             .read_to_end(&mut cpio)
             .unwrap();
-        assert_eq!(cpio, initramfs_cpio(b"sealed-agent"));
+        assert_eq!(cpio, initramfs_cpio(b"sealed-agent").unwrap());
         assert!(
             !cpio
                 .windows(b"addons-agent".len())
@@ -848,7 +830,7 @@ mod tests {
         GzDecoder::new(std::fs::File::open(&refreshed.image_path).unwrap())
             .read_to_end(&mut refreshed_cpio)
             .unwrap();
-        assert_eq!(refreshed_cpio, initramfs_cpio(b"sealed-agent"));
+        assert_eq!(refreshed_cpio, initramfs_cpio(b"sealed-agent").unwrap());
         assert_eq!(
             std::fs::read_to_string(cache.path().join("1.2.3/x86_64/SOURCE_FINGERPRINT")).unwrap(),
             runtime.digest
@@ -968,64 +950,6 @@ mod tests {
         assert!(
             !is_recoverable_resolve_miss(&wrong_size),
             "a size disagreement must keep refusing"
-        );
-    }
-
-    /// A fingerprint is recorded only when the resolved artifact actually
-    /// lives in the version-keyed directory. A pinned-set member resolves from
-    /// `image-set/<root>/…`; labeling the version-keyed dir beside it would
-    /// leave a partial entry the next resolve reports as a missing artifact.
-    #[test]
-    fn fingerprint_recording_skips_a_set_member_artifact() {
-        let cache = tempfile::tempdir().unwrap();
-        let local_dir = cache.path().join("0.18.1").join("aarch64");
-        std::fs::create_dir_all(&local_dir).unwrap();
-
-        let local = mvm_fs::initramfs::InitramfsArtifact {
-            image_path: local_dir.join("initramfs.cpio.gz"),
-            hash_path: local_dir.join("initramfs.hash"),
-            size_path: local_dir.join("initramfs.size"),
-            version: "0.18.1".into(),
-        };
-        record_source_fingerprint_for_resolved(
-            cache.path(),
-            "0.18.1",
-            GuestArch::Aarch64,
-            &local,
-            "local-fingerprint",
-        )
-        .unwrap();
-        assert!(
-            local_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE).is_file(),
-            "a version-keyed local build is labeled with its fingerprint"
-        );
-
-        let member_dir = cache
-            .path()
-            .join("image-set")
-            .join("deadbeef")
-            .join("0.18.0-rc.2")
-            .join("aarch64");
-        std::fs::create_dir_all(&member_dir).unwrap();
-        let member = mvm_fs::initramfs::InitramfsArtifact {
-            image_path: member_dir.join("initramfs.cpio.gz"),
-            hash_path: member_dir.join("initramfs.hash"),
-            size_path: member_dir.join("initramfs.size"),
-            version: "0.18.0-rc.2".into(),
-        };
-        record_source_fingerprint_for_resolved(
-            cache.path(),
-            "0.18.1",
-            GuestArch::Aarch64,
-            &member,
-            "checkout-fingerprint",
-        )
-        .unwrap();
-        let recorded =
-            std::fs::read_to_string(local_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE)).unwrap();
-        assert!(
-            recorded.contains("local-fingerprint"),
-            "a set member must not be recorded into the version-keyed dir: {recorded}"
         );
     }
 
@@ -1664,8 +1588,8 @@ mod tests {
 
     #[test]
     fn initramfs_cpio_is_byte_deterministic_across_builds() {
-        let a = initramfs_cpio(b"agent-bytes");
-        let b = initramfs_cpio(b"agent-bytes");
+        let a = initramfs_cpio(b"agent-bytes").unwrap();
+        let b = initramfs_cpio(b"agent-bytes").unwrap();
         assert_eq!(a, b, "same agent bytes must produce the same cpio");
         assert_eq!(sha256_hex(&a), sha256_hex(&b));
         assert_epoch_zero_metadata(&a);
@@ -1677,7 +1601,7 @@ mod tests {
 
     #[test]
     fn initramfs_cpio_layout_is_dot_and_init_only() {
-        let cpio = initramfs_cpio(b"agent-bytes");
+        let cpio = initramfs_cpio(b"agent-bytes").unwrap();
         assert_eq!(
             newc_names(&cpio),
             vec![
@@ -1707,7 +1631,7 @@ mod tests {
             &mut uncompressed,
         )
         .unwrap();
-        assert_eq!(uncompressed, initramfs_cpio(b"agent-bytes"));
+        assert_eq!(uncompressed, initramfs_cpio(b"agent-bytes").unwrap());
         assert_eq!(hash.trim(), sha256_hex(&uncompressed));
         assert_eq!(size.trim().parse::<usize>().unwrap(), image.len());
         assert_eq!(version.trim(), "0.18.0");

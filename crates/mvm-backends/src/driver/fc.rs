@@ -3081,8 +3081,7 @@ mod console_verbosity_tests {
             "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0 rootwait init=/init"
         );
         // The other shape is the verity/initramfs boot, where the initramfs
-        // PID 1 owns root/init selection. The virtiofs-root shape that used to
-        // be here is gone.
+        // PID 1 owns root/init selection; there is no virtiofs-root shape.
         assert_eq!(
             fc_base_bootargs(false),
             "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0"

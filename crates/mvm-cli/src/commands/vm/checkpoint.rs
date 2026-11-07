@@ -67,15 +67,6 @@ pub(in crate::commands) struct SaveArgs {
     pub json: bool,
 }
 
-#[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct RestoreArgs {
-    /// Checkpoint id to restore.
-    pub id: String,
-    /// Output the restore result as JSON.
-    #[arg(long)]
-    pub json: bool,
-}
-
 /// Which kind of checkpoint to capture. `fs-quick` clones the rootfs of a
 /// quiesced VM (no memory); `vm-full` captures a running VM's {rootfs, memory,
 /// machine-id} triple in one pause window.

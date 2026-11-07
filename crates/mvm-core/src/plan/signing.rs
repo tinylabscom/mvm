@@ -98,17 +98,6 @@ pub fn redaction_from_signed_json(
     Ok(plan.redaction)
 }
 
-/// Extract the reversible replacement policy from a signed plan's payload,
-/// without re-verifying the signature — same trust posture as
-/// [`redaction_from_signed_json`].
-pub fn reversible_replacement_from_signed_json(
-    plan_json: &str,
-) -> Result<crate::policy::ReversibleReplacementPolicy, serde_json::Error> {
-    let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
-    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
-    Ok(plan.reversible_replacement)
-}
-
 /// Extract the cumulative action budget from a signed plan's payload, without
 /// re-verifying the signature — same trust posture as
 /// [`redaction_from_signed_json`]. Returns `None` for plans that carry no

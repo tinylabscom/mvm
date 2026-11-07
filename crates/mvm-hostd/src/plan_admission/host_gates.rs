@@ -43,12 +43,13 @@ pub(super) fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
     // Software evidence only: this adapter collects no hardware attestation.
     let host = LocalHostInterface::new(&record.node_id, policy, Assurance::Software, now)
         .with_record(record.state, record.epoch);
-    // Per-workload containment: a quarantined workload is refused while every
-    // other workload keeps launching. Stale-epoch rejection is not claimed
-    // here: the plan carries no epoch, so a local start cannot present an old
-    // one. `WorkloadLedger::authorize` enforces it where an epoch is presented.
+    // Per-workload containment: a quarantined workload, or a plan carrying an
+    // epoch other than the workload's current one (a stale plan from before a
+    // replacement), is refused while every other workload keeps launching. A
+    // local launch synthesizes its plan at the current epoch; a plan arriving
+    // from a control plane carries the epoch that authority issued.
     mvm_core::host_interface::workload::WorkloadLedger::load_at(&home)?
-        .authorize_local_start(&plan.workload.0)
+        .authorize(&plan.workload.0, ExecutionEpoch(plan.execution_epoch))
         .map_err(mvm_core::host_interface::HostInterfaceError::from)?;
     host.authorize_workload(&LaunchRequest {
         workload_id: plan.workload.0.clone(),

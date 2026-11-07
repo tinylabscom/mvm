@@ -394,9 +394,8 @@ mod tests {
     /// A relative wasm module resolves against the manifest's own directory.
     ///
     /// `Manifest::read_file` is what does that, before this function sees the
-    /// path. The `if !module_path.is_absolute()` join that used to sit here
-    /// re-derived the same rule and could not change the outcome either way,
-    /// which is why deleting its `!` left every test passing; it is gone, and
+    /// path. No `is_absolute()` join belongs here: it would re-derive the same rule and
+    /// could not change the outcome either way, and
     /// this asserts the resolution the caller actually depends on.
     #[test]
     fn a_relative_wasm_module_resolves_against_the_manifest_directory() {
