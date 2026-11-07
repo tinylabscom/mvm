@@ -291,8 +291,8 @@ pub fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report {
 
 /// Netlink `RTM_NEWROUTE` wire encoding for blackhole routes.
 ///
-/// We replaced the async `rtnetlink` crate (which dragged `tokio` and
-/// `async-trait` into the guest closure) with a hand-rolled message over a
+/// A hand-rolled message stands in for the async `rtnetlink` crate (which
+/// would drag `tokio` and `async-trait` into the guest closure), sent over a
 /// synchronous `AF_NETLINK` socket. The message is 36 bytes of stable
 /// kernel UAPI; building it needs no dependency. The encoding lives off the
 /// `cfg(linux)` socket code so its byte layout is unit-tested on any host —

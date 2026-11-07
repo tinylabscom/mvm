@@ -10,31 +10,9 @@
 //! alongside, because a function that got called more often is a different
 //! defect from one that got slower, and the two need telling apart.
 
-use std::path::Path;
-
-use anyhow::{Context, Result};
-use mvm_core::observability::span_timing::{self, SpanProfile, SpanReport};
+use mvm_core::observability::span_timing::{SpanProfile, SpanReport};
 
 use super::regression::RegressionVerdict;
-
-/// Environment a child `mvmctl` needs in order to write a JSON profile to
-/// `out_path`. Feed these into the launch runner's env list.
-pub fn profile_env(out_path: &Path) -> Vec<(String, String)> {
-    vec![
-        (span_timing::ENV_ENABLE.to_string(), "json".to_string()),
-        (
-            span_timing::ENV_OUT.to_string(),
-            out_path.display().to_string(),
-        ),
-    ]
-}
-
-/// Read a profile a child process wrote.
-pub fn read_profile(path: &Path) -> Result<SpanReport> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading span profile {}", path.display()))?;
-    serde_json::from_str(&raw).with_context(|| format!("parsing span profile {}", path.display()))
-}
 
 /// Mean self time per call, or `None` when the span recorded no calls.
 fn self_ns_per_call(profile: &SpanProfile) -> Option<f64> {
@@ -66,13 +44,6 @@ impl SpanDelta {
     /// Whether this call site regressed beyond the limit.
     pub fn is_regressed(&self) -> bool {
         matches!(self.verdict, RegressionVerdict::Regressed { .. })
-    }
-
-    /// Whether the run called this site a different number of times. A pure
-    /// call-count change leaves per-call time flat, so it would otherwise pass
-    /// the gate unnoticed.
-    pub fn call_count_changed(&self) -> bool {
-        self.baseline_calls != self.current_calls
     }
 }
 
@@ -209,16 +180,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_env_names_the_json_format_and_destination() {
-        let env = profile_env(Path::new("/tmp/p.json"));
-        assert!(env.contains(&("MVM_SPAN_TIMINGS".to_string(), "json".to_string())));
-        assert!(env.contains(&(
-            "MVM_SPAN_TIMINGS_OUT".to_string(),
-            "/tmp/p.json".to_string()
-        )));
-    }
-
-    #[test]
     fn an_unchanged_profile_is_clean() {
         let base = report(vec![span("boot", 4, 400)]);
         let cur = report(vec![span("boot", 4, 400)]);
@@ -270,23 +231,6 @@ mod tests {
 
         let cmp = compare_span_reports(&base, &cur, 10.0);
         assert!(cmp.is_clean(), "{:?}", cmp.deltas);
-    }
-
-    #[test]
-    fn a_changed_call_count_is_surfaced_even_when_per_call_time_is_flat() {
-        // Calling a hasher twice per launch instead of once is a real defect
-        // that leaves per-call time untouched.
-        let base = report(vec![span("sha256_file.uncached", 1, 100)]);
-        let cur = report(vec![span("sha256_file.uncached", 2, 200)]);
-
-        let cmp = compare_span_reports(&base, &cur, 10.0);
-        assert!(cmp.is_clean(), "per-call time did not change");
-        assert!(
-            cmp.deltas[0].call_count_changed(),
-            "the extra call must still be visible"
-        );
-        assert_eq!(cmp.deltas[0].baseline_calls, 1);
-        assert_eq!(cmp.deltas[0].current_calls, 2);
     }
 
     #[test]
@@ -371,24 +315,5 @@ mod tests {
         assert_eq!(cmp.regressions().count(), 1);
         assert!(cmp.appeared.is_empty());
         assert!(cmp.disappeared.is_empty());
-    }
-
-    #[test]
-    fn read_profile_round_trips_a_written_report() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("profile.json");
-        let written = report(vec![span("boot", 2, 200)]);
-        std::fs::write(&path, serde_json::to_string(&written).expect("serialize")).expect("write");
-
-        let read = read_profile(&path).expect("read");
-        assert_eq!(read, written);
-    }
-
-    #[test]
-    fn read_profile_reports_a_missing_file_rather_than_an_empty_profile() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let err = read_profile(&dir.path().join("absent.json")).expect_err("must fail");
-        // An empty profile would read as "nothing was slow", the wrong default.
-        assert!(format!("{err}").contains("reading span profile"), "{err}");
     }
 }

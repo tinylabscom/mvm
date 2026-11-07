@@ -825,8 +825,8 @@ struct PulledRootfs<'a> {
 ///
 /// A production pull is sealed and carries a signed provenance mark. The
 /// caller reaches here only after the trust policy has verified the image.
-/// This used to materialize the dev variant whatever the flag said, and a
-/// `--prod` run on a cold cache then booted it.
+/// Materializing the dev variant whatever the flag says would boot it on a
+/// `--prod` run with a cold cache.
 fn materialize_pulled_rootfs(
     pulled: PulledRootfs<'_>,
     materialize: RuntimeMaterializer,
@@ -1571,7 +1571,7 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
     }
 
     /// A fresh `--prod` pull materializes the sealed variant with its mark;
-    /// it used to hard-code the dev variant.
+    /// it never hard-codes the dev variant.
     #[test]
     fn a_fresh_prod_pull_materializes_the_sealed_variant() {
         let fixture = prod_fixture();

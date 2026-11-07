@@ -833,8 +833,8 @@ mod server_tests {
         );
     }
 
-    /// The peer refusal holds on every service. It used to sit behind an
-    /// optional gate, so a service built without one forwarded a peer name to
+    /// The peer refusal holds on every service. It does not sit behind an
+    /// optional gate, which would let a service built without one forward a peer name to
     /// the forward leg like any other host.
     #[tokio::test]
     async fn a_peer_destination_is_refused_by_every_service() {

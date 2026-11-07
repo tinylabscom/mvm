@@ -31,8 +31,6 @@ pub struct QuotaPolicy {
 impl QuotaConfig {
     /// Shortest enforceable period.
     pub const MIN_PERIOD: Duration = Duration::from_millis(5);
-    /// Recommended default period.
-    pub const DEFAULT_PERIOD: Duration = Duration::from_millis(10);
     /// Longest allowed period.
     pub const MAX_PERIOD: Duration = Duration::from_millis(100);
     /// Smallest run slice or hold that can be expressed without collapsing into

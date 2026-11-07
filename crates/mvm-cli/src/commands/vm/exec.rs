@@ -892,7 +892,7 @@ pub(in crate::commands) fn run_secure_started(
         let result =
             crate::exec::run_captured_started(req, Some(&admit), Some(&posture), startup_started);
         let refused = denials.finish_and_summarize(!json_requested);
-        let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
+        let output = outputs.close_run(&admit_ctx, result)?;
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
         }
@@ -947,7 +947,6 @@ pub(in crate::commands) fn run_secure_started(
         RunAudit {
             admit: Some(&admit),
             ctx: &admit_ctx,
-            backend: &receipt_backend,
             oci_provenance: &oci_provenance,
             outputs: &outputs,
             denials: &denials,
@@ -966,7 +965,6 @@ struct RunAudit<'a> {
     startup_started: std::time::Instant,
     admit: Option<&'a crate::exec::SessionAdmit<'a>>,
     ctx: &'a std::cell::RefCell<Option<super::up::AdmissionContext>>,
-    backend: &'a str,
     /// Filled by image resolution, read by the admission that boots it.
     oci_provenance: &'a OciProvenanceSink,
     /// Output grants whose disks the run attaches and whose collection is
@@ -1024,9 +1022,7 @@ fn run_run_args(
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_started(req, audit.admit, Some(&posture), audit.startup_started);
     let refused = audit.denials.finish_and_summarize(true);
-    let exit_code = audit
-        .outputs
-        .close_run(audit.ctx, audit.backend, posture.get(), result)?;
+    let exit_code = audit.outputs.close_run(audit.ctx, result)?;
     audit
         .network
         .announce_exit(exit_code, &super::host_notices::Stderr);

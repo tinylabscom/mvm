@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use crate::supervisor::ebpf_telemetry::{ObservabilityTarget, TelemetryEvent};
+use crate::supervisor::ebpf_telemetry::ObservabilityTarget;
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
+use crate::supervisor::ebpf_telemetry::TelemetryEvent;
 
 /// Configuration for the egress telemetry probe.
 #[derive(Debug, Clone, Default)]
@@ -80,11 +82,6 @@ impl EgressTelemetry {
         info!(vm = %handle.target.vm_name, "detaching egress telemetry probe");
         inner_detach(handle);
     }
-
-    /// Drain any pending telemetry events.
-    pub fn poll_events(&self, handle: &ProbeHandle) -> Vec<TelemetryEvent> {
-        inner_poll_events(handle)
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -111,11 +108,6 @@ fn inner_attach(
 
 #[cfg(not(all(target_os = "linux", feature = "ebpf-telemetry")))]
 fn inner_detach(_handle: ProbeHandle) {}
-
-#[cfg(not(all(target_os = "linux", feature = "ebpf-telemetry")))]
-fn inner_poll_events(_handle: &ProbeHandle) -> Vec<TelemetryEvent> {
-    Vec::new()
-}
 
 #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn inner_attach(
@@ -173,11 +165,6 @@ fn inner_detach(handle: ProbeHandle) {
     if let Some(worker) = handle.worker {
         let _ = worker.join();
     }
-}
-
-#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
-fn inner_poll_events(handle: &ProbeHandle) -> Vec<TelemetryEvent> {
-    handle.events.try_iter().collect()
 }
 
 #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]

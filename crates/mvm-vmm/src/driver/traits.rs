@@ -272,7 +272,7 @@ pub trait VmmDriver: Send + Sync {
         })
     }
 
-    /// Resume a child previously returned by [`preload_standby_child`](Self::preload_standby_child).
+    /// Resume a child returned earlier by [`preload_standby_child`](Self::preload_standby_child).
     /// The caller wires all claim-specific channels before invoking this method.
     fn resume_preloaded_child(
         &self,

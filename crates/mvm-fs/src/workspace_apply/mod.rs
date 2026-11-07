@@ -22,7 +22,6 @@
 //! never records a hash it did not store — a blob's name is the digest of
 //! the bytes written to it, computed during the write.
 
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -477,12 +476,6 @@ impl From<OpAction> for ManifestAction {
             OpAction::Remove => Self::Remove,
         }
     }
-}
-
-/// The set of paths an apply touches, for overlap checks.
-#[must_use]
-pub fn op_paths(ops: &[FileOp]) -> BTreeSet<String> {
-    ops.iter().map(|op| op.path.clone()).collect()
 }
 
 #[cfg(test)]

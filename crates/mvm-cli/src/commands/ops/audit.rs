@@ -684,7 +684,7 @@ fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
             id = signed.payload.receipt_id,
         );
     }
-    // Citations are the entries that used to vanish. Showing them is the
+    // Citations are the entries that would otherwise vanish. Showing them is the
     // difference between "there was no egress" and "egress was not exported".
     for cited in &evidence.cited {
         eprintln!(
@@ -1402,7 +1402,37 @@ fn audit_verify(tenant: &str) -> Result<()> {
             refusal.detail
         );
     }
+    println!(
+        "{}",
+        chain_summary(&dir, tenant, &signer.verifying, &outcome)
+    );
     Ok(())
+}
+
+/// The one-line stdout confirmation of a chain that verified. Sessions and
+/// seals come from the same walk `trust audit sessions` reads; when that walk
+/// cannot be repeated the entry count still stands on its own.
+fn chain_summary(
+    dir: &std::path::Path,
+    tenant: &str,
+    vk: &VerifyingKey,
+    outcome: &mvm_client::audit::SourceVerification,
+) -> String {
+    let entries: u64 = outcome.sources.iter().map(|s| s.entries).sum();
+    let extra = mvm_client::audit::chain::session::read_lines_from_genesis(dir, tenant, vk)
+        .ok()
+        .and_then(|lines| {
+            mvm_client::audit::chain::session::list_sessions(&lines, Default::default()).ok()
+        })
+        .map(|(sessions, ledger)| {
+            let (n, k) = (sessions.len() as u64, ledger.seals);
+            let plural = |n: u64| if n == 1 { "" } else { "s" };
+            format!(", {n} session{}, {k} seal{}", plural(n), plural(k))
+        });
+    format!(
+        "VERIFIED chain: {entries} entries{}",
+        extra.unwrap_or_default()
+    )
 }
 
 /// Human label for a chain kind in `audit verify` output.
@@ -2297,4 +2327,33 @@ fn emit_decision_records(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod chain_summary_tests {
+    use super::*;
+    use mvm_core::plan::test_support::PlanFixture;
+    use mvm_hostd::audit::session::SealReason;
+
+    #[test]
+    fn a_verified_chain_is_summarised_with_entries_sessions_and_seals() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        let signer = host_signer::load_or_init().unwrap();
+        let dir = default_audit_dir().unwrap();
+        let emitter = mvm_hostd::audit::emitter::AuditEmitter::new(signer.signing.clone()).unwrap();
+        let plan = PlanFixture::new().tenant("local").plan_id("plan-a").build();
+        emitter.emit_launched(&plan, "mock").unwrap();
+        emitter.emit_exited(&plan, 0, "mock").unwrap();
+        emitter.seal_session(&plan, SealReason::Exited).unwrap();
+
+        let outcome = LocalAuditReader::new(&dir, signer.verifying)
+            .verify_sources(Some("local"))
+            .unwrap();
+        assert_eq!(
+            chain_summary(&dir, "local", &signer.verifying, &outcome),
+            "VERIFIED chain: 3 entries, 1 session, 1 seal"
+        );
+    }
 }

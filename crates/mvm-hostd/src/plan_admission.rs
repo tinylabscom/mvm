@@ -159,6 +159,10 @@ pub struct AdmittedPlan {
     assurance_runtime: Option<AssuranceRuntimeBinding>,
     canonical_kernel: Option<std::sync::Arc<canonical_kernel::AdmittedKernel>>,
     backend: Option<BackendKind>,
+    /// Set once the backend has been started under this admission. An
+    /// admission authorizes one launch; the plan is handed back on
+    /// `StartedMachine`, and holding it again must not start a second backend.
+    dispatched: bool,
 }
 
 /// Re-verified host artifact behind one extension binding in the signed plan.
@@ -226,6 +230,7 @@ impl AdmittedPlan {
             assurance_runtime: None,
             canonical_kernel: None,
             backend: None,
+            dispatched: false,
         }
     }
 
@@ -615,6 +620,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         assurance_runtime,
         canonical_kernel,
         backend,
+        dispatched: false,
     })
 }
 
@@ -1867,24 +1873,6 @@ pub fn apply_admitted_grants_or_undo_launch(
     )
 }
 
-/// Share admitted-grants policy with an original-owner rollback operation.
-pub fn apply_admitted_grants_with_owned_rollback(
-    backend: &AnyBackend,
-    vm_id: &VmId,
-    admitted: &AdmittedPlan,
-    emitter: Option<&crate::audit::emitter::AuditEmitter>,
-    rollback: impl FnOnce() -> Result<()>,
-) -> Result<EnforcedGrants> {
-    apply_admitted_grants_with_rollback(
-        backend,
-        vm_id,
-        admitted,
-        emitter,
-        rollback,
-        FailureAuditPolicy::OwnedAfterConfirmedRollback,
-    )
-}
-
 fn apply_admitted_grants_with_rollback(
     backend: &AnyBackend,
     vm_id: &VmId,
@@ -2070,7 +2058,11 @@ pub struct StartAdmittedParams<'a> {
 #[tracing::instrument(skip_all)]
 pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine> {
     let backend = params.backend;
-    let admitted = params.admitted;
+    let mut admitted = params.admitted;
+    anyhow::ensure!(
+        !admitted.dispatched,
+        "original admitted plan was already dispatched"
+    );
 
     // A refusal in any post-admission gate must still terminate the chain:
     // `plan.admitted` already fired, so a gate refusal emits `plan.failed`
@@ -2114,6 +2106,9 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
         &admitted,
         params.emitter,
     )?;
+    // Spent before the backend starts, so an admission that reached dispatch
+    // can never authorize another launch, whatever the start's outcome.
+    admitted.dispatched = true;
     match backend
         .start(&config)
         .context("backend start after signed-plan admission")
@@ -2283,8 +2278,8 @@ mod admitted_environment_tests {
     }
 
     /// A different kernel than the plan pinned is refused: same plan, same
-    /// image, a kernel swapped underneath — the substitution that used to be
-    /// invisible because nothing in the plan described the environment.
+    /// image, a kernel swapped underneath — a substitution that would be
+    /// invisible if nothing in the plan described the environment.
     #[test]
     fn substituted_kernel_is_refused() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3780,6 +3775,36 @@ mod tests {
         let other = r#"{"some-other-workload":{"epoch":1,"quarantined":true}}"#;
         admit_with_host_interface_files(&[("workloads.json", other)])
             .expect("quarantining another workload must not block this one");
+    }
+
+    #[test]
+    fn host_interface_refuses_a_plan_from_before_a_replacement() {
+        // The ledger says epoch 2; a plan synthesized before the replacement
+        // (or issued by a control plane that never saw it) still carries 1.
+        let (_env, home) = host_with_ceiling(Default::default());
+        let hi = home.path().join("host-interface");
+        std::fs::create_dir_all(&hi).unwrap();
+        std::fs::write(
+            hi.join("workloads.json"),
+            r#"{"vm-epoch":{"epoch":2,"quarantined":false}}"#,
+        )
+        .unwrap();
+        let mut stale = synthesize_plan(&fixture_input("vm-epoch")).unwrap();
+        assert_eq!(
+            stale.execution_epoch, 2,
+            "synthesis reads the current epoch"
+        );
+        stale.execution_epoch = 1;
+        let err = host_gates::admit_host_interface(&stale)
+            .expect_err("a plan at an older epoch must not admit");
+        assert!(err.to_string().contains("stale execution epoch"), "{err}");
+        stale.execution_epoch = 2;
+        host_gates::admit_host_interface(&stale).expect("the current epoch admits");
+        stale.execution_epoch = 3;
+        assert!(
+            host_gates::admit_host_interface(&stale).is_err(),
+            "an epoch the host never issued is refused too"
+        );
     }
 
     #[test]
@@ -5596,6 +5621,59 @@ mod tests {
         assert!(matches!(
             backend.status(&started.vm_id).unwrap(),
             mvm_core::vm_backend::VmStatus::Running
+        ));
+    }
+
+    #[test]
+    fn one_signed_admission_cannot_start_a_second_backend() {
+        // `start_admitted` hands the admitted plan back on `StartedMachine`.
+        // Nothing may turn that into a second launch under the same admission.
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let first = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let second = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let config = VmStartConfig {
+            name: "single-use-admission".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        let admitted = admit_for_run(
+            &fixture_input(&config.name),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+            RunPosture::on_backend(Variant::Dev, first.kind()),
+        )
+        .unwrap();
+        let started = start_admitted(StartAdmittedParams {
+            backend: &first,
+            admitted,
+            config: config.clone(),
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        })
+        .expect("the original admission starts the first backend");
+
+        // A different backend instance, so a duplicate-name refusal cannot
+        // mask a second dispatch under the original admission.
+        let error = start_admitted(StartAdmittedParams {
+            backend: &second,
+            admitted: started.admitted,
+            config,
+            policy_bundle: None,
+            emitter: None,
+            assurance: None,
+        })
+        .expect_err("a spent admission must refuse a second dispatch");
+        assert!(
+            error.to_string().contains("already dispatched"),
+            "{error:#}"
+        );
+        assert!(!matches!(
+            second.status(&started.vm_id),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
         ));
     }
 

@@ -16,8 +16,7 @@ pub mod persist;
 
 use crate::AnyBackend;
 use crate::selection::SelectionError;
-use mvm_core::network_policy::NetworkPolicy;
-use mvm_core::vm_backend::{RequiredCapabilities, VmCapabilities, VmStartConfig};
+use mvm_core::vm_backend::RequiredCapabilities;
 
 /// How a machine reaches the network. Closed by default: a machine gets no
 /// guest NIC, and reaches nothing until networking is explicitly requested.
@@ -180,42 +179,11 @@ impl Machine {
         req
     }
 
-    /// Fail closed if `caps` cannot serve this machine — returns the named
-    /// capability shortfall rather than degrading onto a weaker backend.
-    pub fn check_backend(&self, caps: &VmCapabilities) -> Result<(), CapabilityError> {
-        let missing = caps.shortfall(&self.required_capabilities());
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(CapabilityError { missing })
-        }
-    }
-
     /// Choose the most-preferred backend whose capabilities can serve this
     /// machine, failing closed with the per-candidate shortfall if none can.
     /// This is selection only — it does not boot anything.
     pub fn select_backend(&self) -> Result<AnyBackend, SelectionError> {
         AnyBackend::select_capable(&self.required_capabilities())
-    }
-
-    /// Translate this machine plus resolved artifacts into a backend-agnostic
-    /// [`VmStartConfig`] a backend can launch. Transient by default
-    /// (`warm_pool_size = 0`).
-    pub fn to_start_config(&self, inputs: LaunchInputs) -> VmStartConfig {
-        // Closed by default. `NetworkMode::HostVsockProxy` will resolve to a
-        // broker-backed policy once the brokers land; until then it cannot be
-        // selected (see `select_backend`), so deny-all is the honest mapping.
-        let network_policy = NetworkPolicy::deny_all();
-        VmStartConfig {
-            name: inputs.name,
-            rootfs_path: inputs.rootfs_path,
-            kernel_path: inputs.kernel_path,
-            cpus: self.spec.cpus,
-            memory_mib: u32::try_from(self.spec.memory_mib).unwrap_or(u32::MAX),
-            network_policy,
-            warm_pool_size: 0,
-            ..Default::default()
-        }
     }
 }
 
@@ -271,37 +239,6 @@ mod tests {
     }
 
     #[test]
-    fn check_backend_fails_closed_with_named_shortfall() {
-        // A pty machine needs vsock + pty_exec; a backend advertising neither
-        // is rejected, and the error names both.
-        let machine = Machine::builder()
-            .image("alpine")
-            .pty(true)
-            .build()
-            .unwrap();
-        let err = machine
-            .check_backend(&VmCapabilities::default())
-            .unwrap_err();
-        assert!(err.missing.contains(&"vsock"));
-        assert!(err.missing.contains(&"pty_exec"));
-    }
-
-    #[test]
-    fn check_backend_ok_for_capable_backend() {
-        let machine = Machine::builder()
-            .image("alpine")
-            .pty(true)
-            .build()
-            .unwrap();
-        let caps = VmCapabilities {
-            vsock: true,
-            pty_exec: true,
-            ..VmCapabilities::default()
-        };
-        assert!(machine.check_backend(&caps).is_ok());
-    }
-
-    #[test]
     fn select_backend_picks_a_capable_backend_for_a_basic_machine() {
         let machine = Machine::builder().image("alpine").build().unwrap();
         let backend = machine.select_backend().unwrap();
@@ -319,69 +256,5 @@ mod tests {
         let caps = backend.capabilities();
         assert!(caps.host_vsock_proxy);
         assert!(caps.no_routable_guest_nic);
-    }
-
-    #[test]
-    fn to_start_config_carries_resources_and_artifacts() {
-        let machine = Machine::builder()
-            .image("alpine")
-            .cpus(2)
-            .memory_mib(1024)
-            .build()
-            .unwrap();
-        let cfg = machine.to_start_config(LaunchInputs {
-            name: "m1".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            kernel_path: Some("/store/vmlinux".into()),
-            backend_name: None,
-            sealed: false,
-            root_strategy: None,
-        });
-        assert_eq!(cfg.name, "m1");
-        assert_eq!(cfg.rootfs_path, "/store/rootfs.ext4");
-        assert_eq!(cfg.kernel_path.as_deref(), Some("/store/vmlinux"));
-        assert_eq!(cfg.cpus, 2);
-        assert_eq!(cfg.memory_mib, 1024);
-        assert_eq!(cfg.warm_pool_size, 0, "transient by default");
-    }
-
-    #[test]
-    fn to_start_config_no_network_is_deny_all() {
-        let machine = Machine::builder().image("alpine").build().unwrap();
-        let cfg = machine.to_start_config(LaunchInputs {
-            name: "m1".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            kernel_path: None,
-            backend_name: None,
-            sealed: false,
-            root_strategy: None,
-        });
-        assert_eq!(
-            cfg.network_policy,
-            mvm_core::network_policy::NetworkPolicy::deny_all()
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "test-support")]
-    fn produced_config_is_launchable_by_a_backend() {
-        // Prove the translation yields a config a backend accepts: the mock
-        // (the VmBackend test double) starts it and records a running VM.
-        use crate::mock::MockBackend;
-        use mvm_core::vm_backend::VmBackend;
-
-        let _env = mvm_core::util::test_env::TestEnv::new();
-        let machine = Machine::builder().image("alpine").build().unwrap();
-        let cfg = machine.to_start_config(LaunchInputs {
-            name: "m1".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            kernel_path: None,
-            backend_name: None,
-            sealed: false,
-            root_strategy: None,
-        });
-        let backend = MockBackend::new();
-        let id = backend.start(&cfg).unwrap();
-        backend.stop(&id).unwrap();
     }
 }

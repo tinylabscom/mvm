@@ -1422,6 +1422,64 @@ mod post_restore_ack_tests {
 }
 
 #[cfg(test)]
+mod run_entrypoint_readiness_tests {
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    use mvm_core::security::AgentProfile;
+
+    use super::*;
+    use crate::state::{AgentBootState, AgentState, IntegrationState, ProbeState};
+
+    fn run_with_entrypoint(entrypoint: ComponentState) -> GuestResponse {
+        let boot_state = Arc::new(AgentBootState::new(AgentProfile::Dev, Instant::now()));
+        boot_state.set_entrypoint(entrypoint);
+        let state = Arc::new(Mutex::new(AgentState::new()));
+        let integrations = Arc::new(Mutex::new(IntegrationState {
+            integrations: vec![],
+        }));
+        let probes = Arc::new(Mutex::new(ProbeState { probes: vec![] }));
+        let mut sink = Vec::new();
+        let mut ctx = HandlerCtx {
+            file: &mut sink,
+            state: &state,
+            integration_state: &integrations,
+            probe_state: &probes,
+            boot_state: &boot_state,
+        };
+        handle_run_entrypoint_request(&mut ctx, vec![], 1, vec![], false)
+    }
+
+    fn error_kind(response: GuestResponse) -> RunEntrypointError {
+        match response {
+            GuestResponse::EntrypointEvent(EntrypointEvent::Error { kind, .. }) => kind,
+            other => panic!("expected an entrypoint error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_run_before_validation_finishes_is_not_ready_and_a_settled_state_is_not() {
+        assert_eq!(
+            error_kind(run_with_entrypoint(ComponentState::Starting)),
+            RunEntrypointError::NotReady
+        );
+        // Disabled and Failed are settled answers, never the transient
+        // "retry later" one; the in-process validation result was never set.
+        for settled in [
+            ComponentState::Disabled,
+            ComponentState::Failed {
+                message: "bad".into(),
+            },
+        ] {
+            assert_eq!(
+                error_kind(run_with_entrypoint(settled)),
+                RunEntrypointError::EntrypointInvalid
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod sleep_prep_tests {
     use std::cell::Cell;
 

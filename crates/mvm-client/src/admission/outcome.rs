@@ -2,7 +2,8 @@
 //! under: `plan.launched`, the boot posture and start mode a successful run
 //! records, `plan.failed` for one that did not.
 
-use anyhow::Result;
+use mvm_core::plan::ExecutionPlan;
+use mvm_hostd::audit::emitter::AuditEmitter;
 
 use super::AdmissionContext;
 
@@ -33,20 +34,9 @@ pub fn emit_launched(ctx: &AdmissionContext, backend: &str, persist_plan: bool) 
     }
 }
 
-/// Record the resolved boot posture (which rootfs strategy the run-path tier
-/// gate actually selected) on the chain-signed admission log. Fires alongside
-/// `plan.launched`, reflecting the decision `run_inner` made — never a
-/// re-derivation — so a virtiofs-root dev boot and an Option-B block boot are
-/// distinguishable in the tamper-evident chain.
-pub(crate) fn emit_boot_posture(
-    ctx: &AdmissionContext,
-    strategy: mvm_build::run_image::RootStrategy,
-) {
-    let label = match strategy {
+fn boot_posture_label(strategy: mvm_build::run_image::RootStrategy) -> &'static str {
+    match strategy {
         mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
-    };
-    if let Err(e) = ctx.emitter.emit_boot_posture(ctx.admitted.plan(), label) {
-        tracing::warn!(error = %e, "audit emit_boot_posture failed (non-fatal)");
     }
 }
 
@@ -79,50 +69,28 @@ impl BootPosture {
     }
 }
 
-fn emit_start_mode(ctx: &AdmissionContext, start: StartMode) {
+/// Record that a transient run booted: `plan.launched`, the boot posture and,
+/// when the claim-or-boot decision was reached, the start mode. Written ahead of
+/// the run's exit record and seal, so the seal covers the whole narrative.
+pub(crate) fn record_boot(
+    emitter: &AuditEmitter,
+    plan: &ExecutionPlan,
+    backend: &str,
+    posture: BootPosture,
+) {
+    if let Err(e) = emitter.emit_launched(plan, backend) {
+        tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
+    }
+    if let Err(e) = emitter.emit_boot_posture(plan, boot_posture_label(posture.root_strategy)) {
+        tracing::warn!(error = %e, "audit emit_boot_posture failed (non-fatal)");
+    }
+    let Some(start) = posture.start else { return };
     let (mode, reason) = match start {
         StartMode::Warm => ("warm", None),
         StartMode::Cold { reason } => ("cold", Some(reason)),
     };
-    if let Err(e) = ctx
-        .emitter
-        .emit_start_mode(ctx.admitted.plan(), mode, reason)
-    {
+    if let Err(e) = emitter.emit_start_mode(plan, mode, reason) {
         tracing::warn!(error = %e, "audit emit_start_mode failed (non-fatal)");
-    }
-}
-
-/// Close a transient run's audit narrative against the plan it booted under:
-/// `plan.launched`, the boot posture and the start mode when the run
-/// succeeded, `plan.failed` when it did not.
-///
-/// `admitted` is `None` only when the run failed before admission was reached —
-/// resolving the image, say. There is no plan to bind that failure to, so
-/// nothing is recorded. It is never `None` for a run that booted: admission is
-/// unconditional, and the admit closure fills this before the backend starts.
-///
-/// Both transient paths close the same way, so they share this rather than each
-/// carrying its own copy of the two branches.
-pub fn record_transient_outcome<T>(
-    admitted: Option<&AdmissionContext>,
-    backend: &str,
-    posture: BootPosture,
-    outcome: &Result<T>,
-) {
-    let Some(ctx) = admitted else { return };
-    match outcome {
-        Ok(_) => {
-            emit_launched(ctx, backend, false);
-            emit_boot_posture(ctx, posture.root_strategy);
-            if let Some(start) = posture.start {
-                emit_start_mode(ctx, start);
-            }
-        }
-        Err(e) => emit_failed(
-            ctx,
-            crate::launch::startup_budget::failure_class(e, "launch"),
-            e,
-        ),
     }
 }
 

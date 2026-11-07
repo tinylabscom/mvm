@@ -7,7 +7,7 @@
 //! at every offset and for every distinct secret length, so a secret split
 //! down the middle of two writes is still a contiguous match here.
 //!
-//! ## Why it withholds, and why it withholds more than it used to
+//! ## Why it withholds, and why it withholds more than the match alone
 //!
 //! Retaining context and withholding bytes are the same act. If the scanner
 //! shipped the tail of a frame and kept a copy to scan against, a secret

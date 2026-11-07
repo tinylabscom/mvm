@@ -5,11 +5,13 @@
 Proposed. Formalizes a posture the codebase already half-implements — the agent
 runs as an unprivileged uid through the first-party static
 `/sbin/mvm-setpriv --no-new-privs` helper, each service runs under its own uid,
-and `/etc/{passwd,group,nsswitch.conf}` are read-only bind mounts — and pins
+and the rootfs is a read-only dm-verity mount, so `/etc/{passwd,group,nsswitch.conf}` cannot be rewritten — and pins
 down the stronger property the product overview asserts: the runtime
 itself never runs as root, and there is no usable root account inside the
 guest. The build-time no-setuid-root check and the runtime euid witness
 this ADR requires do not exist yet.
+
+Open follow-ups that bear on this posture and stay visible here: [#2101](https://github.com/tinylabscom/mvm/issues/2101) (the OCI workload process runs with `NoNewPrivs=0` and a full capability bounding set), [#4612](https://github.com/tinylabscom/mvm/issues/4612) (Firecracker canonical custody review follow-ups) and [#4819](https://github.com/tinylabscom/mvm/issues/4819) (binding the claim-time layout check to the descriptors Firecracker holds open). The stronger runtime-never-root claim above is not promoted from the narrower shipped anti-escalation guarantee.
 
 ## Context
 
@@ -76,9 +78,10 @@ also requires a build-time scan proving that the production rootfs contains no
 setuid-root binary and no `su`/`sudo`/`doas`; that scan has not shipped and is
 deferred with the runtime-euid witness below. Until it does, this ADR does not
 claim that image contents satisfy that stronger property.
-`/etc/{passwd,group,nsswitch.conf}` stay read-only bind mounts and the root
+`/etc/{passwd,group,nsswitch.conf}` stay unwritable by the workload and the root
 entry carries no usable login. The dm-verity-sealed read-only rootfs prevents
-a workload from changing the image contents at runtime.
+a workload from changing the image contents at runtime; the only writer is the
+pre-drop provisioner, which appends a non-root entry and mints no uid 0.
 
 ### 3. Claim numbering is deferred to the implementing change
 

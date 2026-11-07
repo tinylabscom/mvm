@@ -64,11 +64,6 @@ impl NixManifest {
             profile_module: profile_entry.module.clone(),
         })
     }
-
-    /// Get drive requirements for a role, if defined.
-    pub fn role_requirements(&self, role: &Role) -> Option<&RoleEntry> {
-        self.roles.get(&role.to_string())
-    }
 }
 
 /// Result of resolving a (role, profile) pair.
@@ -168,32 +163,6 @@ module = "roles/worker.nix"
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("nonexistent"));
-    }
-
-    #[test]
-    fn test_role_requirements_gateway() {
-        let manifest = NixManifest::from_toml(SAMPLE_TOML).unwrap();
-        let reqs = manifest.role_requirements(&Role::Gateway).unwrap();
-        assert!(reqs.requires_config_drive);
-        assert!(reqs.requires_secrets_drive);
-    }
-
-    #[test]
-    fn test_role_requirements_builder() {
-        let manifest = NixManifest::from_toml(SAMPLE_TOML).unwrap();
-        let reqs = manifest.role_requirements(&Role::Builder).unwrap();
-        assert!(!reqs.requires_config_drive);
-        assert!(!reqs.requires_secrets_drive);
-    }
-
-    #[test]
-    fn test_role_requirements_missing() {
-        let toml = r#"
-[meta]
-version = 1
-"#;
-        let manifest = NixManifest::from_toml(toml).unwrap();
-        assert!(manifest.role_requirements(&Role::Worker).is_none());
     }
 
     #[test]

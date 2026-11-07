@@ -19,7 +19,6 @@ mod generate;
 mod image;
 mod machine;
 mod manifest;
-mod new_pack;
 mod ops;
 pub(crate) mod pack;
 mod plugin;
@@ -190,9 +189,6 @@ pub(in crate::commands) enum Commands {
     /// Manage versioned packs (list/rollback/prune/download/update)
     #[command(display_order = 9)]
     Pack(pack::Args),
-    /// Create an unpublished policy-pack draft for registry review
-    #[command(display_order = 9)]
-    NewPack(new_pack::Args),
     /// Run an image or a signed `.mvmpkg` (alias of `machine run`)
     ///
     /// `mvmctl run <IMAGE|ARTIFACT> -- <cmd>` is `mvmctl machine run`, plus

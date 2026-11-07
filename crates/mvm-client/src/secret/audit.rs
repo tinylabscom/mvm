@@ -213,22 +213,22 @@ fn emit_through_recorder(
     if let Some(err) = error {
         extras.push(("error".to_string(), err.to_string()));
     }
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::warn!(error = %e, "building tokio runtime for secret audit emit");
-            return;
-        }
-    };
-    if let Err(e) = rt.block_on(recorder.record_unbound(EventCategory::Secret, event, extras)) {
-        tracing::warn!(
+    // This is reached from synchronous secret-service calls that async
+    // `MvmClient` methods (and the hostlib dispatcher) also make, so it must
+    // not start a runtime of its own when one is already running.
+    let recorded = mvm_hostd::blocking::block_on_anywhere(recorder.record_unbound(
+        EventCategory::Secret,
+        event,
+        extras,
+    ));
+    match recorded {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(
             error = %e,
             action = action,
             "Recorder dual-emit failed for secret event"
-        );
+        ),
+        Err(e) => tracing::warn!(error = %e, "secret audit emit could not run"),
     }
 }
 
@@ -328,6 +328,24 @@ mod tests {
             entries[0].labels.get("category"),
             Some(&"secret".to_string())
         );
+    }
+
+    /// The hostlib dispatcher and async `MvmClient` methods reach this sync
+    /// path from inside a runtime, where building a second one panics.
+    #[tokio::test]
+    async fn recorder_dual_emit_works_from_inside_a_current_thread_runtime() {
+        let (_dir, audit, signer) = temp_audit_with_recorder();
+        let res: Result<()> = Ok(());
+        audit.record("replace", "acme", "api_token", &res).unwrap();
+        assert_eq!(signer.entries().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recorder_dual_emit_works_from_inside_a_multi_thread_runtime() {
+        let (_dir, audit, signer) = temp_audit_with_recorder();
+        let res: Result<()> = Ok(());
+        audit.record("replace", "acme", "api_token", &res).unwrap();
+        assert_eq!(signer.entries().len(), 1);
     }
 
     #[test]

@@ -66,11 +66,8 @@ pub use bundle_binding::{BundlePin, InheritedBundle};
 pub use durability::admit_plan_for_boot_syncing_beside_boot;
 pub use enforce::{enforce_kernel, enforce_shares, enforce_shares_for_claim};
 pub use instructions::InstructionSources;
-pub use outcome::{BootPosture, StartMode, emit_failed, emit_launched, record_transient_outcome};
-// Directly exercised by `admit_plan_tests` alongside the fixture helpers it
-// shares with that family.
-#[cfg(test)]
-pub(crate) use outcome::emit_boot_posture;
+pub(crate) use outcome::record_boot;
+pub use outcome::{BootPosture, StartMode, emit_failed, emit_launched};
 
 /// A content-bound asset. Operator-declared files and internally selected
 /// signed packs are recorded in the plan without sharing them with the guest.
@@ -1005,8 +1002,8 @@ fn admit(
     // between them acts on the one before it, so syncing each separately
     // bought no ordering. The batch covers the admission record, its decision
     // record, the grant, the shares, the asset identities, the policy
-    // resolution and the egress destinations: all entries that used to
-    // trigger their own fsync now share the single flush. A failed write
+    // resolution and the egress destinations: all entries that would
+    // each trigger their own fsync share the single flush. A failed write
     // inside the batch is an error here; a failed sync is an error wherever
     // the caller waits for it, which is here unless it asked to sync beside
     // the boot.
@@ -1036,8 +1033,8 @@ fn admit(
             .emit_asset_identities(admitted.plan())
             .context("recording admitted asset identities in the audit chain")?;
         // Policy resolution and egress destinations are non-fatal records
-        // that used to live outside the batch, each triggering its own
-        // fsync. Folding them in saves two serial F_FULLFSYNCs (~15ms on
+        // that sit in the batch rather than syncing each on its own.
+        // Folding them in saves two serial F_FULLFSYNCs (~15ms on
         // Apple silicon, ~84ms on KVM arrays) with no ordering loss.
         emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
         if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
@@ -1922,13 +1919,18 @@ pub(crate) mod admit_plan_tests {
     }
 
     #[test]
-    fn emit_boot_posture_audits_the_root_strategy_label() {
+    fn record_boot_audits_the_root_strategy_label() {
         let _home = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-boot-posture");
 
-        emit_boot_posture(&ctx, mvm_build::run_image::RootStrategy::BlockExt4);
+        record_boot(
+            &ctx.emitter,
+            ctx.admitted.plan(),
+            "firecracker",
+            BootPosture::block(),
+        );
 
         let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
             .expect("audit file exists");
@@ -1952,15 +1954,14 @@ pub(crate) mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-ok");
 
-        let outcome: Result<()> = Ok(());
-        record_transient_outcome(
-            Some(&ctx),
+        record_boot(
+            &ctx.emitter,
+            ctx.admitted.plan(),
             "firecracker",
             BootPosture {
                 start: Some(StartMode::Warm),
                 ..BootPosture::block()
             },
-            &outcome,
         );
 
         let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
@@ -1982,9 +1983,9 @@ pub(crate) mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-cold");
 
-        let outcome: Result<()> = Ok(());
-        record_transient_outcome(
-            Some(&ctx),
+        record_boot(
+            &ctx.emitter,
+            ctx.admitted.plan(),
             "firecracker",
             BootPosture {
                 start: Some(StartMode::Cold {
@@ -1992,7 +1993,6 @@ pub(crate) mod admit_plan_tests {
                 }),
                 ..BootPosture::block()
             },
-            &outcome,
         );
 
         let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
@@ -2002,35 +2002,6 @@ pub(crate) mod admit_plan_tests {
             content.contains("\"cold_reason\":\"no_standby_ready\""),
             "{content}"
         );
-    }
-
-    #[test]
-    fn a_transient_run_that_failed_records_failed_and_not_launched() {
-        let _home = isolated_home();
-        let keys_dir = tempfile::tempdir().expect("keys dir");
-        let audit_dir = tempfile::tempdir().expect("audit dir");
-        let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-err");
-
-        let outcome: Result<()> = Err(anyhow::anyhow!("the guest never came up"));
-        record_transient_outcome(
-            Some(&ctx),
-            "firecracker",
-            BootPosture {
-                start: Some(StartMode::Cold {
-                    reason: "no_standby_ready",
-                }),
-                ..BootPosture::block()
-            },
-            &outcome,
-        );
-
-        let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
-            .expect("audit file exists");
-        assert!(content.contains("plan.failed"), "{content}");
-        assert!(content.contains("the guest never came up"), "{content}");
-        assert!(!content.contains("plan.launched"), "{content}");
-        assert!(!content.contains("plan.boot_posture"), "{content}");
-        assert!(!content.contains("plan.start_mode"), "{content}");
     }
 
     // ──────────────────────────────────────────────────────────────

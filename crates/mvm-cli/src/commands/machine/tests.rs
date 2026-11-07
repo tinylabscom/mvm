@@ -3055,8 +3055,8 @@ fn seed_runtime_state(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn removing_a_machine_removes_its_runtime_state_not_only_its_spec() {
-    // `machine rm` deletes `machines/<name>/`. It used to stop there, so a
-    // removed machine kept its console log, sockets and pid file under
+    // `machine rm` deletes `machines/<name>/` and must not stop there: a
+    // removed machine would keep its console log, sockets and pid file under
     // `vms/<name>/` forever — and `machine ps`, which reads that directory,
     // kept listing it.
     let _state = IsolatedMachineState::new();

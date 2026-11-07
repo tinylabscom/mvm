@@ -78,15 +78,6 @@ impl HvfDriver {
         Self
     }
 
-    /// Mint transport custody only through this concrete fresh launch path.
-    /// Failed launches retain the original child if safe rollback is uncertain.
-    pub fn boot_cold_owned(
-        &self,
-        spec: &VmmSpec,
-    ) -> std::result::Result<ColdHvfOwner, ColdHvfBootFailure> {
-        self.boot_cold_owned_verified(spec, None, None)
-    }
-
     pub fn boot_cold_owned_verified(
         &self,
         spec: &VmmSpec,

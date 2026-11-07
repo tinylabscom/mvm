@@ -31,7 +31,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `ops <sub>`                | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`                | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
 | `trust <sub>`              | `add`/`list`/`remove` (publishers), `instructions`, `attest`, `receipt`, `audit`                                                                                        |
-| Other top-level            | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`, `deploy`, `deployments`, `policy`, `backend`, `new-pack` |
+| Other top-level            | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`, `deploy`, `deployments`, `policy`, `backend` |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
@@ -418,7 +418,7 @@ forward legs.
 | `mvmctl trust audit tail`                                                                                | Show the last 20 audit events from /var/log/mvm/audit.jsonl                                                                                                                                                                                                                                                                                                             |
 | `mvmctl trust audit tail -n <N>`                                                                         | Show the last N audit events                                                                                                                                                                                                                                                                                                                                            |
 | `mvmctl trust audit tail -f`                                                                             | Follow audit log output (poll until Ctrl-C)                                                                                                                                                                                                                                                                                                                             |
-| `mvmctl trust audit verify [--tenant <t>]`                                                               | Verify every segment of the chain-signed audit log from genesis; nonzero exit on any signature or chain-link failure                                                                                                                                                                                                                                                    |
+| `mvmctl trust audit verify [--tenant <t>]`                                                               | Verify every segment of the chain-signed audit log from genesis; nonzero exit on any signature or chain-link failure; on success prints `VERIFIED chain: N entries, M sessions, K seals`                                                                                                                                                                                                                                                    |
 | `mvmctl trust audit verify <session> [--tenant <t>] [--json]`                                            | Verify one session: the whole chain, then each `session.sealed` record against it. Prints `VERIFIED`, `MISMATCH` with the reason (chain break, signature, count, sequence, session root, checkpoint root, environment identity, head, ledger), `UNSEALED`, or `NOT_FOUND`; exit 0, 1, 2, or 3                                                                                  |
 | `mvmctl trust audit sessions [--tenant <t>] [--since <t>] [--until <t>] [--json]`                        | List sessions (admitted runs) with their entry counts and seals, and check the hash-chained session ledger. Times are RFC 3339, `YYYY-MM-DD`, or a duration back from now (`7d`)                                                                                                                                                                                        |
 | `mvmctl trust audit show <session> [--tenant <t>] [--kind <glob>] [--since <t>] [--until <t>] [--json]`  | Show a session's entries across every segment. `<session>` is a plan id or at least 8 leading hex characters of it; `--kind` is a glob over the event name                                                                                                                                                                                                              |
@@ -2397,16 +2397,16 @@ their version strings. Pull checks the catalog digest against exact manifest
 bytes before adoption or installation. This untrusted discovery hash does not
 replace publisher signatures or existing authenticated installed pins.
 
-From a checkout of the pack registry, `mvmctl new-pack runtime/example` creates
-an unpublished policy-pack source at `pack-sources/runtime/example/`. The draft
-starts with no network access or secret bindings. Edit its metadata, policy, and
-README, then submit a reviewed pull request; this command does not sign or
-publish anything. Application and built-image packs use separate publication
-paths.
+From a checkout of the pack registry, `mvmctl pack new acme/example` creates an
+unpublished application-pack source at `pack-sources/acme/example/`: a `pack.toml`
+with an `[application]` bundle to fill in, because a pack must embed its binary in a
+`.mvmpkg` and a policy alone cannot be signed. The `mvm`, `agent` and `runtime`
+namespaces are reserved for first-party packs. Pin the archive, then submit a
+reviewed pull request; this command does not sign or publish anything.
 
 | Command                                                   | Description                                                                                                                                                       |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mvmctl new-pack ns/name`                                  | Scaffold an unpublished policy-pack draft in the current registry checkout; refuse existing paths and the reserved official namespace |
+| `mvmctl pack new ns/name` | Scaffold an unpublished application-pack draft (a `pack.toml` with an `[application]` bundle to fill in) in the current registry checkout; refuse existing paths and the reserved first-party namespaces (`mvm`, `agent`, `runtime`) |
 | `mvmctl pack ls [--json]`                                 | List pinned registry products with their kind (`application` or `policy`) and whether each is installed                                                                                                          |
 | `mvmctl pack rm ns/name[@version]`                        | Remove a registry product's cache entry and lock pin; a supplied version must match the pin. An application's installed bundle stays in the shared bundle store                                                                           |
 | `mvmctl pack update ns/name[@version]`                    | Re-pull a signed workload pack and its signed profile dependencies, adopting a newer published version when available. For an installed application it is the same install as `pack pull` and prints the same `installed ns/name@version (manifest DIGEST, bundle SHA256)` line |

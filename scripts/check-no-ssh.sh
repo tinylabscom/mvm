@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ADR-001 "no SSH in microVMs, ever" — absolute, no dev-tier carve-out.
+# No SSH in microVMs, ever — absolute, no dev-tier carve-out.
 #
 # Fails if any genuine SSH-capability token appears in source: an SSH
 # server/client package, a keypair or authorized_keys/known_hosts file, an
