@@ -138,6 +138,15 @@ class BuildLibkrunTierTests(unittest.TestCase):
         )
         self.assertNotIn("mvm-libkrun-supervisor", restore)
 
+    def test_the_supervisor_builds_in_a_private_target_directory(self):
+        # Cargo does not track MACOSX_DEPLOYMENT_TARGET: a restored target
+        # directory would link the supervisor at the toolchain default.
+        source = SCRIPT.read_text()
+        build = source.split("cargo build --release", 1)[0].rsplit("\n\n", 1)[1]
+        self.assertIn('CARGO_TARGET_DIR="$supervisor_target"', build)
+        self.assertIn('cp "$supervisor_target/$build_target/release/mvm-libkrun-supervisor"', source)
+        self.assertNotIn('cp "target/$build_target/release/mvm-libkrun-supervisor"', source)
+
     def test_cached_kernel_tarball_is_checked_against_the_pin(self):
         source = SCRIPT.read_text()
         self.assertLess(
