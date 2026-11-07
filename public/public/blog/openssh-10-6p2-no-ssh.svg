@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">OpenSSH 10.6p2: remove the workload login path</title>
+  <desc id="desc">An Internet SSH login attempt has no default route into an MVM workload. The host manages the NIC-less guest with typed vsock RPC. Host SSH and deliberately published guest services still need patching.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#0e1b27"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#58a6ff"/>
+    </marker>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <g font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="100" y="140" font-size="56" font-weight="650" fill="#e6edf3">OpenSSH 10.6p2: no workload SSH login</text>
+    <text x="100" y="197" font-size="28" fill="#8b949e">Remove the management exposure. Patch the servers you still run.</text>
+
+    <rect x="100" y="280" width="340" height="160" rx="20" fill="#161b22" stroke="#f85149" stroke-width="2"/>
+    <text x="270" y="343" text-anchor="middle" font-size="25" font-weight="650" fill="#f85149">Internet login attempt</text>
+    <text x="270" y="389" text-anchor="middle" font-size="24" fill="#e6edf3">SSH password bypass</text>
+    <path d="M440 360H640" stroke="#f85149" stroke-width="4" stroke-dasharray="12 10"/>
+    <path d="M655 333L709 387M709 333L655 387" stroke="#f85149" stroke-width="6" stroke-linecap="round"/>
+    <text x="565" y="420" text-anchor="middle" font-size="21" fill="#8b949e">no default SSH route</text>
+
+    <rect x="780" y="265" width="720" height="380" rx="28" fill="#0e1720" stroke="#58a6ff" stroke-width="3"/>
+    <text x="830" y="322" font-size="23" font-weight="700" fill="#58a6ff">MVM WORKLOAD · NO NIC</text>
+    <rect x="830" y="365" width="620" height="100" rx="16" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+    <text x="1140" y="407" text-anchor="middle" font-size="25" fill="#e6edf3">No SSH daemon required for management</text>
+    <text x="1140" y="442" text-anchor="middle" font-size="21" fill="#8b949e">No SSH password check in the control path</text>
+    <rect x="830" y="510" width="620" height="85" rx="16" fill="#161b22" stroke="#58a6ff" stroke-width="2"/>
+    <text x="1140" y="562" text-anchor="middle" font-size="27" fill="#e6edf3">Guest agent · typed control API</text>
+
+    <rect x="100" y="500" width="340" height="115" rx="20" fill="#161b22" stroke="#58a6ff" stroke-width="2"/>
+    <text x="270" y="550" text-anchor="middle" font-size="26" fill="#e6edf3">Host control plane</text>
+    <text x="270" y="585" text-anchor="middle" font-size="21" fill="#8b949e">health · status · lifecycle</text>
+    <path d="M440 553H815" stroke="#58a6ff" stroke-width="4" marker-end="url(#arrow)"/>
+    <text x="625" y="530" text-anchor="middle" font-size="23" fill="#58a6ff">vsock RPC, not SSH</text>
+
+    <rect x="100" y="710" width="1400" height="110" rx="20" fill="#161b22" stroke="#d29922" stroke-width="2"/>
+    <text x="140" y="755" font-size="23" font-weight="700" fill="#d29922">THE BOUNDARY</text>
+    <text x="140" y="793" font-size="25" fill="#e6edf3">Host SSH and explicitly published guest services remain your patching responsibility.</text>
+  </g>
+</svg>
