@@ -118,7 +118,7 @@ fn render_manifest_toml_with_sizing(
 name = "{name}"
 flake = "."
 profile = "default"
-vcpus = {cpus}
+cpus = {cpus}
 mem = "{mem_mib}M"
 data_disk = "0"
 net = false
@@ -1705,7 +1705,7 @@ mod tests {
             "manifest points at local flake: {toml}"
         );
         assert!(
-            toml.contains("vcpus = 2"),
+            toml.contains("cpus = 2"),
             "python preset gets 2 vcpus: {toml}"
         );
         assert!(
@@ -1719,7 +1719,7 @@ mod tests {
 
         let minimal = render_manifest_toml("demo", "minimal");
         assert!(
-            minimal.contains("vcpus = 1"),
+            minimal.contains("cpus = 1"),
             "minimal preset gets 1 vcpu: {minimal}"
         );
         assert!(
@@ -1729,7 +1729,7 @@ mod tests {
 
         let postgres = render_manifest_toml("demo", "postgres");
         assert!(
-            postgres.contains("vcpus = 2"),
+            postgres.contains("cpus = 2"),
             "postgres preset gets 2 vcpus: {postgres}"
         );
         assert!(
@@ -1760,7 +1760,7 @@ mod tests {
 
         let manifest_text = std::fs::read_to_string(tmp.join("mvm.toml")).unwrap();
         assert!(manifest_text.contains("name = \"demo\""));
-        assert!(manifest_text.contains("vcpus = 2"));
+        assert!(manifest_text.contains("cpus = 2"));
         assert!(manifest_text.contains("mem = \"512M\""));
 
         // The generated manifest must parse as a valid v1 Manifest.

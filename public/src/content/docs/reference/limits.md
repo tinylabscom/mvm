@@ -10,7 +10,7 @@ it; the selected backend still has to support the shape.
 ## Manifest sizing
 
 ```toml
-vcpus = 2
+cpus = 2
 mem = "1024M"
 data_disk = "0"
 ```
