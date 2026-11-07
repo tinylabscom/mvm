@@ -48,27 +48,6 @@ pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String
     (Some(verity.to_string_lossy().into_owned()), Some(hash))
 }
 
-/// Build the cmdline fragment consumed by `mvm-verity-init`
-/// (the PID 1 in the verity initramfs). Pure function for unit
-/// testing — `None` is returned when verity is disabled (no
-/// `roothash`). When the three runtime-overlay fields are also
-/// present, the fragment includes the `mvm.runtime_*` knobs the
-/// init binary reads to set up the second dm-verity target and
-/// bind-mount it at `/sysroot/mvm/runtime`.
-pub fn build_verity_cmdline_args(
-    roothash: Option<&str>,
-    overlay_roothash: Option<&str>,
-) -> Option<String> {
-    let h = roothash?;
-    let base = format!("mvm.roothash={h} mvm.data=/dev/vda mvm.hash=/dev/vdb");
-    match overlay_roothash {
-        Some(oh) => Some(format!(
-            "{base} mvm.runtime_roothash={oh} mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd"
-        )),
-        None => Some(base),
-    }
-}
-
 /// Whether this boot attached the universal initramfs (as opposed to a
 /// legacy per-rootfs verity initramfs or no initramfs at all). Release
 /// assemblies use the universal ABI even after their verified initramfs is
