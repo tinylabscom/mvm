@@ -17,9 +17,12 @@ here for where the overlay and sidecar are going.
 
 This records a decision. This repository's side has landed in source:
 `mvmctl` assembles the guest runtime from its own release asset and no longer
-reads it from the image set. What has not landed is mvm-images' side (it still
-builds and publishes the retired pieces) and release-publication and boot
-evidence for the new asset; "Where the code is today" below says exactly what
+reads it from the image set. What has not landed is publication. mvm-images' source
+now builds only the Linux layer, with no `mvm` input, and its base root
+filesystems declare the base-image contract; but the newest published image set,
+`image-set/v0.2.4`, predates that and still lists the retired pieces. Release
+evidence and installed-product boot evidence for the new asset are also still
+missing; "Where the code is today" below says exactly what
 runs now. The design detail lives in
 specs/plans/2026-10-05-image-boundary-linux-layer.md (retired; recover from tag specs-archive-2026-11-02).
 
@@ -240,7 +243,7 @@ and cite #4100 for the direction, never the reverse.
   every set up to `image-set/v0.2.4` — and is checked by that number rather
   than skipped; contract 1 is a base root filesystem with no mvm binary and no
   mvm `/init`, carrying the fixed guest identities. This CLI
-  boots 0 and 1. `mvm-images` declaring it is tinylabscom/mvm-images#64.
+  boots 0 and 1. `mvm-images` declares it in source (tinylabscom/mvm-images#64); no published set carries it yet.
 - mvm's CI stops building guest pieces through `mvm-images` (#4108).
 - `mvm-images` drops the `mvm` input and every read of mvm's source
   (tinylabscom/mvm-images#49) and attests build provenance for image sets
@@ -316,7 +319,8 @@ builder image sets (#4107), and the workload-author guide is updated with it.
 - A fix to the guest agent now needs a CLI release; there is no image-only
   path for it. Kernel and package fixes still ship as image sets without one.
 - During the transition the published image set still lists guest pieces
-  until mvm-images drops its `mvm` input; `mvmctl` parses them as retired
+  until a set built from mvm-images' current source (which has no `mvm` input) is
+  published; `mvmctl` parses them as retired
   roles and ignores them (#4105).
 
 ## Workstreams

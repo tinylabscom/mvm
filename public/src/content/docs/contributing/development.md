@@ -462,6 +462,14 @@ command propagates nextest failures and keeps the pinned fast toolchain and
 worktree-isolated target directory. This is the edit/test loop, not a replacement
 for the final workspace tests, clippy and applicable Linux/BDD checks.
 
+Cargo unifies features per invocation, and `-p <crate>` selects a smaller set
+than `--workspace` (for instance `manifest-verify`, `test-support` and `addons`
+are off for `mvm-cli`). Alternating the two in one target directory therefore
+rebuilds about twenty workspace crates each time: 4 min 34 s on an Apple
+Silicon laptop and 2 min 04 s on a 12-core Linux host in a measured run. Stay on
+one selection style per worktree target directory, or point the other at its own
+`CARGO_TARGET_DIR`.
+
 ## Profiling
 
 Functions carrying `#[instrument]` are timed when `MVM_SPAN_TIMINGS` is set.

@@ -109,6 +109,8 @@ pub struct TransientExitAudit<'a> {
     pub backend: &'a str,
     pub exit_code: Option<i32>,
     pub completed: bool,
+    /// How the run booted, recorded ahead of its exit and seal.
+    pub posture: Option<crate::admission::BootPosture>,
 }
 
 /// Options for [`LocalBackend::remove_machine_with`].
@@ -196,6 +198,7 @@ pub fn record_transient_exit(exit: TransientExitAudit<'_>) -> Result<()> {
             backend: exit.backend,
             exit_code: exit.exit_code,
             completed: exit.completed,
+            posture: exit.posture,
         },
     )
 }
@@ -237,6 +240,8 @@ pub(crate) struct TransientEnd<'a> {
     pub(crate) exit_code: Option<i32>,
     /// Whether the workload ran to an exit, as opposed to a failed dispatch.
     pub(crate) completed: bool,
+    /// How the run booted; recorded ahead of the exit record when it completed.
+    pub(crate) posture: Option<crate::admission::BootPosture>,
 }
 
 /// Close a transient run's session under its admitted `plan`: `plan.exited`
@@ -266,6 +271,9 @@ pub(crate) fn seal_transient_end(
     // one serial fsync per record on a path the caller waits on. A flush that
     // fails is a seal that failed, and is recorded as one.
     let closed = emitter.batched(|| {
+        if let Some(posture) = end.posture.filter(|_| end.completed) {
+            crate::admission::record_boot(emitter, plan, end.backend, posture);
+        }
         emitter.emit_exit_record(
             plan,
             ExitRecord {
