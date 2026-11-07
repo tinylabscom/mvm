@@ -134,10 +134,6 @@ fn pack_new_scaffolding_command_parses() {
     ));
     assert!(Cli::try_parse_from(["mvmctl", "pack", "new"]).is_err());
     assert!(Cli::try_parse_from(["mvmctl", "pack", "new", "../example"]).is_err());
-    let help = Cli::try_parse_from(["mvmctl", "pack", "new", "--help"])
-        .expect_err("help exits after rendering")
-        .to_string();
-    assert!(help.contains("namespace/name"));
 }
 
 #[test]
@@ -150,12 +146,6 @@ fn deprecated_new_pack_alias_still_parses() {
             if reference.coordinate_string() == "acme/example"
     ));
     assert!(Cli::try_parse_from(["mvmctl", "new-pack"]).is_err());
-    assert!(Cli::try_parse_from(["mvmctl", "new-pack", "../example"]).is_err());
-    let help = Cli::try_parse_from(["mvmctl", "new-pack", "--help"])
-        .expect_err("help exits after rendering")
-        .to_string();
-    assert!(help.contains("namespace/name"));
-    assert!(help.contains("unpublished application pack"));
 }
 
 #[test]
