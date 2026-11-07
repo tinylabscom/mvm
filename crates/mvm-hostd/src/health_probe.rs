@@ -19,6 +19,7 @@
 //! tamper-evident on the same chain `mvmctl trust audit` verifies. The seam
 //! keeps the probe loop unit-testable without a live signer helper.
 
+use mvm_vmm::host::shell::shell_quote;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -99,22 +100,6 @@ fn command_string(hc: &HealthCheck) -> String {
         .map(|arg| shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Single-quote wrap, escaping embedded single quotes the portable POSIX
-/// way (`'` -> `'\''`). Mirrors the mvm-cli exec-target quoting convention.
-fn shell_quote(arg: &str) -> String {
-    let mut out = String::with_capacity(arg.len() + 2);
-    out.push('\'');
-    for ch in arg.chars() {
-        if ch == '\'' {
-            out.push_str(r"'\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 /// Testable core: run `hc.command` in `vm_name` via `exec` and decide

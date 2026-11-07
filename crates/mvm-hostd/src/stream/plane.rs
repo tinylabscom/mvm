@@ -49,6 +49,7 @@
 //! with it. So attach clears the directory; it clears it *after* the bind,
 //! because a refused bind means someone else's live capture is in there.
 
+use mvm_core::util::time::now_unix_secs;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -975,12 +976,6 @@ fn now_unix_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos())
-}
-
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]

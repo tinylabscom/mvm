@@ -23,6 +23,7 @@
 //! "no OCI" non-goal does not apply to the builder: OCI is
 //! deliberately acceptable here.
 
+use mvm_vmm::host::shell::shell_quote;
 use std::path::{Path, PathBuf};
 
 use mvm_core::build_env::ShellEnvironment;
@@ -1220,10 +1221,6 @@ pub fn host_system_linux() -> &'static str {
     } else {
         "x86_64-linux"
     }
-}
-
-fn shell_quote(input: &str) -> String {
-    format!("'{}'", input.replace('\'', "'\\''"))
 }
 
 /// Best-effort sidecar emission: query `passthru.mvm` against the

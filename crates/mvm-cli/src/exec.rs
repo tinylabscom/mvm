@@ -16,6 +16,7 @@ use mvm_core::launch_trace::PhaseTimingMode;
 use mvm_core::vm_backend::{SnapshotCapability, VmId, VmStartConfig, VmVolume};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport;
+use mvm_vmm::host::shell::shell_quote;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -355,24 +356,6 @@ impl ExecRequest {
 fn quote_argv_for_exec(argv: &[String]) -> String {
     let quoted: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
     format!("exec {}", quoted.join(" "))
-}
-
-/// Quote a single argument for inclusion in a shell command line.
-///
-/// Wraps in single quotes and escapes embedded single quotes the
-/// portable POSIX way (`'` → `'\''`).
-pub fn shell_quote(arg: &str) -> String {
-    let mut out = String::with_capacity(arg.len() + 2);
-    out.push('\'');
-    for ch in arg.chars() {
-        if ch == '\'' {
-            out.push_str(r"'\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 /// Build the wrapper script that runs inside the guest:
@@ -1889,17 +1872,6 @@ mod tests {
             minted.elapsed() < std::time::Duration::from_millis(20),
             "the grant window must start when admission runs, not before preparation"
         );
-    }
-
-    #[test]
-    fn shell_quote_basic() {
-        assert_eq!(shell_quote("hello"), "'hello'");
-        assert_eq!(shell_quote("hello world"), "'hello world'");
-    }
-
-    #[test]
-    fn shell_quote_escapes_single_quotes() {
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
     #[test]

@@ -1462,7 +1462,7 @@ fn machine_start_audit_detail(input: &MachineStartReceiptInput) -> String {
 fn machine_exec_command(argv: &[String]) -> String {
     let quoted = argv
         .iter()
-        .map(|arg| crate::exec::shell_quote(arg))
+        .map(|arg| mvm_vmm::host::shell::shell_quote(arg))
         .collect::<Vec<_>>();
     format!("exec {}", quoted.join(" "))
 }

@@ -31,6 +31,7 @@
 //! [`ApplyStore::recover_source`] with each workspace's source directory
 //! before staging anything else.
 
+use mvm_core::util::time::now_unix_secs;
 use std::collections::HashSet;
 use std::fs;
 use std::fs::OpenOptions;
@@ -207,7 +208,7 @@ impl ApplyStore {
         }
         let mut manifest = Manifest {
             id: id.clone(),
-            created_at: now_secs(),
+            created_at: now_unix_secs(),
             ops,
             exclusions: plan.exclusion_patterns.clone(),
             refused_protected: Vec::new(),
@@ -908,7 +909,7 @@ impl ApplyStore {
             apply: apply.to_string(),
             merkle_root,
             reason,
-            at: now_secs(),
+            at: now_unix_secs(),
         };
         let mut file = OpenOptions::new()
             .create(true)
@@ -1140,13 +1141,6 @@ fn sync_dir(dir: &Path) -> Result<(), ApplyError> {
     let file = OpenOptions::new().read(true).open(dir)?;
     file.sync_all()?;
     Ok(())
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// The inverse of a committed apply: the original's pre-images become this

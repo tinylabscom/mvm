@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result, bail};
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
+use mvm_core::util::time::now_unix_secs;
 
 use crate::checkpoint::Checkpoints;
 
@@ -50,13 +51,6 @@ impl Default for ReplayService {
     }
 }
 
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
 /// Choose a collision-free local target for checkpoint or prompt replay.
 pub fn replay_target_name(from: &CheckpointId, as_name: Option<&str>) -> Result<String> {
     match as_name {
@@ -71,7 +65,7 @@ pub fn replay_target_name(from: &CheckpointId, as_name: Option<&str>) -> Result<
             }
             Ok(name.to_string())
         }
-        None => Ok(format!("replay-{}-{}", from.as_str(), now_unix())),
+        None => Ok(format!("replay-{}-{}", from.as_str(), now_unix_secs())),
     }
 }
 
