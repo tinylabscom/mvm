@@ -202,6 +202,19 @@ mod tests {
     }
 
     #[test]
+    fn security_profile_carries_zero_numbered_claims() {
+        let profile = WebLinuxBackend::new().security_profile();
+        assert!(
+            profile
+                .claims
+                .iter()
+                .all(|c| matches!(c, ClaimStatus::DoesNotHold)),
+            "the browser tier must not claim any numbered security guarantee"
+        );
+        assert_eq!(profile.layer_coverage, LayerCoverage::default());
+    }
+
+    #[test]
     fn is_available_is_false_on_native_host() {
         assert!(!WebLinuxBackend::new().is_available().unwrap());
     }

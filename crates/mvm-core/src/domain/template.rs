@@ -10,37 +10,6 @@ fn default_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
 }
 
-/// Complete template configuration that can define multiple variants/roles.
-/// Typically loaded from a TOML file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplateConfig {
-    /// Optional base name used when a variant omits `name`.
-    #[serde(default)]
-    pub template_id: String,
-    pub flake_ref: String,
-    /// Default profile if a variant omits it.
-    #[serde(default = "default_profile")]
-    pub profile: String,
-    pub variants: Vec<TemplateVariant>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplateVariant {
-    /// Template name for this variant; if empty, falls back to the template id.
-    #[serde(default)]
-    pub name: String,
-    #[serde(default = "default_profile")]
-    pub profile: String,
-    pub vcpus: u8,
-    pub mem_mib: u32,
-    #[serde(default)]
-    pub data_disk_mib: u32,
-}
-
-fn default_profile() -> String {
-    "minimal".to_string()
-}
-
 /// Global template definition (tenant-agnostic base image).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateSpec {
@@ -79,10 +48,6 @@ pub fn templates_base_dir() -> String {
 
 pub fn template_dir(template_id: &str) -> String {
     format!("{}/{}", templates_base_dir(), template_id)
-}
-
-pub fn template_spec_path(template_id: &str) -> String {
-    format!("{}/template.json", template_dir(template_id))
 }
 
 /// Artifacts base dir for a template.

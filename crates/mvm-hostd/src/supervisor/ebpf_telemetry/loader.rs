@@ -8,6 +8,8 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::supervisor::ebpf_telemetry::ObservabilityTarget;
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
+use crate::supervisor::ebpf_telemetry::TelemetryEvent;
 
 /// Configuration for the egress telemetry probe.
 #[derive(Debug, Clone, Default)]

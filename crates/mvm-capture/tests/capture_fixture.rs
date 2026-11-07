@@ -149,3 +149,55 @@ fn rendered_nix_contains_expected_flake_and_launch_json() {
         "secret value must not leak into launch.json"
     );
 }
+
+#[test]
+fn capture_honours_ignore_files_and_leaves_the_project_unchanged() {
+    let project = tempfile::tempdir().expect("project directory");
+    let root = project.path();
+    std::fs::write(root.join(".gitignore"), "vendored/\n").expect("write ignore file");
+    std::fs::create_dir(root.join("vendored")).expect("ignored directory");
+    std::fs::write(root.join("vendored/package.json"), "{}").expect("ignored manifest");
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"p\"\n").expect("manifest");
+
+    let before = tree_contents(root);
+    let opts = mvm_capture::collect::CollectOptions {
+        project_path: root.to_path_buf(),
+        ..Default::default()
+    };
+    let report = mvm_capture::collect::collect_project(&opts).expect("collect succeeds");
+
+    assert!(
+        report
+            .observations
+            .iter()
+            .any(|o| o.path.as_deref() == Some("Cargo.toml")),
+        "the unignored manifest is observed"
+    );
+    assert!(
+        !report
+            .observations
+            .iter()
+            .any(|o| o.path.as_deref().is_some_and(|p| p.starts_with("vendored"))),
+        "an ignored directory is never observed"
+    );
+    assert_eq!(
+        before,
+        tree_contents(root),
+        "capture is read-only: it adds, removes or rewrites nothing in the project"
+    );
+}
+
+fn tree_contents(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read dir").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(tree_contents(&path));
+        } else {
+            let bytes = std::fs::read(&path).expect("read file");
+            out.push((path, bytes));
+        }
+    }
+    out.sort();
+    out
+}
