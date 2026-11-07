@@ -105,13 +105,6 @@ pub fn first_nameserver_from_resolv_conf(body: &str) -> Option<String> {
     })
 }
 
-/// Render a kernel-cmdline token that tells the guest which resolver IP to
-/// seed when the host's gateway path does not answer DNS at the virtual
-/// gateway address.
-pub fn resolver_cmdline_token_from_resolv_conf(body: &str) -> Option<String> {
-    first_nameserver_from_resolv_conf(body).map(|ip| format!("{RESOLVER_CMDLINE_PREFIX}{ip}"))
-}
-
 /// Parse the host-supplied resolver override out of the kernel cmdline.
 pub fn resolver_override_from_cmdline(cmdline: &str) -> Option<&str> {
     cmdline
@@ -577,25 +570,6 @@ mod tests {
     fn resolver_override_from_cmdline_ignores_malformed_values() {
         assert_eq!(resolver_override_from_cmdline("mvm.resolver=bad.ip"), None);
         assert_eq!(resolver_override_from_cmdline("console=hvc0"), None);
-    }
-
-    #[test]
-    fn first_nameserver_from_resolv_conf_ignores_comments_and_invalid_lines() {
-        let body = "\
-# comment
-search example.internal
-nameserver invalid
-nameserver 10.0.0.2
-nameserver 10.0.0.3
-";
-        assert_eq!(
-            first_nameserver_from_resolv_conf(body).as_deref(),
-            Some("10.0.0.2")
-        );
-        assert_eq!(
-            resolver_cmdline_token_from_resolv_conf(body).as_deref(),
-            Some("mvm.resolver=10.0.0.2")
-        );
     }
 
     #[test]

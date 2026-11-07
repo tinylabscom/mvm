@@ -173,16 +173,6 @@ pub fn reap_gpu_endpoint(state_dir: &Path) {
     let _ = std::fs::remove_file(&pid_path);
 }
 
-/// Parse a bind proof path from a `--listen unix:...` value, for tests and
-/// for callers that need to know the socket without re-deriving it.
-#[must_use]
-pub fn uds_bind_path(listen: &str) -> Option<PathBuf> {
-    listen
-        .strip_prefix("unix:")
-        .map(std::path::Path::new)
-        .map(std::path::Path::to_path_buf)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,15 +225,6 @@ mod tests {
         // so the probe must fail.
         let probe = unsafe { libc::kill(i32::try_from(pid).expect("pid fits i32"), 0) };
         assert_ne!(probe, 0, "a reaped child must not answer a liveness probe");
-    }
-
-    #[test]
-    fn uds_bind_path_parses_the_listen_value() {
-        assert_eq!(
-            uds_bind_path("unix:/run/gpu.sock"),
-            Some(PathBuf::from("/run/gpu.sock"))
-        );
-        assert_eq!(uds_bind_path("vsock:5256"), None);
     }
 
     #[test]

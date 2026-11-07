@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use super::{PAYLOAD_DIR_IN_INITRAMFS, PAYLOAD_MANIFEST_NAME, STAGE1_MEMBER};
 use crate::host_payload_manifest::host_binary_names;
-use crate::rootfs_inject::{CpioEntry, build_newc_cpio};
+use crate::rootfs_inject::{CpioEntry, CpioError, build_newc_cpio};
 
 /// Mode of every payload binary, in the initramfs and in the guest's tmpfs
 /// copy. Nothing in the guest has a reason to modify them.
@@ -51,6 +51,8 @@ pub enum BootPayloadError {
     NoStage1Member,
     #[error("builder boot payload: {0:?} is not a 64-character lowercase SHA-256")]
     InvalidDigest(String),
+    #[error("builder boot payload: initramfs archive: {0}")]
+    Cpio(#[from] CpioError),
     #[error("builder boot payload: {op} {}: {source}", .path.display())]
     Io {
         op: &'static str,
@@ -279,7 +281,7 @@ impl BuilderBootPayloadBuilder {
             .get(STAGE1_MEMBER)
             .map(|(_, bytes)| bytes.clone())
             .ok_or(BootPayloadError::NoStage1Member)?;
-        let cpio = build_newc_cpio(&initramfs_entries(stage1, &members, &manifest));
+        let cpio = build_newc_cpio(&initramfs_entries(stage1, &members, &manifest))?;
         Ok(BuilderBootPayload { cpio, manifest })
     }
 }

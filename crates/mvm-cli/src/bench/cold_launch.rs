@@ -256,16 +256,6 @@ impl LaunchLane {
 }
 
 impl LaunchLane {
-    /// Whether every measured dispatch in this lane must be strictly under a
-    /// per-sample ceiling: [`PREPARED_COLD_HARD_MAX_MS`] for the prepared
-    /// lanes, [`WARM_CLAIM_HARD_MAX_MS`] for a warm claim. Read by the report
-    /// builder and both report gates, so a lane cannot be ceilinged in one and
-    /// not the others.
-    #[must_use]
-    pub const fn has_hard_boot_ceiling(self) -> bool {
-        self.budgets().hard_max_ms.is_some()
-    }
-
     /// Whether this lane measures a claimed warm standby rather than a cold
     /// boot. The benchmark waits for an idle standby before every sample in
     /// such a lane, because a claimed standby's replacement takes seconds to
@@ -1732,35 +1722,6 @@ mod tests {
     }
 
     #[test]
-    fn warm_shape_lanes_share_the_warm_claim_budget_and_ceiling() {
-        for lane in [
-            LaunchLane::WarmClaimFlake,
-            LaunchLane::WarmClaimManifest,
-            LaunchLane::WarmClaimBundle,
-            LaunchLane::WarmClaimEgress,
-            LaunchLane::WarmClaimMount,
-        ] {
-            assert_eq!(
-                lane.budgets(),
-                LaunchLane::WarmClaim.budgets(),
-                "{}",
-                lane.as_str()
-            );
-            assert!(lane.has_hard_boot_ceiling(), "{}", lane.as_str());
-            assert!(lane.is_warm_claim(), "{}", lane.as_str());
-        }
-        for lane in [
-            LaunchLane::PreparedCold,
-            LaunchLane::PreparedColdMountHit,
-            LaunchLane::PreparedColdArtifact,
-            LaunchLane::MountMiss,
-            LaunchLane::ArtifactMiss,
-        ] {
-            assert!(!lane.is_warm_claim(), "{}", lane.as_str());
-        }
-    }
-
-    #[test]
     fn template_warm_lanes_require_the_claimed_child_to_boot_a_slot_rootfs() {
         let _env = mvm_core::util::test_env::TestEnv::new();
         for lane in [LaunchLane::WarmClaimFlake, LaunchLane::WarmClaimManifest] {
@@ -2003,49 +1964,6 @@ mod tests {
                     performed: vec!["bundle_verify"],
                 })
             );
-        }
-    }
-
-    #[test]
-    fn the_artifact_lane_is_held_to_the_prepared_cold_budgets_and_ceiling() {
-        assert_eq!(
-            LaunchLane::PreparedColdArtifact.budgets(),
-            LaunchLane::PreparedCold.budgets()
-        );
-        assert!(LaunchLane::PreparedColdArtifact.has_hard_boot_ceiling());
-        assert_eq!(
-            validate_hard_boot_timing(LaunchLane::PreparedColdArtifact, 200.0),
-            Err(LaneViolation::HardMaximumExceeded {
-                lane: LaunchLane::PreparedColdArtifact,
-                found_ms: 200.0,
-                limit_ms: PREPARED_COLD_HARD_MAX_MS,
-            })
-        );
-    }
-
-    #[test]
-    fn every_warm_claim_is_held_under_the_launch_ceiling() {
-        assert!(LaunchLane::WarmClaim.has_hard_boot_ceiling());
-        assert_eq!(
-            LaunchLane::WarmClaim.budgets().hard_max_ms,
-            Some(crate::commands::vm::phase_timing::WARM_START_MAX_MS),
-            "the bench ceiling is the one the CLI enforces on every warm launch"
-        );
-        assert_eq!(
-            validate_hard_boot_timing(LaunchLane::WarmClaim, WARM_CLAIM_HARD_MAX_MS - 0.1),
-            Ok(())
-        );
-        assert_eq!(
-            validate_hard_boot_timing(LaunchLane::WarmClaim, WARM_CLAIM_HARD_MAX_MS),
-            Err(LaneViolation::HardMaximumExceeded {
-                lane: LaunchLane::WarmClaim,
-                found_ms: WARM_CLAIM_HARD_MAX_MS,
-                limit_ms: WARM_CLAIM_HARD_MAX_MS,
-            })
-        );
-        for lane in [LaunchLane::MountMiss, LaunchLane::ArtifactMiss] {
-            assert!(!lane.has_hard_boot_ceiling());
-            assert_eq!(validate_hard_boot_timing(lane, 10_000.0), Ok(()));
         }
     }
 

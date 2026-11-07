@@ -77,6 +77,10 @@ pub(crate) const GATES: &[Gate] = &[
         crate::check_no_spec_refs_in_comments::run,
     ),
     (
+        "check-no-history-in-comments",
+        crate::check_no_history_in_comments::run,
+    ),
+    (
         "check-no-string-backend-dispatch",
         crate::check_no_string_backend_dispatch::run,
     ),
@@ -107,6 +111,7 @@ pub(crate) const GATES: &[Gate] = &[
         crate::check_witness_citations::run,
     ),
     ("check-asserted-absence", crate::check_asserted_absence::run),
+    ("check-documented-env", crate::check_documented_env::run),
     ("check-dormant-controls", crate::check_dormant_controls::run),
     ("check-conformance", conformance_read_only),
     ("check-deferrals", crate::check_deferrals::run),

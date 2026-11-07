@@ -188,6 +188,26 @@ mod tests {
     }
 
     #[test]
+    fn only_a_ready_control_plane_is_accepted() {
+        for state in [
+            ComponentState::Disabled,
+            ComponentState::Starting,
+            ComponentState::Failed {
+                message: "listener died".into(),
+            },
+        ] {
+            let report = ReadinessReport {
+                control_plane: state.clone(),
+                ..ready_report()
+            };
+            assert!(
+                validate_readiness_report(&report).is_err(),
+                "{state:?} must not read as ready"
+            );
+        }
+    }
+
+    #[test]
     fn non_sealed_profile_is_rejected() {
         let report = ReadinessReport {
             profile: AgentProfile::Dev,

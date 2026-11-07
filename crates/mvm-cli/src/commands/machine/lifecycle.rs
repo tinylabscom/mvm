@@ -293,7 +293,7 @@ impl mvm_client::launch::machine_start::StartHost for CliStartHost {
 /// rather than on it having a persisted spec.
 ///
 /// Both verbs reach the guest over the per-VM vsock socket under
-/// `~/.mvm/vms/<name>/` and never read the spec they used to load — it was a
+/// `~/.mvm/vms/<name>/` and never read the spec: loading it would be a
 /// bare existence check. But `machine run` boots a transient VM that has a
 /// live console and no spec, so that check refused, with "does not exist", a
 /// machine `machine ps` was listing as running.

@@ -248,18 +248,6 @@ pub fn read_report(path: &Path) -> Result<BenchReport> {
     serde_json::from_slice(&bytes).with_context(|| format!("parsing baseline {}", path.display()))
 }
 
-pub fn read_launch_distribution_report(path: &Path) -> Result<LaunchDistributionReport> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading baseline {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parsing baseline {}", path.display()))
-}
-
-pub fn read_density_report(path: &Path) -> Result<DensityReport> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading baseline {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parsing baseline {}", path.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -82,16 +82,6 @@ pub fn run_on_vm_visible(vm_name: &str, script: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run a bash script in the Linux environment, returning stdout as String.
-#[instrument(skip_all, fields(vm_name))]
-pub fn run_on_vm_stdout(vm_name: &str, script: &str) -> Result<String> {
-    if vm_name == VM_NAME {
-        return linux_env::default_env().run_stdout(script);
-    }
-    let output = run_on_vm(vm_name, script)?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 /// Run a bash script in the default Linux environment, capturing output.
 #[instrument(skip_all)]
 pub fn run_in_vm(script: &str) -> Result<Output> {
@@ -178,16 +168,6 @@ pub fn replace_process(cmd: &str, args: &[&str]) -> Result<()> {
 
     // exec() only returns on error
     Err(err).with_context(|| format!("Failed to replace process: {} {}", cmd, args.join(" ")))
-}
-
-/// Replace the current process with `cmd args...`, wrapped for the VM runtime.
-///
-/// Mirrors [`run_in_vm`] but uses process replacement (Unix exec) instead of
-/// spawning a child. Needed for interactive TTY pass-through (e.g. interactive
-/// shells launched from `mvmctl`).
-#[cfg(unix)]
-pub fn replace_process_in_vm(cmd: &str, args: &[&str]) -> Result<()> {
-    replace_process(cmd, args)
 }
 
 #[cfg(test)]

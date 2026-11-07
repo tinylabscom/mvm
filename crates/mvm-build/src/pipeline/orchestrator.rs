@@ -1,5 +1,4 @@
-use anyhow::{Result, bail};
-use std::env;
+use anyhow::Result;
 
 use mvm_core::build_env::BuildEnvironment;
 use mvm_core::naming;
@@ -13,16 +12,6 @@ use crate::cache::maybe_skip_by_lock_hash;
 use crate::shell_scripts;
 use crate::template_reuse::reuse_template_artifacts;
 
-fn validate_builder_mode(value: Option<&str>) -> Result<()> {
-    match value.map(str::to_ascii_lowercase).as_deref() {
-        None | Some("host") => Ok(()),
-        Some("vsock" | "auto") => bail!(
-            "MVM_BUILDER_MODE=vsock|auto is retired: the old Firecracker builder attached a TAP NIC"
-        ),
-        Some(other) => bail!("unsupported MVM_BUILDER_MODE={other}"),
-    }
-}
-
 /// Build artifacts for a pool. Default mode runs `nix build` on the host;
 /// `opts` carries the timeout and builder resource overrides.
 #[tracing::instrument(skip_all, fields(tenant_id, pool_id))]
@@ -32,8 +21,6 @@ pub fn pool_build(
     pool_id: &str,
     opts: PoolBuildOpts,
 ) -> Result<()> {
-    let mode = env::var("MVM_BUILDER_MODE").ok();
-    validate_builder_mode(mode.as_deref())?;
     let timeout = opts.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let spec = env.load_pool_spec(tenant_id, pool_id)?;
     let _tenant = env.load_tenant_config(tenant_id)?;
@@ -147,18 +134,4 @@ pub fn pool_build(
     let _ = env.shell_exec(&shell_scripts::rm_rf(&build_run_dir));
 
     build_result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_builder_mode;
-
-    #[test]
-    fn retired_tap_builder_modes_fail_closed() {
-        assert!(validate_builder_mode(None).is_ok());
-        assert!(validate_builder_mode(Some("host")).is_ok());
-        for mode in ["vsock", "AUTO", "unknown"] {
-            assert!(validate_builder_mode(Some(mode)).is_err(), "{mode}");
-        }
-    }
 }

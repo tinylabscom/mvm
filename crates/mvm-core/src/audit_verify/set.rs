@@ -565,8 +565,8 @@ pub fn verify_segment_set(
 ///
 /// This is what the Merkle root builder needs: leaves have to come from the
 /// same buffers the verification ran over, and they have to span the whole set.
-/// A root built over the active segment alone would silently attest less than
-/// it used to the first time a host rotated.
+/// A root built over the active segment alone would silently attest less once a host
+/// rotates.
 pub fn read_verified_set(
     dir: &Path,
     base: &str,

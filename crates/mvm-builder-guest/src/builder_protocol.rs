@@ -480,21 +480,6 @@ pub fn read_host_vm_response(stream: &mut std::os::unix::net::UnixStream) -> Hos
     }
 }
 
-/// Write one framed [`HostVmResponse`] to a `UnixStream`. Mirror
-/// of [`read_host_vm_response`] — exists so unit tests of the
-/// reader can produce real wire bytes via the same framing
-/// `mvm-host-vm-init` uses (the actual guest emit hand-rolls the JSON
-/// to keep builder-init's dep tree small). The pair-test using this
-/// writer + the reader locks in the regression so the guest emit lands
-/// against a known-good host reader.
-pub fn write_host_vm_response(
-    stream: &mut std::os::unix::net::UnixStream,
-    response: &HostVmResponse,
-) -> std::io::Result<()> {
-    mvm_agentd::vsock::write_frame(stream, response)
-        .map_err(|e| std::io::Error::other(e.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -891,24 +876,6 @@ mod tests {
     }
 
     #[test]
-    fn read_host_vm_response_roundtrips_through_unix_stream_pair() {
-        // Host-side wire: when the guest sends a HostVmResponse over
-        // the dispatch socket, the host reader should decode it
-        // byte-for-byte. Pair of UnixStreams stands in for the
-        // libkrun-managed socket.
-        use std::os::unix::net::UnixStream;
-        let (mut a, mut b) = UnixStream::pair().expect("socketpair");
-        let response = sample_result();
-        write_host_vm_response(&mut a, &response).expect("write");
-        drop(a); // signal EOF after the single frame
-        let read = read_host_vm_response(&mut b);
-        match read {
-            HostVmResponseRead::Frame(got) => assert_eq!(got, response),
-            other => panic!("expected Frame, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn read_host_vm_response_returns_empty_eof_on_clean_close() {
         // The guest-send wiring transition expects this: the host
         // opens a vsock conn, but no guest send code is wired yet,
@@ -937,29 +904,6 @@ mod tests {
         match read_host_vm_response(&mut b) {
             HostVmResponseRead::Timeout => {}
             other => panic!("expected Timeout, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn read_host_vm_response_handles_streamed_chunks() {
-        // Guest writes a Result preceded by a StderrChunk over the
-        // same conn; the reader picks up the first frame. This
-        // documents that the reader reads ONE frame and stops —
-        // multi-frame streaming is a later concern (the persistent
-        // dispatch loop reads many).
-        use std::os::unix::net::UnixStream;
-        let (mut a, mut b) = UnixStream::pair().expect("socketpair");
-        let chunk = HostVmResponse::StderrChunk {
-            job_id: JobId(Uuid::nil()),
-            line: "[mvm] building".to_string(),
-        };
-        let final_result = sample_result();
-        write_host_vm_response(&mut a, &chunk).expect("chunk");
-        write_host_vm_response(&mut a, &final_result).expect("result");
-        drop(a);
-        match read_host_vm_response(&mut b) {
-            HostVmResponseRead::Frame(got) => assert_eq!(got, chunk),
-            other => panic!("expected first frame to be the chunk, got {other:?}"),
         }
     }
 

@@ -32,10 +32,6 @@ impl ReplayService {
         }
     }
 
-    pub fn with_checkpoints(checkpoints: Checkpoints) -> Self {
-        Self { checkpoints }
-    }
-
     /// Load the replay source and choose a target that does not overwrite a
     /// running or persisted machine.
     pub fn prepare(&self, from: &CheckpointId, as_name: Option<&str>) -> Result<ReplaySource> {

@@ -68,13 +68,6 @@ where
 /// Shared reference to the in-memory filesystem backing the mock.
 pub type SharedFs = Arc<Mutex<HashMap<String, String>>>;
 
-/// Build a mock backed by an in-memory filesystem.
-pub fn mock_fs() -> MockFsBuilder {
-    MockFsBuilder {
-        files: HashMap::new(),
-    }
-}
-
 pub struct MockFsBuilder {
     files: HashMap<String, String>,
 }

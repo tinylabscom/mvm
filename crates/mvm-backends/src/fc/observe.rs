@@ -1,8 +1,8 @@
 //! VM observability: layered diagnostics, the running-VM listing, and slot
 //! allocation/reservation bookkeeping.
 //!
-//! Workload output is **not** here. It used to be: a `logs` entry point that
-//! shelled `tail`/`tail -f` at the console capture through
+//! Workload output is **not** here: a `logs` entry point would
+//! shell `tail`/`tail -f` at the console capture through
 //! [`run_in_vm_stdout`]. That indirection is a no-op
 //! on Linux and macOS 13-25 and hands back the dev-VM environment on macOS
 //! 26+, where nothing is left to dispatch to — so the same command read a

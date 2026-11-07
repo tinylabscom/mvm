@@ -69,25 +69,6 @@ pub fn build_verity_cmdline_args(
     }
 }
 
-/// Build the runtime-overlay cmdline fragment for Firecracker workload boots.
-///
-/// Verity-root boots use the fixed `/dev/vdc` + `/dev/vdd` runtime pair that
-/// `mvm-verity-init` consumes. Injected OCI non-verity boots instead mount a
-/// plain read-only overlay ext4 from `/dev/vdb` in their `/init`, so they only
-/// need the data-device token.
-pub fn build_runtime_overlay_cmdline_args(
-    rootfs_roothash: Option<&str>,
-    overlay_present: bool,
-) -> Option<String> {
-    if !overlay_present {
-        return None;
-    }
-    match rootfs_roothash {
-        Some(_) => Some("mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd".to_string()),
-        None => Some("mvm.runtime_data=/dev/vdb".to_string()),
-    }
-}
-
 /// Whether this boot attached the universal initramfs (as opposed to a
 /// legacy per-rootfs verity initramfs or no initramfs at all). Release
 /// assemblies use the universal ABI even after their verified initramfs is

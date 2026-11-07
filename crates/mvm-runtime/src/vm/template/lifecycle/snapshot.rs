@@ -13,15 +13,6 @@ use super::artifacts::{
 };
 use super::slots::template_load_slot;
 
-/// Whether the slot's current revision has a Firecracker snapshot.
-pub fn template_has_snapshot_for_slot(slot_hash: &str) -> Result<bool> {
-    let rev = current_revision_id_for_slot(slot_hash)?;
-    let snap_dir = mvm_core::manifest::slot_snapshot_dir(slot_hash, &rev);
-    let vmstate = std::path::Path::new(&snap_dir).join("vmstate.bin");
-    let mem = std::path::Path::new(&snap_dir).join("mem.bin");
-    Ok(vmstate.exists() && mem.exists())
-}
-
 /// Load snapshot metadata for the slot's current revision.
 pub fn template_snapshot_info_for_slot(slot_hash: &str) -> Result<Option<SnapshotInfo>> {
     let rev = current_revision_id_for_slot(slot_hash)?;
@@ -247,13 +238,6 @@ pub fn installed_bundle_environment(
         .and_then(|manifest| manifest.environment().cloned()))
 }
 
-/// The declared arch of an installed bundle, for the *export* path, which
-/// prefers a best-effort answer over a refusal — a bundle it cannot read is
-/// simply not a bundle whose arch it can carry through.
-pub fn installed_bundle_arch_for_export(id_or_slot: &str) -> Option<String> {
-    installed_bundle_arch(id_or_slot).ok().flatten()
-}
-
 /// Dispatched variant of [`super::crud::template_load`] / [`super::slots::template_load_slot`].
 /// Returns a [`TemplateSpec`] regardless of which key shape was used.
 ///
@@ -284,19 +268,6 @@ pub fn template_snapshot_info_dispatched(id_or_slot: &str) -> Result<Option<Snap
         template_snapshot_info_for_slot(id_or_slot)
     } else {
         Ok(None)
-    }
-}
-
-/// Dispatched variant of [`template_has_snapshot`] /
-/// [`template_has_snapshot_for_slot`]. Same bundle-fallthrough
-/// shape as `template_snapshot_info_dispatched`: bundles never
-/// have snapshots in v1.
-pub fn template_has_snapshot_dispatched(id_or_slot: &str) -> Result<bool> {
-    let slot_path = require_slot_key(id_or_slot)?;
-    if slot_path.exists() {
-        template_has_snapshot_for_slot(id_or_slot)
-    } else {
-        Ok(false)
     }
 }
 
@@ -424,36 +395,6 @@ mod tests {
         );
     }
 
-    /// A slot wins over an identically-named bundle, and a slot carries no
-    /// manifest — so the gate must not invent an architecture for it. Locks the
-    /// dispatch precedence into the gate's behaviour.
-    #[test]
-    fn template_artifacts_for_boot_ignores_arch_for_a_slot() {
-        let _lock = crate::vm::DATA_DIR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", tmp.path());
-
-        let sha = "0123456789abcdef".repeat(4);
-        // Both a slot and a foreign-arch bundle under the same name.
-        let slot = test_persisted_manifest(&sha);
-        slot.write_to_slot(std::path::Path::new(&slot_dir(&sha)))
-            .expect("write persisted slot");
-        install_bundle_manifest(&sha, other_arch());
-
-        assert_eq!(installed_bundle_arch_for_export(&sha), None);
-        let msg = match template_artifacts_for_boot(&sha) {
-            Ok(_) => String::new(),
-            Err(e) => format!("{e:#}"),
-        };
-        assert!(
-            !msg.contains("but this host is"),
-            "a slot must not be gated on a same-named bundle's arch: {msg}"
-        );
-    }
-
     /// A boot from an installed bundle is told where that bundle's archive is,
     /// so admission can pin it. A slot, even one sharing the bundle's name, and
     /// a key nothing is installed under are not bundles and yield no pin.
@@ -510,28 +451,6 @@ mod tests {
         assert!(
             !msg.contains("but this host is"),
             "export paths must not be gated on architecture: {msg}"
-        );
-    }
-
-    /// Archive export re-stamping the exporting host's arch onto a re-exported
-    /// foreign-arch bundle would produce a mislabelled `.mvmpkg` — and the label
-    /// is exactly what the boot gate above trusts.
-    #[test]
-    fn a_re_exported_bundle_keeps_its_own_arch() {
-        let _lock = crate::vm::DATA_DIR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", tmp.path());
-
-        let sha = "0f0f0f0f89abcdef".repeat(4);
-        install_bundle_manifest(&sha, other_arch());
-
-        assert_eq!(
-            installed_bundle_arch_for_export(&sha).as_deref(),
-            Some(other_arch()),
-            "export must carry the source bundle's arch, not this host's"
         );
     }
 

@@ -134,11 +134,6 @@ impl Platform {
         LIBKRUN_LIB_PATHS.iter().any(|p| Path::new(p).exists())
     }
 
-    /// Whether this platform is WSL2.
-    pub fn is_wsl(self) -> bool {
-        matches!(self, Platform::Wsl2)
-    }
-
     /// Whether this platform is native Windows.
     pub fn is_windows(self) -> bool {
         matches!(self, Platform::Windows)

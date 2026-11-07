@@ -838,24 +838,6 @@ impl AgentSessionJournal {
         Ok(event)
     }
 
-    /// Publish a reference to an already committed transcript/audit record.
-    pub fn record_committed_output(
-        &mut self,
-        output: CommittedOutput,
-        now_unix_ms: u64,
-    ) -> Result<AgentSessionEventEnvelope, AgentSessionError> {
-        if matches!(self.state, AgentSessionState::Deleted) {
-            return Err(AgentSessionError::new(
-                AgentSessionErrorCode::SessionDeleted,
-                "session has been deleted",
-            ));
-        }
-        self.append_durable(
-            DurableAgentSessionEvent::OutputAvailable { output },
-            now_unix_ms,
-        )
-    }
-
     /// Append a policy or approval event to this session's durable history.
     /// The event shares the same monotonic cursor as every other durable
     /// session event and cannot be appended after deletion.
@@ -1537,27 +1519,5 @@ mod tests {
             envelope.validate().expect_err("missing live sequence").code,
             AgentSessionErrorCode::MalformedEvent
         );
-    }
-
-    #[test]
-    fn committed_output_contains_hashes_but_not_payload() {
-        let (mut journal, _) =
-            AgentSessionJournal::open(session(), [0; 32], 1, RetentionPolicy::default())
-                .expect("open");
-        let event = journal
-            .record_committed_output(
-                CommittedOutput {
-                    stream_kind: StreamKind::Stdout,
-                    stream_sequence: 4,
-                    stream_record_hash: [1; 32],
-                    audit_sequence: 8,
-                    audit_entry_hash: [2; 32],
-                },
-                2,
-            )
-            .expect("output reference");
-        let json = serde_json::to_string(&event).expect("encode output reference");
-        assert!(!json.contains("payload"));
-        assert!(json.contains("stream_record_hash"));
     }
 }

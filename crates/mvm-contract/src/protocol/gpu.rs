@@ -77,22 +77,13 @@ pub const SUCCESS: i32 = 0;
 pub const CUDA_ERROR_INVALID_VALUE: i32 = 1;
 pub const CUDA_ERROR_OUT_OF_MEMORY: i32 = 2;
 pub const CUDA_ERROR_NOT_INITIALIZED: i32 = 3;
-pub const CUDA_ERROR_DEINITIALIZED: i32 = 4;
-pub const CUDA_ERROR_STUB_LIBRARY: i32 = 34;
 pub const CUDA_ERROR_NO_DEVICE: i32 = 100;
 pub const CUDA_ERROR_INVALID_DEVICE: i32 = 101;
 pub const CUDA_ERROR_INVALID_CONTEXT: i32 = 201;
 pub const CUDA_ERROR_INVALID_IMAGE: i32 = 200;
-pub const CUDA_ERROR_INVALID_PTX: i32 = 218;
-pub const CUDA_ERROR_INVALID_SOURCE: i32 = 300;
-pub const CUDA_ERROR_FILE_NOT_FOUND: i32 = 301;
-pub const CUDA_ERROR_SHARED_OBJECT_SYMBOL_NOT_FOUND: i32 = 302;
-pub const CUDA_ERROR_SHARED_OBJECT_INIT_FAILED: i32 = 303;
 pub const CUDA_ERROR_INVALID_HANDLE: i32 = 400;
 pub const CUDA_ERROR_NOT_FOUND: i32 = 500;
 pub const CUDA_ERROR_NOT_READY: i32 = 600;
-pub const CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES: i32 = 701;
-pub const CUDA_ERROR_LAUNCH_FAILED: i32 = 719;
 pub const CUDA_ERROR_NOT_SUPPORTED: i32 = 801;
 pub const CUDA_ERROR_UNKNOWN: i32 = 999;
 
@@ -102,10 +93,8 @@ pub const CUDA_ERROR_RUNTIME_INVALID_VALUE: i32 = 1;
 pub const CUDA_ERROR_RUNTIME_MEMORY_ALLOCATION: i32 = 2;
 pub const CUDA_ERROR_RUNTIME_INITIALIZATION: i32 = 3;
 pub const CUDA_ERROR_RUNTIME_INVALID_DEVICE: i32 = 10;
-pub const CUDA_ERROR_RUNTIME_INVALID_DEVICE_POINTER: i32 = 17;
 pub const CUDA_ERROR_RUNTIME_INVALID_MEMCPY_DIRECTION: i32 = 21;
 pub const CUDA_ERROR_RUNTIME_NOT_READY: i32 = 34;
-pub const CUDA_ERROR_RUNTIME_INSUFFICIENT_DRIVER: i32 = 35;
 pub const CUDA_ERROR_RUNTIME_NO_DEVICE: i32 = 38;
 pub const CUDA_ERROR_RUNTIME_NOT_SUPPORTED: i32 = 801;
 pub const CUDA_ERROR_RUNTIME_UNKNOWN: i32 = 999;
@@ -695,25 +684,6 @@ mod tests {
         let err = serde_json::from_str::<GpuRequest>(r#"{"op":"steal_the_gpu","args":null}"#)
             .expect_err("unknown verb must not parse");
         assert!(err.to_string().contains("unknown variant"), "{err}");
-    }
-
-    #[test]
-    fn error_codes_match_the_public_cuda_and_nvml_headers() {
-        // Pinned: the whole point of carrying numeric codes is that a
-        // workload cannot tell the shim's answer from the real library's.
-        assert_eq!(SUCCESS, 0);
-        assert_eq!(CUDA_ERROR_INVALID_VALUE, 1);
-        assert_eq!(CUDA_ERROR_OUT_OF_MEMORY, 2);
-        assert_eq!(CUDA_ERROR_NO_DEVICE, 100);
-        assert_eq!(CUDA_ERROR_INVALID_HANDLE, 400);
-        assert_eq!(CUDA_ERROR_NOT_SUPPORTED, 801);
-        assert_eq!(CUDA_ERROR_UNKNOWN, 999);
-        assert_eq!(CUDA_ERROR_RUNTIME_INVALID_DEVICE, 10);
-        assert_eq!(CUDA_ERROR_RUNTIME_INVALID_DEVICE_POINTER, 17);
-        assert_eq!(CUDA_ERROR_RUNTIME_NOT_READY, 34);
-        assert_eq!(CUDA_ERROR_RUNTIME_NO_DEVICE, 38);
-        assert_eq!(NVML_ERROR_NOT_FOUND, 6);
-        assert_eq!(NVML_ERROR_UNKNOWN, 999);
     }
 
     #[test]

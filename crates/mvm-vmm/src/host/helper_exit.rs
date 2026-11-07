@@ -21,16 +21,6 @@ pub enum HelperExit {
 }
 
 impl HelperExit {
-    /// Decode a `waitpid`-style status word.
-    #[must_use]
-    pub fn from_wait_status(status: libc::c_int) -> Self {
-        if libc::WIFSIGNALED(status) {
-            Self::Signal(libc::WTERMSIG(status))
-        } else {
-            Self::Code(libc::WEXITSTATUS(status))
-        }
-    }
-
     /// Decode a status `std::process::Child::wait` returned. `None` only for
     /// a status that is neither an exit nor a terminating signal, which a
     /// reaped process cannot have.
@@ -181,26 +171,6 @@ mod tests {
         );
         assert!(!HelperExit::Signal(libc::SIGKILL).is_seccomp_kill());
         assert!(!HelperExit::Code(libc::SIGSYS).is_seccomp_kill());
-    }
-
-    #[test]
-    fn wait_and_exit_statuses_decode_alike() {
-        use std::os::unix::process::ExitStatusExt as _;
-        let signalled = std::process::ExitStatus::from_raw(libc::SIGSYS);
-        let exited = std::process::ExitStatus::from_raw(7 << 8);
-        assert_eq!(
-            HelperExit::from_exit_status(&signalled),
-            Some(HelperExit::Signal(libc::SIGSYS))
-        );
-        assert_eq!(
-            HelperExit::from_exit_status(&exited),
-            Some(HelperExit::Code(7))
-        );
-        assert_eq!(
-            HelperExit::from_wait_status(libc::SIGSYS),
-            HelperExit::Signal(libc::SIGSYS)
-        );
-        assert_eq!(HelperExit::from_wait_status(7 << 8), HelperExit::Code(7));
     }
 
     #[test]

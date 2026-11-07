@@ -37,6 +37,8 @@ pub mod console_loglevel;
 /// Immediate kernel CRNG reseed through a helper process that holds the one
 /// capability the agent does not.
 pub mod crng_reseed;
+/// Detached threads that name themselves and report a panic.
+pub mod detached;
 /// Fixed-method Chrome DevTools bridge. It emits view-only frames to the host,
 /// and with `--input` turns admitted display input into a fixed set of CDP
 /// input commands. No host byte is ever forwarded to Chrome verbatim.
