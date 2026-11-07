@@ -25,7 +25,9 @@ pub struct ProbeConfig {
 pub struct ProbeHandle {
     target: ObservabilityTarget,
     #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
-    events: std::sync::mpsc::Receiver<TelemetryEvent>,
+    // Held so the worker's sends reach a live channel; nothing drains it since
+    // the poll accessor was removed.
+    _events: std::sync::mpsc::Receiver<TelemetryEvent>,
     #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
     detach: Option<std::sync::mpsc::Sender<()>>,
     #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
@@ -37,7 +39,7 @@ impl ProbeHandle {
         Self {
             target,
             #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
-            events: {
+            _events: {
                 let (_, rx) = std::sync::mpsc::channel();
                 rx
             },
@@ -151,7 +153,7 @@ fn inner_attach(
 
     Ok(ProbeHandle {
         target,
-        events: events_rx,
+        _events: events_rx,
         detach: Some(detach_tx),
         worker: Some(worker),
     })
