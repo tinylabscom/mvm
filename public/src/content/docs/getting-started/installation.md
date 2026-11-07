@@ -257,8 +257,6 @@ mvmctl env update
 ```
 
 A source checkout updates the usual way — `git pull && cargo build --release`.
-Cached build artifacts are refreshed separately with `mvmctl pack update <KIND>`
-(`builder`, `runtime`, `dev-image`, or `extension`).
 
 ## Prerequisites
 

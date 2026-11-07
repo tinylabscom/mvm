@@ -458,11 +458,6 @@ path = "ops metrics"
 tier = "exec"
 
 [[command]]
-path = "pack download"
-tier = "parse"
-reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"
-
-[[command]]
 path = "pack update"
 tier = "parse"
 reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"
