@@ -186,7 +186,7 @@ pub(in crate::commands) enum Commands {
     /// Rebuild a workload when its local inputs change
     #[command(display_order = 8)]
     Watch(watch::Args),
-    /// Manage versioned packs (list/rollback/prune/download/update)
+    /// Manage versioned packs (ls/rm/update/system)
     #[command(display_order = 9)]
     Pack(pack::Args),
     /// Run an image or a signed `.mvmpkg` (alias of `machine run`)
