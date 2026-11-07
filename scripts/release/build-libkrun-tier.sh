@@ -200,12 +200,18 @@ if (( upstream_restored == 0 )); then
   [[ -z "$upstream_cache" ]] || export_upstream_cache "$upstream_cache"
 fi
 
+# Cargo does not track MACOSX_DEPLOYMENT_TARGET, so a target directory restored
+# from a build made without it would link this binary at the toolchain default
+# (11.0) instead of the tier's deployment target. A private target directory
+# keeps the supervisor's dependencies built under the exported target.
+supervisor_target="$scratch_root/supervisor-target"
+CARGO_TARGET_DIR="$supervisor_target" \
 MVM_LIBKRUN_HEADER="$prefix/include/libkrun.h" \
 LIBRARY_PATH="$prefix/lib" \
 cargo build --release --target "$build_target" -p mvm-hostd \
   --bin mvm-libkrun-supervisor --features libkrun-sys
 
-cp "target/$build_target/release/mvm-libkrun-supervisor" "$output_dir/"
+cp "$supervisor_target/$build_target/release/mvm-libkrun-supervisor" "$output_dir/"
 cp "$prefix/lib/libkrun.$libkrun_version.dylib" "$output_dir/lib/libkrun.1.dylib"
 cp "$prefix/lib/libkrunfw.$libkrunfw_abi.dylib" "$output_dir/lib/"
 
