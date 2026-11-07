@@ -767,13 +767,6 @@ impl MaterializeOptionsBuilder {
         self
     }
 
-    /// Set `build`.
-    #[must_use]
-    pub fn with_build(mut self, build: BuildOptions) -> Self {
-        self.inner.build = build;
-        self
-    }
-
     /// Set `extra_nodes`.
     #[must_use]
     pub fn extra_nodes(mut self, extra_nodes: Vec<Node>) -> Self {
@@ -838,13 +831,6 @@ impl MaterializeOptions {
     /// Give the image's nodes the owners the source layers declared.
     pub fn with_owners(mut self, owners: OwnerTable) -> Self {
         self.owners = owners;
-        self
-    }
-
-    /// Claim the paths the image builder owns, so no declared owner reaches
-    /// them.
-    pub fn with_root_owned(mut self, root_owned: RootOwnedPaths) -> Self {
-        self.root_owned = root_owned;
         self
     }
 }

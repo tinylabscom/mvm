@@ -31,10 +31,6 @@ use serde::{Deserialize, Serialize};
 use crate::guest_libc::GuestLibc;
 use thiserror::Error;
 
-/// Cache directory for the pulled builder image, relative to the
-/// user's cache root.
-pub const BUILDER_IMAGE_CACHE_SUBDIR: &str = "builder-image";
-
 /// Mount layout for a builder sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderMounts {
