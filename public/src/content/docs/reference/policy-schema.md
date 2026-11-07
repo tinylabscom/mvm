@@ -657,7 +657,7 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
           }
         },
         "executable": {
-          "description": "Exact absolute executable path in the guest for declared-command mediation. A command with no path is refused, while an MCP-only tool may omit it. Composition cannot redirect a previously named path.",
+          "description": "Exact absolute executable path in the guest for declared-command mediation. A command with no path is refused, while an MCP-only tool may omit it. Composition cannot redirect a path an earlier layer named.",
           "type": [
             "string",
             "null"
