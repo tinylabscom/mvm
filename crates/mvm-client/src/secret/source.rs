@@ -31,10 +31,8 @@
 //!   exit status and the first line of what it wrote to stderr, which is where
 //!   these tools say "not signed in".
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use secrecy::ExposeSecret;
 
@@ -378,46 +376,27 @@ impl SourceResolver {
         if let Ok(path) = std::env::join_paths(trusted) {
             command.env("PATH", path);
         }
-        command
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|e| SourceError::Read {
-            reference: reference.to_string(),
-            detail: format!("starting `{program}`: {e}"),
-        })?;
-        let stdout = child
-            .stdout
-            .take()
-            .map(|pipe| spawn_bounded_reader(pipe, MAX_SOURCE_BYTES + 1));
-        let stderr = child
-            .stderr
-            .take()
-            .map(|pipe| spawn_bounded_reader(pipe, 4096));
-        let deadline = Instant::now() + self.timeout;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(SourceError::CliTimedOut {
-                        program,
-                        secs: self.timeout.as_secs(),
-                    });
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Err(e) => {
-                    return Err(SourceError::Read {
-                        reference: reference.to_string(),
-                        detail: format!("waiting for `{program}`: {e}"),
-                    });
-                }
-            }
+        command.args(args);
+        let bounds = mvm_core::bounded_run::RunBounds {
+            timeout: self.timeout,
+            max_stdout: MAX_SOURCE_BYTES + 1,
+            max_stderr: 4096,
         };
-        let out = stdout.map(join_reader).unwrap_or_default();
-        let err = stderr.map(join_reader).unwrap_or_default();
+        let run = mvm_core::bounded_run::run_bounded(command, bounds).map_err(|e| match e {
+            mvm_core::bounded_run::BoundedRunError::TimedOut(_) => SourceError::CliTimedOut {
+                program,
+                secs: self.timeout.as_secs(),
+            },
+            mvm_core::bounded_run::BoundedRunError::Spawn(e) => SourceError::Read {
+                reference: reference.to_string(),
+                detail: format!("starting `{program}`: {e}"),
+            },
+            mvm_core::bounded_run::BoundedRunError::Wait(e) => SourceError::Read {
+                reference: reference.to_string(),
+                detail: format!("waiting for `{program}`: {e}"),
+            },
+        })?;
+        let (status, out, err) = (run.status, run.stdout, run.stderr);
         if !status.success() {
             let first_line = String::from_utf8_lossy(&err)
                 .lines()
@@ -530,21 +509,6 @@ impl Cli {
     }
 }
 
-fn spawn_bounded_reader<R: Read + Send + 'static>(
-    pipe: R,
-    limit: usize,
-) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let _ = pipe.take(limit as u64).read_to_end(&mut out);
-        out
-    })
-}
-
-fn join_reader(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
-    handle.join().unwrap_or_default()
-}
-
 fn read_file(path: &Path, reference: &str) -> Result<String, SourceError> {
     let read_err = |detail: String| SourceError::Read {
         reference: reference.to_string(),
@@ -592,6 +556,7 @@ fn finish_value(mut value: String, reference: &str) -> Result<String, SourceErro
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
 
     fn parse(s: &str) -> Result<SecretSource, SourceError> {
         s.parse()
@@ -607,8 +572,7 @@ mod tests {
     /// Put an executable script named `name` in `dir`, printing `stdout`.
     fn fake_cli(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        mvm_core::bounded_run::test_support::write_executable_script(&path, body);
         path
     }
 

@@ -347,24 +347,49 @@ fn prepare_output_file(output: &Path, size_bytes: u64) -> Result<(), OciUnpackEr
     Ok(())
 }
 
+/// Wall-clock limit for one `mke2fs` run; far above any rootfs this builds.
+#[cfg(target_os = "linux")]
+const MKE2FS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Bytes of each `mke2fs` stream kept, and characters of it quoted in an error.
+#[cfg(target_os = "linux")]
+const MKE2FS_KEEP_BYTES: usize = 64 * 1024;
+#[cfg(target_os = "linux")]
+const MKE2FS_ERROR_CHARS: usize = 2000;
+
 #[cfg(target_os = "linux")]
 fn run_mke2fs(
     staged_root: &Path,
     output: &Path,
     options: &Mke2fsOptions,
 ) -> Result<(), OciUnpackError> {
+    let bounds = mvm_core::bounded_run::RunBounds::new(MKE2FS_TIMEOUT, MKE2FS_KEEP_BYTES);
+    run_mke2fs_bounded(staged_root, output, options, bounds)
+}
+
+#[cfg(target_os = "linux")]
+fn run_mke2fs_bounded(
+    staged_root: &Path,
+    output: &Path,
+    options: &Mke2fsOptions,
+    bounds: mvm_core::bounded_run::RunBounds,
+) -> Result<(), OciUnpackError> {
+    use mvm_core::bounded_run::{BoundedRunError, excerpt, run_bounded};
     let binary = selected_mke2fs_binary(options);
-    let mut cmd = build_mke2fs_command(binary, staged_root, output, options);
-    let exec = cmd.output().map_err(|e| OciUnpackError::Mke2fsFailed {
-        reason: format!("spawn `{}`: {e}", binary.display()),
+    let cmd = build_mke2fs_command(binary, staged_root, output, options);
+    let exec = run_bounded(cmd, bounds).map_err(|e| OciUnpackError::Mke2fsFailed {
+        reason: match e {
+            BoundedRunError::Spawn(e) => format!("spawn `{}`: {e}", binary.display()),
+            other => format!("`{}` {other}", binary.display()),
+        },
     })?;
     if !exec.status.success() {
-        let stderr = String::from_utf8_lossy(&exec.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
         return Err(OciUnpackError::Mke2fsFailed {
             reason: format!(
-                "exit {:?}; stderr={stderr}; stdout={stdout}",
-                exec.status.code()
+                "exit {:?}; stderr={}; stdout={}",
+                exec.status.code(),
+                excerpt(&exec.stderr, MKE2FS_ERROR_CHARS),
+                excerpt(&exec.stdout, MKE2FS_ERROR_CHARS)
             ),
         });
     }
@@ -460,6 +485,49 @@ mod tests {
 
     fn defaults() -> Mke2fsOptions {
         Mke2fsOptions::default()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fake_mke2fs(dir: &TempDir, body: &str) -> Mke2fsOptions {
+        let path = dir.path().join("fake-mke2fs");
+        mvm_core::bounded_run::test_support::write_executable_script(&path, body);
+        Mke2fsOptions {
+            mke2fs_binary: Some(path),
+            ..defaults()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_hung_mke2fs_is_a_typed_timeout() {
+        let dir = TempDir::new().unwrap();
+        let options = fake_mke2fs(&dir, "exec sleep 30");
+        let bounds =
+            mvm_core::bounded_run::RunBounds::new(std::time::Duration::from_millis(200), 1024);
+        let err =
+            run_mke2fs_bounded(dir.path(), &dir.path().join("o"), &options, bounds).unwrap_err();
+        let OciUnpackError::Mke2fsFailed { reason } = err else {
+            panic!("wrong error")
+        };
+        assert!(reason.contains("did not finish within"), "{reason}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_chatty_failing_mke2fs_yields_a_capped_error() {
+        let dir = TempDir::new().unwrap();
+        let options = fake_mke2fs(&dir, "head -c 10485760 /dev/zero | tr '\\0' e >&2; exit 1");
+        let bounds = mvm_core::bounded_run::RunBounds::new(
+            std::time::Duration::from_secs(30),
+            MKE2FS_KEEP_BYTES,
+        );
+        let err =
+            run_mke2fs_bounded(dir.path(), &dir.path().join("o"), &options, bounds).unwrap_err();
+        let OciUnpackError::Mke2fsFailed { reason } = err else {
+            panic!("wrong error")
+        };
+        assert!(reason.len() < 8 * 1024, "{}", reason.len());
+        assert!(reason.contains(mvm_core::bounded_run::TRUNCATED_MARK));
     }
 
     #[test]

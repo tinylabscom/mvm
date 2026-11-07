@@ -10,6 +10,7 @@ use crate::base::ui;
 
 use super::abs_vms_dir;
 use super::flake_run::FlakeRunConfig;
+use mvm_vmm::host::shell::shell_quote;
 
 /// Persist run info for a named VM.
 #[instrument(skip_all, fields(name = %config.name))]
@@ -38,11 +39,7 @@ pub fn write_vm_run_info(config: &FlakeRunConfig, abs_dir: &str) -> Result<()> {
     }
 
     let json = serde_json::to_string(&json_value)?;
-    run_in_vm(&format!(
-        "echo '{}' > {dir}/run-info.json",
-        json,
-        dir = abs_dir,
-    ))?;
+    run_in_vm(&write_run_info_script(abs_dir, &json))?;
     Ok(())
 }
 
@@ -64,11 +61,7 @@ const RUN_INFO_MIGRATIONS: &[mvm_core::migration::MigrateFn] = &[];
 
 /// Read run info from a specific VM directory, applying schema migrations if needed.
 pub(super) fn read_vm_run_info_from(abs_dir: &str) -> Option<RunInfo> {
-    let json = run_in_vm_stdout(&format!(
-        "cat {dir}/run-info.json 2>/dev/null || echo 'null'",
-        dir = abs_dir,
-    ))
-    .ok()?;
+    let json = run_in_vm_stdout(&read_run_info_script(abs_dir)).ok()?;
     let raw: serde_json::Value = serde_json::from_str(&json).ok()?;
     let from = mvm_core::migration::schema_version_of(&raw);
     let migrated =
@@ -103,19 +96,7 @@ pub fn is_pid_alive(pid: u32) -> bool {
 /// Returns a list of VM names with orphaned state files.
 pub fn find_orphaned_vms() -> Result<Vec<String>> {
     // List all run-info.json files and check each PID in a single shell script.
-    let output = run_in_vm_stdout(&format!(
-        r#"for dir in {vms_dir}/*/; do
-            name=$(basename "$dir")
-            rif="${{dir}}run-info.json"
-            if [ ! -f "$rif" ]; then continue; fi
-            pid=$(cat "$rif" 2>/dev/null | grep -o '"fc_pid":[0-9]*' | grep -o '[0-9]*$' | head -1)
-            if [ -z "$pid" ]; then continue; fi
-            if ! kill -0 "$pid" 2>/dev/null; then
-                echo "$name"
-            fi
-        done 2>/dev/null || true"#,
-        vms_dir = abs_vms_dir(),
-    ))?;
+    let output = run_in_vm_stdout(&orphan_scan_script(&abs_vms_dir()))?;
 
     Ok(output
         .lines()
@@ -148,11 +129,7 @@ pub fn cleanup_orphaned_vms(dry_run: bool) -> Result<()> {
     }
 
     for name in &orphans {
-        let result = run_in_vm(&format!(
-            "rm -f {vms_dir}/{name}/run-info.json",
-            vms_dir = abs_vms_dir(),
-            name = name,
-        ));
+        let result = run_in_vm(&remove_run_info_script(&abs_vms_dir(), name));
         match result {
             Ok(_) => {
                 ui::success(&format!("Removed orphaned state for VM '{}'", name));
@@ -181,6 +158,96 @@ pub fn read_run_info() -> Option<RunInfo> {
             .map_err(|e| tracing::warn!("run-info migration failed: {e}"))
             .ok()?;
     serde_json::from_value(migrated).ok()
+}
+
+fn write_run_info_script(abs_dir: &str, json: &str) -> String {
+    format!(
+        "printf '%s\\n' {} > {}",
+        shell_quote(json),
+        shell_quote(&format!("{abs_dir}/run-info.json"))
+    )
+}
+
+fn read_run_info_script(abs_dir: &str) -> String {
+    format!(
+        "cat {} 2>/dev/null || echo 'null'",
+        shell_quote(&format!("{abs_dir}/run-info.json"))
+    )
+}
+
+fn remove_run_info_script(vms_dir: &str, name: &str) -> String {
+    format!(
+        "rm -f {}/{}/run-info.json",
+        shell_quote(vms_dir),
+        shell_quote(name)
+    )
+}
+
+fn orphan_scan_script(vms_dir: &str) -> String {
+    format!(
+        r#"for dir in {vms_dir}/*/; do
+            name=$(basename "$dir")
+            rif="${{dir}}run-info.json"
+            if [ ! -f "$rif" ]; then continue; fi
+            pid=$(cat "$rif" 2>/dev/null | grep -o '"fc_pid":[0-9]*' | grep -o '[0-9]*$' | head -1)
+            if [ -z "$pid" ]; then continue; fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+                echo "$name"
+            fi
+        done 2>/dev/null || true"#,
+        vms_dir = shell_quote(vms_dir),
+    )
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::*;
+
+    const HOSTILE: [&str; 6] = [
+        "/h/PWN a b",
+        "/h/PWN'; touch /tmp/PWN; '",
+        "/h/PWN$(touch /tmp/PWN)",
+        "/h/PWN`touch /tmp/PWN`",
+        "/h/PWN\ntouch /tmp/PWN",
+        "/h/PWN;rm -rf /",
+    ];
+
+    fn assert_inert(v: &str, script: &str, quoted: &[String]) {
+        let mut rest = script.to_string();
+        for q in quoted {
+            assert!(rest.contains(q.as_str()), "{v:?} not quoted in {script}");
+            rest = rest.replace(q.as_str(), "Q");
+        }
+        assert!(!rest.contains("PWN"), "{v:?} leaks: {rest}");
+    }
+
+    #[test]
+    fn run_info_scripts_keep_hostile_values_one_inert_word() {
+        for v in HOSTILE {
+            assert_inert(
+                v,
+                &read_run_info_script(v),
+                &[shell_quote(&format!("{v}/run-info.json"))],
+            );
+            assert_inert(v, &orphan_scan_script(v), &[shell_quote(v)]);
+            assert_inert(v, &remove_run_info_script(v, "n"), &[shell_quote(v)]);
+            assert_inert(v, &remove_run_info_script("/d", v), &[shell_quote(v)]);
+            // the JSON body is data too: a quote in a VM name must not end the string
+            assert_inert(v, &write_run_info_script("/d", v), &[shell_quote(v)]);
+        }
+    }
+
+    #[test]
+    fn ordinary_run_info_scripts_keep_their_shape() {
+        assert_eq!(
+            read_run_info_script("/d"),
+            "cat '/d/run-info.json' 2>/dev/null || echo 'null'"
+        );
+        assert_eq!(
+            write_run_info_script("/d", "{}"),
+            "printf '%s\\n' '{}' > '/d/run-info.json'"
+        );
+    }
 }
 
 #[cfg(test)]

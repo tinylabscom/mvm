@@ -488,9 +488,18 @@ EONG
 /// Build a microVM image from a Mvmfile.toml config.
 ///
 /// Returns the path to the built .elf file.
+/// An image name that may be spliced into a build script: the template-name
+/// charset, so no quote, `$`, backtick, space or path separator gets through.
+fn validated_image_name(name: &str) -> Result<()> {
+    mvm_core::naming::validate_template_name(name)
+        .with_context(|| format!("image name {name:?} cannot be used in a build script"))
+}
+
 pub fn build(name_or_path: &str, output: Option<&str>) -> Result<String> {
     let (_config_dir, config) = find_config(name_or_path)?;
     let name = &config.image.name;
+    // The name is spliced into root-run build scripts as a path component.
+    validated_image_name(name)?;
 
     // Repair /dev/null if a previous interrupted build destroyed it
     repair_dev_null()?;
@@ -742,6 +751,24 @@ mod images_dir_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_name_with_shell_syntax_is_refused_before_any_script_is_built() {
+        for bad in [
+            "a b",
+            "a'b",
+            "a$(touch x)",
+            "a`x`",
+            "a;b",
+            "a\nb",
+            "../x",
+            "a/b",
+            "",
+        ] {
+            assert!(validated_image_name(bad).is_err(), "{bad:?}");
+        }
+        validated_image_name("web-app_1").unwrap();
+    }
 
     #[test]
     fn runtime_volume_defaults_to_an_unmaterialized_disk() {

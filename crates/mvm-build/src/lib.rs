@@ -169,6 +169,8 @@ pub mod published_image_set;
 /// sparse file; formatting and copying happen inside the builder VM.
 #[cfg(unix)]
 pub mod rootfs;
+#[cfg(unix)]
+pub(crate) mod shell_scripts;
 /// In-process newc cpio writer for host-assembled initramfs archives.
 #[cfg(unix)]
 pub use mvm_builder_guest::rootfs_inject;

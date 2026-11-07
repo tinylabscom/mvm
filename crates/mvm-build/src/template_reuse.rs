@@ -4,6 +4,8 @@ use mvm_core::build_env::BuildEnvironment;
 use mvm_core::pool::pool_artifacts_dir;
 use mvm_core::template::{TemplateRevision, template_current_symlink, template_revision_dir};
 
+use crate::shell_scripts;
+
 /// Attempt to reuse artifacts from a global template. Returns true if reused.
 pub(crate) fn reuse_template_artifacts(
     env: &dyn BuildEnvironment,
@@ -19,14 +21,14 @@ pub(crate) fn reuse_template_artifacts(
 
     let current_link = template_current_symlink(template_id);
     let has_current = env
-        .shell_exec_stdout(&format!("test -L {current_link} && echo yes || echo no"))?
+        .shell_exec_stdout(&shell_scripts::test_link(&current_link))?
         .trim()
         .to_string();
     if has_current != "yes" {
         return Ok(false);
     }
 
-    let rel = env.shell_exec_stdout(&format!("readlink {current_link}"))?;
+    let rel = env.shell_exec_stdout(&shell_scripts::readlink(&current_link))?;
     let rel = rel.trim();
     let rev = rel.strip_prefix("revisions/").unwrap_or(rel);
     if rev.is_empty() {
@@ -38,7 +40,7 @@ pub(crate) fn reuse_template_artifacts(
     let dst = format!("{}/revisions/{}", dst_root, rev);
 
     // Verify compatibility using revision metadata
-    let meta_json = env.shell_exec_stdout(&format!("cat {}/revision.json", src))?;
+    let meta_json = env.shell_exec_stdout(&shell_scripts::cat(&format!("{src}/revision.json")))?;
     let rev_meta: TemplateRevision = serde_json::from_str(&meta_json)?;
     let spec = env.load_pool_spec(tenant_id, pool_id)?;
 
@@ -73,10 +75,13 @@ pub(crate) fn reuse_template_artifacts(
         return Ok(false);
     }
 
-    env.shell_exec(&format!("mkdir -p {dst_root}/revisions"))?;
-    env.shell_exec(&format!("rm -rf {dst}"))?;
-    env.shell_exec(&format!("cp -a {src} {dst}"))?;
-    env.shell_exec(&format!("ln -snf revisions/{rev} {dst_root}/current"))?;
+    env.shell_exec(&shell_scripts::mkdir_p(&format!("{dst_root}/revisions")))?;
+    env.shell_exec(&shell_scripts::rm_rf(&dst))?;
+    env.shell_exec(&shell_scripts::copy_tree(&src, &dst))?;
+    env.shell_exec(&shell_scripts::relink(
+        &format!("revisions/{rev}"),
+        &format!("{dst_root}/current"),
+    ))?;
 
     Ok(true)
 }

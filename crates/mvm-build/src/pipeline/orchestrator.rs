@@ -9,6 +9,7 @@ use crate::backend::host::HostBackend;
 use crate::backend::{BackendParams, BuilderBackend};
 use crate::build::{DEFAULT_TIMEOUT_SECS, PoolBuildOpts, record_build_history};
 use crate::cache::maybe_skip_by_lock_hash;
+use crate::shell_scripts;
 use crate::template_reuse::reuse_template_artifacts;
 
 /// Build artifacts for a pool. Default mode runs `nix build` on the host;
@@ -53,7 +54,7 @@ pub fn pool_build(
     // Create a unique build ID for this run.
     let build_id = naming::generate_instance_id().replace("i-", "b-");
     let build_run_dir = format!("{}/run/{}", crate::build::BUILDER_DIR, build_id);
-    env.shell_exec(&format!("mkdir -p {}", build_run_dir))?;
+    env.shell_exec(&shell_scripts::mkdir_p(&build_run_dir))?;
 
     env.log_info(&format!("Build ID: {}", build_id));
 
@@ -87,10 +88,7 @@ pub fn pool_build(
         let arts_dir = pool_artifacts_dir(tenant_id, pool_id);
         let rev_dir = format!("{}/revisions/{}", arts_dir, revision_hash);
         let has_initrd = env
-            .shell_exec_stdout(&format!(
-                "test -f {}/initrd && echo yes || echo no",
-                rev_dir
-            ))
+            .shell_exec_stdout(&shell_scripts::test_file(&format!("{rev_dir}/initrd")))
             .map(|s| s.trim() == "yes")
             .unwrap_or(false);
 
@@ -118,11 +116,10 @@ pub fn pool_build(
         if let Some(hash) = lock_hash {
             let artifacts_dir = pool_artifacts_dir(tenant_id, pool_id);
             let lock_hash_path = format!("{}/last_flake_lock.hash", artifacts_dir);
-            env.shell_exec(&format!(
-                "mkdir -p {dir} && echo '{hash}' > {path}",
-                dir = artifacts_dir,
-                hash = hash,
-                path = lock_hash_path
+            env.shell_exec(&shell_scripts::write_value(
+                &artifacts_dir,
+                &lock_hash_path,
+                &hash,
             ))?;
         }
 
@@ -134,7 +131,7 @@ pub fn pool_build(
         Ok(())
     })();
 
-    let _ = env.shell_exec(&format!("rm -rf {}", build_run_dir));
+    let _ = env.shell_exec(&shell_scripts::rm_rf(&build_run_dir));
 
     build_result
 }

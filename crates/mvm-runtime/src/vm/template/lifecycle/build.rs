@@ -11,6 +11,7 @@ use tracing::{instrument, warn};
 
 use crate::shell;
 use crate::ui;
+use mvm_vmm::host::shell::shell_quote;
 
 use super::artifacts::{
     RevisionArtifactSources, install_revision_artifacts, slot_kernel_source, slot_sidecar_source,
@@ -74,7 +75,7 @@ fn build_manifest_slot(
     if force {
         ui::info("Force build: clearing dev build cache");
         let builds_dir = format!("{}/dev/builds", mvm_core::config::mvm_home());
-        if let Err(e) = env.shell_exec(&format!("rm -rf {builds_dir}")) {
+        if let Err(e) = env.shell_exec(&format!("rm -rf {}", shell_quote(&builds_dir))) {
             warn!("failed to clear dev build cache: {e}");
         }
     }
@@ -170,15 +171,12 @@ fn build_manifest_slot(
     // Compute the actual flake.lock hash for accurate cache keys.
     // Pool builds delegate this; dev/manifest builds compute it inline.
     // Falls back to revision hash for remote flakes (no flake.lock on disk).
-    let flake_lock_hash = shell::run_in_vm_stdout(&format!(
-        "if [ -f {flake}/flake.lock ]; then nix hash path {flake}/flake.lock; else echo ''; fi",
-        flake = persisted.flake_ref
-    ))
-    // On a tier with no Linux builder to run this against, the call itself
-    // errors here and silently degrades to the revision hash below.
-    .unwrap_or_default()
-    .trim()
-    .to_string();
+    let flake_lock_hash = shell::run_in_vm_stdout(&flake_lock_hash_script(&persisted.flake_ref))
+        // On a tier with no Linux builder to run this against, the call itself
+        // errors here and silently degrades to the revision hash below.
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let flake_lock_hash = if flake_lock_hash.is_empty() {
         rev.clone()
     } else {
@@ -240,6 +238,53 @@ fn build_manifest_slot(
     Ok(revision)
 }
 
+fn flake_lock_hash_script(flake: &str) -> String {
+    let lock = shell_quote(&format!("{flake}/flake.lock"));
+    format!("if [ -f {lock} ]; then nix hash path {lock}; else echo ''; fi")
+}
+
+fn read_fod_hash_script(flake: &str) -> String {
+    format!(
+        r#"sed -n 's/.*outputHash = "\([^"]*\)".*/\1/p' {}"#,
+        shell_quote(&format!("{flake}/flake.nix"))
+    )
+}
+
+fn nix_build_script(flake: &str) -> String {
+    format!(
+        "cd {} && nix build '.#' --no-link 2>&1 || true",
+        shell_quote(flake)
+    )
+}
+
+/// `hash` is spliced inside single quotes, so [`validate_fod_hash`] must have
+/// accepted it.
+fn set_fod_hash_script(flake: &str, hash: &str) -> String {
+    let nix = shell_quote(&format!("{flake}/flake.nix"));
+    let bak = shell_quote(&format!("{flake}/flake.nix.bak"));
+    format!(r#"sed -i.bak 's|outputHash = "[^"]*"|outputHash = "{hash}"|' {nix} && rm -f {bak}"#)
+}
+
+/// A fixed-output hash is `sha256-` plus base64; nothing else may reach a script.
+fn validate_fod_hash(hash: &str, allow_empty: bool) -> Result<()> {
+    let ok = if hash.is_empty() {
+        allow_empty
+    } else {
+        hash.strip_prefix("sha256-").is_some_and(|b| {
+            !b.is_empty()
+                && b.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+        })
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "refusing a fixed-output hash that is not a bare sha256 SRI value"
+        ))
+    }
+}
+
 /// Recompute the Nix fixed-output derivation hash in a flake's `flake.nix`.
 ///
 /// Blanks the `outputHash` field, runs `nix build` to trigger hash computation,
@@ -254,26 +299,19 @@ fn update_fod_hash(flake_ref: &str) -> Result<()> {
     ui::info("Recomputing fixed-output derivation hash...");
 
     // Save original hash for recovery.
-    let orig_hash = shell::run_in_vm_stdout(&format!(
-        r#"sed -n 's/.*outputHash = "\([^"]*\)".*/\1/p' {flake}/flake.nix"#,
-        flake = flake_ref
-    ))?
-    .trim()
-    .to_string();
+    let orig_hash = shell::run_in_vm_stdout(&read_fod_hash_script(flake_ref))?
+        .trim()
+        .to_string();
+    // Written back verbatim on failure, so it must be a bare SRI hash or empty.
+    validate_fod_hash(&orig_hash, true)?;
 
     // Blank the hash to trigger TOFU computation.
-    shell::run_in_vm(&format!(
-        r#"sed -i.bak 's|outputHash = "[^"]*"|outputHash = ""|' {flake}/flake.nix && rm -f {flake}/flake.nix.bak"#,
-        flake = flake_ref
-    ))?;
+    shell::run_in_vm(&set_fod_hash_script(flake_ref, ""))?;
 
     // Run nix build and capture all output. It will fail with hash mismatch,
     // printing the correct hash. Phase 2/3 never execute; only the FOD runs.
     ui::info("Running nix build to compute hash (this downloads the package)...");
-    let build_output = shell::run_in_vm_stdout(&format!(
-        r#"cd {flake} && nix build '.#' --no-link 2>&1 || true"#,
-        flake = flake_ref
-    ))?;
+    let build_output = shell::run_in_vm_stdout(&nix_build_script(flake_ref))?;
 
     // Extract the "got: sha256-..." hash from the build output.
     let new_hash = build_output
@@ -297,22 +335,16 @@ fn update_fod_hash(flake_ref: &str) -> Result<()> {
             }
         }
         // Restore original hash.
-        if let Err(e) = shell::run_in_vm(&format!(
-            r#"sed -i.bak 's|outputHash = "[^"]*"|outputHash = "{orig}"|' {flake}/flake.nix && rm -f {flake}/flake.nix.bak"#,
-            orig = orig_hash,
-            flake = flake_ref
-        )) {
+        if let Err(e) = shell::run_in_vm(&set_fod_hash_script(flake_ref, &orig_hash)) {
             warn!("failed to restore original FOD hash: {e}");
         }
         return Err(anyhow!("Could not extract FOD hash from nix build output."));
     }
 
-    // Write the correct hash.
-    shell::run_in_vm(&format!(
-        r#"sed -i.bak 's|outputHash = "[^"]*"|outputHash = "{hash}"|' {flake}/flake.nix && rm -f {flake}/flake.nix.bak"#,
-        hash = new_hash,
-        flake = flake_ref
-    ))?;
+    // The hash came out of `nix build` output for a flake that may be
+    // untrusted; only a bare SRI hash is ever written back into a script.
+    validate_fod_hash(&new_hash, false)?;
+    shell::run_in_vm(&set_fod_hash_script(flake_ref, &new_hash))?;
 
     ui::success(&format!("Updated outputHash: {}", new_hash));
     Ok(())
@@ -320,6 +352,59 @@ fn update_fod_hash(flake_ref: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        flake_lock_hash_script, nix_build_script, read_fod_hash_script, set_fod_hash_script,
+        shell_quote, validate_fod_hash,
+    };
+
+    const HOSTILE: [&str; 6] = [
+        "/f/PWN a b",
+        "/f/PWN'; touch /tmp/PWN; '",
+        "/f/PWN$(touch /tmp/PWN)",
+        "/f/PWN`touch /tmp/PWN`",
+        "/f/PWN\ntouch /tmp/PWN",
+        "/f/PWN;rm -rf /",
+    ];
+
+    #[test]
+    fn flake_scripts_keep_a_hostile_flake_path_one_inert_word() {
+        for v in HOSTILE {
+            let lock = shell_quote(&format!("{v}/flake.lock"));
+            let nix = shell_quote(&format!("{v}/flake.nix"));
+            let bak = shell_quote(&format!("{v}/flake.nix.bak"));
+            let check = |script: String, quoted: &[&String]| {
+                let mut rest = script.clone();
+                for q in quoted {
+                    assert!(rest.contains(q.as_str()), "{script}");
+                    rest = rest.replace(q.as_str(), "Q");
+                }
+                assert!(!rest.contains("PWN"), "{v:?} leaks: {rest}");
+            };
+            check(flake_lock_hash_script(v), &[&lock]);
+            check(read_fod_hash_script(v), &[&nix]);
+            check(nix_build_script(v), &[&shell_quote(v)]);
+            check(set_fod_hash_script(v, "sha256-AAAA+/=="), &[&nix, &bak]);
+        }
+    }
+
+    #[test]
+    fn only_a_bare_sri_hash_may_be_written_into_the_script() {
+        validate_fod_hash("sha256-AbC+/9=", false).unwrap();
+        validate_fod_hash("", true).unwrap();
+        for bad in [
+            "",
+            "sha256-",
+            "sha1-AAAA",
+            "sha256-A'; touch /tmp/x; '",
+            "sha256-A$(x)",
+            "sha256-A\nB",
+            "AAAA",
+        ] {
+            assert!(validate_fod_hash(bad, false).is_err(), "{bad:?}");
+        }
+        assert!(validate_fod_hash("x y", true).is_err());
+    }
+
     // The one test here is macOS-only; keep the glob gated to match, else it is
     // an unused import when the test compiles out (e.g. the Linux test build).
     #[cfg(target_os = "macos")]

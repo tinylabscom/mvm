@@ -18,3 +18,5 @@ Scope: the exact backend/process boundary for #4414, refined by the [owner-appro
 ## Reasoning
 
 The direct current-user Firecracker boundary recorded in ADR-001 removes the need for privilege-escalation helpers. A fixed-argv utility is not itself an unaudited second launch path; the violations are launching outside signed admission, interpreting untrusted text through a shell, exposing secrets, or losing typed and born-bounded lifecycle ownership. Keeping the VMM and role processes preserves the isolation the claims rely on, while the inventory makes every production process visible and CI-checked.
+
+The per-site assessment required by decision 6 is the Disposition column and the reviewed-site table in `process-spawn-inventory.md`; what is still unassessed is listed there with its missing piece, and `OPEN_REVIEW_CEILING` in the generator keeps that list from growing.
