@@ -24,12 +24,12 @@ three #4839 checklist boxes named in §0; it does not touch #3731.
 
 ### 1.2 Packages and binaries
 
-- `cargo metadata --no-deps --format-version 1` -> **28 packages** (all workspace members; CLAUDE.md's "31 packages" is stale), **54 `bin` targets** in 14 packages (unchanged since the first measurement) (the rest are library-only).
+- `cargo metadata --no-deps --format-version 1` -> **28 packages** (all workspace members; CLAUDE.md's "31 packages" is stale), **53 `bin` targets** in 14 packages, re-counted 2026-11-06 at `d6b4a29f84` (`mvm-egress-proxy` is gone; the rest are library-only).
 
 | Package | Bins | Binaries |
 |---|---|---|
 | `mvm-agentd` | 20 | `audit-probe`, `emit_protocol_schema`, `fake-runner`, `mvm-addon-dns`, `mvm-addon-vsock-bridge`, `mvm-builder-agent`, `mvm-display-bridge`, `mvm-egress-client`, `mvm-entrypoint-test-wrapper`, `mvm-exit-report`, `mvm-guest-agent`, `mvm-guest-netinit`, `mvm-oci-entrypoint`, `mvm-ping`, `mvm-runner`, `mvm-seccomp-apply`, `mvm-setpriv-fixture`, `mvm-tool-helper`, `mvm-tool-shim`, `syscall-probe` |
-| `mvm-build` | 2 | `mvm-egress-proxy`, `mvm-test-image-lock-holder` |
+| `mvm-build` | 1 | `mvm-test-image-lock-holder` |
 | `mvm-builder-guest` | 3 | `mvm-builderd`, `mvm-host-vm-init`, `stage0-init` |
 | `mvm-client` | 2 | `emit_instruction_trust_schema`, `emit_policy_schema` |
 | `mvm-contract` | 2 | `emit_assurance_schema`, `emit_pack_spec_schema` |
@@ -51,7 +51,8 @@ Roles (from CLAUDE.md, cross-checked against the table): host CLI `mvmctl`; host
 - Image set is the Linux layer only (ADR-054); overlay, SDK sidecars and initramfs are retired roles that `mvmctl` assembles from the guest runtime archive shipped with each release.
 - Release artifacts (`.github/workflows/release.yml`): `mvmctl-<target>.tar.gz` (+ `.sha256`, bundle) for `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (built against musl; Intel macOS is deferred, matrix lines 208-229), each carrying `libmvm_hostlib`; `mvm-guest-bins-v<version>.tar.gz` + `.sha256` + bundles (built by `guest-bins.yml` via `mvmctl dev guest-bins`); deb/rpm packages; signed `checksums-sha256.txt`.
 - Guest-bins members (`cli-commands.md` "Guest Binaries", `GUEST_BINS_MANIFEST_FILE` in `crates/mvm-build/src/guest_runtime.rs`): per arch `bin/` (`mvm-guest-agent`, `mvm-guest-netinit`, `mvm-seccomp-apply`, `mvm-display-bridge`, `mvm-runner`, `mvm-egress-client`, `mvm-addon-dns`, `mvm-exit-report`, `mvm-ping`, `mvm-oci-entrypoint`, `mvm-setpriv`), `initramfs/mvm-guest-agent`, `lib/{glibc,musl}/` (`libmvm_host_services.so`, GPU shims), plus `sdk-py/mvm/` and `manifest.json`.
-- Contracts: signed `ExecutionPlan`; `.mvmpkg` bundle (`mvm_core::plan::bundle`); image-set contract; builder boot ABI 0/1/2; base-image contract 0/1; C ABIs `mvm_hostlib_*` (ABI 1.7 per CLAUDE.md) and `libmvm_host_services.so`; guest-agent vsock protocol.
+- Contracts: signed `ExecutionPlan`; `.mvmpkg` bundle (`mvm_core::plan::bundle`); image-set contract; builder boot ABI 0/1/2; base-image contract 0/1; C ABIs `mvm_hostlib_*` and `libmvm_host_services.so`; guest-agent vsock protocol.
+- Current versions (read from source 2026-11-06 at `d6b4a29f84`; re-grep before relying on them): `mvm_hostlib` ABI 1.13 (`MVM_HOSTLIB_ABI_MAJOR`/`MVM_HOSTLIB_ABI_MINOR` in `crates/mvm-hostlib/src/lib.rs`; `runmvm-client` negotiates 1.7 as its minimum, `ABI_MINOR` in `crates/runmvm-client/src/lib.rs`); bundle manifest `BUNDLE_SCHEMA_VERSION` 7 and `ExecutionPlan` `SCHEMA_VERSION` 1 (`crates/mvm-contract/src/plan/`); image-set reader `IMAGE_SET_SCHEMA_VERSION` 3 with 2 accepted as legacy, `images.lock` `builder_cache_contract` 5; Workload IR 0.2 (`crates/mvm-contract/src/ir/version.rs`); guest vsock `PROTOCOL_VERSION` 2 in `mvm-agentd` and 3 in `mvm-core`.
 
 ### 1.4 Targets and features
 

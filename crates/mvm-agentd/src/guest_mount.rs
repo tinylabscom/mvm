@@ -184,65 +184,85 @@ pub fn validate_roothash(roothash: &str, name: &str) -> Result<()> {
 /// and `mount` fails before the agent can report anything useful.
 pub fn mount_early_filesystems() -> Result<()> {
     #[cfg(target_os = "linux")]
-    {
-        ensure_dir("/proc")?;
+    for early in &EARLY_MOUNTS {
+        ensure_dir(early.target)?;
         mount(
-            "proc",
-            "/proc",
-            "proc",
-            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
-            "",
+            early.source,
+            early.target,
+            early.fstype,
+            early.flags,
+            early.data,
         )?;
-        ensure_dir("/sys")?;
-        mount(
-            "sysfs",
-            "/sys",
-            "sysfs",
-            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
-            "",
-        )?;
-        // devtmpfs supplies every device node the initramfs has no static
-        // table for — /dev/null, and the /dev/mapper/control that dm-verity
-        // needs to bring the sealed rootfs up at activation.
-        //
-        // Mounted unconditionally. The kernel creates a bare /dev/console in
-        // the initramfs rootfs so init has stdio, so a "is /dev/console
-        // already there?" guard reads as "devtmpfs is already mounted" when
-        // in fact nothing is — and then activation dies on a missing
-        // /dev/mapper/control. A shared-kernel container runtime, the one case
-        // where /dev really is pre-mounted, never reaches here: that path is
-        // branched off before the early mounts.
-        ensure_dir("/dev")?;
-        mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, "")?;
-
-        // The activated workload root is deliberately read-only. Runtime
-        // state and scratch files therefore need their own writable mounts,
-        // created before the pivot and carried across with the pseudofs
-        // mounts by `pivot_to_root`. OCI materialization guarantees both
-        // target directories exist in the sealed root.
-        ensure_dir("/run")?;
-        mount(
-            "tmpfs",
-            "/run",
-            "tmpfs",
-            libc::MS_NOSUID | libc::MS_NODEV,
-            "mode=0755",
-        )?;
-        ensure_dir("/tmp")?;
-        mount(
-            "tmpfs",
-            "/tmp",
-            "tmpfs",
-            libc::MS_NOSUID | libc::MS_NODEV,
-            "mode=1777",
-        )?;
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = ();
     }
     Ok(())
 }
+
+/// One early-boot mount, in the order PID 1 issues them.
+#[cfg(target_os = "linux")]
+struct EarlyMount {
+    source: &'static str,
+    target: &'static str,
+    fstype: &'static str,
+    flags: libc::c_ulong,
+    data: &'static str,
+}
+
+/// The early mounts, one per [`PIVOT_MOVED_MOUNTS`] entry and in its order.
+///
+/// devtmpfs supplies every device node the initramfs has no static table for:
+/// `/dev/null`, and the `/dev/mapper/control` dm-verity needs to bring the
+/// sealed rootfs up. It is mounted unconditionally. The kernel creates a bare
+/// `/dev/console` in the initramfs so init has stdio, so an "is `/dev/console`
+/// already there?" guard would read as "devtmpfs is already mounted" when
+/// nothing is, and activation would die on the missing control node. A
+/// shared-kernel container runtime, the one case where `/dev` really is
+/// pre-mounted, branches off before the early mounts.
+///
+/// The activated workload root is read-only, so `/run` and `/tmp` are their
+/// own tmpfs mounts, created before the pivot and carried across by
+/// [`pivot_to_root`].
+#[cfg(target_os = "linux")]
+const EARLY_MOUNTS: [EarlyMount; 5] = {
+    const PSEUDO: libc::c_ulong = libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV;
+    const SCRATCH: libc::c_ulong = libc::MS_NOSUID | libc::MS_NODEV;
+    [
+        EarlyMount {
+            source: "proc",
+            target: "/proc",
+            fstype: "proc",
+            flags: PSEUDO,
+            data: "",
+        },
+        EarlyMount {
+            source: "sysfs",
+            target: "/sys",
+            fstype: "sysfs",
+            flags: PSEUDO,
+            data: "",
+        },
+        EarlyMount {
+            source: "devtmpfs",
+            target: "/dev",
+            fstype: "devtmpfs",
+            flags: libc::MS_NOSUID,
+            data: "",
+        },
+        EarlyMount {
+            source: "tmpfs",
+            target: "/run",
+            fstype: "tmpfs",
+            flags: SCRATCH,
+            data: "mode=0755",
+        },
+        EarlyMount {
+            source: "tmpfs",
+            target: "/tmp",
+            fstype: "tmpfs",
+            flags: SCRATCH,
+            data: "mode=1777",
+        },
+    ]
+};
 
 /// Flags for every rootfs mount shape. Read-only is what keeps a guest
 /// process from rewriting `/etc/passwd` to mint a uid-0 entry.
@@ -1538,83 +1558,32 @@ mod tests {
         assert!(rendered.contains(&expected_source));
     }
 
-    /// Every early mount target must be created before it is mounted.
-    ///
-    /// The universal initramfs carries the init binary and nothing else, so
-    /// there is no `/proc`, `/sys` or `/dev` to mount onto unless PID 1 makes
-    /// one. Without that, `mount` fails with ENOENT, init exits, and the kernel
-    /// panics before the agent can report anything — which is what shipped.
-    ///
-    /// Asserted against the source because the real function issues syscalls
-    /// that no unit test can run: it needs PID 1 in a guest, and the host it is
-    /// compiled on may not even be Linux.
+    /// The early mounts are the ones the pivot carries across, and the two
+    /// writable ones are tmpfs: the activated root is read-only, so runtime
+    /// state and scratch files have nowhere else to go.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn every_early_mount_target_is_created_before_it_is_mounted() {
-        let src = include_str!("guest_mount.rs");
-        let body = src
-            .split("pub fn mount_early_filesystems")
-            .nth(1)
-            .expect("mount_early_filesystems must exist");
-        let body = body
-            .split("\npub fn ")
-            .next()
-            .expect("function body is delimited by the next item");
-
-        for target in ["/proc", "/sys", "/dev", "/run", "/tmp"] {
-            let created = body
-                .find(&format!("ensure_dir(\"{target}\")"))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{target} is mounted but never created; the initramfs has no \
-                     directory to mount onto, so PID 1 dies on ENOENT"
-                    )
-                });
-            let mounted = body
-                .find(&format!("\"{target}\","))
-                .unwrap_or_else(|| panic!("{target} should still be mounted here"));
-            assert!(
-                created < mounted,
-                "{target}: ensure_dir must come before the mount, not after"
-            );
-        }
-    }
-
-    /// Runtime writes belong on tmpfs, and those mounts must survive the
-    /// switch from the universal initramfs to the sealed workload root.
-    #[test]
-    fn writable_runtime_mounts_are_tmpfs_and_move_into_the_workload_root() {
-        let src = include_str!("guest_mount.rs");
-        let early = src
-            .split("pub fn mount_early_filesystems")
-            .nth(1)
-            .expect("mount_early_filesystems must exist")
-            .split("\npub fn ")
-            .next()
-            .expect("function body is delimited by the next item");
-        let pivot = src
-            .split("pub fn pivot_to_root")
-            .nth(1)
-            .expect("pivot_to_root must exist")
-            .split("\npub fn ")
-            .next()
-            .expect("function body is delimited by the next item");
-        assert!(
-            pivot.contains("for sub in PIVOT_MOVED_MOUNTS"),
-            "pivot_to_root must move the mounts it declares"
-        );
+    fn early_mounts_match_the_pivot_and_runtime_writes_land_on_tmpfs() {
+        let targets: Vec<&str> = EARLY_MOUNTS.iter().map(|m| m.target).collect();
+        assert_eq!(targets, PIVOT_MOVED_MOUNTS);
 
         for target in ["/run", "/tmp"] {
-            assert!(
-                early.contains(&format!(
-                    "\"tmpfs\",\n            \"{target}\",\n            \"tmpfs\""
-                )),
-                "{target} must be mounted as tmpfs before the read-only root is activated"
-            );
-            assert!(
-                PIVOT_MOVED_MOUNTS.contains(&target),
-                "{target} must move into the activated workload root"
-            );
+            let early = EARLY_MOUNTS.iter().find(|m| m.target == target).unwrap();
+            assert_eq!(early.fstype, "tmpfs", "{target}");
+            assert_ne!(early.flags & libc::MS_NOSUID, 0, "{target}");
+            assert_eq!(early.flags & libc::MS_RDONLY, 0, "{target}");
         }
+        let tmp = EARLY_MOUNTS.iter().find(|m| m.target == "/tmp").unwrap();
+        assert_eq!(tmp.data, "mode=1777");
+    }
+
+    /// Without a devtmpfs mount there is no `/dev/mapper/control`, and
+    /// dm-verity cannot bring the sealed rootfs up.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn devtmpfs_is_among_the_unconditional_early_mounts() {
+        let dev = EARLY_MOUNTS.iter().find(|m| m.target == "/dev").unwrap();
+        assert_eq!((dev.source, dev.fstype), ("devtmpfs", "devtmpfs"));
     }
 
     /// A failed home mount must fall back, not hand the workload the
@@ -1814,51 +1783,6 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
     fn sealed_roots_refuse_optional_image_writes() {
         assert!(!optional_image_writes_allowed(true));
         assert!(optional_image_writes_allowed(false));
-    }
-
-    /// devtmpfs must be mounted unconditionally, never gated on `/dev/console`.
-    ///
-    /// The kernel creates a bare `/dev/console` in the initramfs rootfs so init
-    /// has stdio — which is precisely why the agent's own output reaches the
-    /// serial console. A `if !Path::new("/dev/console").exists()` guard around
-    /// the devtmpfs mount therefore always skips it, `/dev` keeps that single
-    /// node, and activation dies on a missing `/dev/mapper/control` the moment
-    /// dm-verity tries to bring the sealed rootfs up. That shipped, and it reads
-    /// as a verity bug rather than a mount bug.
-    ///
-    /// The one case where `/dev` genuinely is pre-mounted — a shared-kernel
-    /// container runtime — branches off before the early mounts entirely, so it
-    /// needs no guard here.
-    ///
-    /// Asserted against the source for the same reason as the test above: the
-    /// real path needs to be PID 1 inside a guest.
-    #[test]
-    fn devtmpfs_is_not_gated_on_a_kernel_supplied_console_node() {
-        let src = include_str!("guest_mount.rs");
-        let body = src
-            .split("pub fn mount_early_filesystems")
-            .nth(1)
-            .expect("mount_early_filesystems must exist")
-            .split("\npub fn ")
-            .next()
-            .expect("function body is delimited by the next item");
-        // Comments explain the trap by naming the node, so judge the code only.
-        let code: String = body
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(
-            code.contains("\"devtmpfs\""),
-            "devtmpfs must still be mounted; without it there is no /dev/mapper/control"
-        );
-        assert!(
-            !code.contains("/dev/console"),
-            "devtmpfs must not be gated on /dev/console — the kernel always supplies \
-             that node, so the guard skips the mount every time and dm-verity then \
-             fails to open /dev/mapper/control"
-        );
     }
 
     #[test]

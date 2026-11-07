@@ -7,7 +7,6 @@ use mvm_vmm::host::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
 use mvm_vmm::host::ui;
 
 use super::host;
-use super::observe::list_vms;
 use super::{abs_vms_dir, read_firecracker_pid};
 
 /// Pause the vCPUs of a running Firecracker VM.
@@ -110,7 +109,7 @@ pub fn balloon_set_target(name: &str, target_inflate_mib: u32) -> Result<()> {
 ///
 /// Returns the inflation amount in MiB. `0` means the balloon is
 /// fully deflated (guest has all of `memory`). Combined with the
-/// VM's declared `memory` cap (e.g. from `list_vms()`), the host
+/// VM's declared `memory` cap, the host
 /// reclaim controller derives the effective commitment.
 pub fn balloon_state(name: &str) -> Result<u32> {
     let abs_vms = abs_vms_dir();
@@ -250,24 +249,6 @@ pub fn stop_vm(name: &str) -> Result<()> {
     )?;
 
     ui::success(&format!("VM '{}' stopped.", name));
-    Ok(())
-}
-
-/// Stop all running VMs.
-#[instrument(skip_all)]
-pub fn stop_all_vms() -> Result<()> {
-    let vms = list_vms()?;
-    if vms.is_empty() {
-        ui::info("No VMs are running.");
-        return Ok(());
-    }
-
-    for info in &vms {
-        if let Some(ref name) = info.name {
-            stop_vm(name)?;
-        }
-    }
-
     Ok(())
 }
 
