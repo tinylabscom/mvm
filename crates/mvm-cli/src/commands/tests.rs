@@ -137,18 +137,6 @@ fn pack_new_scaffolding_command_parses() {
 }
 
 #[test]
-fn deprecated_new_pack_alias_still_parses() {
-    let parsed =
-        Cli::try_parse_from(["mvmctl", "new-pack", "acme/example"]).expect("new-pack parse");
-    assert!(matches!(
-        parsed.command,
-        Commands::NewPack(pack::new::Args { reference })
-            if reference.coordinate_string() == "acme/example"
-    ));
-    assert!(Cli::try_parse_from(["mvmctl", "new-pack"]).is_err());
-}
-
-#[test]
 fn workload_pack_management_and_system_commands_parse() {
     for argv in [
         ["mvmctl", "pack", "ls", "--json"].as_slice(),

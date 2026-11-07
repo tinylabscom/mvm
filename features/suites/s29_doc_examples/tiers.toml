@@ -193,11 +193,6 @@ path = "init"
 tier = "exec"
 
 [[command]]
-path = "new-pack"
-tier = "exec"
-fixture = "pack-sources"
-
-[[command]]
 path = "pack new"
 tier = "exec"
 fixture = "pack-sources"
