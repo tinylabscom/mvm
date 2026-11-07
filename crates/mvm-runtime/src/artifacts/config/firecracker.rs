@@ -10,8 +10,6 @@
 //! The config file is written next to the artifact (adjacent to the
 //! kernel and rootfs in the same directory).
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use crate::artifacts::artifact::{BackendConfigArtifact, MicrovmArtifact};
@@ -155,18 +153,6 @@ fn build_config(artifact: &MicrovmArtifact, artifact_dir: &std::path::Path) -> F
 }
 
 // ── derive the config path ────────────────────────────────────────────────────
-
-/// Resolve the path where `FirecrackerConfigWriter` would write the config,
-/// given an artifact. Used by callers that need to know the path before
-/// actually writing.
-pub fn config_path_for(artifact: &MicrovmArtifact) -> PathBuf {
-    let dir = artifact
-        .rootfs
-        .path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    dir.join(FC_CONFIG_FILENAME)
-}
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
@@ -316,13 +302,5 @@ mod tests {
                 .copied()
                 .collect();
         assert_eq!(keys, expected, "unexpected or missing top-level keys");
-    }
-
-    #[test]
-    fn config_path_for_helper_returns_expected_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let artifact = fixture_artifact(tmp.path());
-        let p = config_path_for(&artifact);
-        assert_eq!(p, tmp.path().join(FC_CONFIG_FILENAME));
     }
 }

@@ -74,8 +74,7 @@ pub fn host_signer_id() -> String {
 /// Idempotent: a subsequent call reloads from disk. Refuses if the
 /// secret-half file has perms looser than `SECRET_MODE`. The caller is
 /// not responsible for `~/.mvm` itself: `load_or_init_at` locks the whole
-/// chain from the home root down. It used to say the caller was, and
-/// pointed at a helper with no callers, so in practice nobody was.
+/// chain from the home root down.
 pub fn load_or_init() -> Result<HostSigner> {
     load_or_init_at(&default_keys_dir()?)
 }

@@ -184,7 +184,7 @@ pub(crate) fn init_telemetry() {
         eprintln!("mvm-guest-agent: telemetry subscriber install failed");
     }
     emit_coverage(&state, CoverageState::Started, "guest-agent");
-    std::thread::spawn(move || {
+    let _ = mvm_agentd::detached::spawn_named("telemetry-listener", move || {
         let fd = match bind_vsock_listener(TELEMETRY_PORT) {
             Ok(fd) => fd,
             Err(e) => {

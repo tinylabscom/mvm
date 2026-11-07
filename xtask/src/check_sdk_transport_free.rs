@@ -17,8 +17,8 @@
 //! for `wasm32-unknown-unknown` at all — both targets the SDK surface is meant
 //! to reach.
 //!
-//! That is exactly what a shared crate cost before the split: the FFI lived in
-//! `mvm-sdk`, so the guest object was compiled from a crate that also holds the
+//! That is exactly what a shared crate costs: with the FFI in
+//! `mvm-sdk`, the guest object is compiled from a crate that also holds the
 //! decorator parser (five tree-sitter C parsers) and the deploy record
 //! (`blake3`'s NEON path). "Pure Rust by construction" is only by construction
 //! if something checks it.

@@ -7,9 +7,6 @@ use serde::{Deserialize, Serialize};
 // dropping a JSON file into the drop-in directory.
 // ============================================================================
 
-/// Base path inside the guest where integration state is stored.
-pub const INTEGRATIONS_BASE_PATH: &str = "/data/integrations";
-
 /// Directory where integration drop-in files are placed.
 /// Each `*.json` file declares one integration the guest agent should monitor.
 pub const INTEGRATIONS_DROPIN_DIR: &str = "/etc/mvm/integrations.d";
@@ -124,16 +121,6 @@ impl IntegrationManifest {
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string_pretty(self)
     }
-}
-
-/// Generate the guest-side state directory path for an integration.
-pub fn integration_state_dir(name: &str) -> String {
-    format!("{}/{}/state", INTEGRATIONS_BASE_PATH, name)
-}
-
-/// Generate the guest-side checkpoint marker path for an integration.
-pub fn integration_checkpoint_path(name: &str) -> String {
-    format!("{}/{}/checkpoint", INTEGRATIONS_BASE_PATH, name)
 }
 
 /// Load integration entries from a drop-in directory.
@@ -258,18 +245,6 @@ mod tests {
         assert_eq!(parsed.status, IntegrationStatus::Active);
         assert_eq!(parsed.state_size_bytes, 4096);
         assert!(parsed.health.unwrap().healthy);
-    }
-
-    #[test]
-    fn test_state_dir_paths() {
-        assert_eq!(
-            integration_state_dir("whatsapp"),
-            "/data/integrations/whatsapp/state"
-        );
-        assert_eq!(
-            integration_checkpoint_path("telegram"),
-            "/data/integrations/telegram/checkpoint"
-        );
     }
 
     #[test]

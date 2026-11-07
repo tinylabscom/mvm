@@ -3274,7 +3274,7 @@ mod tests {
     ///
     /// Driven through the real handoff socket and `poll`, not the line encoder,
     /// because the encoder being right says nothing about whether the refusal
-    /// path calls it. It used to write a bare `ERR`.
+    /// path calls it. A bare `ERR` would pass a line-encoder test.
     #[test]
     fn a_refused_handoff_tells_the_host_why() {
         let Some(HandoffParent {

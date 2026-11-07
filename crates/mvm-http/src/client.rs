@@ -407,21 +407,6 @@ impl RequestBuilder {
         self
     }
 
-    /// Stream a request body with HTTP/1.1 chunked transfer framing.
-    ///
-    /// Use this when a bounded transform can change the decoded byte count.
-    /// The channel capacity remains the caller's backpressure bound; empty
-    /// chunks are ignored and the terminating chunk is emitted only after the
-    /// producer closes cleanly.
-    #[must_use]
-    pub fn body_chunked(mut self, receiver: tokio::sync::mpsc::Receiver<Vec<u8>>) -> Self {
-        self.body = Some(RequestBody::Stream {
-            declared_len: None,
-            receiver,
-        });
-        self
-    }
-
     /// Stream a transformed body whose producer can fail closed.
     ///
     /// A producer error closes the connection without the final chunk, so the

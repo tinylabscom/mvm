@@ -33,6 +33,8 @@ pub mod assurance_provider;
 pub mod assurance_session;
 pub mod audit;
 pub mod audit_signer;
+/// Sync-to-async bridge that is safe to call from inside a tokio runtime.
+pub mod blocking;
 pub mod broker;
 pub mod caller_identity;
 pub mod containment;

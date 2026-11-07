@@ -448,7 +448,7 @@ mod tests {
 
     /// Only a release binary in its default mode acquires a published guest
     /// runtime. A source build assembles its tree's in either mode — the image
-    /// set it used to install from in download mode carries none — and a
+    /// set it would install from in download mode carries none — and a
     /// release binary asked to build has no tree, which the source arm reports.
     #[test]
     fn only_a_release_binary_takes_a_published_guest_runtime() {

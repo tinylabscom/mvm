@@ -9,7 +9,7 @@
 //! carry no mirror risk, because the report derives them from the same payload
 //! build plan the mvm-cli build script consumes.
 //!
-//! Why a gate rather than the comment that used to guard this: the workflow
+//! Why a gate rather than a comment to guard this: the workflow
 //! runs on tags, so a report row that drifted from its build step skews the
 //! attribution of every release until someone reads the commands side by
 //! side — which is what the comment asked and nobody did. Here the comparison

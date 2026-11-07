@@ -666,13 +666,6 @@ pub fn read_roothash_file(path: &Path) -> Result<String, OverlayError> {
     Ok(trimmed.to_string())
 }
 
-/// Check the overlay ext4 payload carries every required guest binary at its
-/// canonical absolute path, holding it to this CLI's full list. Fails closed
-/// when the image can't be opened.
-pub fn validate_overlay_payload(overlay_ext4: &Path) -> Result<(), OverlayError> {
-    validate_overlay_payload_against(overlay_ext4, REQUIRED_OVERLAY_GUEST_PATHS)
-}
-
 /// The same check for an overlay labelled `version`: it is held to the paths
 /// its own version promises (see [`required_overlay_guest_paths_for`]), which
 /// is the full list for any overlay as new as this CLI.
