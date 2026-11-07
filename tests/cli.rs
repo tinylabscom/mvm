@@ -828,7 +828,7 @@ fn why_routed_host_requires_request_context_and_reports_the_matching_rule() {
     );
 }
 
-/// `pack --help` advertises all five lifecycle subcommands.
+/// `pack --help` advertises every pack subcommand.
 #[test]
 fn pack_help_lists_all_subcommands() {
     #[allow(deprecated)]
@@ -844,8 +844,8 @@ fn pack_help_lists_all_subcommands() {
     );
     let help = String::from_utf8_lossy(&out.stdout);
     for verb in [
-        "ls", "rm", "system", "list", "rollback", "prune", "download", "update", "lock", "compile",
-        "build",
+        "ls", "new", "rm", "system", "update", "info", "verify", "lock", "compile", "search",
+        "pull", "registry",
     ] {
         assert!(help.contains(verb), "help is missing '{verb}':\n{help}");
     }
