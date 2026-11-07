@@ -125,7 +125,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-core | `src/crypto/key_rotation.rs` | 1 | storage tool | cryptsetup luksChangeKey | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub |
 | mvm-core | `src/env_hygiene.rs` | 3 | factory | the sanctioned Command constructor: scrubs denied env, then everything above calls it | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub; RAW_SITES (on_host) |
 | mvm-core | `src/host_storage_encryption.rs` | 4 | host probe | diskutil / findmnt / tune2fs / lsblk encryption-at-rest probes | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub |
-| mvm-core | `src/platform/platform.rs` | 2 | host probe | sw_vers and nix presence probe | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub |
+| mvm-core | `src/platform/platform.rs` | 1 | host probe | sw_vers and nix presence probe | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub |
 | mvm-core | `src/spawn_scope.rs` | 4 | systemd-run | wrap a VMM spawn in a systemd transient scope; kill and systemctl show | library: caller's process (CLI, daemon, embedder) | CHS | C | `helper_command` env scrub |
 | mvm-fs | `src/oci_to_rootfs/ext4.rs` | 1 | storage tool | mke2fs to materialize an OCI rootfs (Linux) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 | mvm-fs | `src/oci_to_rootfs/verity.rs` | 1 | storage tool | veritysetup format of a rootfs (Linux) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
@@ -150,7 +150,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-vmm | `src/host/network_endpoint_spawn/owned.rs` | 1 | helper bin | spawn an owned network endpoint | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; check-single-network-path |
 | mvm-vmm | `src/host/shell/exec.rs` | 6 | shell script | run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub |
 
-Totals: 192 production sites in 99 files.
+Totals: 191 production sites in 99 files.
 
 | Crate | Sites |
 |---|--:|
@@ -162,14 +162,14 @@ Totals: 192 production sites in 99 files.
 | mvm-cli | 26 |
 | mvm-client | 1 |
 | mvm-conformance | 3 |
-| mvm-core | 14 |
+| mvm-core | 13 |
 | mvm-fs | 2 |
 | mvm-hostd | 9 |
 | mvm-runtime | 12 |
 | mvm-setpriv | 1 |
 | mvm-vmm | 17 |
 
-By construct: `Command::new` 60, `SYS_execve` 1, `helper_command` 118, `helper_command_with` 3, `libc::fork` 1, `openpty` 2, `raw:execve` 1, `raw:execveat_raw` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
+By construct: `Command::new` 60, `SYS_execve` 1, `helper_command` 117, `helper_command_with` 3, `libc::fork` 1, `openpty` 2, `raw:execve` 1, `raw:execveat_raw` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
 
 Linked and Traced are host-side facts about the crate and the call graph. A `guest` or `builder VM` row is crate-linked into the host closure (so `CHS`), but its binary only ever runs inside the microVM; the host never calls it. Read those rows by Authority.

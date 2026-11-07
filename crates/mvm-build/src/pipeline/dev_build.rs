@@ -1077,7 +1077,7 @@ mod typed_export_tests {
     #[test]
     fn an_empty_export_is_an_error_rather_than_an_empty_success() {
         // The regression this guards: the copy loop over an empty directory
-        // does not run, so it used to return Ok and the caller went on to
+        // does not run, so without a check it returns Ok and the caller goes on to
         // report a complete build whose vmlinux and rootfs paths named files
         // that were never written.
         let scratch = tempfile::tempdir().unwrap();

@@ -37,6 +37,14 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// The fields here are the rubric — `enforce_*` in `mvm/src/enforce.rs`
 /// walks the plan field-by-field and rejects any plan that doesn't
 /// satisfy the corresponding enforcement row.
+fn first_epoch() -> u64 {
+    1
+}
+
+fn is_first_epoch(epoch: &u64) -> bool {
+    *epoch == 1
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
@@ -45,6 +53,16 @@ pub struct ExecutionPlan {
 
     /// Stable plan identifier. Audit entries reference this verbatim.
     pub plan_id: PlanId,
+
+    /// Execution epoch of this workload under the issuing authority.
+    ///
+    /// A replacement of a contained workload is issued a strictly newer
+    /// epoch; a plan carrying an older one is refused at admission, so a stale
+    /// or replayed plan cannot restart what was replaced. Epoch 1 is the first
+    /// and is skipped on the wire, so plans signed before this field existed
+    /// keep their bytes and their `plan_id`.
+    #[serde(default = "first_epoch", skip_serializing_if = "is_first_epoch")]
+    pub execution_epoch: u64,
 
     /// Monotonic revision counter under the stable workload identity
     /// `(tenant, workload)`. `plan_id` is a per-execution content-address
@@ -410,6 +428,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
 
     let valid_from = Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap();
     ExecutionPlan {
+        execution_epoch: 1,
         environment: None,
         schema_version: SCHEMA_VERSION,
         plan_id: PlanId("fixture-plan".to_string()),

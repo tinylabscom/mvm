@@ -244,14 +244,6 @@ impl Default for BlockingOsvClient {
 }
 
 impl BlockingOsvClient {
-    /// Test seam: point the client at a stub OSV endpoint.
-    pub fn with_base_url(base_url: impl Into<String>) -> Self {
-        Self {
-            base_url: base_url.into(),
-            ..Self::default()
-        }
-    }
-
     fn http(&self) -> Result<mvm_http::blocking::Client, ScanError> {
         mvm_http::blocking::Client::builder()
             .timeout(self.timeout)

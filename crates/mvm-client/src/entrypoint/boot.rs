@@ -400,21 +400,7 @@ impl Drop for OwnedBootFailure {
     }
 }
 
-impl OwnedBootFailure {
-    pub(crate) fn observe_failure(
-        &mut self,
-        observe: impl FnOnce(&crate::admission::AdmissionContext, &anyhow::Error),
-    ) {
-        let error = self.error.as_ref().expect("launch error present");
-        let slot = self
-            .owner
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(owner) = slot.as_ref() {
-            observe(&owner.resources().admission, error);
-        }
-    }
-}
+impl OwnedBootFailure {}
 
 impl std::fmt::Debug for OwnedBootFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

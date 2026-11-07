@@ -58,6 +58,7 @@ struct ProgramHeader {
 ///
 /// An object with no dynamic section needs nothing and returns empty — a fully
 /// static object is a legitimate answer to the question, not an error.
+#[deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 pub fn needed_sonames(object: &[u8]) -> Result<Vec<String>, ElfError> {
     let headers = program_headers(object)?;
     let Some(dynamic) = headers.iter().find(|h| h.kind == PT_DYNAMIC) else {
@@ -85,25 +86,28 @@ pub fn needed_sonames(object: &[u8]) -> Result<Vec<String>, ElfError> {
 }
 
 /// Parse the program header table, validating the identity bytes first.
+#[deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 fn program_headers(object: &[u8]) -> Result<Vec<ProgramHeader>, ElfError> {
     if object.len() < 64 {
         return Err(ElfError::NotElf64Le {
             reason: format!("only {} bytes; an ELF64 header is 64", object.len()),
         });
     }
-    if object[0..4] != ELF_MAGIC {
+    if read_array::<4>(object, 0)? != ELF_MAGIC {
         return Err(ElfError::NotElf64Le {
             reason: "missing the \\x7fELF magic".to_string(),
         });
     }
-    if object[4] != ELFCLASS64 {
+    let [class] = read_array::<1>(object, 4)?;
+    if class != ELFCLASS64 {
         return Err(ElfError::NotElf64Le {
-            reason: format!("EI_CLASS {} is not ELFCLASS64", object[4]),
+            reason: format!("EI_CLASS {class} is not ELFCLASS64"),
         });
     }
-    if object[5] != ELFDATA2LSB {
+    let [data] = read_array::<1>(object, 5)?;
+    if data != ELFDATA2LSB {
         return Err(ElfError::NotElf64Le {
-            reason: format!("EI_DATA {} is not little-endian", object[5]),
+            reason: format!("EI_DATA {data} is not little-endian"),
         });
     }
 
@@ -136,6 +140,7 @@ fn program_headers(object: &[u8]) -> Result<Vec<ProgramHeader>, ElfError> {
 }
 
 /// The `(tag, value)` pairs of the dynamic section, stopping at `DT_NULL`.
+#[deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 fn dynamic_entries(object: &[u8], dynamic: ProgramHeader) -> Result<Vec<(u64, u64)>, ElfError> {
     let mut entries = Vec::new();
     let mut cursor = dynamic.offset;
@@ -162,14 +167,16 @@ fn dynamic_entries(object: &[u8], dynamic: ProgramHeader) -> Result<Vec<(u64, u6
 /// offset. For a freshly linked shared object the two often coincide, which is
 /// exactly why translating matters: a reader that assumed they were equal would
 /// work on every object it was tested against and then misread a linker's.
+#[deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 fn vaddr_to_offset(headers: &[ProgramHeader], vaddr: u64) -> Option<u64> {
     headers
         .iter()
         .filter(|h| h.kind == PT_LOAD)
         .find(|h| vaddr >= h.vaddr && vaddr - h.vaddr < h.filesz)
-        .map(|h| h.offset + (vaddr - h.vaddr))
+        .and_then(|h| h.offset.checked_add(vaddr - h.vaddr))
 }
 
+#[deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 fn read_c_string(object: &[u8], offset: u64) -> Result<String, ElfError> {
     let start = usize::try_from(offset).map_err(|_| ElfError::OutOfBounds {
         what: format!("string table offset {offset}"),
@@ -183,7 +190,10 @@ fn read_c_string(object: &[u8], offset: u64) -> Result<String, ElfError> {
         .ok_or(ElfError::OutOfBounds {
             what: format!("unterminated string at offset {offset}"),
         })?;
-    Ok(String::from_utf8_lossy(&tail[..end]).into_owned())
+    let name = tail.get(..end).ok_or(ElfError::OutOfBounds {
+        what: format!("string table offset {offset}"),
+    })?;
+    Ok(String::from_utf8_lossy(name).into_owned())
 }
 
 fn read_u16(object: &[u8], offset: u64) -> Result<u16, ElfError> {
@@ -198,6 +208,7 @@ fn read_u64(object: &[u8], offset: u64) -> Result<u64, ElfError> {
     Ok(u64::from_le_bytes(read_array(object, offset)?))
 }
 
+#[deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 fn read_array<const N: usize>(object: &[u8], offset: u64) -> Result<[u8; N], ElfError> {
     let start = usize::try_from(offset).map_err(|_| ElfError::OutOfBounds {
         what: format!("offset {offset}"),
@@ -320,6 +331,20 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// Poke a little-endian u64 into the program header at `index`.
+    fn set_phdr_u64(object: &mut [u8], index: usize, field: usize, value: u64) {
+        let at = 64 + 56 * index + field;
+        object[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn a_load_segment_whose_offset_wraps_the_string_table_is_refused() {
+        let mut object = test_fixture::shared_object(&["libc.so"]);
+        set_phdr_u64(&mut object, 0, 0x08, u64::MAX); // PT_LOAD p_offset
+        let err = needed_sonames(&object).unwrap_err();
+        assert!(matches!(err, ElfError::NoStringTable), "{err}");
     }
 
     #[test]

@@ -474,11 +474,6 @@ impl EffectivePolicy {
         self.blocklist.get(sha256_hex).map(Option::as_deref)
     }
 
-    /// The blocked digests, lowercase hex.
-    pub fn blocked_digests(&self) -> impl Iterator<Item = &str> {
-        self.blocklist.keys().map(String::as_str)
-    }
-
     /// The policy files this was built from.
     #[must_use]
     pub fn sources(&self) -> &[PathBuf] {

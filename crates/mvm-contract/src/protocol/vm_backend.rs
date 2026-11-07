@@ -688,11 +688,6 @@ impl WarmLaunchMode {
     pub const fn requires_warm(self) -> bool {
         matches!(self, Self::Required)
     }
-
-    /// Whether this mode permits a cold boot.
-    pub const fn permits_cold(self) -> bool {
-        !self.requires_warm()
-    }
 }
 
 /// A typed reason a warm claim was refused. These reasons are part of the
@@ -1472,26 +1467,6 @@ mod tests {
             ]
             .as_slice()
         );
-    }
-
-    #[test]
-    fn warm_launch_mode_defaults_to_optional_and_round_trips() {
-        assert_eq!(WarmLaunchMode::default(), WarmLaunchMode::Optional);
-        assert!(WarmLaunchMode::Required.requires_warm());
-        assert!(!WarmLaunchMode::Optional.requires_warm());
-        assert!(!WarmLaunchMode::Required.permits_cold());
-        assert!(WarmLaunchMode::Cold.permits_cold());
-
-        for mode in [
-            WarmLaunchMode::Optional,
-            WarmLaunchMode::Required,
-            WarmLaunchMode::Cold,
-        ] {
-            let encoded = serde_json::to_string(&mode).expect("warm launch mode serializes");
-            let decoded: WarmLaunchMode =
-                serde_json::from_str(&encoded).expect("warm launch mode deserializes");
-            assert_eq!(decoded, mode);
-        }
     }
 
     #[test]

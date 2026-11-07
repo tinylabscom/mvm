@@ -22,9 +22,6 @@ use crate::supervisor::egress_rate::EgressRateGuard;
 use crate::supervisor::icmp_audit::{self, EchoAudit};
 use crate::supervisor::icmp_echo::EchoTransport;
 
-/// First-line marker that selects ICMP framing on the shared egress stream.
-pub const FRAME_LINE: &str = mvm_core::guest_netd::ICMP_FRAME_LINE;
-
 /// How long the host waits for a guest to finish its request line.
 ///
 /// [`MAX_LINE_LEN`] bounds the request's *size*; this bounds its *time*. Without
@@ -74,43 +71,6 @@ where
         write_line(stream.get_mut(), &reply).await?;
     }
     Ok(())
-}
-
-/// Serve one request line, blocking. The Linux AF_VSOCK accept threads have no
-/// async context; the decision and the echoes are [`serve_request`], shared with
-/// the async path above, so only the line I/O differs.
-#[cfg(target_os = "linux")]
-pub fn serve_icmp_blocking<S>(
-    mut guest: S,
-    gate: &EgressGate,
-    recorder: Option<&Recorder>,
-    rate_guard: &EgressRateGuard,
-    echo: &dyn EchoTransport,
-) -> std::io::Result<()>
-where
-    S: std::io::Read + std::io::Write,
-{
-    use std::io::{BufRead, BufReader, Read};
-
-    let mut reader = BufReader::new(&mut guest);
-    let mut line = String::new();
-    let read = reader
-        .by_ref()
-        .take(MAX_LINE_LEN as u64)
-        .read_line(&mut line)?;
-    if read == 0 {
-        return Ok(());
-    }
-    let (replies, audit) = serve_request(&line, gate, rate_guard, echo);
-    if let Some(recorder) = recorder {
-        icmp_audit::emit_icmp_echo_blocking(recorder, &audit);
-    }
-    for reply in replies {
-        let mut bytes = serde_json::to_vec(&reply)?;
-        bytes.push(b'\n');
-        guest.write_all(&bytes)?;
-    }
-    guest.flush()
 }
 
 /// Decide one request line and perform its echoes, returning the replies to

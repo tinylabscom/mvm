@@ -160,7 +160,7 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
 /// configurations no shipped build selects and no lane tests.
 const RETIRED_BUILDER_FEATURES: [&str; 2] = ["builder-vm", "pure-mkfs"];
 
-/// The crates that used to declare [`RETIRED_BUILDER_FEATURES`].
+/// The crates that declared [`RETIRED_BUILDER_FEATURES`] and must not again.
 const RETIRED_FEATURE_OWNERS: [&str; 2] = ["mvm-build", "mvm-cli"];
 
 fn validate_retired_builder_features(owner: &str, manifest: &str) -> Result<()> {

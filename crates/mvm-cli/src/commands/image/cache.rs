@@ -1836,9 +1836,8 @@ mod tests {
         serde_json::to_vec(&owners).unwrap()
     }
 
-    /// A write cut short leaves a prefix of valid JSON. That used to be a hard
-    /// error on every read, wedging the image until the file was deleted by
-    /// hand; it now reads as unrecorded, which sends the caller to unpack again.
+    /// A write cut short leaves a prefix of valid JSON. A hard error on every read would wedge
+    /// the image until the file was deleted by hand, so it reads as unrecorded, which sends the caller to unpack again.
     #[test]
     fn a_truncated_owner_sidecar_reads_as_unrecorded() {
         let tmp = tempfile::tempdir().expect("tempdir");

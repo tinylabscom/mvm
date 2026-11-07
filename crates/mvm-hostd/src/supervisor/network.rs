@@ -19,7 +19,7 @@ pub mod flow_byte_log {
     //! on a 0600 file under a 0700 dir.
 
     use sha2::{Digest, Sha256};
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::Path;
 
@@ -73,27 +73,6 @@ pub mod flow_byte_log {
         }
     }
 
-    /// Read back every record (test + forensics helper).
-    pub fn read_all_records(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
-        let mut f = std::fs::File::open(path)?;
-        let mut out = Vec::new();
-        loop {
-            let mut idbuf = [0u8; 8];
-            match f.read_exact(&mut idbuf) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e),
-            }
-            let mut lenbuf = [0u8; 4];
-            f.read_exact(&mut lenbuf)?;
-            let len = u32::from_le_bytes(lenbuf) as usize;
-            let mut payload = vec![0u8; len];
-            f.read_exact(&mut payload)?;
-            out.push(payload);
-        }
-        Ok(out)
-    }
-
     /// Retention sweep: delete flow-byte files whose mtime is older than
     /// `max_age_days` under `root` (`~/.mvm/audit/flow-bytes`, with one
     /// per-tenant subdir). Returns the number of files removed. Called from
@@ -126,20 +105,6 @@ pub mod flow_byte_log {
     #[cfg(test)]
     mod tests {
         use super::*;
-
-        #[test]
-        fn append_then_read_back_records() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("vm-a.bin");
-            let mut w = FlowByteLogWriter::create(&path).unwrap();
-            let rec = w.append(b"hello").unwrap();
-            assert_eq!(rec.record_id, 0);
-            assert_eq!(rec.sha256.len(), 64);
-            let rec2 = w.append(b"world").unwrap();
-            assert_eq!(rec2.record_id, 1);
-            let records = read_all_records(&path).unwrap();
-            assert_eq!(records, vec![b"hello".to_vec(), b"world".to_vec()]);
-        }
 
         #[test]
         fn created_file_is_mode_0600() {

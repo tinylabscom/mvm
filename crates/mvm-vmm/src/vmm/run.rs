@@ -318,21 +318,6 @@ where
             _marker: self._marker,
         }
     }
-
-    /// Hold the vCPU outside guest execution while `should_throttle` is true.
-    pub fn throttle_when<NextT>(self, should_throttle: NextT) -> RunHooks<C, X, Q, P, H, NextT>
-    where
-        NextT: Fn() -> bool,
-    {
-        RunHooks {
-            on_exception: self.on_exception,
-            should_stop: self.should_stop,
-            should_pause: self.should_pause,
-            on_pause: self.on_pause,
-            should_throttle,
-            _marker: self._marker,
-        }
-    }
 }
 
 /// Run `vcpu` until it halts/cancels or `on_exception` says stop.
@@ -790,19 +775,6 @@ mod tests {
                 Some(self.irq)
             }
         }
-    }
-
-    #[test]
-    fn run_accepts_one_composable_hook_set() {
-        let vcpu = ScriptVcpu::new(vec![VcpuExit::Halt]);
-        let mut devs: Vec<&mut dyn RunDevice> = vec![];
-        let hooks = RunHooks::new(no_exceptions, || true, || false)
-            .on_pause(|_, _| Ok(()))
-            .throttle_when(|| false);
-
-        let outcome = run(&vcpu, |_, _| Ok(()), &mut devs, hooks).unwrap();
-
-        assert_eq!(outcome, RunOutcome::Halt);
     }
 
     /// A heartbeat wake (`Canceled` with `should_stop()==false`) polls devices,

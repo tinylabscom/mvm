@@ -476,3 +476,66 @@ fn the_audit_digest_extension_resolves_to_the_entry_it_came_from() {
         "the digest must identify the exact signed entry bytes"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Evidence completeness as the operator sees it
+// ─────────────────────────────────────────────────────────────────
+
+fn export_archive(sandbox: &ExportSandbox, extra: &[&str]) -> PathBuf {
+    let path = sandbox.home_path().join("evidence.mvmev");
+    let mut cmd = sandbox.mvmctl();
+    cmd.args(["trust", "audit", "receipts", "export", "--tenant", "local"])
+        .args(extra)
+        .arg("--archive")
+        .arg(&path);
+    cmd.assert().success();
+    path
+}
+
+fn verify_json(sandbox: &ExportSandbox, archive: &std::path::Path) -> assert_cmd::assert::Assert {
+    let mut cmd = sandbox.mvmctl();
+    cmd.args(["trust", "audit", "receipts", "verify", "--json"])
+        .arg(archive);
+    cmd.assert()
+}
+
+fn stdout_json(assert: &assert_cmd::assert::Assert) -> serde_json::Value {
+    serde_json::from_slice(&assert.get_output().stdout).expect("verify --json output")
+}
+
+#[test]
+fn verify_reports_a_plan_scoped_archive_as_attested_and_a_full_chain_one_as_derived() {
+    let sandbox = ExportSandbox::new();
+    write_test_chain(&sandbox);
+
+    let plan = export_archive(&sandbox, &["--plan-id", &sample_plan_id().0]);
+    let report = stdout_json(&verify_json(&sandbox, &plan).success());
+    assert_eq!(report["completeness"]["result"], "attested", "{report}");
+    assert_eq!(report["integrity"]["result"], "ok", "{report}");
+    assert_eq!(report["inclusion"]["result"], "ok", "{report}");
+
+    let full = export_archive(&sandbox, &["--full-chain"]);
+    let report = stdout_json(&verify_json(&sandbox, &full).success());
+    assert_eq!(report["completeness"]["result"], "derived", "{report}");
+}
+
+#[test]
+fn verify_exits_nonzero_for_an_archive_whose_receipt_was_altered() {
+    let sandbox = ExportSandbox::new();
+    write_test_chain(&sandbox);
+    let path = export_archive(&sandbox, &["--full-chain"]);
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    // A tar header sits on a 512-byte boundary and its data follows it.
+    let header = (0..bytes.len().saturating_sub(512))
+        .step_by(512)
+        .find(|&at| bytes[at..].starts_with(b"receipts/"))
+        .expect("a receipt member header");
+    bytes[header + 512] ^= 0x01;
+    std::fs::write(&path, bytes).unwrap();
+
+    let assert = verify_json(&sandbox, &path).code(1);
+    let report = stdout_json(&assert);
+    assert_eq!(report["integrity"]["result"], "FAILED", "{report}");
+    assert_eq!(report["exit_code"], 1, "{report}");
+}

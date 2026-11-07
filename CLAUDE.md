@@ -422,9 +422,9 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    including the one in the pinned image set a release binary boots until it
    assembles its own guest runtime. ADR-001's claim-1 row carries the limits.
 2. **No guest binary can elevate to uid 0.** `mvm-setpriv --no-new-privs`
-   in the launch path; `/etc/{passwd,group,nsswitch.conf}` are
-   read-only bind-mounts so a compromised service can't mint a uid 0
-   entry.
+   in the launch path; the rootfs is mounted read-only (dm-verity
+   sealed) so a compromised service can't rewrite
+   `/etc/{passwd,group,nsswitch.conf}` to mint a uid 0 entry.
 3. **A tampered rootfs ext4 fails to boot.** dm-verity sidecar +
    roothash delivered in `ActivateEnvironment` over vsock + the universal
    initramfs agent's verity check (the separate verity-init PID 1 is gone;

@@ -264,35 +264,6 @@ pub enum WorkloadClass {
 // Desired instance state (declarative target the reconciler drives toward)
 // ============================================================================
 
-/// Declarative per-instance desired state.
-///
-/// Carries identity + the workspace/volume/class metadata that the
-/// scheduler and `mvm-hostd` need to materialize an instance. Distinct
-/// from [`InstanceState`], which is the *observed* runtime state.
-///
-/// Backward compatibility: every field added after the initial shape
-/// MUST carry `#[serde(default)]` so older serialized payloads keep
-/// deserializing cleanly. Tested via
-/// `test_desired_instance_backward_compat`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DesiredInstance {
-    pub instance_id: String,
-    pub pool_id: String,
-    pub tenant_id: String,
-    /// Workspace this instance belongs to.
-    /// Required for service-class workloads; optional for sandbox-class
-    /// during migration (None = workspace-unknown, treated as
-    /// tenant-only).
-    #[serde(default)]
-    pub workspace_id: Option<String>,
-    /// Workspace-scoped volumes to attach at instance start.
-    #[serde(default)]
-    pub volumes: Vec<VolumeAttach>,
-    /// Workload class — drives sleep policy, auto-provision rules, etc.
-    #[serde(default)]
-    pub workload_class: WorkloadClass,
-}
-
 /// Instance lifecycle status. Only instances have runtime state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -537,96 +508,10 @@ impl InstanceState {
     }
 }
 
-/// Validate that a state transition is allowed.
-///
-/// Returns Ok(()) if the transition is valid, Err with explanation otherwise.
-/// Enforces the state machine defined in the spec.
-pub fn validate_transition(from: InstanceStatus, to: InstanceStatus) -> Result<()> {
-    // Any state -> Destroyed is always allowed
-    if to == InstanceStatus::Destroyed {
-        return Ok(());
-    }
-
-    let valid = matches!(
-        (from, to),
-        // Build completes
-        (InstanceStatus::Created, InstanceStatus::Ready)
-        // Start
-        | (InstanceStatus::Ready, InstanceStatus::Running)
-        // Pause vCPUs
-        | (InstanceStatus::Running, InstanceStatus::Warm)
-        // Stop from running
-        | (InstanceStatus::Running, InstanceStatus::Stopped)
-        // Resume from warm
-        | (InstanceStatus::Warm, InstanceStatus::Running)
-        // Snapshot + shutdown
-        | (InstanceStatus::Warm, InstanceStatus::Sleeping)
-        // Stop from warm
-        | (InstanceStatus::Warm, InstanceStatus::Stopped)
-        // Wake from snapshot
-        | (InstanceStatus::Sleeping, InstanceStatus::Running)
-        // Stop from sleeping (discard snapshot)
-        | (InstanceStatus::Sleeping, InstanceStatus::Stopped)
-        // Fresh boot from stopped
-        | (InstanceStatus::Stopped, InstanceStatus::Running)
-        // Rebuild
-        | (InstanceStatus::Ready, InstanceStatus::Ready)
-    );
-
-    if valid {
-        Ok(())
-    } else {
-        bail!("Invalid state transition: {} -> {}", from, to)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use sha2::Digest;
-
-    #[test]
-    fn test_valid_transitions() {
-        assert!(validate_transition(InstanceStatus::Created, InstanceStatus::Ready).is_ok());
-        assert!(validate_transition(InstanceStatus::Ready, InstanceStatus::Running).is_ok());
-        assert!(validate_transition(InstanceStatus::Running, InstanceStatus::Warm).is_ok());
-        assert!(validate_transition(InstanceStatus::Running, InstanceStatus::Stopped).is_ok());
-        assert!(validate_transition(InstanceStatus::Warm, InstanceStatus::Running).is_ok());
-        assert!(validate_transition(InstanceStatus::Warm, InstanceStatus::Sleeping).is_ok());
-        assert!(validate_transition(InstanceStatus::Warm, InstanceStatus::Stopped).is_ok());
-        assert!(validate_transition(InstanceStatus::Sleeping, InstanceStatus::Running).is_ok());
-        assert!(validate_transition(InstanceStatus::Sleeping, InstanceStatus::Stopped).is_ok());
-        assert!(validate_transition(InstanceStatus::Stopped, InstanceStatus::Running).is_ok());
-        assert!(validate_transition(InstanceStatus::Ready, InstanceStatus::Ready).is_ok());
-    }
-
-    #[test]
-    fn test_destroyed_from_any() {
-        for status in [
-            InstanceStatus::Created,
-            InstanceStatus::Ready,
-            InstanceStatus::Running,
-            InstanceStatus::Warm,
-            InstanceStatus::Sleeping,
-            InstanceStatus::Stopped,
-        ] {
-            assert!(
-                validate_transition(status, InstanceStatus::Destroyed).is_ok(),
-                "{} -> Destroyed should be valid",
-                status,
-            );
-        }
-    }
-
-    #[test]
-    fn test_invalid_transitions() {
-        assert!(validate_transition(InstanceStatus::Created, InstanceStatus::Running).is_err());
-        assert!(validate_transition(InstanceStatus::Created, InstanceStatus::Warm).is_err());
-        assert!(validate_transition(InstanceStatus::Running, InstanceStatus::Sleeping).is_err());
-        assert!(validate_transition(InstanceStatus::Sleeping, InstanceStatus::Warm).is_err());
-        assert!(validate_transition(InstanceStatus::Stopped, InstanceStatus::Warm).is_err());
-        assert!(validate_transition(InstanceStatus::Stopped, InstanceStatus::Sleeping).is_err());
-    }
 
     #[test]
     fn test_instance_state_json_roundtrip() {
@@ -1131,57 +1016,4 @@ mod tests {
     }
 
     // ------------- DesiredInstance -------------
-
-    #[test]
-    fn test_desired_instance_roundtrip_full() {
-        let di = DesiredInstance {
-            instance_id: "i-abc123".to_string(),
-            pool_id: "memory-svc".to_string(),
-            tenant_id: "acme".to_string(),
-            workspace_id: Some("ws-prod".to_string()),
-            volumes: vec![VolumeAttach {
-                workspace_id: "ws-prod".to_string(),
-                name: "memory".to_string(),
-                mount_path: "/var/lib/memory".to_string(),
-                mode: VolumeMode::ReadWrite,
-            }],
-            workload_class: WorkloadClass::Service,
-        };
-        let json = serde_json::to_string(&di).unwrap();
-        let parsed: DesiredInstance = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, di);
-    }
-
-    #[test]
-    fn test_desired_instance_backward_compat() {
-        // Pre-workspace JSON (no workspace_id, volumes, workload_class)
-        // must still deserialize with defaults — sandbox-class sandboxes
-        // produced before workspace identity existed land here.
-        let json = r#"{
-            "instance_id": "i-legacy",
-            "pool_id": "workers",
-            "tenant_id": "acme"
-        }"#;
-        let parsed: DesiredInstance = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.instance_id, "i-legacy");
-        assert_eq!(parsed.workspace_id, None);
-        assert!(parsed.volumes.is_empty());
-        assert_eq!(parsed.workload_class, WorkloadClass::Sandbox);
-    }
-
-    #[test]
-    fn test_desired_instance_partial_compat() {
-        // Mid-migration payload: workspace_id present, but no volumes
-        // and no workload_class — should default sensibly.
-        let json = r#"{
-            "instance_id": "i-mid",
-            "pool_id": "workers",
-            "tenant_id": "acme",
-            "workspace_id": "ws-prod"
-        }"#;
-        let parsed: DesiredInstance = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.workspace_id.as_deref(), Some("ws-prod"));
-        assert!(parsed.volumes.is_empty());
-        assert_eq!(parsed.workload_class, WorkloadClass::Sandbox);
-    }
 }

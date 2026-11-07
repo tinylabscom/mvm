@@ -152,7 +152,7 @@ fn libkrun_lifecycle_start_status_stop() {
 
     let listed_after = backend.list().expect("libkrun runner list after stop");
     let still_listed = listed_after.iter().any(|v| v.name == name);
-    // After stop the state dir is gone (we removed it above before
+    // After stop the state dir is gone (it was cleared above before
     // the run, and `stop` rm'd the PID file; depending on whether
     // anything else writes to the state dir, list() may still see
     // the directory but without a PID file — that's filtered out by
