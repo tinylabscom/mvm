@@ -261,8 +261,7 @@ The manifest is the signed object. For `runtime/node@1.0.0` it is:
 **A published version is immutable.** Change a source without changing its
 version and the build stops, naming the pack and telling you to bump the
 version in `pack.toml`. Publish a fix as a new version; consumers move to it
-with `mvmctl pack update runtime/node`. The older
-`mvmctl pack registry update runtime/node` spelling remains available.
+with `mvmctl pack update runtime/node`.
 
 The same check the workflow runs is available in a `mvm-packs` checkout:
 
@@ -286,9 +285,7 @@ mvmctl pack verify runtime/node
 
 `mvmctl pack registry ls` and `mvmctl pack registry rm` remain compatibility
 spellings of `pack ls` and `pack rm`. The distinct builder/runtime system pack
-cache is under `mvmctl pack system`; its former top-level commands also remain
-available. A bare `pack update runtime` selects that system cache, whereas
-`pack update runtime/node` selects the signed workload pack.
+cache is under `mvmctl pack system` (`list`, `rollback`, `prune`).
 
 `pack info` and `pack verify` work from the installed copy, without fetching a
 registry index. Both check the lock pin, publisher signature and every declared

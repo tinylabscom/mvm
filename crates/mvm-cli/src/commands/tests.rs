@@ -151,13 +151,6 @@ fn workload_pack_management_and_system_commands_parse() {
         ["mvmctl", "pack", "system", "list", "--json"].as_slice(),
         ["mvmctl", "pack", "system", "rollback", "runtime"].as_slice(),
         ["mvmctl", "pack", "system", "prune", "--dry-run"].as_slice(),
-        ["mvmctl", "pack", "system", "download", "builder"].as_slice(),
-        ["mvmctl", "pack", "system", "update", "dev-image"].as_slice(),
-        ["mvmctl", "pack", "list", "--json"].as_slice(),
-        ["mvmctl", "pack", "rollback", "runtime"].as_slice(),
-        ["mvmctl", "pack", "prune", "--dry-run"].as_slice(),
-        ["mvmctl", "pack", "download", "builder"].as_slice(),
-        ["mvmctl", "pack", "update", "dev-image"].as_slice(),
         ["mvmctl", "pack", "registry", "ls", "--json"].as_slice(),
     ] {
         Cli::try_parse_from(argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
@@ -167,7 +160,8 @@ fn workload_pack_management_and_system_commands_parse() {
         ["mvmctl", "pack", "update", "unknown"].as_slice(),
         ["mvmctl", "pack", "update", "runtime@1.0.0"].as_slice(),
         ["mvmctl", "pack", "update", "mvm/claude@invalid"].as_slice(),
-        ["mvmctl", "pack", "system", "update", "mvm/claude"].as_slice(),
+        ["mvmctl", "pack", "system", "update", "builder"].as_slice(),
+        ["mvmctl", "pack", "download", "builder"].as_slice(),
         ["mvmctl", "pack", "rm", "runtime"].as_slice(),
     ] {
         assert!(Cli::try_parse_from(argv).is_err(), "{argv:?}");
