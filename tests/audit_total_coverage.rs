@@ -284,6 +284,7 @@ const PACK_SYSTEM_SUB: &[(&str, AuditPosture)] = &[
 
 const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
+    ("new", AuditPosture::InteractiveOrControl),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
     ("list", AuditPosture::ReadOnly),
     ("info", AuditPosture::ReadOnly),
@@ -742,7 +743,6 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
     ("pack", AuditPosture::DelegatesToSub(PACK_SUB)),
-    ("new-pack", AuditPosture::InteractiveOrControl),
     // Plan 200 — beginner microVM workflows.
     ("machine", AuditPosture::DelegatesToSub(MACHINE_SUB)),
     // Operational surfaces.

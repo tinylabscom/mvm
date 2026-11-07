@@ -14,6 +14,7 @@ pub(in crate::commands) mod build;
 mod download;
 pub(crate) mod inspect;
 mod list;
+pub(in crate::commands) mod new;
 mod prune;
 mod registry;
 mod rollback;
@@ -29,6 +30,8 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum PackAction {
     /// List installed workload packs
     Ls(registry::LsArgs),
+    /// Draft an unpublished application pack (binary embedded in a .mvmpkg) for registry review
+    New(new::Args),
     /// Remove an installed workload pack and its lock pin
     Rm {
         /// The pack to remove; a version must match the lock pin
@@ -263,6 +266,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
                 cfg,
             ),
         },
+        PackAction::New(args) => new::run(args),
         PackAction::Info { reference, json } => inspect::run(&reference, json, false),
         PackAction::Verify { reference, json } => inspect::run(&reference, json, true),
         PackAction::Lock(args) => author::run_lock(args),
