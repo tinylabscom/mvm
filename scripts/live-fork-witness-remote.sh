@@ -33,7 +33,7 @@
 # Evidence from runs with this script's exact shape: two children forked from
 # one running parent restored in 39-47 ms (FC_FORK_RESTORE_MS), the parent
 # served alongside both children, and per-child generation tokens and
-# post-restore kernel randomness diverged. See issue #3552.
+# post-restore kernel randomness diverged.
 
 set -euo pipefail
 

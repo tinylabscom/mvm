@@ -120,8 +120,8 @@ pub(super) fn refuse(refusal: ClaimRefusal) -> StandbyError {
 /// message, so the caller sees the specific one: a parent with no signed
 /// creation entry, a ledger too damaged to say either way, or a parent that
 /// drifted from its sealed content. The unverifiable-ledger arm must come first
-/// — it is the case that used to be reported as un-audited, which sent the
-/// operator to re-capture a parent when the real finding was a broken chain.
+/// — it would otherwise be reported as un-audited, which sends the
+/// operator to re-capture a parent when the real finding is a broken chain.
 pub(super) fn map_lineage_refusal(err: &anyhow::Error) -> ClaimRefusal {
     let msg = err.to_string();
     if msg.contains(crate::lineage::LEDGER_UNVERIFIABLE) {

@@ -243,19 +243,6 @@ impl NestingHopTransport {
             workload_id: workload_id.into(),
         }
     }
-
-    /// Build the hop transport for a host VM whose libkrun vsock
-    /// sockets live under `vm_state_dir`, targeting `workload_id`. The
-    /// forward-port socket name mirrors libkrun's `vsock-<port>.sock`
-    /// convention.
-    pub fn for_host_vm(vm_state_dir: impl Into<PathBuf>, workload_id: impl Into<String>) -> Self {
-        let dir: PathBuf = vm_state_dir.into();
-        let hop = dir.join(format!(
-            "vsock-{}.sock",
-            mvm_agentd::builder_agent::WORKLOAD_FORWARD_PORT
-        ));
-        Self::new(hop, workload_id)
-    }
 }
 
 impl VsockTransport for NestingHopTransport {
@@ -604,16 +591,6 @@ mod tests {
         assert!(!firecracker_transport_supported(
             mvm_core::platform::Platform::Windows
         ));
-    }
-
-    #[test]
-    fn nesting_hop_for_host_vm_derives_forward_socket_path() {
-        let t = NestingHopTransport::for_host_vm("/tmp/vm-state", "wl-1");
-        assert_eq!(
-            t.hop_socket_path,
-            PathBuf::from("/tmp/vm-state/vsock-21472.sock")
-        );
-        assert_eq!(t.workload_id, "wl-1");
     }
 
     #[test]

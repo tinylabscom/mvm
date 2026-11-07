@@ -29,7 +29,6 @@
 //!   netns wiring; this module provides the resolver the endpoint uses.
 
 use std::net::IpAddr;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use hickory_resolver::TokioResolver;
@@ -105,13 +104,6 @@ impl DnsResolver for HickoryDnsResolver {
     }
 }
 
-/// `Arc`-wrap the resolver. The `L7EgressProxy::new` constructor
-/// takes `Arc<dyn DnsResolver>` so a shared resolver across
-/// proxy tasks is the standard shape.
-pub fn into_arc(r: HickoryDnsResolver) -> Arc<dyn DnsResolver> {
-    Arc::new(r)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,15 +121,6 @@ mod tests {
         // The Default impl matches with_defaults — no surprise
         // upstream config diff.
         let _r: HickoryDnsResolver = Default::default();
-    }
-
-    #[test]
-    fn into_arc_returns_dyn_resolver() {
-        // Compile-time check that the helper produces the exact
-        // shape the L7EgressProxy::new constructor expects.
-        fn takes_resolver(_: Arc<dyn DnsResolver>) {}
-        let r = HickoryDnsResolver::with_defaults();
-        takes_resolver(into_arc(r));
     }
 
     // Live-DNS tests are deliberately out — sandboxed test envs

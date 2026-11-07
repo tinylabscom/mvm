@@ -197,13 +197,6 @@ impl TelemetrySummary {
         }
     }
 
-    /// Records the guest reported losing, summed over every class.
-    pub fn guest_records_lost(&self) -> u64 {
-        self.guest_losses
-            .iter()
-            .fold(0u64, |sum, loss| sum.saturating_add(loss.records))
-    }
-
     /// Producers whose latest mark says they are not capturing.
     pub fn impaired_producers(&self) -> impl Iterator<Item = &CoverageMark> {
         self.coverage.iter().filter(|mark| {
@@ -311,43 +304,6 @@ mod tests {
         assert_eq!(summary.unmatched_span_records, 1);
         assert_eq!(summary.spans_failed, 1);
         assert!(summary.open_spans.is_empty());
-    }
-
-    #[test]
-    fn guest_losses_sum_by_stage_and_reason_and_keep_an_unknown_tail() {
-        let loss = |seq, records, tail| {
-            received(
-                seq,
-                RecordBody::Loss {
-                    stage: GuestLossStage::Capture,
-                    reason: LossReason::Capacity,
-                    records,
-                    bytes: records * 10,
-                    tail,
-                },
-            )
-        };
-        let other = received(
-            3,
-            RecordBody::Loss {
-                stage: GuestLossStage::Pipe,
-                reason: LossReason::Truncated,
-                records: 1,
-                bytes: 4096,
-                tail: TailState::Known,
-            },
-        );
-        let records = [
-            loss(1, 5, TailState::Known),
-            loss(2, 7, TailState::Unknown),
-            other,
-        ];
-        let summary = TelemetrySummary::of(&records);
-        assert_eq!(summary.guest_losses.len(), 2);
-        let capture = summary.guest_losses[0];
-        assert_eq!((capture.records, capture.bytes), (12, 120));
-        assert!(capture.tail_unknown);
-        assert_eq!(summary.guest_records_lost(), 13);
     }
 
     #[test]

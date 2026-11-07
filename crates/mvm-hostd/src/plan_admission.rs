@@ -1873,24 +1873,6 @@ pub fn apply_admitted_grants_or_undo_launch(
     )
 }
 
-/// Share admitted-grants policy with an original-owner rollback operation.
-pub fn apply_admitted_grants_with_owned_rollback(
-    backend: &AnyBackend,
-    vm_id: &VmId,
-    admitted: &AdmittedPlan,
-    emitter: Option<&crate::audit::emitter::AuditEmitter>,
-    rollback: impl FnOnce() -> Result<()>,
-) -> Result<EnforcedGrants> {
-    apply_admitted_grants_with_rollback(
-        backend,
-        vm_id,
-        admitted,
-        emitter,
-        rollback,
-        FailureAuditPolicy::OwnedAfterConfirmedRollback,
-    )
-}
-
 fn apply_admitted_grants_with_rollback(
     backend: &AnyBackend,
     vm_id: &VmId,
@@ -2296,8 +2278,8 @@ mod admitted_environment_tests {
     }
 
     /// A different kernel than the plan pinned is refused: same plan, same
-    /// image, a kernel swapped underneath — the substitution that used to be
-    /// invisible because nothing in the plan described the environment.
+    /// image, a kernel swapped underneath — a substitution that would be
+    /// invisible if nothing in the plan described the environment.
     #[test]
     fn substituted_kernel_is_refused() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3793,6 +3775,36 @@ mod tests {
         let other = r#"{"some-other-workload":{"epoch":1,"quarantined":true}}"#;
         admit_with_host_interface_files(&[("workloads.json", other)])
             .expect("quarantining another workload must not block this one");
+    }
+
+    #[test]
+    fn host_interface_refuses_a_plan_from_before_a_replacement() {
+        // The ledger says epoch 2; a plan synthesized before the replacement
+        // (or issued by a control plane that never saw it) still carries 1.
+        let (_env, home) = host_with_ceiling(Default::default());
+        let hi = home.path().join("host-interface");
+        std::fs::create_dir_all(&hi).unwrap();
+        std::fs::write(
+            hi.join("workloads.json"),
+            r#"{"vm-epoch":{"epoch":2,"quarantined":false}}"#,
+        )
+        .unwrap();
+        let mut stale = synthesize_plan(&fixture_input("vm-epoch")).unwrap();
+        assert_eq!(
+            stale.execution_epoch, 2,
+            "synthesis reads the current epoch"
+        );
+        stale.execution_epoch = 1;
+        let err = host_gates::admit_host_interface(&stale)
+            .expect_err("a plan at an older epoch must not admit");
+        assert!(err.to_string().contains("stale execution epoch"), "{err}");
+        stale.execution_epoch = 2;
+        host_gates::admit_host_interface(&stale).expect("the current epoch admits");
+        stale.execution_epoch = 3;
+        assert!(
+            host_gates::admit_host_interface(&stale).is_err(),
+            "an epoch the host never issued is refused too"
+        );
     }
 
     #[test]

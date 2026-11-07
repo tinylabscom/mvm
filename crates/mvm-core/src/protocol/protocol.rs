@@ -6,9 +6,6 @@ use serde::{Deserialize, Serialize};
 use crate::instance::VolumeAttach;
 use crate::tenant::TenantNet;
 
-/// Default Unix domain socket path for hostd.
-pub const HOSTD_SOCKET_PATH: &str = "/run/mvm/hostd.sock";
-
 /// Maximum frame size for hostd IPC (1 MiB).
 #[cfg(feature = "hostd-transport")]
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
@@ -322,15 +319,6 @@ pub async fn send_response<W: tokio::io::AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     let data = serde_json::to_vec(resp).with_context(|| "Failed to serialize response")?;
     write_frame(writer, &data).await
-}
-
-/// Read and deserialize a response.
-#[cfg(feature = "hostd-transport")]
-pub async fn recv_response<R: tokio::io::AsyncReadExt + Unpin>(
-    reader: &mut R,
-) -> Result<HostdResponse> {
-    let data = read_frame(reader).await?;
-    serde_json::from_slice(&data).with_context(|| "Failed to deserialize response")
 }
 
 // ============================================================================
@@ -909,11 +897,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_socket_path_constant() {
-        assert_eq!(HOSTD_SOCKET_PATH, "/run/mvm/hostd.sock");
-    }
-
     #[cfg(feature = "hostd-transport")]
     #[tokio::test]
     async fn test_frame_roundtrip() {
@@ -936,17 +919,5 @@ mod tests {
         let mut cursor = std::io::Cursor::new(buf);
         let parsed = recv_request(&mut cursor).await.unwrap();
         assert!(matches!(parsed, HostdRequest::Ping));
-    }
-
-    #[cfg(feature = "hostd-transport")]
-    #[tokio::test]
-    async fn test_response_send_recv_roundtrip() {
-        let resp = HostdResponse::Ok;
-        let mut buf = Vec::new();
-        send_response(&mut buf, &resp).await.unwrap();
-
-        let mut cursor = std::io::Cursor::new(buf);
-        let parsed = recv_response(&mut cursor).await.unwrap();
-        assert!(matches!(parsed, HostdResponse::Ok));
     }
 }

@@ -66,9 +66,7 @@ pub fn template_delete_slot(slot_hash: &str, force: bool) -> Result<()> {
 /// `~/.mvm/templates/`. Independent of the filesystem so it is
 /// straightforwardly unit-testable.
 ///
-/// Anything else in that directory is not a slot. It used to be sorted into a
-/// second "name-keyed" bucket that a lister exposed; there are no name-keyed
-/// slots any more, so a non-hash entry is simply skipped.
+/// Anything else in that directory is not a slot. There are no name-keyed slots, so a non-hash entry is simply skipped.
 fn slot_hash_dirnames<I>(entries: I) -> Vec<String>
 where
     I: IntoIterator<Item = String>,

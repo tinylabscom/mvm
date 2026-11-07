@@ -2,7 +2,7 @@
 //!
 //! Submodules split by concern; every item keeps its original visibility so
 //! `crate::microvm::<name>` (and `mvm_runtime::microvm::<name>` for external
-//! crates) resolves identically to before the split.
+//! crates) resolves identically.
 
 pub(crate) mod activation;
 mod boot_config;

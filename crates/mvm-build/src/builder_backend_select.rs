@@ -387,20 +387,6 @@ pub fn try_resolve_builder_backend_for(
     }
 }
 
-/// Builder driver for the Stage 0 bootstrap.
-///
-/// Stage 0 is implemented for libkrun and QEMU; hvf and Firecracker
-/// Stage 0 are still fail-closed gaps. So this dispatch deliberately differs
-/// from [`try_resolve_builder_backend`]: an explicit `qemu` choice uses QEMU, but
-/// everything else — including the hvf auto-detect default on macOS-26+ —
-/// falls back to libkrun, preserving the "Stage 0 is libkrun even on
-/// hvf-default hosts" invariant rather than hitting the gap.
-/// `verbose` streams the libkrun console; the QEMU path always logs to
-/// `console.log`.
-pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
-    resolve_stage0_backend_for_choice(resolve_choice(None), verbose)
-}
-
 /// Constructor for a driver-backed Stage 0 bootstrapper, registered by the CLI
 /// for the same reason [`HvfBuilderCtor`] is: `mvm-build` sits below the crate
 /// that owns the drivers, so it cannot name them.
@@ -933,8 +919,8 @@ mod tests {
         // Typo / removed backend / accidental value: log a warning
         // and fall through to auto-detect (the caller's job).
         //
-        // This used to use "firecracker" as its example of an unrecognised
-        // value, which stopped being one when the Firecracker builder landed.
+        // "firecracker" is a recognised builder, so the unrecognised value must
+        // be something no backend will ever be named.
         with_env(Some("not-a-vmm"), || {
             assert_eq!(resolve_env_override(), None);
         });
