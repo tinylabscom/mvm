@@ -502,7 +502,6 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_AUDIT_WITNESS` | live-read | `crates/mvm-hostd/src/audit/witness.rs:367` | 2 | yes | yes |
 | `MVM_AUTO_DEV` | live-read | `crates/mvm-vmm/src/host/linux_env.rs:99` | 1 | NO | - |
 | `MVM_AUX_BIN_DIR` | live-read | `crates/mvm-vmm/src/host/aux_bin.rs:779` | 1 | NO | - |
-| `MVM_BACKEND` | live-read | `crates/mvm-cli/src/commands/vm/run_policy.rs:152` | 2 | NO | - |
 | `MVM_BASE_CONTRACT_TEST_CHILD` | live-read | `crates/mvm-cli/src/test_boot_payload.rs:12` | 1 | NO | - |
 | `MVM_BDD_ALLOWED_SKIPS` | test-only | `crates/mvm-conformance/tests/conformance.rs:415` | 0 | NO | yes |
 | `MVM_BDD_BUILD_MODE` | test-only | `crates/mvm-conformance/tests/steps/sdk.rs:243` | 0 | NO | yes |

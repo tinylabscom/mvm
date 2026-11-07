@@ -1669,7 +1669,6 @@ mod tests {
     fn select_exec_backend_none_with_no_env_falls_to_auto_detect() {
         let mut env = TestEnv::new();
         env.remove("MVM_HYPERVISOR");
-        env.remove("MVM_BACKEND");
         let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
         let backend =
             select_exec_backend(false, &deny_all, None).expect("auto-detect always resolves");
@@ -1682,7 +1681,6 @@ mod tests {
     #[test]
     fn select_exec_backend_requested_flag_beats_conflicting_env() {
         let mut env = TestEnv::new();
-        env.remove("MVM_BACKEND");
         env.set("MVM_HYPERVISOR", "qemu");
         let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
         let backend = select_exec_backend(false, &deny_all, Some("libkrun"))
