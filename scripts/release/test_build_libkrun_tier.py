@@ -125,6 +125,30 @@ class BuildLibkrunTierTests(unittest.TestCase):
         added_lines = [line for line in body.splitlines() if line.startswith("+")]
         self.assertEqual(len(added_lines), int(declared.strip()))
 
+    def test_upstream_cache_is_verified_before_adoption_and_never_holds_the_supervisor(self):
+        source = SCRIPT.read_text()
+        restore = source.split("restore_upstream_cache() {", 1)[1].split("\n}\n", 1)[0]
+        for check in ('"$(pins_record)"', "shasum -a 256 -c", "find . -type f | sort"):
+            self.assertIn(check, restore)
+        # Adoption happens only after every check, and the supervisor is built
+        # from this tree after the cache decision, never restored from it.
+        self.assertLess(restore.index("shasum -a 256 -c"), restore.index("cp -a"))
+        self.assertGreater(
+            source.index("cargo build --release"), source.index("export_upstream_cache \"$upstream_cache\"")
+        )
+        self.assertNotIn("mvm-libkrun-supervisor", restore)
+
+    def test_cached_kernel_tarball_is_checked_against_the_pin(self):
+        source = SCRIPT.read_text()
+        self.assertLess(
+            source.index('cp "$cached_kernel" "$kernel_tarball"'),
+            source.index('"$actual_kernel_sha256" != "$kernel_sha256"'),
+        )
+        self.assertLess(
+            source.index('"$actual_kernel_sha256" != "$kernel_sha256"'),
+            source.index('cp "$kernel_tarball" "$cached_kernel"'),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

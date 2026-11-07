@@ -2152,8 +2152,18 @@ mod tests {
     fn trusted_main_warms_workspace_and_nix_outputs_for_validation() {
         let cache_action = workflow("../actions/rust-cache/action.yml");
         assert!(cache_action.contains("prefix-key: v1-rust"));
-        assert!(cache_action.contains("cache-workspace-crates: \"true\""));
-        assert!(cache_action.contains("cache-bin: \"true\""));
+        let workspace_input = cache_action
+            .split_once("  workspace-crates:\n")
+            .unwrap()
+            .1
+            .split_once("\n  cache-bin:\n")
+            .unwrap()
+            .0;
+        let bin_input = cache_action.split_once("  cache-bin:\n").unwrap().1;
+        assert!(workspace_input.contains("default: \"true\""));
+        assert!(bin_input.contains("default: \"true\""));
+        assert!(cache_action.contains("cache-workspace-crates: ${{ inputs.workspace-crates }}"));
+        assert!(cache_action.contains("cache-bin: ${{ inputs.cache-bin }}"));
         assert!(cache_action.contains("save-if: ${{ inputs.save }}"));
 
         let warm = workflow("cache-warm.yml");

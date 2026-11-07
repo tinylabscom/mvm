@@ -51,6 +51,18 @@ jobs:
       # action installs zig, cargo-zigbuild and all four targets.
       - uses: ./.github/actions/install-zigbuild
 
+      # Manual rehearsals only: when release.yml calls this workflow for a tag
+      # the event is the tag push, so the signed archive builds from source.
+      # Dependency units only; workspace crate outputs are not cached.
+      - name: Restore dependency build cache (rehearsal only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: ./.github/actions/rust-cache
+        with:
+          key: guest-bins
+          save: ${{ github.event_name == 'workflow_dispatch' }}
+          workspace-crates: "false"
+          cache-bin: "false"
+
       - name: Build the guest-bins artifact
         run: cargo run --locked -p mvmctl -- dev guest-bins --out dist
 
