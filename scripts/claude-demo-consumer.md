@@ -32,7 +32,7 @@ Obtain these nonsecret assertions independently from the public release:
   `--runtime-version`, `--runtime-archive-sha256`,
   `--runtime-overlay-roothash`.
 
-The genuine public `agent/claude@2.0.0` archive must carry a signed environment
+The genuine public `agent/claude@2.0.1` archive must carry a signed environment
 with its normal default entrypoint, exactly the required `ANTHROPIC_API_KEY`
 slot, and this policy:
 
@@ -76,7 +76,7 @@ mvmctl env caller-identity show
 mvmctl secret ls
 mvmctl search agent/claude
 mvmctl pull agent/claude
-mvmctl pack verify agent/claude@2.0.0 --json
+mvmctl pack verify agent/claude@2.0.1 --json
 printf '%s\n' 'tell me a joke' | mvmctl run agent/claude
 ```
 

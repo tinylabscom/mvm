@@ -82,7 +82,7 @@ class ConsumerTests(unittest.TestCase):
                              "verdict": "VERIFIED", "late_entries": 0, "seals": [{}]}
         self.info = {"bundle": {"source": self.args.archive_url}, "bundle_manifest": {
             "members": [{"class": "environment",
-                         "pack": {"name": "agent/claude", "version": "2.0.0"},
+                         "pack": {"name": "agent/claude", "version": "2.0.1"},
                          "target": "aarch64-linux", "entrypoint": {"argv": ["/etc/mvm/entrypoint"]},
                          "policy": {"allow_hosts": ["api.anthropic.com:443"],
                                     "request_budget": demo.BUDGET},
