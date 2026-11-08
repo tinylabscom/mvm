@@ -141,7 +141,7 @@ fn follow_download(
             .filter(|d| !d.is_zero())
             .ok_or_else(|| anyhow::anyhow!("download deadline exceeded at hop {hop}"))?;
         let shown = redacted(&current);
-        let mut resp = send(&current, hop, remaining)
+        let resp = send(&current, hop, remaining)
             .map_err(|e| anyhow::anyhow!("download failed at hop {hop} ({shown}): {e}"))?;
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
             if hop == MAX_REDIRECT_HOPS {
@@ -165,12 +165,35 @@ fn follow_download(
         }
         let mut file = std::fs::File::create(dest)
             .with_context(|| format!("Failed to create file: {}", dest.display()))?;
-        std::io::copy(&mut resp.body, &mut file).map_err(|e| {
+        let mut body = DeadlineReader {
+            inner: resp.body,
+            deadline,
+            now: Instant::now,
+        };
+        std::io::copy(&mut body, &mut file).map_err(|e| {
             anyhow::anyhow!("failed to stream download from hop {hop} ({shown}): {e}")
         })?;
         return Ok(());
     }
     unreachable!("the loop returns or bails by the last hop")
+}
+
+/// Ends the body with `TimedOut` once the one download deadline has passed,
+/// so a slow-drip body cannot outlive it (the client's own timeout stops at
+/// the response head).
+struct DeadlineReader<R, C: Fn() -> Instant> {
+    inner: R,
+    deadline: Instant,
+    now: C,
+}
+
+impl<R: Read, C: Fn() -> Instant> Read for DeadlineReader<R, C> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if (self.now)() > self.deadline {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.inner.read(buf)
+    }
 }
 
 /// scheme+host+path only: a signed redirect target's query is a bearer token.
@@ -460,5 +483,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("byte budget"));
+    }
+
+    #[test]
+    fn a_body_trickling_past_the_deadline_is_refused() {
+        let base = Instant::now();
+        let ticks = std::cell::Cell::new(0u32);
+        let clock = || {
+            ticks.set(ticks.get() + 1);
+            base + Duration::from_secs(u64::from(ticks.get()))
+        };
+        let mut r = DeadlineReader {
+            inner: std::io::repeat(b'x'),
+            deadline: base + Duration::from_secs(3),
+            now: clock,
+        };
+        let mut buf = [0u8; 1];
+        assert_eq!(r.read(&mut buf).unwrap(), 1);
+        assert_eq!(r.read(&mut buf).unwrap(), 1);
+        assert_eq!(r.read(&mut buf).unwrap(), 1);
+        let err = r.read(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }
 }
