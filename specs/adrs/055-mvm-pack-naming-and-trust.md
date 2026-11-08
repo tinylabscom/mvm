@@ -30,8 +30,18 @@ identity
 under the GitHub OIDC issuer. It has a separate private cache and checkpoint
 from operator-configured feeds. A fresh signed document is required at
 installation and every execution; absence, expiry, invalid signature,
-revocation, and rollback fail closed. The first release imports the signed
-document explicitly rather than silently fetching it. Rotation of this
+revocation, and rollback fail closed. The client refreshes the official
+document on demand, at `pull` and before `run` resolves an installed
+application, only when the cached feed is absent, expired or within 12 hours
+of its signed `not_after`; launch admission never touches the network. A fetch
+adds no authority: the bytes are verified exactly as an explicit import is,
+a failed refresh proceeds only on a still-valid cache, and the offline import
+command remains. The built-in feed also covers an application whose
+authenticated signer is the built-in publish identity under the built-in
+publisher policy, selected by that signer and not by namespace pattern, so no
+wildcard conveys official status. An operator-configured feed is checked in
+addition, and an operator publisher policy replaces built-in trust wholesale.
+Rotation of this
 identity requires a deliberate client trust update. The official feed's signed
 validity interval may be at most 30 days; the authenticated `not_after` remains
 the exact expiration boundary. Operator-configured feeds retain their 48-hour
@@ -124,5 +134,6 @@ verified rotation or re-publication. A new-identity publish must not replace
 the legacy registry before compatible client trust ships. After the cutoff,
 legacy-only bundles fail built-in verification unless re-signed under the new
 identity; explicit operator trust remains a separate decision. Official
-`mvm/` publication also requires revocation enforcement. ADR-054's pack
+`mvm/` publication, and any application signed by the built-in publisher,
+also requires revocation enforcement. ADR-054's pack
 producer is the renamed repository; its Linux-layer boundary is unchanged.

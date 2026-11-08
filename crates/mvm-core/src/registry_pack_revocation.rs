@@ -81,6 +81,11 @@ impl VerifiedRegistryPackRevocations {
         &self.checkpoint
     }
 
+    /// The instant after which this document no longer establishes trust.
+    pub fn not_after(&self) -> DateTime<Utc> {
+        self.document.not_after
+    }
+
     /// Refuse a revoked signing identity or exact manifest digest.
     ///
     /// The signer and digest come from the authenticated pack, never from

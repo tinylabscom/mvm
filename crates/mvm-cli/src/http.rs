@@ -86,8 +86,19 @@ const BOUNDED_DEADLINE: Duration = Duration::from_secs(600);
 /// policy. One deadline and one byte budget span every hop; the final bytes
 /// are still held to the caller's digest by the caller.
 pub(crate) fn download_file_bounded(url: &str, dest: &Path, limit: u64) -> Result<()> {
+    download_file_bounded_within(url, dest, limit, BOUNDED_DEADLINE)
+}
+
+/// [`download_file_bounded`] with a caller-chosen total deadline across every
+/// hop and the body.
+pub(crate) fn download_file_bounded_within(
+    url: &str,
+    dest: &Path,
+    limit: u64,
+    total: Duration,
+) -> Result<()> {
     let start = Url::parse(url).map_err(|_| anyhow::anyhow!("download URL is not valid"))?;
-    let deadline = Instant::now() + BOUNDED_DEADLINE;
+    let deadline = Instant::now() + total;
     let mut send = |target: &Url, hop: usize, remaining: Duration| -> Result<Hop> {
         let mut builder = mvm_http::blocking::Client::builder()
             .user_agent(concat!("mvmctl/", env!("CARGO_PKG_VERSION")))

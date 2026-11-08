@@ -211,7 +211,10 @@ pub(in crate::commands) fn apply_application_source(args: &mut RunArgs) -> Resul
     settle(
         args,
         |reference| classify_pinned_registry_reference(reference, &store),
-        |reference| resolve_installed_application(reference, &store, &policy, &trust),
+        |reference| {
+            crate::official_revocations::ensure_official_feed_fresh();
+            resolve_installed_application(reference, &store, &policy, &trust)
+        },
     )
 }
 
