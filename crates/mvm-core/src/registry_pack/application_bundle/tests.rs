@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(unix)]
 use crate::plan::bundle::BundleRegistry;
 use crate::plan::bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, FsTrustStore,
