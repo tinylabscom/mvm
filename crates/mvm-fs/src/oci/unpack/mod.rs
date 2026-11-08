@@ -785,6 +785,15 @@ fn unpack_layer_inner<R: Read>(
             continue;
         }
 
+        // Nix tarballs may list "./" as their root. The caller already owns
+        // output_root; do not resolve or rewrite it as a layer entry.
+        if (raw_path == b"." || raw_path == b"./")
+            && entry.header().entry_type().is_dir()
+            && entry.size() == 0
+        {
+            continue;
+        }
+
         // Safety check 3 — max length.
         if raw_path.len() > options.max_path_len {
             report.refused.push(RefusedEntry {
@@ -1160,6 +1169,37 @@ mod tests {
             &HashSet::new(),
             folding,
         )
+    }
+
+    #[test]
+    fn tar_root_directory_is_not_an_entry_or_a_root_permission_change() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempDir::new().unwrap();
+        let root_mode = std::fs::metadata(root.path()).unwrap().permissions().mode();
+        let archive = build_tar(|tar| {
+            add_dir(tar, "./");
+            add_file(tar, "usr/bin/sh", b"busybox");
+        });
+        let report = unpack_layer(
+            Cursor::new(archive),
+            root.path(),
+            &UnpackOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert!(report.refused.is_empty(), "{:?}", report.refused);
+        assert!(!report.paths_written.contains(Path::new(".")));
+        assert_eq!(report.files_written, 1);
+        assert_eq!(
+            std::fs::read(root.path().join("usr/bin/sh")).unwrap(),
+            b"busybox"
+        );
+        assert_eq!(
+            std::fs::metadata(root.path()).unwrap().permissions().mode(),
+            root_mode,
+            "the layer must not change its caller-owned root"
+        );
     }
 
     /// The fetcher's size cap counts bytes off the wire, so a compressed
