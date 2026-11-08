@@ -2469,7 +2469,9 @@ optional operator-feed behavior. Their bundles must already have an
 independently enrolled key in `$MVM_HOME/trusted-publishers/`; naming a key in a
 descriptor never enrolls it. Pull accepts canonical HTTPS or digest-pinned OCI
 sources, limits acquisition to the descriptor's signed byte size and at most
-4 GiB, and checks the exact archive SHA-256, independent bundle signature,
+4 GiB, following at most five HTTPS redirects (never to HTTP, an IP literal,
+localhost, a URL with userinfo or another port, or a host that resolves to a
+non-public address) under the same byte and time budget, and checks the exact archive SHA-256, independent bundle signature,
 asserted key ID, and descriptor-to-bundle architecture match. OCI sources also
 require the production registry allowlist, including when reusing a cached archive.
 Cached archives are reverified and extracted files are rebuilt from verified
