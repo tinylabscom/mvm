@@ -11,9 +11,9 @@ name: Claim witness freshness
 # until 2026-07-21. Five weeks in which every claim kept a green ledger entry
 # with no evidence behind it, and no watcher could have said so.
 #
-# This covers the second. It runs on its own schedule — deliberately not
-# `workflow_run`, since the whole point is to notice absence — and asks
-# whether each claim-bearing scheduled lane ran at all.
+# This checks scheduled cadence independently of `workflow_run`, and also
+# verifies that a failed scheduled lane has a newer healthy default-branch
+# recovery before clearing its verdict.
 #
 # It never blocks a merge. These lanes do not run on pull requests, so there
 # is nothing to block; the tracking issue is the enforcement surface, the
@@ -99,12 +99,12 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           {
-            echo "A workflow that backs one or more numbered security claims has not run"
-            echo "recently enough for its own schedule."
+            echo "A workflow that backs one or more numbered security claims lacks"
+            echo "healthy evidence within its scheduled cadence."
             echo
-            echo "This is the failure mode a red-lane watcher cannot see: nothing failed,"
-            echo "because nothing ran. The claims below currently have a green ledger entry"
-            echo "and no evidence behind it."
+            echo "The independent check detects missed scheduled runs, failed runs with no"
+            echo "newer trusted recovery, and missing watcher delivery. A green ledger"
+            echo "entry alone does not establish live evidence for these claims."
             echo
             echo '```'
             cat freshness.log
