@@ -43,7 +43,9 @@ use mvm_hostd::audit::{
     session::{EventFilter, workload_events},
 };
 use mvm_hostd::containment::{quarantine_workload, replace_workload};
-use mvm_hostd::mailbox_service::{MailboxLimits, MailboxPolicy, MailboxService, Refusal, send};
+use mvm_hostd::mailbox_service::{
+    MailboxLimits, MailboxPolicy, MailboxService, Refusal, send, send_on,
+};
 use mvm_hostd::supervisor::verify_audit_chain;
 
 const NOW: u64 = 1_000;
@@ -553,4 +555,55 @@ fn the_service_queue_is_bounded_and_refuses_synchronously() {
     );
     // Draining one slot lets the refused message through (it was never consumed as a replay).
     send(&channel.socket, &capability, &envelope).expect("space after a receive");
+}
+
+#[test]
+fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let send_ops = [MailboxOperation::Send, MailboxOperation::Receive];
+    let (node, channel) = channel_with_one_node();
+    let capability = sign_capability(grant(&send_ops), &channel.authority_key).unwrap();
+    let mux = node.home.path().join("fc.vsock");
+    let listener = UnixListener::bind(&mux).unwrap();
+    // A Firecracker-style mux: the guest end answers CONNECT, then sends.
+    let envelopes: Vec<_> = (1..=LIMITS.max_depth as u8 + 1)
+        .map(|id| {
+            seal_envelope(
+                SealRequest {
+                    routing: routing(),
+                    header: header(1, id),
+                    plaintext: b"hello",
+                },
+                &channel.encryption_key,
+                &channel.sender_key,
+            )
+            .unwrap()
+        })
+        .collect();
+    let guest = std::thread::spawn(move || {
+        let mut verdicts = Vec::new();
+        for envelope in &envelopes {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line.trim(), "CONNECT 5257");
+            (&stream).write_all(b"OK 1\n").unwrap();
+            verdicts.push(send_on(stream, &capability, envelope));
+        }
+        verdicts
+    });
+    let absent = node.home.path().join("absent.sock");
+    for _ in 0..=LIMITS.max_depth {
+        channel.service.serve_guest(&absent, &mux).unwrap();
+    }
+    let verdicts = guest.join().unwrap();
+    assert!(verdicts[..LIMITS.max_depth].iter().all(Result::is_ok));
+    assert_eq!(
+        verdicts[LIMITS.max_depth],
+        Err(Refusal::QueueFull(LIMITS.max_depth))
+    );
 }
