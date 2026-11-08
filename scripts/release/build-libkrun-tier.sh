@@ -38,6 +38,9 @@ libkrunfw_abi="5"
 kernel_version="linux-6.12.115"
 kernel_sha256="0ec90fe4b20422b1b664b77e6d2dde22b40bd41e7eb2cad8ac8739a4749cb1bb"
 deployment_target="13.0"
+# Exported at top level, not inside build_upstream: a restored upstream cache skips
+# that function, and the supervisor built below must still link at this target.
+export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 
 scratch_root="${RUNNER_TEMP:?RUNNER_TEMP is required}/mvm-libkrun-tier"
 prefix="$scratch_root/prefix"
@@ -150,7 +153,6 @@ if [[ -n "$kernel_cache" && ! -f "$cached_kernel" ]]; then
   mkdir -p "$kernel_cache" && cp "$kernel_tarball" "$cached_kernel"
 fi
 
-export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 kernel_hostcc="$(xcrun --find clang)"
 macos_sdk="$(xcrun --show-sdk-path)"
 

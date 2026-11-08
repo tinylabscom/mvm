@@ -147,6 +147,16 @@ class BuildLibkrunTierTests(unittest.TestCase):
         self.assertIn('cp "$supervisor_target/$build_target/release/mvm-libkrun-supervisor"', source)
         self.assertNotIn('cp "target/$build_target/release/mvm-libkrun-supervisor"', source)
 
+    def test_the_deployment_target_is_exported_outside_the_cache_skipped_function(self):
+        # A restored upstream cache skips build_upstream(); the supervisor built
+        # afterwards must still see MACOSX_DEPLOYMENT_TARGET or it links at the
+        # toolchain default (11.0) and the tier's own minos check refuses it.
+        source = SCRIPT.read_text()
+        export = 'export MACOSX_DEPLOYMENT_TARGET="$deployment_target"'
+        self.assertEqual(source.count(export), 1)
+        self.assertLess(source.index(export), source.index("build_upstream() {"))
+        self.assertLess(source.index(export), source.index("cargo build --release"))
+
     def test_cached_kernel_tarball_is_checked_against_the_pin(self):
         source = SCRIPT.read_text()
         self.assertLess(
