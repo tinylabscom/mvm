@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(unix)]
 use crate::plan::bundle::BundleRegistry;
 use crate::plan::bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, FsTrustStore,
@@ -12,6 +11,8 @@ use crate::registry_pack::{
 use crate::registry_pack_store::application_test_feed;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
+
+mod builtin_author;
 
 fn fixture() -> (tempfile::TempDir, Vec<u8>, FsTrustStore, String) {
     use rand::Rng;

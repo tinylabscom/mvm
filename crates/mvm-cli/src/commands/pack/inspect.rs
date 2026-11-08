@@ -276,7 +276,11 @@ fn inspect_application(
     use mvm_core::registry_pack::application_bundle::verify_application_bundle;
 
     let registry = BundleRegistry::default_path()?;
-    let trust = FsTrustStore::default_path()?;
+    let enrolled = FsTrustStore::default_path()?;
+    let loaded = mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+    )?;
+    let trust = mvm_core::registry_pack::BuiltinAuthorTrust::for_policy(&enrolled, &loaded);
     let archive = registry.archive_path(
         application
             .manifest()

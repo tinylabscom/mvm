@@ -73,7 +73,25 @@ the identity in existing signature bundles. On 2026-10-07 the owner approved
 built-in trust in both exact workflow identities for legacy `agent/` and
 `runtime/` references. The former identity expires at 2026-11-06 00:00 UTC;
 verification after that instant accepts only the renamed workflow identity.
-An operator policy file still replaces built-in trust wholesale. This
+An operator policy file still replaces built-in trust wholesale. The client
+release also pins the official bundle-author Ed25519 public keys
+(`OFFICIAL_BUNDLE_AUTHOR_KEYS` in `mvm-core`). Under the built-in publisher
+policy an application bundle whose signed `bundle.key_id` equals a pinned key
+verifies against it with no `mvmctl trust add`; the key set is chosen by the
+client release, not by the descriptor, so a descriptor naming an unpinned
+`key_id` is still refused and the author key remains a second root independent
+of the keyless publish identity. Operator enrollment stays additive, an
+operator policy file drops the pinned author keys with the rest of built-in
+trust, and a host-signed bundle is never in the list. A compromised author key
+is disabled by a client release that lists its `key_id` in
+`REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS` (empty today); that check runs first,
+so a hand-enrolled copy of a revoked pinned key is refused too. The pinned keys
+apply only to an application bundle: sites that do not already know the bundle
+is an application (admission, launch, canonical-plan and installed-bundle
+verification) ask `trust_for_installed_bundle`, which grants them only when the
+bundle digest is the archive of an installed application whose descriptor
+authenticates under the built-in policy and is not revoked, with the digest computed from the archive bytes being verified, and otherwise returns the raw store. `xtask check-bundle-trust-sites` fails when a production file builds the raw store outside an allow-list, or when a listed application path stops composing.
+This
 transition does not grant `mvm/` trust without revocation enforcement. A URL
 redirect is not signing authority.
 

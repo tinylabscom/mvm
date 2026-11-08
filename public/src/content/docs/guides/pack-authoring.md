@@ -308,7 +308,7 @@ admission require a fresh signed feed in the private revocation cache and
 reject a revoked signer or manifest digest. A missing, expired, corrupt, or
 rolled-back feed fails closed. Built-image packs outside `mvm/` require this independently
 anchored operator trust and a fresh feed at pull and every installed-pack reopen.
-Removing the operator trust file refuses those packs. Legacy policy-only and source-image packs retain
+Removing the operator trust file refuses those packs. The bundle-author key of an official application pack is pinned in the client release and needs no `mvmctl trust add`; with an operator publisher policy, or for any other author, enrol the key explicitly. Legacy policy-only and source-image packs retain
 the legacy publisher-only behavior when no trust file is configured. After
 obtaining the signed JSON document and its
 signature bundle through an operator-controlled channel, run

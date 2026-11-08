@@ -1044,6 +1044,12 @@ fn validate_registry_pack_manifest(
 
 pub mod application;
 pub mod application_bundle;
+mod builtin_author_keys;
+#[cfg(any(test, feature = "test-support"))]
+pub use builtin_author_keys::register_test_author_key;
+pub use builtin_author_keys::{
+    BuiltinAuthorTrust, OFFICIAL_BUNDLE_AUTHOR_KEYS, REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS,
+};
 mod dispatch;
 pub use dispatch::{
     AuthenticatedRegistryManifest, VerifiedRegistryApplication, VerifiedRegistryManifest,

@@ -227,6 +227,10 @@ pub(crate) const GATES: &[Gate] = &[
         crate::check_guest_binary_lists::run,
     ),
     (
+        "check-bundle-trust-sites",
+        crate::check_bundle_trust_sites::run,
+    ),
+    (
         "check-builder-shell-job-sites",
         crate::check_builder_shell_job_sites::run,
     ),
