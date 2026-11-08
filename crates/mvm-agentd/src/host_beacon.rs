@@ -232,6 +232,18 @@ mod tests {
         use mvm_core::protocol::telemetry::{MAX_RECORD_BYTES, RecordBody, TelemetryRecord};
         use std::sync::Arc;
 
+        // `with_default` is thread-local but tracing's callsite interest cache
+        // is process-wide. While only one dispatcher exists, interest is
+        // rebuilt against the calling thread's default alone, so a parallel
+        // test reaching the `warn!` callsite first can cache "never" and the
+        // event is dropped. A second live dispatcher forces tracing to
+        // consult every dispatcher, which this scope's subscriber then wins.
+        static SECOND_DISPATCHER: std::sync::LazyLock<tracing::Dispatch> =
+            std::sync::LazyLock::new(|| {
+                tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default())
+            });
+        std::sync::LazyLock::force(&SECOND_DISPATCHER);
+
         let outbox = Arc::new(Outbox::new(16, 16 * MAX_RECORD_BYTES).unwrap());
         let state = Arc::new(CaptureState::new(outbox.clone()).unwrap());
         tracing::subscriber::with_default(AgentSubscriber::new(Arc::clone(&state)), || {
