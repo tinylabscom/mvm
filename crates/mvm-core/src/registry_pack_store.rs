@@ -99,7 +99,7 @@ pub fn check_registry_pack_revocations_if_configured(
 
 /// Applications never inherit the legacy policy-pack absent-feed fallback.
 pub(crate) fn check_application_revocations(
-    verified: &crate::registry_pack::VerifiedRegistryApplication,
+    verified: &impl AuthenticatedRegistryManifest,
 ) -> Result<(), RegistryPackStoreError> {
     let now = Utc::now();
     if verified.reference().namespace() == "mvm" {
@@ -123,7 +123,7 @@ pub(crate) fn check_application_revocations(
 }
 
 fn check_application_revocations_with<F>(
-    verified: &crate::registry_pack::VerifiedRegistryApplication,
+    verified: &impl AuthenticatedRegistryManifest,
     trust_path: &Path,
     now: DateTime<Utc>,
     load: F,
@@ -891,6 +891,13 @@ pub(crate) fn open_installed_registry_pack_with(
             }
             .into())
         }
+        VerifiedRegistryManifest::RuntimeLayer(layer) => {
+            Err(RegistryPackVerificationError::UnsupportedManifestSchema {
+                got: layer.manifest().schema_version,
+                expected: crate::registry_pack::REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
+            }
+            .into())
+        }
     }
 }
 
@@ -956,6 +963,12 @@ fn open_installed_registry_manifest_with_checks(
         }
         VerifiedRegistryManifest::Application(application) => {
             check_application(application)?;
+        }
+        VerifiedRegistryManifest::RuntimeLayer(_) => {
+            return Err(RegistryPackVerificationError::ManifestParse(
+                "runtime layer install requires verified archive custody".to_string(),
+            )
+            .into());
         }
     }
     Ok((installed, verified))

@@ -537,6 +537,9 @@ fn reopen_caller_image(
                     ));
                 }
             }
+            VerifiedRegistryManifest::RuntimeLayer(_) => {
+                anyhow::bail!("a runtime layer cannot be used as a caller boot image");
+            }
             VerifiedRegistryManifest::Application(_) => {
                 use mvm_core::plan::bundle::{
                     ArtifactRole, BundleRegistry, FsBundleResolver, FsTrustStore,

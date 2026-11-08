@@ -28,6 +28,8 @@
 //! string every language SDK reports for the same mistake.
 
 pub use mvm_contract::ir::PythonTool;
+/// Strict TOML authoring for the separate composable v2 contract.
+pub mod composable;
 pub use mvm_contract::pack_spec::{
     CopyOperation, DependencyFiles, PackIdentity, PackResources, PackSource, PackSpec,
     PackSpecError, PackSpecSchema, PackTarget, PackageRequest, PackageScope,

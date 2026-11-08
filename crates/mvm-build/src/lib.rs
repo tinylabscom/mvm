@@ -178,6 +178,9 @@ pub use mvm_builder_guest::rootfs_inject;
 pub mod run_image;
 #[cfg(unix)]
 pub mod runtime_identity;
+/// Strict staging of authenticated runtime pack layers before composition.
+#[cfg(unix)]
+pub mod runtime_layer;
 #[cfg(unix)]
 pub use mvm_builder_guest::seed_store_entries;
 #[cfg(unix)]

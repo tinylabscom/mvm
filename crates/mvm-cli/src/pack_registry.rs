@@ -510,6 +510,9 @@ fn pull_one(
             // authenticated bytes and digest for that later transaction.
             return Ok((VerifiedPull::Application(Box::new(application)), Vec::new()));
         }
+        VerifiedRegistryManifest::RuntimeLayer(_) => {
+            bail!("runtime layer acquisition requires verified archive custody");
+        }
         VerifiedRegistryManifest::Legacy(legacy) => legacy,
     };
     check_registry_pack_revocations_if_configured(&verified)?;

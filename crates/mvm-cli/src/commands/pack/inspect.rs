@@ -61,6 +61,9 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
         VerifiedRegistryManifest::Application(application) => {
             return inspect_application(&application, json, verify_only);
         }
+        VerifiedRegistryManifest::RuntimeLayer(_) => {
+            anyhow::bail!("runtime layer inspection requires verified archive custody");
+        }
     };
     let manifest = verified.manifest();
     let revocation_required = manifest.reference.namespace() == "mvm"

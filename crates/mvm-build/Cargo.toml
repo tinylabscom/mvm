@@ -109,6 +109,8 @@ required-features = ["manifest-verify"]
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# Exercise the authored v2 source-to-archive path against the real compositor.
+mvm-sdk = { workspace = true, features = ["compiler"] }
 # The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a
 # test that seeds a sidecar cache needs a real ELF object, not a stub.
 mvm-fs = { workspace = true, features = ["test-support"] }
