@@ -8,6 +8,7 @@
 
 use crate::CaptureError;
 use crate::report::{VerificationRecord, VerificationStatus};
+use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
 use std::path::{Path, PathBuf};
 
 /// A request to verify a captured workload by replaying a command.
@@ -198,10 +199,18 @@ impl BuilderJobOutcome {
     }
 }
 
+/// A library embedder's executable is not `mvmctl`, so the job is refused
+/// before a script or command exists.
+fn refuse_for_library_embedder(host: &HostProcess) -> Result<(), CaptureError> {
+    host.refuse_cli_spawn(CliSpawn::BuilderShellJob)
+        .map_err(|e| CaptureError::Unsupported(e.to_string()))
+}
+
 fn run_builder_shell_job(
     config: &BuilderVmConfig,
     script: &str,
 ) -> Result<BuilderJobOutcome, CaptureError> {
+    refuse_for_library_embedder(&HostProcess::current())?;
     let script_path = write_temp_script(script)?;
     let artifact_out = tempfile::tempdir()
         .map_err(|e| CaptureError::Io(PathBuf::from("<verify-artifacts>"), e))?
@@ -309,6 +318,14 @@ fn write_temp_script(script: &str) -> Result<PathBuf, CaptureError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_library_embedder_is_refused_the_shell_job_and_the_cli_is_not() {
+        let err = refuse_for_library_embedder(&HostProcess::undeclared().as_library_embedder())
+            .expect_err("embedder refused");
+        assert!(matches!(err, CaptureError::Unsupported(m) if m.contains("__builder-shell-job")));
+        assert!(refuse_for_library_embedder(&HostProcess::undeclared()).is_ok());
+    }
 
     #[test]
     fn record_only_verifier_records_command() {
