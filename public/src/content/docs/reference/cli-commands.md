@@ -2682,8 +2682,12 @@ independently signed MVM revocation feed is fresh. Other packs report
 `"not_established"`; an operator-configured feed cannot confer official status.
 Built-image packs outside `mvm/` require an operator-configured, independently
 signed fresh feed. Its JSON `revocation_scope` is `mvm_release_identity` for
-verified official packs and `operator_configured_only` otherwise. A signature
-proves identity and integrity, not safety.
+verified official packs and `operator_configured_only` otherwise. For an
+application signed by the built-in publish identity, the text output says so
+("signed by the built-in official publisher identity", which does not imply the
+`mvm/` namespace) and names the official signed feed that gates it, with its
+cache expiry when a verified copy exists. A signature proves identity and
+integrity, not safety.
 
 The workload pack commands `pack ls`, `pack rm`, and `pack update ns/name[@version]`
 use the signed registry-pack cache and lockfile. Existing `pack registry`
