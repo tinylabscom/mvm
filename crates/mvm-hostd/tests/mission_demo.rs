@@ -12,8 +12,9 @@
 //! opens it and enqueues it under a bounded queue; a refusal comes back to the
 //! sender as a typed reply.
 //!
-//! What is simulated, on purpose: there is no vsock guest service (the
-//! aircraft's queue is read by the test, not by a workload), no cross-host
+//! What is simulated, on purpose: no booted guest runs the mailbox
+//! client or reads the queue (the guest end is a test driving the same
+//! `send_frame` over a Firecracker-style mux), no cross-host
 //! Iroh or relay transport (both ends share this process's host), and the VMs
 //! (a launch is gated and audited, but nothing boots). Only the aircraft node
 //! runs a service. Run with `--nocapture` to read the timeline.
@@ -36,6 +37,7 @@ use mvm_core::host_interface::{
     local::LocalHostInterface,
     workload::WorkloadLedger,
 };
+use mvm_core::mailbox::frame::send_frame;
 use mvm_core::mailbox::{MailboxError, OpenContext, SealRequest, seal_envelope, sign_capability};
 use mvm_core::plan::ExecutionPlan;
 use mvm_hostd::audit::{
@@ -43,9 +45,7 @@ use mvm_hostd::audit::{
     session::{EventFilter, workload_events},
 };
 use mvm_hostd::containment::{quarantine_workload, replace_workload};
-use mvm_hostd::mailbox_service::{
-    MailboxLimits, MailboxPolicy, MailboxService, Refusal, send, send_on,
-};
+use mvm_hostd::mailbox_service::{MailboxLimits, MailboxPolicy, MailboxService, Refusal, send};
 use mvm_hostd::supervisor::verify_audit_chain;
 
 const NOW: u64 = 1_000;
@@ -592,7 +592,8 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
                 .unwrap();
             assert_eq!(line.trim(), "CONNECT 5257");
             (&stream).write_all(b"OK 1\n").unwrap();
-            verdicts.push(send_on(stream, &capability, envelope));
+            let mut stream = stream;
+            verdicts.push(send_frame(&mut stream, &capability, envelope));
         }
         verdicts
     });
@@ -606,4 +607,41 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
         verdicts[LIMITS.max_depth],
         Err(Refusal::QueueFull(LIMITS.max_depth))
     );
+}
+
+#[test]
+fn a_guest_without_the_send_operation_is_refused_across_the_port() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let (node, channel) = channel_with_one_node();
+    let capability =
+        sign_capability(grant(&[MailboxOperation::Receive]), &channel.authority_key).unwrap();
+    let envelope = seal_envelope(
+        SealRequest {
+            routing: routing(),
+            header: header(1, 1),
+            plaintext: b"hello",
+        },
+        &channel.encryption_key,
+        &channel.sender_key,
+    )
+    .unwrap();
+    let mux = node.home.path().join("fc.vsock");
+    let listener = UnixListener::bind(&mux).unwrap();
+    let guest = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        stream.write_all(b"OK 1\n").unwrap();
+        send_frame(&mut stream, &capability, &envelope)
+    });
+    channel
+        .service
+        .serve_guest(&node.home.path().join("absent.sock"), &mux)
+        .unwrap();
+    assert!(matches!(guest.join().unwrap(), Err(Refusal::Mailbox(_))));
+    assert!(channel.service.receive().is_none(), "nothing was queued");
 }
