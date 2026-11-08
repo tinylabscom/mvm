@@ -2,6 +2,36 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.27.0] — 2026-11-07
+
+Final release of the 0.27.0 line. It carries everything in rc.3 and rc.4 plus the changes below.
+
+### Added
+- **packs**: The official bundle-author key is pinned in the client, so official application packs verify without `trust add`; the pinned keys apply at every installed-application launch and admission site
+- **packs**: The official revocation feed is refreshed on demand and applied to applications signed by the built-in publisher
+
+### Changed
+- **cli**: Pack bundle downloads follow at most five HTTPS redirects (no IP-literal, localhost, userinfo or port-changing targets, public-address-only resolution after the first hop, one deadline and byte budget across hops); the general client and other fetches still never redirect
+- **examples**: The Claude application candidate and its demo scripts move to agent/claude@2.0.1
+
+### Documentation
+- Drop the removed pack compatibility commands from the CLI reference, tier manifest and surface inventory
+
+## [0.27.0] — 2026-11-07
+
+Final release of the 0.27.0 line. It carries everything in rc.3 and rc.4 plus the changes below.
+
+### Added
+- **packs**: The official bundle-author key is pinned in the client, so official application packs verify without `trust add`; the pinned keys apply at every installed-application launch and admission site
+- **packs**: The official revocation feed is refreshed on demand and applied to applications signed by the built-in publisher
+
+### Changed
+- **cli**: Pack bundle downloads follow at most five HTTPS redirects (no IP-literal, localhost, userinfo or port-changing targets, public-address-only resolution after the first hop, one deadline and byte budget across hops); the general client and other fetches still never redirect
+- **examples**: The Claude application candidate and its demo scripts move to agent/claude@2.0.1
+
+### Documentation
+- Drop the removed pack compatibility commands from the CLI reference, tier manifest and surface inventory
+
 ## [0.27.0-rc.4] — 2026-11-06
 
 ### Changed
