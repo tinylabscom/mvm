@@ -109,6 +109,8 @@ pub mod icmp_mediator;
 pub mod integrations;
 pub mod late_volumes;
 pub mod lifecycle_hooks;
+/// Guest side of the mailbox port: forwards the workload's sealed frame.
+pub mod mailbox_outbox;
 /// Guest-side network defense. The `mvm-guest-netinit`
 /// binary calls into this module at boot to install kernel blackhole
 /// routes for `MANDATORY_DENY_RANGES` before any workload code runs.

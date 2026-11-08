@@ -19,11 +19,14 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
-use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxEnvelope, SignedMailboxCapability};
+use mvm_contract::protocol::mailbox::{
+    ExecutionEpoch, MailboxEnvelope, MailboxGrant, SignedMailboxCapability,
+};
 use mvm_core::crypto::aead::Key;
 pub use mvm_core::mailbox::frame::Refusal;
 use mvm_core::mailbox::frame::{decode_frame, send_frame};
 use mvm_core::mailbox::{InMemoryReplayProtector, OpenContext, open_envelope};
+use mvm_core::plan::ExecutionPlan;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -40,6 +43,37 @@ pub struct MailboxPolicy {
     pub encryption_key: Key,
     pub sender_key: VerifyingKey,
     pub authority_key: VerifyingKey,
+}
+
+impl MailboxPolicy {
+    /// Fold a signed plan's grant into host-held trust. The grant decides
+    /// which mailbox, whose capabilities and which epoch; the keys and peer
+    /// identities stay what the host already trusted.
+    pub fn with_grant(mut self, grant: &MailboxGrant) -> std::io::Result<Self> {
+        self.authority_key = VerifyingKey::from_bytes(&grant.authority_key)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        self.context.expected_mailbox = grant.mailbox;
+        self.context.current_execution_epoch = grant.epoch;
+        Ok(self)
+    }
+}
+
+/// Launch-path entry: serve the guest's mailbox port only when the signed
+/// `plan` carries a grant. No grant means no socket bound, no dial, and
+/// `None`; a grant yields the service holding whatever the guest sent.
+pub fn serve_granted_guest(
+    plan: &ExecutionPlan,
+    trust: MailboxPolicy,
+    limits: MailboxLimits,
+    socket: &Path,
+    guest: (&Path, &Path),
+) -> std::io::Result<Option<MailboxService>> {
+    let Some(grant) = &plan.mailbox else {
+        return Ok(None);
+    };
+    let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
+    service.serve_guest(guest.0, guest.1)?;
+    Ok(Some(service))
 }
 
 struct State {

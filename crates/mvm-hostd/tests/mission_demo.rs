@@ -37,7 +37,7 @@ use mvm_core::host_interface::{
     local::LocalHostInterface,
     workload::WorkloadLedger,
 };
-use mvm_core::mailbox::frame::send_frame;
+use mvm_core::mailbox::frame::{encode_frame, send_frame};
 use mvm_core::mailbox::{MailboxError, OpenContext, SealRequest, seal_envelope, sign_capability};
 use mvm_core::plan::ExecutionPlan;
 use mvm_hostd::audit::{
@@ -45,7 +45,9 @@ use mvm_hostd::audit::{
     session::{EventFilter, workload_events},
 };
 use mvm_hostd::containment::{quarantine_workload, replace_workload};
-use mvm_hostd::mailbox_service::{MailboxLimits, MailboxPolicy, MailboxService, Refusal, send};
+use mvm_hostd::mailbox_service::{
+    MailboxLimits, MailboxPolicy, MailboxService, Refusal, send, serve_granted_guest,
+};
 use mvm_hostd::supervisor::verify_audit_chain;
 
 const NOW: u64 = 1_000;
@@ -644,4 +646,80 @@ fn a_guest_without_the_send_operation_is_refused_across_the_port() {
         .unwrap();
     assert!(matches!(guest.join().unwrap(), Err(Refusal::Mailbox(_))));
     assert!(channel.service.receive().is_none(), "nothing was queued");
+}
+
+/// A plan, optionally carrying a mailbox grant for `channel`'s authority and
+/// epoch 1. The host-held trust the test hands in names a different epoch and
+/// a different authority, so only the grant can make a message open.
+fn plan_and_trust(channel: &Channel, granted: bool) -> (ExecutionPlan, MailboxPolicy) {
+    let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+    if granted {
+        plan.mailbox = Some(mvm_contract::protocol::mailbox::MailboxGrant {
+            mailbox: address().mailbox,
+            authority_key: channel.authority_key.verifying_key().to_bytes(),
+            epoch: MbEpoch::new(1).unwrap(),
+        });
+    }
+    let trust = MailboxPolicy {
+        context: context(7),
+        encryption_key: Key::from_bytes([23; 32]),
+        sender_key: channel.sender_key.verifying_key(),
+        authority_key: SigningKey::from_bytes(&[99; 32]).verifying_key(),
+    };
+    (plan, trust)
+}
+
+/// The real guest forwarder, writing a sealed frame from its outbox, against
+/// the real service, over the real framing: the grant decides whether the
+/// host serves the port at all.
+#[test]
+fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
+    use std::os::unix::net::UnixListener;
+
+    let (node, channel) = channel_with_one_node();
+    let capability = sign_capability(
+        grant(&[MailboxOperation::Send, MailboxOperation::Receive]),
+        &channel.authority_key,
+    )
+    .unwrap();
+    let envelope = seal_envelope(
+        SealRequest {
+            routing: routing(),
+            header: header(1, 1),
+            plaintext: b"hello",
+        },
+        &channel.encryption_key,
+        &channel.sender_key,
+    )
+    .unwrap();
+    let outbox = node.home.path().join("outbox");
+    std::fs::write(&outbox, encode_frame(&capability, &envelope).unwrap()).unwrap();
+    let per_port = node.home.path().join("port.sock");
+    let socket = node.home.path().join("granted.sock");
+    let absent_mux = node.home.path().join("absent-mux");
+
+    // No grant: nothing is bound and the guest port is never dialed.
+    let listener = UnixListener::bind(&per_port).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (plan, trust) = plan_and_trust(&channel, false);
+    let none = serve_granted_guest(&plan, trust, LIMITS, &socket, (&per_port, &absent_mux));
+    assert!(none.unwrap().is_none());
+    assert!(!socket.exists(), "no service socket without a grant");
+    assert!(
+        listener.accept().is_err(),
+        "the guest port was never dialed"
+    );
+
+    // Grant present: the guest forwards its outbox frame and it is queued.
+    listener.set_nonblocking(false).unwrap();
+    let guest = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox)
+    });
+    let (plan, trust) = plan_and_trust(&channel, true);
+    let service = serve_granted_guest(&plan, trust, LIMITS, &socket, (&per_port, &absent_mux))
+        .unwrap()
+        .expect("a granted plan is served");
+    assert_eq!(guest.join().unwrap(), Ok(()));
+    assert_eq!(service.receive().unwrap(), b"hello");
 }

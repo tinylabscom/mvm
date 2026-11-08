@@ -36,6 +36,7 @@ pub struct PlanFixture {
     extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
     stream_edges: Vec<mvm_contract::stream::StreamEdge>,
     stream_retention: StreamRetention,
+    mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     sdk_uses_sidecar: bool,
     audit_labels: BTreeMap<String, String>,
     caller_commitment: Option<crate::plan::CallerCommitment>,
@@ -57,6 +58,7 @@ impl Default for PlanFixture {
             extensions: Vec::new(),
             stream_edges: Vec::new(),
             stream_retention: StreamRetention::default(),
+            mailbox: None,
             sdk_uses_sidecar: true,
             audit_labels: BTreeMap::new(),
             caller_commitment: None,
@@ -118,6 +120,11 @@ impl PlanFixture {
     /// Whether this plan's captured output is kept after the run. The default
     /// is [`StreamRetention::Persist`]; a test pins `Ephemeral` to exercise the
     /// signed opt-out.
+    pub fn mailbox(mut self, grant: mvm_contract::protocol::mailbox::MailboxGrant) -> Self {
+        self.mailbox = Some(grant);
+        self
+    }
+
     pub fn stream_retention(mut self, retention: StreamRetention) -> Self {
         self.stream_retention = retention;
         self
@@ -232,6 +239,7 @@ impl PlanFixture {
             services: self.services,
             extensions: self.extensions,
             stream_edges: self.stream_edges.clone(),
+            mailbox: self.mailbox,
             stream_retention: self.stream_retention,
             action_budget: None,
             protected_paths: Default::default(),

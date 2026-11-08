@@ -22,6 +22,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         build_provenance: Default::default(),
         snapshot_at: Default::default(),
         network_mode: Default::default(),
+        mailbox: None,
         stream_retention: Default::default(),
         action_budget: None,
         protected_paths: Default::default(),
