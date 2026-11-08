@@ -961,6 +961,22 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires MVM_TEST_PYTHON_LAYER_TAR from the pinned source signing smoke"]
+    fn pinned_python_layer_passes_the_real_runtime_tar_preflight() {
+        let path = std::env::var("MVM_TEST_PYTHON_LAYER_TAR")
+            .expect("the signing smoke supplies its verified Python tar");
+        let staged = stage_tar(&mut std::fs::File::open(path).unwrap()).unwrap();
+        assert!(staged.root().join("usr/bin/python3").is_file());
+        assert!(
+            staged
+                .root()
+                .join("usr/lib/python3.13/encodings/__init__.py")
+                .is_file()
+        );
+        assert!(staged.report().files_written >= 500);
+    }
+
+    #[test]
     fn every_tar_role_refuses_hidden_bytes_after_the_end_marker() {
         let mut tar = archive(&[(
             "srv/app/main.py",

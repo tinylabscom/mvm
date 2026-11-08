@@ -79,6 +79,9 @@ jobs:
             --features host-state,manifest-verify -- \
             "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/layer.tar" \
             "$tmp/files" "$IDENTITY"
+          MVM_TEST_PYTHON_LAYER_TAR="$tmp/layer.tar" cargo test --locked -p mvm-build \
+            --lib runtime_layer::tests::pinned_python_layer_passes_the_real_runtime_tar_preflight \
+            -- --ignored --exact
           cp "$tmp/layer.tar" "$tmp/tampered.tar"
           printf x >> "$tmp/tampered.tar"
           if cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
