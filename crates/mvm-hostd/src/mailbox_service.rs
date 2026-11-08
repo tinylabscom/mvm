@@ -1,7 +1,8 @@
 //! Per-node mailbox service: a bounded local queue behind a Unix domain socket.
 //!
 //! A peer connects, writes one length-prefixed frame (a capability and a
-//! sealed envelope) and reads one typed verdict. The service opens the
+//! sealed envelope) and reads one typed verdict. A guest instead sends a
+//! plaintext message the host seals itself ([`GuestSealer`]). The service opens the
 //! envelope (capability, execution epoch, replay, expiry) before it enqueues
 //! anything, so a refused message never occupies queue space. This socket
 //! carries mailbox frames only; telemetry and control have their own planes.
@@ -18,14 +19,18 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::mailbox::{
-    ExecutionEpoch, MailboxEnvelope, MailboxGrant, SignedMailboxCapability,
+    ExecutionEpoch, MailboxCapabilityGrant, MailboxEnvelope, MailboxEnvelopeHeader, MailboxGrant,
+    MailboxRoutingFrame, MessageId, ReplayNonce, SequenceNumber, SignedMailboxCapability,
 };
 use mvm_core::crypto::aead::Key;
 pub use mvm_core::mailbox::frame::Refusal;
-use mvm_core::mailbox::frame::{decode_frame, send_frame};
-use mvm_core::mailbox::{InMemoryReplayProtector, OpenContext, open_envelope};
+use mvm_core::mailbox::frame::{OutboxMessage, decode_frame, send_frame};
+use mvm_core::mailbox::{
+    InMemoryReplayProtector, OpenContext, SealRequest, open_envelope, seal_envelope,
+    sign_capability,
+};
 use mvm_core::plan::ExecutionPlan;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,12 +63,81 @@ impl MailboxPolicy {
     }
 }
 
+/// Host-held material that turns a guest's plaintext message into a sealed,
+/// signed one. The guest names a recipient and a body; the keys, the
+/// capability and the header template never leave the host and never come
+/// from the plan or the guest. Encryption is host to host: this is not
+/// guest-to-guest encryption and gives no per-workload sender identity.
+pub struct GuestSealer {
+    pub encryption_key: Key,
+    pub sender_key: SigningKey,
+    pub authority_key: SigningKey,
+    pub capability: MailboxCapabilityGrant,
+    /// Template; recipient, ids, sequence and length are stamped per message.
+    pub header: MailboxEnvelopeHeader,
+    pub routing: MailboxRoutingFrame,
+    /// Messages sealed so far; start at 0.
+    pub sent: u64,
+}
+
+impl GuestSealer {
+    /// Bind to a plan's grant: its mailbox and epoch apply, and its authority
+    /// key must be the verifying half of the host's own authority key.
+    pub fn with_grant(mut self, grant: &MailboxGrant) -> std::io::Result<Self> {
+        if self.authority_key.verifying_key().to_bytes() != grant.authority_key {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "grant authority is not the host's authority key",
+            ));
+        }
+        self.capability.address.mailbox = grant.mailbox;
+        self.header.mailbox = grant.mailbox;
+        self.header.execution_epoch = grant.epoch;
+        Ok(self)
+    }
+
+    fn seal(
+        &mut self,
+        message: OutboxMessage,
+    ) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal> {
+        let gate = |e: mvm_core::mailbox::MailboxError| Refusal::Mailbox(e.to_string());
+        self.sent += 1;
+        let n = self.sent;
+        let counter = |width: usize| {
+            let mut bytes = vec![0; width];
+            bytes[width - 8..].copy_from_slice(&n.to_be_bytes());
+            bytes
+        };
+        let mut header = self.header.clone();
+        header.recipient = message.recipient;
+        header.message_id = MessageId::from_bytes(counter(32).try_into().unwrap());
+        header.nonce = ReplayNonce::from_bytes(counter(16).try_into().unwrap());
+        header.sequence = SequenceNumber::new(n).map_err(|_| Refusal::Malformed)?;
+        header.plaintext_len = message.body.len() as u32;
+        let capability =
+            sign_capability(self.capability.clone(), &self.authority_key).map_err(gate)?;
+        let envelope = seal_envelope(
+            SealRequest {
+                routing: self.routing.clone(),
+                header,
+                plaintext: &message.body,
+            },
+            &self.encryption_key,
+            &self.sender_key,
+        )
+        .map_err(gate)?;
+        Ok((capability, envelope))
+    }
+}
+
 /// Launch-path entry: serve the guest's mailbox port only when the signed
 /// `plan` carries a grant. No grant means no socket bound, no dial, and
-/// `None`; a grant yields the service holding whatever the guest sent.
+/// `None`; a grant yields the service holding whatever the guest sent, sealed
+/// by `sealer` and opened under `trust`, both host-held.
 pub fn serve_granted_guest(
     plan: &ExecutionPlan,
     trust: MailboxPolicy,
+    sealer: GuestSealer,
     limits: MailboxLimits,
     socket: &Path,
     guest: (&Path, &Path),
@@ -71,8 +145,9 @@ pub fn serve_granted_guest(
     let Some(grant) = &plan.mailbox else {
         return Ok(None);
     };
+    let mut sealer = sealer.with_grant(grant)?;
     let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
-    service.serve_guest(guest.0, guest.1)?;
+    service.serve_guest(guest.0, guest.1, &mut sealer)?;
     Ok(Some(service))
 }
 
@@ -120,7 +195,7 @@ impl MailboxService {
                         break;
                     }
                     if let Ok(stream) = stream {
-                        serve(&shared, stream);
+                        serve(&shared, stream, decode_frame);
                     }
                 }
             })
@@ -146,15 +221,23 @@ impl MailboxService {
 
     /// Serve one connection the host dialed to the guest's mailbox port
     /// (per-port socket, or the Firecracker mux), the way the telemetry
-    /// collector attaches. Admission and the queue are the service's own, so
-    /// a guest that floods this port fills only this queue.
-    pub fn serve_guest(&self, per_port: &Path, firecracker_mux: &Path) -> std::io::Result<()> {
+    /// collector attaches. The guest sends plaintext; `sealer` seals it, then
+    /// admission and the queue are the service's own, so a guest that floods
+    /// this port fills only this queue.
+    pub fn serve_guest(
+        &self,
+        per_port: &Path,
+        firecracker_mux: &Path,
+        sealer: &mut GuestSealer,
+    ) -> std::io::Result<()> {
         let stream = crate::telemetry_collector::dial_guest_port(
             per_port,
             firecracker_mux,
             mvm_contract::protocol::mailbox::MAILBOX_PORT,
         )?;
-        serve(&self.shared, stream);
+        serve(&self.shared, stream, |body| {
+            sealer.seal(OutboxMessage::decode(body)?)
+        });
         Ok(())
     }
 
@@ -200,10 +283,18 @@ pub fn send_on(
     send_frame(&mut stream, capability, envelope)
 }
 
-fn serve(shared: &Shared, mut stream: UnixStream) {
+/// Read one frame, turn it into a capability and envelope with `prepare`, and
+/// answer with the admission verdict.
+fn serve(
+    shared: &Shared,
+    mut stream: UnixStream,
+    prepare: impl FnOnce(&[u8]) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal>,
+) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let verdict = read_frame(shared, &mut stream).and_then(|body| admit(shared, &body));
+    let verdict = read_frame(shared, &mut stream)
+        .and_then(|body| prepare(&body))
+        .and_then(|(capability, envelope)| admit(shared, &capability, &envelope));
     if let Ok(reply) = serde_json::to_vec(&verdict) {
         let _ = stream.write_all(&reply);
     }
@@ -226,9 +317,11 @@ fn read_frame(shared: &Shared, stream: &mut UnixStream) -> Result<Vec<u8>, Refus
     Ok(body)
 }
 
-fn admit(shared: &Shared, body: &[u8]) -> Result<(), Refusal> {
-    let (capability, envelope) = decode_frame(body)?;
-
+fn admit(
+    shared: &Shared,
+    capability: &SignedMailboxCapability,
+    envelope: &MailboxEnvelope,
+) -> Result<(), Refusal> {
     let mut guard = shared.state.lock().unwrap();
     let state = &mut *guard;
     if state.queue.len() >= shared.limits.max_depth {
@@ -236,8 +329,8 @@ fn admit(shared: &Shared, body: &[u8]) -> Result<(), Refusal> {
     }
     let p = &state.policy;
     let plaintext = open_envelope(
-        &envelope,
-        &capability,
+        envelope,
+        capability,
         &p.context,
         &p.encryption_key,
         &p.sender_key,

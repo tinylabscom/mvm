@@ -1,5 +1,5 @@
 //! Mailbox listener glue: bind the reserved mailbox vsock port and forward the
-//! workload's outbox frame to each host connection.
+//! workload's outbox message to each host connection.
 //!
 //! Opt-in and launch-asserted, like telemetry: the listener binds only when
 //! the kernel cmdline carries `mvm.mailbox=1`, which the host sets only for a
@@ -20,7 +20,7 @@ use crate::transport::{accept_vsock, bind_vsock_listener, unix_transport_selecte
 /// The launch assertion that turns the mailbox listener on.
 const MAILBOX_CMDLINE_TOKEN: &str = "mvm.mailbox=1";
 
-/// Where the workload leaves its sealed frame for the agent to forward.
+/// Where the workload leaves its plaintext message for the agent to forward.
 const OUTBOX: &str = "/run/mvm/mailbox/outbox";
 
 /// Spawn the mailbox listener on a boot that asserts one. Called after PID-1
