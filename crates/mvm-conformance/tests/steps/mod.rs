@@ -20,6 +20,7 @@ mod kernel_pin;
 pub(crate) mod launch_e2e;
 pub(crate) mod live_home;
 mod machine_journey;
+mod mission_demo;
 mod network_surface;
 mod oci_unpack;
 mod one_transport;
