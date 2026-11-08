@@ -21,26 +21,11 @@ use std::time::Duration;
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxEnvelope, SignedMailboxCapability};
 use mvm_core::crypto::aead::Key;
-use mvm_core::mailbox::{
-    InMemoryReplayProtector, OpenContext, decode_envelope, encode_envelope, open_envelope,
-};
-use serde::{Deserialize, Serialize};
+pub use mvm_core::mailbox::frame::Refusal;
+use mvm_core::mailbox::frame::{decode_frame, send_frame};
+use mvm_core::mailbox::{InMemoryReplayProtector, OpenContext, open_envelope};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Why a frame was not queued. Sent back to the peer verbatim.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-pub enum Refusal {
-    #[error("frame exceeds the {0}-byte limit")]
-    Oversized(usize),
-    #[error("mailbox queue is full ({0} messages)")]
-    QueueFull(usize),
-    #[error("frame is malformed")]
-    Malformed,
-    /// The mailbox gate refused it; carries the gate's own reason text.
-    #[error("{0}")]
-    Mailbox(String),
-}
 
 /// Bounds on what one node will hold or accept.
 #[derive(Debug, Clone, Copy)]
@@ -176,25 +161,9 @@ pub fn send_on(
     envelope: &MailboxEnvelope,
 ) -> Result<(), Refusal> {
     let io = |_| Refusal::Malformed;
-    let cap = serde_json::to_vec(capability).map_err(io_json)?;
-    let env = encode_envelope(envelope).map_err(|e| Refusal::Mailbox(e.to_string()))?;
-    let mut body = (cap.len() as u32).to_be_bytes().to_vec();
-    body.extend_from_slice(&cap);
-    body.extend_from_slice(&env);
     stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(io)?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(io)?;
-    // A service that refuses on length alone closes early; the verdict is
-    // still readable, so a failed write is not itself the answer.
-    let _ = stream
-        .write_all(&(body.len() as u32).to_be_bytes())
-        .and_then(|()| stream.write_all(&body));
-    let mut reply = Vec::new();
-    stream.read_to_end(&mut reply).map_err(io)?;
-    serde_json::from_slice::<Result<(), Refusal>>(&reply).map_err(io_json)?
-}
-
-fn io_json(_: serde_json::Error) -> Refusal {
-    Refusal::Malformed
+    send_frame(&mut stream, capability, envelope)
 }
 
 fn serve(shared: &Shared, mut stream: UnixStream) {
@@ -224,12 +193,7 @@ fn read_frame(shared: &Shared, stream: &mut UnixStream) -> Result<Vec<u8>, Refus
 }
 
 fn admit(shared: &Shared, body: &[u8]) -> Result<(), Refusal> {
-    let (len, rest) = body.split_at_checked(4).ok_or(Refusal::Malformed)?;
-    let cap_len = u32::from_be_bytes(len.try_into().unwrap()) as usize;
-    let (cap, env) = rest.split_at_checked(cap_len).ok_or(Refusal::Malformed)?;
-    let capability: SignedMailboxCapability =
-        serde_json::from_slice(cap).map_err(|_| Refusal::Malformed)?;
-    let envelope = decode_envelope(env).map_err(|_| Refusal::Malformed)?;
+    let (capability, envelope) = decode_frame(body)?;
 
     let mut guard = shared.state.lock().unwrap();
     let state = &mut *guard;
