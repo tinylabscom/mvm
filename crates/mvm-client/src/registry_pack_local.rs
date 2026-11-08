@@ -2,9 +2,12 @@
 //! No registry lookup, recursive fetch, trust override, or runtime launch.
 
 use anyhow::{Context, Result, bail, ensure};
+use mvm_core::registry_pack::runtime_layer::{
+    VerifiedRuntimeLayerInputs, verify_runtime_layer_inputs,
+};
 use mvm_core::registry_pack::{
     InstalledRegistryPack, PackLockfile, PackPin, PackReference, RegistryPackVerification,
-    VerifiedRegistryPack, local_input,
+    VerifiedRegistryManifest, VerifiedRegistryPack, local_input, verify_registry_manifest,
 };
 use mvm_core::registry_pack_store as store;
 use std::collections::BTreeSet;
@@ -38,6 +41,77 @@ impl LocalRegistryPackPaths {
             files,
         })
     }
+}
+
+/// Explicit offline mirror paths for a build-only, signed runtime layer.
+#[derive(Clone, Debug)]
+pub struct LocalRuntimeLayerPaths {
+    metadata: LocalRegistryPackPaths,
+    archive: PathBuf,
+}
+
+impl LocalRuntimeLayerPaths {
+    /// Bound all supplied paths before touching untrusted files.
+    ///
+    /// # Errors
+    ///
+    /// Refuses empty, excessively long or excessively deep path names.
+    pub fn new(
+        manifest: PathBuf,
+        bundle: PathBuf,
+        files: PathBuf,
+        archive: PathBuf,
+    ) -> Result<Self> {
+        let metadata = LocalRegistryPackPaths::new(manifest, bundle, files)?;
+        ensure!(
+            !archive.as_os_str().is_empty()
+                && archive.as_os_str().len() <= 4096
+                && archive.components().count() <= 64,
+            "local runtime archive path must be bounded"
+        );
+        Ok(Self { metadata, archive })
+    }
+}
+
+/// Retain an exact pinned layer and signed policy documents as build inputs.
+///
+/// This never installs a layer as a runnable image or updates a user's pack
+/// lock. A later composer must resolve the complete pinned dependency graph
+/// and enforce policy before using these bytes.
+///
+/// # Errors
+///
+/// Refuses a wrong manifest kind or pin, untrusted signer, absent/stale
+/// revocation feed, changed archive, or missing/changed policy document.
+pub fn acquire_local_runtime_layer(
+    expected: &PackPin,
+    paths: &LocalRuntimeLayerPaths,
+) -> Result<VerifiedRuntimeLayerInputs> {
+    let manifest = local_input::read_metadata(&paths.metadata.manifest)
+        .context("reading local runtime manifest")?;
+    let bundle = local_input::read_metadata(&paths.metadata.bundle)
+        .context("reading local runtime Sigstore bundle")?;
+    let policy = store::load_publisher_policy_or_official_default(
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+    )?
+    .policy;
+    let lock = PackLockfile::new(vec![expected.clone()])?;
+    let verified = verify_registry_manifest(&RegistryPackVerification::new(
+        expected.reference(),
+        &manifest,
+        &bundle,
+        &lock,
+        &policy,
+    ))?;
+    let VerifiedRegistryManifest::RuntimeLayer(layer) = verified else {
+        bail!("the pinned manifest is not a build-only runtime layer");
+    };
+    layer.check_current_revocations()?;
+    Ok(verify_runtime_layer_inputs(
+        &layer,
+        &paths.archive,
+        &paths.metadata.files,
+    )?)
 }
 
 /// Authenticate small metadata first, freeze the complete signed inventory,
@@ -196,4 +270,49 @@ fn add_policy_dependency(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod runtime_layer_tests {
+    use super::*;
+    use mvm_core::packs::Sha256Hex;
+
+    #[test]
+    fn offline_layer_requires_bounded_paths_and_a_manifest_before_any_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing.json");
+        let bundle = temp.path().join("manifest.sigstore.json");
+        let files = temp.path().join("files");
+        let archive = temp.path().join("layer.tar");
+        assert!(
+            LocalRuntimeLayerPaths::new(
+                PathBuf::new(),
+                bundle.clone(),
+                files.clone(),
+                archive.clone()
+            )
+            .is_err()
+        );
+        assert!(
+            LocalRuntimeLayerPaths::new(
+                missing.clone(),
+                bundle.clone(),
+                files.clone(),
+                PathBuf::from("x".repeat(4097))
+            )
+            .is_err()
+        );
+        let paths = LocalRuntimeLayerPaths::new(missing, bundle, files, archive).unwrap();
+        let pin = PackPin::new(
+            "runtime/python@1.1.0".parse().unwrap(),
+            Sha256Hex::from_bytes(b"expected manifest"),
+        )
+        .unwrap();
+        assert!(
+            acquire_local_runtime_layer(&pin, &paths)
+                .unwrap_err()
+                .to_string()
+                .contains("reading local runtime manifest")
+        );
+    }
 }
