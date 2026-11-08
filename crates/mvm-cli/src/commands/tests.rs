@@ -124,21 +124,16 @@ fn workload_pack_search_and_pull_aliases_parse() {
 }
 
 #[test]
-fn new_pack_scaffolding_command_parses() {
+fn pack_new_scaffolding_command_parses() {
     let parsed =
-        Cli::try_parse_from(["mvmctl", "new-pack", "runtime/example"]).expect("new-pack parse");
+        Cli::try_parse_from(["mvmctl", "pack", "new", "acme/example"]).expect("pack new parse");
     assert!(matches!(
         parsed.command,
-        Commands::NewPack(new_pack::Args { reference })
-            if reference.coordinate_string() == "runtime/example"
+        Commands::Pack(pack::Args { action: pack::PackAction::New(pack::new::Args { reference }) })
+            if reference.coordinate_string() == "acme/example"
     ));
-    assert!(Cli::try_parse_from(["mvmctl", "new-pack"]).is_err());
-    assert!(Cli::try_parse_from(["mvmctl", "new-pack", "../example"]).is_err());
-    let help = Cli::try_parse_from(["mvmctl", "new-pack", "--help"])
-        .expect_err("help exits after rendering")
-        .to_string();
-    assert!(help.contains("namespace/name"));
-    assert!(help.contains("unpublished policy-pack"));
+    assert!(Cli::try_parse_from(["mvmctl", "pack", "new"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "pack", "new", "../example"]).is_err());
 }
 
 #[test]
@@ -151,13 +146,6 @@ fn workload_pack_management_and_system_commands_parse() {
         ["mvmctl", "pack", "system", "list", "--json"].as_slice(),
         ["mvmctl", "pack", "system", "rollback", "runtime"].as_slice(),
         ["mvmctl", "pack", "system", "prune", "--dry-run"].as_slice(),
-        ["mvmctl", "pack", "system", "download", "builder"].as_slice(),
-        ["mvmctl", "pack", "system", "update", "dev-image"].as_slice(),
-        ["mvmctl", "pack", "list", "--json"].as_slice(),
-        ["mvmctl", "pack", "rollback", "runtime"].as_slice(),
-        ["mvmctl", "pack", "prune", "--dry-run"].as_slice(),
-        ["mvmctl", "pack", "download", "builder"].as_slice(),
-        ["mvmctl", "pack", "update", "dev-image"].as_slice(),
         ["mvmctl", "pack", "registry", "ls", "--json"].as_slice(),
     ] {
         Cli::try_parse_from(argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
@@ -167,7 +155,8 @@ fn workload_pack_management_and_system_commands_parse() {
         ["mvmctl", "pack", "update", "unknown"].as_slice(),
         ["mvmctl", "pack", "update", "runtime@1.0.0"].as_slice(),
         ["mvmctl", "pack", "update", "mvm/claude@invalid"].as_slice(),
-        ["mvmctl", "pack", "system", "update", "mvm/claude"].as_slice(),
+        ["mvmctl", "pack", "system", "update", "builder"].as_slice(),
+        ["mvmctl", "pack", "download", "builder"].as_slice(),
         ["mvmctl", "pack", "rm", "runtime"].as_slice(),
     ] {
         assert!(Cli::try_parse_from(argv).is_err(), "{argv:?}");

@@ -90,6 +90,32 @@ pub struct PreparedWritableDisks {
     disks: Vec<PreparedDisk>,
 }
 
+/// Original prepared files for one boot, not admission or native ownership proof.
+#[derive(Debug)]
+#[must_use = "retain prepared files through the selected boot handoff"]
+pub struct PreparedBootFiles<'a> {
+    /// Borrowed original kernel; its producer retains custody through launch.
+    pub kernel: Option<&'a crate::host::restore_image::VerifiedRestoreFile>,
+    /// Owned original writable backing/sidecar pairs.
+    pub writable: PreparedWritableDisks,
+    /// Owned private read-only input DATA file, when explicitly supplied.
+    pub data: Option<crate::driver::readonly_data::PreparedReadOnlyDataDisk>,
+}
+
+impl PreparedBootFiles<'_> {
+    /// Refuse DATA custody before an unsupported backend can dispatch or reopen.
+    ///
+    /// # Errors
+    /// Returns an error whenever this request contains a protected DATA file.
+    pub fn require_no_data(&self) -> Result<()> {
+        ensure!(
+            self.data.is_none(),
+            "backend does not support protected read-only DATA descriptor handoff"
+        );
+        Ok(())
+    }
+}
+
 /// Original descriptions compacted for a sudo-launched Firecracker.
 #[derive(Debug)]
 pub struct SudoWritableHandoff {
@@ -545,25 +571,28 @@ mod tests {
 
     #[test]
     fn wrong_object_or_changed_final_recipe_is_refused() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("image");
-        let other = tmp.path().join("other");
-        let image =
-            LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
-                .unwrap();
-        writable(&other);
-        let error = PreparedWritableDisks::bind(&spec(vec![block(&other, 1)]), vec![(1, image)])
-            .expect_err("wrong backing object must refuse");
-        drop(error);
-        let image =
-            LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock-2")))
-                .unwrap();
-        let mut spec = spec(vec![block(&path, 1)]);
-        let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
-        spec.blocks[0].source = other;
-        assert!(disks.validate_spec(&spec).is_err());
-        spec.blocks[0].read_only = true;
-        assert!(disks.validate_spec(&spec).is_err());
+        crate::test_support::isolated_lock_probe(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("image");
+            let other = tmp.path().join("other");
+            let image =
+                LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
+                    .unwrap();
+            writable(&other);
+            let error =
+                PreparedWritableDisks::bind(&spec(vec![block(&other, 1)]), vec![(1, image)])
+                    .expect_err("wrong backing object must refuse");
+            drop(error);
+            let image =
+                LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock-2")))
+                    .unwrap();
+            let mut spec = spec(vec![block(&path, 1)]);
+            let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
+            spec.blocks[0].source = other;
+            assert!(disks.validate_spec(&spec).is_err());
+            spec.blocks[0].read_only = true;
+            assert!(disks.validate_spec(&spec).is_err());
+        });
     }
 
     #[test]
@@ -592,35 +621,37 @@ mod tests {
         use std::io::Read as _;
         use std::os::fd::AsRawFd;
 
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("image");
-        let sidecar = tmp.path().join("image.lock");
-        let held = LockedWritableImage::acquire(writable(&path), writable(&sidecar)).unwrap();
-        let fds = vec![held.backing().as_raw_fd(), held.sidecar().as_raw_fd()];
-        let mut command = std::process::Command::new("/bin/sh");
-        command
-            .args(["-c", "printf x; exec sleep 30"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-        crate::host::restore_image::inherit_descriptors(&mut command, fds);
-        let mut child = command.spawn().unwrap();
-        drop(held);
-        let mut ready = [0_u8; 1];
-        child
-            .stdout
-            .as_mut()
-            .unwrap()
-            .read_exact(&mut ready)
-            .unwrap();
-        assert_eq!(
-            LockedWritableImage::open(&path, &sidecar)
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::WouldBlock
-        );
-        child.kill().unwrap();
-        child.wait().unwrap();
-        let _restarted = LockedWritableImage::open(&path, &sidecar).unwrap();
+        crate::test_support::isolated_lock_probe(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("image");
+            let sidecar = tmp.path().join("image.lock");
+            let held = LockedWritableImage::acquire(writable(&path), writable(&sidecar)).unwrap();
+            let fds = vec![held.backing().as_raw_fd(), held.sidecar().as_raw_fd()];
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .args(["-c", "printf x; exec sleep 30"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+            crate::host::restore_image::inherit_descriptors(&mut command, fds);
+            let mut child = command.spawn().unwrap();
+            drop(held);
+            let mut ready = [0_u8; 1];
+            child
+                .stdout
+                .as_mut()
+                .unwrap()
+                .read_exact(&mut ready)
+                .unwrap();
+            assert_eq!(
+                LockedWritableImage::open(&path, &sidecar)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let _restarted = LockedWritableImage::open(&path, &sidecar).unwrap();
+        });
     }
 
     #[test]
@@ -800,7 +831,14 @@ mod tests {
         let disks = PreparedWritableDisks::empty();
 
         let error = driver
-            .boot_custodied(&spec, Some(&kernel), disks)
+            .boot_custodied(
+                &spec,
+                PreparedBootFiles {
+                    kernel: Some(&kernel),
+                    writable: disks,
+                    data: None,
+                },
+            )
             .err()
             .expect("recorded verified route");
         assert_eq!(error.to_string(), "verified dispatch witness");
@@ -808,7 +846,14 @@ mod tests {
         assert_eq!(driver.ordinary.load(Ordering::SeqCst), 0);
 
         let error = driver
-            .boot_custodied(&spec, None, PreparedWritableDisks::empty())
+            .boot_custodied(
+                &spec,
+                PreparedBootFiles {
+                    kernel: None,
+                    writable: PreparedWritableDisks::empty(),
+                    data: None,
+                },
+            )
             .err()
             .expect("recorded ordinary route");
         assert_eq!(error.to_string(), "ordinary dispatch witness");
@@ -818,25 +863,97 @@ mod tests {
 
     #[test]
     fn unsupported_nonempty_handoff_never_calls_either_boot_route() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("image");
-        let spec = spec(vec![block(&path, 1)]);
-        let driver = DispatchRecorder::default();
-        let kernel = kernel(tmp.path(), b"unsupported handoff fixture");
+        crate::test_support::isolated_lock_probe(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("image");
+            let spec = spec(vec![block(&path, 1)]);
+            let driver = DispatchRecorder::default();
+            let kernel = kernel(tmp.path(), b"unsupported handoff fixture");
 
+            for kernel in [None, Some(&kernel)] {
+                let image = LockedWritableImage::acquire(
+                    writable(&path),
+                    writable(&tmp.path().join("lock")),
+                )
+                .unwrap();
+                let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
+                let error = driver
+                    .boot_custodied(
+                        &spec,
+                        PreparedBootFiles {
+                            kernel,
+                            writable: disks,
+                            data: None,
+                        },
+                    )
+                    .err()
+                    .expect("unsupported handoff");
+                assert!(error.to_string().contains("prepared writable descriptor"));
+            }
+            assert_eq!(driver.ordinary.load(Ordering::SeqCst), 0);
+            assert_eq!(driver.verified.load(Ordering::SeqCst), 0);
+            let _reacquired = LockedWritableImage::open(&path, &tmp.path().join("lock")).unwrap();
+        });
+    }
+
+    #[test]
+    fn readonly_data_unsupported_dispatch_refuses_without_generic_boot_or_fallback() {
+        use crate::driver::readonly_data::{DataDiskExpectation, PreparedReadOnlyDataDisk};
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = b"source-only DATA fixture";
+        let spec = spec(
+            (0..3)
+                .map(|slot| BlockDev {
+                    source: tmp.path().join(format!("diagnostic-{slot}")),
+                    read_only: true,
+                    ephemeral: false,
+                    slot,
+                })
+                .collect(),
+        );
+        let driver = DispatchRecorder::default();
+        let kernel = kernel(tmp.path(), b"not a bootable kernel");
         for kernel in [None, Some(&kernel)] {
-            let image =
-                LockedWritableImage::acquire(writable(&path), writable(&tmp.path().join("lock")))
-                    .unwrap();
-            let disks = PreparedWritableDisks::bind(&spec, vec![(1, image)]).unwrap();
+            let path = tmp.path().join("input.img");
+            std::fs::write(&path, bytes).unwrap();
+            let file = File::open(&path).unwrap();
+            std::fs::remove_file(path).unwrap();
+            let data = PreparedReadOnlyDataDisk::bind(
+                &spec,
+                file,
+                DataDiskExpectation {
+                    len: bytes.len() as u64,
+                    sha256: mvm_core::plan::bundle::sha256_hex(bytes),
+                },
+            )
+            .unwrap();
             let error = driver
-                .boot_custodied(&spec, kernel, disks)
+                .boot_custodied(
+                    &spec,
+                    PreparedBootFiles {
+                        kernel,
+                        writable: PreparedWritableDisks::empty(),
+                        data: Some(data),
+                    },
+                )
                 .err()
-                .expect("unsupported handoff");
-            assert!(error.to_string().contains("prepared writable descriptor"));
+                .expect("unsupported DATA handoff");
+            assert!(error.to_string().contains("read-only DATA descriptor"));
         }
         assert_eq!(driver.ordinary.load(Ordering::SeqCst), 0);
         assert_eq!(driver.verified.load(Ordering::SeqCst), 0);
-        let _reacquired = LockedWritableImage::open(&path, &tmp.path().join("lock")).unwrap();
+        let error = driver
+            .boot_custodied(
+                &spec,
+                PreparedBootFiles {
+                    kernel: None,
+                    writable: PreparedWritableDisks::empty(),
+                    data: None,
+                },
+            )
+            .err()
+            .expect("ordinary dispatch witness");
+        assert_eq!(error.to_string(), "ordinary dispatch witness");
+        assert_eq!(driver.ordinary.load(Ordering::SeqCst), 1);
     }
 }

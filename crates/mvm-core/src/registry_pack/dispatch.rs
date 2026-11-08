@@ -31,8 +31,9 @@ impl VerifiedRegistryApplication {
 
     /// Require a current, independently authenticated revocation feed before use.
     ///
-    /// Official applications use the built-in MVM feed. Other applications
-    /// require operator-configured trust and a verified cached feed. This does
+    /// `mvm/` applications and applications signed by the built-in publisher
+    /// use the built-in MVM feed; an operator feed is additive. Other
+    /// applications require operator-configured trust and a verified cached feed. This does
     /// not acquire an archive or grant permission to execute it.
     pub fn check_current_revocations(
         &self,

@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use crate::supervisor::ebpf_telemetry::{ObservabilityTarget, TelemetryEvent};
+use crate::supervisor::ebpf_telemetry::ObservabilityTarget;
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
+use crate::supervisor::ebpf_telemetry::TelemetryEvent;
 
 /// Configuration for the egress telemetry probe.
 #[derive(Debug, Clone, Default)]
@@ -23,7 +25,9 @@ pub struct ProbeConfig {
 pub struct ProbeHandle {
     target: ObservabilityTarget,
     #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
-    events: std::sync::mpsc::Receiver<TelemetryEvent>,
+    // Held so the worker's sends reach a live channel; nothing drains it since
+    // the poll accessor was removed.
+    _events: std::sync::mpsc::Receiver<TelemetryEvent>,
     #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
     detach: Option<std::sync::mpsc::Sender<()>>,
     #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
@@ -35,7 +39,7 @@ impl ProbeHandle {
         Self {
             target,
             #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
-            events: {
+            _events: {
                 let (_, rx) = std::sync::mpsc::channel();
                 rx
             },
@@ -80,11 +84,6 @@ impl EgressTelemetry {
         info!(vm = %handle.target.vm_name, "detaching egress telemetry probe");
         inner_detach(handle);
     }
-
-    /// Drain any pending telemetry events.
-    pub fn poll_events(&self, handle: &ProbeHandle) -> Vec<TelemetryEvent> {
-        inner_poll_events(handle)
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -111,11 +110,6 @@ fn inner_attach(
 
 #[cfg(not(all(target_os = "linux", feature = "ebpf-telemetry")))]
 fn inner_detach(_handle: ProbeHandle) {}
-
-#[cfg(not(all(target_os = "linux", feature = "ebpf-telemetry")))]
-fn inner_poll_events(_handle: &ProbeHandle) -> Vec<TelemetryEvent> {
-    Vec::new()
-}
 
 #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn inner_attach(
@@ -159,7 +153,7 @@ fn inner_attach(
 
     Ok(ProbeHandle {
         target,
-        events: events_rx,
+        _events: events_rx,
         detach: Some(detach_tx),
         worker: Some(worker),
     })
@@ -173,11 +167,6 @@ fn inner_detach(handle: ProbeHandle) {
     if let Some(worker) = handle.worker {
         let _ = worker.join();
     }
-}
-
-#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
-fn inner_poll_events(handle: &ProbeHandle) -> Vec<TelemetryEvent> {
-    handle.events.try_iter().collect()
 }
 
 #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]

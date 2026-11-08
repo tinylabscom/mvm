@@ -50,12 +50,6 @@ impl PlaceholderPosition {
         }
     }
 
-    /// Whether this position is part of the request URL.
-    #[must_use]
-    pub fn in_url(&self) -> bool {
-        matches!(self, Self::QueryParam | Self::UrlPath | Self::UrlOther)
-    }
-
     /// The fixed label a refusal records for a placeholder found here.
     #[must_use]
     pub fn refusal_label(&self) -> &'static str {

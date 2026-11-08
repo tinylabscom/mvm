@@ -31,7 +31,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `ops <sub>`                | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`                | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
 | `trust <sub>`              | `add`/`list`/`remove` (publishers), `instructions`, `attest`, `receipt`, `audit`                                                                                        |
-| Other top-level            | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`, `deploy`, `deployments`, `policy`, `backend`, `new-pack` |
+| Other top-level            | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`, `deploy`, `deployments`, `policy`, `backend` |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
@@ -404,7 +404,7 @@ forward legs.
 
 | Command | Description |
 | ------- | ----------- |
-| `mvmctl trust add <PUBKEY> [--force]` | Enrol a publisher's Ed25519 public key as trusted. Reads 32 raw bytes (no PEM, no headers) and writes them to `~/.mvm/trusted-publishers/<key_id>.pub`; `--force` overwrites an existing entry with the same key id |
+| `mvmctl trust add <PUBKEY> [--force]` | Enrol a publisher's Ed25519 public key as trusted. Reads 32 raw bytes (no PEM, no headers) and writes them to `~/.mvm/trusted-publishers/<key_id>.pub`; `--force` overwrites an existing entry with the same key id. Application packs signed by the official bundle author (for example `agent/claude`) need no enrolment under the built-in publisher policy: the release pins that key. An operator publisher-policy file drops it, and other authors' keys are enrolled here |
 | `mvmctl trust list [--json]` | List the currently trusted publisher `key_id`s; `--json` prints an array of strings |
 | `mvmctl trust remove <KEY_ID>` | Remove a publisher by its 32-character hex `key_id` (see `trust list`). The file is unlinked, not zeroed: public keys are lookup tokens, not secrets |
 | `mvmctl trust attest export [--output <FILE>]` | Emit a fresh attestation report signed by this host; written to stdout unless `--output` is given |
@@ -418,7 +418,7 @@ forward legs.
 | `mvmctl trust audit tail`                                                                                | Show the last 20 audit events from /var/log/mvm/audit.jsonl                                                                                                                                                                                                                                                                                                             |
 | `mvmctl trust audit tail -n <N>`                                                                         | Show the last N audit events                                                                                                                                                                                                                                                                                                                                            |
 | `mvmctl trust audit tail -f`                                                                             | Follow audit log output (poll until Ctrl-C)                                                                                                                                                                                                                                                                                                                             |
-| `mvmctl trust audit verify [--tenant <t>]`                                                               | Verify every segment of the chain-signed audit log from genesis; nonzero exit on any signature or chain-link failure                                                                                                                                                                                                                                                    |
+| `mvmctl trust audit verify [--tenant <t>]`                                                               | Verify every segment of the chain-signed audit log from genesis; nonzero exit on any signature or chain-link failure; on success prints `VERIFIED chain: N entries, M sessions, K seals`                                                                                                                                                                                                                                                    |
 | `mvmctl trust audit verify <session> [--tenant <t>] [--json]`                                            | Verify one session: the whole chain, then each `session.sealed` record against it. Prints `VERIFIED`, `MISMATCH` with the reason (chain break, signature, count, sequence, session root, checkpoint root, environment identity, head, ledger), `UNSEALED`, or `NOT_FOUND`; exit 0, 1, 2, or 3                                                                                  |
 | `mvmctl trust audit sessions [--tenant <t>] [--since <t>] [--until <t>] [--json]`                        | List sessions (admitted runs) with their entry counts and seals, and check the hash-chained session ledger. Times are RFC 3339, `YYYY-MM-DD`, or a duration back from now (`7d`)                                                                                                                                                                                        |
 | `mvmctl trust audit show <session> [--tenant <t>] [--kind <glob>] [--since <t>] [--until <t>] [--json]`  | Show a session's entries across every segment. `<session>` is a plan id or at least 8 leading hex characters of it; `--kind` is a glob over the event name                                                                                                                                                                                                              |
@@ -2397,28 +2397,22 @@ their version strings. Pull checks the catalog digest against exact manifest
 bytes before adoption or installation. This untrusted discovery hash does not
 replace publisher signatures or existing authenticated installed pins.
 
-From a checkout of the pack registry, `mvmctl new-pack runtime/example` creates
-an unpublished policy-pack source at `pack-sources/runtime/example/`. The draft
-starts with no network access or secret bindings. Edit its metadata, policy, and
-README, then submit a reviewed pull request; this command does not sign or
-publish anything. Application and built-image packs use separate publication
-paths.
+From a checkout of the pack registry, `mvmctl pack new acme/example` creates an
+unpublished application-pack source at `pack-sources/acme/example/`: a `pack.toml`
+with an `[application]` bundle to fill in, because a pack must embed its binary in a
+`.mvmpkg` and a policy alone cannot be signed. The `mvm`, `agent` and `runtime`
+namespaces are reserved for first-party packs. Pin the archive, then submit a
+reviewed pull request; this command does not sign or publish anything.
 
 | Command                                                   | Description                                                                                                                                                       |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mvmctl new-pack ns/name`                                  | Scaffold an unpublished policy-pack draft in the current registry checkout; refuse existing paths and the reserved official namespace |
+| `mvmctl pack new ns/name` | Scaffold an unpublished application-pack draft (a `pack.toml` with an `[application]` bundle to fill in) in the current registry checkout; refuse existing paths and the reserved first-party namespaces (`mvm`, `agent`, `runtime`) |
 | `mvmctl pack ls [--json]`                                 | List pinned registry products with their kind (`application` or `policy`) and whether each is installed                                                                                                          |
 | `mvmctl pack rm ns/name[@version]`                        | Remove a registry product's cache entry and lock pin; a supplied version must match the pin. An application's installed bundle stays in the shared bundle store                                                                           |
 | `mvmctl pack update ns/name[@version]`                    | Re-pull a signed workload pack and its signed profile dependencies, adopting a newer published version when available. For an installed application it is the same install as `pack pull` and prints the same `installed ns/name@version (manifest DIGEST, bundle SHA256)` line |
 | `mvmctl pack system list [--kind KIND] [--json]`          | List every recorded builder, runtime, image-project, or extension pack version, marking each active one                                                            |
 | `mvmctl pack system rollback KIND [--to VERSION]`        | Point a system pack class's active version at an already-cached one                                                                                                |
 | `mvmctl pack system prune [--keep-recent N] [--dry-run]`   | Reclaim non-active system pack versions beyond the newest N per key                                                                                                |
-| `mvmctl pack system download KIND`                        | Fetch a system pack version into the cache without changing the active one; no system pack class is published yet                                                  |
-| `mvmctl pack list [--kind KIND] [--json]` | Compatibility spelling of `pack system list` |
-| `mvmctl pack rollback KIND [--to VERSION]` | Compatibility spelling of `pack system rollback` |
-| `mvmctl pack prune [--keep-recent N] [--dry-run] [--json]` | Compatibility spelling of `pack system prune` |
-| `mvmctl pack download KIND` | Compatibility spelling of `pack system download` |
-| `mvmctl pack system update KIND`                          | Fetch and activate a system pack version; no system pack class is published yet                                                                                    |
 | `mvmctl pack info ns/name[@version] [--json]`             | Re-verify a pinned registry product. Legacy packs show publisher, policy, image, and payload details; applications show the authenticated descriptor, guest architecture, archive digest and size, signer, and, from the verified bundle, the entrypoint, working directory, advisory resources and egress policy summary, with an architecture warning when the host differs |
 | `mvmctl pack verify ns/name[@version] [--json]`           | Recheck the exact pin, current publisher and revocation policy, and legacy payload or application bundle archive; report verification scope or fail closed, without fetching or installing |
 | `mvmctl pack lock SPEC.json --mvm-revision COMMIT [--out FILE \| --stdout]` | Resolve an authored `mvm.pack-spec/v1` document against its source tree and write the frozen `pack.lock.json` beside it: spec, source snapshot and lowered-workload digests, compiler version and the pinned mvm commit. A uv `pyproject.toml` + `uv.lock` at the source root is resolved here for the pack's target and its single `python3NN` runtime package: one sha256-pinned manylinux wheel per runtime dependency, recorded in the lowered workload. Non-registry sources, markers the target does not decide, an unsatisfied `requires-python` and packages without a compatible wheel are refused by name. The spec is read as data; no author code runs |
@@ -2463,8 +2457,11 @@ the error states that the archive was published; the valid archive is retained.
 
 Application descriptors use the same catalog digest, publisher policy, and pins
 as legacy packs, but require a current independently signed revocation feed.
-Applications in `mvm/` use the built-in official feed; other namespaces require
-explicit operator revocation trust and a verified cached feed with at most
+Applications in `mvm/`, and applications signed by the built-in publisher
+identity under the built-in publisher policy, use the built-in official feed,
+which `pull` and `run` refresh when it is absent, expired or has under 12 hours
+left (an operator feed, if configured, is checked as well). Other applications
+require explicit operator revocation trust and a verified cached feed with at most
 48 hours of signed validity. Missing trust or feed, expired data, revoked
 signers/digests, rollback, equivocation, or a feed identity matching the descriptor
 publisher refuses acquisition and use. Legacy policy-only packs retain their
@@ -2472,7 +2469,9 @@ optional operator-feed behavior. Their bundles must already have an
 independently enrolled key in `$MVM_HOME/trusted-publishers/`; naming a key in a
 descriptor never enrolls it. Pull accepts canonical HTTPS or digest-pinned OCI
 sources, limits acquisition to the descriptor's signed byte size and at most
-4 GiB, and checks the exact archive SHA-256, independent bundle signature,
+4 GiB, following at most five HTTPS redirects (never to HTTP, an IP literal,
+localhost, a URL with userinfo or another port, or a host that resolves to a
+non-public address) under the same byte and time budget, and checks the exact archive SHA-256, independent bundle signature,
 asserted key ID, and descriptor-to-bundle architecture match. OCI sources also
 require the production registry allowlist, including when reusing a cached archive.
 Cached archives are reverified and extracted files are rebuilt from verified
@@ -2683,18 +2682,21 @@ independently signed MVM revocation feed is fresh. Other packs report
 `"not_established"`; an operator-configured feed cannot confer official status.
 Built-image packs outside `mvm/` require an operator-configured, independently
 signed fresh feed. Its JSON `revocation_scope` is `mvm_release_identity` for
-verified official packs and `operator_configured_only` otherwise. A signature
-proves identity and integrity, not safety.
+verified official packs and `operator_configured_only` otherwise. For an
+application signed by the built-in publish identity, the text output says so
+("signed by the built-in official publisher identity", which does not imply the
+`mvm/` namespace) and names the official signed feed that gates it, with its
+cache expiry when a verified copy exists. A signature proves identity and
+integrity, not safety.
 
 The workload pack commands `pack ls`, `pack rm`, and `pack update ns/name[@version]`
 use the signed registry-pack cache and lockfile. Existing `pack registry`
-commands remain available. The former system-cache commands are now grouped
-under `pack system`; their original `pack list`, `pack rollback`, `pack prune`,
-`pack download KIND`, and `pack update KIND` spellings remain compatible.
-`pack update` selects the system cache only for the exact class names
-`builder`, `runtime`, `dev-image`, and `extension`; a namespaced reference
-selects a workload pack. Other targets are rejected. This command migration
-does not change pack trust or establish any pack as official.
+commands remain available. The system-cache commands live only under
+`pack system` (`list`, `rollback`, `prune`); the earlier top-level spellings
+`pack list`, `pack rollback`, `pack prune`, `pack download` and `pack update KIND`
+were removed. `pack update` takes a namespaced workload-pack reference; other
+targets are rejected. This command migration does not change pack trust or
+establish any pack as official.
 
 #### Install a signed local candidate
 

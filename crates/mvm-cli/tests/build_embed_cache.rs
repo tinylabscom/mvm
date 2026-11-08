@@ -541,10 +541,10 @@ fn publishing_records_the_digest_of_the_bytes() {
     );
 }
 
-/// Entries published before digests were recorded stay usable, and are given
-/// one on first read.
+/// Nothing vouches for bytes without a recorded digest, so they are a miss
+/// and are never served or given a digest after the fact.
 #[test]
-fn an_entry_without_a_digest_adopts_one() {
+fn an_entry_without_a_digest_is_a_miss() {
     let store = tempfile::tempdir().expect("tempdir");
     let work = tempfile::tempdir().expect("tempdir");
     let built = work.path().join("mvm-host-vm-init");
@@ -552,11 +552,17 @@ fn an_entry_without_a_digest_adopts_one() {
     install(store.path(), "keyA", "mvm-host-vm-init", &built);
     std::fs::remove_file(digest_path(store.path(), "keyA", "mvm-host-vm-init")).expect("rm");
 
-    assert!(matches!(
+    assert_eq!(
         inspect(store.path(), "keyA", "mvm-host-vm-init"),
-        Stored::Verified { .. }
+        Stored::Missing
+    );
+    assert!(!digest_path(store.path(), "keyA", "mvm-host-vm-init").exists());
+    assert!(!lookup(
+        store.path(),
+        "keyA",
+        "mvm-host-vm-init",
+        &work.path().join("out")
     ));
-    assert!(digest_path(store.path(), "keyA", "mvm-host-vm-init").is_file());
 }
 
 #[test]

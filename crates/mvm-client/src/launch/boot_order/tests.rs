@@ -1,4 +1,5 @@
 use super::*;
+use crate::admission::admit_plan_tests::pinning_params;
 use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
 use crate::admission::{AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot};
 use chrono::{DateTime, Utc};
@@ -40,43 +41,14 @@ impl Host {
         let keys = self.dir.path().join("keys");
         let audit = self.dir.path().join("audit");
         admit_plan_for_boot(AdmitPlanForBootParams {
-            gpu: false,
-            tools: Default::default(),
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
             vm_name: "vm-boot-order",
-            backend_name: "firecracker",
-            configured_images_dir: None,
-            rootfs_path: &self.rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
-            runtime_config: None,
             cpus: 1,
             mem_mib: 256,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger,
             keys_dir: Some(&keys),
             audit_dir: Some(&audit),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: Vec::new(),
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test resolves none"),
+            ..pinning_params(&self.rootfs, ledger)
         })
         .expect("admission")
     }

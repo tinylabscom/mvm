@@ -278,14 +278,12 @@ const PACK_SYSTEM_SUB: &[(&str, AuditPosture)] = &[
     ("list", AuditPosture::ReadOnly),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
-    ("download", AuditPosture::ReadOnly),
-    ("update", AuditPosture::ReadOnly),
 ];
 
 const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
+    ("new", AuditPosture::InteractiveOrControl),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
-    ("list", AuditPosture::ReadOnly),
     ("info", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
     ("search", AuditPosture::ReadOnly),
@@ -294,9 +292,6 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("lock", AuditPosture::ReadOnly),
     ("compile", AuditPosture::ReadOnly),
     ("pull", AuditPosture::Emits("RegistryPackPin")),
-    ("rollback", AuditPosture::Emits("PackCacheChange")),
-    ("prune", AuditPosture::Emits("CachePrune")),
-    ("download", AuditPosture::ReadOnly),
     ("update", AuditPosture::Emits("RegistryPackPin")),
     ("registry", AuditPosture::DelegatesToSub(PACK_REGISTRY_SUB)),
     ("system", AuditPosture::DelegatesToSub(PACK_SYSTEM_SUB)),
@@ -742,7 +737,6 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
     ("pack", AuditPosture::DelegatesToSub(PACK_SUB)),
-    ("new-pack", AuditPosture::InteractiveOrControl),
     // Plan 200 — beginner microVM workflows.
     ("machine", AuditPosture::DelegatesToSub(MACHINE_SUB)),
     // Operational surfaces.

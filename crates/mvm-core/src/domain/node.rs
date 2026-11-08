@@ -8,7 +8,6 @@ pub struct NodeInfo {
     pub arch: String,
     pub total_vcpus: u32,
     pub total_mem_mib: u64,
-    #[serde(alias = "lima_status")]
     pub vm_status: Option<String>,
     pub firecracker_version: Option<String>,
     pub jailer_available: bool,

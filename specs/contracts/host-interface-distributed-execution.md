@@ -467,3 +467,25 @@ The first demo promises **contain, terminate, and rebuild**. It does not
 promise verified physical wipe. A remote command cannot immediately affect a
 disconnected node, and revocation takes effect only where current revocation
 state is known or an offline lease has expired.
+
+### Demo status: what runs today
+
+`crates/mvm-hostd/tests/mission_demo.rs` scripts the sequence above across
+three nodes, and `features/suites/s40_mission_demo/` runs it as a conformance
+scenario. Run it with
+`cargo nextest run -p mvm-hostd --test mission_demo --no-capture`.
+
+Real in that run: the launch preflight and per-workload ledger, quarantine and
+replacement with chain-signed entries, the signed offline lease, the command
+replay gate, the reconnect challenge, and the sealed mailbox envelope with its
+capability, replay and execution-epoch checks.
+
+Mailbox delivery is real on one host: the sender's sealed envelope crosses a
+Unix domain socket to the receiving node's `MailboxService`
+(`mvm-hostd::mailbox_service`), which opens it and enqueues it under a bounded
+queue, and refusals return to the sender as typed replies.
+
+Not wired, and therefore not claimed: no vsock guest service reads the queue
+(the typed guest service remains open work in #4622), there is no cross-host
+transport, and nothing boots a VM or attests hardware. Only one node runs a
+service in the demo. The demo prints this on its own output.

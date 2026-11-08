@@ -286,7 +286,7 @@ mod tests {
         let path = root.join("mvm.toml");
         std::fs::write(
             &path,
-            "flake = \".\"\nprofile = \"default\"\nvcpus = 2\nmem = \"1G\"\n",
+            "flake = \".\"\nprofile = \"default\"\ncpus = 2\nmem = \"1G\"\n",
         )
         .unwrap();
         let canonical = path.canonicalize().unwrap();

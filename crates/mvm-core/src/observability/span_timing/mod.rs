@@ -74,11 +74,6 @@ pub fn format_from_env() -> Option<ReportFormat> {
     format_from_env_value(std::env::var(ENV_ENABLE).ok().as_deref())
 }
 
-/// Whether span profiling is enabled for this process.
-pub fn is_enabled() -> bool {
-    format_from_env().is_some()
-}
-
 /// The target filter to install on the timing layer.
 pub fn filter_from_env() -> String {
     std::env::var(ENV_FILTER)

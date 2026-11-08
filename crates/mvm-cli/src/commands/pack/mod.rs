@@ -11,13 +11,12 @@ use super::{Cli, pull, search};
 
 mod author;
 pub(in crate::commands) mod build;
-mod download;
 pub(crate) mod inspect;
 mod list;
+pub(in crate::commands) mod new;
 mod prune;
 mod registry;
 mod rollback;
-mod update;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -29,6 +28,8 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum PackAction {
     /// List installed workload packs
     Ls(registry::LsArgs),
+    /// Draft an unpublished application pack (binary embedded in a .mvmpkg) for registry review
+    New(new::Args),
     /// Remove an installed workload pack and its lock pin
     Rm {
         /// The pack to remove; a version must match the lock pin
@@ -37,46 +38,10 @@ pub(in crate::commands) enum PackAction {
     },
     /// Manage the builder, runtime, and image-project pack cache
     System(SystemArgs),
-    /// List every recorded system pack version (compatibility syntax)
-    List {
-        /// Only list versions of this pack class
-        #[arg(long)]
-        kind: Option<PackKindArg>,
-        /// Emit machine-readable JSON to stdout
-        #[arg(long)]
-        json: bool,
-    },
-    /// Roll back a system pack class (compatibility syntax)
-    Rollback {
-        /// Which pack class to roll back
-        kind: PackKindArg,
-        /// A release version (e.g. "v0.17.0") or a pack-hash prefix to
-        /// activate. Omit to roll back to the second-newest version.
-        #[arg(long)]
-        to: Option<String>,
-    },
-    /// Prune the system pack cache (compatibility syntax)
-    Prune {
-        /// How many of the newest versions per key to keep (beyond the active one)
-        #[arg(long, default_value_t = 2)]
-        keep_recent: usize,
-        /// Print what would be removed without removing anything
-        #[arg(long)]
-        dry_run: bool,
-        /// Emit machine-readable JSON to stdout
-        #[arg(long)]
-        json: bool,
-    },
-    /// Download a system pack class (compatibility syntax)
-    Download {
-        /// Which pack class to fetch
-        kind: PackKindArg,
-    },
-    /// Update a workload pack by reference or a system pack by class
+    /// Update an installed workload pack by reference
     Update {
-        /// Workload reference (`ns/name[@version]`) or system class
-        #[arg(value_name = "ns/name[@version]|SYSTEM_KIND")]
-        target: UpdateTarget,
+        #[arg(value_name = "ns/name[@version]")]
+        reference: PackReference,
     },
     /// Show the signed manifest and policy of an installed workload pack
     Info {
@@ -145,41 +110,6 @@ enum SystemAction {
         #[arg(long)]
         json: bool,
     },
-    /// Fetch a version into the cache without activating it
-    Download {
-        /// Which pack class to fetch
-        kind: PackKindArg,
-    },
-    /// Fetch the latest version of a pack class and activate it
-    Update {
-        /// Which pack class to update
-        kind: PackKindArg,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub(in crate::commands) enum UpdateTarget {
-    System(PackKindArg),
-    Workload(PackReference),
-}
-
-impl std::str::FromStr for UpdateTarget {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        match value {
-            "builder" => Ok(Self::System(PackKindArg::Builder)),
-            "runtime" => Ok(Self::System(PackKindArg::Runtime)),
-            "dev-image" => Ok(Self::System(PackKindArg::DevImage)),
-            "extension" => Ok(Self::System(PackKindArg::Extension)),
-            _ => value
-                .parse::<PackReference>()
-                .map(Self::Workload)
-                .map_err(|error| {
-                    format!("expected a workload reference or system pack class: {error}")
-                }),
-        }
-    }
 }
 
 /// `mvmctl pack <kind>` CLI selector, mapping onto [`PackKind`]. `dev-image`
@@ -240,29 +170,17 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
                 dry_run,
                 json,
             } => prune::run(keep_recent, dry_run, json),
-            SystemAction::Download { kind } => download::run(kind),
-            SystemAction::Update { kind } => update::run(kind),
         },
-        PackAction::List { kind, json } => list::run(kind, json),
-        PackAction::Rollback { kind, to } => rollback::run(kind, to),
-        PackAction::Prune {
-            keep_recent,
-            dry_run,
-            json,
-        } => prune::run(keep_recent, dry_run, json),
-        PackAction::Download { kind } => download::run(kind),
-        PackAction::Update { target } => match target {
-            UpdateTarget::System(kind) => update::run(kind),
-            UpdateTarget::Workload(reference) => registry::run(
-                cli,
-                registry::Args {
-                    action: registry::RegistryAction::Update(registry::UpdateArgs {
-                        reference: reference.to_string(),
-                    }),
-                },
-                cfg,
-            ),
-        },
+        PackAction::Update { reference } => registry::run(
+            cli,
+            registry::Args {
+                action: registry::RegistryAction::Update(registry::UpdateArgs {
+                    reference: reference.to_string(),
+                }),
+            },
+            cfg,
+        ),
+        PackAction::New(args) => new::run(args),
         PackAction::Info { reference, json } => inspect::run(&reference, json, false),
         PackAction::Verify { reference, json } => inspect::run(&reference, json, true),
         PackAction::Lock(args) => author::run_lock(args),

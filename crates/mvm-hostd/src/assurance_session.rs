@@ -18,7 +18,6 @@
 //! does not bind `host.assurance.v1` gets no session, regardless of what the
 //! declaration asks for. Both must agree.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
@@ -1367,15 +1366,6 @@ pub fn default_policy_ceiling() -> AuthorityCeiling {
     AuthorityCeiling::extension_maximum()
 }
 
-/// Edges keyed by label, for a caller that wants to check its own declaration.
-#[must_use]
-pub fn edges_by_label(decl: &CampaignDeclaration) -> BTreeMap<AssuranceId, (String, u16)> {
-    decl.edges
-        .iter()
-        .map(|edge| (edge.label.clone(), (edge.host.clone(), edge.port)))
-        .collect()
-}
-
 /// An operator-declared campaign, with everything the open needs that the
 /// admit path does not already hold.
 ///
@@ -1423,6 +1413,7 @@ pub fn open_for_boot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     use mvm_contract::assurance::{InconclusiveReason, TrialOutcome};
     use mvm_contract::protocol::extension_pack::{
@@ -1581,15 +1572,6 @@ mod tests {
             NOW_MS,
         );
         assert!(result.is_err(), "an unapproved campaign must not open");
-    }
-
-    #[test]
-    fn a_declared_edge_table_keys_by_label() {
-        let table = edges_by_label(&declaration());
-        assert_eq!(
-            table.get(&id("undeclared.synthetic.destination")),
-            Some(&("attacker.example.com".to_string(), 443))
-        );
     }
 
     #[test]

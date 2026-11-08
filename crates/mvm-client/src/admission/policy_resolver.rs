@@ -423,90 +423,14 @@ fn load_tenant_workload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::plan::{
-        AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, KeyRotationSpec,
-        Nonce, PlanId, PlanSeccompTier, PostRunLifecycle, Resources, RuntimeProfileRef,
-        SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
-    };
-    use std::collections::BTreeMap;
+    use mvm_core::plan::test_support::PlanFixture;
 
     fn fixture_plan() -> ExecutionPlan {
         let now = chrono::Utc::now();
-        ExecutionPlan {
-            execution_epoch: 1,
-            grants: None,
-            environment: None,
-            build_provenance: Default::default(),
-            snapshot_at: Default::default(),
-            network_mode: Default::default(),
-            stream_retention: Default::default(),
-            action_budget: None,
-            protected_paths: Default::default(),
-            ingress: Vec::new(),
-            network_limits: Default::default(),
-            schema_version: SCHEMA_VERSION,
-            plan_id: PlanId("plan-test".to_string()),
-            plan_version: 1,
-            tenant: TenantId("local".to_string()),
-            workload: WorkloadId("vm-test".to_string()),
-            runtime_profile: RuntimeProfileRef("firecracker".to_string()),
-            image: SignedImageRef {
-                name: "vm-test".to_string(),
-                sha256: "a".repeat(64),
-                cosign_bundle: None,
-                entrypoint_present: true,
-            },
-            resources: Resources {
-                cpus: 1,
-                mem_mib: 128,
-                disk_mib: 0,
-                timeouts: TimeoutSpec {
-                    boot_secs: 30,
-                    exec_secs: 0,
-                },
-            },
-            admission_profile: AdmissionProfile::local_default(
-                "vm:boot",
-                PlanSeccompTier::Standard,
-            ),
-            network_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
-            fs_policy: FsPolicyRef(LOCAL_DEFAULT.to_string()),
-            secrets: Vec::new(),
-            egress_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
-            redaction: Default::default(),
-            reversible_replacement: Default::default(),
-            tool_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
-            tools: Default::default(),
-            artifact_policy: ArtifactPolicy {
-                capture_paths: Vec::new(),
-                retention_days: 0,
-            },
-            caller_commitment: None,
-            audit_labels: BTreeMap::new(),
-            key_rotation: KeyRotationSpec { interval_days: 0 },
-            attestation: AttestationRequirement {
-                mode: AttestationMode::Noop,
-            },
-            release_pin: None,
-            post_run: PostRunLifecycle {
-                destroy_on_exit: true,
-                snapshot_on_idle: false,
-                idle_secs: 0,
-            },
-            valid_from: now,
-            valid_until: now + chrono::Duration::minutes(10),
-            nonce: Nonce::from_bytes([0u8; 16]),
-            bundle: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            asset_identities: Vec::new(),
-            outputs: Vec::new(),
-            agent_verbs: None,
-            services: Vec::new(),
-            extensions: Vec::new(),
-            stream_edges: Vec::new(),
-            sdk_uses_sidecar: true,
-        }
+        PlanFixture::new()
+            .plan_id("plan-test")
+            .validity(now, now + chrono::Duration::minutes(10))
+            .build()
     }
 
     #[test]

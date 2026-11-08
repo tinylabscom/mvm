@@ -87,7 +87,7 @@ def signed_prerequisites(info, args):
                     if member.get("class") == "environment"]
     require(len(environments) == 1, "one verified signed environment is required")
     environment = environments[0]
-    require(environment.get("pack") == {"name": "agent/claude", "version": "2.0.0"},
+    require(environment.get("pack") == {"name": "agent/claude", "version": "2.0.1"},
             "signed environment application identity mismatch")
     require(environment.get("target") == "aarch64-linux", "signed guest target mismatch")
     policy = environment.get("policy", {})

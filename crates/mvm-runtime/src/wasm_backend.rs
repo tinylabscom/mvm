@@ -65,7 +65,7 @@ use thiserror::Error;
 /// the request — see the module docs.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WasmBackendError {
-    /// Selected via `--backend wasm` / `MVM_BACKEND=wasm`, but `mvm-runtime`
+    /// Selected via `--backend wasm` / `MVM_HYPERVISOR=wasm`, but `mvm-runtime`
     /// was built without the `wasm-backend` feature.
     #[error(
         "wasm backend was not compiled in — rebuild with `cargo build -p mvm-runtime \

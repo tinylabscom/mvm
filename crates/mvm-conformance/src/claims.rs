@@ -299,12 +299,3 @@ pub fn unresolved_witnesses(root: &Path, claim: &Claim) -> Vec<String> {
 pub fn registered_ids(root: &Path) -> BTreeSet<String> {
     load_claims(root).into_iter().map(|c| c.id).collect()
 }
-
-/// All scenario ids discovered from feature files.
-pub fn scenario_ids(root: &Path) -> BTreeSet<String> {
-    load_scenarios(root)
-        .into_iter()
-        .map(|s| s.id)
-        .filter(|id| !id.is_empty())
-        .collect()
-}

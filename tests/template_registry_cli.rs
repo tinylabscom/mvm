@@ -162,7 +162,7 @@ fn generate_template_fetches_and_scaffolds_remote_template() {
         "manifest must use the project directory name:\n{manifest}"
     );
     assert!(
-        manifest.contains("vcpus = 2"),
+        manifest.contains("cpus = 2"),
         "manifest must use the template vcpu default:\n{manifest}"
     );
     assert!(

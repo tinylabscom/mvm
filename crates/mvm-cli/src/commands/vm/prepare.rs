@@ -4,8 +4,8 @@
 //! Scope is deliberately narrow and read-only: only the host default runtime
 //! pack cache is diagnosed here (the same cache `machine run`'s default launch
 //! path consults). Acquiring packs — resolve, download, verify, activate — is a
-//! separate, side-effecting concern that lives in `mvmctl pack download`/`update`
-//! (over the content-addressed pack cache) and the install-time `mvmctl bootstrap`
+//! separate, side-effecting concern that lives in the content-addressed pack cache
+//! and the install-time `mvmctl bootstrap`
 //! prefetch; this command only reports readiness and takes no positional input.
 
 use anyhow::Result;

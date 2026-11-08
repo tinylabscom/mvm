@@ -5,9 +5,7 @@
 //! `PersistedManifest` is the slot-resident JSON record.
 
 use anyhow::{Context, Result};
-use mvm_core::manifest::{
-    PersistedManifest, is_slot_hash_dirname, slot_dir, slot_dir_for_manifest_path,
-};
+use mvm_core::manifest::{PersistedManifest, is_slot_hash_dirname, slot_dir};
 use tracing::instrument;
 
 /// One row produced by [`template_list_slots`]. Contains just the
@@ -36,15 +34,6 @@ pub fn template_persist_slot(persisted: &PersistedManifest) -> Result<()> {
 #[instrument(skip_all, fields(slot_hash = slot_hash))]
 pub fn template_load_slot(slot_hash: &str) -> Result<PersistedManifest> {
     let dir = slot_dir(slot_hash);
-    PersistedManifest::read_from_slot(std::path::Path::new(&dir))
-}
-
-/// Convenience: load the slot record for a given manifest filesystem
-/// path. Computes `sha256(canonical_path)` then delegates to
-/// [`template_load_slot`].
-#[instrument(skip_all, fields(manifest_path = %path.display()))]
-pub fn template_load_slot_for_manifest_path(path: &std::path::Path) -> Result<PersistedManifest> {
-    let dir = slot_dir_for_manifest_path(path)?;
     PersistedManifest::read_from_slot(std::path::Path::new(&dir))
 }
 

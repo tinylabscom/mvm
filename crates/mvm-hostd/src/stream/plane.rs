@@ -49,6 +49,7 @@
 //! with it. So attach clears the directory; it clears it *after* the bind,
 //! because a refused bind means someone else's live capture is in there.
 
+use mvm_core::util::time::now_unix_secs;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -158,13 +159,6 @@ impl StreamPlane {
     /// Whether this plane currently holds a capture for `vm`.
     pub fn is_attached(&self, vm: &str) -> bool {
         self.registry().contains_key(vm)
-    }
-
-    /// VMs this plane is capturing, for a caller reporting host state.
-    pub fn attached_vms(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.registry().keys().cloned().collect();
-        names.sort();
-        names
     }
 
     /// Subscribe to the redacted output of a VM this plane owns.
@@ -984,12 +978,6 @@ fn now_unix_nanos() -> u128 {
         .map_or(0, |d| d.as_nanos())
 }
 
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1190,48 +1178,6 @@ mod tests {
     }
 
     #[test]
-    fn attach_serves_the_console_over_the_broker_socket() {
-        let (_env, _tmp) = isolated_home();
-        let console = console_log_for("plane-vm");
-        let plane = StreamPlane::new();
-
-        plane
-            .attach(&capture("plane-vm", &console))
-            .expect("attach");
-        assert!(plane.is_attached("plane-vm"));
-        assert_eq!(plane.attached_vms(), ["plane-vm"]);
-        assert!(config::vm_stream_socket("plane-vm").exists());
-
-        let follower = Follower::attach("plane-vm");
-        let mut edge_reader = plane
-            .subscribe("plane-vm")
-            .expect("an attached VM is subscribable");
-        assert_eq!(follower.availability, StreamAvailability::LiveOnly);
-
-        std::fs::write(&console, b"from the console\n").expect("write the console capture");
-        let record = follower.next();
-        assert!(
-            matches!(record.origin, RecordOrigin::Live { .. }),
-            "the broker served the read, not the console fallback: {:?}",
-            record.origin
-        );
-        assert_eq!(record.payload, b"from the console\n");
-        assert_eq!(
-            edge_reader
-                .recv()
-                .expect("the edge reader saw the frame")
-                .payload,
-            b"from the console\n"
-        );
-        assert!(
-            plane.subscribe("not-attached").is_none(),
-            "all absent sources have the same result"
-        );
-
-        plane.release("plane-vm");
-    }
-
-    #[test]
     fn attach_wires_the_granted_display_socket_into_the_same_stream_chain() {
         let (_env, tmp) = isolated_home();
         let console = console_log_for("plane-display");
@@ -1269,23 +1215,6 @@ mod tests {
             frame
         );
         plane.release("plane-display");
-    }
-
-    #[test]
-    fn attach_is_idempotent_and_keeps_the_first_capture() {
-        let (_env, _tmp) = isolated_home();
-        let console = console_log_for("plane-twice");
-        let plane = StreamPlane::new();
-
-        plane
-            .attach(&capture("plane-twice", &console))
-            .expect("first attach");
-        plane
-            .attach(&capture("plane-twice", &console))
-            .expect("a second attach must not fail");
-        assert_eq!(plane.attached_vms(), ["plane-twice"]);
-
-        plane.release("plane-twice");
     }
 
     #[test]

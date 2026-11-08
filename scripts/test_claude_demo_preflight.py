@@ -48,7 +48,7 @@ class PreflightTests(unittest.TestCase):
             bundles.mkdir()
             (bundles / f"{self.args.archive_sha256}.mvmpkg").write_bytes(self.cli.read_bytes())
         return {"stdout": {
-            "version": self.args.version + "\n", "search": "agent/claude@2.0.0\n",
+            "version": self.args.version + "\n", "search": "agent/claude@2.0.1\n",
             "pull": "", "verify": json.dumps(self.info),
         }[label], "stderr": ""}
 

@@ -8,7 +8,6 @@
 mod artifacts;
 mod build;
 mod build_image;
-mod health;
 mod registry_sync;
 mod slots;
 mod snapshot;
@@ -19,7 +18,6 @@ mod path_security_tests;
 pub use artifacts::*;
 pub use build::*;
 pub use build_image::*;
-pub use health::*;
 pub use registry_sync::*;
 pub use slots::*;
 pub use snapshot::*;

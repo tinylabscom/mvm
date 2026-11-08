@@ -103,6 +103,7 @@ def audit_result(home, entries, code=0):
         "Roots are published at admission and exit.\n"
         "[mvm] No readable off-host witness configured (MVM_AUDIT_WITNESS), so a rewrite "
         "by this host is undetectable from here.\n"
+        f"VERIFIED chain: {entries} entries, 0 sessions, 0 seals\n"
     ).encode())
 
 

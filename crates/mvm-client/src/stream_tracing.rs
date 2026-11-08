@@ -23,8 +23,6 @@ use base64::engine::general_purpose::STANDARD as B64;
 use mvm_contract::stream::{StreamKind, StreamRecord, StreamSource};
 use tracing::Level;
 
-use crate::stream::{StreamError, StreamReader};
-
 /// Event target every republished record carries, so a subscriber can filter
 /// workload output away from mvm's own diagnostics.
 pub const TARGET: &str = "mvm::workload";
@@ -41,18 +39,6 @@ pub const UNDECODABLE_TRACE_EVENT: &str = "stream.undecodable_trace";
 /// Recover the exact captured bytes from a [`PAYLOAD_FIELD`] value.
 pub fn decode_payload(payload_b64: &str) -> Option<Vec<u8>> {
     B64.decode(payload_b64).ok()
-}
-
-/// Drain `reader`, emitting one `tracing` event per record.
-///
-/// Returns when the stream ends. A verification failure stops the bridge and
-/// propagates: republishing past a broken chain would put unverified bytes
-/// into a consumer's log under the same target as verified ones.
-pub fn republish_to_tracing(mut reader: Box<dyn StreamReader>) -> Result<(), StreamError> {
-    while let Some(record) = reader.next_record()? {
-        republish_record(&record);
-    }
-    Ok(())
 }
 
 /// Emit one record as a `tracing` event.
@@ -345,85 +331,6 @@ mod tests {
             payload.to_vec(),
             "even an undecodable record keeps its bytes"
         );
-    }
-
-    #[test]
-    fn republishing_a_reader_emits_one_event_per_record_in_order() {
-        let mut prev = [0u8; 32];
-        let mut records = Vec::new();
-        for seq in 0..3u64 {
-            let record = StreamRecord {
-                seq,
-                source: StreamSource::Entrypoint,
-                kind: StreamKind::Stdout,
-                host_unix_nanos: 1_000 + seq,
-                prev_hash: prev,
-                payload: format!("line-{seq}").into_bytes(),
-            };
-            prev = record.hash();
-            records.push(record);
-        }
-        let mut framed = Vec::new();
-        crate::stream::write_batch(
-            &mut framed,
-            &crate::stream::StreamBatch {
-                anchor: [0u8; 32],
-                records,
-                gap: None,
-                caught_up: true,
-            },
-        )
-        .expect("frame");
-
-        let events = capture_tracing_events(|| {
-            let reader = crate::stream::FramedStreamReader::new(
-                // Owned, not borrowed: `Box<dyn StreamReader>` is `'static`,
-                // which is what lets `connect_stream` hand one back.
-                std::io::Cursor::new(framed.clone()),
-                crate::stream::StreamOpts::default(),
-            );
-            republish_to_tracing(Box::new(reader)).expect("republish");
-        });
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[0].raw_payload(), b"line-0".to_vec());
-        assert_eq!(events[2].raw_payload(), b"line-2".to_vec());
-    }
-
-    #[test]
-    fn a_broken_chain_stops_the_bridge_instead_of_republishing_unverified_bytes() {
-        let bad = StreamRecord {
-            seq: 0,
-            source: StreamSource::Entrypoint,
-            kind: StreamKind::Stdout,
-            host_unix_nanos: 1,
-            // Not the genesis marker and not the anchor the batch declares.
-            prev_hash: [9u8; 32],
-            payload: b"unverified".to_vec(),
-        };
-        let mut framed = Vec::new();
-        crate::stream::write_batch(
-            &mut framed,
-            &crate::stream::StreamBatch {
-                anchor: [0u8; 32],
-                records: vec![bad],
-                gap: None,
-                caught_up: true,
-            },
-        )
-        .expect("frame");
-
-        let mut outcome = None;
-        let events = capture_tracing_events(|| {
-            let reader = crate::stream::FramedStreamReader::new(
-                // Owned, not borrowed: `Box<dyn StreamReader>` is `'static`,
-                // which is what lets `connect_stream` hand one back.
-                std::io::Cursor::new(framed.clone()),
-                crate::stream::StreamOpts::default(),
-            );
-            outcome = Some(republish_to_tracing(Box::new(reader)));
-        });
-        assert!(matches!(outcome, Some(Err(StreamError::Chain(_)))));
-        assert!(events.is_empty(), "nothing unverified reached the log");
     }
 
     #[test]

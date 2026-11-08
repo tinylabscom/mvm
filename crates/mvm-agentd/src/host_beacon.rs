@@ -15,7 +15,6 @@
 //! authoritative identity into the chain entry from the connection
 //! context; the guest cannot influence the binding.
 
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceErrorCode, ServiceId};
@@ -118,13 +117,6 @@ fn report_with_retries(
     Err(err)
 }
 
-/// Report agent liveness over an already-open broker stream.
-pub fn report_on(stream: &mut UnixStream, report: &BeaconReport) -> Result<BeaconAck, BeaconError> {
-    let call = build_call(report)?;
-    let payload = broker_client::call(stream, &call)?;
-    decode(payload)
-}
-
 /// Dial the broker port and report agent liveness.
 pub fn report(report: &BeaconReport, timeout_secs: u64) -> Result<BeaconAck, BeaconError> {
     let call = build_call(report)?;
@@ -166,111 +158,14 @@ fn next_correlation_id() -> CorrelationId {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-
-    use mvm_core::protocol::broker::ServiceResponse;
 
     use super::*;
-    use crate::vsock::{read_frame, write_frame};
 
     fn sample_report() -> BeaconReport {
         BeaconReport {
             agent_version: "0.17.0".into(),
             boot_unix_ms: 1_787_181_844_000,
         }
-    }
-
-    /// Spawn a mock broker on the server half of a socket pair: read the
-    /// one `ServiceCall`, hand it to `respond` (which also captures it),
-    /// write the returned `ServiceResponse`.
-    fn serve_once(
-        server: UnixStream,
-        captured: Arc<Mutex<Option<ServiceCall>>>,
-        respond: impl FnOnce(&ServiceCall) -> ServiceResponse + Send + 'static,
-    ) -> thread::JoinHandle<()> {
-        thread::spawn(move || {
-            let mut server = server;
-            let call: ServiceCall = read_frame(&mut server).unwrap();
-            *captured.lock().unwrap() = Some(call.clone());
-            write_frame(&mut server, &respond(&call)).unwrap();
-        })
-    }
-
-    #[test]
-    fn report_sends_host_beacon_v1_envelope_and_returns_chain_head() {
-        let (mut client, server) = UnixStream::pair().unwrap();
-        let captured = Arc::new(Mutex::new(None));
-        let handle = serve_once(server, captured.clone(), |call| ServiceResponse::Ok {
-            correlation_id: call.correlation_id.clone(),
-            payload: serde_json::json!({"chain_head": "head-001"}),
-        });
-
-        let ack = report_on(&mut client, &sample_report()).expect("report must succeed");
-        assert_eq!(ack.chain_head, "head-001");
-        handle.join().unwrap();
-
-        let call = captured
-            .lock()
-            .unwrap()
-            .take()
-            .expect("server must capture call");
-        assert_eq!(call.service.as_str(), "host.beacon.v1");
-        assert_eq!(call.verb, "report");
-        assert!(
-            call.payload.get("workload_id").is_none(),
-            "guest payload must not carry identity fields"
-        );
-        let report: BeaconReport = serde_json::from_value(call.payload).unwrap();
-        assert_eq!(report, sample_report());
-    }
-
-    #[test]
-    fn report_surfaces_not_bound_as_typed_error() {
-        let (mut client, server) = UnixStream::pair().unwrap();
-        let captured = Arc::new(Mutex::new(None));
-        let handle = serve_once(server, captured, |call| ServiceResponse::Err {
-            correlation_id: call.correlation_id.clone(),
-            code: ServiceErrorCode::NotBound,
-            message: "service `host.beacon.v1` not registered".into(),
-        });
-
-        let err = report_on(&mut client, &sample_report()).expect_err("must surface NotBound");
-        assert!(matches!(err, BeaconError::NotBound), "got {err:?}");
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn report_surfaces_unavailable_as_typed_error() {
-        let (mut client, server) = UnixStream::pair().unwrap();
-        let captured = Arc::new(Mutex::new(None));
-        let handle = serve_once(server, captured, |call| ServiceResponse::Err {
-            correlation_id: call.correlation_id.clone(),
-            code: ServiceErrorCode::Unavailable,
-            message: "audit-signer transport failed".into(),
-        });
-
-        let err = report_on(&mut client, &sample_report()).expect_err("must surface unavailable");
-        assert!(matches!(err, BeaconError::Unavailable(_)), "got {err:?}");
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn report_surfaces_bad_request_as_typed_error() {
-        let (mut client, server) = UnixStream::pair().unwrap();
-        let captured = Arc::new(Mutex::new(None));
-        let handle = serve_once(server, captured, |call| ServiceResponse::Err {
-            correlation_id: call.correlation_id.clone(),
-            code: ServiceErrorCode::BadRequest,
-            message: "payload parse failed".into(),
-        });
-
-        let err = report_on(&mut client, &sample_report()).expect_err("must surface BadRequest");
-        match err {
-            BeaconError::BadRequest(msg) => assert!(msg.contains("parse")),
-            other => panic!("expected BadRequest, got {other:?}"),
-        }
-        handle.join().unwrap();
     }
 
     #[test]
@@ -336,6 +231,18 @@ mod tests {
         use mvm_core::net::telemetry::outbox::Outbox;
         use mvm_core::protocol::telemetry::{MAX_RECORD_BYTES, RecordBody, TelemetryRecord};
         use std::sync::Arc;
+
+        // `with_default` is thread-local but tracing's callsite interest cache
+        // is process-wide. While only one dispatcher exists, interest is
+        // rebuilt against the calling thread's default alone, so a parallel
+        // test reaching the `warn!` callsite first can cache "never" and the
+        // event is dropped. A second live dispatcher forces tracing to
+        // consult every dispatcher, which this scope's subscriber then wins.
+        static SECOND_DISPATCHER: std::sync::LazyLock<tracing::Dispatch> =
+            std::sync::LazyLock::new(|| {
+                tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default())
+            });
+        std::sync::LazyLock::force(&SECOND_DISPATCHER);
 
         let outbox = Arc::new(Outbox::new(16, 16 * MAX_RECORD_BYTES).unwrap());
         let state = Arc::new(CaptureState::new(outbox.clone()).unwrap());

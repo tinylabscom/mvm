@@ -24,12 +24,12 @@ three #4839 checklist boxes named in §0; it does not touch #3731.
 
 ### 1.2 Packages and binaries
 
-- `cargo metadata --no-deps --format-version 1` -> **28 packages** (all workspace members; CLAUDE.md's "31 packages" is stale), **54 `bin` targets** in 14 packages (unchanged since the first measurement) (the rest are library-only).
+- `cargo metadata --no-deps --format-version 1` -> **28 packages** (all workspace members; CLAUDE.md's "31 packages" is stale), **53 `bin` targets** in 14 packages, re-counted 2026-11-06 at `d6b4a29f84` (`mvm-egress-proxy` is gone; the rest are library-only).
 
 | Package | Bins | Binaries |
 |---|---|---|
 | `mvm-agentd` | 20 | `audit-probe`, `emit_protocol_schema`, `fake-runner`, `mvm-addon-dns`, `mvm-addon-vsock-bridge`, `mvm-builder-agent`, `mvm-display-bridge`, `mvm-egress-client`, `mvm-entrypoint-test-wrapper`, `mvm-exit-report`, `mvm-guest-agent`, `mvm-guest-netinit`, `mvm-oci-entrypoint`, `mvm-ping`, `mvm-runner`, `mvm-seccomp-apply`, `mvm-setpriv-fixture`, `mvm-tool-helper`, `mvm-tool-shim`, `syscall-probe` |
-| `mvm-build` | 2 | `mvm-egress-proxy`, `mvm-test-image-lock-holder` |
+| `mvm-build` | 1 | `mvm-test-image-lock-holder` |
 | `mvm-builder-guest` | 3 | `mvm-builderd`, `mvm-host-vm-init`, `stage0-init` |
 | `mvm-client` | 2 | `emit_instruction_trust_schema`, `emit_policy_schema` |
 | `mvm-contract` | 2 | `emit_assurance_schema`, `emit_pack_spec_schema` |
@@ -51,7 +51,8 @@ Roles (from CLAUDE.md, cross-checked against the table): host CLI `mvmctl`; host
 - Image set is the Linux layer only (ADR-054); overlay, SDK sidecars and initramfs are retired roles that `mvmctl` assembles from the guest runtime archive shipped with each release.
 - Release artifacts (`.github/workflows/release.yml`): `mvmctl-<target>.tar.gz` (+ `.sha256`, bundle) for `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (built against musl; Intel macOS is deferred, matrix lines 208-229), each carrying `libmvm_hostlib`; `mvm-guest-bins-v<version>.tar.gz` + `.sha256` + bundles (built by `guest-bins.yml` via `mvmctl dev guest-bins`); deb/rpm packages; signed `checksums-sha256.txt`.
 - Guest-bins members (`cli-commands.md` "Guest Binaries", `GUEST_BINS_MANIFEST_FILE` in `crates/mvm-build/src/guest_runtime.rs`): per arch `bin/` (`mvm-guest-agent`, `mvm-guest-netinit`, `mvm-seccomp-apply`, `mvm-display-bridge`, `mvm-runner`, `mvm-egress-client`, `mvm-addon-dns`, `mvm-exit-report`, `mvm-ping`, `mvm-oci-entrypoint`, `mvm-setpriv`), `initramfs/mvm-guest-agent`, `lib/{glibc,musl}/` (`libmvm_host_services.so`, GPU shims), plus `sdk-py/mvm/` and `manifest.json`.
-- Contracts: signed `ExecutionPlan`; `.mvmpkg` bundle (`mvm_core::plan::bundle`); image-set contract; builder boot ABI 0/1/2; base-image contract 0/1; C ABIs `mvm_hostlib_*` (ABI 1.7 per CLAUDE.md) and `libmvm_host_services.so`; guest-agent vsock protocol.
+- Contracts: signed `ExecutionPlan`; `.mvmpkg` bundle (`mvm_core::plan::bundle`); image-set contract; builder boot ABI 0/1/2; base-image contract 0/1; C ABIs `mvm_hostlib_*` and `libmvm_host_services.so`; guest-agent vsock protocol.
+- Current versions (read from source 2026-11-06 at `d6b4a29f84`; re-grep before relying on them): `mvm_hostlib` ABI 1.13 (`MVM_HOSTLIB_ABI_MAJOR`/`MVM_HOSTLIB_ABI_MINOR` in `crates/mvm-hostlib/src/lib.rs`; `runmvm-client` negotiates 1.7 as its minimum, `ABI_MINOR` in `crates/runmvm-client/src/lib.rs`); bundle manifest `BUNDLE_SCHEMA_VERSION` 7 and `ExecutionPlan` `SCHEMA_VERSION` 1 (`crates/mvm-contract/src/plan/`); image-set reader `IMAGE_SET_SCHEMA_VERSION` 3 with 2 accepted as legacy, `images.lock` `builder_cache_contract` 5; Workload IR 0.2 (`crates/mvm-contract/src/ir/version.rs`); guest vsock `PROTOCOL_VERSION` 2 in `mvm-agentd` and 3 in `mvm-core`.
 
 ### 1.4 Targets and features
 
@@ -176,7 +177,7 @@ Caveat: the script is a regex over source, so variant names use the kebab-case o
 Built from `9168754adca89a00dbaf4bee109bd1966b2081bf` with `~/.cargo/bin/cargo build -p mvmctl` (debug, worktree-local target dir, 14m12s), then `python3 scripts/gen-cli-surface-inventory.py --bin target/debug/mvmctl`. Defaults are not in `--help` output here, so they come from source counts instead: `rg -o default_value crates/mvm-cli/src -g '*.rs'` -> 109 sites; `rg -o 'env *= *"'` -> 0 (no clap-level `env =` binding; knobs are read by hand, see §3.4); `rg -o deprecated` -> 0 (no clap deprecation markers); `hide *= *true` -> 34 (§3.6). Per-flag default values are therefore not tabulated.
 
 <!-- cli-tree:begin -->
-Verb paths walked: **264** (every `Commands` listed by `--help`, recursively); flag and positional entries in their `Options`/`Arguments` sections, excluding `-h`/`-V`: **852**. Root flags (propagated to every verb by clap) are listed once, under `(root)`. `--help` here is width-constrained (`constrain_help_output`, `crates/mvm-cli/src/commands/mod.rs`), so descriptions, defaults and deprecation markers are cut off and not recorded. Hidden verbs do not appear in `--help` and are not in this table; see the hidden-verb list in §3.2.
+Verb paths walked: **262** (every `Commands` listed by `--help`, recursively); flag and positional entries in their `Options`/`Arguments` sections, excluding `-h`/`-V`: **849**. Root flags (propagated to every verb by clap) are listed once, under `(root)`. `--help` here is width-constrained (`constrain_help_output`, `crates/mvm-cli/src/commands/mod.rs`), so descriptions, defaults and deprecation markers are cut off and not recorded. Hidden verbs do not appear in `--help` and are not in this table; see the hidden-verb list in §3.2.
 
 | Verb path | Flags and arguments (`= default`, `(env X)`) |
 |---|---|
@@ -186,7 +187,9 @@ Verb paths walked: **264** (every `Commands` listed by `--help`, recursively); f
 | `machine build` | `-c, --mvm-config <MVM_CONFIG>`<br>`-o, --output <OUTPUT>`<br>`--flake <FLAKE>`<br>`--profile <PROFILE>`<br>`--watch`<br>`--force`<br>`--update-hash`<br>`--json`<br>`--deps`<br>`--no-persistent-builder`<br>`--allow-local-builder-build` |
 | `machine create` | `--manifest <PATH>`<br>`--image <REF>`<br>`--net`<br>`--allow-host <HOST[:PORT]>`<br>`--peer <NAME:PORT=ADDR:PORT>`<br>`--gpu`<br>`--gpu-device <ORDINAL>`<br>`--cpus <CPUS>`<br>`--cpu-limit <MILLICORES>`<br>`--timeout <SECS>`<br>`--grants-file <PATH>`<br>`--memory <MEMORY>`<br>`--mem-initial <SIZE>`<br>`--profile <PROFILE>`<br>`--policy <NAME|PATH>`<br>`--force`<br>`--json` |
 | `machine start` | `<NAME>...`<br>`--image <REF>`<br>`--manifest <PATH>`<br>`--net`<br>`--allow-host <HOST[:PORT]>`<br>`--peer <NAME:PORT=ADDR:PORT>`<br>`--gpu`<br>`--gpu-device <ORDINAL>`<br>`--cpus <CPUS>`<br>`--cpu-limit <MILLICORES>`<br>`--timeout <SECS>`<br>`--grants-file <PATH>`<br>`--memory <MEMORY>`<br>`--mem-initial <SIZE>`<br>`--profile <PROFILE>`<br>`--policy <NAME|PATH>`<br>`--force`<br>`--receipt <PATH>`<br>`--json`<br>`--dry-run`<br>`--hypervisor <HYPERVISOR>` |
+| `machine quarantine` | `<NAME>`<br>`--reason <REASON>` |
 | `machine reconfigure` | `<NAME>`<br>`--net`<br>`--no-net`<br>`--allow-host <HOST[:PORT]>`<br>`--clear-allow-host`<br>`--cpus <CPUS>`<br>`--memory <MEMORY>`<br>`--mem-initial <MEM_INITIAL>`<br>`--hypervisor <HYPERVISOR>` |
+| `machine replace` | `<NAME>` |
 | `machine restart` | `<NAME>...`<br>`--image <REF>`<br>`--manifest <PATH>`<br>`--net`<br>`--allow-host <HOST[:PORT]>`<br>`--peer <NAME:PORT=ADDR:PORT>`<br>`--gpu`<br>`--gpu-device <ORDINAL>`<br>`--cpus <CPUS>`<br>`--cpu-limit <MILLICORES>`<br>`--timeout <SECS>`<br>`--grants-file <PATH>`<br>`--memory <MEMORY>`<br>`--mem-initial <SIZE>`<br>`--profile <PROFILE>`<br>`--policy <NAME|PATH>`<br>`--force`<br>`--receipt <PATH>`<br>`--json`<br>`--dry-run`<br>`--hypervisor <HYPERVISOR>` |
 | `machine stop` | `--all`<br>`--yes` |
 | `machine rm` | `--all`<br>`--yes`<br>`--force`<br>`--json` |
@@ -247,18 +250,13 @@ Verb paths walked: **264** (every `Commands` listed by `--help`, recursively); f
 | `watch` | `--from-ir <PATH>`<br>`-o, --out <DIR>`<br>`--manifest-dir <DIR>`<br>`--interval-ms <MILLISECONDS>`<br>`--once` |
 | `pack` | - |
 | `pack ls` | `--json` |
+| `pack new` | `<namespace/name>` |
 | `pack rm` | `<ns/name[@version]>` |
 | `pack system` | - |
 | `pack system list` | `--kind <KIND>`<br>`--json` |
 | `pack system rollback` | `<KIND>`<br>`--to <TO>` |
 | `pack system prune` | `--keep-recent <KEEP_RECENT>`<br>`--dry-run`<br>`--json` |
-| `pack system download` | `<KIND>` |
-| `pack system update` | `<KIND>` |
-| `pack list` | `--kind <KIND>`<br>`--json` |
-| `pack rollback` | `<KIND>`<br>`--to <TO>` |
-| `pack prune` | `--keep-recent <KEEP_RECENT>`<br>`--dry-run`<br>`--json` |
-| `pack download` | `<KIND>` |
-| `pack update` | `<ns/name[@version]|SYSTEM_KIND>` |
+| `pack update` | `<ns/name[@version]>` |
 | `pack info` | `<ns/name[@version]>`<br>`--json` |
 | `pack verify` | `<ns/name[@version]>`<br>`--json` |
 | `pack lock` | `<SPEC.json>`<br>`--mvm-revision <COMMIT>`<br>`--out <FILE>`<br>`--stdout` |
@@ -388,6 +386,7 @@ Verb paths walked: **264** (every `Commands` listed by `--help`, recursively); f
 | `trust audit asset id` | `<PATH>` |
 | `trust audit prune` | `--through <THROUGH>`<br>`--tenant <TENANT>`<br>`--ack` |
 | `trust audit show` | `<SESSION>`<br>`--tenant <TENANT>`<br>`--kind <KIND>`<br>`--since <SINCE>`<br>`--until <UNTIL>`<br>`--json` |
+| `trust audit timeline` | `<WORKLOAD>`<br>`--tenant <TENANT>`<br>`--json` |
 | `trust audit posture` | `--json` |
 | `trust audit verify-cert` | `<CERT>`<br>`--pubkey <PUBKEY>`<br>`--chain <CHAIN>`<br>`--json` |
 | `trust audit publish-root` | `--tenant <TENANT>` |
@@ -459,7 +458,7 @@ Documented as removed or non-existent (checked against the generated block: none
 | `MVM_NO_VM` | read by the SDKs (`__sdk-no-vm`) | not a Rust literal |
 
 <!-- env:begin -->
-Distinct `MVM_*` literals in Rust (`crates`, `src`, tests included): **377**; live-read **222**, set-only **7**, test-only **148**; live-read and absent from `public/src/content/docs`: **150**; names in `public/src/content/docs` that no Rust literal or script/nix/feature/test file uses: **19**.
+Distinct `MVM_*` literals in Rust (`crates`, `src`, tests included): **374**; live-read **219**, set-only **7**, test-only **148**; live-read and absent from `public/src/content/docs`: **148**; names in `public/src/content/docs` that no Rust literal or script/nix/feature/test file uses: **1**.
 
 Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only` = only written to a child process, so the reader is outside Rust or in another process; `test-only` = test code only), first reader `file:line`, count of live-read sites, documented in `public/src/content/docs`, referenced by a script/nix/feature/test file.
 
@@ -479,16 +478,16 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_AEAD_TEST_CHILD_KEY_PATH` | test-only | `crates/mvm-core/src/crypto/aead.rs:301` | 0 | NO | - |
 | `MVM_AEAD_TEST_CHILD_START_PATH` | test-only | `crates/mvm-core/src/crypto/aead.rs:302` | 0 | NO | - |
 | `MVM_AGENT_DIRECT_VSOCK_UDS` | test-only | `crates/mvm-agentd/tests/live_resource_usage.rs:15` | 0 | NO | - |
-| `MVM_AGENT_EGRESS_ENDPOINT_SOCK` | live-read | `crates/mvm-agentd/src/flowmux_sync.rs:57` | 1 | NO | - |
+| `MVM_AGENT_EGRESS_ENDPOINT_SOCK` | live-read | `crates/mvm-agentd/src/flowmux_sync.rs:54` | 1 | NO | - |
 | `MVM_AGENT_SMOKE` | test-only | `crates/mvm-cli/tests/agent_workload_example.rs:116` | 0 | NO | - |
 | `MVM_AGENT_TRANSPORT` | live-read | `crates/mvm-agentd/src/bin/mvm-guest-agent/transport.rs:32` | 1 | NO | - |
 | `MVM_AGENT_UNIX_SOCK` | live-read | `crates/mvm-agentd/src/bin/mvm-guest-agent/transport.rs:34` | 1 | NO | - |
 | `MVM_AGENT_VSOCK_UDS` | test-only | `crates/mvm-agentd/tests/live_resource_usage.rs:19` | 0 | NO | - |
 | `MVM_ALLOW_LOCAL_BUILDER_BUILD` | live-read | `crates/mvm-client/src/entrypoint/caller_registration_live_hvf.rs:218` | 2 | yes | yes |
 | `MVM_ALLOW_STALE_SNAPSHOT` | live-read | `crates/mvm-runtime/src/base/snapshot_integrity.rs:107` | 2 | NO | - |
-| `MVM_ALLOW_UNENCRYPTED_SNAPSHOT` | live-read | `crates/mvm-runtime/src/vm/instance_snapshot.rs:74` | 1 | yes | - |
+| `MVM_ALLOW_UNENCRYPTED_SNAPSHOT` | live-read | `crates/mvm-runtime/src/vm/instance_snapshot.rs:73` | 1 | yes | - |
 | `MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE` | live-read | `crates/mvm-core/src/host_storage_encryption.rs:34` | 1 | yes | yes |
-| `MVM_ALLOW_UNSIGNED_RUNTIME` | test-only | `crates/mvm-build/src/guest_runtime.rs:2416` | 0 | NO | - |
+| `MVM_ALLOW_UNSIGNED_RUNTIME` | test-only | `crates/mvm-build/src/guest_runtime.rs:2387` | 0 | NO | - |
 | `MVM_APFS_SNAPSHOT_HELPER_SOCKET` | live-read | `crates/mvm-fs/src/trusted_snapshot.rs:105` | 1 | NO | - |
 | `MVM_API_TOKEN` | test-only | `crates/mvm-hostd/src/workload_env.rs:103` | 0 | NO | - |
 | `MVM_ATTRIBUTION_ANSWER_PID` | test-only | `crates/mvm-agentd/src/tool_attribution.rs:1017` | 0 | NO | - |
@@ -496,12 +495,11 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_ATTRIBUTION_CREDENTIAL_WITNESS` | test-only | `crates/mvm-agentd/src/tool_attribution.rs:1007` | 0 | NO | - |
 | `MVM_ATTRIBUTION_SERVER` | test-only | `crates/mvm-agentd/src/tool_attribution.rs:1013` | 0 | NO | - |
 | `MVM_AUDIT_CONCURRENT_WORKER` | test-only | `crates/mvm-hostd/tests/audit_chain_concurrent_writers.rs:31` | 0 | NO | - |
-| `MVM_AUDIT_SEGMENT_BYTES` | live-read | `crates/mvm-core/src/config.rs:1348` | 1 | yes | - |
+| `MVM_AUDIT_SEGMENT_BYTES` | live-read | `crates/mvm-core/src/config.rs:1324` | 1 | yes | - |
 | `MVM_AUDIT_SIGNER_PATH` | live-read | `crates/mvm-vmm/src/host/broker_services_spawn.rs:186` | 1 | NO | - |
 | `MVM_AUDIT_WITNESS` | live-read | `crates/mvm-hostd/src/audit/witness.rs:367` | 2 | yes | yes |
 | `MVM_AUTO_DEV` | live-read | `crates/mvm-vmm/src/host/linux_env.rs:99` | 1 | NO | - |
 | `MVM_AUX_BIN_DIR` | live-read | `crates/mvm-vmm/src/host/aux_bin.rs:779` | 1 | NO | - |
-| `MVM_BACKEND` | live-read | `crates/mvm-cli/src/commands/vm/run_policy.rs:152` | 2 | NO | - |
 | `MVM_BASE_CONTRACT_TEST_CHILD` | live-read | `crates/mvm-cli/src/test_boot_payload.rs:12` | 1 | NO | - |
 | `MVM_BDD_ALLOWED_SKIPS` | test-only | `crates/mvm-conformance/tests/conformance.rs:415` | 0 | NO | yes |
 | `MVM_BDD_BUILD_MODE` | test-only | `crates/mvm-conformance/tests/steps/sdk.rs:243` | 0 | NO | yes |
@@ -535,13 +533,13 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_BUILDER_CLOSURE_NAR` | live-read | `crates/mvm-runtime/examples/hvf-builder-transport.rs:72` | 1 | NO | - |
 | `MVM_BUILDER_CMD_FILE` | live-read | `crates/mvm-runtime/examples/hvf-builder-transport.rs:56` | 2 | NO | - |
 | `MVM_BUILDER_KERNEL` | live-read | `crates/mvm-runtime/examples/hvf-builder-transport.rs:24` | 1 | NO | - |
-| `MVM_BUILDER_LOCK_WAIT_SECS` | live-read | `crates/mvm-build/src/builder_vm_runtime/image_lock.rs:191` | 1 | yes | yes |
+| `MVM_BUILDER_LOCK_WAIT_SECS` | live-read | `crates/mvm-build/src/builder_vm_runtime/image_lock.rs:209` | 1 | yes | yes |
 | `MVM_BUILDER_MEM_MIB` | live-read | `crates/mvm-runtime/examples/hvf-builder-transport.rs:92` | 1 | NO | - |
 | `MVM_BUILDER_ROOTFS` | live-read | `crates/mvm-runtime/examples/hvf-builder-transport.rs:29` | 1 | NO | - |
-| `MVM_BUILDER_STORE_GC_GIB` | live-read | `crates/mvm-build/src/builder_vm_runtime.rs:120` | 1 | NO | - |
+| `MVM_BUILDER_STORE_GC_GIB` | live-read | `crates/mvm-build/src/builder_vm_runtime.rs:122` | 1 | NO | - |
 | `MVM_BUILDER_VM_BOOTSTRAP_ACTIVE` | live-read | `crates/mvm-build/src/builder_vm_bootstrap.rs:42` | 1 | NO | - |
 | `MVM_BUILDER_VM_BOOTSTRAP_BIN` | live-read | `crates/mvm-build/src/builder_vm_bootstrap.rs:34` | 1 | NO | - |
-| `MVM_BUILDER_VM_TIMEOUT_SECS` | live-read | `crates/mvm-build/src/builder_vm_runtime.rs:110` | 1 | yes | yes |
+| `MVM_BUILDER_VM_TIMEOUT_SECS` | live-read | `crates/mvm-build/src/builder_vm_runtime.rs:112` | 1 | yes | yes |
 | `MVM_BUILD_SOURCE_COMMIT` | live-read | `crates/mvm-cli/build.rs:70` | 1 | NO | - |
 | `MVM_BUILD_SOURCE_DIRTY` | live-read | `crates/mvm-cli/build.rs:74` | 1 | NO | - |
 | `MVM_BUILD_STUB_OUTDIR` | live-read | `crates/mvm-build/src/pipeline/dev_build.rs:168` | 1 | NO | - |
@@ -588,7 +586,7 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_E2E_PRODUCER_MVMCTL` | test-only | `crates/mvm-conformance/tests/steps/cli.rs:375` | 0 | NO | yes |
 | `MVM_E2E_ROOTFS` | test-only | `crates/mvm-client/tests/launch_lifecycle_live.rs:24` | 0 | NO | yes |
 | `MVM_E2E_RUNTIME_CANDIDATE_DIR` | test-only | `crates/mvm-conformance/tests/conformance.rs:353` | 0 | NO | yes |
-| `MVM_EBPF_LIVE_TESTS` | test-only | `crates/mvm-hostd/src/supervisor/ebpf_telemetry/loader.rs:324` | 0 | NO | - |
+| `MVM_EBPF_LIVE_TESTS` | test-only | `crates/mvm-hostd/src/supervisor/ebpf_telemetry/loader.rs:313` | 0 | NO | - |
 | `MVM_EGRESS_LISTEN` | live-read | `crates/mvm-agentd/src/bin/mvm-egress-client.rs:135` | 1 | NO | - |
 | `MVM_EGRESS_VSOCK_PORT` | live-read | `crates/mvm-agentd/src/bin/mvm-egress-client.rs:26` | 3 | NO | - |
 | `MVM_EMBED` | live-read | `crates/mvm-cli/build.rs:152` | 1 | yes | yes |
@@ -600,15 +598,15 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_EMBED_ZIG` | live-read | `crates/mvm-build/src/embed_toolchain.rs:96` | 1 | NO | - |
 | `MVM_ENDPOINT_HANDSHAKE_TIMEOUT_SECS` | live-read | `crates/mvm-vmm/src/host/network_endpoint_spawn.rs:409` | 1 | NO | - |
 | `MVM_ENTRYPOINT_TEST_WRAPPER` | test-only | `crates/mvm-agentd/tests/process_fd_hygiene.rs:12` | 0 | NO | - |
-| `MVM_ENV` | live-read | `crates/mvm-core/src/config.rs:1494` | 1 | NO | - |
+| `MVM_ENV` | live-read | `crates/mvm-core/src/config.rs:1470` | 1 | NO | - |
 | `MVM_ENV_HYGIENE_KEPT` | test-only | `crates/mvm-core/tests/env_hygiene_spawn.rs:96` | 0 | NO | - |
 | `MVM_ENV_HYGIENE_SPAWN_PROBE` | test-only | `crates/mvm-core/tests/env_hygiene_spawn.rs:14` | 0 | NO | - |
 | `MVM_FAILURE_DIAGNOSTICS` | live-read | `crates/mvm-core/src/launch_trace/failure.rs:7` | 1 | yes | - |
 | `MVM_FAKE_RUNNER_BEHAVIOR` | test-only | `crates/mvm-agentd/tests/bin/fake_runner.rs:66` | 0 | NO | yes |
-| `MVM_FC_BOOT_SMOKE` | test-only | `crates/mvm-builder-guest/src/bin/mvm-host-vm-init/workload.rs:483` | 0 | NO | - |
+| `MVM_FC_BOOT_SMOKE` | test-only | `crates/mvm-builder-guest/src/bin/mvm-host-vm-init/workload.rs:487` | 0 | NO | - |
 | `MVM_FC_IDLE_POOL` | live-read | `crates/mvm-backends/src/fc/idle_pool.rs:50` | 1 | yes | - |
-| `MVM_FC_SMOKE_KERNEL` | test-only | `crates/mvm-builder-guest/src/bin/mvm-host-vm-init/workload.rs:491` | 0 | NO | - |
-| `MVM_FC_SMOKE_ROOTFS` | test-only | `crates/mvm-builder-guest/src/bin/mvm-host-vm-init/workload.rs:493` | 0 | NO | - |
+| `MVM_FC_SMOKE_KERNEL` | test-only | `crates/mvm-builder-guest/src/bin/mvm-host-vm-init/workload.rs:495` | 0 | NO | - |
+| `MVM_FC_SMOKE_ROOTFS` | test-only | `crates/mvm-builder-guest/src/bin/mvm-host-vm-init/workload.rs:497` | 0 | NO | - |
 | `MVM_FC_VERSION` | live-read | `crates/mvm-core/src/config.rs:8` | 2 | yes | yes |
 | `MVM_FLAKE_URL` | live-read | `crates/mvm-compiler/src/mvm_pin.rs:30` | 1 | yes | - |
 | `MVM_FLEET` | live-read | `crates/mvm-cli/src/commands/dashboard/mod.rs:49` | 1 | NO | - |
@@ -622,14 +620,14 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_GATEWAY_TOKEN` | live-read | `crates/mvm-cli/src/commands/vm/volume/remote.rs:26` | 1 | yes | - |
 | `MVM_GATEWAY_URL` | live-read | `crates/mvm-cli/src/commands/vm/volume/remote.rs:25` | 1 | yes | yes |
 | `MVM_GPU_ENDPOINT_PATH` | live-read | `crates/mvm-vmm/src/host/gpu_endpoint_spawn.rs:38` | 1 | NO | - |
-| `MVM_GPU_RPC` | live-read | `crates/mvm-gpu-shim-core/src/lib.rs:32` | 1 | NO | yes |
-| `MVM_GPU_TEST_EXPECT_NATIVE` | test-only | `crates/mvm-gpu/src/native.rs:1415` | 0 | NO | - |
+| `MVM_GPU_RPC` | live-read | `crates/mvm-gpu/src/shim.rs:32` | 1 | NO | yes |
+| `MVM_GPU_TEST_EXPECT_NATIVE` | test-only | `crates/mvm-gpu/src/native.rs:1420` | 0 | NO | - |
 | `MVM_GUEST_BUILD_VERBOSE` | live-read | `crates/mvm-build/src/guest_agent_build.rs:23` | 1 | NO | - |
-| `MVM_GUEST_CONSOLE_VERBOSE` | test-only | `crates/mvm-backends/src/driver/fc.rs:121` | 0 | NO | - |
+| `MVM_GUEST_CONSOLE_VERBOSE` | test-only | `crates/mvm-backends/src/driver/fc.rs:124` | 0 | NO | - |
 | `MVM_GUEST_PRIVILEGED_TESTS` | live-read | `crates/mvm-agentd/src/tool_helper/capability_tests.rs:60` | 2 | NO | yes |
 | `MVM_HARD_EXPIRY_FIXTURE` | test-only | `crates/mvm-hostd/src/supervisor/wall_clock.rs:394` | 0 | NO | - |
 | `MVM_HIGH_CAPABILITY_PROBE_CHILD` | live-read | `crates/mvm-agentd/src/guest_mount/high_capability_tests.rs:13` | 1 | NO | - |
-| `MVM_HOME` | live-read | `crates/mvm-cli/src/commands/vm/runtime_pack.rs:354` | 27 | yes | yes |
+| `MVM_HOME` | live-read | `crates/mvm-cli/src/commands/vm/runtime_pack.rs:354` | 28 | yes | yes |
 | `MVM_HOSTLIB_PATH` | live-read | `crates/mvm-sdk/src/env.rs:110` | 2 | yes | yes |
 | `MVM_HOSTLIB_PATH_ENV` | test-only | `crates/mvm-sdk/src/env.rs:139` | 0 | NO | yes |
 | `MVM_HOST_AGENT_DAEMON` | live-read | `crates/mvm-vmm/src/host/host_agent_spawn.rs:568` | 1 | yes | - |
@@ -641,51 +639,50 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_HVF_AGENT_SOCKET` | live-read | `crates/mvm-runtime/examples/hvf-agent-ping.rs:22` | 1 | NO | - |
 | `MVM_HVF_BOOTARGS` | live-read | `crates/mvm-client/src/entrypoint/caller_registration_live_hvf.rs:216` | 3 | NO | - |
 | `MVM_HVF_BOOTARGS_EXTRA` | live-read | `crates/mvm-runtime/examples/hvf-backend-egress.rs:92` | 4 | NO | - |
-| `MVM_HVF_DIAGNOSTICS_TEST_CHILD` | test-only | `crates/mvm-vmm/src/host/hvf_supervisor/startup_diagnostics.rs:251` | 0 | NO | - |
-| `MVM_HVF_DIAGNOSTICS_TEST_SYNC_FD` | test-only | `crates/mvm-vmm/src/host/hvf_supervisor/startup_diagnostics.rs:253` | 0 | NO | - |
+| `MVM_HVF_DIAGNOSTICS_TEST_CHILD` | test-only | `crates/mvm-vmm/src/host/hvf_supervisor/startup_diagnostics.rs:255` | 0 | NO | - |
+| `MVM_HVF_DIAGNOSTICS_TEST_SYNC_FD` | test-only | `crates/mvm-vmm/src/host/hvf_supervisor/startup_diagnostics.rs:257` | 0 | NO | - |
 | `MVM_HVF_DISK` | live-read | `crates/mvm-runtime/examples/hvf-agent-ping.rs:32` | 5 | NO | - |
-| `MVM_HVF_ENABLE_TRUSTED_SNAPSHOT` | test-only | `crates/mvm-runtime/src/workload_runner/runner.rs:1279` | 0 | NO | yes |
+| `MVM_HVF_ENABLE_TRUSTED_SNAPSHOT` | test-only | `crates/mvm-runtime/src/workload_runner/runner.rs:1317` | 0 | NO | yes |
 | `MVM_HVF_INITRAMFS` | live-read | `crates/mvm-runtime/examples/hvf-kernel-boot.rs:29` | 1 | NO | - |
 | `MVM_HVF_INITRD` | live-read | `crates/mvm-runtime/examples/hvf-backend-egress.rs:104` | 6 | NO | - |
 | `MVM_HVF_KERNEL` | live-read | `crates/mvm-runtime/examples/hvf-agent-ping.rs:31` | 9 | NO | - |
 | `MVM_HVF_LEGACY_CONFIG_REPLAY` | live-read | `crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs:23` | 2 | NO | - |
-| `MVM_HVF_SIGNED` | live-read | `crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs:321` | 2 | NO | - |
-| `MVM_HVF_STARTUP_DIAGNOSTICS_FD` | live-read | `crates/mvm-hostd/src/supervisor/caller_registration.rs:146` | 2 | NO | - |
+| `MVM_HVF_SIGNED` | live-read | `crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs:347` | 2 | NO | - |
+| `MVM_HVF_STARTUP_DIAGNOSTICS_FD` | live-read | `crates/mvm-hostd/src/supervisor/caller_registration.rs:202` | 2 | NO | - |
 | `MVM_HVF_SUBSTITUTION_SOCKET` | test-only | `crates/mvm-runtime/src/backends/hvf/kernel_boot.rs:1581` | 0 | NO | - |
-| `MVM_HVF_SUPERVISOR_PATH` | live-read | `crates/mvm-backends/src/driver/hvf_process.rs:127` | 9 | yes | yes |
+| `MVM_HVF_SUPERVISOR_PATH` | live-read | `crates/mvm-backends/src/driver/hvf_process.rs:116` | 9 | yes | yes |
 | `MVM_HVF_TIMEOUT` | live-read | `crates/mvm-runtime/examples/hvf-backend-persistent.rs:22` | 2 | NO | - |
 | `MVM_HVF_VIRTIO_DEBUG` | live-read | `crates/mvm-vmm/src/vmm/virtio.rs:36` | 1 | NO | - |
 | `MVM_HVF_VSOCK` | live-read | `crates/mvm-runtime/examples/hvf-kernel-boot.rs:42` | 1 | NO | - |
 | `MVM_HVF_WARM_REQUIRE_CLAIM` | live-read | `crates/mvm-cli/src/commands/pool/cold_start.rs:110` | 1 | NO | yes |
 | `MVM_HYPERVISOR` | live-read | `crates/mvm-cli/src/commands/vm/run_policy.rs:152` | 2 | NO | - |
-| `MVM_IDLE_TIMEOUT` | live-read | `crates/mvm-hostd/src/supervisor/reaper.rs:90` | 1 | NO | - |
 | `MVM_IMAGES_DIR` | live-read | `crates/mvm-build/src/image_source.rs:69` | 4 | yes | yes |
 | `MVM_INSTALL_LIB_DIR` | live-read | `crates/mvm-cli/src/commands/env/uninstall.rs:40` | 1 | yes | yes |
 | `MVM_IR_OUT` | live-read | `crates/mvm-sdk/src/emit.rs:10` | 1 | yes | yes |
 | `MVM_ISOLATED_HELPER_TEST_MODE` | test-only | `crates/mvm-cli/src/test_boot_payload.rs:186` | 0 | NO | - |
 | `MVM_KERNEL_HANDOFF_UNIT_CHILD` | live-read | `crates/mvm-runtime/src/kernel_custody/native_handoff_tests.rs:99` | 1 | NO | - |
-| `MVM_KERNEL_PATH` | live-read | `crates/mvm-client/src/launch/machine_start.rs:165` | 1 | NO | - |
+| `MVM_KERNEL_PATH` | live-read | `crates/mvm-client/src/launch/machine_start.rs:162` | 1 | NO | - |
 | `MVM_KERNEL_SOURCE` | live-read | `crates/mvm-cli/src/commands/env/builder_vm/kernel.rs:128` | 4 | yes | yes |
 | `MVM_KRUN_LOG` | live-read | `crates/mvm-hostd/src/bin/mvm-libkrun-supervisor.rs:107` | 1 | NO | - |
 | `MVM_LAUNCH_SAMPLE_JSON` | live-read | `crates/mvm-core/src/launch_trace.rs:96` | 1 | yes | - |
 | `MVM_LIBKRUN_E2E` | test-only | `crates/mvm-runtime/tests/libkrun_lifecycle_e2e.rs:67` | 0 | NO | - |
 | `MVM_LIBKRUN_HEADER` | live-read | `crates/deps/libkrun-sys/build.rs:61` | 1 | NO | yes |
 | `MVM_LIBKRUN_SUPERVISOR` | test-only | `crates/mvm-vmm/src/host/aux_bin.rs:1557` | 0 | NO | - |
-| `MVM_LIBKRUN_SUPERVISOR_PATH` | live-read | `crates/mvm-backends/src/driver/libkrun_process.rs:563` | 2 | NO | yes |
+| `MVM_LIBKRUN_SUPERVISOR_PATH` | live-read | `crates/mvm-backends/src/driver/libkrun_process.rs:285` | 2 | NO | yes |
 | `MVM_LINUX_BUILDER_VM` | live-read | `crates/mvm-build/src/builder_backend_select.rs:151` | 1 | NO | - |
-| `MVM_LIVE_FORK_CHECKPOINT` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:455` | 0 | NO | - |
-| `MVM_LIVE_FORK_CHILD` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:451` | 0 | NO | - |
-| `MVM_LIVE_FORK_CHILDREN` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:567` | 0 | NO | - |
-| `MVM_LIVE_FORK_CHILD_NAME` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:456` | 0 | NO | - |
-| `MVM_LIVE_FORK_WITNESS` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:458` | 0 | NO | - |
+| `MVM_LIVE_FORK_CHECKPOINT` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:487` | 0 | NO | - |
+| `MVM_LIVE_FORK_CHILD` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:483` | 0 | NO | - |
+| `MVM_LIVE_FORK_CHILDREN` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:599` | 0 | NO | - |
+| `MVM_LIVE_FORK_CHILD_NAME` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:488` | 0 | NO | - |
+| `MVM_LIVE_FORK_WITNESS` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:490` | 0 | NO | - |
 | `MVM_LIVE_GUEST_MIB` | test-only | `crates/mvm-hostd/tests/spawn_ceiling_audit_live.rs:50` | 0 | NO | - |
-| `MVM_LIVE_HOME` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:527` | 0 | NO | yes |
-| `MVM_LIVE_KERNEL` | test-only | `crates/mvm-runtime/src/vm/instance_snapshot.rs:1763` | 0 | NO | yes |
-| `MVM_LIVE_LUKS` | test-only | `crates/mvm-runtime/src/storage/volume/encrypted_linux.rs:270` | 0 | NO | - |
+| `MVM_LIVE_HOME` | test-only | `crates/mvm-runtime/tests/fc_fork_live.rs:559` | 0 | NO | yes |
+| `MVM_LIVE_KERNEL` | test-only | `crates/mvm-runtime/src/vm/instance_snapshot.rs:1757` | 0 | NO | yes |
+| `MVM_LIVE_LUKS` | test-only | `crates/mvm-runtime/src/storage/volume/encrypted_linux.rs:335` | 0 | NO | - |
 | `MVM_LIVE_RESTORE_CHECKPOINT` | test-only | `crates/mvm-runtime/tests/fc_warm_pool_live.rs:524` | 0 | NO | - |
 | `MVM_LIVE_RESTORE_CHILD` | test-only | `crates/mvm-runtime/tests/fc_warm_pool_live.rs:527` | 0 | NO | - |
 | `MVM_LIVE_RESTORE_WITNESS` | test-only | `crates/mvm-runtime/tests/fc_warm_pool_live.rs:529` | 0 | NO | - |
-| `MVM_LIVE_ROOTFS` | test-only | `crates/mvm-runtime/src/vm/instance_snapshot.rs:1764` | 0 | NO | yes |
+| `MVM_LIVE_ROOTFS` | test-only | `crates/mvm-runtime/src/vm/instance_snapshot.rs:1758` | 0 | NO | yes |
 | `MVM_LIVE_SMOKE` | test-only | `crates/mvm-agentd/tests/live_resource_usage.rs:10` | 0 | NO | - |
 | `MVM_LIVE_VMM_ARGV` | test-only | `crates/mvm-hostd/tests/spawn_ceiling_audit_live.rs:41` | 0 | NO | - |
 | `MVM_MACHINE_MAX_OUTPUT_BYTES` | test-only | `crates/mvm-sdk/src/env.rs:172` | 0 | NO | - |
@@ -710,7 +707,7 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_NO_BUILD_CACHE` | live-read | `crates/mvm-build/src/pipeline/dev_build.rs:282` | 1 | NO | - |
 | `MVM_NO_LEGACY_BANNER` | live-read | `crates/mvm-hostd/src/caller_identity/production_fixture/environment.rs:47` | 3 | NO | yes |
 | `MVM_NO_PERSISTENT_BUILDER` | live-read | `crates/mvm-build/src/pipeline/dev_build.rs:509` | 1 | yes | - |
-| `MVM_NO_UPDATE_CHECK` | live-read | `crates/mvm-cli/src/update_notice.rs:26` | 1 | NO | - |
+| `MVM_NO_UPDATE_CHECK` | live-read | `crates/mvm-cli/src/update_notice.rs:27` | 1 | NO | - |
 | `MVM_OCI_BEARER_TOKEN` | live-read | `crates/mvm-cli/src/commands/image/trust.rs:101` | 1 | yes | - |
 | `MVM_OCI_BEARER_TOKEN_GHCR_IO` | test-only | `crates/mvm-cli/src/commands/image/trust.rs:151` | 0 | yes | - |
 | `MVM_OCI_POLICY` | live-read | `crates/mvm-cli/src/commands/image/trust_policy.rs:279` | 1 | yes | - |
@@ -723,17 +720,17 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_PINNED_CARGO_ZIGBUILD` | live-read | `crates/mvm-cli/src/doctor/toolchain.rs:70` | 1 | NO | - |
 | `MVM_PINNED_TARGET` | live-read | `crates/mvm-cli/src/doctor/toolchain.rs:71` | 1 | NO | - |
 | `MVM_PINNED_ZIG` | live-read | `crates/mvm-cli/src/doctor/toolchain.rs:69` | 1 | NO | - |
-| `MVM_PRESERVE_TRANSIENT_STATE` | live-read | `crates/mvm-cli/src/exec/transient.rs:436` | 1 | yes | - |
+| `MVM_PRESERVE_TRANSIENT_STATE` | live-read | `crates/mvm-cli/src/exec/transient.rs:445` | 1 | yes | - |
 | `MVM_PRINT_ADDRESS_VECTORS` | live-read | `crates/mvm-core/src/plan/bundle.rs:2874` | 1 | NO | - |
 | `MVM_PRODUCTION` | live-read | `crates/mvm-cli/src/commands/dashboard/mod.rs:48` | 2 | yes | - |
 | `MVM_PROTECTED_WITNESS_ROOT` | test-only | `crates/mvm-client/tests/protected_capture_live_hvf.rs:41` | 0 | NO | yes |
 | `MVM_PYTHON` | live-read | `crates/mvm-cli/src/commands/build/sandbox_record.rs:213` | 1 | NO | - |
-| `MVM_QEMU_BRIDGE_PATH` | live-read | `crates/mvm-backends/src/driver/qemu_process.rs:464` | 1 | NO | - |
+| `MVM_QEMU_BRIDGE_PATH` | live-read | `crates/mvm-backends/src/driver/qemu_process.rs:356` | 1 | NO | - |
 | `MVM_REGENERATE_VECTORS` | test-only | `crates/mvm-core/tests/studio_telemetry_fixtures.rs:494` | 0 | NO | - |
-| `MVM_REGEN_AUDIT_CORPUS` | test-only | `crates/mvm-hostd/src/supervisor/audit_file.rs:1905` | 0 | NO | - |
+| `MVM_REGEN_AUDIT_CORPUS` | test-only | `crates/mvm-hostd/src/supervisor/audit_file.rs:1904` | 0 | NO | - |
 | `MVM_RESIDENCY` | live-read | `crates/mvm-client/src/entrypoint/caller_registration_live_hvf.rs:206` | 5 | yes | yes |
-| `MVM_RESOLVE_SUBPROCESS_BIN_TEST_UNSET_PATH` | test-only | `crates/mvm-vmm/src/host/broker_services_spawn.rs:1202` | 0 | NO | - |
-| `MVM_ROOTFS_PATH` | live-read | `crates/mvm-client/src/launch/machine_start.rs:167` | 1 | NO | - |
+| `MVM_RESOLVE_SUBPROCESS_BIN_TEST_UNSET_PATH` | test-only | `crates/mvm-vmm/src/host/broker_services_spawn.rs:1206` | 0 | NO | - |
+| `MVM_ROOTFS_PATH` | live-read | `crates/mvm-client/src/launch/machine_start.rs:164` | 1 | NO | - |
 | `MVM_RUNTIME_CONFIG` | live-read | `crates/mvm-agentd/src/bin/mvm-runner.rs:52` | 1 | NO | - |
 | `MVM_RUNTIME_DISPATCH_DIR` | live-read | `crates/mvm-agentd/src/bin/mvm-runner.rs:54` | 1 | NO | - |
 | `MVM_RUNTIME_OVERLAY` | live-read | `crates/mvm-agentd/src/workload_env.rs:57` | 1 | yes | - |
@@ -749,33 +746,33 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_SESSION_TAG` | test-only | `crates/mvm-agentd/src/console.rs:1024` | 0 | NO | - |
 | `MVM_SIGNED` | test-only | `crates/mvm-hostd/tests/prelaunch_live.rs:83` | 0 | yes | - |
 | `MVM_SIGNER_HELPER_PATH` | live-read | `crates/mvm-hostd/src/bin/mvm-host-agent.rs:186` | 3 | NO | yes |
-| `MVM_SKIP_BOOTSTRAP` | test-only | `crates/mvm-cli/src/update.rs:1201` | 0 | NO | yes |
+| `MVM_SKIP_BOOTSTRAP` | test-only | `crates/mvm-cli/src/update.rs:1132` | 0 | NO | yes |
 | `MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP` | live-read | `crates/mvm-build/src/builder_vm_bootstrap.rs:35` | 1 | NO | - |
 | `MVM_SKIP_COSIGN_VERIFY` | live-read | `crates/mvm-build/src/release_signature.rs:30` | 6 | yes | yes |
 | `MVM_SKIP_HASH_VERIFY` | live-read | `crates/mvm-build/src/runtime_overlay.rs:891` | 4 | yes | yes |
-| `MVM_SKIP_RECONCILE` | test-only | `crates/mvm-cli/src/commands/mod.rs:927` | 0 | NO | - |
+| `MVM_SKIP_RECONCILE` | test-only | `crates/mvm-cli/src/commands/mod.rs:928` | 0 | NO | - |
 | `MVM_SNAPSHOT_HMAC_STRICT` | live-read | `crates/mvm-runtime/src/base/snapshot_integrity.rs:87` | 2 | NO | - |
-| `MVM_SOURCE_COMMIT` | test-only | `crates/mvm-cli/src/update.rs:701` | 0 | NO | - |
-| `MVM_SOURCE_DIRTY` | test-only | `crates/mvm-cli/src/update.rs:702` | 0 | NO | - |
+| `MVM_SOURCE_COMMIT` | test-only | `crates/mvm-cli/src/update.rs:655` | 0 | NO | - |
+| `MVM_SOURCE_DIRTY` | test-only | `crates/mvm-cli/src/update.rs:656` | 0 | NO | - |
 | `MVM_SOURCE_HELPER_BASE_URL` | live-read | `crates/mvm-cli/src/update.rs:13` | 1 | yes | - |
 | `MVM_SOURCE_PATH` | set-only | `crates/mvm-agentd/src/bin/mvm-runner.rs:95` | 0 | NO | - |
 | `MVM_SPAN_TIMINGS` | live-read | `crates/mvm-core/src/observability/span_timing/mod.rs:36` | 1 | yes | - |
 | `MVM_SPAN_TIMINGS_FILTER` | live-read | `crates/mvm-core/src/observability/span_timing/mod.rs:40` | 1 | yes | - |
 | `MVM_SPAN_TIMINGS_OUT` | live-read | `crates/mvm-core/src/observability/span_timing/mod.rs:38` | 1 | yes | - |
-| `MVM_STAGE0_BUILD_ATTR` | live-read | `crates/mvm-builder-guest/src/bin/stage0-init.rs:1072` | 1 | NO | - |
-| `MVM_STAGE0_CONFIG_ATTR` | live-read | `crates/mvm-builder-guest/src/bin/stage0-init.rs:1154` | 1 | NO | - |
-| `MVM_STAGE0_FLAKE` | live-read | `crates/mvm-builder-guest/src/bin/stage0-init.rs:1084` | 1 | NO | - |
-| `MVM_STAGE0_OUTPUT_MODE` | live-read | `crates/mvm-builder-guest/src/bin/stage0-init.rs:1076` | 1 | NO | - |
+| `MVM_STAGE0_BUILD_ATTR` | live-read | `crates/mvm-builder-guest/src/bin/stage0-init.rs:1074` | 1 | NO | - |
+| `MVM_STAGE0_CONFIG_ATTR` | live-read | `crates/mvm-builder-guest/src/bin/stage0-init.rs:1156` | 1 | NO | - |
+| `MVM_STAGE0_FLAKE` | live-read | `crates/mvm-builder-guest/src/bin/stage0-init.rs:1086` | 1 | NO | - |
+| `MVM_STAGE0_OUTPUT_MODE` | live-read | `crates/mvm-builder-guest/src/bin/stage0-init.rs:1078` | 1 | NO | - |
 | `MVM_SUBSTITUTION_ENDPOINT_PATH` | live-read | `crates/mvm-build/src/builder_vm_transport.rs:406` | 6 | NO | yes |
 | `MVM_TELEMETRY_COLLECT` | live-read | `crates/mvm-vmm/src/host/telemetry_provisioning.rs:31` | 1 | yes | - |
-| `MVM_TEMPLATE_LOCAL_API_KEY` | live-read | `crates/mvm-cli/src/template_cmd.rs:356` | 2 | yes | - |
-| `MVM_TEMPLATE_LOCAL_BASE_URL` | live-read | `crates/mvm-cli/src/template_cmd.rs:349` | 1 | yes | - |
-| `MVM_TEMPLATE_LOCAL_MODEL` | live-read | `crates/mvm-cli/src/template_cmd.rs:352` | 2 | yes | - |
-| `MVM_TEMPLATE_LOCAL_PROBE_TARGETS` | live-read | `crates/mvm-cli/src/template_cmd.rs:403` | 1 | yes | - |
-| `MVM_TEMPLATE_NO_LOCAL_PROBE` | live-read | `crates/mvm-cli/src/template_cmd.rs:381` | 1 | yes | - |
-| `MVM_TEMPLATE_OPENAI_BASE_URL` | live-read | `crates/mvm-cli/src/template_cmd.rs:335` | 1 | yes | - |
-| `MVM_TEMPLATE_OPENAI_MODEL` | live-read | `crates/mvm-cli/src/template_cmd.rs:339` | 1 | yes | - |
-| `MVM_TEMPLATE_PROVIDER` | live-read | `crates/mvm-cli/src/template_cmd.rs:301` | 1 | yes | - |
+| `MVM_TEMPLATE_LOCAL_API_KEY` | live-read | `crates/mvm-cli/src/template_cmd.rs:352` | 2 | yes | - |
+| `MVM_TEMPLATE_LOCAL_BASE_URL` | live-read | `crates/mvm-cli/src/template_cmd.rs:345` | 1 | yes | - |
+| `MVM_TEMPLATE_LOCAL_MODEL` | live-read | `crates/mvm-cli/src/template_cmd.rs:348` | 2 | yes | - |
+| `MVM_TEMPLATE_LOCAL_PROBE_TARGETS` | live-read | `crates/mvm-cli/src/template_cmd.rs:399` | 1 | yes | - |
+| `MVM_TEMPLATE_NO_LOCAL_PROBE` | live-read | `crates/mvm-cli/src/template_cmd.rs:377` | 1 | yes | - |
+| `MVM_TEMPLATE_OPENAI_BASE_URL` | live-read | `crates/mvm-cli/src/template_cmd.rs:331` | 1 | yes | - |
+| `MVM_TEMPLATE_OPENAI_MODEL` | live-read | `crates/mvm-cli/src/template_cmd.rs:335` | 1 | yes | - |
+| `MVM_TEMPLATE_PROVIDER` | live-read | `crates/mvm-cli/src/template_cmd.rs:297` | 1 | yes | - |
 | `MVM_TEMPLATE_REGISTRY` | live-read | `crates/mvm-cli/src/template_registry.rs:173` | 1 | yes | - |
 | `MVM_TEMPLATE_REGISTRY_ACCESS_KEY_ID` | live-read | `crates/mvm-runtime/src/vm/template/registry.rs:47` | 1 | yes | - |
 | `MVM_TEMPLATE_REGISTRY_BUCKET` | live-read | `crates/mvm-runtime/src/vm/template/registry.rs:43` | 1 | yes | - |
@@ -787,89 +784,66 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_TENANT` | live-read | `crates/mvm-cli/src/commands/vm/tenant_resolution.rs:20` | 1 | yes | - |
 | `MVM_TENANT_ID` | live-read | `crates/mvm-cli/src/commands/vm/volume/remote.rs:27` | 1 | yes | - |
 | `MVM_TENANT_KEY_ACME` | test-only | `crates/mvm-core/src/crypto/keystore.rs:439` | 0 | NO | - |
-| `MVM_TENANT_KEY_ACME_1` | test-only | `crates/mvm-runtime/src/checkpoint/custody.rs:307` | 0 | NO | - |
+| `MVM_TENANT_KEY_ACME_1` | test-only | `crates/mvm-runtime/src/checkpoint/custody.rs:302` | 0 | NO | - |
 | `MVM_TENANT_KEY_BADLEN` | test-only | `crates/mvm-core/src/crypto/keystore.rs:469` | 0 | NO | - |
 | `MVM_TENANT_KEY_FOO_BAR` | test-only | `crates/mvm-core/src/crypto/keystore.rs:460` | 0 | NO | - |
 | `MVM_TENANT_KEY_LOCAL` | live-read | `crates/mvm-runtime/src/vm/snapshot_key.rs:49` | 1 | yes | - |
 | `MVM_TENANT_KEY_MVM_TEST_ENV_FALLBACK` | test-only | `crates/mvm-core/src/crypto/keystore.rs:677` | 0 | NO | - |
 | `MVM_TENANT_KEY_MVM_TEST_LOOKUP_BAD` | test-only | `crates/mvm-core/src/crypto/keystore.rs:725` | 0 | NO | - |
 | `MVM_TENANT_KEY_MVM_TEST_LOOKUP_UNSET` | test-only | `crates/mvm-core/src/crypto/keystore.rs:706` | 0 | NO | - |
-| `MVM_TENANT_KEY_NOKEY_TENANT` | test-only | `crates/mvm-runtime/src/checkpoint/custody.rs:330` | 0 | NO | - |
+| `MVM_TENANT_KEY_NOKEY_TENANT` | test-only | `crates/mvm-runtime/src/checkpoint/custody.rs:325` | 0 | NO | - |
 | `MVM_TENANT_KEY_TESTX` | test-only | `crates/mvm-core/src/crypto/keystore.rs:448` | 0 | NO | - |
 | `MVM_TEST_CANONICAL_ENVIRONMENT` | test-only | `crates/mvm-client/src/portable_boot_assets.rs:459` | 0 | NO | - |
 | `MVM_TEST_CANONICAL_KERNEL` | live-read | `crates/mvm-bundler/src/export/canonical_tests.rs:353` | 6 | NO | - |
 | `MVM_TEST_CANONICAL_OUTPUT` | test-only | `crates/mvm-client/src/portable_boot_assets.rs:458` | 0 | NO | - |
 | `MVM_TEST_CANONICAL_ROOTFS` | test-only | `crates/mvm-client/src/portable_boot_assets.rs:457` | 0 | NO | - |
 | `MVM_TEST_CGROUP_DIR` | test-only | `crates/mvm-vmm/src/host/fc_cgroup.rs:323` | 0 | NO | - |
-| `MVM_TEST_FIRECRACKER_INVOKED` | test-only | `crates/mvm-backends/src/fc/daemon.rs:1111` | 0 | NO | - |
-| `MVM_TEST_INSTALL_DIR` | test-only | `crates/mvm-cli/src/update.rs:2597` | 0 | NO | - |
+| `MVM_TEST_FIRECRACKER_INVOKED` | test-only | `crates/mvm-backends/src/fc/daemon.rs:1335` | 0 | NO | - |
+| `MVM_TEST_INSTALL_DIR` | test-only | `crates/mvm-cli/src/update.rs:2582` | 0 | NO | - |
+| `MVM_TEST_ISOLATED_PRE_EXEC_LOCK_PROBE` | live-read | `crates/mvm-core/src/util/test_env.rs:126` | 2 | NO | - |
 | `MVM_TEST_LOCK_WAIT_CHILD` | test-only | `crates/mvm-build/tests/image_lock_holder.rs:202` | 0 | NO | - |
-| `MVM_TEST_RUNTIME_UMASK_OUTPUT` | test-only | `crates/mvm-build/src/runtime_overlay.rs:1793` | 0 | NO | - |
+| `MVM_TEST_RUNTIME_UMASK_OUTPUT` | test-only | `crates/mvm-build/src/runtime_overlay.rs:1680` | 0 | NO | - |
 | `MVM_TEST_SIGNED_RUNTIME_ARCHIVE` | test-only | `crates/mvm-client/src/portable_boot_assets.rs:456` | 0 | NO | - |
 | `MVM_TEST_SIGNED_RUNTIME_VERSION` | test-only | `crates/mvm-client/src/portable_boot_assets.rs:481` | 0 | NO | - |
 | `MVM_TEST_SOURCED_SECRET` | test-only | `crates/mvm-cli/src/commands/ops/secret.rs:1294` | 0 | NO | - |
-| `MVM_TEST_STALE_SOCKET_PATH` | test-only | `crates/mvm-vmm/src/host/network_endpoint_spawn.rs:2107` | 0 | NO | - |
-| `MVM_TEST_SUDO_MARKER` | test-only | `crates/mvm-cli/src/update.rs:2596` | 0 | NO | - |
-| `MVM_TEST_SUDO_PID_FILE` | test-only | `crates/mvm-backends/src/fc/daemon.rs:1112` | 0 | NO | - |
+| `MVM_TEST_STALE_SOCKET_PATH` | test-only | `crates/mvm-vmm/src/host/network_endpoint_spawn.rs:2111` | 0 | NO | - |
+| `MVM_TEST_SUDO_MARKER` | test-only | `crates/mvm-cli/src/update.rs:2581` | 0 | NO | - |
+| `MVM_TEST_SUDO_PID_FILE` | test-only | `crates/mvm-backends/src/fc/daemon.rs:1336` | 0 | NO | - |
 | `MVM_TEST_VAR` | test-only | `crates/mvm-agentd/tests/entrypoint_execute.rs:158` | 0 | NO | - |
 | `MVM_TEST_WEB_FETCH_ALLOWLIST_DEFINITELY_NOT_SET_XYZZY` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_fetch.rs:711` | 0 | NO | - |
 | `MVM_TEST_WEB_FETCH_ALLOWLIST_PARSE` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_fetch.rs:685` | 0 | NO | - |
 | `MVM_TEST_WEB_FETCH_ALLOWLIST_TRIM` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_fetch.rs:697` | 0 | NO | - |
-| `MVM_TEST_WEB_SEARCH_ALLOWLIST_PARSE` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_search.rs:1448` | 0 | NO | - |
-| `MVM_TEST_WEB_SEARCH_DEFINITELY_NOT_SET_PLUGH` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_search.rs:1459` | 0 | NO | - |
+| `MVM_TEST_WEB_SEARCH_ALLOWLIST_PARSE` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_search.rs:1444` | 0 | NO | - |
+| `MVM_TEST_WEB_SEARCH_DEFINITELY_NOT_SET_PLUGH` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_search.rs:1455` | 0 | NO | - |
 | `MVM_TOOL_CAPABILITY_TEST_STAGE` | live-read | `crates/mvm-agentd/src/tool_helper/capability_tests.rs:8` | 1 | NO | - |
 | `MVM_TOOL_CAPABILITY_TEST_STASH` | live-read | `crates/mvm-agentd/src/tool_helper/capability_tests.rs:9` | 1 | NO | - |
 | `MVM_TOOL_READY_FD` | live-read | `crates/mvm-agentd/src/bin/mvm-tool-helper.rs:24` | 1 | NO | - |
 | `MVM_TOOL_STAGING_DIR` | live-read | `crates/mvm-hostd/src/supervisor/tools/staging.rs:86` | 1 | NO | - |
-| `MVM_TRUSTED_APFS_LIVE` | test-only | `crates/mvm-fs/src/trusted_snapshot.rs:910` | 0 | NO | - |
+| `MVM_TRUSTED_APFS_LIVE` | test-only | `crates/mvm-fs/src/trusted_snapshot.rs:906` | 0 | NO | - |
 | `MVM_TRUSTED_ENV_PROBE` | test-only | `crates/mvm-agentd/src/trusted_env.rs:177` | 0 | NO | - |
 | `MVM_TSX` | live-read | `crates/mvm-cli/src/commands/build/sandbox_record.rs:239` | 1 | yes | - |
-| `MVM_TS_SDK_ROOT` | test-only | `crates/mvm-conformance/tests/steps/doc_examples.rs:1231` | 0 | NO | - |
-| `MVM_TS_SDK_SRC` | test-only | `crates/mvm-conformance/tests/steps/doc_examples.rs:1127` | 0 | NO | - |
+| `MVM_TS_SDK_ROOT` | test-only | `crates/mvm-conformance/tests/steps/doc_examples.rs:1235` | 0 | NO | - |
+| `MVM_TS_SDK_SRC` | test-only | `crates/mvm-conformance/tests/steps/doc_examples.rs:1131` | 0 | NO | - |
 | `MVM_UNINSTALL_CHECKER` | live-read | `crates/mvm-cli/src/commands/env/uninstall.rs:42` | 1 | NO | yes |
-| `MVM_UNPACK_DIRECTORY_UMASK_CHILD` | test-only | `crates/mvm-fs/src/oci/unpack/fs_ops.rs:685` | 0 | NO | - |
+| `MVM_UNPACK_DIRECTORY_UMASK_CHILD` | test-only | `crates/mvm-fs/src/oci/unpack/fs_ops.rs:686` | 0 | NO | - |
 | `MVM_UPDATE_API_URL` | live-read | `crates/mvm-cli/src/update.rs:62` | 1 | NO | yes |
-| `MVM_UPDATE_DOCS_COVERAGE` | test-only | `crates/mvm-conformance/tests/steps/doc_examples.rs:1518` | 0 | NO | yes |
+| `MVM_UPDATE_DOCS_COVERAGE` | test-only | `crates/mvm-conformance/tests/steps/doc_examples.rs:1522` | 0 | NO | yes |
 | `MVM_UPDATE_DOWNLOAD_URL` | test-only | `crates/mvm-build/src/published_image_set.rs:45` | 0 | NO | yes |
 | `MVM_UPDATE_MCP_TOOL_CONTRACT` | live-read | `crates/mvm-cli/src/mcp/protocol.rs:562` | 1 | NO | - |
 | `MVM_VERIFY_TIMING_MEMORY_MIB` | live-read | `crates/mvm-runtime/src/checkpoint/durability_tests.rs:423` | 1 | NO | - |
 | `MVM_VERIFY_TIMING_ROOTFS_MIB` | live-read | `crates/mvm-runtime/src/checkpoint/durability_tests.rs:424` | 1 | NO | - |
-| `MVM_VOLUMES` | live-read | `crates/mvm-core/src/config.rs:500` | 1 | NO | - |
+| `MVM_VOLUMES` | live-read | `crates/mvm-core/src/config.rs:484` | 1 | NO | - |
 | `MVM_WEB_FETCH_ALLOWLIST` | live-read | `crates/mvm-hostd/src/supervisor/tools/web_fetch.rs:213` | 1 | NO | - |
 | `MVM_WEB_SEARCH_ALLOWLIST` | live-read | `crates/mvm-hostd/src/supervisor/tools/web_search.rs:752` | 1 | NO | - |
-| `MVM_WEB_SEARCH_DEFAULT` | live-read | `crates/mvm-hostd/src/supervisor/tools/web_search.rs:756` | 1 | NO | - |
-| `MVM_WORKLOAD_KERNEL_VARIANT` | live-read | `crates/mvm-build/src/kernel_fetch.rs:255` | 1 | yes | - |
+| `MVM_WORKLOAD_KERNEL_VARIANT` | live-read | `crates/mvm-build/src/kernel_fetch.rs:249` | 1 | yes | - |
 | `MVM_WORKSPACE_PATH` | set-only | `crates/mvm-build/src/image_source/build.rs:398` | 0 | NO | yes |
-| `MVM_WRAPPER_CONFIG_PATH` | set-only | `crates/mvm-cli/src/commands/vm/sdk_no_vm.rs:127` | 0 | NO | yes |
+| `MVM_WRAPPER_CONFIG_PATH` | set-only | `crates/mvm-cli/src/commands/vm/sdk_no_vm.rs:131` | 0 | NO | yes |
 
-Documented names with no reader anywhere (docs-only): none. Every name the
-table used to list was checked against `crates/`, `xtask/`, `scripts/`, `src/`, `tests/`, `.github/`, justfiles, `nix/` and the SDKs; the verdicts are in the table below.
+Documented names with no reader anywhere (docs-only):
 
-| Name | Verdict |
-|---|---|
-| `MVM_ASSURANCE_BOOT_CONFIG`, `MVM_RUNTIME_ARCH`, `MVM_RUNTIME_ARCHIVE`, `MVM_RUNTIME_CHECKSUM`, `MVM_RUNTIME_INITRAMFS`, `MVM_RUNTIME_OVERLAY`, `MVM_RUNTIME_ROOT_HASH`, `MVM_RUNTIME_SIGNATURE_BUNDLE`, `MVM_RUNTIME_VERITY`, `MVM_RUNTIME_VERSION` | inputs of the inline Python snippet in `public/src/content/docs/guides/assurance-runtime.md` (it reads them with `os.environ`). No `mvmctl` code reads them, and the page says the operator sets them before running the snippet; the docs are accurate |
-| `MVM_EGRESS_BENCH` | read by `tests/egress_path_bench.rs:27` (test-only opt-in, with `_RUNS` and `_PAYLOAD_BYTES`); `guides/networking.md` documents it correctly |
-| `MVM_FC_ASSET_BASE`, `MVM_FC_ASSET_ROOTFS`, `MVM_FC_ASSET_KERNEL` | only reader is `crates/mvm-build/resources/builder_scripts/download_builder_artifacts.sh.tera`, which is registered in `nix/scripts.rs` but never rendered outside the template-list test, so no run reads them. Rows removed from `reference/cli-commands.md` |
-| `MVM_BUILDER_AGENT_BIN`, `MVM_DEV_FLAKE_URL` | no reader, and no public doc names them any more |
-| `MVM_SRC` | a shell variable the generated builder-VM build script assigns itself (`crates/mvm-build/src/builder_vm_runtime.rs:436`), not an environment input; not in public docs |
 | Name | First doc site | Removal statement |
 |---|---|---|
-| `MVM_ACK_UNRESTRICTED_NETWORK` | `public/src/content/docs/guides/fleet-stream-edges.md:61` | no removal statement |
-| `MVM_ASSURANCE_BOOT_CONFIG` | `public/src/content/docs/guides/assurance-runtime.md:57` | no removal statement |
-| `MVM_BUILDER_AGENT_BIN` | `public/src/content/docs/reference/cli-commands.md:2835` | no removal statement |
-| `MVM_DEV_FLAKE_URL` | `public/src/content/docs/reference/cli-commands.md:2833` | no removal statement |
 | `MVM_EGRESS_BENCH` | `public/src/content/docs/guides/networking.md:201` | no removal statement |
-| `MVM_RUNTIME_ARCH` | `public/src/content/docs/guides/assurance-runtime.md:64` | no removal statement |
-| `MVM_RUNTIME_ARCHIVE` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
-| `MVM_RUNTIME_CHECKSUM` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
-| `MVM_RUNTIME_INITRAMFS` | `public/src/content/docs/guides/assurance-runtime.md:60` | no removal statement |
-| `MVM_RUNTIME_ROOT_HASH` | `public/src/content/docs/guides/assurance-runtime.md:62` | no removal statement |
-| `MVM_RUNTIME_SIGNATURE_BUNDLE` | `public/src/content/docs/guides/assurance-runtime.md:58` | no removal statement |
-| `MVM_RUNTIME_VERITY` | `public/src/content/docs/guides/assurance-runtime.md:60` | no removal statement |
-| `MVM_RUNTIME_VERSION` | `public/src/content/docs/guides/assurance-runtime.md:63` | no removal statement |
-| `MVM_SRC` | `public/src/content/docs/reference/cli-commands.md:2834` | no removal statement |
-| `MVM_STUDIO_BACKEND` | `public/src/content/docs/sdk/rust.md:146` | no removal statement |
-| `MVM_TOKEN` | `public/src/content/docs/sdk/rust.md:136` | no removal statement |
 <!-- env:end -->
 
 ### 3.5 Backend x platform x feature combinations

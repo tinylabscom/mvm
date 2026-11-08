@@ -52,24 +52,32 @@ impl FirecrackerGuard {
     }
 }
 
+/// The cleanup script for an orphaned Firecracker in `dir`; every path is
+/// quoted, since `dir` derives from the VM name.
+fn orphan_cleanup_script(dir: &str) -> String {
+    use mvm_vmm::host::shell::shell_quote as q;
+    let pid = q(&format!("{dir}/fc.pid"));
+    let old_pid = q(&format!("{dir}/.fc-pid"));
+    let socket = q(&super::fc_api_socket_path(dir));
+    format!(
+        r#"
+                if [ -f {pid} ]; then
+                    sudo kill "$(cat {pid})" 2>/dev/null || true
+                    rm -f {pid}
+                elif [ -f {old_pid} ]; then
+                    sudo kill "$(cat {old_pid})" 2>/dev/null || true
+                    rm -f {old_pid}
+                fi
+                sudo rm -f {socket}
+                "#
+    )
+}
+
 impl Drop for FirecrackerGuard {
     fn drop(&mut self) {
         if let Some(ref dir) = self.abs_dir {
             warn!(dir = %dir, "FirecrackerGuard: killing orphaned Firecracker process");
-            if let Err(e) = run_in_vm(&format!(
-                r#"
-                if [ -f {dir}/fc.pid ]; then
-                    sudo kill "$(cat {dir}/fc.pid)" 2>/dev/null || true
-                    rm -f {dir}/fc.pid
-                elif [ -f {dir}/.fc-pid ]; then
-                    sudo kill "$(cat {dir}/.fc-pid)" 2>/dev/null || true
-                    rm -f {dir}/.fc-pid
-                fi
-                sudo rm -f {socket}
-                "#,
-                dir = dir,
-                socket = mvm_vmm::host::shell::shell_quote(&super::fc_api_socket_path(dir)),
-            )) {
+            if let Err(e) = run_in_vm(&orphan_cleanup_script(dir)) {
                 warn!("FirecrackerGuard: cleanup failed: {e}");
             }
         }
@@ -211,6 +219,36 @@ mod tests {
         // Should not panic even though cleanup shell command fails
         {
             let _guard = FirecrackerGuard::new("/tmp/nonexistent-vm");
+        }
+    }
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::orphan_cleanup_script;
+    use mvm_vmm::host::shell::shell_quote;
+
+    #[test]
+    fn the_orphan_cleanup_script_keeps_a_hostile_directory_one_inert_word() {
+        for v in [
+            "/v/PWN a b",
+            "/v/PWN'; touch /tmp/PWN; '",
+            "/v/PWN$(touch /tmp/PWN)",
+            "/v/PWN`touch /tmp/PWN`",
+            "/v/PWN\ntouch /tmp/PWN",
+            "/v/PWN;rm -rf /",
+        ] {
+            let script = orphan_cleanup_script(v);
+            let mut rest = script.clone();
+            for part in [
+                shell_quote(&format!("{v}/fc.pid")),
+                shell_quote(&format!("{v}/.fc-pid")),
+                shell_quote(&crate::fc::fc_api_socket_path(v)),
+            ] {
+                assert!(rest.contains(&part), "{part} missing from {script}");
+                rest = rest.replace(&part, "Q");
+            }
+            assert!(!rest.contains("PWN"), "leaks: {rest}");
         }
     }
 }

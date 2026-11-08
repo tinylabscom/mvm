@@ -8,7 +8,7 @@
 //! lifecycle operation is invoked.
 //!
 //! The stub is intentionally selectable via `--hypervisor web-linux` /
-//! `MVM_BACKEND=web-linux` so the catalog and CLI help surfaces can list
+//! `MVM_HYPERVISOR=web-linux` so the catalog and CLI help surfaces can list
 //! it, but `AnyBackend::auto_select` never returns it and the native
 //! `as_workload_backend()` gate refuses to admit an untrusted workload
 //! through it. A future browser build of `mvm-runtime` will replace this
@@ -199,6 +199,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("browser-only"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn security_profile_carries_zero_numbered_claims() {
+        let profile = WebLinuxBackend::new().security_profile();
+        assert!(
+            profile
+                .claims
+                .iter()
+                .all(|c| matches!(c, ClaimStatus::DoesNotHold)),
+            "the browser tier must not claim any numbered security guarantee"
+        );
+        assert_eq!(profile.layer_coverage, LayerCoverage::default());
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! `qemu_builder`): boots a user workload microVM via `qemu-system-<arch>` so a
 //! workload can run for dev/test on a host without `/dev/kvm` (TCG fallback) or
 //! where Firecracker isn't wanted. **Firecracker stays the sole production
-//! runtime**; QEMU is opt-in (`--hypervisor qemu` / `MVM_BACKEND=qemu`) and
+//! runtime**; QEMU is opt-in (`--hypervisor qemu` / `MVM_HYPERVISOR=qemu`) and
 //! `auto_select` never picks it.
 //!
 //! Locating the binary, allocating a CID, PID files, and the vsock bridge
@@ -39,95 +39,6 @@ pub(crate) const QEMU_CID_FILE: &str = "qemu.cid";
 pub(crate) const BRIDGE_PID_FILE: &str = "qemu-vsock-bridge.pid";
 /// The JSON wiring plan the detached bridge process reads at startup.
 pub(crate) const BRIDGE_SPEC_FILE: &str = "qemu-vsock-bridge.json";
-
-pub fn qemu_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
-    config.initrd_path.as_ref().map(PathBuf::from)
-}
-
-pub fn qemu_verity_enabled(config: &VmStartConfig) -> bool {
-    config.verity_path.is_some()
-        && config.roothash.is_some()
-        && qemu_effective_initrd(config).is_some()
-}
-
-pub fn qemu_runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
-    Some((
-        config.runtime_overlay_path.as_deref()?,
-        config.runtime_overlay_verity_path.as_deref()?,
-        config.runtime_overlay_roothash.as_deref()?,
-    ))
-}
-
-pub fn ensure_qemu_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
-    // A sealed boot (verity metadata present) must be fully verity capable — a
-    // missing initrd fails closed rather than downgrading to an unverified root —
-    // and carries the dm-verity overlay triple its initramfs mounts. A non-verity
-    // dev boot instead mounts a plain read-only overlay from `/dev/vdb`.
-    let verity_intended = config.roothash.is_some() || config.verity_path.is_some();
-    if verity_intended {
-        if !qemu_verity_enabled(config) {
-            bail!(
-                "required-overlay qemu boot requires verity metadata plus an initrd \
-                 (`--initrd` or sibling rootfs.initrd)"
-            );
-        }
-        if qemu_runtime_overlay(config).is_none() {
-            bail!("required-overlay qemu boot requires the runtime overlay artifact triple");
-        }
-    } else if mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_none() {
-        bail!(
-            "required-overlay qemu boot requires the runtime overlay artifact triple \
-             (a non-verity boot mounts it as a plain read-only /dev/vdb)"
-        );
-    }
-    Ok(())
-}
-
-pub fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
-    if let Some(verity_path) = config
-        .verity_path
-        .as_deref()
-        .filter(|_| qemu_verity_enabled(config))
-    {
-        let mut drives = vec![
-            format!(
-                "file={},if=virtio,format=raw,readonly=on",
-                config.rootfs_path
-            ),
-            format!("file={},if=virtio,format=raw,readonly=on", verity_path),
-        ];
-        if let Some((overlay_path, overlay_verity_path, _)) = qemu_runtime_overlay(config) {
-            drives.push(format!(
-                "file={overlay_path},if=virtio,format=raw,readonly=on"
-            ));
-            drives.push(format!(
-                "file={overlay_verity_path},if=virtio,format=raw,readonly=on"
-            ));
-        }
-        append_qemu_user_disks(&mut drives, config);
-        return drives;
-    }
-    let mut drives = vec![format!("file={},if=virtio,format=raw", config.rootfs_path)];
-    // A non-verity dev boot has no initramfs to mount the runtime overlay, so
-    // attach it as a plain read-only virtio-blk device right after the rootfs
-    // (=> /dev/vdb). The guest `/init` mounts it from the matching
-    // `mvm.runtime_data=` cmdline token.
-    if let Some(overlay) = mvm_vmm::host::boot_config::non_verity_overlay_ext4(config) {
-        drives.push(format!("file={overlay},if=virtio,format=raw,readonly=on"));
-    }
-    append_qemu_user_disks(&mut drives, config);
-    drives
-}
-
-pub fn append_qemu_user_disks(drives: &mut Vec<String>, config: &VmStartConfig) {
-    drives.extend(config.volumes.iter().map(|volume| {
-        let read_only = if volume.read_only { ",readonly=on" } else { "" };
-        format!(
-            "file={},if=virtio,format=raw{read_only}",
-            volume.block_source()
-        )
-    }));
-}
 
 // ─── KVM / qemu probing ─────────────────────────────────────────────
 
@@ -338,26 +249,7 @@ pub struct QemuBridgeSpec {
     pub exit_capture_state_dir: Option<PathBuf>,
 }
 
-impl QemuBridgeSpec {
-    /// The bridge plan for the raw (pre-runner) boot path: only the agent
-    /// RPC channel, in the host-dialed direction — exactly what the legacy
-    /// single-port bridge served.
-    pub fn agent_only(name: &str, cid: u32, state_dir: &Path) -> Self {
-        Self {
-            cid,
-            watch_pid_file: state_dir.join(QEMU_PID_FILE),
-            host_dials: vec![QemuBridgeHostDial {
-                guest_port: mvm_agentd::vsock::GUEST_AGENT_PORT,
-                listen_uds: mvm_core::config::vm_vsock_port_socket(
-                    name,
-                    mvm_agentd::vsock::GUEST_AGENT_PORT,
-                ),
-            }],
-            guest_dials: Vec::new(),
-            exit_capture_state_dir: None,
-        }
-    }
-}
+impl QemuBridgeSpec {}
 
 /// Spawn the detached host-side AF_VSOCK↔UNIX bridge for this VM.
 ///

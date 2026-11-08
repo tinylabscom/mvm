@@ -444,9 +444,14 @@ impl VmmDriver for MockDriver {
     fn boot_custodied(
         &self,
         spec: &VmmSpec,
-        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        files: mvm_vmm::driver::prepared_disks::PreparedBootFiles<'_>,
     ) -> Result<Box<dyn RunningVm>> {
+        files.require_no_data()?;
+        let mvm_vmm::driver::prepared_disks::PreparedBootFiles {
+            kernel,
+            writable: disks,
+            ..
+        } = files;
         anyhow::ensure!(
             kernel.is_none(),
             "mock verified kernel handoff is unsupported"

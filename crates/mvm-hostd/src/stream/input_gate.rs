@@ -347,17 +347,6 @@ impl InputBinding {
         self
     }
 
-    /// The same for a whole set, which is how one arrives: the substitution
-    /// endpoint fingerprints every secret it resolved for this VM at once.
-    #[must_use]
-    pub fn with_fingerprints(
-        mut self,
-        fingerprints: impl IntoIterator<Item = SecretFingerprint>,
-    ) -> Self {
-        self.fingerprints.extend(fingerprints);
-        self
-    }
-
     /// Send this VM's input decisions to a specific chain.
     ///
     /// [`InputAudit`] and nothing else: the parameter is the concrete chain

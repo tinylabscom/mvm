@@ -263,57 +263,6 @@ pub fn verify_mark(mark_json: &[u8], signature_hex: &str) -> Result<VerifiedMark
     })
 }
 
-/// Read the provenance mark out of a sealed ext4 image using host
-/// `debugfs` (offline, no mount). Returns `Ok(None)` when the image has
-/// no mark. `debugfs` is a Linux/e2fsprogs tool; on other hosts this
-/// returns an error naming the limitation — roothash verification via
-/// [`mvm_fs::ext4::verity::root_hash`] remains available everywhere.
-pub fn read_mark_from_ext4(image: &Path) -> Result<Option<VerifiedMark>> {
-    let debugfs = locate_debugfs().context(
-        "debugfs (e2fsprogs) not found; reading an in-rootfs mark needs a Linux host or the builder VM",
-    )?;
-    let Some(mark_json) = debugfs_cat(&debugfs, image, "/mvm/provenance.json")? else {
-        return Ok(None);
-    };
-    let Some(signature_hex) = debugfs_cat(&debugfs, image, "/mvm/provenance.sig")? else {
-        anyhow::bail!("image has /mvm/provenance.json but no /mvm/provenance.sig");
-    };
-    verify_mark(mark_json.as_bytes(), &signature_hex).map(Some)
-}
-
-fn locate_debugfs() -> Option<std::path::PathBuf> {
-    for candidate in [
-        "/usr/sbin/debugfs",
-        "/sbin/debugfs",
-        "/usr/bin/debugfs",
-        "/bin/debugfs",
-    ] {
-        let path = Path::new(candidate);
-        if path.is_file() {
-            return Some(path.to_path_buf());
-        }
-    }
-    which::which("debugfs").ok()
-}
-
-/// `debugfs -R "cat <guest_path>" <image>`; `Ok(None)` when the guest
-/// path is absent from the image.
-fn debugfs_cat(debugfs: &Path, image: &Path, guest_path: &str) -> Result<Option<String>> {
-    let output = mvm_core::env_hygiene::helper_command(debugfs)
-        .args(["-R", &format!("cat {guest_path}")])
-        .arg(image)
-        .output()
-        .with_context(|| format!("spawn debugfs for {guest_path}"))?;
-    if output.status.success() {
-        return Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()));
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("not found") {
-        return Ok(None);
-    }
-    anyhow::bail!("debugfs cat {guest_path} failed: {stderr}");
-}
-
 // ============================================================================
 // Tests
 // ============================================================================

@@ -387,20 +387,6 @@ pub fn try_resolve_builder_backend_for(
     }
 }
 
-/// Builder driver for the Stage 0 bootstrap.
-///
-/// Stage 0 is implemented for libkrun and QEMU; hvf and Firecracker
-/// Stage 0 are still fail-closed gaps. So this dispatch deliberately differs
-/// from [`try_resolve_builder_backend`]: an explicit `qemu` choice uses QEMU, but
-/// everything else — including the hvf auto-detect default on macOS-26+ —
-/// falls back to libkrun, preserving the "Stage 0 is libkrun even on
-/// hvf-default hosts" invariant rather than hitting the gap.
-/// `verbose` streams the libkrun console; the QEMU path always logs to
-/// `console.log`.
-pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
-    resolve_stage0_backend_for_choice(resolve_choice(None), verbose)
-}
-
 /// Constructor for a driver-backed Stage 0 bootstrapper, registered by the CLI
 /// for the same reason [`HvfBuilderCtor`] is: `mvm-build` sits below the crate
 /// that owns the drivers, so it cannot name them.
@@ -760,14 +746,6 @@ pub fn linux_builder_vm_readiness_for(
         });
     }
     Ok(())
-}
-
-/// Live readiness check using the runtime platform + sysfs probe.
-/// `mvmctl doctor` and the future workload-nesting dispatch both call
-/// this to surface clean errors before mid-build.
-pub fn linux_builder_vm_readiness() -> Result<(), BuilderVmError> {
-    let plat = current();
-    linux_builder_vm_readiness_for(plat, plat.has_nested_kvm())
 }
 
 #[cfg(test)]

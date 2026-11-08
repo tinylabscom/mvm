@@ -4,6 +4,19 @@ set -euo pipefail
 # Build the macOS libkrun release tier from immutable upstream source commits.
 # The caller supplies an empty output directory; all downloads and build state
 # stay under RUNNER_TEMP and only the relocatable runtime payload is exported.
+#
+# MVM_LIBKRUN_UPSTREAM_CACHE names an optional directory holding the result of
+# the upstream half of the build (libkrun and libkrunfw built from the pinned
+# commits, with their licences). It is adopted only when its recorded pins equal
+# this script's and every file still matches the SHA-256 recorded when it was
+# written; anything else is rebuilt from source. The mvm supervisor is always
+# compiled from this tree and never comes from the cache. The check lives inside
+# the entry, so it detects corruption, not a hostile writer: callers must only
+# supply this cache for rehearsal runs, never for a release that gets signed.
+#
+# MVM_LIBKRUNFW_KERNEL_CACHE names a directory that may hold the kernel source
+# tarball. It is verified against the SHA-256 pinned below like a download, so
+# it is safe in any run.
 
 if [[ $# -ne 2 ]]; then
   echo "usage: $0 OUTPUT_DIR BUILD_TARGET" >&2
@@ -25,6 +38,9 @@ libkrunfw_abi="5"
 kernel_version="linux-6.12.115"
 kernel_sha256="0ec90fe4b20422b1b664b77e6d2dde22b40bd41e7eb2cad8ac8739a4749cb1bb"
 deployment_target="13.0"
+# Exported at top level, not inside build_upstream: a restored upstream cache skips
+# that function, and the supervisor built below must still link at this target.
+export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 
 scratch_root="${RUNNER_TEMP:?RUNNER_TEMP is required}/mvm-libkrun-tier"
 prefix="$scratch_root/prefix"
@@ -61,6 +77,53 @@ checkout_commit() {
   }
 }
 
+pins_record() {
+  printf '%s\n' \
+    "libkrun_commit=$libkrun_commit" \
+    "libkrunfw_commit=$libkrunfw_commit" \
+    "libkrun_version=$libkrun_version" \
+    "libkrunfw_abi=$libkrunfw_abi" \
+    "kernel_version=$kernel_version" \
+    "kernel_sha256=$kernel_sha256" \
+    "deployment_target=$deployment_target" \
+    "patch_sha256=$(shasum -a 256 "$script_dir/libkrunfw-macos-host.patch" | awk '{print $1}')" \
+    "script_sha256=$(shasum -a 256 "${BASH_SOURCE[0]}" | awk '{print $1}')"
+}
+
+# Adopt the cached upstream tree into $prefix only if it is exactly what this
+# script would have built: same pins, same file set, same bytes.
+restore_upstream_cache() {
+  local cache="$1"
+  [[ -f "$cache/PINS" && -f "$cache/SHA256SUMS" && -d "$cache/prefix" ]] || return 1
+  [[ "$(cat "$cache/PINS")" == "$(pins_record)" ]] || return 1
+  [[ "$(cd "$cache/prefix" && find . -type f | sort)" == \
+     "$(awk '{print $2}' "$cache/SHA256SUMS" | sort)" ]] || return 1
+  (cd "$cache/prefix" && shasum -a 256 -c "$cache/SHA256SUMS" --quiet) || return 1
+  cp -a "$cache/prefix/." "$prefix/"
+  local required
+  for required in lib/libkrun.$libkrun_version.dylib lib/libkrunfw.$libkrunfw_abi.dylib \
+      include/libkrun.h licenses/libkrun-APACHE-2.0.txt \
+      licenses/libkrunfw-LGPL-2.1-only.txt licenses/linux-GPL-2.0-only.txt; do
+    [[ -f "$prefix/$required" ]] || return 1
+  done
+}
+
+upstream_cache="${MVM_LIBKRUN_UPSTREAM_CACHE:-}"
+case "$upstream_cache" in
+  "$scratch_root"|"$scratch_root"/*) echo "cache must live outside scratch: $upstream_cache" >&2; exit 1 ;;
+esac
+upstream_restored=0
+if [[ -n "$upstream_cache" ]]; then
+  if restore_upstream_cache "$upstream_cache"; then
+    upstream_restored=1
+    echo "libkrun upstream tree restored from verified cache"
+  else
+    echo "libkrun upstream cache absent or failed verification; building from source"
+    rm -rf "$prefix" && mkdir -p "$prefix"
+  fi
+fi
+
+build_upstream() {
 libkrunfw_src="$source_root/libkrunfw"
 libkrun_src="$source_root/libkrun"
 checkout_commit https://github.com/libkrun/libkrunfw.git "$libkrunfw_commit" "$libkrunfw_src"
@@ -69,8 +132,12 @@ patch -p1 -d "$libkrunfw_src" < "$script_dir/libkrunfw-macos-host.patch"
 
 kernel_tarball="$libkrunfw_src/tarballs/$kernel_version.tar.xz"
 mkdir -p "$(dirname "$kernel_tarball")"
+kernel_cache="${MVM_LIBKRUNFW_KERNEL_CACHE:-}"
+cached_kernel="$kernel_cache/$kernel_version.tar.xz"
 if [[ -n "${MVM_LIBKRUNFW_KERNEL_TARBALL:-}" ]]; then
   cp "$MVM_LIBKRUNFW_KERNEL_TARBALL" "$kernel_tarball"
+elif [[ -n "$kernel_cache" && -f "$cached_kernel" ]]; then
+  cp "$cached_kernel" "$kernel_tarball"
 else
   curl --fail --location \
     "https://cdn.kernel.org/pub/linux/kernel/v6.x/$kernel_version.tar.xz" \
@@ -81,8 +148,11 @@ if [[ "$actual_kernel_sha256" != "$kernel_sha256" ]]; then
   echo "kernel source SHA-256 mismatch: $actual_kernel_sha256" >&2
   exit 1
 fi
+# Verified against the pin in this file, so the cache copy is safe in any run.
+if [[ -n "$kernel_cache" && ! -f "$cached_kernel" ]]; then
+  mkdir -p "$kernel_cache" && cp "$kernel_tarball" "$cached_kernel"
+fi
 
-export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 kernel_hostcc="$(xcrun --find clang)"
 macos_sdk="$(xcrun --show-sdk-path)"
 
@@ -112,12 +182,38 @@ BINDGEN_EXTRA_CLANG_ARGS="-isysroot $macos_sdk" \
   SYSROOT_LINUX="$scratch_root/zig-linux-sysroot" \
   CC_LINUX="zig cc -target aarch64-linux-musl" install
 
+mkdir -p "$prefix/licenses"
+cp "$libkrun_src/LICENSE" "$prefix/licenses/libkrun-APACHE-2.0.txt"
+cp "$libkrunfw_src/LICENSE-LGPL-2.1-only" \
+  "$prefix/licenses/libkrunfw-LGPL-2.1-only.txt"
+cp "$libkrunfw_src/LICENSE-GPL-2.0-only" "$prefix/licenses/linux-GPL-2.0-only.txt"
+}
+
+export_upstream_cache() {
+  local cache="$1"
+  rm -rf "$cache" && mkdir -p "$cache"
+  cp -a "$prefix" "$cache/prefix"
+  pins_record > "$cache/PINS"
+  (cd "$cache/prefix" && find . -type f | sort | xargs shasum -a 256) > "$cache/SHA256SUMS"
+}
+
+if (( upstream_restored == 0 )); then
+  build_upstream
+  [[ -z "$upstream_cache" ]] || export_upstream_cache "$upstream_cache"
+fi
+
+# Cargo does not track MACOSX_DEPLOYMENT_TARGET, so a target directory restored
+# from a build made without it would link this binary at the toolchain default
+# (11.0) instead of the tier's deployment target. A private target directory
+# keeps the supervisor's dependencies built under the exported target.
+supervisor_target="$scratch_root/supervisor-target"
+CARGO_TARGET_DIR="$supervisor_target" \
 MVM_LIBKRUN_HEADER="$prefix/include/libkrun.h" \
 LIBRARY_PATH="$prefix/lib" \
 cargo build --release --target "$build_target" -p mvm-hostd \
   --bin mvm-libkrun-supervisor --features libkrun-sys
 
-cp "target/$build_target/release/mvm-libkrun-supervisor" "$output_dir/"
+cp "$supervisor_target/$build_target/release/mvm-libkrun-supervisor" "$output_dir/"
 cp "$prefix/lib/libkrun.$libkrun_version.dylib" "$output_dir/lib/libkrun.1.dylib"
 cp "$prefix/lib/libkrunfw.$libkrunfw_abi.dylib" "$output_dir/lib/"
 
@@ -156,11 +252,7 @@ install_name_tool -add_rpath '@loader_path' "$libkrun"
 # Separate regular files survive strict archive inspection and independent signing.
 cp "$libkrunfw" "$output_dir/lib/libkrunfw.dylib"
 
-cp "$libkrun_src/LICENSE" "$output_dir/licenses/libkrun-APACHE-2.0.txt"
-cp "$libkrunfw_src/LICENSE-LGPL-2.1-only" \
-  "$output_dir/licenses/libkrunfw-LGPL-2.1-only.txt"
-cp "$libkrunfw_src/LICENSE-GPL-2.0-only" \
-  "$output_dir/licenses/linux-GPL-2.0-only.txt"
+cp "$prefix"/licenses/*.txt "$output_dir/licenses/"
 cp "$script_dir/libkrunfw-macos-host.patch" "$output_dir/sources/"
 cat > "$output_dir/SOURCE-OFFER.txt" <<EOF
 This release contains libkrun and libkrunfw built from the following exact sources:

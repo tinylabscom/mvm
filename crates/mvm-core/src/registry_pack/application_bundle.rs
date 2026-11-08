@@ -21,6 +21,7 @@ pub use launch::{
     ApplicationLaunchError, PinnedRegistryKind, ResolvedApplication,
     classify_pinned_registry_reference, names_installed_application, names_installed_policy_pack,
     resolve_installed_application, resolve_installed_application_bundle,
+    trust_for_installed_archive, trust_for_installed_bundle,
 };
 
 /// Resource ceiling shared with the bundle OCI transport.

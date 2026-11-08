@@ -298,7 +298,7 @@ use mvm_core::vm_backend::RequiredCapabilities;
 use mvm_runtime::backend::AnyBackend;
 
 /// Select the backend for a transient run: CLI `--hypervisor` wins over
-/// the `MVM_HYPERVISOR`/`MVM_BACKEND` environment override, and the
+/// the `MVM_HYPERVISOR` environment override, and the
 /// result is validated against the run's egress policy before it is
 /// returned.
 pub fn select_exec_backend(
@@ -306,7 +306,7 @@ pub fn select_exec_backend(
     network_policy: &NetworkPolicy,
     requested: Option<&str>,
 ) -> anyhow::Result<AnyBackend> {
-    // CLI `--hypervisor` wins over the MVM_HYPERVISOR/MVM_BACKEND env override.
+    // CLI `--hypervisor` wins over the MVM_HYPERVISOR env override.
     let backend_override = requested
         .and_then(normalize_backend_override)
         .or_else(explicit_hypervisor_override);
@@ -322,15 +322,13 @@ pub fn select_exec_backend(
 
 /// An explicit workload-backend override from the environment. The transient
 /// run path otherwise auto-detects the backend; this lets `MVM_HYPERVISOR`
-/// (or `MVM_BACKEND`) pin it — e.g. `libkrun`, whose vsock-tunnel egress path
+/// pin it — e.g. `libkrun`, whose vsock-tunnel egress path
 /// the auto-detected default would otherwise never select on this host. Every
 /// `select_exec_backend` call site reads the same value, so the admitted plan's
 /// backend and the boot backend agree.
 fn explicit_hypervisor_override() -> Option<String> {
-    ["MVM_HYPERVISOR", "MVM_BACKEND"]
-        .into_iter()
-        .filter_map(std::env::var_os)
-        .find_map(|raw| normalize_backend_override(&raw.to_string_lossy()))
+    std::env::var_os("MVM_HYPERVISOR")
+        .and_then(|raw| normalize_backend_override(&raw.to_string_lossy()))
 }
 
 /// Normalize a backend-override string (trim + lowercase); a blank value yields

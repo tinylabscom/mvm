@@ -70,6 +70,12 @@ ALLOWED_FILES=(
   "public/src/content/docs/guides/building-microvm-images.md"
   "public/src/content/docs/reference/cli-commands.md"
   "public/src/content/docs/guides/machine-limitations.md"
+  # Blog post analysing a published OpenSSH advisory and explaining why mvm
+  # workloads expose no SSH authentication boundary: it names `sshd` and
+  # OpenSSH throughout as the subject, never as installed capability.
+  "public/src/content/blog/openssh-10-6p2-no-ssh.md"
+  # The same post's hero image: its title and caption name OpenSSH as the subject.
+  "public/public/blog/openssh-10-6p2-no-ssh.svg"
 )
 
 is_allowed() {

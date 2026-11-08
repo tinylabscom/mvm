@@ -279,7 +279,11 @@ fn inspect_application(
     use mvm_core::registry_pack::application_bundle::verify_application_bundle;
 
     let registry = BundleRegistry::default_path()?;
-    let trust = FsTrustStore::default_path()?;
+    let enrolled = FsTrustStore::default_path()?;
+    let loaded = mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+    )?;
+    let trust = mvm_core::registry_pack::BuiltinAuthorTrust::for_policy(&enrolled, &loaded);
     let archive = registry.archive_path(
         application
             .manifest()
@@ -322,7 +326,16 @@ fn inspect_application(
     }
     println!("Signer identity: {}", safe(&info.signer_identity));
     println!("Signer issuer: {}", safe(&info.signer_issuer));
-    for line in trust_status_lines(application.reference().namespace() == "mvm", false) {
+    let built_in_signer = info.signer_identity
+        == mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+        && loaded.is_official_default();
+    let feed_valid_until =
+        mvm_core::registry_pack_store::official_registry_pack_revocation_valid_until();
+    for line in application_trust_lines(
+        application.reference().namespace() == "mvm",
+        built_in_signer,
+        feed_valid_until,
+    ) {
         println!("{line}");
     }
     println!("Guest architecture: {}", safe(&info.guest_arch));
@@ -413,9 +426,38 @@ fn trust_status_lines(official: bool, revocation_required: bool) -> [&'static st
     }
 }
 
+/// Trust lines for an application. A signer that is the built-in publish
+/// identity is named as such: that is identity, not the reserved `mvm/`
+/// namespace's official status, and the official feed is what gates it.
+fn application_trust_lines(
+    mvm_namespace: bool,
+    built_in_signer: bool,
+    feed_valid_until: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<String> {
+    if mvm_namespace || !built_in_signer {
+        return trust_status_lines(mvm_namespace, false)
+            .map(str::to_owned)
+            .to_vec();
+    }
+    let scope = match feed_valid_until {
+        Some(end) => format!(
+            "Revocation scope: official signed feed (verified cache valid until {})",
+            end.to_rfc3339()
+        ),
+        None => "Revocation scope: official signed feed required; no current verified copy is cached (`mvmctl pull` refreshes it)".to_owned(),
+    };
+    vec![
+        "Publisher: signed by the built-in official publisher identity (the mvm/ namespace is not implied)".to_owned(),
+        scope,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LaunchSummary, application_info, launch_lines, safe, trust_status_lines};
+    use super::{
+        LaunchSummary, application_info, application_trust_lines, launch_lines, safe,
+        trust_status_lines,
+    };
 
     const HOSTILE: &str = "a\x1b[2Jb\rc\nd\u{9b}e";
 
@@ -524,5 +566,23 @@ mod tests {
             assert!(!scope.contains("MVM-controlled"));
             assert_eq!(scope.contains("fresh signed feed required"), required);
         }
+    }
+
+    #[test]
+    fn application_trust_lines_name_the_feed_that_applies() {
+        let end = "2026-11-09T00:00:00Z".parse().unwrap();
+        let cached = application_trust_lines(false, true, Some(end));
+        assert!(cached[0].contains("built-in official publisher identity"));
+        assert!(cached[1].contains("valid until 2026-11-09T00:00:00+00:00"));
+        let cold = application_trust_lines(false, true, None);
+        assert!(cold[1].contains("no current verified copy"));
+        let operator = application_trust_lines(false, false, Some(end));
+        assert_eq!(
+            operator,
+            [
+                "Official status: not established by this verification",
+                "Revocation scope: operator-configured signed feed only; no feed is required"
+            ]
+        );
     }
 }

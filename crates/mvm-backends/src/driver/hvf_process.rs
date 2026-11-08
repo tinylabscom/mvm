@@ -15,9 +15,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_core::config::vms_dir;
 use mvm_core::vm_backend::VmStartConfig;
-use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk};
+use mvm_vmm::host::hvf_supervisor::HvfDisk;
 
 use mvm_vmm::host::cmdline;
 
@@ -32,16 +31,6 @@ pub(crate) const PID_FILE_NAME: &str = "hvf.pid";
 /// once; only a live one that never publishes waits this long.
 pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PAUSE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
-
-pub fn hvf_console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<HostDialSocket> {
-    mvm_vmm::host::spec_map::console_data_sockets(state_dir, dev_console)
-        .into_iter()
-        .map(|(guest_port, host_socket)| HostDialSocket {
-            guest_port,
-            host_socket,
-        })
-        .collect()
-}
 
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
@@ -130,10 +119,6 @@ fn hvf_supervisor_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
     .signed_with(mvm_vmm::host::codesign::RequiredEntitlement::Hypervisor)
 }
 
-pub fn vms_root() -> PathBuf {
-    vms_dir()
-}
-
 /// The per-VM gating endpoint is the sole egress gate on hvf (claim-10
 /// default-deny plus optional secret substitution). It only needs to run for a
 /// workload that can actually reach the network: an admitted egress policy, or a
@@ -207,33 +192,6 @@ pub fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
         });
     }
     disks
-}
-
-pub fn ensure_hvf_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
-    // Two supported required-overlay shapes, keyed on whether the rootfs asks to
-    // be sealed. A sealed boot (verity metadata present) must be fully verity
-    // capable — a missing initrd fails closed rather than silently downgrading to
-    // an unverified root — and carries the dm-verity overlay triple its initramfs
-    // (mvm-verity-init) mounts. A non-verity dev boot instead mounts a plain
-    // read-only overlay from `/dev/vdb` in its guest `/init`.
-    let verity_intended = config.roothash.is_some() || config.verity_path.is_some();
-    if verity_intended {
-        if !cmdline::verity_enabled(config) {
-            bail!(
-                "required-overlay hvf boot requires verity metadata plus an initrd \
-                 (`--initrd` or sibling rootfs.initrd)"
-            );
-        }
-        if cmdline::runtime_overlay(config).is_none() {
-            bail!("required-overlay hvf boot requires the runtime overlay artifact triple");
-        }
-    } else if mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_none() {
-        bail!(
-            "required-overlay hvf boot requires the runtime overlay artifact triple \
-             (a non-verity boot mounts it as a plain read-only /dev/vdb)"
-        );
-    }
-    Ok(())
 }
 
 pub fn workspace_root_from_manifest_dir() -> Option<PathBuf> {

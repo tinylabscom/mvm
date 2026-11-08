@@ -17,9 +17,7 @@ dev/workload microVM image, verified against a cosign-signed manifest —
 was removed with the legacy import flow. The current `mvmctl dev`
 namespace contains contributor build tools and does not restore that import.
 Its would-be successor (the `dev-image` pack class) has no publish/fetch path
-wired yet: `mvmctl pack download
-dev-image` refuses explicitly rather than pretending to work. (The pack
-kind is a positional argument; `--kind` is a filter on `pack list` only.)
+wired yet, and no `pack download` command exists.
 Signed bundles are the current sanctioned air-gapped path for shipping
 a prebuilt workload; this guide describes that flow.
 :::

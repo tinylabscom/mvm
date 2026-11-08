@@ -61,9 +61,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
-/// Default subdirectory under `~/.mvm/` where overlays live.
-pub const DEFAULT_OVERLAY_DIR_NAME: &str = "overlays";
-
 /// Maximum length of a tenant id or workload id, in bytes. Keeps
 /// the audit chain bounded and avoids PATH_MAX surprises on Linux
 /// (PATH_MAX = 4096, but we're nested two levels deep + with the

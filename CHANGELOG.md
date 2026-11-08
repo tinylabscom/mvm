@@ -2,6 +2,52 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.27.0] — 2026-11-07
+
+Final release of the 0.27.0 line. It carries everything in rc.3 and rc.4 plus the changes below.
+
+### Added
+- **packs**: The official bundle-author key is pinned in the client, so official application packs verify without `trust add`; the pinned keys apply at every installed-application launch and admission site
+- **packs**: The official revocation feed is refreshed on demand and applied to applications signed by the built-in publisher
+
+### Changed
+- **cli**: Pack bundle downloads follow at most five HTTPS redirects (no IP-literal, localhost, userinfo or port-changing targets, public-address-only resolution after the first hop, one deadline and byte budget across hops); the general client and other fetches still never redirect
+- **examples**: The Claude application candidate and its demo scripts move to agent/claude@2.0.1
+
+### Documentation
+- Drop the removed pack compatibility commands from the CLI reference, tier manifest and surface inventory
+
+## [0.27.0] — 2026-11-07
+
+Final release of the 0.27.0 line. It carries everything in rc.3 and rc.4 plus the changes below.
+
+### Added
+- **packs**: The official bundle-author key is pinned in the client, so official application packs verify without `trust add`; the pinned keys apply at every installed-application launch and admission site
+- **packs**: The official revocation feed is refreshed on demand and applied to applications signed by the built-in publisher
+
+### Changed
+- **cli**: Pack bundle downloads follow at most five HTTPS redirects (no IP-literal, localhost, userinfo or port-changing targets, public-address-only resolution after the first hop, one deadline and byte budget across hops); the general client and other fetches still never redirect
+- **examples**: The Claude application candidate and its demo scripts move to agent/claude@2.0.1
+
+### Documentation
+- Drop the removed pack compatibility commands from the CLI reference, tier manifest and surface inventory
+
+## [0.27.0-rc.4] — 2026-11-06
+
+### Changed
+- SDK runtime compatibility follows the workspace version
+- Remove dead configuration surface and gate documented env vars
+
+### Documentation
+- **adr-054**: State both layers of first-run runtime preparation
+
+### Fixed
+- **cli**: Pack rm accepts the :latest spelling pull, info and verify accept
+- **release**: Reconcile detached standby during smoke cleanup
+
+### Testing
+- **plan**: Reuse shared plan fixtures
+
 ## [0.27.0-rc.3] — 2026-11-06
 
 v0.27.0-rc.1 and v0.27.0-rc.2 did not publish. rc.1 was stopped by the BDD gate, which caught a first-run cached-kernel regression. rc.2 was stopped in distro-packages, which rejected the hyphenated pre-release RPM version. rc.3 carries both fixes.

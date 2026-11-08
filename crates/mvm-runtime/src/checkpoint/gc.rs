@@ -429,6 +429,10 @@ mod tests {
 
     #[test]
     fn abandoned_staging_and_the_objects_only_it_linked_go_in_one_run() {
+        mvm_core::util::test_env::isolated_lock_probe(abandoned_staging_fixture);
+    }
+
+    fn abandoned_staging_fixture() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let kept = capture(&store, tmp.path(), "kept", &[chunk(1)]);
@@ -454,6 +458,10 @@ mod tests {
 
     #[test]
     fn active_or_uncertain_staging_defers_global_objects_even_after_real_lease_loss() {
+        mvm_core::util::test_env::isolated_lock_probe(active_or_uncertain_staging_fixture);
+    }
+
+    fn active_or_uncertain_staging_fixture() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let kept = capture(&store, tmp.path(), "kept", &[chunk(1)]);
@@ -508,6 +516,10 @@ mod tests {
 
     #[test]
     fn post_inspection_lease_or_store_substitution_retains_claim_and_global_roots() {
+        mvm_core::util::test_env::isolated_lock_probe(post_inspection_substitution_fixture);
+    }
+
+    fn post_inspection_substitution_fixture() {
         use std::os::unix::fs::PermissionsExt as _;
         for fault in [
             "lease",

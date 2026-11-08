@@ -173,7 +173,8 @@ impl PreparedOutputs {
             .collect()
     }
 
-    /// Close a transient run: record how it ended against its admitted plan,
+    /// Close a transient run: record a failure against its admitted plan (a booted
+    /// run's launch records were written ahead of its seal),
     /// collect its outputs, and surface the run's own failure ahead of a
     /// collection refusal.
     ///
@@ -183,8 +184,6 @@ impl PreparedOutputs {
     pub(super) fn close_run<T>(
         &self,
         admitted: &std::cell::RefCell<Option<AdmissionContext>>,
-        backend: &str,
-        posture: mvm_client::admission::BootPosture,
         result: Result<T>,
     ) -> Result<T> {
         if result.as_ref().is_err_and(|error| {
@@ -196,7 +195,13 @@ impl PreparedOutputs {
             return result;
         }
         let admitted = admitted.borrow_mut().take();
-        super::up::record_transient_outcome(admitted.as_ref(), backend, posture, &result);
+        if let (Some(ctx), Err(e)) = (admitted.as_ref(), &result) {
+            super::up::emit_failed(
+                ctx,
+                mvm_client::launch::startup_budget::failure_class(e, "launch"),
+                e,
+            );
+        }
         let collected = self.collect(admitted.as_ref(), result.is_ok());
         let value = result?;
         collected?;
@@ -357,14 +362,7 @@ mod tests {
             // Even borrowing/taking the context would panic while this read is held.
             // The uncertain path must bypass outcome/seal/collection entirely.
             let borrowed = admitted.borrow();
-            let error = prepared
-                .close_run(
-                    &admitted,
-                    "mock",
-                    mvm_client::admission::BootPosture::block(),
-                    result,
-                )
-                .unwrap_err();
+            let error = prepared.close_run(&admitted, result).unwrap_err();
             assert!(
                 error
                     .downcast_ref::<crate::exec::TransientStopFailure>()
@@ -396,12 +394,7 @@ mod tests {
             } else {
                 Ok(0)
             };
-            let closed = prepared.close_run(
-                &std::cell::RefCell::new(None),
-                "mock",
-                mvm_client::admission::BootPosture::block(),
-                result,
-            );
+            let closed = prepared.close_run(&std::cell::RefCell::new(None), result);
             assert_eq!(closed.is_err(), failed);
             drop(prepared);
             assert!(!path.exists());

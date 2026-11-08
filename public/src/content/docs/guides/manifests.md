@@ -33,7 +33,7 @@ flake = "."                   # any flake ref accepted
 # image = "alpine:3.20"       # OCI image for mvmctl machine create
 
 profile = "default"           # flake package selector; machine profile is CLI-selected
-cpus = 2                      # vcpus remains accepted as a legacy alias
+cpus = 2
 mem = "1024M"                 # memory cap
 mem_initial = "512M"          # optional initial host commitment
 data_disk = "0"               # flake/build flow only today
@@ -70,7 +70,7 @@ Each field's owner:
 |---|---|---|
 | `flake` / `image` | mvmctl source selector | **Yes**, exactly one effective source |
 | `profile` | flake defines, mvmctl selects | **Yes**, as selector |
-| `cpus` / `vcpus` | mvmctl — host-side sizing | **Yes** |
+| `cpus` | mvmctl — host-side sizing | **Yes** |
 | `mem` | mvmctl — host-side sizing | **Yes** |
 | `mem_initial` | mvmctl — optional balloon initial commitment | Optional |
 | `data_disk` | mvmctl — host-side block device sizing | **Yes** |
@@ -101,7 +101,7 @@ mvmctl machine build               # discover manifest, run nix build, persist a
 mvmctl machine run --manifest .                  # boot the built microVM
 ```
 
-Repeated edits are just edits. The next `mvmctl machine build` re-reads `mvm.toml` and re-runs the build. Resource changes (`vcpus`, `mem`, `data_disk`) update silently; identity changes (`flake`, `profile`) trip a drift refusal that asks you to `--force` or rename — see [Drift detection](#drift-detection) below.
+Repeated edits are just edits. The next `mvmctl machine build` re-reads `mvm.toml` and re-runs the build. Resource changes (`cpus`, `mem`, `data_disk`) update silently; identity changes (`flake`, `profile`) trip a drift refusal that asks you to `--force` or rename — see [Drift detection](#drift-detection) below.
 
 For an image-backed durable machine:
 
@@ -167,7 +167,7 @@ mvmctl init my-job --preset worker      # background worker / cron-like
 mvmctl init my-vm  --preset minimal     # bare minimum (default)
 ```
 
-Each preset emits a different `flake.nix` plus a `mvm.toml` with sensible resource defaults (`vcpus = 2, mem = "1024M"` for HTTP/Python, `vcpus = 1, mem = "512M"` for workers, etc.).
+Each preset emits a different `flake.nix` plus a `mvm.toml` with sensible resource defaults (`cpus = 2, mem = "1024M"` for HTTP/Python, `cpus = 1, mem = "512M"` for workers, etc.).
 
 ### Prompt-driven scaffolding (LLM-assisted)
 
@@ -224,7 +224,7 @@ mvmctl machine run --manifest /path/to/project           # explicit
 mvmctl machine run --manifest /path/to/project -- uname -a   # ephemeral one-shot
 ```
 
-If no current revision exists, you get an error with a hint to run `mvmctl machine build`. If the manifest's `vcpus`/`mem` differ from what the slot's snapshot was taken at, the snapshot is ignored and a cold-boot from the rootfs proceeds (with a warning).
+If no current revision exists, you get an error with a hint to run `mvmctl machine build`. If the manifest's `cpus`/`mem` differ from what the slot's snapshot was taken at, the snapshot is ignored and a cold-boot from the rootfs proceeds (with a warning).
 
 ### Backend mismatch
 
@@ -265,7 +265,7 @@ The slot's `manifest.json` records the manifest's identity-shaping fields (`flak
 
 > Manifest at `<path>` declares `flake=X, profile=Y`. The slot at `<sha256>` was last built with `flake=X', profile=Y'`. Pass `--force` to overwrite, or pick a different manifest directory.
 
-This catches typos, "I'm in the wrong cwd" mistakes, and accidental flake-ref churn. Resource changes (`vcpus`, `mem`, `data_disk`) update silently; only the build-identity fields trip the gate.
+This catches typos, "I'm in the wrong cwd" mistakes, and accidental flake-ref churn. Resource changes (`cpus`, `mem`, `data_disk`) update silently; only the build-identity fields trip the gate.
 
 ## Schema versioning
 

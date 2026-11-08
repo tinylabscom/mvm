@@ -33,14 +33,17 @@ def validate_metadata(root, event, tag, dry_run):
     hostlib = tomllib.loads((root / "crates/mvm-hostlib/Cargo.toml").read_text())
     python = tomllib.loads((sdk / "python/pyproject.toml").read_text())["project"]
     npm = json.loads((sdk / "typescript/package.json").read_text())
-    # The runtime mirror may be a release candidate; the SDK's own version may not.
-    for key, pattern in (("version", r"\d+\.\d+\.\d+"), ("runtime_version", r"\d+\.\d+\.\d+(-rc\.\d+)?")):
-        if not re.fullmatch(pattern, release[key]):
-            raise ValueError(f"invalid {key}")
+    # The SDK version is independent; the hostlib's runtime version is not.
+    if not re.fullmatch(r"\d+\.\d+\.\d+", release["version"]):
+        raise ValueError("invalid version")
+    if "runtime_version" in release:
+        raise ValueError("runtime_version must come from the workspace")
     if hostlib["package"]["version"] != {"workspace": True}:
         raise ValueError("hostlib must inherit workspace version")
-    if release["runtime_version"] != workspace["workspace"]["package"]["version"]:
-        raise ValueError("runtime_version must equal the compiled hostlib workspace version")
+    runtime_version = workspace["workspace"]["package"]["version"]
+    if not re.fullmatch(r"\d+\.\d+\.\d+(-rc\.\d+)?", runtime_version):
+        raise ValueError("invalid runtime_version in workspace")
+    release["runtime_version"] = runtime_version
     if release["cli_binary_names"] != ["mvmctl"]:
         raise ValueError("CLI binary names must be ['mvmctl']")
     for key, package in (("python", python), ("typescript", npm)):

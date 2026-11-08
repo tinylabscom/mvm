@@ -158,27 +158,93 @@ TRANSCRIPT="$OUT/transcript.log"
 BOOT_RESULTS="$OUT/boot-results.jsonl"
 : > "$BOOT_RESULTS"
 
+# Processes that provably belong to this smoke: they run from, or sit in a
+# directory under, the throwaway root, or carry its HOME in their environment
+# (every command is started through `env -i HOME=...`, and children inherit
+# it). Nothing is matched by name, so a process outside the root is never
+# touched. Without /proc, whatever has a file open under the root.
+smoke_pids() {
+  if [ -d /proc/self ]; then
+    for proc in /proc/[0-9]*; do
+      pid="${proc#/proc/}"
+      [ "$pid" != "$$" ] || continue
+      where="$(readlink "$proc/cwd" 2>/dev/null || true):$(readlink "$proc/exe" 2>/dev/null || true)"
+      case "$where" in
+        "$ROOT":*|"$ROOT"/*|*:"$ROOT"/*) printf '%s\n' "$pid"; continue ;;
+      esac
+      if tr '\0' '\n' < "$proc/environ" 2>/dev/null | grep -qxF "HOME=$SMOKE_HOME"; then
+        printf '%s\n' "$pid"
+      fi
+    done
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -t +D "$ROOT" 2>/dev/null | sort -u
+  fi
+}
+
+# Wait up to $1 tenths of a second for the smoke's processes to be gone.
+wait_for_no_smoke_pids() {
+  waited=0
+  while [ "$waited" -lt "$1" ] && [ -n "$(smoke_pids)" ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+}
+
+# A run leaves a detached standby behind that keeps writing into the throwaway
+# HOME. Ask the product to stop what it started, then end whatever is still
+# provably ours, so removing the root does not race a live writer.
+stop_smoke_processes() {
+  if [ -x "$SMOKE_HOME/.local/bin/mvmctl" ] && [ -d "$SMOKE_HOME/.mvm" ]; then
+    if bounded 30 "$ROOT/stop.out" "$ROOT/stop.err" mvmctl machine stop --all; then :; fi
+    set +e
+  fi
+  pids="$(smoke_pids)"
+  [ -n "$pids" ] || return 0
+  # shellcheck disable=SC2086 # one word per pid
+  kill -TERM $pids 2>/dev/null
+  wait_for_no_smoke_pids 100
+  pids="$(smoke_pids)"
+  [ -z "$pids" ] || {
+    # shellcheck disable=SC2086
+    kill -KILL $pids 2>/dev/null
+    wait_for_no_smoke_pids 50
+  }
+  return 0
+}
+
 remove_smoke_root() {
   attempt=1
   while [ "$attempt" -le 5 ]; do
-    if rm -rf "$ROOT"; then return 0; fi
+    rm -rf "$ROOT"
+    [ ! -e "$ROOT" ] && return 0
     [ "$attempt" -lt 5 ] || break
-    # A detached standby refill can still write under this isolated HOME.
-    # Reconcile its external state; a pool-lifecycle event would replace this retry.
     sleep "$attempt"
     attempt=$((attempt + 1))
   done
-  printf '[smoke] could not remove throwaway HOME at %s\n' "$SMOKE_HOME" >&2
-  return 1
+  holders="$(smoke_pids | tr '\n' ' ')"
+  if [ -z "$holders" ] && command -v lsof >/dev/null 2>&1; then
+    holders="$(lsof -t +D "$ROOT" 2>/dev/null | sort -u | tr '\n' ' ')"
+  fi
+  printf '[smoke] cleanup incomplete: %s was not removed; processes still using it: %s\n' \
+    "$ROOT" "${holders:-none found}" >&2
+  find "$ROOT" -maxdepth 3 2>/dev/null | head -n 20 | sed 's/^/[smoke]   left: /' >&2
+  return 0
 }
 
+# The smoke's verdict is the status it was exiting with; nothing here, however
+# it fails, may change it.
 cleanup() {
   status=$?
+  set +e
+  trap '' INT TERM
   if [ "${MVM_SMOKE_KEEP:-}" = "1" ]; then
     printf '[smoke] kept the throwaway HOME at %s\n' "$SMOKE_HOME" >&2
   else
     case "$ROOT" in
-      /tmp/mvm-fresh.*|/private/tmp/mvm-fresh.*) remove_smoke_root || status=1 ;;
+      /tmp/mvm-fresh.*|/private/tmp/mvm-fresh.*)
+        stop_smoke_processes
+        remove_smoke_root
+        ;;
     esac
   fi
   exit "$status"

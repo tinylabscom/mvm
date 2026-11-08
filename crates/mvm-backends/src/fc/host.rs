@@ -307,12 +307,19 @@ pub fn is_vm_running(pid_file: &str) -> Result<bool> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let result = run_in_vm_stdout(&format!(
-            r#"[ -f {pid} ] && p=$(cat {pid}) && [ -f "/proc/$p/comm" ] && [ "$(cat /proc/$p/comm)" = "firecracker" ] && echo yes || echo no"#,
-            pid = pid_file,
-        ))?;
+        let result = run_in_vm_stdout(&pid_marker_probe_script(pid_file))?;
         Ok(result.trim() == "yes")
     }
+}
+
+/// The probe that asks the Linux environment whether the pid recorded in
+/// `pid_file` names a live Firecracker. `pid_file` is a path, so it is quoted.
+#[cfg(any(not(target_os = "linux"), test))]
+fn pid_marker_probe_script(pid_file: &str) -> String {
+    let pid = mvm_vmm::host::shell::shell_quote(pid_file);
+    format!(
+        r#"[ -f {pid} ] && p=$(cat {pid}) && [ -f "/proc/$p/comm" ] && [ "$(cat /proc/$p/comm)" = "firecracker" ] && echo yes || echo no"#
+    )
 }
 
 /// Whether the pid recorded in `pid_file` names a live `firecracker` under
@@ -1018,6 +1025,22 @@ impl FcForkRestorer {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_pid_marker_probe_keeps_a_hostile_path_one_inert_word() {
+        for v in [
+            "/v/PWN a b/fc.pid",
+            "/v/PWN'; touch /tmp/PWN; '/fc.pid",
+            "/v/PWN$(touch /tmp/PWN)/fc.pid",
+            "/v/PWN`touch /tmp/PWN`/fc.pid",
+            "/v/PWN\ntouch /tmp/PWN/fc.pid",
+        ] {
+            let script = pid_marker_probe_script(v);
+            let quoted = mvm_vmm::host::shell::shell_quote(v);
+            assert!(script.contains(&quoted), "{script}");
+            assert!(!script.replace(&quoted, "Q").contains("PWN"), "{script}");
+        }
+    }
 
     #[test]
     fn preloaded_authentication_refusals_clean_up_before_resume_or_attachment() {
