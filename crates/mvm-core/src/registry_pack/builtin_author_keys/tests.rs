@@ -23,7 +23,7 @@ fn the_embedded_key_matches_its_published_key_id() {
 #[test]
 fn a_builtin_key_resolves_without_enrollment_and_writes_nothing() {
     let (_dir, store) = empty_store();
-    let trust = BuiltinAuthorTrust::with_lists(&store, OFFICIAL_BUNDLE_AUTHOR_KEYS, &[]);
+    let trust = BuiltinAuthorTrust::with_lists(&store, OFFICIAL_BUNDLE_AUTHOR_KEYS.to_vec(), &[]);
     let key = trust.lookup(&id(OFFICIAL_KEY_ID)).unwrap();
     assert_eq!(key.as_bytes(), &OFFICIAL_BUNDLE_AUTHOR_KEYS[0]);
     assert!(!store.root().exists());
@@ -32,7 +32,7 @@ fn a_builtin_key_resolves_without_enrollment_and_writes_nothing() {
 #[test]
 fn an_unknown_key_id_is_not_trusted() {
     let (_dir, store) = empty_store();
-    let trust = BuiltinAuthorTrust::with_lists(&store, OFFICIAL_BUNDLE_AUTHOR_KEYS, &[]);
+    let trust = BuiltinAuthorTrust::with_lists(&store, OFFICIAL_BUNDLE_AUTHOR_KEYS.to_vec(), &[]);
     assert!(trust.lookup(&id(&"0".repeat(32))).is_none());
 }
 
@@ -40,7 +40,8 @@ fn an_unknown_key_id_is_not_trusted() {
 fn a_revoked_builtin_key_is_dropped_before_trust() {
     static REVOKED: &[&str] = &[OFFICIAL_KEY_ID];
     let (_dir, store) = empty_store();
-    let trust = BuiltinAuthorTrust::with_lists(&store, OFFICIAL_BUNDLE_AUTHOR_KEYS, REVOKED);
+    let trust =
+        BuiltinAuthorTrust::with_lists(&store, OFFICIAL_BUNDLE_AUTHOR_KEYS.to_vec(), REVOKED);
     assert!(trust.lookup(&id(OFFICIAL_KEY_ID)).is_none());
     assert!(REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS.is_empty());
 }
@@ -56,7 +57,7 @@ fn operator_enrollment_stays_additive() {
         key.as_bytes(),
     )
     .unwrap();
-    let trust = BuiltinAuthorTrust::with_lists(&store, OFFICIAL_BUNDLE_AUTHOR_KEYS, &[]);
+    let trust = BuiltinAuthorTrust::with_lists(&store, OFFICIAL_BUNDLE_AUTHOR_KEYS.to_vec(), &[]);
     assert_eq!(trust.lookup(&key_id).unwrap(), key);
     assert!(trust.lookup(&id(OFFICIAL_KEY_ID)).is_some());
 }
@@ -79,4 +80,19 @@ fn an_operator_policy_replaces_the_builtin_keys_wholesale() {
             .lookup(&id(OFFICIAL_KEY_ID))
             .is_none()
     );
+}
+
+#[test]
+fn a_revoked_key_is_refused_even_when_an_operator_enrolled_it() {
+    static REVOKED: &[&str] = &[OFFICIAL_KEY_ID];
+    let (_dir, store) = empty_store();
+    std::fs::create_dir(store.root()).unwrap();
+    std::fs::write(
+        store.root().join(format!("{OFFICIAL_KEY_ID}.pub")),
+        OFFICIAL_BUNDLE_AUTHOR_KEYS[0],
+    )
+    .unwrap();
+    assert!(store.lookup(&id(OFFICIAL_KEY_ID)).is_some());
+    let trust = BuiltinAuthorTrust::with_lists(&store, Vec::new(), REVOKED);
+    assert!(trust.lookup(&id(OFFICIAL_KEY_ID)).is_none());
 }

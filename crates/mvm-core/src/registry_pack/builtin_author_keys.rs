@@ -26,33 +26,64 @@ pub const OFFICIAL_BUNDLE_AUTHOR_KEYS: &[[u8; 32]] = &[
 /// so a compromised key is dropped by shipping a release.
 pub const REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS: &[&str] = &[];
 
+impl<T: TrustStore + ?Sized> TrustStore for &T {
+    fn lookup(&self, key_id: &KeyId) -> Option<VerifyingKey> {
+        (**self).lookup(key_id)
+    }
+}
+
+/// Test-only registry so a fixture signed by a throwaway key can stand in for
+/// the pinned author, through the real call sites. Never holds a real key.
+#[cfg(any(test, feature = "test-support"))]
+static TEST_AUTHOR_KEYS: std::sync::Mutex<Vec<[u8; 32]>> = std::sync::Mutex::new(Vec::new());
+
+/// Pin a throwaway public key as if the release carried it (tests only).
+#[cfg(any(test, feature = "test-support"))]
+pub fn register_test_author_key(key: [u8; 32]) {
+    TEST_AUTHOR_KEYS.lock().unwrap().push(key);
+}
+
+fn pinned_keys() -> Vec<[u8; 32]> {
+    #[allow(unused_mut)]
+    let mut keys = OFFICIAL_BUNDLE_AUTHOR_KEYS.to_vec();
+    #[cfg(any(test, feature = "test-support"))]
+    keys.extend(TEST_AUTHOR_KEYS.lock().unwrap().iter().copied());
+    keys
+}
+
 /// The consumer trust store plus the built-in author keys, in memory only.
 /// Nothing is written to the consumer store, which stays the one place an
-/// operator enrolls or removes keys.
-pub struct BuiltinAuthorTrust<'a> {
-    inner: &'a dyn TrustStore,
-    builtin: &'static [[u8; 32]],
+/// operator enrolls or removes keys. A revoked pinned key id is refused first,
+/// even when an operator enrolled a copy of it.
+pub struct BuiltinAuthorTrust<T> {
+    inner: T,
+    builtin: Vec<[u8; 32]>,
     revoked: &'static [&'static str],
 }
 
-impl<'a> BuiltinAuthorTrust<'a> {
+impl<T: TrustStore> BuiltinAuthorTrust<T> {
     /// Compose the view for an application verified under `policy`. An operator
     /// policy file replaces built-in trust wholesale, author keys included.
-    pub fn for_policy(inner: &'a dyn TrustStore, policy: &LoadedPublisherPolicy) -> Self {
+    pub fn for_policy(inner: T, policy: &LoadedPublisherPolicy) -> Self {
         Self::with_lists(
             inner,
             if policy.source == PublisherPolicySource::OfficialDefault {
-                OFFICIAL_BUNDLE_AUTHOR_KEYS
+                pinned_keys()
             } else {
-                &[]
+                Vec::new()
             },
             REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS,
         )
     }
 
+    /// Raw store with no pinned keys: the fail-closed view.
+    pub fn without_builtin(inner: T) -> Self {
+        Self::with_lists(inner, Vec::new(), REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS)
+    }
+
     pub(crate) fn with_lists(
-        inner: &'a dyn TrustStore,
-        builtin: &'static [[u8; 32]],
+        inner: T,
+        builtin: Vec<[u8; 32]>,
         revoked: &'static [&'static str],
     ) -> Self {
         Self {
@@ -63,13 +94,13 @@ impl<'a> BuiltinAuthorTrust<'a> {
     }
 }
 
-impl TrustStore for BuiltinAuthorTrust<'_> {
+impl<T: TrustStore> TrustStore for BuiltinAuthorTrust<T> {
     fn lookup(&self, key_id: &KeyId) -> Option<VerifyingKey> {
-        if let Some(key) = self.inner.lookup(key_id) {
-            return Some(key);
-        }
         if self.revoked.contains(&key_id.0.as_str()) {
             return None;
+        }
+        if let Some(key) = self.inner.lookup(key_id) {
+            return Some(key);
         }
         self.builtin
             .iter()

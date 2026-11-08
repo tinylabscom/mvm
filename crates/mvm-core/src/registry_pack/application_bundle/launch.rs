@@ -238,6 +238,88 @@ pub fn resolve_installed_application_bundle(
     )
 }
 
+/// Trust view for a bundle whose kind the caller does not know.
+///
+/// The pinned author keys apply only when the bundle's digest is the archive of
+/// an installed application whose descriptor authenticates under the built-in
+/// publisher policy. Anything else, and any error while finding out, gets the
+/// raw store, so a non-application bundle is never widened.
+pub fn trust_for_installed_bundle<T: TrustStore>(
+    inner: T,
+    bundle_sha256: &str,
+) -> crate::registry_pack::BuiltinAuthorTrust<T> {
+    let Ok(registry) = BundleRegistry::default_path() else {
+        return crate::registry_pack::BuiltinAuthorTrust::without_builtin(inner);
+    };
+    let store = ApplicationInstallStore::new(
+        crate::config::registry_pack_cache_dir(),
+        crate::config::pack_lockfile_path(),
+        registry.root(),
+    );
+    let loaded = crate::registry_pack_store::load_publisher_policy_or_official_default(
+        &crate::config::registry_pack_publisher_policy_path(),
+    );
+    trust_for_installed_bundle_with(
+        inner,
+        bundle_sha256,
+        &store,
+        loaded,
+        check_registry_pack_signature,
+    )
+}
+
+pub(super) fn trust_for_installed_bundle_with<T: TrustStore>(
+    inner: T,
+    bundle_sha256: &str,
+    store: &ApplicationInstallStore,
+    loaded: Result<
+        crate::registry_pack_store::LoadedPublisherPolicy,
+        crate::registry_pack_store::RegistryPackStoreError,
+    >,
+    check_signature: RegistryPackSignatureChecker,
+) -> crate::registry_pack::BuiltinAuthorTrust<T> {
+    use crate::registry_pack::BuiltinAuthorTrust;
+    let Ok(loaded) = loaded else {
+        return BuiltinAuthorTrust::without_builtin(inner);
+    };
+    if names_installed_bundle(store, &loaded.policy, bundle_sha256, check_signature) {
+        BuiltinAuthorTrust::for_policy(inner, &loaded)
+    } else {
+        BuiltinAuthorTrust::without_builtin(inner)
+    }
+}
+
+fn names_installed_bundle(
+    store: &ApplicationInstallStore,
+    policy: &RegistryPackPublisherPolicy,
+    bundle_sha256: &str,
+    check_signature: RegistryPackSignatureChecker,
+) -> bool {
+    let Ok(lock) = load_pack_lockfile(&store.lock_path) else {
+        return false;
+    };
+    lock.pins().iter().any(|pin| {
+        let descriptor = store
+            .descriptor_cache_root
+            .join(pin.manifest_sha256().as_str());
+        let read = |name| super::super::local_input::read_metadata(&descriptor.join(name));
+        let (Ok(manifest), Ok(signature)) = (
+            read(REGISTRY_MANIFEST_FILE_NAME),
+            read(REGISTRY_SIGNATURE_FILE_NAME),
+        ) else {
+            return false;
+        };
+        matches!(
+            super::super::dispatch::verify_with(
+                &RegistryPackVerification::new(pin.reference(), &manifest, &signature, &lock, policy),
+                check_signature,
+            ),
+            Ok(VerifiedRegistryManifest::Application(application))
+                if application.manifest().application.bundle.archive_sha256.as_str() == bundle_sha256
+        )
+    })
+}
+
 pub(super) fn resolve_bundle_with(
     reference: &PackReference,
     store: &ApplicationInstallStore,

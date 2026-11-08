@@ -647,7 +647,10 @@ fn reopen_caller_image(
                 let verified = verify_canonical_plan_bundle(
                     &original,
                     &FsBundleResolver::new(registry.root()),
-                    &trust,
+                    &mvm_core::registry_pack::application_bundle::trust_for_installed_bundle(
+                        &trust,
+                        &original.bundle_sha256,
+                    ),
                     &owner,
                     &config,
                     backend,

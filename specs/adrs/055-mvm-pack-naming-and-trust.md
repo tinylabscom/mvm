@@ -74,8 +74,14 @@ of the keyless publish identity. Operator enrollment stays additive, an
 operator policy file drops the pinned author keys with the rest of built-in
 trust, and a host-signed bundle is never in the list. A compromised author key
 is disabled by a client release that lists its `key_id` in
-`REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS` (empty today); a key an operator
-enrolled by hand is the operator's to remove. This
+`REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS` (empty today); that check runs first,
+so a hand-enrolled copy of a revoked pinned key is refused too. The pinned keys
+apply only to an application bundle: sites that do not already know the bundle
+is an application (admission, launch, canonical-plan and installed-bundle
+verification) ask `trust_for_installed_bundle`, which grants them only when the
+bundle digest is the archive of an installed application whose descriptor
+authenticates under the built-in policy, and otherwise returns the raw store.
+This
 transition does not grant `mvm/` trust without revocation enforcement. A URL
 redirect is not signing authority.
 
