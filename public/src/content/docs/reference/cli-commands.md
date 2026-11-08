@@ -2457,8 +2457,11 @@ the error states that the archive was published; the valid archive is retained.
 
 Application descriptors use the same catalog digest, publisher policy, and pins
 as legacy packs, but require a current independently signed revocation feed.
-Applications in `mvm/` use the built-in official feed; other namespaces require
-explicit operator revocation trust and a verified cached feed with at most
+Applications in `mvm/`, and applications signed by the built-in publisher
+identity under the built-in publisher policy, use the built-in official feed,
+which `pull` and `run` refresh when it is absent, expired or has under 12 hours
+left (an operator feed, if configured, is checked as well). Other applications
+require explicit operator revocation trust and a verified cached feed with at most
 48 hours of signed validity. Missing trust or feed, expired data, revoked
 signers/digests, rollback, equivocation, or a feed identity matching the descriptor
 publisher refuses acquisition and use. Legacy policy-only packs retain their

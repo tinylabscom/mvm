@@ -819,7 +819,9 @@ fn held_application_production_check_requires_current_independent_feed() {
     assert!(matches!(
         reopen(),
         Err(ApplicationLaunchError::Store(
-            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+            crate::registry_pack_store::RegistryPackStoreError::RevocationStore(
+                crate::registry_pack_revocation_store::RegistryPackRevocationStoreError::Missing
+            )
         ))
     ));
     application_test_feed::configure();
@@ -1072,7 +1074,9 @@ fn production_resolver_requires_operator_trust_and_cached_feed_before_bundle_use
     assert!(matches!(
         resolve(),
         Err(ApplicationLaunchError::Store(
-            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+            crate::registry_pack_store::RegistryPackStoreError::RevocationStore(
+                crate::registry_pack_revocation_store::RegistryPackRevocationStoreError::Missing
+            )
         ))
     ));
     application_test_feed::configure();
@@ -1113,7 +1117,9 @@ fn production_installer_refuses_absent_operator_trust_before_publishing_content(
     assert!(matches!(
         result,
         Err(ApplicationBundleError::Store(
-            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+            crate::registry_pack_store::RegistryPackStoreError::RevocationStore(
+                crate::registry_pack_revocation_store::RegistryPackRevocationStoreError::Missing
+            )
         ))
     ));
     assert!(!store.lock_path.exists());
@@ -1160,7 +1166,9 @@ fn production_revocation_recheck_refuses_withdrawn_trust_before_pin_commit() {
     assert!(matches!(
         result,
         Err(ApplicationBundleError::Store(
-            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+            crate::registry_pack_store::RegistryPackStoreError::RevocationStore(
+                crate::registry_pack_revocation_store::RegistryPackRevocationStoreError::Missing
+            )
         ))
     ));
     assert!(!store.lock_path.exists());

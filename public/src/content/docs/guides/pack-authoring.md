@@ -317,7 +317,8 @@ signature bundle through an operator-controlled channel, run
 document bytes under `trust.toml` before advancing the durable checkpoint.
 This operator path does not confer official status on a pack.
 
-Every `mvm/` pack instead requires a fresh feed signed by the separate,
+Every `mvm/` pack, and every application whose authenticated signer is the
+built-in publish identity under the built-in publisher policy, instead requires a fresh feed signed by the separate,
 built-in MVM release identity
 `https://github.com/tinylabscom/mvm-packs/.github/workflows/registry-pack-revocations.yml@refs/heads/main`
 under the GitHub OIDC issuer. Download
@@ -328,9 +329,12 @@ under the GitHub OIDC issuer. Download
 The CLI verifies the exact document bytes against the built-in identity and
 advances a private, rollback-resistant checkpoint. It refuses a missing,
 expired, corrupt, revoked or rolled-back feed at pull and every subsequent
-installed-pack open, including execution. Feed retrieval is manual in this
-release; downloading the files does not establish trust until the update
-command succeeds. The verifier permits an official feed validity
+installed-pack open, including execution. `mvmctl pull` and `mvmctl run`
+download both files themselves when the cached feed is absent, expired or has
+under 12 hours of validity left, and never during launch admission; a download
+establishes no trust until the same verification succeeds. A failed refresh
+proceeds only on a still-valid cache, and the manual command remains for
+air-gapped hosts. The verifier permits an official feed validity
 interval of at most 30 days, but always rejects it at its signed `not_after`;
 the operator-configured feed maximum remains 48 hours. If publication or
 retrieval fails, official packs stop working when that cached feed expires. A

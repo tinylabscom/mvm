@@ -23,6 +23,7 @@ mod mcp;
 pub mod metrics_server;
 pub(crate) mod mount_cache;
 pub mod observability;
+pub(crate) mod official_revocations;
 pub mod pack_registry;
 pub(crate) mod release_guest_runtime;
 pub mod shell_init;

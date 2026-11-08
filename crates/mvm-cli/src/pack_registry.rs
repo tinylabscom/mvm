@@ -328,6 +328,9 @@ fn acquire_application(
     application: &VerifiedRegistryApplication,
 ) -> Result<InstalledRegistryApplication> {
     use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, TrustStore};
+    if application.signer().identity == mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY {
+        crate::official_revocations::ensure_official_feed_fresh();
+    }
     application.check_current_revocations()?;
     crate::commands::bundle::fetch::admit_application_source(application)?;
     let trust = FsTrustStore::default_path()?;

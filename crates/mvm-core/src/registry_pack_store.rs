@@ -98,28 +98,97 @@ pub fn check_registry_pack_revocations_if_configured(
 }
 
 /// Applications never inherit the legacy policy-pack absent-feed fallback.
+///
+/// The built-in official feed applies to the reserved `mvm` namespace and to
+/// any application whose authenticated signer is the built-in publisher
+/// identity under the built-in publisher policy. The rule keys on the signer,
+/// never on a namespace pattern, so no wildcard conveys official status. An
+/// operator publisher policy replaces built-in trust wholesale, and an
+/// operator-configured feed is checked in addition to the built-in one.
 pub(crate) fn check_application_revocations(
     verified: &crate::registry_pack::VerifiedRegistryApplication,
 ) -> Result<(), RegistryPackStoreError> {
-    let now = Utc::now();
-    if verified.reference().namespace() == "mvm" {
-        check_official_registry_pack_revocations_with(verified, now, |trust, at| {
-            official_registry_pack_revocation_store()
+    let builtin_policy = load_publisher_policy_or_official_default(
+        &crate::config::registry_pack_publisher_policy_path(),
+    )?
+    .is_official_default();
+    let official_store = official_registry_pack_revocation_store();
+    let operator_store = RegistryPackRevocationStore::in_mvm_home();
+    check_application_revocations_at(
+        verified,
+        builtin_policy,
+        &crate::config::registry_pack_revocation_trust_path(),
+        Utc::now(),
+        |trust, at| {
+            official_store
                 .load(trust, at)
                 .map_err(RegistryPackStoreError::from)
-        })
-    } else {
-        check_application_revocations_with(
+        },
+        |trust, at| {
+            operator_store
+                .load(trust, at)
+                .map_err(RegistryPackStoreError::from)
+        },
+    )
+}
+
+fn uses_builtin_feed(
+    verified: &crate::registry_pack::VerifiedRegistryApplication,
+    builtin_policy: bool,
+) -> bool {
+    verified.reference().namespace() == "mvm"
+        || (builtin_policy
+            && verified.signer().identity == crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY)
+}
+
+fn check_application_revocations_at<O, P>(
+    verified: &crate::registry_pack::VerifiedRegistryApplication,
+    builtin_policy: bool,
+    operator_trust_path: &Path,
+    now: DateTime<Utc>,
+    official_load: O,
+    operator_load: P,
+) -> Result<(), RegistryPackStoreError>
+where
+    O: FnOnce(
+        &KeylessTrust,
+        DateTime<Utc>,
+    ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
+    P: FnOnce(
+        &KeylessTrust,
+        DateTime<Utc>,
+    ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
+{
+    if !uses_builtin_feed(verified, builtin_policy) {
+        return check_application_revocations_with(
             verified,
-            &crate::config::registry_pack_revocation_trust_path(),
+            operator_trust_path,
             now,
-            |trust, at| {
-                RegistryPackRevocationStore::in_mvm_home()
-                    .load(trust, at)
-                    .map_err(RegistryPackStoreError::from)
-            },
-        )
+            operator_load,
+        );
     }
+    check_official_registry_pack_revocations_with(verified, now, official_load)?;
+    if verified.reference().namespace() != "mvm"
+        && let Some(trust) = load_revocation_trust(operator_trust_path)?
+    {
+        check_trusted_registry_pack_revocations(
+            verified,
+            operator_trust_path,
+            &trust,
+            now,
+            operator_load,
+        )?;
+    }
+    Ok(())
+}
+
+/// Expiry of the cached official feed, or `None` when it is absent, corrupt,
+/// rolled back or already expired. Lets a client decide whether to refresh.
+pub fn official_registry_pack_revocation_valid_until() -> Option<DateTime<Utc>> {
+    official_registry_pack_revocation_store()
+        .load(&official_registry_pack_revocation_trust(), Utc::now())
+        .ok()
+        .map(|feed| feed.not_after())
 }
 
 fn check_application_revocations_with<F>(
@@ -1908,6 +1977,26 @@ mod tests {
     fn application_reference_for_revocation_test(
         name: &str,
     ) -> crate::registry_pack::VerifiedRegistryApplication {
+        application_verified_as(name, None)
+    }
+
+    const FOREIGN_IDENTITY: &str =
+        "https://example.test/other/.github/workflows/p.yml@refs/heads/main";
+
+    // Signed by a non-official identity that an operator policy trusts for `agent`.
+    #[cfg(unix)]
+    fn application_signed_by(
+        name: &str,
+        _identity: &str,
+    ) -> crate::registry_pack::VerifiedRegistryApplication {
+        application_verified_as(name, Some(FOREIGN_IDENTITY))
+    }
+
+    #[cfg(unix)]
+    fn application_verified_as(
+        name: &str,
+        foreign: Option<&str>,
+    ) -> crate::registry_pack::VerifiedRegistryApplication {
         let fixture = application_descriptor_fixture();
         let mut document: serde_json::Value =
             serde_json::from_slice(&std::fs::read(fixture.installed.manifest_path()).unwrap())
@@ -1919,7 +2008,17 @@ mod tests {
             PackPin::new(requested.clone(), Sha256Hex::from_bytes(&bytes)).unwrap(),
         ])
         .unwrap();
-        let policy = if requested.namespace() == "mvm" {
+        let policy = if let Some(identity) = foreign {
+            RegistryPackPublisherPolicy::new(vec![
+                RegistryPackPublisher::new(
+                    requested.namespace(),
+                    crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER,
+                    vec![identity.to_string()],
+                )
+                .unwrap(),
+            ])
+            .unwrap()
+        } else if ["mvm", "agent"].contains(&requested.namespace()) {
             crate::registry_pack::official_publisher_policy()
         } else {
             fixture.policy
@@ -1932,13 +2031,28 @@ mod tests {
                 &lock,
                 &policy,
             ),
-            accept_application_signature,
+            if foreign.is_some() {
+                accept_foreign_application_signature
+            } else {
+                accept_application_signature
+            },
         )
         .unwrap();
         let VerifiedRegistryManifest::Application(application) = verified else {
             panic!("expected authenticated application")
         };
         application
+    }
+
+    fn accept_foreign_application_signature(
+        _payload: &[u8],
+        _bundle: &[u8],
+        _trust: &crate::packs::KeylessTrust,
+    ) -> Result<crate::crypto::image_verify::VerifiedSigner, RegistryPackVerificationError> {
+        Ok(crate::crypto::image_verify::VerifiedSigner {
+            identity: FOREIGN_IDENTITY.to_string(),
+            issuer: crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER.to_string(),
+        })
     }
 
     // Real Ed25519 signature verification through the existing private feed seam;
@@ -2151,6 +2265,182 @@ mod tests {
             Err(RegistryPackStoreError::Revoked(
                 RegistryPackRevocationError::RevokedManifest { .. }
             ))
+        ));
+    }
+
+    // Feed loader that signs a document under the private unit seam.
+    #[cfg(unix)]
+    fn unit_feed(
+        application: &crate::registry_pack::VerifiedRegistryApplication,
+        revoked: bool,
+        sequence: u64,
+        previous: Option<RegistryPackRevocationCheckpoint>,
+    ) -> impl FnOnce(
+        &KeylessTrust,
+        DateTime<Utc>,
+    ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError> {
+        let application = application.clone();
+        move |trust, at| {
+            signed_application_feed_at_position(
+                &application,
+                trust,
+                at,
+                revoked,
+                sequence,
+                previous.as_ref(),
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    fn unavailable_feed(
+        _: &KeylessTrust,
+        _: DateTime<Utc>,
+    ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError> {
+        panic!("this feed must not be consulted")
+    }
+
+    #[cfg(unix)]
+    fn at_test_time() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 7, 0, 0, 0).single().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_application_signed_by_the_builtin_publisher_uses_the_official_feed() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("absent.toml");
+        let application = application_reference_for_revocation_test("agent/claude@2.0.0");
+        assert_eq!(
+            application.signer().identity,
+            crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+        );
+        check_application_revocations_at(
+            &application,
+            true,
+            &path,
+            at_test_time(),
+            unit_feed(&application, false, 7, None),
+            unavailable_feed,
+        )
+        .expect("official feed alone admits it, with no operator trust file");
+        assert!(matches!(
+            check_application_revocations_at(
+                &application,
+                true,
+                &path,
+                at_test_time(),
+                unit_feed(&application, true, 7, None),
+                unavailable_feed,
+            ),
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::RevokedManifest { .. }
+            ))
+        ));
+        let missing: fn(
+            &KeylessTrust,
+            DateTime<Utc>,
+        )
+            -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError> =
+            |_, _| Err(RegistryPackRevocationStoreError::Missing.into());
+        assert!(matches!(
+            check_application_revocations_at(
+                &application,
+                true,
+                &path,
+                at_test_time(),
+                missing,
+                unavailable_feed,
+            ),
+            Err(RegistryPackStoreError::RevocationStore(
+                RegistryPackRevocationStoreError::Missing
+            ))
+        ));
+        assert!(matches!(
+            check_application_revocations_at(
+                &application,
+                true,
+                &path,
+                at_test_time(),
+                unit_feed(
+                    &application,
+                    false,
+                    1,
+                    Some(RegistryPackRevocationCheckpoint {
+                        sequence: 9,
+                        sha256: Sha256Hex::from_bytes(b"newer"),
+                    }),
+                ),
+                unavailable_feed,
+            ),
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::Rollback { .. }
+            ))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_application_with_a_foreign_signer_still_requires_operator_trust() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("absent.toml");
+        let application = application_reference_for_revocation_test("agent/claude@2.0.0");
+        // An operator publisher policy replaces built-in trust wholesale.
+        assert!(matches!(
+            check_application_revocations_at(
+                &application,
+                false,
+                &path,
+                at_test_time(),
+                unavailable_feed,
+                unavailable_feed,
+            ),
+            Err(RegistryPackStoreError::MissingRevocationTrust { .. })
+        ));
+        // A different signer in `agent/` is not official: the namespace conveys nothing.
+        let foreign = application_signed_by("agent/claude@2.0.0", FOREIGN_IDENTITY);
+        assert!(matches!(
+            check_application_revocations_at(
+                &foreign,
+                true,
+                &path,
+                at_test_time(),
+                unavailable_feed,
+                unavailable_feed,
+            ),
+            Err(RegistryPackStoreError::MissingRevocationTrust { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_operator_feed_is_checked_in_addition_to_the_official_one() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("trust.toml");
+        write_trust(
+            &path,
+            "schema_version = 1\nissuer = 'operator issuer'\naccepted_identities = ['operator release identity']\n",
+        );
+        let application = application_reference_for_revocation_test("agent/claude@2.0.0");
+        check_application_revocations_at(
+            &application,
+            true,
+            &path,
+            at_test_time(),
+            unit_feed(&application, false, 7, None),
+            unit_feed(&application, false, 7, None),
+        )
+        .expect("both feeds clean");
+        assert!(matches!(
+            check_application_revocations_at(
+                &application,
+                true,
+                &path,
+                at_test_time(),
+                unit_feed(&application, false, 7, None),
+                unit_feed(&application, true, 7, None),
+            ),
+            Err(RegistryPackStoreError::Revoked(_))
         ));
     }
 
@@ -2371,7 +2661,9 @@ mod tests {
         };
         assert!(matches!(
             super::open_installed_registry_manifest_with(&request, accept_application_signature),
-            Err(RegistryPackStoreError::MissingRevocationTrust { .. })
+            Err(RegistryPackStoreError::RevocationStore(
+                RegistryPackRevocationStoreError::Missing
+            ))
         ));
         assert!(!crate::config::registry_pack_revocation_trust_path().exists());
         assert!(matches!(
