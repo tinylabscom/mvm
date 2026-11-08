@@ -14,8 +14,10 @@
 //! On its scheduled reporting pass this gate independently reconciles both
 //! properties. For every scheduled workflow that anchors a `ci:` witness, it
 //! reads the most recent *completed* scheduled run and fails when that run is
-//! older than the schedule can explain or did not complete successfully. A
-//! run still in flight is not evidence either way: Security's nightly
+//! older than the schedule can explain. A failed scheduled run stays red until
+//! a newer successful default-branch dispatch recovers it (the same recovery
+//! `Security lane watch` accepts). A run still in flight is not evidence
+//! either way: Security's nightly
 //! routinely takes longer than the gap between its cron and this one, and
 //! judging the in-flight run reported a missing lane on mornings when the
 //! previous night was green. The completed run it falls back to still ages
@@ -82,7 +84,7 @@ pub(crate) enum Freshness {
     NotScheduled,
 }
 
-/// The fields needed from the latest scheduled Actions run.
+/// The fields needed from an Actions run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LatestRun {
     pub created_at: String,
@@ -90,7 +92,7 @@ pub(crate) struct LatestRun {
     pub conclusion: Option<String>,
 }
 
-/// Whether the latest scheduled run established healthy evidence.
+/// Whether a completed run established healthy evidence.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RunOutcome {
     Healthy,
@@ -101,7 +103,7 @@ pub(crate) enum RunOutcome {
 }
 
 /// `check_reporting` reads mutable Actions history: it validates the latest
-/// scheduled run's cadence and outcome, then asks whether its watcher fired.
+/// scheduled run's cadence and recovered outcome, then asks whether its watcher fired.
 ///
 /// Off by default, and off on pull requests, because the two questions have
 /// different audiences. Pull requests still resolve every witness and parse
@@ -155,11 +157,18 @@ pub(crate) fn run(workspace: &Path, check_reporting: bool) -> Result<()> {
                     .expect("a fresh verdict requires a latest scheduled run");
                 match classify_outcome(run) {
                     RunOutcome::Healthy => checked += 1,
-                    RunOutcome::Unhealthy { status, conclusion } => problems.push(format!(
-                        "{} latest scheduled run has status {status:?} and conclusion {:?} — \
-                         claim(s) {:?} are witnessed by {:?}",
-                        wf.file, conclusion, wf.claims, wf.witnesses
-                    )),
+                    RunOutcome::Unhealthy { status, conclusion } => {
+                        if recovered_by_default_branch_dispatch(&wf.file, &run.created_at)? {
+                            checked += 1;
+                        } else {
+                            problems.push(format!(
+                                "{} latest scheduled run has status {status:?} and conclusion {:?}, \
+                                 with no newer successful default-branch dispatch — \
+                                 claim(s) {:?} are witnessed by {:?}",
+                                wf.file, conclusion, wf.claims, wf.witnesses
+                            ));
+                        }
+                    }
                 }
             }
             Freshness::NeverRan => problems.push(format!(
@@ -219,7 +228,7 @@ pub(crate) fn run(workspace: &Path, check_reporting: bool) -> Result<()> {
 
     if check_reporting {
         eprintln!(
-            "check-claim-witness-freshness: clean ({checked} scheduled lane(s) fresh and successful, {} unscheduled)",
+            "check-claim-witness-freshness: clean ({checked} scheduled lane(s) fresh with healthy evidence, {} unscheduled)",
             skipped.len()
         );
     } else {
@@ -495,6 +504,81 @@ fn latest_scheduled_run(file: &str) -> Result<Option<LatestRun>> {
     Ok(judged_run(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// A clean dispatch can recover a failed nightly, but cannot establish that
+/// the schedule fired. The caller checks scheduled cadence independently.
+fn recovered_by_default_branch_dispatch(file: &str, after: &str) -> Result<bool> {
+    let repo = std::process::Command::new("gh")
+        .args([
+            "repo",
+            "view",
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            ".defaultBranchRef.name",
+        ])
+        .output()
+        .context("reading the repository default branch")?;
+    if !repo.status.success() {
+        bail!(
+            "gh repo view failed: {}",
+            String::from_utf8_lossy(&repo.stderr).trim()
+        );
+    }
+    let branch = String::from_utf8_lossy(&repo.stdout);
+    let branch = branch.trim();
+    if branch.is_empty() {
+        bail!("gh repo view returned no default branch");
+    }
+
+    let out = std::process::Command::new("gh")
+        .args([
+            "run",
+            "list",
+            "--workflow",
+            file,
+            "--event",
+            "workflow_dispatch",
+            "--branch",
+            branch,
+            "--limit",
+            "20",
+            "--json",
+            "createdAt,status,conclusion,headBranch",
+        ])
+        .output()
+        .with_context(|| format!("reading default-branch dispatches for {file}"))?;
+    if !out.status.success() {
+        bail!(
+            "gh run list --workflow {file} --event workflow_dispatch failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(recovered_run(
+        &String::from_utf8_lossy(&out.stdout),
+        branch,
+        after,
+    ))
+}
+
+/// Only the latest completed, exact-default-branch dispatch can recover a
+/// failed scheduled run; a feature branch or older success has no authority.
+fn recovered_run(json: &str, default_branch: &str, after: &str) -> bool {
+    let Ok(runs) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    runs.as_array().is_some_and(|runs| {
+        runs.iter()
+            .filter(|run| {
+                run.get("headBranch").and_then(serde_json::Value::as_str) == Some(default_branch)
+            })
+            .filter_map(parse_run)
+            .find(|run| run.status == "completed")
+            .is_some_and(|run| {
+                run.created_at.as_str() > after && classify_outcome(&run) == RunOutcome::Healthy
+            })
+    })
+}
+
 /// How many scheduled runs to read when looking for the newest completed one.
 /// Enough to see past one in-flight run and a queued one behind it.
 const SCHEDULED_RUNS_READ: &str = "5";
@@ -749,6 +833,38 @@ mod tests {
                 conclusion: None,
             }
         );
+    }
+
+    #[test]
+    fn a_newer_default_branch_dispatch_recovers_a_failed_nightly() {
+        let failed_nightly = "2026-11-08T04:19:20Z";
+        let runs = r#"[
+            {"createdAt":"2026-11-08T18:29:39Z","status":"completed","conclusion":"success","headBranch":"main"},
+            {"createdAt":"2026-11-08T14:09:16Z","status":"completed","conclusion":"success","headBranch":"release/v0.27.0-final-candidate"}
+        ]"#;
+        assert!(recovered_run(runs, "main", failed_nightly));
+        assert!(!recovered_run(runs, "main", "2026-11-09T04:19:20Z"));
+    }
+
+    #[test]
+    fn recovery_requires_the_latest_completed_dispatch_on_the_exact_default_branch() {
+        let failed_nightly = "2026-11-08T04:19:20Z";
+        for runs in [
+            r#"[{"createdAt":"2026-11-08T18:29:39Z","status":"completed","conclusion":"success","headBranch":"Main"}]"#,
+            r#"[{"createdAt":"2026-11-08T18:29:39Z","status":"completed","conclusion":"success","headBranch":"release/v0.27.0-final-candidate"}]"#,
+            r#"[{"createdAt":"2026-11-08T02:29:39Z","status":"completed","conclusion":"success","headBranch":"main"}]"#,
+            r#"[
+                {"createdAt":"2026-11-08T19:00:00Z","status":"completed","conclusion":"failure","headBranch":"main"},
+                {"createdAt":"2026-11-08T18:29:39Z","status":"completed","conclusion":"success","headBranch":"main"}
+            ]"#,
+            r#"[
+                {"createdAt":"2026-11-08T19:00:00Z","status":"in_progress","conclusion":"","headBranch":"main"},
+                {"createdAt":"2026-11-08T18:29:39Z","status":"completed","conclusion":"failure","headBranch":"main"}
+            ]"#,
+            "not json",
+        ] {
+            assert!(!recovered_run(runs, "main", failed_nightly), "{runs}");
+        }
     }
 
     #[test]
