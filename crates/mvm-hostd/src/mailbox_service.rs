@@ -125,6 +125,20 @@ impl MailboxService {
             .current_execution_epoch = epoch;
     }
 
+    /// Serve one connection the host dialed to the guest's mailbox port
+    /// (per-port socket, or the Firecracker mux), the way the telemetry
+    /// collector attaches. Admission and the queue are the service's own, so
+    /// a guest that floods this port fills only this queue.
+    pub fn serve_guest(&self, per_port: &Path, firecracker_mux: &Path) -> std::io::Result<()> {
+        let stream = crate::telemetry_collector::dial_guest_port(
+            per_port,
+            firecracker_mux,
+            mvm_contract::protocol::mailbox::MAILBOX_PORT,
+        )?;
+        serve(&self.shared, stream);
+        Ok(())
+    }
+
     /// Take the oldest accepted plaintext, if any.
     pub fn receive(&self) -> Option<Vec<u8>> {
         self.shared.state.lock().unwrap().queue.pop_front()
@@ -148,13 +162,25 @@ pub fn send(
     capability: &SignedMailboxCapability,
     envelope: &MailboxEnvelope,
 ) -> Result<(), Refusal> {
+    send_on(
+        UnixStream::connect(path).map_err(|_| Refusal::Malformed)?,
+        capability,
+        envelope,
+    )
+}
+
+/// Write one frame on an already-connected `stream` and read the verdict.
+pub fn send_on(
+    mut stream: UnixStream,
+    capability: &SignedMailboxCapability,
+    envelope: &MailboxEnvelope,
+) -> Result<(), Refusal> {
     let io = |_| Refusal::Malformed;
     let cap = serde_json::to_vec(capability).map_err(io_json)?;
     let env = encode_envelope(envelope).map_err(|e| Refusal::Mailbox(e.to_string()))?;
     let mut body = (cap.len() as u32).to_be_bytes().to_vec();
     body.extend_from_slice(&cap);
     body.extend_from_slice(&env);
-    let mut stream = UnixStream::connect(path).map_err(io)?;
     stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(io)?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(io)?;
     // A service that refuses on length alone closes early; the verdict is

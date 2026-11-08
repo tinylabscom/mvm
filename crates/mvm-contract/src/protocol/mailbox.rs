@@ -9,6 +9,10 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+/// Dedicated mailbox vsock service. Its own port, so mailbox traffic never
+/// shares a queue or credit with machine control (5252), `NetworkFlow` (5253),
+/// telemetry (5254), display (5255) or GPU (5256).
+pub const MAILBOX_PORT: u32 = 5257;
 /// Current mailbox protocol version.
 pub const MAILBOX_PROTOCOL_VERSION: u16 = 1;
 /// Current signature algorithm identifier (Ed25519).
