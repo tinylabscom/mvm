@@ -1,0 +1,107 @@
+name: Composable Python layer signing smoke
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/composable-python-layer-smoke.yml
+      - scripts/build-python-runtime-layer.py
+      - scripts/test_build_python_runtime_layer.py
+      - crates/mvm-core/examples/verify-runtime-layer-fixture.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  signed-input:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: sigstore/cosign-installer@v3
+      - name: Reproduce and verify an unpublished Python runtime input
+        env:
+          MVM_EMBED: "0"
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts/test_build_python_runtime_layer.py
+          command -v zstd
+          tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp"' EXIT
+          curl -fLsS --retry 2 --max-time 120 \
+            'https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18%2B20261026-x86_64-unknown-linux-musl-lto%2Bstatic-full.tar.zst' \
+            -o "$tmp/source.tar.zst"
+          python3 scripts/build-python-runtime-layer.py "$tmp/source.tar.zst" "$tmp/layer.tar"
+          python3 scripts/build-python-runtime-layer.py "$tmp/source.tar.zst" "$tmp/again.tar"
+          cmp "$tmp/layer.tar" "$tmp/again.tar"
+
+          mkdir -p "$tmp/files/pack"
+          printf 'description = "Offline Python runtime"\nrequired = false\n[network]\nblock = true\n' \
+            > "$tmp/files/pack/group.toml"
+          LAYER_ROOT="$tmp" python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ["LAYER_ROOT"])
+          archive = (root / "layer.tar").read_bytes()
+          group = (root / "files/pack/group.toml").read_bytes()
+          manifest = {
+              "schema_version": 3,
+              "kind": "runtime_layer",
+              "reference": "runtime/python@1.1.0",
+              "description": "Unpublished offline Python input test",
+              "runtime_layer": {
+                  "schema_version": 1,
+                  "guest_arch": "x86_64",
+                  "dependencies": [],
+                  "archive": {
+                      "source": "https://example.invalid/unpublished/runtime/python/1.1.0/layer.tar",
+                      "archive_sha256": hashlib.sha256(archive).hexdigest(),
+                      "archive_size": len(archive),
+                  },
+              },
+              "files": [{
+                  "path": "pack/group.toml",
+                  "sha256": hashlib.sha256(group).hexdigest(),
+                  "size": len(group),
+              }],
+          }
+          (root / "manifest.json").write_bytes(
+              json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
+          )
+          PY
+          cosign sign-blob --yes --new-bundle-format --bundle "$tmp/manifest.bundle" \
+            "$tmp/manifest.json"
+          cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+            --features host-state,manifest-verify -- \
+            "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/layer.tar" \
+            "$tmp/files" "$IDENTITY"
+          cp "$tmp/layer.tar" "$tmp/tampered.tar"
+          printf x >> "$tmp/tampered.tar"
+          if cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+            --features host-state,manifest-verify -- \
+            "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/tampered.tar" \
+            "$tmp/files" "$IDENTITY"; then
+            echo "tampered signed input was accepted" >&2
+            exit 1
+          fi
+          printf '# changed after signing\n' >> "$tmp/files/pack/group.toml"
+          if cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+            --features host-state,manifest-verify -- \
+            "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/layer.tar" \
+            "$tmp/files" "$IDENTITY"; then
+            echo "tampered signed policy was accepted" >&2
+            exit 1
+          fi
+          printf 'description = "Offline Python runtime"\nrequired = false\n[network]\nblock = true\n' \
+            > "$tmp/files/pack/group.toml"
+          if cargo run --locked -p mvm-core --example verify-runtime-layer-fixture \
+            --features host-state,manifest-verify -- \
+            "$tmp/manifest.json" "$tmp/manifest.bundle" "$tmp/layer.tar" \
+            "$tmp/files" "https://example.invalid/untrusted-publisher"; then
+            echo "wrong publisher identity was accepted" >&2
+            exit 1
+          fi

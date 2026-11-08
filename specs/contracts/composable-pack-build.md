@@ -258,6 +258,21 @@ application or policy-only manifests to imitate it.
 
 ## Spike and decision rule
 
+The first **unsigned** x86_64 Python source experiment is
+[`scripts/build-python-runtime-layer.py`](../../scripts/build-python-runtime-layer.py).
+It accepts only the SHA-256-pinned `cpython-3.13.18+20261026`
+`x86_64-unknown-linux-musl-lto+static-full.tar.zst` from the Astral
+python-build-standalone release (`e0bb0840e127aa95dbb1212202a29cde715711ae6826132e548f5eb04a958533`).
+It repacks the static interpreter and runtime-only standard library as a
+deterministic plain `layer.tar`; it does not run untrusted install scripts,
+sign, publish, or grant policy. The interpreter has no ELF `PT_INTERP` loader.
+The upstream GitHub asset digest establishes *byte identity*, not an
+independent publisher-signature or reproduction claim. A production publisher
+must accept that upstream trust choice explicitly, sign a new
+`runtime/python@1.1.0` descriptor binding the actual output SHA-256 and size,
+and pass the consumer and exact-archive boot gates. The historical revoked
+policy-only `runtime/python@1.0.0` is not reusable.
+
 Keep the Nix producer working unchanged. Resolve one authenticated Python
 runtime input into a runtime layer, add a small Python application as a distinct
 input and produce one candidate with one entrypoint without invoking Nix in the
