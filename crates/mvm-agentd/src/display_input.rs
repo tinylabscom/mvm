@@ -468,10 +468,20 @@ mod tests {
         );
 
         drop(input);
-        assert_eq!(
-            open_writer(&fifo).unwrap_err().raw_os_error(),
-            Some(libc::ENXIO)
-        );
+        // A sibling test thread may fork between our open and close, and the
+        // child holds a copy of the read end until its exec closes it. That
+        // release is not observable, so wait a bounded time for it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match open_writer(&fifo) {
+                Err(error) => {
+                    assert_eq!(error.raw_os_error(), Some(libc::ENXIO));
+                    break;
+                }
+                Ok(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+                Ok(_) => panic!("the read end stayed open after the input was dropped"),
+            }
+        }
     }
 
     #[test]
