@@ -7,10 +7,16 @@
 //! challenge, and the sealed mailbox envelope with its capability, replay and
 //! execution-epoch checks. Each node writes its own signed audit chain.
 //!
-//! What is simulated, on purpose: the mailbox transport (an envelope is handed
-//! from one node to the next in memory — no vsock service or relay carries it,
-//! that runtime is tracked separately) and the VMs (a launch is gated and
-//! audited, but nothing boots). Run with `--nocapture` to read the timeline.
+//! Mailbox delivery is real as far as one host: the ship's sealed envelope
+//! crosses a Unix domain socket to the aircraft node's `MailboxService`, which
+//! opens it and enqueues it under a bounded queue; a refusal comes back to the
+//! sender as a typed reply.
+//!
+//! What is simulated, on purpose: there is no vsock guest service (the
+//! aircraft's queue is read by the test, not by a workload), no cross-host
+//! Iroh or relay transport (both ends share this process's host), and the VMs
+//! (a launch is gated and audited, but nothing boots). Only the aircraft node
+//! runs a service. Run with `--nocapture` to read the timeline.
 
 use ed25519_dalek::SigningKey;
 use mvm_contract::protocol::mailbox::{
@@ -30,16 +36,14 @@ use mvm_core::host_interface::{
     local::LocalHostInterface,
     workload::WorkloadLedger,
 };
-use mvm_core::mailbox::{
-    InMemoryReplayProtector, MailboxError, OpenContext, SealRequest, open_envelope, seal_envelope,
-    sign_capability,
-};
+use mvm_core::mailbox::{MailboxError, OpenContext, SealRequest, seal_envelope, sign_capability};
 use mvm_core::plan::ExecutionPlan;
 use mvm_hostd::audit::{
     emitter::AuditEmitter,
     session::{EventFilter, workload_events},
 };
 use mvm_hostd::containment::{quarantine_workload, replace_workload};
+use mvm_hostd::mailbox_service::{MailboxLimits, MailboxPolicy, MailboxService, Refusal, send};
 use mvm_hostd::supervisor::verify_audit_chain;
 
 const NOW: u64 = 1_000;
@@ -271,32 +275,60 @@ fn context(current_epoch: u64) -> OpenContext {
     }
 }
 
+/// Ship -> aircraft over the aircraft node's mailbox socket. The aircraft's
+/// service opens and queues; the ship only ever holds the socket path.
 struct Channel {
     sender_key: SigningKey,
     authority_key: SigningKey,
     encryption_key: Key,
-    replay: InMemoryReplayProtector,
+    service: MailboxService,
+    socket: std::path::PathBuf,
 }
 
+const LIMITS: MailboxLimits = MailboxLimits {
+    max_depth: 4,
+    max_frame_bytes: 64 * 1024,
+};
+
 impl Channel {
-    fn new() -> Self {
+    fn new(aircraft: &Node) -> Self {
+        let (sender_key, authority_key) = (
+            SigningKey::from_bytes(&[21; 32]),
+            SigningKey::from_bytes(&[22; 32]),
+        );
+        let socket = aircraft.home.path().join("mailbox.sock");
+        let service = MailboxService::bind(
+            &socket,
+            LIMITS,
+            MailboxPolicy {
+                context: context(1),
+                encryption_key: Key::from_bytes([23; 32]),
+                sender_key: sender_key.verifying_key(),
+                authority_key: authority_key.verifying_key(),
+            },
+        )
+        .unwrap();
         Self {
-            sender_key: SigningKey::from_bytes(&[21; 32]),
-            authority_key: SigningKey::from_bytes(&[22; 32]),
+            sender_key,
+            authority_key,
             encryption_key: Key::from_bytes([23; 32]),
-            replay: InMemoryReplayProtector::default(),
+            service,
+            socket,
         }
     }
 
-    /// Ship seals at `sent_epoch`; the aircraft opens knowing `current_epoch`
-    /// under a capability that grants `operations`.
+    /// Ship seals at `sent_epoch` and sends over the socket; the aircraft
+    /// knows `current_epoch` and opens under a capability that grants
+    /// `operations`. Returns what the aircraft's service queued.
     fn deliver(
         &mut self,
         sent_epoch: u64,
         current_epoch: u64,
         id: u8,
         operations: &[MailboxOperation],
-    ) -> Result<Vec<u8>, MailboxError> {
+    ) -> Result<Vec<u8>, Refusal> {
+        self.service
+            .set_current_epoch(MbEpoch::new(current_epoch).unwrap());
         let capability = sign_capability(grant(operations), &self.authority_key).unwrap();
         let envelope = seal_envelope(
             SealRequest {
@@ -308,16 +340,16 @@ impl Channel {
             &self.sender_key,
         )
         .unwrap();
-        open_envelope(
-            &envelope,
-            &capability,
-            &context(current_epoch),
-            &self.encryption_key,
-            &self.sender_key.verifying_key(),
-            &self.authority_key.verifying_key(),
-            &mut self.replay,
-        )
+        send(&self.socket, &capability, &envelope)?;
+        Ok(self
+            .service
+            .receive()
+            .expect("an accepted message is queued"))
     }
+}
+
+fn refused(reason: MailboxError) -> Refusal {
+    Refusal::Mailbox(reason.to_string())
 }
 
 #[test]
@@ -327,7 +359,7 @@ fn contain_terminate_and_rebuild() {
         Node::new("ship", 2),
         Node::new("ground", 3),
     );
-    let mut channel = Channel::new();
+    let mut channel = Channel::new(&aircraft);
     let send = [MailboxOperation::Send, MailboxOperation::Receive];
 
     // Act 1: each node launches its workloads under the preflight; the ship's
@@ -383,7 +415,7 @@ fn contain_terminate_and_rebuild() {
         .expect_err("secrets are outside the lease");
     ship.record_denial("analyst", "secret", &secret.to_string());
     assert!(
-        matches!(channel.deliver(1, 1, 1, &send), Err(MailboxError::Replay)),
+        channel.deliver(1, 1, 1, &send) == Err(refused(MailboxError::Replay)),
         "replaying an already-opened message is refused as a replay"
     );
 
@@ -419,10 +451,7 @@ fn contain_terminate_and_rebuild() {
     assert_eq!(epoch.0, 2);
     ship.launch("analyst").expect("the replacement launches");
     assert!(
-        matches!(
-            channel.deliver(1, 2, 3, &send),
-            Err(MailboxError::StaleExecutionEpoch)
-        ),
+        channel.deliver(1, 2, 3, &send) == Err(refused(MailboxError::StaleExecutionEpoch)),
         "a message from the replaced workload's epoch is rejected as a stale epoch"
     );
     assert!(
@@ -452,7 +481,9 @@ fn contain_terminate_and_rebuild() {
             .unwrap_or_else(|e| panic!("{} chain must verify: {e:?}", node.name));
     }
     let timeline = ship.timeline("analyst");
-    println!("\nsimulated: mailbox transport (in memory), VMs (gated and audited, none boot)");
+    println!(
+        "\nsimulated: mailbox delivery is a local Unix socket between node services (no vsock guest service, no cross-host transport), VMs (gated and audited, none boot)"
+    );
     println!("\n--- evidence timeline: ship / analyst ---");
     for line in &timeline {
         println!("{line}");
@@ -475,4 +506,51 @@ fn contain_terminate_and_rebuild() {
             "plan.launched",
         ]
     );
+}
+
+fn channel_with_one_node() -> (Node, Channel) {
+    let aircraft = Node::new("aircraft", 1);
+    let channel = Channel::new(&aircraft);
+    (aircraft, channel)
+}
+
+#[test]
+fn the_service_queue_is_bounded_and_refuses_synchronously() {
+    let send_ops = [MailboxOperation::Send, MailboxOperation::Receive];
+    let (_node, channel) = channel_with_one_node();
+    // Fill the queue without draining it, then the next send is refused.
+    let capability = sign_capability(grant(&send_ops), &channel.authority_key).unwrap();
+    for id in 1..=LIMITS.max_depth as u8 {
+        let envelope = seal_envelope(
+            SealRequest {
+                routing: routing(),
+                header: header(1, id),
+                plaintext: b"hello",
+            },
+            &channel.encryption_key,
+            &channel.sender_key,
+        )
+        .unwrap();
+        send(&channel.socket, &capability, &envelope).expect("within depth");
+    }
+    let envelope = seal_envelope(
+        SealRequest {
+            routing: routing(),
+            header: header(1, 99),
+            plaintext: b"hello",
+        },
+        &channel.encryption_key,
+        &channel.sender_key,
+    )
+    .unwrap();
+    assert_eq!(
+        send(&channel.socket, &capability, &envelope),
+        Err(Refusal::QueueFull(LIMITS.max_depth))
+    );
+    assert!(
+        channel.service.receive().is_some(),
+        "queued messages stay readable"
+    );
+    // Draining one slot lets the refused message through (it was never consumed as a replay).
+    send(&channel.socket, &capability, &envelope).expect("space after a receive");
 }

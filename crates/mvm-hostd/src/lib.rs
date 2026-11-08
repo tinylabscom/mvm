@@ -64,6 +64,7 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
+pub mod mailbox_service;
 pub mod operator_admitted_trial_booter;
 /// Redacting panic hook for the daemon bins. A panic payload is the one
 /// string the no-`Display`-on-secret-types gate cannot reach.
