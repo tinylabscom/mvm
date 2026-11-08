@@ -1983,13 +1983,18 @@ mod tests {
     const FOREIGN_IDENTITY: &str =
         "https://example.test/other/.github/workflows/p.yml@refs/heads/main";
 
-    // Signed by a non-official identity that an operator policy trusts for `agent`.
+    thread_local! {
+        static SIGNER: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+
+    // Signed by the given identity, which an operator policy trusts for the namespace.
     #[cfg(unix)]
     fn application_signed_by(
         name: &str,
-        _identity: &str,
+        identity: &str,
     ) -> crate::registry_pack::VerifiedRegistryApplication {
-        application_verified_as(name, Some(FOREIGN_IDENTITY))
+        SIGNER.with(|signer| *signer.borrow_mut() = identity.to_string());
+        application_verified_as(name, Some(identity))
     }
 
     #[cfg(unix)]
@@ -2050,7 +2055,7 @@ mod tests {
         _trust: &crate::packs::KeylessTrust,
     ) -> Result<crate::crypto::image_verify::VerifiedSigner, RegistryPackVerificationError> {
         Ok(crate::crypto::image_verify::VerifiedSigner {
-            identity: FOREIGN_IDENTITY.to_string(),
+            identity: SIGNER.with(|signer| signer.borrow().clone()),
             issuer: crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER.to_string(),
         })
     }
@@ -2397,19 +2402,82 @@ mod tests {
             ),
             Err(RegistryPackStoreError::MissingRevocationTrust { .. })
         ));
-        // A different signer in `agent/` is not official: the namespace conveys nothing.
-        let foreign = application_signed_by("agent/claude@2.0.0", FOREIGN_IDENTITY);
+        // A different signer in `agent/` is not official: the namespace conveys nothing,
+        // and only an exact match of the signer identity selects the built-in feed.
+        let official = crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY;
+        for identity in [
+            FOREIGN_IDENTITY.to_string(),
+            format!("{official}/evil"),
+            format!("x{official}"),
+            official.to_uppercase(),
+        ] {
+            let foreign = application_signed_by("agent/claude@2.0.0", &identity);
+            assert!(
+                matches!(
+                    check_application_revocations_at(
+                        &foreign,
+                        true,
+                        &path,
+                        at_test_time(),
+                        unavailable_feed,
+                        unavailable_feed,
+                    ),
+                    Err(RegistryPackStoreError::MissingRevocationTrust { .. })
+                ),
+                "{identity}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_expired_official_cache_refuses_with_the_existing_error_family() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("absent.toml");
+        let application = application_reference_for_revocation_test("agent/claude@2.0.0");
+        let after_expiry = Utc.with_ymd_and_hms(2026, 10, 9, 0, 0, 0).single().unwrap();
         assert!(matches!(
             check_application_revocations_at(
-                &foreign,
+                &application,
                 true,
                 &path,
-                at_test_time(),
-                unavailable_feed,
+                after_expiry,
+                unit_feed(&application, false, 7, None),
                 unavailable_feed,
             ),
-            Err(RegistryPackStoreError::MissingRevocationTrust { .. })
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::Expired
+            ))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_document_the_official_identity_did_not_sign_is_refused_and_nothing_is_cached() {
+        let home = tempfile::tempdir().unwrap();
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(home.path().join("home"));
+        let document = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "sequence": 1,
+            "issued_at": Utc::now() - chrono::Duration::minutes(1),
+            "not_after": Utc::now() + chrono::Duration::hours(36),
+        }))
+        .unwrap();
+        // The bundle is not a signature under the built-in release identity.
+        assert!(matches!(
+            update_official_registry_pack_revocations(&document, b"{\"not\":\"a bundle\"}"),
+            Err(RegistryPackStoreError::RevocationStore(
+                RegistryPackRevocationStoreError::Verification(_)
+            ))
+        ));
+        assert!(official_registry_pack_revocation_valid_until().is_none());
+        assert!(
+            !crate::config::registry_pack_revocation_store_dir()
+                .join("official")
+                .join("feed.json")
+                .exists()
+        );
     }
 
     #[cfg(unix)]

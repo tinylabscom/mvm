@@ -324,14 +324,25 @@ pub fn pull(reference_arg: &str) -> Result<PullOutcome> {
     }
 }
 
+/// The one revocation gate for a pulled application: refresh the built-in
+/// feed when it is due and the application uses it, then require a current feed.
+fn check_application_revocations_refreshing(
+    application: &VerifiedRegistryApplication,
+) -> Result<()> {
+    if application.reference().namespace() == "mvm"
+        || application.signer().identity == mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+    {
+        crate::official_revocations::ensure_official_feed_fresh();
+    }
+    application.check_current_revocations()?;
+    Ok(())
+}
+
 fn acquire_application(
     application: &VerifiedRegistryApplication,
 ) -> Result<InstalledRegistryApplication> {
     use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, TrustStore};
-    if application.signer().identity == mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY {
-        crate::official_revocations::ensure_official_feed_fresh();
-    }
-    application.check_current_revocations()?;
+    check_application_revocations_refreshing(application)?;
     crate::commands::bundle::fetch::admit_application_source(application)?;
     let trust = FsTrustStore::default_path()?;
     anyhow::ensure!(
@@ -508,7 +519,7 @@ fn pull_one(
     };
     let verified = match verified {
         VerifiedRegistryManifest::Application(application) => {
-            application.check_current_revocations()?;
+            check_application_revocations_refreshing(&application)?;
             // Persist a pin only after acquisition succeeds. The handoff retains
             // authenticated bytes and digest for that later transaction.
             return Ok((VerifiedPull::Application(Box::new(application)), Vec::new()));
