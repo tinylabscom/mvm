@@ -63,7 +63,19 @@ the identity in existing signature bundles. On 2026-10-07 the owner approved
 built-in trust in both exact workflow identities for legacy `agent/` and
 `runtime/` references. The former identity expires at 2026-11-06 00:00 UTC;
 verification after that instant accepts only the renamed workflow identity.
-An operator policy file still replaces built-in trust wholesale. This
+An operator policy file still replaces built-in trust wholesale. The client
+release also pins the official bundle-author Ed25519 public keys
+(`OFFICIAL_BUNDLE_AUTHOR_KEYS` in `mvm-core`). Under the built-in publisher
+policy an application bundle whose signed `bundle.key_id` equals a pinned key
+verifies against it with no `mvmctl trust add`; the key set is chosen by the
+client release, not by the descriptor, so a descriptor naming an unpinned
+`key_id` is still refused and the author key remains a second root independent
+of the keyless publish identity. Operator enrollment stays additive, an
+operator policy file drops the pinned author keys with the rest of built-in
+trust, and a host-signed bundle is never in the list. A compromised author key
+is disabled by a client release that lists its `key_id` in
+`REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS` (empty today); a key an operator
+enrolled by hand is the operator's to remove. This
 transition does not grant `mvm/` trust without revocation enforcement. A URL
 redirect is not signing authority.
 

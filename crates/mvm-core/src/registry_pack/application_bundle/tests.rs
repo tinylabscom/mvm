@@ -13,6 +13,8 @@ use crate::registry_pack_store::application_test_feed;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
 
+mod builtin_author;
+
 fn fixture() -> (tempfile::TempDir, Vec<u8>, FsTrustStore, String) {
     use rand::Rng;
     let directory = tempfile::tempdir().unwrap();

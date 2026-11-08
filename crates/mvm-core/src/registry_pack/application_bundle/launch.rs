@@ -225,15 +225,15 @@ pub fn resolve_installed_application_bundle(
     publisher_policy_path: &Path,
     trust: &dyn TrustStore,
 ) -> Result<VerifiedApplicationBundle, ApplicationLaunchError> {
-    let policy = crate::registry_pack_store::load_publisher_policy_or_official_default(
+    let loaded = crate::registry_pack_store::load_publisher_policy_or_official_default(
         publisher_policy_path,
-    )?
-    .policy;
+    )?;
+    let trust = crate::registry_pack::BuiltinAuthorTrust::for_policy(trust, &loaded);
     resolve_bundle_with(
         reference,
         store,
-        &policy,
-        trust,
+        &loaded.policy,
+        &trust,
         check_registry_pack_signature,
     )
 }

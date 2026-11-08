@@ -404,7 +404,7 @@ forward legs.
 
 | Command | Description |
 | ------- | ----------- |
-| `mvmctl trust add <PUBKEY> [--force]` | Enrol a publisher's Ed25519 public key as trusted. Reads 32 raw bytes (no PEM, no headers) and writes them to `~/.mvm/trusted-publishers/<key_id>.pub`; `--force` overwrites an existing entry with the same key id |
+| `mvmctl trust add <PUBKEY> [--force]` | Enrol a publisher's Ed25519 public key as trusted. Reads 32 raw bytes (no PEM, no headers) and writes them to `~/.mvm/trusted-publishers/<key_id>.pub`; `--force` overwrites an existing entry with the same key id. Application packs signed by the official bundle author (for example `agent/claude`) need no enrolment under the built-in publisher policy: the release pins that key. An operator publisher-policy file drops it, and other authors' keys are enrolled here |
 | `mvmctl trust list [--json]` | List the currently trusted publisher `key_id`s; `--json` prints an array of strings |
 | `mvmctl trust remove <KEY_ID>` | Remove a publisher by its 32-character hex `key_id` (see `trust list`). The file is unlinked, not zeroed: public keys are lookup tokens, not secrets |
 | `mvmctl trust attest export [--output <FILE>]` | Emit a fresh attestation report signed by this host; written to stdout unless `--output` is given |
