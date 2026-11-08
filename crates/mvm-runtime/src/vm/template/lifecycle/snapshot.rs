@@ -190,9 +190,9 @@ fn installed_bundle_verified_manifest(
         return Ok(None);
     }
     let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
-    let trust = mvm_core::registry_pack::application_bundle::trust_for_installed_bundle(
+    let trust = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
         mvm_core::plan::FsTrustStore::default_path()?,
-        id_or_slot,
+        &registry.archive_path(id_or_slot),
     );
     registry
         .verified_launch_manifest(id_or_slot, trust, host_verifying_key()?)

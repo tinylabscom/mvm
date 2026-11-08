@@ -35,6 +35,8 @@ impl<T: TrustStore + ?Sized> TrustStore for &T {
 /// Test-only registry so a fixture signed by a throwaway key can stand in for
 /// the pinned author, through the real call sites. Never holds a real key.
 #[cfg(any(test, feature = "test-support"))]
+// Never cleared: process-global by design. Tests rely on nextest running each
+// test in its own process, and the keys are throwaway public halves.
 static TEST_AUTHOR_KEYS: std::sync::Mutex<Vec<[u8; 32]>> = std::sync::Mutex::new(Vec::new());
 
 /// Pin a throwaway public key as if the release carried it (tests only).

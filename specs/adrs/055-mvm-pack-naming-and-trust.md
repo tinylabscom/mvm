@@ -80,7 +80,7 @@ apply only to an application bundle: sites that do not already know the bundle
 is an application (admission, launch, canonical-plan and installed-bundle
 verification) ask `trust_for_installed_bundle`, which grants them only when the
 bundle digest is the archive of an installed application whose descriptor
-authenticates under the built-in policy, and otherwise returns the raw store.
+authenticates under the built-in policy and is not revoked, with the digest computed from the archive bytes being verified, and otherwise returns the raw store. `xtask check-bundle-trust-sites` fails when a production file builds the raw store outside an allow-list, or when a listed application path stops composing.
 This
 transition does not grant `mvm/` trust without revocation enforcement. A URL
 redirect is not signing authority.

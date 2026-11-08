@@ -158,6 +158,7 @@ mod installed_flow {
             &flow.store,
             Ok(loaded(source)),
             accept_signature,
+            application_test_feed::check,
         )
     }
 
@@ -228,7 +229,63 @@ mod installed_flow {
             &flow.store,
             Ok(loaded(PublisherPolicySource::OfficialDefault)),
             crate::registry_pack::tests::reject_signature,
+            application_test_feed::check,
         );
         assert!(trust.lookup(&id(&flow)).is_none());
+    }
+
+    fn refuse_revoked(
+        _: &crate::registry_pack::VerifiedRegistryApplication,
+    ) -> Result<(), crate::registry_pack_store::RegistryPackStoreError> {
+        Err(
+            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust {
+                path: String::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_revoked_application_gets_no_pinned_keys() {
+        use crate::plan::bundle::TrustStore;
+        let flow = install_without_enrollment();
+        let trust = launch::trust_for_installed_bundle_with(
+            &flow.empty,
+            &flow.bundle_sha256,
+            &flow.store,
+            Ok(loaded(PublisherPolicySource::OfficialDefault)),
+            accept_signature,
+            refuse_revoked,
+        );
+        assert!(trust.lookup(&id(&flow)).is_none());
+    }
+
+    fn by_archive<'a>(
+        flow: &'a Flow,
+        archive: &std::path::Path,
+    ) -> BuiltinAuthorTrust<&'a FsTrustStore> {
+        launch::trust_for_installed_archive_with(
+            &flow.empty,
+            archive,
+            &flow.store,
+            Ok(loaded(PublisherPolicySource::OfficialDefault)),
+            accept_signature,
+            application_test_feed::check,
+        )
+    }
+
+    #[test]
+    fn a_different_archive_planted_under_the_installed_name_gets_no_pinned_keys() {
+        use crate::plan::bundle::TrustStore;
+        let flow = install_without_enrollment();
+        let real = BundleRegistry::new(&flow.store.bundle_root).archive_path(&flow.bundle_sha256);
+        assert!(by_archive(&flow, &real).lookup(&id(&flow)).is_some());
+        let planted = flow
+            .store
+            .bundle_root
+            .join("planted")
+            .join(format!("{}.mvmpkg", flow.bundle_sha256));
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        std::fs::write(&planted, b"not the installed archive").unwrap();
+        assert!(by_archive(&flow, &planted).lookup(&id(&flow)).is_none());
     }
 }

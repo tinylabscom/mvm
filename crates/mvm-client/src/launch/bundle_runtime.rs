@@ -52,12 +52,9 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         return Ok(false);
     };
     let registry = BundleRegistry::default_path()?;
-    let trust = mvm_core::registry_pack::application_bundle::trust_for_installed_bundle(
+    let trust = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
         FsTrustStore::default_path()?,
-        archive
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or_default(),
+        &archive,
     );
     let verified = verify_bundle_file(&archive, &trust).context("verifying bundle boot assets")?;
     let canonical = verified.manifest.members.iter().any(|member| {
