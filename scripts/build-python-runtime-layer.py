@@ -132,7 +132,7 @@ def build(source: Path, destination: Path, expected: str = SOURCE_SHA256) -> tup
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=Path, help=f"pinned upstream tar.zst ({SOURCE_URL})")
+    parser.add_argument("source", type=Path, help="pinned upstream tar.zst (see SOURCE_URL)")
     parser.add_argument("destination", type=Path, help="new, unsigned layer.tar")
     args = parser.parse_args()
     sha256, size = build(args.source, args.destination)

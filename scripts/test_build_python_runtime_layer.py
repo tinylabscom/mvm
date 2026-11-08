@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -87,6 +88,13 @@ class PythonRuntimeLayerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             PRODUCER.build(self.source, output, expected)
         self.assertFalse(output.exists())
+
+    def test_command_line_help_does_not_interpret_url_percent_escapes(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pinned upstream tar.zst", result.stdout)
 
 
 if __name__ == "__main__":
