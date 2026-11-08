@@ -452,6 +452,7 @@ fn contain_terminate_and_rebuild() {
             .unwrap_or_else(|e| panic!("{} chain must verify: {e:?}", node.name));
     }
     let timeline = ship.timeline("analyst");
+    println!("\nsimulated: mailbox transport (in memory), VMs (gated and audited, none boot)");
     println!("\n--- evidence timeline: ship / analyst ---");
     for line in &timeline {
         println!("{line}");
