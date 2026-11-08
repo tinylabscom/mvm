@@ -1,6 +1,6 @@
 # Claude application candidate
 
-`environment.json` declares `agent/claude@2.0.0`, the baked
+`environment.json` declares `agent/claude@2.0.1`, the baked
 `/etc/mvm/entrypoint`, a required `ANTHROPIC_API_KEY` slot, and only
 `api.anthropic.com:443` egress. The old `agent/claude@1.0.1` is policy-only.
 Source definitions and a locally signed archive are not registry publication.
