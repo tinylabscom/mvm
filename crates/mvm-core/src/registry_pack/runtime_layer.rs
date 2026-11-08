@@ -723,12 +723,15 @@ mod tests {
             held.reverify_with(|_| Ok(())),
             Err(RuntimeLayerPolicyError::Digest)
         ));
-        std::fs::remove_file(&group).unwrap();
-        std::os::unix::fs::symlink(&profile, &group).unwrap();
-        assert!(matches!(
-            verify_runtime_layer_policies(&layer, root.path()),
-            Err(RuntimeLayerPolicyError::Io(_))
-        ));
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&group).unwrap();
+            std::os::unix::fs::symlink(&profile, &group).unwrap();
+            assert!(matches!(
+                verify_runtime_layer_policies(&layer, root.path()),
+                Err(RuntimeLayerPolicyError::Io(_))
+            ));
+        }
     }
 
     fn pin(layer: &VerifiedRegistryRuntimeLayer) -> PackPin {
