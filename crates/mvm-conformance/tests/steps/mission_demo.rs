@@ -61,11 +61,11 @@ fn timeline_order(world: &mut CliWorld) {
     }
 }
 
-#[then("the demo output says the mailbox transport and the VMs are simulated")]
+#[then("the demo output says the mailbox is local-only and the VMs are simulated")]
 fn says_simulated(world: &mut CliWorld) {
     let out = stdout(world);
     assert!(
-        out.contains("simulated: mailbox transport") && out.contains("VMs"),
+        out.contains("simulated: mailbox delivery") && out.contains("VMs"),
         "the demo must disclose what it simulates:\n{out}"
     );
 }

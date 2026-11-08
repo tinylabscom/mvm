@@ -16,4 +16,4 @@ Feature: The three-node mission demo contains, terminates and rebuilds
   Scenario: The demo states what it simulates
     When the scripted mission demo runs
     Then the demo passes
-    And the demo output says the mailbox transport and the VMs are simulated
+    And the demo output says the mailbox is local-only and the VMs are simulated

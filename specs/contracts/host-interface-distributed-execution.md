@@ -480,8 +480,12 @@ replacement with chain-signed entries, the signed offline lease, the command
 replay gate, the reconnect challenge, and the sealed mailbox envelope with its
 capability, replay and execution-epoch checks.
 
-Not wired, and therefore not claimed: there is no mailbox runtime in
-`mvm-hostd` or `mvm-agentd` (the typed vsock service, local queue and transport
-are open work in #4622), so the demo hands envelopes between nodes in memory.
-It shows no live node-to-node delivery, no booted VM and no hardware
-attestation. The demo prints this on its own output.
+Mailbox delivery is real on one host: the sender's sealed envelope crosses a
+Unix domain socket to the receiving node's `MailboxService`
+(`mvm-hostd::mailbox_service`), which opens it and enqueues it under a bounded
+queue, and refusals return to the sender as typed replies.
+
+Not wired, and therefore not claimed: no vsock guest service reads the queue
+(the typed guest service remains open work in #4622), there is no cross-host
+transport, and nothing boots a VM or attests hardware. Only one node runs a
+service in the demo. The demo prints this on its own output.
