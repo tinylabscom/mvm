@@ -266,6 +266,9 @@ python-build-standalone release (`e0bb0840e127aa95dbb1212202a29cde715711ae682613
 It repacks the static interpreter and runtime-only standard library as a
 deterministic plain `layer.tar`; it does not run untrusted install scripts,
 sign, publish, or grant policy. The interpreter has no ELF `PT_INTERP` loader.
+Independent macOS and Linux runs produced SHA-256
+`9f5dfaf983a54a62212184f08f5dfc36d1474052d71a799cdfd3f1a53dc970d4`
+and 63,836,160 bytes; the signing smoke pins these output bytes.
 The upstream GitHub asset digest establishes *byte identity*, not an
 independent publisher-signature or reproduction claim. A production publisher
 must accept that upstream trust choice explicitly, sign a new
