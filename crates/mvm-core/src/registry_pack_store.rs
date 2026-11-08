@@ -132,17 +132,14 @@ pub(crate) fn check_application_revocations(
     )
 }
 
-fn uses_builtin_feed(
-    verified: &crate::registry_pack::VerifiedRegistryApplication,
-    builtin_policy: bool,
-) -> bool {
+fn uses_builtin_feed(verified: &impl AuthenticatedRegistryManifest, builtin_policy: bool) -> bool {
     verified.reference().namespace() == "mvm"
         || (builtin_policy
             && verified.signer().identity == crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY)
 }
 
 fn check_application_revocations_at<O, P>(
-    verified: &crate::registry_pack::VerifiedRegistryApplication,
+    verified: &impl AuthenticatedRegistryManifest,
     builtin_policy: bool,
     operator_trust_path: &Path,
     now: DateTime<Utc>,
