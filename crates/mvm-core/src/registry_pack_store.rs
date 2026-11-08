@@ -1980,9 +1980,11 @@ mod tests {
         application_verified_as(name, None)
     }
 
+    #[cfg(unix)]
     const FOREIGN_IDENTITY: &str =
         "https://example.test/other/.github/workflows/p.yml@refs/heads/main";
 
+    #[cfg(unix)]
     thread_local! {
         static SIGNER: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     }
@@ -2049,6 +2051,7 @@ mod tests {
         application
     }
 
+    #[cfg(unix)]
     fn accept_foreign_application_signature(
         _payload: &[u8],
         _bundle: &[u8],
