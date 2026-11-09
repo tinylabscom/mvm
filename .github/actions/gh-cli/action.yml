@@ -1,0 +1,29 @@
+name: GitHub CLI
+description: >-
+  Put a pinned `gh` first on PATH, for runners that do not ship it (the
+  self-hosted macOS runner). The release zip's SHA-256 is pinned here, so the
+  bytes are checked rather than trusted, and nothing outside RUNNER_TEMP is
+  written. macOS Apple Silicon only.
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned gh and put it on PATH
+      shell: bash
+      env:
+        GH_VERSION: "2.103.2"
+        GH_ZIP_SHA256: "5416000f5d17580a187339e0c4068a01ca5c87f7d4fe6ca64933696f967bc418"
+      run: |
+        set -euo pipefail
+        zip="gh_${GH_VERSION}_macOS_arm64.zip"
+        dir="${RUNNER_TEMP}/gh-cli"
+        rm -rf "$dir"
+        mkdir -p "$dir"
+        curl --proto '=https' --tlsv1.2 -fsSL \
+          --retry 6 --retry-delay 5 --retry-all-errors --retry-max-time 180 \
+          -o "$dir/$zip" \
+          "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${zip}"
+        echo "${GH_ZIP_SHA256}  ${dir}/${zip}" | shasum -a 256 -c -
+        unzip -q -o "$dir/$zip" -d "$dir"
+        bin="${dir}/gh_${GH_VERSION}_macOS_arm64/bin"
+        echo "$bin" >> "$GITHUB_PATH"
+        "$bin/gh" --version
