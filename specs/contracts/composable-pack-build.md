@@ -242,7 +242,12 @@ requires fresh revocations, and holds the signed archive and policy bytes in
 private snapshots. Its first remote transport accepts only mvm-packs HTTPS
 GitHub release assets; the signed digest, not the release URL, makes their
 contents immutable to the builder. OCI and other HTTPS origins fail closed until a
-separately reviewed transport exists. It neither freezes a v2 CLI lock nor
+separately reviewed transport exists. For the first Python slice both local
+and remote build-input acquisition refuse anything but a signed deny-all group
+with no profile, network routes, secrets, shares, tools, environment overrides
+or resource requests. This is a first-slice restriction, not the general
+policy-intersection algorithm, and host admission must independently enforce
+it before a package can run. It neither freezes a v2 CLI lock nor
 installs an image: `pack registry pull` and the installed-pack reader still
 refuse a runtime layer. A signed base tar can be fetched separately
 from the boot artifacts and merged with runtime archives in order without
@@ -253,7 +258,22 @@ is not a cache install or a runnable bundle: source custody, symlink closure,
 policy, release proof and health boot still require final checks.
 The workload bundle needs a versioned, signed composition member that
 binds runtime manifest pins for transitive revocation checks; old bundle
-schemas remain unchanged.
+schemas remain unchanged. Coordinate its schema floor with the separate
+universal-pack work in `mvm-packs` ADR 004 (builder version, policy and
+keyless provenance members), rather than independently claiming the next
+number. Carry one typed composition member, not reuse the v7 `other` role
+as an implicit grant. Its Ed25519-signed manifest binds the authored
+spec/source/producer lock, selected signed Linux root, ordered runtime manifest pins, policy
+digests, output artifact hashes and health-tested entrypoint. Embed each
+runtime's original keyless-signed descriptor, signature bundle and declared
+policy document as small digest-bound bundle artifacts; a clean offline
+recipient must verify both publisher and bundle trust roots and check
+current revocations for every pinned layer before admission. The final
+package carries the composed rootfs and CLI runtime itself, not an external
+layer fetch dependency. Missing evidence, ambiguous policy, changed
+bytes or an old-schema bundle claiming composition must refuse, never fall back
+to an unsigned local cache or guest install script. This is a source
+contract, not a completed exporter or consumer.
 The CLI must not interpret any new source, mode or layer field as optional
 and silently fall back to Nix. A local production-mode build is not an
 official published release merely because it is sealed and host-signed.

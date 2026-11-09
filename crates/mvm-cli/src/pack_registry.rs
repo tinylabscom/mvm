@@ -139,7 +139,7 @@ pub fn acquire_runtime_layer(
     let archive = fetched.staged_path().join("layer.tar");
     download_payload_file(&source.source, &archive, source.archive_size, true)?;
     let held = verify_runtime_layer_inputs(&layer, &archive, fetched.staged_path())?;
-    held.reverify()?;
+    mvm_client::registry_pack_local::require_offline_runtime_policy(&held)?;
     Ok(held)
 }
 
