@@ -13,7 +13,7 @@ REPO = "https://github.com/tinylabscom/mvm"
 HOSTS = ("x86_64", "aarch64")
 HOST_BINS = (
     "mvmctl", "mvm-host-agent", "mvm-signer-helper", "mvm-network-endpoint",
-    "mvm-broker", "mvm-audit-signer", "mvm-gpu-endpoint",
+    "mvm-broker", "mvm-audit-signer", "mvm-mailbox", "mvm-gpu-endpoint",
 )
 
 

@@ -30,7 +30,7 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::mailbox_service::{
-    GuestSealer, MailboxLimits, MailboxPolicy, MailboxService, serve_granted_guest,
+    GuestSealer, MailboxLimits, MailboxPolicy, MailboxService, serve_grant,
 };
 
 const SIGNER_SECRET: &str = "host-signer.ed25519";
@@ -94,56 +94,103 @@ pub fn authority_key_for(keys_dir: &Path, mailbox: &MailboxId) -> Result<Verifyi
     Ok(derived_keys(keys_dir, mailbox)?.authority.verifying_key())
 }
 
-/// The host trust and sealer for `grant`, from the host key directory.
+/// Everything a mailbox host process needs to serve one granted guest, derived
+/// by the launcher from the host key and nothing else: the three derived keys
+/// and the identities and capability they seal under. It never carries the host
+/// signing seed, and the per-mailbox derivation inputs are not recoverable from
+/// it, so a process holding only this cannot derive another mailbox's keys.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DerivedMailboxKeys {
+    sender: [u8; 32],
+    authority: [u8; 32],
+    encryption: [u8; 32],
+    template: MailboxTemplate,
+}
+
+impl std::fmt::Debug for DerivedMailboxKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DerivedMailboxKeys")
+            .field("keys", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for DerivedMailboxKeys {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        self.sender.zeroize();
+        self.authority.zeroize();
+        self.encryption.zeroize();
+    }
+}
+
+impl DerivedMailboxKeys {
+    /// The host trust and sealer these keys stand for. Pure: no file is read,
+    /// so it can be rebuilt on every dial attempt.
+    pub fn trust(&self) -> (MailboxPolicy, GuestSealer) {
+        let sender_key = SigningKey::from_bytes(&self.sender);
+        let authority_key = SigningKey::from_bytes(&self.authority);
+        let template = self.template.clone();
+        let h = &template.header;
+        let policy = MailboxPolicy {
+            context: OpenContext {
+                expected_tenant: h.tenant,
+                expected_authorization_domain: h.authorization_domain,
+                expected_mailbox: h.mailbox,
+                expected_sender: h.sender,
+                expected_recipient: h.recipient,
+                acting_principal: template.capability.subject,
+                expected_capability_issuer: template.capability.issuer,
+                current_execution_epoch: h.execution_epoch,
+                current_policy_epoch: h.policy_epoch,
+                required_operation: MailboxOperation::Send,
+                now_unix_ms: now_unix_ms(),
+                accepted_content_types: vec![h.content_type.clone()],
+                revoked_capabilities: vec![],
+            },
+            encryption_key: Key::from_bytes(self.encryption),
+            sender_key: sender_key.verifying_key(),
+            authority_key: authority_key.verifying_key(),
+        };
+        let sealer = GuestSealer {
+            encryption_key: Key::from_bytes(self.encryption),
+            sender_key,
+            authority_key,
+            capability: template.capability,
+            header: template.header,
+            routing: template.routing,
+            sent: 0,
+        };
+        (policy, sealer)
+    }
+}
+
+/// The launcher half: read the host key directory and derive what serving
+/// `grant` needs.
 ///
 /// The grant's authority key must be the verifying half of the key this host
 /// derives for that mailbox; any other is refused.
-pub fn host_trust(keys_dir: &Path, grant: &MailboxGrant) -> Result<(MailboxPolicy, GuestSealer)> {
+pub fn derive_launch_keys(keys_dir: &Path, grant: &MailboxGrant) -> Result<DerivedMailboxKeys> {
     let derived = derived_keys(keys_dir, &grant.mailbox)?;
-    let template = template_for(keys_dir, &derived, grant, now_unix_ms())?;
-    let Derived {
-        sender: sender_key,
-        authority: authority_key,
-        encryption,
-        ..
-    } = derived;
-    let h = &template.header;
-    let policy = MailboxPolicy {
-        context: OpenContext {
-            expected_tenant: h.tenant,
-            expected_authorization_domain: h.authorization_domain,
-            expected_mailbox: h.mailbox,
-            expected_sender: h.sender,
-            expected_recipient: h.recipient,
-            acting_principal: template.capability.subject,
-            expected_capability_issuer: template.capability.issuer,
-            current_execution_epoch: h.execution_epoch,
-            current_policy_epoch: h.policy_epoch,
-            required_operation: mvm_contract::protocol::mailbox::MailboxOperation::Send,
-            now_unix_ms: now_unix_ms(),
-            accepted_content_types: vec![h.content_type.clone()],
-            revoked_capabilities: vec![],
-        },
-        encryption_key: Key::from_bytes(*encryption),
-        sender_key: sender_key.verifying_key(),
-        authority_key: authority_key.verifying_key(),
-    };
-    let sealer = GuestSealer {
-        encryption_key: Key::from_bytes(*encryption),
-        sender_key,
-        authority_key,
-        capability: template.capability,
-        header: template.header,
-        routing: template.routing,
-        sent: 0,
-    };
-    if sealer.authority_key.verifying_key().to_bytes() != grant.authority_key {
+    if derived.authority.verifying_key().to_bytes() != grant.authority_key {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
             "grant authority is not the host's authority key for this mailbox",
         ));
     }
-    Ok((policy, sealer))
+    let template = template_for(keys_dir, &derived, grant, now_unix_ms())?;
+    Ok(DerivedMailboxKeys {
+        sender: derived.sender.to_bytes(),
+        authority: derived.authority.to_bytes(),
+        encryption: *derived.encryption,
+        template,
+    })
+}
+
+/// The host trust and sealer for `grant`, from the host key directory.
+pub fn host_trust(keys_dir: &Path, grant: &MailboxGrant) -> Result<(MailboxPolicy, GuestSealer)> {
+    Ok(derive_launch_keys(keys_dir, grant)?.trust())
 }
 
 const VALID_FOR_MS: i64 = 60 * 60 * 1000;
@@ -282,27 +329,20 @@ impl Drop for MailboxLaunch {
 }
 
 /// Where the guest's mailbox port is reached, and where the host serves.
-pub struct MailboxPaths {
-    pub keys_dir: PathBuf,
+pub struct ServePaths {
     pub socket: PathBuf,
     pub guest_port: PathBuf,
     pub firecracker_mux: PathBuf,
 }
 
-/// Serve the guest mailbox for a launch, only when the signed plan's `grant` is present.
-/// Returns at once: no grant yields `None` with nothing built or dialed; a
-/// grant builds the host trust now (so a bad key or template is refused here)
-/// and dials the guest from its own thread, waiting up to 30 s for the guest
-/// to listen.
-pub fn start_for_launch(
-    grant: Option<MailboxGrant>,
-    paths: MailboxPaths,
+/// Dial the guest's mailbox port from its own thread, retrying for up to 30 s
+/// while the guest comes up, and serve it under `keys`. Returns at once.
+pub fn serve_derived(
+    grant: MailboxGrant,
+    keys: DerivedMailboxKeys,
+    paths: ServePaths,
     limits: MailboxLimits,
-) -> Result<Option<MailboxLaunch>> {
-    let Some(grant) = grant else {
-        return Ok(None);
-    };
-    let mut first = Some(host_trust(&paths.keys_dir, &grant)?);
+) -> MailboxLaunch {
     let stop = Arc::new(AtomicBool::new(false));
     let service = Arc::new(OnceLock::new());
     let (thread_stop, thread_service) = (stop.clone(), service.clone());
@@ -311,25 +351,18 @@ pub fn start_for_launch(
             if thread_stop.load(Ordering::SeqCst) {
                 return;
             }
-            let Ok((trust, sealer)) = first
-                .take()
-                .map_or_else(|| host_trust(&paths.keys_dir, &grant), Ok)
-            else {
-                return;
-            };
+            let (trust, sealer) = keys.trust();
             let guest = (paths.guest_port.as_path(), paths.firecracker_mux.as_path());
-            match serve_granted_guest(Some(&grant), trust, sealer, limits, &paths.socket, guest) {
+            match serve_grant(&grant, trust, sealer, limits, &paths.socket, guest) {
                 Ok(served) => {
-                    if let Some(served) = served {
-                        let _ = thread_service.set(served);
-                    }
+                    let _ = thread_service.set(served);
                     return;
                 }
                 Err(_) => std::thread::sleep(DIAL_INTERVAL),
             }
         }
     });
-    Ok(Some(MailboxLaunch { stop, service }))
+    MailboxLaunch { stop, service }
 }
 
 /// Bounds a launch-time mailbox holds and accepts.
@@ -337,38 +370,6 @@ pub const LAUNCH_LIMITS: MailboxLimits = MailboxLimits {
     max_depth: 64,
     max_frame_bytes: 64 * 1024,
 };
-
-/// What the per-VM process that serves a guest's mailbox is handed: the signed
-/// plan's grant and the VM's state dir. Every path is derived from those and
-/// the host key directory, so nothing else crosses the process boundary.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MailboxEmbed {
-    pub grant: MailboxGrant,
-    pub state_dir: PathBuf,
-}
-
-impl MailboxEmbed {
-    fn paths(&self) -> MailboxPaths {
-        let port = mvm_core::config::vm_hvf_vsock_port_socket_at(
-            &self.state_dir,
-            mvm_contract::protocol::mailbox::MAILBOX_PORT,
-        );
-        MailboxPaths {
-            keys_dir: mvm_core::config::mvm_keys_dir(),
-            socket: mvm_core::config::vm_mailbox_socket_at(&self.state_dir),
-            guest_port: port,
-            firecracker_mux: mvm_agentd::vsock::vsock_uds_path(&self.state_dir.to_string_lossy())
-                .into(),
-        }
-    }
-
-    /// Start serving this VM's mailbox on its own thread; never waits on the guest.
-    pub fn start(&self) -> Result<MailboxLaunch> {
-        start_for_launch(Some(self.grant), self.paths(), LAUNCH_LIMITS)?
-            .ok_or_else(|| Error::other("mailbox grant vanished"))
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -436,19 +437,37 @@ mod tests {
     }
 
     #[test]
-    fn an_ungranted_plan_builds_and_dials_nothing() {
+    fn derived_keys_round_trip_and_carry_neither_the_seed_nor_a_mailbox_root() {
         let dir = keys_dir();
-        let paths = MailboxPaths {
-            keys_dir: dir.path().to_path_buf(),
-            socket: dir.path().join("m.sock"),
-            guest_port: dir.path().join("p"),
-            firecracker_mux: dir.path().join("mux"),
-        };
-        let limits = MailboxLimits {
-            max_depth: 4,
-            max_frame_bytes: 1024,
-        };
-        assert!(start_for_launch(None, paths, limits).unwrap().is_none());
-        assert!(!dir.path().join("m.sock").exists());
+        let seed = std::fs::read(dir.path().join(SIGNER_SECRET)).unwrap();
+        let g = grant(dir.path(), [4; 32]);
+        let keys = derive_launch_keys(dir.path(), &g).unwrap();
+        let wire = serde_json::to_vec(&keys).unwrap();
+        let back: DerivedMailboxKeys = serde_json::from_slice(&wire).unwrap();
+        let (policy, sealer) = back.trust();
+        assert_eq!(policy.authority_key.to_bytes(), g.authority_key);
+        assert_eq!(
+            sealer.authority_key.verifying_key().to_bytes(),
+            g.authority_key
+        );
+        // The seed, in every encoding the config could carry it in.
+        let text = String::from_utf8(wire).unwrap();
+        let as_array = serde_json::to_string(&seed).unwrap();
+        for needle in [
+            as_array.trim_matches(['[', ']']).to_string(),
+            hex::encode(&seed),
+        ] {
+            assert!(!text.contains(&needle), "seed leaked into the config");
+        }
+        assert!(format!("{keys:?}").contains("redacted"));
+    }
+
+    #[test]
+    fn derived_keys_refuse_unknown_fields() {
+        let dir = keys_dir();
+        let keys = derive_launch_keys(dir.path(), &grant(dir.path(), [4; 32])).unwrap();
+        let mut value = serde_json::to_value(&keys).unwrap();
+        value["root"] = serde_json::json!("00");
+        assert!(serde_json::from_value::<DerivedMailboxKeys>(value).is_err());
     }
 }

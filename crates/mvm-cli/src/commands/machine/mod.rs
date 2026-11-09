@@ -898,6 +898,10 @@ pub(in crate::commands) struct MachineStartArgs {
     /// is up. Not a CLI flag — set programmatically by `run_persistent`.
     #[arg(skip)]
     pub has_ad_hoc_argv: bool,
+    /// The mailbox grant resolved from `machine run --mailbox`. Not a flag
+    /// here: `machine start` grants none.
+    #[arg(skip)]
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
 }
 
 /// CLI surface for `machine start`: one or more machine names plus the shared
@@ -950,6 +954,7 @@ impl MachineStartCmd {
             hypervisor: self.hypervisor.clone(),
             kernel_pin: self.kernel_pin.clone(),
             has_ad_hoc_argv: false,
+            mailbox: None,
         }
     }
 }

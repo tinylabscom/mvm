@@ -209,8 +209,6 @@ pub struct EndpointSpawnInputs<'a> {
     /// warm claim inherits its parent's, because the restored child already
     /// holds the parent's signing key in memory.
     pub identity: FlowMuxIdentitySource<'a>,
-    /// The admitted plan's mailbox grant; `None` serves nothing.
-    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
 }
 
 /// A spawned per-VM substitution endpoint: the host UDS the guest's `EGRESS_PORT`
@@ -316,7 +314,6 @@ impl<'a> ClaimGuards<'a> {
             network_limits: inputs.network_limits,
             ingress: inputs.ingress,
             identity: inputs.identity,
-            mailbox: inputs.mailbox,
         };
         if inputs.secrets.is_empty()
             && !inputs.network_policy.admits_outbound()
@@ -529,7 +526,6 @@ mod tests {
             network_policy: policy,
             network_limits: mvm_core::plan::NetworkLimits::default(),
             ingress: &[],
-            mailbox: None,
         }
     }
 

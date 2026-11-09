@@ -211,10 +211,6 @@ pub struct EndpointConfig {
     /// absent otherwise. See `mvm_hostd::telemetry_collector`.
     #[serde(default)]
     pub telemetry: Option<crate::telemetry_collector::TelemetryEmbedConfig>,
-    /// Serve the guest's mailbox from this process when the signed plan
-    /// grants one; absent means nothing is bound or dialed.
-    #[serde(default)]
-    pub mailbox: Option<crate::mailbox_launch::MailboxEmbed>,
     /// Per-destination reversible replacement policy, carried from the signed
     /// `ExecutionPlan.reversible_replacement`. Default (disabled) preserves the
     /// current one-way-only behavior.
@@ -1176,7 +1172,6 @@ mod tests {
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {
         EndpointConfig {
             telemetry: None,
-            mailbox: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),
             secrets,
@@ -1227,6 +1222,16 @@ mod tests {
         assert_eq!(binding.file_name().unwrap(), "secret-bindings");
         // Both resolve under the same data-dir base.
         assert_eq!(secret.parent(), binding.parent());
+    }
+
+    #[test]
+    fn the_endpoint_config_has_no_mailbox_section() {
+        let cfg = vsock_cfg(Vec::new(), std::path::Path::new("/tmp/x"));
+        let mut value = serde_json::to_value(&cfg).unwrap();
+        assert!(value.get("mailbox").is_none());
+        value["mailbox"] = serde_json::json!({"state_dir": "/tmp/x"});
+        let err = parse(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got {err}");
     }
 
     #[test]

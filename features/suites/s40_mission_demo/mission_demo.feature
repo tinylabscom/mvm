@@ -4,9 +4,10 @@ Feature: The three-node mission demo contains, terminates and rebuilds
   a ship and a ground vehicle, each with its own state directory and signed
   audit chain. These scenarios run that script and assert on what it reports.
 
-  What this does not show, and the demo says so itself: the mailbox transport
-  is in memory (the vsock service and relay are tracked in #4629 and #4633),
-  and no VM boots. There is no live node-to-node delivery here.
+  What this does not show, and the demo says so itself: node-to-node delivery
+  is a loopback TCP transport between two node services in one test process
+  (the guest mailbox is served by a separate host process), not Iroh or a
+  relay (tracked in #4633), not different physical hosts, and no VM boots.
 
   Scenario: The compromised workload is contained and replaced in the audit timeline
     When the scripted mission demo runs
@@ -17,3 +18,8 @@ Feature: The three-node mission demo contains, terminates and rebuilds
     When the scripted mission demo runs
     Then the demo passes
     And the demo output says the mailbox is local-only and the VMs are simulated
+
+  Scenario: Two nodes deliver a sealed message over a loopback TCP transport
+    When the scripted mission demo runs
+    Then the demo passes
+    And the cross-node delivery test ran and passed

@@ -240,7 +240,6 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         spawn_network_endpoint(SubstitutionSpawnParams {
             // Builder-VM and wasm endpoints never collect telemetry.
             telemetry: false,
-            mailbox: None,
             vm_name: &transport.name,
             state_dir: &transport.state_dir,
             // One builder job: the runner owns the VM and stops it before it

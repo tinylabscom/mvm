@@ -144,10 +144,24 @@ pub fn serve_granted_guest(
     let Some(grant) = grant else {
         return Ok(None);
     };
+    serve_grant(grant, trust, sealer, limits, socket, guest).map(Some)
+}
+
+/// [`serve_granted_guest`] for a caller that already holds the grant rather
+/// than the whole plan: the separate mailbox process is handed the grant and
+/// the derived trust, never the plan.
+pub fn serve_grant(
+    grant: &MailboxGrant,
+    trust: MailboxPolicy,
+    sealer: GuestSealer,
+    limits: MailboxLimits,
+    socket: &Path,
+    guest: (&Path, &Path),
+) -> std::io::Result<MailboxService> {
     let mut sealer = sealer.with_grant(grant)?;
     let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
     service.serve_guest(guest.0, guest.1, &mut sealer)?;
-    Ok(Some(service))
+    Ok(service)
 }
 
 struct State {
@@ -194,7 +208,7 @@ impl MailboxService {
                         break;
                     }
                     if let Ok(stream) = stream {
-                        serve(&shared, stream, decode_frame);
+                        let _ = serve(&shared, stream, decode_frame);
                     }
                 }
             })
@@ -223,6 +237,11 @@ impl MailboxService {
     /// collector attaches. The guest sends plaintext; `sealer` seals it, then
     /// admission and the queue are the service's own, so a guest that floods
     /// this port fills only this queue.
+    ///
+    /// Returns an error when the guest sent no frame at all, which is what a
+    /// guest whose workload has not written its outbox yet looks like; the
+    /// launch path dials again rather than miss a message written after the
+    /// first dial. A frame the queue refuses is still a served connection.
     pub fn serve_guest(
         &self,
         per_port: &Path,
@@ -236,8 +255,9 @@ impl MailboxService {
         )?;
         serve(&self.shared, stream, |body| {
             sealer.seal(OutboxMessage::decode(body)?)
-        });
-        Ok(())
+        })
+        .then_some(())
+        .ok_or_else(|| std::io::Error::other("the guest sent no mailbox frame"))
     }
 
     /// Take the oldest accepted plaintext, if any.
@@ -283,20 +303,23 @@ pub fn send_on(
 }
 
 /// Read one frame, turn it into a capability and envelope with `prepare`, and
-/// answer with the admission verdict.
+/// answer with the admission verdict. Returns whether a frame arrived.
 fn serve(
     shared: &Shared,
     mut stream: UnixStream,
     prepare: impl FnOnce(&[u8]) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal>,
-) {
+) -> bool {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let verdict = read_frame(shared, &mut stream)
+    let frame = read_frame(shared, &mut stream);
+    let received = frame.is_ok();
+    let verdict = frame
         .and_then(|body| prepare(&body))
         .and_then(|(capability, envelope)| admit(shared, &capability, &envelope));
     if let Ok(reply) = serde_json::to_vec(&verdict) {
         let _ = stream.write_all(&reply);
     }
+    received
 }
 
 fn read_frame(shared: &Shared, stream: &mut UnixStream) -> Result<Vec<u8>, Refusal> {

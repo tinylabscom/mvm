@@ -65,7 +65,18 @@ fn timeline_order(world: &mut CliWorld) {
 fn says_simulated(world: &mut CliWorld) {
     let out = stdout(world);
     assert!(
-        out.contains("simulated: mailbox delivery") && out.contains("VMs"),
+        out.contains("simulated: mailbox delivery")
+            && out.contains("no Iroh")
+            && out.contains("VMs"),
         "the demo must disclose what it simulates:\n{out}"
+    );
+}
+
+#[then("the cross-node delivery test ran and passed")]
+fn cross_node_delivery(world: &mut CliWorld) {
+    let out = stdout(world);
+    assert!(
+        out.contains("two_nodes_deliver_over_a_loopback_tcp_peer_transport ... ok"),
+        "the TCP delivery test must run:\n{out}"
     );
 }
