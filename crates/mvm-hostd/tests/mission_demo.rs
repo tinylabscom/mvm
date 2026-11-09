@@ -863,7 +863,40 @@ fn the_launch_helper_serves_a_granted_plan_and_builds_nothing_without_one() {
     assert_eq!(received.unwrap(), b"hello");
 }
 
-struct KillOnDrop(std::process::Child);
+struct KillOnDrop(std::process::Child, std::path::PathBuf);
+
+impl KillOnDrop {
+    fn stderr(&self) -> String {
+        std::fs::read_to_string(&self.1).unwrap_or_default()
+    }
+
+    /// Accept one connection within 20s, or fail with the child's stderr.
+    fn accept(
+        &mut self,
+        listener: &std::os::unix::net::UnixListener,
+    ) -> std::os::unix::net::UnixStream {
+        listener.set_nonblocking(true).unwrap();
+        for _ in 0..400 {
+            if let Ok((stream, _)) = listener.accept() {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the process never dialed; stderr:\n{}", self.stderr());
+    }
+
+    /// Wait for exit within 20s, or fail with the child's stderr.
+    fn exit(&mut self) -> std::process::ExitStatus {
+        for _ in 0..400 {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                return status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the process never exited; stderr:\n{}", self.stderr());
+    }
+}
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -873,17 +906,21 @@ impl Drop for KillOnDrop {
 
 fn spawn_collector_only(home: &std::path::Path, config: serde_json::Value) -> KillOnDrop {
     use std::io::Write;
+    let (log_file, log) = tempfile::NamedTempFile::new_in(home.parent().unwrap())
+        .unwrap()
+        .keep()
+        .unwrap();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_mvm-network-endpoint"))
         .env("MVM_HOME", home)
         .env("HOME", home)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(log_file)
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(config.to_string().as_bytes()).unwrap();
-    KillOnDrop(child)
+    KillOnDrop(child, log)
 }
 
 /// The per-VM process a launch spawns, handed only the signed grant and the
@@ -917,7 +954,7 @@ fn the_per_vm_process_serves_a_granted_mailbox_with_telemetry_off() {
     };
     let outbox = dir.path().join("outbox");
     std::fs::write(&outbox, outbox_message().encode()).unwrap();
-    let _process = spawn_collector_only(
+    let mut process = spawn_collector_only(
         &home,
         serde_json::json!({"telemetry_only": {
             "instance_id": "vm",
@@ -925,7 +962,7 @@ fn the_per_vm_process_serves_a_granted_mailbox_with_telemetry_off() {
             "mailbox": embed,
         }}),
     );
-    let (mut stream, _) = listener.accept().unwrap();
+    let mut stream = process.accept(&listener);
     assert_eq!(
         mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox),
         Ok(())
@@ -936,7 +973,8 @@ fn the_per_vm_process_serves_a_granted_mailbox_with_telemetry_off() {
             std::thread::sleep(std::time::Duration::from_millis(50));
             socket.exists()
         }),
-        "the host service bound its socket"
+        "the host service bound its socket; stderr:\n{}",
+        process.stderr()
     );
 
     let mut idle = spawn_collector_only(
@@ -946,5 +984,5 @@ fn the_per_vm_process_serves_a_granted_mailbox_with_telemetry_off() {
             "redaction": mvm_core::policy::RedactionPolicy::default(),
         }}),
     );
-    assert!(!idle.0.wait().unwrap().success(), "nothing to serve");
+    assert!(!idle.exit().success(), "nothing to serve");
 }

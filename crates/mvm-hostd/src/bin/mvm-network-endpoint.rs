@@ -265,13 +265,17 @@ fn run_telemetry_only(only: mvm_hostd::telemetry_collector::TelemetryOnlyConfig)
             .map(|t| &t.state_dir)
             .or(only.mailbox.as_ref().map(|m| &m.state_dir))
             .context("collector-only config has no state dir")?;
-        let spec = ConfinementSpec::telemetry_collector(
+        let mut spec = ConfinementSpec::telemetry_collector(
             state_dir,
             only.telemetry
                 .as_ref()
                 .and_then(|t| t.telemetry_sock.parent()),
             mvm_core::config::mvm_keys_dir(),
         );
+        if let Some(mailbox) = &only.mailbox {
+            spec = spec
+                .with_mailbox_socket_dir(&mvm_core::config::vm_socket_dir_at(&mailbox.state_dir));
+        }
         confine_self(&spec).context("confine the telemetry collector")?;
         info!("telemetry collector self-confined (landlock + seccomp)");
     }
