@@ -433,7 +433,12 @@ mod collector_only_tests {
             let _ = done_rx.recv();
             line
         });
-        let stream = dial_guest_telemetry(&dir.path().join("absent.sock"), &mux).unwrap();
+        let stream = dial_guest_port(
+            &dir.path().join("absent.sock"),
+            &mux,
+            mvm_core::protocol::telemetry::TELEMETRY_PORT,
+        )
+        .unwrap();
         let timeout = stream.read_timeout().unwrap();
         drop(done_tx);
         assert_eq!(
@@ -447,7 +452,7 @@ mod collector_only_tests {
 
         // With neither socket there is nothing to dial.
         assert!(
-            dial_guest_telemetry(&dir.path().join("a.sock"), &dir.path().join("b.sock")).is_err()
+            dial_guest_port(&dir.path().join("a.sock"), &dir.path().join("b.sock"), 0).is_err()
         );
     }
 }
@@ -928,23 +933,24 @@ fn write_status(path: &std::path::Path, snapshot: &CollectorStatusSnapshot) {
 /// The worker retries on its own backoff, so this bounds one attempt only.
 const MUX_CONNECT_TIMEOUT_SECS: u64 = 5;
 
-/// Dial the guest's telemetry listener. A VMM that bridges host-dialed ports
+/// Dial a guest listener on `port`. A VMM that bridges host-dialed ports
 /// (HVF, libkrun) exposes it as a per-port socket; Firecracker does not, and
 /// is reached through its vsock mux with the `CONNECT <port>` handshake.
-fn dial_guest_telemetry(
+pub(crate) fn dial_guest_port(
     per_port: &std::path::Path,
     firecracker_mux: &std::path::Path,
+    port: u32,
 ) -> std::io::Result<std::os::unix::net::UnixStream> {
     match std::os::unix::net::UnixStream::connect(per_port) {
         Ok(stream) => Ok(stream),
         Err(_) if firecracker_mux.exists() => {
             let stream = mvm_agentd::vsock::connect_to_port_once(
                 &firecracker_mux.to_string_lossy(),
-                mvm_core::protocol::telemetry::TELEMETRY_PORT,
+                port,
                 MUX_CONNECT_TIMEOUT_SECS,
             )
             .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
-            // The handshake's timeouts bounded the dial. A telemetry session
+            // The handshake's timeouts bounded the dial. A session
             // is long and often quiet; left in place they would end it, and
             // re-announce it, every few idle seconds.
             stream.set_read_timeout(None)?;
@@ -1123,7 +1129,13 @@ pub fn start_embedded(
     let firecracker_mux = PathBuf::from(mvm_agentd::vsock::vsock_uds_path(
         &config.state_dir.to_string_lossy(),
     ));
-    let connector = move || dial_guest_telemetry(&telemetry_sock, &firecracker_mux);
+    let connector = move || {
+        dial_guest_port(
+            &telemetry_sock,
+            &firecracker_mux,
+            mvm_core::protocol::telemetry::TELEMETRY_PORT,
+        )
+    };
 
     let signer_sock = config.signer_sock.clone();
     let signer = move |hello: &mvm_core::security::SessionHello,

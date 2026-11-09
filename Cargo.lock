@@ -3827,6 +3827,7 @@ dependencies = [
  "mvm-compiler",
  "mvm-contract",
  "mvm-core",
+ "mvm-vmm",
  "serde",
  "serde_json",
  "sha2 0.11.0",

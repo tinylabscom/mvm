@@ -236,8 +236,15 @@ boots a Nix-built slot and its exported environment has no pack policy, secret
 slots, volumes or capabilities. Authenticated runtime-layer metadata and
 external archive and declared policy bytes can be verified in source, and
 authenticated dependency pins can be ordered with cycle, architecture,
-digest, duplicate-name and revocation checks. The CLI still refuses to pull a layer and the
-installed-pack reader refuses it. A signed base tar can be fetched separately
+digest, duplicate-name and revocation checks. A build-only acquisition API now
+accepts an exact caller-supplied pin, publisher-authenticates the descriptor,
+requires fresh revocations, and holds the signed archive and policy bytes in
+private snapshots. Its first remote transport accepts only mvm-packs HTTPS
+GitHub release assets; the signed digest, not the release URL, makes their
+contents immutable to the builder. OCI and other HTTPS origins fail closed until a
+separately reviewed transport exists. It neither freezes a v2 CLI lock nor
+installs an image: `pack registry pull` and the installed-pack reader still
+refuse a runtime layer. A signed base tar can be fetched separately
 from the boot artifacts and merged with runtime archives in order without
 replacing base-owned files, retaining tar ownership under one aggregate size
 and entry budget. A digest-bound application archive can be added under

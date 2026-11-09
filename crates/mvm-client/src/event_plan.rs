@@ -18,6 +18,7 @@ pub fn build_event_plan(
     image_sha256: &str,
 ) -> Result<ExecutionPlan> {
     let input = SynthesisInput {
+        mailbox: None,
         outputs: Vec::new(),
         grants: None,
         stream_edges: Vec::new(),

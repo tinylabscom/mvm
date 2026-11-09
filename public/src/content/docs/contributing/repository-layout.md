@@ -25,6 +25,8 @@ change.
 | `AGENTS.md`, `CLAUDE.md`, `*.sigstore.json` | Contributor and agent instructions with detached signatures. | contributors, CI |
 | `Justfile`, `just/` | Recipe entry point and per-area modules (`check`, `tests`, `lints`, `payload`, `release`, ...). | contributors, CI |
 | `scripts/`, `bin/` | Shell and Python helpers used by recipes and workflows; `bin/dev` runs this checkout's `mvmctl`. | `Justfile`, workflows, tests |
+| `.envrc.example` | Optional worktree-local direnv template; sources `scripts/dev-env.sh` when present. | contributors using direnv |
+| `.gitignore` | Keeps local caches, generated outputs, secrets and editor state out of tracked source. | git, contributors |
 | `nix/` | Nix library, packages, packaging and host operations. See below. | `flake.nix`, workflows, `mvm-build` |
 | `flake.nix`, `flake.lock` | The contributor dev shell. The library flake that workload flakes import is `nix/flake.nix`. | `nix develop` |
 | `public/` | The documentation site. | `website.yml` |
@@ -33,6 +35,18 @@ change.
 | `.cargo/`, `.config/`, `.githooks/`, `.github/` | Cargo config and guest target specs, nextest config, pre-commit hook, CI. | cargo, nextest, git, GitHub |
 | `deny.toml`, `rust-toolchain.toml`, `treefmt.toml`, `cliff.toml` | Dependency policy, pinned toolchain, formatting, changelog generation. | cargo-deny, rustup, treefmt, git-cliff |
 | `README.md`, `CHANGELOG.md`, `SECURITY.md`, `LICENSE` | Project front matter. | GitHub, release workflow |
+
+## Verified root cleanup
+
+The root allow-list guards the remaining entries; it is not a reason to move
+live inputs merely to make the root shorter. [#5010](https://github.com/tinylabscom/mvm/pull/5010)
+reduced `specs/` from 372 tracked files to 87, moved the live conformance
+document to `model/`, and retired `docs/` (one obsolete guide removed, one
+document moved). [#5059](https://github.com/tinylabscom/mvm/pull/5059) removed
+three tracked agent-episode notes and one editor setting, keeping future local
+state untracked. Those are measured removals; the remaining `nix/` package
+ownership is deliberately unresolved until the image migration and release
+gates in #4100 and #4764 are satisfied.
 
 ## `third_party/` versus `crates/deps/`
 

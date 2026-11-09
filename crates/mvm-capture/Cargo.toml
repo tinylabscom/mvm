@@ -14,6 +14,8 @@ authors.workspace = true
 mvm-contract = { workspace = true, default-features = false }
 # The host-helper environment filter every tool spawn goes through.
 mvm-core.workspace = true
+# `HostProcess`/`CliSpawn`: the embedder refusal every CLI-running path shares.
+mvm-vmm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

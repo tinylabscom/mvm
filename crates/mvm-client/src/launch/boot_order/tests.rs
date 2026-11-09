@@ -41,6 +41,7 @@ impl Host {
         let keys = self.dir.path().join("keys");
         let audit = self.dir.path().join("audit");
         admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-boot-order",
             cpus: 1,
             mem_mib: 256,

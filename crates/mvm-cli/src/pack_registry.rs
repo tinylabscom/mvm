@@ -124,7 +124,7 @@ pub fn acquire_runtime_layer(
     layer.check_current_revocations()?;
     let source = &layer.manifest().runtime_layer.archive;
     if !supported_runtime_layer_source(&source.source) {
-        bail!("runtime layer source is not a supported immutable HTTPS release asset");
+        bail!("runtime layer source is not a supported pinned HTTPS release asset");
     }
     for file in &layer.manifest().files {
         let target = fetched.staged_path().join(&file.path);

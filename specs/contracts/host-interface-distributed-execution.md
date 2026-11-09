@@ -480,6 +480,13 @@ replacement with chain-signed entries, the signed offline lease, the command
 replay gate, the reconnect challenge, and the sealed mailbox envelope with its
 capability, replay and execution-epoch checks.
 
+Mailbox encryption is host to host: a guest's outbox carries plaintext and a
+recipient, and the host service seals and signs it under keys the host holds,
+so the host sees the plaintext and a compromised host agent can read messages.
+Guest-to-guest or host-blind delivery would need hardware-backed attestation
+(key release only to an attested guest), a separate high-assurance track that
+is not built.
+
 Mailbox delivery is real on one host: the sender's sealed envelope crosses a
 Unix domain socket to the receiving node's `MailboxService`
 (`mvm-hostd::mailbox_service`), which opens it and enqueues it under a bounded

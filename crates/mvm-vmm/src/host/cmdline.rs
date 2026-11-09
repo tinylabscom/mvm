@@ -23,8 +23,9 @@ use mvm_core::vm_backend::VmStartConfig;
 use crate::host::boot_config::booted_with_universal_initramfs;
 use crate::host::boot_config::non_verity_overlay_ext4;
 use crate::host::egress_bridge::{
-    host_signer_pub_cmdline_token, profile_cmdline_token, require_grant_cmdline_token,
-    seccomp_cmdline_token, telemetry_cmdline_token, verb_grant_cmdline_token,
+    host_signer_pub_cmdline_token, mailbox_cmdline_token, profile_cmdline_token,
+    require_grant_cmdline_token, seccomp_cmdline_token, telemetry_cmdline_token,
+    verb_grant_cmdline_token,
 };
 
 /// Bytes the guest kernel reserves for its command line (`COMMAND_LINE_SIZE`,
@@ -161,6 +162,7 @@ fn workload_cmdline_for_hostname(
         host_signer_pub_cmdline_token(&config.name),
         telemetry_cmdline_token(&config.name),
         seccomp_cmdline_token(config),
+        mailbox_cmdline_token(config),
         profile_cmdline_token(config),
     ]
     .into_iter()
@@ -527,6 +529,41 @@ mod tests {
             plan_json: Some(serde_json::to_string(&plan).expect("plan serializes")),
             ..Default::default()
         }
+    }
+
+    /// A mailbox grant asserts the listener and nothing else: no grant, no
+    /// token, and the seccomp tier is the same either way.
+    #[test]
+    fn workload_cmdline_asserts_a_mailbox_only_for_a_granted_plan() {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        let dir = tempfile::tempdir().unwrap();
+        let build = |grant: Option<MailboxGrant>| {
+            let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+            plan.mailbox = grant;
+            let config = VmStartConfig {
+                name: "vm-test".to_string(),
+                plan_json: Some(serde_json::to_string(&plan).unwrap()),
+                ..Default::default()
+            };
+            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline")
+        };
+        let granted = build(Some(MailboxGrant {
+            mailbox: MailboxId::from_bytes([1; 32]),
+            authority_key: [2; 32],
+            epoch: ExecutionEpoch::new(1).unwrap(),
+        }));
+        let absent = build(None);
+        let tokens = |c: &str| c.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        assert!(tokens(&granted).contains(&"mvm.mailbox=1".to_string()));
+        assert!(!absent.contains("mvm.mailbox"), "{absent}");
+        assert_eq!(
+            tokens(&granted)
+                .into_iter()
+                .filter(|t| t != "mvm.mailbox=1")
+                .collect::<Vec<_>>(),
+            tokens(&absent),
+            "the grant changes the cmdline by exactly one token"
+        );
     }
 
     /// The guest applies the admitted tier to every workload process, and the

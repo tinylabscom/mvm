@@ -156,6 +156,7 @@ mod policy_audit_admission_tests {
         let sha = mvm_core::crypto::image_verify::sha256_file(rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),

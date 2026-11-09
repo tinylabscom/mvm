@@ -4643,3 +4643,13 @@ fn an_attached_entrypoint_infers_no_boot_source() {
     let transient = parse_run(&["run", "--", "true"]).expect("transient run parses");
     assert_eq!(transient.source_inference(), Inference::Enabled);
 }
+
+#[test]
+fn a_mailbox_id_is_accepted_on_run_and_absent_by_default() {
+    let id = "ab".repeat(32);
+    let run =
+        parse_run(&["run", "--image", "alpine", "--mailbox", &id]).expect("run accepts --mailbox");
+    assert_eq!(run.run.mailbox.as_deref(), Some(id.as_str()));
+    let plain = parse_run(&["run", "--image", "alpine"]).expect("plain run parses");
+    assert!(plain.run.mailbox.is_none());
+}

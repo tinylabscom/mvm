@@ -32,6 +32,8 @@ mod health;
 mod init;
 #[path = "mvm-guest-agent/interactive.rs"]
 mod interactive;
+#[path = "mvm-guest-agent/mailbox.rs"]
+mod mailbox;
 #[path = "mvm-guest-agent/monitoring.rs"]
 mod monitoring;
 #[path = "mvm-guest-agent/port_forward.rs"]
@@ -1233,6 +1235,7 @@ fn main() {
         // readiness already served by the control plane above and never
         // waiting on either.
         telemetry::init_telemetry();
+        mailbox::init_mailbox();
     }
 
     // Port forwarders are started on-demand via StartPortForward requests
