@@ -537,6 +537,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
 
     EndpointConfig {
         telemetry: None,
+        mailbox: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![SecretBinding {
