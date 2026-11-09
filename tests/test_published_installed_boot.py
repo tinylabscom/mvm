@@ -307,5 +307,38 @@ class BootEvidenceTests(unittest.TestCase):
                     self.aggregate()
 
 
+class SmokeEnvironmentTests(unittest.TestCase):
+    """Which lanes skip the installer's bootstrap and boot cold."""
+
+    def env(self, target, environ=None):
+        return boot.smoke_env(target, environ or {}, Path("/out"), Path("/out/home.txt"))
+
+    def test_macos_boots_cold_because_its_archive_carries_everything_it_needs(self):
+        self.assertEqual(self.env("aarch64-apple-darwin")["MVM_SMOKE_COLD_FIRST"], "1")
+
+    def test_linux_runs_the_default_install_because_firecracker_comes_from_bootstrap(self):
+        self.assertNotIn("MVM_SMOKE_COLD_FIRST", self.env("x86_64-unknown-linux-gnu"))
+
+    def test_an_inherited_cold_first_knob_cannot_reach_the_linux_lane(self):
+        env = self.env("x86_64-unknown-linux-gnu",
+                       {"MVM_SMOKE_COLD_FIRST": "1", "MVM_SMOKE_ARCHIVE": "/x", "PATH": "/bin"})
+        self.assertNotIn("MVM_SMOKE_COLD_FIRST", env)
+        self.assertNotIn("MVM_SMOKE_ARCHIVE", env)
+        self.assertEqual(env["PATH"], "/bin")
+
+    def test_every_lane_keeps_its_state_and_output_locations(self):
+        for target in boot.LANES:
+            env = self.env(target)
+            self.assertEqual(env["MVM_SMOKE_KEEP"], "1")
+            self.assertEqual(env["MVM_SMOKE_OUT"], "/out/smoke")
+            self.assertEqual(env["MVM_SMOKE_STATE_FILE"], "/out/home.txt")
+
+    def test_the_diagnostic_workflow_step_is_cold_first_only_on_macos(self):
+        text = (Path(__file__).resolve().parents[1]
+                / ".github/workflows/first-run-smoke.yml").read_text()
+        self.assertIn("MVM_SMOKE_COLD_FIRST: ${{ runner.os == 'macOS' && '1' || '' }}", text)
+        self.assertNotIn('MVM_SMOKE_COLD_FIRST: "1"', text)
+
+
 if __name__ == "__main__":
     unittest.main()

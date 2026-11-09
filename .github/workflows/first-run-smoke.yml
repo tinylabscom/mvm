@@ -101,7 +101,9 @@ jobs:
         env:
           TAG_NAME: ${{ inputs.tag }}
           MVM_SMOKE_OUT: ${{ runner.temp }}/first-run
-          MVM_SMOKE_COLD_FIRST: "1"
+          # Cold only where the archive carries everything the backend needs;
+          # Linux installs Firecracker through the installer's bootstrap.
+          MVM_SMOKE_COLD_FIRST: ${{ runner.os == 'macOS' && '1' || '' }}
         run: sh scripts/smoke-fresh-install.sh "${TAG_NAME}"
 
       - name: Upload successful installed boot lane

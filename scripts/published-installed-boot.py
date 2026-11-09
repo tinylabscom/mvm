@@ -25,6 +25,11 @@ LANES = {
 WORKFLOW = ".github/workflows/release.yml"
 BOOT_CHECKS = [{"name": name, "result": "success"} for name in
                ("cold", "cache-reuse", "sdk-sidecar", "egress")]
+# A first run with the installer's bootstrap skipped is a fair witness only
+# where the release archive carries everything the backend needs. HVF does.
+# Firecracker is not in the archive: `mvmctl bootstrap` installs it, so the
+# Linux lane runs the installer as a user does, bootstrap included.
+COLD_FIRST_TARGETS = frozenset({"aarch64-apple-darwin"})
 
 
 def require(condition, message):
@@ -190,6 +195,17 @@ def boot_checks(directory):
     return checks
 
 
+def smoke_env(target, environ, out, state_file):
+    """The environment of one lane's smoke run."""
+    # No archive shortcut or inherited runtime overrides can enter this witness.
+    env = {k: v for k, v in environ.items() if not k.startswith("MVM_")}
+    env.update(MVM_SMOKE_KEEP="1", MVM_SMOKE_OUT=str(out / "smoke"),
+               MVM_SMOKE_STATE_FILE=str(state_file))
+    if target in COLD_FIRST_TARGETS:
+        env["MVM_SMOKE_COLD_FIRST"] = "1"
+    return env
+
+
 def lane(args):
     report = identity(args.tag)
     arch, backend, system, machine = LANES[args.target]
@@ -197,12 +213,8 @@ def lane(args):
     args.out.mkdir(parents=True, exist_ok=False)
     assets_dir = args.out / "authenticated"
     assets = authenticate(assets_dir, args.tag, [args.target])
-    # No archive shortcut or inherited runtime overrides can enter this witness.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("MVM_")}
     state_file = args.out / "smoke-home.txt"
-    env.update(MVM_SMOKE_KEEP="1", MVM_SMOKE_COLD_FIRST="1",
-               MVM_SMOKE_OUT=str(args.out / "smoke"),
-               MVM_SMOKE_STATE_FILE=str(state_file))
+    env = smoke_env(args.target, os.environ, args.out, state_file)
     transcript = args.out / "smoke/transcript.log"
     # Deletion authority comes only from this wrapper-created root, NEVER the
     # state file. A corrupted state cannot nominate another smoke for cleanup.
