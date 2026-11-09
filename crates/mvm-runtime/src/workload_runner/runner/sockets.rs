@@ -22,6 +22,9 @@ pub(super) struct StandingSockets {
     /// Host GPU endpoint socket, present only when the launch asked for the
     /// GPU remoting plane (`VmStartConfig.gpu`).
     pub(super) gpu: Option<PathBuf>,
+    /// Guest mailbox socket, present only when the admitted plan grants a
+    /// mailbox (the same predicate that puts `mvm.mailbox=1` on the cmdline).
+    pub(super) mailbox: Option<PathBuf>,
     pub(super) console_log: PathBuf,
     /// Per-port UDS for the interactive console data range. Non-empty only when
     /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
@@ -42,6 +45,7 @@ impl StandingSockets {
             broker: self.broker.as_deref(),
             display: self.display.as_deref(),
             gpu: self.gpu.as_deref(),
+            mailbox: self.mailbox.as_deref(),
             console_data: self.console_data.clone(),
         }
     }
@@ -73,6 +77,12 @@ pub(super) fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> Stan
         // for it or the channel simply does not exist.
         gpu: config.gpu.then(|| {
             mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::GPU_PORT)
+        }),
+        mailbox: mvm_vmm::host::egress_bridge::mailbox_cmdline_token(config).map(|_| {
+            mvm_core::config::vm_hvf_vsock_port_socket_at(
+                state_dir,
+                mvm_net::channel::GuestService::Mailbox.port(),
+            )
         }),
         console_log: state_dir.join("console.log"),
         console_data: console_data_sockets(state_dir, config.dev_console),
@@ -106,6 +116,43 @@ mod tests {
             mvm_core::config::vm_hvf_vsock_port_socket_at(
                 state_dir,
                 GuestService::Telemetry.port()
+            )
+        );
+    }
+
+    #[test]
+    fn the_mailbox_channel_is_host_dialed_and_present_only_when_granted() {
+        let state_dir = Path::new("/state/mailbox-vm");
+        let none = standing_sockets(state_dir, &VmStartConfig::default());
+        assert!(none.mailbox.is_none());
+        assert!(
+            workload_vsock_ports(&none.with_egress(None))
+                .iter()
+                .all(|p| p.service != GuestService::Mailbox)
+        );
+
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(mvm_contract::protocol::mailbox::MailboxGrant {
+            mailbox: mvm_contract::protocol::mailbox::MailboxId::from_bytes([4; 32]),
+            authority_key: [0; 32],
+            epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(1).unwrap(),
+        });
+        let config = VmStartConfig {
+            plan_json: Some(serde_json::to_string(&plan).unwrap()),
+            ..VmStartConfig::default()
+        };
+        let granted = standing_sockets(state_dir, &config);
+        let ports = workload_vsock_ports(&granted.with_egress(None));
+        let mailbox = ports
+            .iter()
+            .find(|p| p.service == GuestService::Mailbox)
+            .expect("mailbox channel");
+        assert_eq!(mailbox.direction, crate::driver::VsockDirection::HostDials);
+        assert_eq!(
+            mailbox.host_uds,
+            mvm_core::config::vm_hvf_vsock_port_socket_at(
+                state_dir,
+                mvm_contract::protocol::mailbox::MAILBOX_PORT
             )
         );
     }
