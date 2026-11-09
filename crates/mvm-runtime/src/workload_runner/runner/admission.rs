@@ -29,6 +29,16 @@ pub(super) fn admitted_ingress(
     Ok(plan.map_or_else(Vec::new, |plan| plan.ingress))
 }
 
+pub(super) fn admitted_mailbox(
+    plan_json: Option<&str>,
+) -> Result<Option<mvm_contract::protocol::mailbox::MailboxGrant>> {
+    plan_json
+        .map(mvm_core::plan::plan_from_admitted_json)
+        .transpose()
+        .context("parse admitted plan mailbox grant")
+        .map(|plan| plan.and_then(|plan| plan.mailbox))
+}
+
 pub(super) fn admitted_tool_rules(
     plan_json: Option<&str>,
 ) -> Result<mvm_contract::policy::tool_rules::ToolRules> {

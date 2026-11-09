@@ -691,7 +691,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
     let (plan, trust) = plan_and_trust(&channel, false);
     let sealer_for = || sealer(&channel, &ops);
     let none = serve_granted_guest(
-        &plan,
+        plan.mailbox.as_ref(),
         trust,
         sealer_for(),
         LIMITS,
@@ -709,7 +709,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
     let (mut plan, trust) = plan_and_trust(&channel, true);
     plan.mailbox.as_mut().unwrap().authority_key = [1; 32];
     let refused = serve_granted_guest(
-        &plan,
+        plan.mailbox.as_ref(),
         trust,
         sealer_for(),
         LIMITS,
@@ -726,7 +726,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
     });
     let (plan, trust) = plan_and_trust(&channel, true);
     let service = serve_granted_guest(
-        &plan,
+        plan.mailbox.as_ref(),
         trust,
         sealer_for(),
         LIMITS,
@@ -833,7 +833,11 @@ fn the_launch_helper_serves_a_granted_plan_and_builds_nothing_without_one() {
 
     let mut plain = mvm_core::plan::test_support::PlanFixture::new().build();
     plain.mailbox = None;
-    assert!(start_for_launch(&plain, paths(), LIMITS).unwrap().is_none());
+    assert!(
+        start_for_launch(plain.mailbox, paths(), LIMITS)
+            .unwrap()
+            .is_none()
+    );
     assert!(!dir.path().join("mailbox.sock").exists());
     assert!(listener.accept().is_err(), "no grant, nothing dialed");
 
@@ -846,7 +850,9 @@ fn the_launch_helper_serves_a_granted_plan_and_builds_nothing_without_one() {
         let (mut stream, _) = listener.accept().unwrap();
         mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox)
     });
-    let launch = start_for_launch(&plan, paths(), LIMITS).unwrap().unwrap();
+    let launch = start_for_launch(plan.mailbox, paths(), LIMITS)
+        .unwrap()
+        .unwrap();
     assert_eq!(guest.join().unwrap(), Ok(()));
     let received = (0..100).find_map(|_| {
         launch.receive().or_else(|| {
@@ -855,4 +861,128 @@ fn the_launch_helper_serves_a_granted_plan_and_builds_nothing_without_one() {
         })
     });
     assert_eq!(received.unwrap(), b"hello");
+}
+
+struct KillOnDrop(std::process::Child, std::path::PathBuf);
+
+impl KillOnDrop {
+    fn stderr(&self) -> String {
+        std::fs::read_to_string(&self.1).unwrap_or_default()
+    }
+
+    /// Accept one connection within 20s, or fail with the child's stderr.
+    fn accept(
+        &mut self,
+        listener: &std::os::unix::net::UnixListener,
+    ) -> std::os::unix::net::UnixStream {
+        listener.set_nonblocking(true).unwrap();
+        for _ in 0..400 {
+            if let Ok((stream, _)) = listener.accept() {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the process never dialed; stderr:\n{}", self.stderr());
+    }
+
+    /// Wait for exit within 20s, or fail with the child's stderr.
+    fn exit(&mut self) -> std::process::ExitStatus {
+        for _ in 0..400 {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                return status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the process never exited; stderr:\n{}", self.stderr());
+    }
+}
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn spawn_collector_only(home: &std::path::Path, config: serde_json::Value) -> KillOnDrop {
+    use std::io::Write;
+    let (log_file, log) = tempfile::NamedTempFile::new_in(home.parent().unwrap())
+        .unwrap()
+        .keep()
+        .unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_mvm-network-endpoint"))
+        .env("MVM_HOME", home)
+        .env("HOME", home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(log_file)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(config.to_string().as_bytes()).unwrap();
+    KillOnDrop(child, log)
+}
+
+/// The per-VM process a launch spawns, handed only the signed grant and the
+/// VM's state dir, serves that guest's mailbox from the host key directory
+/// with telemetry off; given no mailbox and no telemetry it refuses to run.
+#[test]
+fn the_per_vm_process_serves_a_granted_mailbox_with_telemetry_off() {
+    use std::os::unix::net::UnixListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let keys = mvm_core::config::mvm_keys_dir_at(&home);
+    std::fs::create_dir_all(&keys).unwrap();
+    host_keys(&keys, 5);
+    let state_dir = dir.path().join("vm");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let port = mvm_core::config::vm_hvf_vsock_port_socket_at(
+        &state_dir,
+        mvm_contract::protocol::mailbox::MAILBOX_PORT,
+    );
+    std::fs::create_dir_all(port.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(&port).unwrap();
+
+    let authority = mvm_hostd::mailbox_launch::authority_key_for(&keys, &address().mailbox)
+        .unwrap()
+        .to_bytes();
+    let grant = granted_plan(authority).mailbox.unwrap();
+    let embed = mvm_hostd::mailbox_launch::MailboxEmbed {
+        grant,
+        state_dir: state_dir.clone(),
+    };
+    let outbox = dir.path().join("outbox");
+    std::fs::write(&outbox, outbox_message().encode()).unwrap();
+    let mut process = spawn_collector_only(
+        &home,
+        serde_json::json!({"telemetry_only": {
+            "instance_id": "vm",
+            "redaction": mvm_core::policy::RedactionPolicy::default(),
+            "mailbox": embed,
+        }}),
+    );
+    let mut stream = process.accept(&listener);
+    assert_eq!(
+        mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox),
+        Ok(())
+    );
+    let socket = mvm_core::config::vm_mailbox_socket_at(&state_dir);
+    assert!(
+        (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            socket.exists()
+        }),
+        "the host service bound its socket; stderr:\n{}",
+        process.stderr()
+    );
+
+    let mut idle = spawn_collector_only(
+        &home,
+        serde_json::json!({"telemetry_only": {
+            "instance_id": "vm",
+            "redaction": mvm_core::policy::RedactionPolicy::default(),
+        }}),
+    );
+    assert!(!idle.exit().success(), "nothing to serve");
 }

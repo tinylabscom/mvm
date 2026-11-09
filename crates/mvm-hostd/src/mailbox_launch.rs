@@ -26,7 +26,6 @@ use mvm_contract::protocol::mailbox::{
 };
 use mvm_core::crypto::aead::Key;
 use mvm_core::mailbox::OpenContext;
-use mvm_core::plan::ExecutionPlan;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -290,24 +289,23 @@ pub struct MailboxPaths {
     pub firecracker_mux: PathBuf,
 }
 
-/// Serve the guest mailbox for a launch, only when the signed plan grants one.
+/// Serve the guest mailbox for a launch, only when the signed plan's `grant` is present.
 /// Returns at once: no grant yields `None` with nothing built or dialed; a
 /// grant builds the host trust now (so a bad key or template is refused here)
 /// and dials the guest from its own thread, waiting up to 30 s for the guest
 /// to listen.
 pub fn start_for_launch(
-    plan: &ExecutionPlan,
+    grant: Option<MailboxGrant>,
     paths: MailboxPaths,
     limits: MailboxLimits,
 ) -> Result<Option<MailboxLaunch>> {
-    let Some(grant) = plan.mailbox else {
+    let Some(grant) = grant else {
         return Ok(None);
     };
     let mut first = Some(host_trust(&paths.keys_dir, &grant)?);
     let stop = Arc::new(AtomicBool::new(false));
     let service = Arc::new(OnceLock::new());
     let (thread_stop, thread_service) = (stop.clone(), service.clone());
-    let plan = plan.clone();
     std::thread::spawn(move || {
         for _ in 0..DIAL_ATTEMPTS {
             if thread_stop.load(Ordering::SeqCst) {
@@ -320,7 +318,7 @@ pub fn start_for_launch(
                 return;
             };
             let guest = (paths.guest_port.as_path(), paths.firecracker_mux.as_path());
-            match serve_granted_guest(&plan, trust, sealer, limits, &paths.socket, guest) {
+            match serve_granted_guest(Some(&grant), trust, sealer, limits, &paths.socket, guest) {
                 Ok(served) => {
                     if let Some(served) = served {
                         let _ = thread_service.set(served);
@@ -332,6 +330,44 @@ pub fn start_for_launch(
         }
     });
     Ok(Some(MailboxLaunch { stop, service }))
+}
+
+/// Bounds a launch-time mailbox holds and accepts.
+pub const LAUNCH_LIMITS: MailboxLimits = MailboxLimits {
+    max_depth: 64,
+    max_frame_bytes: 64 * 1024,
+};
+
+/// What the per-VM process that serves a guest's mailbox is handed: the signed
+/// plan's grant and the VM's state dir. Every path is derived from those and
+/// the host key directory, so nothing else crosses the process boundary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxEmbed {
+    pub grant: MailboxGrant,
+    pub state_dir: PathBuf,
+}
+
+impl MailboxEmbed {
+    fn paths(&self) -> MailboxPaths {
+        let port = mvm_core::config::vm_hvf_vsock_port_socket_at(
+            &self.state_dir,
+            mvm_contract::protocol::mailbox::MAILBOX_PORT,
+        );
+        MailboxPaths {
+            keys_dir: mvm_core::config::mvm_keys_dir(),
+            socket: mvm_core::config::vm_mailbox_socket_at(&self.state_dir),
+            guest_port: port,
+            firecracker_mux: mvm_agentd::vsock::vsock_uds_path(&self.state_dir.to_string_lossy())
+                .into(),
+        }
+    }
+
+    /// Start serving this VM's mailbox on its own thread; never waits on the guest.
+    pub fn start(&self) -> Result<MailboxLaunch> {
+        start_for_launch(Some(self.grant), self.paths(), LAUNCH_LIMITS)?
+            .ok_or_else(|| Error::other("mailbox grant vanished"))
+    }
 }
 
 #[cfg(test)]
@@ -402,7 +438,6 @@ mod tests {
     #[test]
     fn an_ungranted_plan_builds_and_dials_nothing() {
         let dir = keys_dir();
-        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
         let paths = MailboxPaths {
             keys_dir: dir.path().to_path_buf(),
             socket: dir.path().join("m.sock"),
@@ -413,7 +448,7 @@ mod tests {
             max_depth: 4,
             max_frame_bytes: 1024,
         };
-        assert!(start_for_launch(&plan, paths, limits).unwrap().is_none());
+        assert!(start_for_launch(None, paths, limits).unwrap().is_none());
         assert!(!dir.path().join("m.sock").exists());
     }
 }

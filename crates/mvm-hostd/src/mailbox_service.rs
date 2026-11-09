@@ -31,7 +31,6 @@ use mvm_core::mailbox::{
     InMemoryReplayProtector, OpenContext, SealRequest, open_envelope, seal_envelope,
     sign_capability,
 };
-use mvm_core::plan::ExecutionPlan;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -131,18 +130,18 @@ impl GuestSealer {
 }
 
 /// Launch-path entry: serve the guest's mailbox port only when the signed
-/// `plan` carries a grant. No grant means no socket bound, no dial, and
+/// plan's `grant` is present. No grant means no socket bound, no dial, and
 /// `None`; a grant yields the service holding whatever the guest sent, sealed
 /// by `sealer` and opened under `trust`, both host-held.
 pub fn serve_granted_guest(
-    plan: &ExecutionPlan,
+    grant: Option<&MailboxGrant>,
     trust: MailboxPolicy,
     sealer: GuestSealer,
     limits: MailboxLimits,
     socket: &Path,
     guest: (&Path, &Path),
 ) -> std::io::Result<Option<MailboxService>> {
-    let Some(grant) = &plan.mailbox else {
+    let Some(grant) = grant else {
         return Ok(None);
     };
     let mut sealer = sealer.with_grant(grant)?;

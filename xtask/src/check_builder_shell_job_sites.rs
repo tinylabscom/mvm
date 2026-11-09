@@ -20,13 +20,10 @@ use regex::Regex;
 use std::path::{Path, PathBuf};
 
 /// Source files allowed to construct a legacy builder shell-job request.
-/// Host-side dispatch: `persistent_builder.rs` (dev_build) and
-/// `pipeline/vsock_builder.rs` (pool_build) — the two WS-D will route through
-/// `BuilderdClient`. Protocol-definition + guest-agent files carry the type
+/// Host-side dispatch: `persistent_builder.rs` (dev_build). Protocol-definition + guest-agent files carry the type
 /// and its tests.
 const ALLOWLIST: &[&str] = &[
     "crates/mvm-build/src/persistent_builder.rs",
-    "crates/mvm-build/src/pipeline/vsock_builder.rs",
     "crates/mvm-builder-guest/src/builder_protocol.rs",
     "crates/mvm-agentd/src/builder_agent.rs",
 ];
@@ -151,15 +148,14 @@ mod tests {
 
     #[test]
     fn removed_dispatch_site_is_stale() {
-        // WS-D routed vsock_builder.rs through BuilderdClient → it stops matching.
+        // A dispatch site that stops matching is reported as stale.
         let hits = vec![
-            "crates/mvm-build/src/persistent_builder.rs".to_string(),
             "crates/mvm-builder-guest/src/builder_protocol.rs".to_string(),
             "crates/mvm-agentd/src/builder_agent.rs".to_string(),
         ];
         assert_eq!(
             stale(&hits, ALLOWLIST),
-            vec!["crates/mvm-build/src/pipeline/vsock_builder.rs"]
+            vec!["crates/mvm-build/src/persistent_builder.rs"]
         );
     }
 
