@@ -111,7 +111,7 @@ fn require_offline_group(bytes: &[u8]) -> Result<()> {
     let group: GroupFile =
         toml::from_str(text).map_err(|_| anyhow::anyhow!("invalid signed runtime group"))?;
     ensure!(
-        !group.required
+        group.required
             && group.network
                 == NetworkSection {
                     block: Some(true),
@@ -315,17 +315,19 @@ mod runtime_layer_tests {
     #[test]
     fn first_runtime_policy_is_closed_and_does_not_drop_requests() {
         require_offline_group(
-            b"description = 'Offline Python runtime'\nrequired = false\n[network]\nblock = true\n",
+            b"description = 'Offline Python runtime'\nrequired = true\n[network]\nblock = true\n",
         )
         .unwrap();
         for document in [
-            b"[network]\nallow = ['pypi.org:443']\n".as_slice(),
-            b"[network]\nblock = false\n".as_slice(),
-            b"[network]\nblock = true\nallow = ['pypi.org:443']\n".as_slice(),
-            b"[[secrets.bind]]\nname = 'token'\n[network]\nblock = true\n".as_slice(),
-            b"[[shares.mount]]\nhost = '.'\nguest = '/work'\n[network]\nblock = true\n".as_slice(),
-            b"[network]\nblock = true\n[resources]\nmax_cpus = 2\n".as_slice(),
-            b"[network]\nblock = true\nnet = true\n".as_slice(),
+            b"[network]\nblock = true\n".as_slice(),
+            b"required = false\n[network]\nblock = true\n".as_slice(),
+            b"required = true\n[network]\nallow = ['pypi.org:443']\n".as_slice(),
+            b"required = true\n[network]\nblock = false\n".as_slice(),
+            b"required = true\n[network]\nblock = true\nallow = ['pypi.org:443']\n".as_slice(),
+            b"required = true\n[[secrets.bind]]\nname = 'token'\n[network]\nblock = true\n".as_slice(),
+            b"required = true\n[[shares.mount]]\nhost = '.'\nguest = '/work'\n[network]\nblock = true\n".as_slice(),
+            b"required = true\n[network]\nblock = true\n[resources]\nmax_cpus = 2\n".as_slice(),
+            b"required = true\n[network]\nblock = true\nnet = true\n".as_slice(),
         ] {
             assert!(require_offline_group(document).is_err(), "{document:?}");
         }

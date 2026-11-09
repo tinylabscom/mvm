@@ -244,7 +244,7 @@ GitHub release assets; the signed digest, not the release URL, makes their
 contents immutable to the builder. OCI and other HTTPS origins fail closed until a
 separately reviewed transport exists. For the first Python slice both local
 and remote build-input acquisition refuse anything but a signed deny-all group
-with no profile, network routes, secrets, shares, tools, environment overrides
+with `required = true`, no profile, network routes, secrets, shares, tools, environment overrides
 or resource requests. This is a first-slice restriction, not the general
 policy-intersection algorithm, and host admission must independently enforce
 it before a package can run. It neither freezes a v2 CLI lock nor
