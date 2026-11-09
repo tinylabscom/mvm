@@ -15,14 +15,15 @@
 //! two nodes with separate state directories and audit chains, the sender
 //! gated by a signed transport binding and the destination re-checking
 //! signature, capability, epoch and replay. The guest mailbox port is served
-//! by a separate host process (`mvm-mailbox`) in its own tests below.
+//! by a separate host process (`mvm-mailbox`) in its own hermetic tests below.
 //!
-//! What is simulated, on purpose: no booted guest runs the mailbox
-//! client or reads the queue (the guest end is a test driving the same
-//! `send_frame` over a Firecracker-style mux), no Iroh or relay transport
-//! (the TCP transport is loopback and the two nodes are threads of one test
-//! process on one physical host; only the guest mailbox is a separate process), and the VMs (a launch is gated and
-//! audited, but nothing boots). Only the aircraft node runs a service. Run
+//! What is simulated, on purpose: the three nodes are simulated nodes in one
+//! test process, and their VMs are gated and audited but none boots here.
+//! Between nodes there is no Iroh or relay and no cross-host transport; the
+//! TCP transport is loopback inside this process. Only the aircraft node runs
+//! a service. A booted guest's mailbox path is not exercised by this test: it
+//! was witnessed by hand on a Firecracker host, as recorded under "Demo
+//! status" in `specs/contracts/host-interface-distributed-execution.md`. Run
 //! with `--nocapture` to read the timeline.
 
 use ed25519_dalek::SigningKey;
@@ -523,7 +524,7 @@ fn contain_terminate_and_rebuild() {
     }
     let timeline = ship.timeline("analyst");
     println!(
-        "\nsimulated: mailbox delivery is a local Unix socket or a loopback TCP transport between node services in one test process, with the guest mailbox in a separate host process (no booted guest, no vsock guest service, no Iroh, no cross-host transport), VMs (gated and audited, none boot)"
+        "\nsimulated: the three nodes are simulated nodes in one test process; their VMs are gated and audited but none boots here; node-to-node mailbox delivery is a local Unix socket or a loopback TCP transport (no Iroh, no cross-host transport); the booted-guest mailbox path is a separate manual Firecracker witness, see Demo status in specs/contracts/host-interface-distributed-execution.md"
     );
     println!("\n--- evidence timeline: ship / analyst ---");
     for line in &timeline {
