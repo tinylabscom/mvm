@@ -639,6 +639,36 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
     );
 }
 
+/// A guest whose workload has not written its outbox yet accepts the dial and
+/// closes without a frame. That must not read as a served connection, or the
+/// launch stops dialing and a later message is never forwarded.
+#[test]
+fn a_guest_that_closes_without_a_frame_is_dialed_again() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let (node, channel) = channel_with_one_node();
+    let mut sealer = sealer(&channel, &[MailboxOperation::Send]);
+    let mux = node.home.path().join("fc.vsock");
+    let listener = UnixListener::bind(&mux).unwrap();
+    let guest = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        stream.write_all(b"OK 1\n").unwrap();
+    });
+    let absent = node.home.path().join("absent.sock");
+    assert!(
+        channel
+            .service
+            .serve_guest(&absent, &mux, &mut sealer)
+            .is_err()
+    );
+    guest.join().unwrap();
+}
+
 #[test]
 fn a_guest_without_the_send_operation_is_refused_across_the_port() {
     use std::io::{BufRead, BufReader, Write};

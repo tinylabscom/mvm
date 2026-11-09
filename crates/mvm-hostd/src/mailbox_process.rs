@@ -13,7 +13,8 @@
 //! Only a Firecracker guest is wired: its vsock mux is a fixed path reached by
 //! the `CONNECT` handshake. The other backends bridge a host-dialed port only
 //! when the VM spec declares it, and no workload spec declares the mailbox
-//! port, so there is no socket to dial and no process is started for them.
+//! port, so there is no socket to dial. A grant on one of them refuses the
+//! launch rather than boot a guest that asserts a mailbox nobody serves.
 
 use std::io::{Error, ErrorKind, Result, Write as _};
 use std::os::unix::process::CommandExt as _;
@@ -23,7 +24,8 @@ use std::time::Duration;
 
 use mvm_contract::protocol::mailbox::{MAILBOX_PORT, MailboxGrant};
 use mvm_core::plan::ExecutionPlan;
-use mvm_core::vm_backend::BackendKind;
+use mvm_core::vm_backend::{BackendKind, VmId, VmStartConfig};
+use mvm_runtime::backend::AnyBackend;
 use mvm_vmm::host::aux_bin::AuxBin;
 
 use crate::mailbox_launch::{
@@ -125,6 +127,68 @@ fn command(bin: &Path) -> Command {
     cmd
 }
 
+/// Refuse a launch whose plan grants a mailbox on a backend that cannot reach
+/// the guest's mailbox port. The guest would be told to serve a port nobody
+/// dials, so the launch fails instead.
+fn require_wired(plan: &ExecutionPlan, backend: BackendKind) -> Result<()> {
+    if plan.mailbox.is_some() && !backend_is_wired(backend) {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            format!("the plan grants a mailbox, which the {backend:?} backend cannot serve"),
+        ));
+    }
+    Ok(())
+}
+
+/// The plan `config` boots under, when it grants a mailbox. Read the way the
+/// guest's `mvm.mailbox=1` cmdline token reads it, so the two cannot disagree.
+fn granted_plan(config: &VmStartConfig) -> Option<ExecutionPlan> {
+    mvm_core::plan::plan_from_admitted_json(config.plan_json.as_deref()?)
+        .ok()
+        .filter(|plan| plan.mailbox.is_some())
+}
+
+/// Refuse, before the VM boots, a config whose guest would be told to serve a
+/// mailbox this backend cannot.
+pub fn require_servable(config: &VmStartConfig, backend: BackendKind) -> anyhow::Result<()> {
+    match granted_plan(config) {
+        Some(plan) => Ok(require_wired(&plan, backend)?),
+        None => Ok(()),
+    }
+}
+
+/// Serve the mailbox `config` grants, now that its VM `id` is up on `backend`.
+/// The cmdline token and this process come from the same plan, so a guest
+/// asserts a mailbox exactly when one is served. A grant that cannot be served
+/// stops the VM and fails the launch.
+pub fn serve_started(
+    backend: &AnyBackend,
+    id: &VmId,
+    config: &VmStartConfig,
+) -> anyhow::Result<()> {
+    serve_started_with(backend, id, config, spawn_for_launch)
+}
+
+fn serve_started_with(
+    backend: &AnyBackend,
+    id: &VmId,
+    config: &VmStartConfig,
+    spawn: impl FnOnce(&ExecutionPlan, BackendKind, &str) -> Result<Option<u32>>,
+) -> anyhow::Result<()> {
+    let Some(plan) = granted_plan(config) else {
+        return Ok(());
+    };
+    if let Err(error) = spawn(&plan, backend.kind(), &id.0) {
+        if let Err(stop) = backend.stop(id) {
+            tracing::warn!(vm = %id.0, error = %stop, "stopping a VM whose mailbox could not be served failed");
+        }
+        return Err(
+            anyhow::Error::new(error).context("the granted guest mailbox could not be served")
+        );
+    }
+    Ok(())
+}
+
 /// Start the mailbox process for a launched VM when `plan` grants a mailbox
 /// and `backend` is wired; its pid, or `None` when nothing was started.
 pub fn spawn_for_launch(
@@ -135,14 +199,7 @@ pub fn spawn_for_launch(
     let Some(grant) = &plan.mailbox else {
         return Ok(None);
     };
-    if !backend_is_wired(backend) {
-        tracing::warn!(
-            vm = vm_name,
-            ?backend,
-            "the plan grants a mailbox but this backend does not reach the guest's mailbox port; none is served"
-        );
-        return Ok(None);
-    }
+    require_wired(plan, backend)?;
     let state_dir = mvm_core::config::vm_state_dir(vm_name);
     let config = build_config(&mvm_core::config::mvm_keys_dir(), grant, &state_dir)?;
     let bin = mvm_vmm::host::broker_services_spawn::resolve_subprocess_bin_to_spawn(&AuxBin::new(
@@ -207,14 +264,12 @@ mod tests {
     }
 
     #[test]
-    fn a_granted_plan_on_an_unwired_backend_spawns_nothing() {
+    fn a_granted_plan_on_an_unwired_backend_is_refused() {
         let dir = keys_dir();
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
         plan.mailbox = Some(grant(dir.path()));
-        assert_eq!(
-            spawn_for_launch(&plan, BackendKind::Hvf, "no-such-vm").unwrap(),
-            None
-        );
+        let error = spawn_for_launch(&plan, BackendKind::Hvf, "no-such-vm").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 
     #[test]
@@ -251,6 +306,85 @@ mod tests {
                 .map(|v| v.to_string_lossy().into_owned())
                 .unwrap_or_default();
             assert!(!value.contains(&hex::encode(&seed)));
+        }
+    }
+
+    fn config_for(grant: Option<MailboxGrant>) -> VmStartConfig {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = grant;
+        VmStartConfig {
+            name: "vm-under-test".into(),
+            plan_json: Some(serde_json::to_string(&plan).unwrap()),
+            ..Default::default()
+        }
+    }
+
+    type Spawns = std::cell::RefCell<Vec<String>>;
+
+    fn serve_with(
+        config: &VmStartConfig,
+        spawns: &Spawns,
+        outcome: Result<Option<u32>>,
+    ) -> anyhow::Result<()> {
+        let backend = AnyBackend::from_hypervisor("firecracker");
+        serve_started_with(
+            &backend,
+            &VmId("vm-under-test".into()),
+            config,
+            |_, _, name| {
+                spawns.borrow_mut().push(name.to_string());
+                outcome
+            },
+        )
+    }
+
+    /// The guest's token and the host process come from one plan: a granted
+    /// config has both, an ungranted one neither.
+    #[test]
+    fn the_token_and_the_host_process_come_together() {
+        let dir = keys_dir();
+        let token = |c: &VmStartConfig| mvm_vmm::host::egress_bridge::mailbox_cmdline_token(c);
+        let spawns = Spawns::default();
+
+        let granted = config_for(Some(grant(dir.path())));
+        assert!(token(&granted).is_some());
+        serve_with(&granted, &spawns, Ok(Some(7))).unwrap();
+        assert_eq!(*spawns.borrow(), ["vm-under-test"]);
+
+        let ungranted = config_for(None);
+        let none = Spawns::default();
+        assert!(token(&ungranted).is_none());
+        serve_with(&ungranted, &none, Ok(Some(7))).unwrap();
+        assert!(none.borrow().is_empty());
+        assert!(VmStartConfig::default().plan_json.is_none());
+        serve_with(&VmStartConfig::default(), &none, Ok(None)).unwrap();
+        assert!(none.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_grant_that_cannot_be_served_fails_the_launch() {
+        let dir = keys_dir();
+        let granted = config_for(Some(grant(dir.path())));
+        let error = serve_with(
+            &granted,
+            &Spawns::default(),
+            Err(Error::other("no mvm-mailbox")),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("no mvm-mailbox"), "{error:#}");
+    }
+
+    #[test]
+    fn a_grant_on_an_unwired_backend_is_refused_before_boot() {
+        let dir = keys_dir();
+        let granted = config_for(Some(grant(dir.path())));
+        assert!(require_servable(&granted, BackendKind::Firecracker).is_ok());
+        for kind in [BackendKind::Hvf, BackendKind::Libkrun, BackendKind::Mock] {
+            assert!(require_servable(&granted, kind).is_err(), "{kind:?}");
+            assert!(
+                require_servable(&config_for(None), kind).is_ok(),
+                "{kind:?}"
+            );
         }
     }
 }
