@@ -185,9 +185,9 @@ fn resolve_boot_source(spec: &mp::MachineSpec, host: &dyn StartHost) -> Result<B
     }
     if let Some(slot_hash) = &spec.manifest {
         let (_, vmlinux, _initrd, rootfs, rev) =
-            mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot(slot_hash)
+            mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(slot_hash)
                 .with_context(|| {
-                    format!("loading manifest slot {slot_hash:?} for machine start")
+                    format!("resolving manifest source {slot_hash:?} for machine start")
                 })?;
         return Ok(BootSource {
             kernel: super::bundle_runtime::installed_archive_for_rootfs(Path::new(&rootfs))?
@@ -629,6 +629,46 @@ mod tests {
         assert_eq!(boot.rootfs, PathBuf::from("/cache/rootfs.ext4"));
         assert_eq!(boot.digest, "sha256:abc");
         assert_eq!(boot.kernel, None, "the host's kernel is used");
+    }
+
+    #[test]
+    fn an_installed_bundle_manifest_resolves_from_the_bundle_registry() {
+        let home = tempfile::tempdir().expect("home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        env.remove("MVM_DIRECT_BOOT");
+        let publisher = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let (archive, key_id) =
+            crate::admission::policy::bundle_pin_tests::make_bundle_for_pin(&publisher);
+        let trust_dir = home.path().join("trusted-publishers");
+        std::fs::create_dir_all(&trust_dir).expect("trust directory");
+        std::fs::write(
+            trust_dir.join(format!("{}.pub", key_id.0)),
+            publisher.verifying_key().to_bytes(),
+        )
+        .expect("trust publisher");
+        let registry = mvm_core::plan::BundleRegistry::default_path().expect("registry");
+        let trust = mvm_core::plan::FsTrustStore::default_path().expect("trust store");
+        let installed = registry
+            .install(&archive, &trust, false)
+            .expect("install signed bundle");
+        let sha = installed.sha256;
+        let bundle = registry.root().join(&sha);
+        let mut machine = spec("bundle");
+        machine.manifest = Some(sha.clone());
+
+        let boot = resolve_boot_source(&machine, &image_host()).expect("installed bundle source");
+        assert_eq!(boot.rootfs, bundle.join("artifacts/rootfs.ext4"));
+        assert_eq!(
+            boot.kernel.as_deref(),
+            bundle.join("artifacts/vmlinux").to_str()
+        );
+        assert_eq!(boot.digest, sha);
+        assert_eq!(
+            super::super::bundle_runtime::installed_archive_for_rootfs(&boot.rootfs)
+                .expect("installed archive"),
+            Some(registry.archive_path(&boot.digest)),
+        );
     }
 
     #[test]
