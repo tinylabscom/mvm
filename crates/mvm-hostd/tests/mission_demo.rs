@@ -695,6 +695,66 @@ fn a_guest_without_the_send_operation_is_refused_across_the_port() {
     assert!(channel.service.receive().is_none(), "nothing was queued");
 }
 
+/// What a guest that addresses `recipient` gets back, and what the host queued.
+fn guest_sends_to(recipient: PrincipalId) -> (Result<(), Refusal>, Option<Vec<u8>>) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let (node, channel) = channel_with_one_node();
+    let mut sealer = sealer(&channel, &[MailboxOperation::Send]);
+    let mux = node.home.path().join("fc.vsock");
+    let listener = UnixListener::bind(&mux).unwrap();
+    let guest = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        stream.write_all(b"OK 1\n").unwrap();
+        let message = OutboxMessage {
+            recipient,
+            body: b"hello".to_vec(),
+        };
+        send_outbox_message(&mut stream, &message)
+    });
+    channel
+        .service
+        .serve_guest(&node.home.path().join("absent.sock"), &mux, &mut sealer)
+        .unwrap();
+    (guest.join().unwrap(), channel.service.receive())
+}
+
+/// A workload can address its mailbox without knowing the host-derived
+/// recipient: the mailbox id or the all-zero recipient is sealed to the
+/// template's recipient and delivered; any other value is still refused.
+#[test]
+fn a_guest_addresses_its_own_mailbox_without_the_derived_recipient() {
+    use mvm_core::mailbox::frame::OWN_MAILBOX_RECIPIENT;
+
+    let mailbox = PrincipalId::from_bytes(*address().mailbox.as_bytes());
+    for named in [mailbox, PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT)] {
+        assert_ne!(named, aircraft_principal(), "the guest does not know it");
+        let (verdict, queued) = guest_sends_to(named);
+        assert_eq!(verdict, Ok(()));
+        assert_eq!(queued.as_deref(), Some(&b"hello"[..]));
+    }
+    let (verdict, queued) = guest_sends_to(PrincipalId::from_bytes([9; 32]));
+    let Err(refusal) = verdict else {
+        panic!("a recipient the policy does not name was sealed");
+    };
+    assert!(matches!(refusal, Refusal::Mailbox(_)));
+    assert!(queued.is_none());
+    // The only thing the guest reads back is a verdict, and it names no
+    // recipient: the derived value stays with the host.
+    let derived = aircraft_principal();
+    let text = format!("{refusal:?}");
+    assert!(!text.contains(&hex::encode(derived.as_bytes())), "{text}");
+    assert!(
+        !text.contains(&format!("{:?}", derived.as_bytes())),
+        "{text}"
+    );
+}
+
 /// A plan, optionally carrying a mailbox grant for `channel`'s authority and
 /// epoch 1. The host-held trust the test hands in names a different epoch and
 /// a different authority, so only the grant can make a message open.
@@ -1059,19 +1119,16 @@ fn spawn_mailbox_process(config: &[u8]) -> KillOnDrop {
     KillOnDrop(child, log)
 }
 
-/// The separate mailbox process, handed only derived keys and the guest's
-/// paths on stdin, dials the guest's mailbox port and binds the VM's mailbox
-/// socket; the host signing seed is in its config nowhere.
-#[test]
-fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
+/// A mailbox process under `dir`, started for a granted mailbox, whose guest
+/// has delivered its one message. Returns the process and the VM state dir.
+fn served_mailbox_process(dir: &std::path::Path) -> (KillOnDrop, std::path::PathBuf) {
     use mvm_hostd::mailbox_process::build_config;
     use std::os::unix::net::UnixListener;
 
-    let dir = tempfile::tempdir().unwrap();
-    let keys = dir.path().join("keys");
+    let keys = dir.join("keys");
     std::fs::create_dir_all(&keys).unwrap();
     host_keys(&keys, 5);
-    let state_dir = dir.path().join("vm");
+    let state_dir = dir.join("vm");
     std::fs::create_dir_all(&state_dir).unwrap();
     let authority = mvm_hostd::mailbox_launch::authority_key_for(&keys, &address().mailbox)
         .unwrap()
@@ -1087,7 +1144,7 @@ fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
         "the seed is not in the process config"
     );
 
-    let outbox = dir.path().join("outbox");
+    let outbox = dir.join("outbox");
     std::fs::write(&outbox, outbox_message().encode()).unwrap();
     let mut process = spawn_mailbox_process(&wire);
     let mut stream = process.accept(&listener);
@@ -1103,6 +1160,16 @@ fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
         "the host service bound its socket; stderr:\n{}",
         process.stderr()
     );
+    (process, state_dir)
+}
+
+/// The separate mailbox process, handed only derived keys and the guest's
+/// paths on stdin, dials the guest's mailbox port and binds the VM's mailbox
+/// socket; the host signing seed is in its config nowhere.
+#[test]
+fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (process, state_dir) = served_mailbox_process(dir.path());
     // The same process answers a host reader with what the guest sent.
     let socket = mvm_core::config::vm_mailbox_socket_at(&state_dir);
     let got = (0..100).find_map(|_| {
@@ -1122,6 +1189,28 @@ fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
         mvm_hostd::mailbox_service::recv(&socket).unwrap().message,
         None
     );
+}
+
+/// Removing the VM's state directory, and with it the mailbox socket path,
+/// ends a serving process: stopping its service must not need that path.
+#[test]
+fn the_mailbox_process_exits_when_its_vm_state_dir_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut process, state_dir) = served_mailbox_process(dir.path());
+    std::fs::remove_dir_all(&state_dir).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = process.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the process outlived its VM; stderr:\n{}",
+            process.stderr()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(status.success(), "{status}");
 }
 
 // ---- two nodes over a loopback TCP PeerTransport ----------------------------
