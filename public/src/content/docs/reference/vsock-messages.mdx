@@ -43,6 +43,7 @@ is not an authorization input. The browser/WASM tier has no hardware vsock.
 | `Telemetry` | 5254 | Host connects; guest sends observations | Guest listener requires `mvm.telemetry=1`; host collection policy is separate; sealed JSON records |
 | `DisplayFrame` | 5255 | Guest connects and sends images | Admitted `host.display.view.v1`; binary frames, no reply |
 | `Gpu` | 5256 | Guest shim calls host endpoint | Admitted/configured GPU endpoint; length-prefixed JSON; hardware support is backend-specific |
+| `Mailbox` | 5257 | Guest sends one message and reads a host verdict | Grant-gated, dedicated channel; big-endian `u32` length, plaintext recipient/body to host-held sealing; not a control or FlowMux frame |
 | `Broker` | 5300 | Guest calls host services | Host-mediated service bindings; length-prefixed JSON |
 | `ConsoleData` | 20001–20128 in the preopened development range | Host attaches; bidirectional PTY bytes | Development console only; raw stream after typed control setup |
 | `BuilderDispatch` | 21471 | Host dispatches; builder sends logs/result | Builder-tier only; length-prefixed JSON |
@@ -53,6 +54,9 @@ Additional channels outside that registry are the legacy builder agent
 and control-requested Unix-socket forwards. Their distinct formats are below.
 Independent typed services do not share one application queue merely because
 they share a virtio-vsock device.
+Registering `Mailbox` does not bind it for every workload: the launch path
+must hold a signed mailbox grant before it serves the guest channel. Its
+guest-to-host frame is not itself sealed; the host owns the sealing keys.
 
 <VsockTypes family="services" />
 
