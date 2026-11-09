@@ -633,39 +633,23 @@ mod tests {
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
         env.remove("MVM_DIRECT_BOOT");
-        let sha = "e".repeat(64);
-        let bundle = mvm_core::config::bundles_dir().join(&sha);
-        std::fs::create_dir_all(bundle.join("artifacts")).expect("bundle directory");
-        std::fs::write(bundle.join("artifacts/vmlinux"), b"kernel").expect("kernel");
-        std::fs::write(bundle.join("artifacts/rootfs.ext4"), b"rootfs").expect("rootfs");
-        let manifest = serde_json::json!({
-            "schema_version": mvm_core::plan::bundle::BUNDLE_SCHEMA_VERSION,
-            "publisher": "machine-start-test",
-            "key_id": "0123456789abcdef0123456789abcdef",
-            "arch": mvm_core::arch::GuestArch::host().to_string(),
-            "created_at": "2026-08-28T00:00:00Z",
-            "artifacts": [
-                {
-                    "name": "kernel",
-                    "role": "kernel",
-                    "path": "artifacts/vmlinux",
-                    "sha256": "0".repeat(64),
-                    "size_bytes": 6
-                },
-                {
-                    "name": "rootfs",
-                    "role": "rootfs",
-                    "path": "artifacts/rootfs.ext4",
-                    "sha256": "1".repeat(64),
-                    "size_bytes": 6
-                }
-            ]
-        });
+        let publisher = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let (archive, key_id) =
+            crate::admission::policy::bundle_pin_tests::make_bundle_for_pin(&publisher);
+        let trust_dir = home.path().join("trusted-publishers");
+        std::fs::create_dir_all(&trust_dir).expect("trust directory");
         std::fs::write(
-            bundle.join("manifest.json"),
-            serde_json::to_vec(&manifest).expect("manifest JSON"),
+            trust_dir.join(format!("{}.pub", key_id.0)),
+            publisher.verifying_key().to_bytes(),
         )
-        .expect("bundle manifest");
+        .expect("trust publisher");
+        let registry = mvm_core::plan::BundleRegistry::default_path().expect("registry");
+        let trust = mvm_core::plan::FsTrustStore::default_path().expect("trust store");
+        let installed = registry
+            .install(&archive, &trust, false)
+            .expect("install signed bundle");
+        let sha = installed.sha256;
+        let bundle = registry.root().join(&sha);
         let mut machine = spec("bundle");
         machine.manifest = Some(sha.clone());
 
@@ -676,6 +660,11 @@ mod tests {
             bundle.join("artifacts/vmlinux").to_str()
         );
         assert_eq!(boot.digest, sha);
+        assert_eq!(
+            super::super::bundle_runtime::installed_archive_for_rootfs(&boot.rootfs)
+                .expect("installed archive"),
+            Some(registry.archive_path(&boot.digest)),
+        );
     }
 
     #[test]
