@@ -1147,6 +1147,7 @@ fn spawn_owned_builder_endpoint(
             // builder boots with no `mvm.telemetry=1` assertion, so there is
             // no guest listener for a collector to dial.
             telemetry: false,
+            mailbox: None,
             vm_name: &endpoint.vm_name,
             state_dir: &endpoint.state_dir,
             // This supervisor is the builder VM, so its own life is the VM's.

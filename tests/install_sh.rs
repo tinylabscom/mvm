@@ -235,11 +235,15 @@ struct Release {
 }
 
 /// A published guest runtime: its bytes, the digest the checksum manifest
-/// records for it, and whether its signature bundle is published.
+/// records for it, whether its signature bundle is published, and whether the
+/// standalone `.sha256` sidecar (with its own bundle) is published.
 struct GuestRuntimeAsset {
     bytes: Vec<u8>,
     recorded_sha256: String,
     publish_bundle: bool,
+    publish_sidecar: bool,
+    /// A digest for the sidecar to record in place of the archive's own.
+    sidecar_digest: Option<String>,
 }
 
 impl Release {
@@ -273,7 +277,27 @@ impl Release {
             recorded_sha256: sha256_hex(&bytes),
             bytes,
             publish_bundle: true,
+            publish_sidecar: true,
+            sidecar_digest: None,
         });
+        self
+    }
+
+    /// Publish a guest runtime whose `.sha256` sidecar describes other bytes.
+    fn with_guest_runtime_and_a_sidecar_for_other_bytes(mut self) -> Self {
+        self = self.with_guest_runtime();
+        if let Some(runtime) = self.guest_runtime.as_mut() {
+            runtime.sidecar_digest = Some("0".repeat(64));
+        }
+        self
+    }
+
+    /// Publish a guest runtime whose `.sha256` sidecar is missing.
+    fn with_guest_runtime_missing_its_sidecar(mut self) -> Self {
+        self = self.with_guest_runtime();
+        if let Some(runtime) = self.guest_runtime.as_mut() {
+            runtime.publish_sidecar = false;
+        }
         self
     }
 
@@ -524,12 +548,16 @@ impl Release {
             let name = self.guest_runtime_name();
             checks.push_str(&format!("{}  {name}\n", runtime.recorded_sha256));
             routes.push((format!("{base}/{name}"), runtime.bytes.clone()));
-            routes.push((
-                format!("{base}/{name}.sha256"),
-                format!("{}  {name}\n", runtime.recorded_sha256).into_bytes(),
-            ));
             if runtime.publish_bundle {
                 routes.push((format!("{base}/{name}.bundle"), b"bundle".to_vec()));
+            }
+            if runtime.publish_sidecar {
+                let digest = runtime
+                    .sidecar_digest
+                    .clone()
+                    .unwrap_or_else(|| sha256_hex(&runtime.bytes));
+                let sidecar = format!("{digest}  {name}\n");
+                routes.push((format!("{base}/{name}.sha256"), sidecar.into_bytes()));
                 routes.push((format!("{base}/{name}.sha256.bundle"), b"bundle".to_vec()));
             }
         }
@@ -1281,56 +1309,30 @@ fn install_sh_stages_the_verified_guest_runtime_beside_mvmctl() {
 
     let output = host.install(&base, "v9.9.9");
     assert!(output.status.success(), "{}", stderr(&output));
-    let staged = host.current_target().join("guest-runtime").join(&name);
+    let directory = host.current_target().join("guest-runtime");
+    let staged = directory.join(&name);
     assert_eq!(
         std::fs::read(&staged).unwrap(),
         release.guest_runtime.as_ref().unwrap().bytes,
         "the runtime must sit in the release directory's guest-runtime/"
     );
-    let runtime_dir = staged.parent().unwrap();
-    assert_eq!(
-        std::fs::read_to_string(runtime_dir.join(format!("{name}.sha256"))).unwrap(),
-        format!(
-            "{}  {name}\n",
-            release.guest_runtime.as_ref().unwrap().recorded_sha256
-        ),
-    );
-    for suffix in [".bundle", ".sha256.bundle"] {
-        assert_eq!(
-            std::fs::read(runtime_dir.join(format!("{name}{suffix}"))).unwrap(),
-            b"bundle"
+    // A release mvmctl authenticates the runtime from these four files and
+    // nothing else, so an install that stages less leaves a first run unable
+    // to launch.
+    for sibling in [
+        format!("{name}.bundle"),
+        format!("{name}.sha256"),
+        format!("{name}.sha256.bundle"),
+    ] {
+        assert!(
+            directory.join(&sibling).is_file(),
+            "{sibling} must be staged beside the runtime archive"
         );
     }
     assert!(
         !host.bin().join("guest-runtime").exists() && !host.bin().join(&name).exists(),
         "the runtime is not a command and must not be linked onto PATH"
     );
-}
-
-#[test]
-fn install_sh_refuses_a_runtime_with_a_mismatched_checksum_sidecar() {
-    let release = Release::new("v9.9.9").with_guest_runtime();
-    let sidecar = format!("/{}.sha256", release.guest_runtime_name());
-    let mut routes = release.routes();
-    let (_, bytes) = routes
-        .iter_mut()
-        .find(|(path, _)| path.ends_with(&sidecar))
-        .expect("fixture publishes the runtime checksum sidecar");
-    *bytes = b"wrong digest  mvm-guest-bins-v9.9.9.tar.gz\n".to_vec();
-    let (base, _stop) = serve(routes);
-    let host = Host::new();
-
-    let output = host.install(&base, "v9.9.9");
-    assert!(
-        !output.status.success(),
-        "mismatched sidecar must prevent install"
-    );
-    assert!(
-        stderr(&output).contains("checksum sidecar mismatch"),
-        "{}",
-        stderr(&output)
-    );
-    assert!(!host.lib().exists(), "no release directory on failure");
 }
 
 /// A release published before the guest runtime asset installs without it.
@@ -1390,6 +1392,51 @@ fn install_sh_refuses_an_unsigned_guest_runtime() {
     assert!(
         stderr(&output).contains(&format!(
             "no signature bundle published for {}",
+            release.guest_runtime_name()
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!host.bin().join("mvmctl").exists(), "no binary on failure");
+}
+
+/// A runtime published without its `.sha256` sidecar stops the install rather
+/// than leaving an archive the launch cannot authenticate.
+#[test]
+fn install_sh_refuses_a_guest_runtime_published_without_its_sidecar() {
+    let release = Release::new("v9.9.9").with_guest_runtime_missing_its_sidecar();
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host.install(&base, "v9.9.9");
+    assert!(
+        !output.status.success(),
+        "a runtime with no sidecar must not install"
+    );
+    assert!(
+        stderr(&output).contains(&format!("{}.sha256", release.guest_runtime_name())),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!host.bin().join("mvmctl").exists(), "no binary on failure");
+}
+
+/// A sidecar that describes other bytes than the archive just verified stops
+/// the install: the launch would refuse the pair anyway.
+#[test]
+fn install_sh_refuses_a_guest_runtime_whose_sidecar_describes_other_bytes() {
+    let release = Release::new("v9.9.9").with_guest_runtime_and_a_sidecar_for_other_bytes();
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host.install(&base, "v9.9.9");
+    assert!(
+        !output.status.success(),
+        "a mismatched sidecar must not install"
+    );
+    assert!(
+        stderr(&output).contains(&format!(
+            "{0}.sha256 does not describe {0}",
             release.guest_runtime_name()
         )),
         "{}",

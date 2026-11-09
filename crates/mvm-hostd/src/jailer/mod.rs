@@ -131,6 +131,8 @@ pub struct ConfinementSpec {
     pub readable_paths: Vec<PathBuf>,
     pub read_write_paths: Vec<PathBuf>,
     pub allowed_syscalls: Vec<&'static str>,
+    /// Directories in which the process may also create unix sockets.
+    pub make_sock_paths: Vec<PathBuf>,
 }
 
 impl ConfinementSpec {
@@ -241,6 +243,7 @@ impl ConfinementSpec {
             readable_paths: existing_paths(readable_paths),
             read_write_paths,
             allowed_syscalls,
+            make_sock_paths: Vec::new(),
         }
     }
 
@@ -273,6 +276,7 @@ impl ConfinementSpec {
             readable_paths: existing_paths(vec![keys_dir]),
             read_write_paths: existing_paths(read_write_paths),
             allowed_syscalls,
+            make_sock_paths: Vec::new(),
         }
     }
 
@@ -298,6 +302,18 @@ impl ConfinementSpec {
         if let Some(state_dir) = state_dir {
             self.read_write_paths.push(state_dir.to_path_buf());
         }
+        self
+    }
+
+    /// Permit a process serving a guest mailbox to bind the mailbox socket in
+    /// `socket_dir`. Only the mailbox-serving process asks for it, so a
+    /// telemetry-only collector keeps a spec that cannot create sockets.
+    #[must_use]
+    pub fn with_mailbox_socket_dir(mut self, socket_dir: &Path) -> Self {
+        if !self.read_write_paths.iter().any(|p| p == socket_dir) {
+            self.read_write_paths.push(socket_dir.to_path_buf());
+        }
+        self.make_sock_paths.push(socket_dir.to_path_buf());
         self
     }
 
@@ -451,6 +467,12 @@ mod tests {
             keys.path().to_path_buf(),
         );
         assert_eq!(nested.read_write_paths, vec![state.path().to_path_buf()]);
+
+        // Only a mailbox grants socket creation, and only in its own dir.
+        assert!(spec.make_sock_paths.is_empty());
+        let mailbox = nested.with_mailbox_socket_dir(state.path());
+        assert_eq!(mailbox.make_sock_paths, vec![state.path().to_path_buf()]);
+        assert_eq!(mailbox.read_write_paths, vec![state.path().to_path_buf()]);
     }
 
     use super::*;

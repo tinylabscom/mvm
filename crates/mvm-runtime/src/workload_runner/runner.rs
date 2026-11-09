@@ -76,7 +76,7 @@ struct PreparedWorkloadBoot {
     trace: Option<mvm_core::launch_trace::LaunchTraceRecorder>,
 }
 
-use admission::{admitted_ingress, admitted_network_limits, admitted_tool_rules};
+use admission::{admitted_ingress, admitted_mailbox, admitted_network_limits, admitted_tool_rules};
 pub use broker::RealBrokerRegistrar;
 use claim_lease::WarmClaimLease;
 use parent_verify::{reserve_and_verify_parent, schedule_resident_checkpoint_reclaim};
@@ -461,6 +461,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 ingress: &ingress,
                 // A cold boot mints this guest's identity and hands it a drive.
                 identity: FlowMuxIdentitySource::Mint,
+                mailbox: admitted_mailbox(inputs.config.plan_json.as_deref())?,
             },
         )?;
         trace.mark("endpoint_spawn");
@@ -926,6 +927,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     // put a different one there. Its endpoint pins what the
                     // guest actually has.
                     identity: FlowMuxIdentitySource::InheritFrom(&parent_state_dir),
+                    // The restored guest's listener comes from its parent's boot,
+                    // so a claim serves no mailbox of its own.
+                    mailbox: None,
                 },
             )
             .map_err(|e| StandbyError::ClaimFailed(format!("spawn child endpoint: {e:#}")))?;

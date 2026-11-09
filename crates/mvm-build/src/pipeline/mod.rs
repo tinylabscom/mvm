@@ -5,7 +5,6 @@ pub use crate::build_cache;
 pub mod dev_build;
 pub mod frozen;
 pub mod orchestrator;
-pub mod vsock_builder;
 
 /// Whether a build should produce a dev-shape or prod-shape image.
 ///

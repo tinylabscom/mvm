@@ -886,6 +886,11 @@ pub fn vm_approval_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf 
     vm_socket_dir_at(state_dir).join(VM_APPROVAL_SOCKET)
 }
 
+/// Where a VM's launch-time mailbox service binds for host consumers.
+pub fn vm_mailbox_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join("mailbox.sock")
+}
+
 /// [`vm_approval_socket_at`] for a named VM.
 pub fn vm_approval_socket(name: &str) -> std::path::PathBuf {
     vm_approval_socket_at(&vm_state_dir(name))

@@ -972,8 +972,13 @@ pub struct TelemetryOnlyConfig {
     pub instance_id: String,
     /// The launch's redaction policy, for the curated seam.
     pub redaction: mvm_core::policy::RedactionPolicy,
-    /// The collector's inputs.
-    pub telemetry: TelemetryEmbedConfig,
+    /// The collector's inputs; absent for a VM that is not collected and
+    /// only needs its mailbox served.
+    #[serde(default)]
+    pub telemetry: Option<TelemetryEmbedConfig>,
+    /// The guest mailbox to serve beside it, when the signed plan grants one.
+    #[serde(default)]
+    pub mailbox: Option<crate::mailbox_launch::MailboxEmbed>,
 }
 
 /// The stdin wrapper key that selects collector-only mode.

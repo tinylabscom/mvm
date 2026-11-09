@@ -527,7 +527,6 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_BOOT_IMAGE` | live-read | `crates/mvm-build/src/boot_image_select.rs:32` | 1 | yes | yes |
 | `MVM_BOOT_IMAGE_TAG` | live-read | `crates/mvm-core/src/config.rs:43` | 1 | NO | - |
 | `MVM_BROKER_PATH` | live-read | `crates/mvm-vmm/src/host/broker_services_spawn.rs:508` | 1 | NO | - |
-| `MVM_BUILDER_AGENT_PORT` | live-read | `crates/mvm-build/src/pipeline/vsock_builder.rs:9` | 1 | yes | - |
 | `MVM_BUILDER_BACKEND` | live-read | `crates/mvm-build/src/builder_backend_select.rs:139` | 1 | yes | yes |
 | `MVM_BUILDER_BOOT_STAGE` | live-read | `crates/mvm-builder-guest/src/builder_boot.rs:65` | 1 | NO | - |
 | `MVM_BUILDER_CLOSURE_NAR` | live-read | `crates/mvm-runtime/examples/hvf-builder-transport.rs:72` | 1 | NO | - |
@@ -634,7 +633,6 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_HOST_AGENT_IDLE_TIMEOUT` | live-read | `crates/mvm-hostd/src/host_agent_idle.rs:48` | 1 | NO | - |
 | `MVM_HOST_AGENT_PATH` | live-read | `crates/mvm-cli/src/commands/env/uninstall.rs:187` | 4 | NO | yes |
 | `MVM_HOST_AGENT_WORKER` | live-read | `crates/mvm-hostd/src/bin/mvm-host-agent.rs:39` | 1 | NO | - |
-| `MVM_HOST_BIN_DIR` | set-only | `crates/mvm-agentd/src/builder_build.rs:88` | 0 | NO | - |
 | `MVM_HVF_AGENT_DEBUG` | live-read | `crates/mvm-vmm/src/agent_debug.rs:18` | 1 | NO | yes |
 | `MVM_HVF_AGENT_SOCKET` | live-read | `crates/mvm-runtime/examples/hvf-agent-ping.rs:22` | 1 | NO | - |
 | `MVM_HVF_BOOTARGS` | live-read | `crates/mvm-client/src/entrypoint/caller_registration_live_hvf.rs:216` | 3 | NO | - |

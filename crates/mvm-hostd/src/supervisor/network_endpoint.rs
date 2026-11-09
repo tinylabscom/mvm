@@ -211,6 +211,10 @@ pub struct EndpointConfig {
     /// absent otherwise. See `mvm_hostd::telemetry_collector`.
     #[serde(default)]
     pub telemetry: Option<crate::telemetry_collector::TelemetryEmbedConfig>,
+    /// Serve the guest's mailbox from this process when the signed plan
+    /// grants one; absent means nothing is bound or dialed.
+    #[serde(default)]
+    pub mailbox: Option<crate::mailbox_launch::MailboxEmbed>,
     /// Per-destination reversible replacement policy, carried from the signed
     /// `ExecutionPlan.reversible_replacement`. Default (disabled) preserves the
     /// current one-way-only behavior.
@@ -1172,6 +1176,7 @@ mod tests {
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {
         EndpointConfig {
             telemetry: None,
+            mailbox: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),
             secrets,
