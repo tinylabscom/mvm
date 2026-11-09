@@ -167,6 +167,19 @@ impl From<ExecutionEpoch> for u64 {
     }
 }
 
+/// What a signed `ExecutionPlan` admits for one workload's mailbox: which
+/// mailbox, the key whose capabilities are honored, and the execution epoch.
+/// Everything else the receiving node trusts (encryption and sender keys,
+/// identities) is host-held and never rides in a plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxGrant {
+    pub mailbox: MailboxId,
+    /// Ed25519 verifying key that must have signed any accepted capability.
+    pub authority_key: [u8; 32],
+    pub epoch: ExecutionEpoch,
+}
+
 /// Monotonic sequence within one declared ordering scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u64", into = "u64")]

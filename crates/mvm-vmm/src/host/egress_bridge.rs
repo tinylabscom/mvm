@@ -42,6 +42,16 @@ pub fn seccomp_cmdline_token(config: &mvm_core::vm_backend::VmStartConfig) -> Op
     ))
 }
 
+/// `mvm.mailbox=1` when the admitted plan carries a mailbox grant. It tells
+/// the guest agent to serve the mailbox port; a plan without a grant, no plan
+/// at all, or one that does not decode asserts nothing, so no listener starts.
+/// Granting a mailbox widens no seccomp tier: the agent, not the workload,
+/// owns the vsock socket.
+pub fn mailbox_cmdline_token(config: &mvm_core::vm_backend::VmStartConfig) -> Option<String> {
+    let plan = mvm_core::plan::plan_from_admitted_json(config.plan_json.as_deref()?).ok()?;
+    plan.mailbox.map(|_| "mvm.mailbox=1".to_string())
+}
+
 /// The cmdline key carrying the agent profile the guest must run under.
 pub const PROFILE_CMDLINE_KEY: &str = "mvm.profile";
 

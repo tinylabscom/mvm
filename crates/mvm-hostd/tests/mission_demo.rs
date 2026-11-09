@@ -37,7 +37,7 @@ use mvm_core::host_interface::{
     local::LocalHostInterface,
     workload::WorkloadLedger,
 };
-use mvm_core::mailbox::frame::send_frame;
+use mvm_core::mailbox::frame::{OutboxMessage, send_outbox_message};
 use mvm_core::mailbox::{MailboxError, OpenContext, SealRequest, seal_envelope, sign_capability};
 use mvm_core::plan::ExecutionPlan;
 use mvm_hostd::audit::{
@@ -45,7 +45,9 @@ use mvm_hostd::audit::{
     session::{EventFilter, workload_events},
 };
 use mvm_hostd::containment::{quarantine_workload, replace_workload};
-use mvm_hostd::mailbox_service::{MailboxLimits, MailboxPolicy, MailboxService, Refusal, send};
+use mvm_hostd::mailbox_service::{
+    GuestSealer, MailboxLimits, MailboxPolicy, MailboxService, Refusal, send, serve_granted_guest,
+};
 use mvm_hostd::supervisor::verify_audit_chain;
 
 const NOW: u64 = 1_000;
@@ -291,6 +293,27 @@ const LIMITS: MailboxLimits = MailboxLimits {
     max_depth: 4,
     max_frame_bytes: 64 * 1024,
 };
+
+/// The host-held sealing material for a guest that may use `operations`.
+fn sealer(channel: &Channel, operations: &[MailboxOperation]) -> GuestSealer {
+    GuestSealer {
+        encryption_key: Key::from_bytes([23; 32]),
+        sender_key: channel.sender_key.clone(),
+        authority_key: channel.authority_key.clone(),
+        capability: grant(operations),
+        header: header(1, 1),
+        routing: routing(),
+        sent: 0,
+    }
+}
+
+/// What a guest leaves in its outbox: a recipient and a plaintext body.
+fn outbox_message() -> OutboxMessage {
+    OutboxMessage {
+        recipient: aircraft_principal(),
+        body: b"hello".to_vec(),
+    }
+}
 
 impl Channel {
     fn new(aircraft: &Node) -> Self {
@@ -562,29 +585,17 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
 
-    let send_ops = [MailboxOperation::Send, MailboxOperation::Receive];
     let (node, channel) = channel_with_one_node();
-    let capability = sign_capability(grant(&send_ops), &channel.authority_key).unwrap();
+    let mut sealer = sealer(
+        &channel,
+        &[MailboxOperation::Send, MailboxOperation::Receive],
+    );
     let mux = node.home.path().join("fc.vsock");
     let listener = UnixListener::bind(&mux).unwrap();
     // A Firecracker-style mux: the guest end answers CONNECT, then sends.
-    let envelopes: Vec<_> = (1..=LIMITS.max_depth as u8 + 1)
-        .map(|id| {
-            seal_envelope(
-                SealRequest {
-                    routing: routing(),
-                    header: header(1, id),
-                    plaintext: b"hello",
-                },
-                &channel.encryption_key,
-                &channel.sender_key,
-            )
-            .unwrap()
-        })
-        .collect();
     let guest = std::thread::spawn(move || {
         let mut verdicts = Vec::new();
-        for envelope in &envelopes {
+        for _ in 0..=LIMITS.max_depth {
             let (stream, _) = listener.accept().unwrap();
             let mut line = String::new();
             BufReader::new(stream.try_clone().unwrap())
@@ -593,13 +604,16 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
             assert_eq!(line.trim(), "CONNECT 5257");
             (&stream).write_all(b"OK 1\n").unwrap();
             let mut stream = stream;
-            verdicts.push(send_frame(&mut stream, &capability, envelope));
+            verdicts.push(send_outbox_message(&mut stream, &outbox_message()));
         }
         verdicts
     });
     let absent = node.home.path().join("absent.sock");
     for _ in 0..=LIMITS.max_depth {
-        channel.service.serve_guest(&absent, &mux).unwrap();
+        channel
+            .service
+            .serve_guest(&absent, &mux, &mut sealer)
+            .unwrap();
     }
     let verdicts = guest.join().unwrap();
     assert!(verdicts[..LIMITS.max_depth].iter().all(Result::is_ok));
@@ -615,18 +629,7 @@ fn a_guest_without_the_send_operation_is_refused_across_the_port() {
     use std::os::unix::net::UnixListener;
 
     let (node, channel) = channel_with_one_node();
-    let capability =
-        sign_capability(grant(&[MailboxOperation::Receive]), &channel.authority_key).unwrap();
-    let envelope = seal_envelope(
-        SealRequest {
-            routing: routing(),
-            header: header(1, 1),
-            plaintext: b"hello",
-        },
-        &channel.encryption_key,
-        &channel.sender_key,
-    )
-    .unwrap();
+    let mut sealer = sealer(&channel, &[MailboxOperation::Receive]);
     let mux = node.home.path().join("fc.vsock");
     let listener = UnixListener::bind(&mux).unwrap();
     let guest = std::thread::spawn(move || {
@@ -636,12 +639,102 @@ fn a_guest_without_the_send_operation_is_refused_across_the_port() {
             .read_line(&mut line)
             .unwrap();
         stream.write_all(b"OK 1\n").unwrap();
-        send_frame(&mut stream, &capability, &envelope)
+        send_outbox_message(&mut stream, &outbox_message())
     });
     channel
         .service
-        .serve_guest(&node.home.path().join("absent.sock"), &mux)
+        .serve_guest(&node.home.path().join("absent.sock"), &mux, &mut sealer)
         .unwrap();
     assert!(matches!(guest.join().unwrap(), Err(Refusal::Mailbox(_))));
     assert!(channel.service.receive().is_none(), "nothing was queued");
+}
+
+/// A plan, optionally carrying a mailbox grant for `channel`'s authority and
+/// epoch 1. The host-held trust the test hands in names a different epoch and
+/// a different authority, so only the grant can make a message open.
+fn plan_and_trust(channel: &Channel, granted: bool) -> (ExecutionPlan, MailboxPolicy) {
+    let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+    if granted {
+        plan.mailbox = Some(mvm_contract::protocol::mailbox::MailboxGrant {
+            mailbox: address().mailbox,
+            authority_key: channel.authority_key.verifying_key().to_bytes(),
+            epoch: MbEpoch::new(1).unwrap(),
+        });
+    }
+    let trust = MailboxPolicy {
+        context: context(7),
+        encryption_key: Key::from_bytes([23; 32]),
+        sender_key: channel.sender_key.verifying_key(),
+        authority_key: SigningKey::from_bytes(&[99; 32]).verifying_key(),
+    };
+    (plan, trust)
+}
+
+/// The real guest forwarder, writing a plaintext message from its outbox,
+/// against the real service, over the real framing: the grant decides whether
+/// the host serves the port at all, and the host seals what the guest sent.
+#[test]
+fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
+    use std::os::unix::net::UnixListener;
+
+    let (node, channel) = channel_with_one_node();
+    let ops = [MailboxOperation::Send, MailboxOperation::Receive];
+    let outbox = node.home.path().join("outbox");
+    std::fs::write(&outbox, outbox_message().encode()).unwrap();
+    let per_port = node.home.path().join("port.sock");
+    let socket = node.home.path().join("granted.sock");
+    let absent_mux = node.home.path().join("absent-mux");
+
+    // No grant: nothing is bound and the guest port is never dialed.
+    let listener = UnixListener::bind(&per_port).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (plan, trust) = plan_and_trust(&channel, false);
+    let sealer_for = || sealer(&channel, &ops);
+    let none = serve_granted_guest(
+        &plan,
+        trust,
+        sealer_for(),
+        LIMITS,
+        &socket,
+        (&per_port, &absent_mux),
+    );
+    assert!(none.unwrap().is_none());
+    assert!(!socket.exists(), "no service socket without a grant");
+    assert!(
+        listener.accept().is_err(),
+        "the guest port was never dialed"
+    );
+
+    // A grant naming an authority the host does not hold is refused.
+    let (mut plan, trust) = plan_and_trust(&channel, true);
+    plan.mailbox.as_mut().unwrap().authority_key = [1; 32];
+    let refused = serve_granted_guest(
+        &plan,
+        trust,
+        sealer_for(),
+        LIMITS,
+        &socket,
+        (&per_port, &absent_mux),
+    );
+    assert!(refused.is_err(), "a foreign authority key is not honored");
+
+    // Grant present: the guest forwards plaintext, the host seals and queues.
+    listener.set_nonblocking(false).unwrap();
+    let guest = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox)
+    });
+    let (plan, trust) = plan_and_trust(&channel, true);
+    let service = serve_granted_guest(
+        &plan,
+        trust,
+        sealer_for(),
+        LIMITS,
+        &socket,
+        (&per_port, &absent_mux),
+    )
+    .unwrap()
+    .expect("a granted plan is served");
+    assert_eq!(guest.join().unwrap(), Ok(()));
+    assert_eq!(service.receive().unwrap(), b"hello");
 }

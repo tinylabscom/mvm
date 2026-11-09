@@ -913,6 +913,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         services: input.services.clone(),
         extensions: input.extensions.clone(),
         stream_edges: input.stream_edges.clone(),
+        mailbox: None,
         stream_retention: input.stream_retention,
         action_budget: None,
         protected_paths: Default::default(),

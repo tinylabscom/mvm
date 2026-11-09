@@ -329,6 +329,13 @@ pub struct ExecutionPlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stream_edges: Vec<crate::stream::StreamEdge>,
 
+    /// The mailbox this workload may send into. `None` (the default) admits
+    /// none: the host serves no mailbox port and the guest listens on none.
+    /// Skip-serialized when absent so plans that predate the field keep their
+    /// bytes and their content address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox: Option<crate::protocol::mailbox::MailboxGrant>,
+
     /// Whether this workload's captured output is kept after the run.
     ///
     /// Always serialized, unlike the optional pins above: the point of
@@ -494,6 +501,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         services: Vec::new(),
         extensions: Vec::new(),
         stream_edges: Vec::new(),
+        mailbox: None,
         stream_retention: StreamRetention::Persist,
         sdk_uses_sidecar: true,
         action_budget: None,
