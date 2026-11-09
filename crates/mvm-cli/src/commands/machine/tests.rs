@@ -4321,6 +4321,7 @@ fn start_args_with_create_flags(
         hypervisor: None,
         kernel_pin: None,
         has_ad_hoc_argv: false,
+        mailbox: None,
     }
 }
 
@@ -4652,4 +4653,25 @@ fn a_mailbox_id_is_accepted_on_run_and_absent_by_default() {
     assert_eq!(run.run.mailbox.as_deref(), Some(id.as_str()));
     let plain = parse_run(&["run", "--image", "alpine"]).expect("plain run parses");
     assert!(plain.run.mailbox.is_none());
+}
+
+/// The detached path boots under the grant `--mailbox` names, and under none
+/// without it: the grant used to be dropped on the way to the persistent boot.
+#[test]
+fn a_detached_machine_start_carries_the_mailbox_grant() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let id = "ab".repeat(32);
+    let granted = parse_run(&["run", "--image", "alpine", "-d", "--mailbox", &id]).unwrap();
+    let start = runtime::start_args_with_grant(&granted, "vm").unwrap();
+    let grant = start.mailbox.expect("the grant reaches the start");
+    assert_eq!(grant.mailbox.as_bytes(), &[0xab; 32]);
+    let plain = parse_run(&["run", "--image", "alpine", "-d"]).unwrap();
+    assert!(
+        runtime::start_args_with_grant(&plain, "vm")
+            .unwrap()
+            .mailbox
+            .is_none()
+    );
 }

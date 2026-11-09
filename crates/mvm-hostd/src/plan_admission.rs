@@ -2106,6 +2106,9 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
         &admitted,
         params.emitter,
     )?;
+    // Before the boot, so a grant this backend cannot serve never reaches a
+    // guest that would assert it.
+    crate::mailbox_process::require_servable(&config, backend.kind())?;
     // Spent before the backend starts, so an admission that reached dispatch
     // can never authorize another launch, whatever the start's outcome.
     admitted.dispatched = true;
