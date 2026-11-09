@@ -183,7 +183,7 @@ fn names_installed_bundle(id_or_slot: &str) -> bool {
 ///
 /// `None` when the key is a template slot or names no installed bundle. A
 /// manifest edited on disk after install refuses rather than reads.
-fn installed_bundle_verified_manifest(
+pub(super) fn installed_bundle_verified_manifest(
     id_or_slot: &str,
 ) -> Result<Option<mvm_core::plan::BundleManifest>> {
     if !names_installed_bundle(id_or_slot) {
@@ -201,7 +201,7 @@ fn installed_bundle_verified_manifest(
 
 /// This host's bundle-signing public key, or `None` when no host key exists
 /// yet. Read-only: checking a bundle must not mint a host identity.
-fn host_verifying_key() -> Result<Option<ed25519_dalek::VerifyingKey>> {
+pub(super) fn host_verifying_key() -> Result<Option<ed25519_dalek::VerifyingKey>> {
     let path = mvm_core::config::mvm_keys_dir().join("host-signer.pub");
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,

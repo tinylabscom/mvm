@@ -886,7 +886,7 @@ fn held_application_rechecks_pin_version_publisher_signature_and_revocation() {
 
 #[cfg(unix)]
 #[test]
-fn held_application_refuses_installed_metadata_tamper_and_unbounded_or_special_inputs() {
+fn held_application_refuses_installed_metadata_tamper_and_rematerializes_absence() {
     let installed = installed();
     let root =
         BundleRegistry::new(&installed.store.bundle_root).install_dir(&installed.bundle_sha256);
@@ -912,11 +912,9 @@ fn held_application_refuses_installed_metadata_tamper_and_unbounded_or_special_i
     assert!(resolve_held(&installed, "runtime/python").is_err());
     std::fs::write(signature, original_signature).unwrap();
     resolve_held(&installed, "runtime/python").unwrap();
-    std::fs::remove_dir_all(root).unwrap();
-    assert!(matches!(
-        resolve_held(&installed, "runtime/python"),
-        Err(ApplicationLaunchError::BundleMissing { .. })
-    ));
+    std::fs::remove_dir_all(&root).unwrap();
+    resolve_held(&installed, "runtime/python").unwrap();
+    assert!(root.join("manifest.json").is_file());
 }
 
 #[cfg(unix)]
@@ -1231,11 +1229,17 @@ fn post_install_tampering_and_withdrawn_trust_refuse_at_launch() {
     std::fs::write(&archive, &original).unwrap();
     resolve(&installed, "runtime/python").unwrap();
 
-    std::fs::remove_dir_all(registry.install_dir(&installed.bundle_sha256)).unwrap();
+    let extraction = registry.install_dir(&installed.bundle_sha256);
+    std::fs::remove_dir_all(&extraction).unwrap();
+    std::fs::write(&archive, b"poisoned archive").unwrap();
     assert!(matches!(
         resolve(&installed, "runtime/python"),
-        Err(ApplicationLaunchError::BundleMissing { .. })
+        Err(ApplicationLaunchError::Bundle(_))
     ));
+    assert!(!extraction.exists());
+    std::fs::write(&archive, &original).unwrap();
+    resolve(&installed, "runtime/python").unwrap();
+    assert!(extraction.join("manifest.json").is_file());
 
     let descriptor = installed
         .store

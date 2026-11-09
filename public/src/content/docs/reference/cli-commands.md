@@ -1745,7 +1745,9 @@ in the bundle registry. The run then continues as
 `mvmctl machine run --manifest <bundle-sha256>`, so admission is unchanged: the
 plan is synthesized and signed by the host, and the bundle is re-verified at
 admit time. A bundle that is already installed is verified again and reused
-rather than re-extracted. Installed archives are gzip-compressed at rest under
+rather than re-extracted; if its extracted tree is absent, a launch recreates
+it from the digest-matched, verified archive. This does not evict an existing
+tree automatically. Installed archives are gzip-compressed at rest under
 `~/.mvm/bundles/<sha256>.mvmpkg.gz`; older plain `.mvmpkg` installs remain
 readable. Admission re-verifies the original signed tar bytes, not the gzip
 wrapper. An unsigned, tampered, or unknown-publisher archive

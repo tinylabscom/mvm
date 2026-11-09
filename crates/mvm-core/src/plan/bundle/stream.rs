@@ -822,13 +822,47 @@ impl BundleRegistry {
             .map(|installed| installed.bundle)
     }
 
+    /// Recreate an absent extracted tree from this registry's retained archive.
+    /// The filename alone is not authority: the signed bytes must hash to `sha`.
+    pub fn materialize_cached(
+        &self,
+        sha: &str,
+        trust: &dyn TrustStore,
+    ) -> Result<InstalledBundle, BundleInstallError> {
+        if !crate::manifest::is_slot_hash_dirname(sha) {
+            return Err(BundleInstallError::Io {
+                bundle_sha256: sha.to_string(),
+                reason: "bundle address must be canonical SHA-256".into(),
+            });
+        }
+        self.install_leased_file_expected(&self.archive_path(sha), trust, false, Some(sha))
+            .map(|installed| installed.bundle)
+    }
+
     pub(crate) fn install_leased_file(
         &self,
         archive: &Path,
         trust: &dyn TrustStore,
         force: bool,
     ) -> Result<BundleInstallLease, BundleInstallError> {
+        self.install_leased_file_expected(archive, trust, force, None)
+    }
+
+    fn install_leased_file_expected(
+        &self,
+        archive: &Path,
+        trust: &dyn TrustStore,
+        force: bool,
+        expected_sha: Option<&str>,
+    ) -> Result<BundleInstallLease, BundleInstallError> {
         let sha = archive_sha256(archive).map_err(BundleInstallError::Verify)?;
+        if expected_sha.is_some_and(|expected| expected != sha) {
+            return Err(BundleInstallError::Verify(
+                BundleVerifyError::ManifestParse(
+                    "cached bundle archive differs from its requested sha256".into(),
+                ),
+            ));
+        }
         let io_error = |reason: String| BundleInstallError::Io {
             bundle_sha256: sha.clone(),
             reason,
@@ -838,7 +872,25 @@ impl BundleRegistry {
         let lease = self.lock_entry(&sha).map_err(io_error)?;
         let install_dir = self.install_dir(&sha);
         if install_dir.exists() && !force {
-            verify_bundle_file(archive, trust).map_err(BundleInstallError::Verify)?;
+            let verified =
+                verify_bundle_file(archive, trust).map_err(BundleInstallError::Verify)?;
+            if expected_sha.is_some() {
+                let installed = self
+                    .find(&sha)
+                    .map_err(|error| io_error(error.to_string()))?
+                    .ok_or_else(|| io_error("materialized bundle disappeared".into()))?;
+                if installed.manifest != verified.manifest {
+                    return Err(BundleInstallError::Verify(
+                        BundleVerifyError::ManifestParse(
+                            "materialized bundle manifest differs from its signed archive".into(),
+                        ),
+                    ));
+                }
+                return Ok(BundleInstallLease {
+                    bundle: installed,
+                    _lease: lease,
+                });
+            }
             return Err(BundleInstallError::AlreadyInstalled {
                 bundle_sha256: sha.clone(),
             });
@@ -900,7 +952,9 @@ impl BundleRegistry {
         if std::fs::symlink_metadata(&staging).is_ok() {
             let _ = std::fs::remove_dir_all(&staging);
         }
-        self.persist_archive(archive, &sha).map_err(io_error)?;
+        if expected_sha.is_none() {
+            self.persist_archive(archive, &sha).map_err(io_error)?;
+        }
 
         Ok(BundleInstallLease {
             bundle: InstalledBundle {
@@ -1541,6 +1595,43 @@ mod tests {
                 .verified_manifest(&installed.sha256, &trust())
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn missing_extraction_rematerializes_only_from_its_signed_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = sealed_from_files(dir.path());
+        let registry = BundleRegistry::new(dir.path().join("registry"));
+        let installed = registry.install_file(&path, &trust(), false).unwrap();
+        let sha = installed.sha256;
+        let archive = registry.archive_path(&sha);
+        std::fs::remove_dir_all(&installed.root).unwrap();
+
+        let rebuilt = registry.materialize_cached(&sha, &trust()).unwrap();
+        assert_eq!(rebuilt.root, installed.root);
+        assert_eq!(
+            std::fs::read(rebuilt.root.join("artifacts/rootfs.ext4")).unwrap(),
+            b"rootfs bytes"
+        );
+        assert_eq!(archive, registry.archive_path(&sha));
+        assert_eq!(
+            registry.materialize_cached(&sha, &trust()).unwrap().root,
+            rebuilt.root
+        );
+
+        std::fs::remove_dir_all(&rebuilt.root).unwrap();
+        let mut wrong = std::fs::read(&path).unwrap();
+        wrong[0] ^= 1;
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&wrong).unwrap();
+        std::fs::write(&archive, gzip.finish().unwrap()).unwrap();
+        assert!(registry.materialize_cached(&sha, &trust()).is_err());
+        assert!(!rebuilt.root.exists());
+        assert!(
+            registry
+                .materialize_cached("../not-a-digest", &trust())
+                .is_err()
         );
     }
 

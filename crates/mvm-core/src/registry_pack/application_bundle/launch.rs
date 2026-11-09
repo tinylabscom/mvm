@@ -474,6 +474,13 @@ pub(super) fn resolve_bundle_with_checks(
             .as_str(),
     );
     let bundle = verify_application_bundle(&application, &archive, trust)?;
+    if std::fs::symlink_metadata(registry.install_dir(&bundle.bundle().bundle_sha256))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        registry
+            .materialize_cached(&bundle.bundle().bundle_sha256, trust)
+            .map_err(ApplicationBundleError::from)?;
+    }
     require_installed_metadata(&registry, &bundle)?;
     Ok(bundle)
 }

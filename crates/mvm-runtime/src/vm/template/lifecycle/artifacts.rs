@@ -286,14 +286,33 @@ pub(super) fn bundle_artifacts_for_sha(
 
     let registry = mvm_core::plan::BundleRegistry::default_path()
         .context("resolving default bundle registry root")?;
-    let installed = registry
+    let installed = match registry
         .find(bundle_sha256)
         .with_context(|| format!("looking up bundle {bundle_sha256} in registry"))?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no installed bundle for {bundle_sha256} — run `mvmctl bundle install` first"
-            )
-        })?;
+    {
+        Some(installed) => installed,
+        None => {
+            super::snapshot::installed_bundle_verified_manifest(bundle_sha256)?
+                .with_context(|| {
+                    format!(
+                        "no installed bundle for {bundle_sha256} — run `mvmctl bundle install` first"
+                    )
+                })?;
+            let archive = registry.archive_path(bundle_sha256);
+            let trust = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
+                mvm_core::plan::FsTrustStore::default_path()?,
+                &archive,
+            );
+            match super::snapshot::host_verifying_key()? {
+                Some(key) => {
+                    let id = mvm_core::plan::bundle::key_id_from_pubkey(&key);
+                    let trust = mvm_core::plan::bundle::LocalBundleTrustStore::new(trust, id, key);
+                    registry.materialize_cached(bundle_sha256, &trust)?
+                }
+                None => registry.materialize_cached(bundle_sha256, &trust)?,
+            }
+        }
+    };
 
     let kernel = installed
         .path_for_role(&ArtifactRole::Kernel)
