@@ -1598,7 +1598,15 @@ mod tests {
         let Some(path) = std::env::var_os("MVM_TEST_COMPOSITION_TAR") else {
             return;
         };
-        let decoder = flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap());
+        let path = PathBuf::from(path);
+        let archive_pin = std::env::var("MVM_TEST_COMPOSITION_TAR_SHA256").ok();
+        if let Some(pin) = &archive_pin {
+            assert_eq!(
+                mvm_core::crypto::image_verify::sha256_file(&path).unwrap(),
+                *pin
+            );
+        }
+        let decoder = flate2::read::GzDecoder::new(std::fs::File::open(&path).unwrap());
         let mut tar = tempfile::tempfile().unwrap();
         io::copy(&mut decoder.take(MAX_UNPACKED_BYTES + 1), &mut tar).unwrap();
         tar.seek(SeekFrom::Start(0)).unwrap();
@@ -1613,13 +1621,17 @@ mod tests {
         }
         extracted.unwrap();
         check_base_contract(&composed).unwrap();
+        let base_pin = std::env::var("MVM_TEST_COMPOSITION_BASE_MANIFEST_SHA256")
+            .map(|pin| Sha256Hex::new(pin).unwrap())
+            .unwrap_or_else(|_| Sha256Hex::from_bytes(b"local test-only Nix base"));
         let candidate = ComposedWorkloadRootfs {
             tree: composed,
-            base_manifest_sha256: Sha256Hex::from_bytes(b"local test-only Nix base"),
+            base_manifest_sha256: base_pin.clone(),
             profile: WorkloadImageProfile::DefaultTenant,
             authored_spec_sha256: None,
             runtime_policies: Vec::new(),
         };
+        assert_eq!(candidate.base_manifest_sha256(), &base_pin);
         let output = tempfile::tempdir().unwrap();
         let ext4 = output.path().join("rootfs.ext4");
         let materialized = candidate.materialize_candidate(&ext4).unwrap();
@@ -1643,6 +1655,12 @@ mod tests {
                 0,
                 "composition changed Nix base files or modes: {:?}",
                 diff.files.iter().take(8).collect::<Vec<_>>()
+            );
+        }
+        if let Some(pin) = archive_pin {
+            assert_eq!(
+                mvm_core::crypto::image_verify::sha256_file(&path).unwrap(),
+                pin
             );
         }
     }
