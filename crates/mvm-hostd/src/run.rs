@@ -274,6 +274,7 @@ pub fn admit_and_boot_local(
     };
 
     let synthesis = SynthesisInput {
+        mailbox: None,
         outputs: Vec::new(),
         grants: req.grants.clone(),
         stream_edges: Vec::new(),

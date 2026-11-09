@@ -386,6 +386,7 @@ fn synthesis_input_for_app<'a>(
     let ingress = lower_ingress(app)?;
 
     Ok(SynthesisInput {
+        mailbox: None,
         outputs: Vec::new(),
         grants: None,
         stream_edges: Vec::new(),
