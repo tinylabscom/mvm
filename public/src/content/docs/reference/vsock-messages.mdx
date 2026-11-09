@@ -502,8 +502,7 @@ The identically named `HostVmRequest` / `HostVmResponse` in **mvm-agentd**
 are a different protocol: **newline-delimited JSON**, not the length-prefixed
 dispatch wire. Requests are externally tagged `Build` and `Ping`;
 responses are `Ok`, `Err`, `Log` and `Pong`. A build client consumes logs
-until its terminal result. The client can override the default port through
-`MVM_BUILDER_AGENT_PORT`.
+until its terminal result.
 
 A Linux listener/client exists; non-Linux builds are unsupported and the
 owning build mode/admission policy still decides whether the path is usable.
