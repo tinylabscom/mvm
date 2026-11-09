@@ -408,6 +408,7 @@ fn admit_standby_parent_plan(
     mem_mib: u32,
 ) -> Result<AdmittedPlan> {
     let input = SynthesisInput {
+        mailbox: None,
         outputs: Vec::new(),
         grants: None,
         kernel_sha256: None,

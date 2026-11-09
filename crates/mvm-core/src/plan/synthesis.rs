@@ -39,6 +39,7 @@
 //! | `*_policy` / `fs_policy` | `"local-default"` (resolver maps to Noops) |
 //! | `valid_from`/`valid_until` | now + 10 min window |
 //! | `nonce` | fresh 128 bits from `SysRng` per invocation |
+//! | `mailbox` | caller-supplied grant (`--mailbox` / workload declaration); `None` grants none |
 //! | `stream_retention` | caller-supplied; `Persist` unless a driver opts the run out of a durable transcript |
 //! | everything else | conservative defaults (no attestation, destroy-on-exit, etc.) |
 
@@ -216,6 +217,9 @@ pub struct SynthesisInput<'a> {
     /// live and keeps nothing. Admitted rather than flagged so an absent
     /// transcript is attributable to a signed decision.
     pub stream_retention: StreamRetention,
+    /// Mailbox this workload may send into, minted into the signed plan.
+    /// `None` (the default) grants none.
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// Runtime attestation required by the signed plan. Ordinary launch
     /// callers use `Noop`; assurance controllers may select a hardware mode
     /// only from operator-owned configuration.
@@ -274,6 +278,7 @@ pub struct SynthesisInputBuilder<'a> {
     extensions: Option<Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>>,
     stream_edges: Option<Vec<mvm_contract::stream::StreamEdge>>,
     stream_retention: Option<StreamRetention>,
+    mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     attestation_mode: Option<AttestationMode>,
 }
 
@@ -322,6 +327,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             extensions: None,
             stream_edges: None,
             stream_retention: None,
+            mailbox: None,
             attestation_mode: None,
         }
     }
@@ -604,6 +610,13 @@ impl<'a> SynthesisInputBuilder<'a> {
         self
     }
 
+    /// Set the mailbox grant minted into the plan. Optional: unset means none.
+    #[must_use]
+    pub fn mailbox(mut self, grant: mvm_contract::protocol::mailbox::MailboxGrant) -> Self {
+        self.mailbox = Some(grant);
+        self
+    }
+
     /// Set `stream_retention`.
     #[must_use]
     pub fn stream_retention(mut self, stream_retention: StreamRetention) -> Self {
@@ -701,6 +714,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             stream_retention: self
                 .stream_retention
                 .ok_or(BuilderError::missing("SynthesisInput", "stream_retention"))?,
+            mailbox: self.mailbox,
             attestation_mode: self.attestation_mode.unwrap_or(AttestationMode::Noop),
         })
     }
@@ -913,7 +927,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         services: input.services.clone(),
         extensions: input.extensions.clone(),
         stream_edges: input.stream_edges.clone(),
-        mailbox: None,
+        mailbox: input.mailbox,
         stream_retention: input.stream_retention,
         action_budget: None,
         protected_paths: Default::default(),
@@ -1305,6 +1319,7 @@ mod tests {
             extensions: Vec::new(),
             stream_edges: Vec::new(),
             stream_retention: Default::default(),
+            mailbox: None,
             attestation_mode: AttestationMode::Noop,
         }
     }
@@ -1626,6 +1641,27 @@ mod tests {
         let json = serde_json::to_string(&plan).expect("plan serializes");
         let parsed: ExecutionPlan = serde_json::from_str(&json).expect("plan parses");
         assert_eq!(parsed.deps_volume, Some(binding));
+    }
+
+    #[test]
+    fn a_mailbox_grant_is_minted_into_the_signed_plan_and_absence_stays_none() {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        assert!(synthesize_plan(&input("vm")).unwrap().mailbox.is_none());
+
+        let grant = MailboxGrant {
+            mailbox: MailboxId::from_bytes([7; 32]),
+            authority_key: [9; 32],
+            epoch: ExecutionEpoch::new(1).unwrap(),
+        };
+        let mut inp = input("vm");
+        inp.mailbox = Some(grant);
+        let plan = synthesize_plan(&inp).unwrap();
+        assert_eq!(plan.mailbox, Some(grant));
+        assert_ne!(
+            plan.plan_id,
+            synthesize_plan(&input("vm")).unwrap().plan_id,
+            "the grant is part of the content address"
+        );
     }
 
     #[test]

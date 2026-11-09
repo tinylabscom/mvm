@@ -171,6 +171,8 @@ pub struct LaunchRequest {
     /// the same plan that was signed over it, rather than by a carrier
     /// travelling alongside one.
     pub(crate) grants: Option<mvm_contract::grants::Grants>,
+    /// Mailbox this launch grants; minted into the signed plan at admission.
+    pub(crate) mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// Path to an operator-authored assurance campaign declaration.
     ///
     /// `None` on every ordinary launch. Present only when an operator asked
@@ -276,6 +278,7 @@ impl LaunchRequest {
             secret_refs: Vec::new(),
             force: false,
             grants: mvm_contract::grants::Grants::default(),
+            mailbox: None,
             assurance_campaign: None,
             signed_plan: None,
         }
@@ -325,6 +328,7 @@ pub struct LaunchRequestBuilder {
     secret_refs: Vec<MachineSecretRef>,
     force: bool,
     grants: mvm_contract::grants::Grants,
+    mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     assurance_campaign: Option<std::path::PathBuf>,
     signed_plan: Option<mvm_core::plan::SignedExecutionPlan>,
 }
@@ -456,6 +460,14 @@ impl LaunchRequestBuilder {
     #[must_use]
     pub fn grants(mut self, grants: mvm_contract::grants::Grants) -> Self {
         self.grants = grants;
+        self
+    }
+
+    /// Grant this launch a mailbox. Minted into the signed plan, so it is
+    /// refused alongside a fleet-issued signed plan, which already carries its own.
+    #[must_use]
+    pub fn mailbox(mut self, grant: mvm_contract::protocol::mailbox::MailboxGrant) -> Self {
+        self.mailbox = Some(grant);
         self
     }
 
@@ -636,6 +648,7 @@ impl LaunchRequestBuilder {
             // granted nothing produces exactly the plan it produced before
             // grants were expressible.
             grants: (self.grants != mvm_contract::grants::Grants::default()).then_some(self.grants),
+            mailbox: self.mailbox,
             assurance_campaign: self.assurance_campaign,
             signed_plan: self.signed_plan,
         })
