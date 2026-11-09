@@ -1400,6 +1400,39 @@ mod tests {
             )
             .publish_extra(root, target, "base-rootfs-aarch64.tar.gz", compressed);
         let images = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
+        if let Some(directory) = std::env::var_os("MVM_TEST_SIGNED_BASE_DIR") {
+            let directory = PathBuf::from(directory);
+            let manifest = directory.join("image-set.json");
+            let tar = directory.join("rootfs.tar.gz");
+            if std::env::var_os("MVM_TEST_SIGNED_BASE_VERIFY").is_some() {
+                let signed = std::fs::read(&manifest).unwrap();
+                assert_eq!(signed, images.manifest_bytes(), "signed root changed");
+                let bundle = std::fs::read(directory.join("image-set.bundle")).unwrap();
+                let identity = std::env::var("MVM_TEST_SIGNED_BASE_IDENTITY").unwrap();
+                mvm_core::crypto::image_verify::verify_signed_payload_under_any_identity(
+                    &signed,
+                    &bundle,
+                    &[identity.as_str()],
+                    "https://token.actions.githubusercontent.com",
+                )
+                .expect("test-only OIDC signature, never a production publisher");
+                let fetched = tempfile::tempdir().unwrap();
+                let digest = images
+                    .fetch_workload_composition_tar(
+                        arch,
+                        profile,
+                        &fetched.path().join("base.tar.gz"),
+                    )
+                    .unwrap();
+                assert_eq!(Sha256Hex::from_bytes(&std::fs::read(&tar).unwrap()), digest);
+            } else {
+                std::fs::create_dir(&directory).unwrap();
+                std::fs::write(&manifest, images.manifest_bytes()).unwrap();
+                images
+                    .fetch_workload_composition_tar(arch, profile, &tar)
+                    .unwrap();
+            }
+        }
         let mut composed =
             compose_signed_workload_tree_with(&images, arch, profile, &[], |_| Ok(())).unwrap();
         assert_eq!(
@@ -1598,15 +1631,7 @@ mod tests {
         let Some(path) = std::env::var_os("MVM_TEST_COMPOSITION_TAR") else {
             return;
         };
-        let path = PathBuf::from(path);
-        let archive_pin = std::env::var("MVM_TEST_COMPOSITION_TAR_SHA256").ok();
-        if let Some(pin) = &archive_pin {
-            assert_eq!(
-                mvm_core::crypto::image_verify::sha256_file(&path).unwrap(),
-                *pin
-            );
-        }
-        let decoder = flate2::read::GzDecoder::new(std::fs::File::open(&path).unwrap());
+        let decoder = flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap());
         let mut tar = tempfile::tempfile().unwrap();
         io::copy(&mut decoder.take(MAX_UNPACKED_BYTES + 1), &mut tar).unwrap();
         tar.seek(SeekFrom::Start(0)).unwrap();
@@ -1621,17 +1646,13 @@ mod tests {
         }
         extracted.unwrap();
         check_base_contract(&composed).unwrap();
-        let base_pin = std::env::var("MVM_TEST_COMPOSITION_BASE_MANIFEST_SHA256")
-            .map(|pin| Sha256Hex::new(pin).unwrap())
-            .unwrap_or_else(|_| Sha256Hex::from_bytes(b"local test-only Nix base"));
         let candidate = ComposedWorkloadRootfs {
             tree: composed,
-            base_manifest_sha256: base_pin.clone(),
+            base_manifest_sha256: Sha256Hex::from_bytes(b"local test-only Nix base"),
             profile: WorkloadImageProfile::DefaultTenant,
             authored_spec_sha256: None,
             runtime_policies: Vec::new(),
         };
-        assert_eq!(candidate.base_manifest_sha256(), &base_pin);
         let output = tempfile::tempdir().unwrap();
         let ext4 = output.path().join("rootfs.ext4");
         let materialized = candidate.materialize_candidate(&ext4).unwrap();
@@ -1655,12 +1676,6 @@ mod tests {
                 0,
                 "composition changed Nix base files or modes: {:?}",
                 diff.files.iter().take(8).collect::<Vec<_>>()
-            );
-        }
-        if let Some(pin) = archive_pin {
-            assert_eq!(
-                mvm_core::crypto::image_verify::sha256_file(&path).unwrap(),
-                pin
             );
         }
     }

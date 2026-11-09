@@ -6,8 +6,6 @@ on:
       - .github/workflows/composable-python-layer-smoke.yml
       - scripts/build-python-runtime-layer.py
       - scripts/test_build_python_runtime_layer.py
-      - scripts/test-composable-base-input.py
-      - scripts/test_composable_base_input.py
       - crates/mvm-build/src/runtime_layer.rs
       - crates/mvm-core/examples/verify-runtime-layer-fixture.rs
   workflow_dispatch:
@@ -129,26 +127,37 @@ jobs:
           IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
         run: |
           set -euo pipefail
-          python3 -m unittest scripts/test_composable_base_input.py
           tmp="$(mktemp -d)"
           trap 'rm -rf -- "$tmp"' EXIT
-          python3 scripts/test-composable-base-input.py create "$tmp/base"
-          cosign sign-blob --yes --new-bundle-format --bundle "$tmp/base/base.bundle" \
-            "$tmp/base/base.json"
-          python3 scripts/test-composable-base-input.py verify "$tmp/base" "$IDENTITY"
-          if python3 scripts/test-composable-base-input.py verify "$tmp/base" \
-            "https://example.invalid/untrusted-publisher"; then
+          MVM_TEST_SIGNED_BASE_DIR="$tmp/base" cargo test --locked -p mvm-build \
+            --features manifest-verify --lib \
+            runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+            -- --exact
+          cosign sign-blob --yes --new-bundle-format --bundle "$tmp/base/image-set.bundle" \
+            "$tmp/base/image-set.json"
+          MVM_TEST_SIGNED_BASE_DIR="$tmp/base" MVM_TEST_SIGNED_BASE_VERIFY=1 \
+            MVM_TEST_SIGNED_BASE_IDENTITY="$IDENTITY" cargo test --locked -p mvm-build \
+            --features manifest-verify --lib \
+            runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+            -- --exact
+          if MVM_TEST_SIGNED_BASE_DIR="$tmp/base" MVM_TEST_SIGNED_BASE_VERIFY=1 \
+            MVM_TEST_SIGNED_BASE_IDENTITY="https://example.invalid/untrusted-publisher" \
+            cargo test --locked -p mvm-build --features manifest-verify --lib \
+              runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+              -- --exact; then
             echo "wrong synthetic base publisher was accepted" >&2
             exit 1
           fi
           MVM_TEST_COMPOSITION_TAR="$tmp/base/rootfs.tar.gz" \
-            MVM_TEST_COMPOSITION_TAR_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_sha256"])' "$tmp/base/base.json")" \
-            MVM_TEST_COMPOSITION_BASE_MANIFEST_SHA256="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$tmp/base/base.json")" \
-            cargo test --locked -p mvm-build \
+            cargo test --locked -p mvm-build --features manifest-verify \
             --lib runtime_layer::tests::nix_generated_base_tar_materializes_with_verity_when_provided \
             -- --exact
           printf x >> "$tmp/base/rootfs.tar.gz"
-          if python3 scripts/test-composable-base-input.py verify "$tmp/base" "$IDENTITY"; then
+          if MVM_TEST_SIGNED_BASE_DIR="$tmp/base" MVM_TEST_SIGNED_BASE_VERIFY=1 \
+            MVM_TEST_SIGNED_BASE_IDENTITY="$IDENTITY" cargo test --locked -p mvm-build \
+              --features manifest-verify --lib \
+              runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+              -- --exact; then
             echo "changed synthetic base archive was accepted" >&2
             exit 1
           fi
