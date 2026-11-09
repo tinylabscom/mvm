@@ -47,6 +47,7 @@ impl Default for RunArgs {
             cpus: crate::commands::shared::default_vcpus(),
             cpu_limit: None,
             grants_file: None,
+            mailbox: None,
             memory: "512M".to_string(),
             explicit_resources: Default::default(),
             profile: RunProfile::Dev,

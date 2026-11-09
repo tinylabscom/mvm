@@ -47,6 +47,7 @@ mod durability;
 mod enforce;
 pub mod entrypoint_resolve;
 pub mod instructions;
+pub mod mailbox_grant;
 mod outcome;
 mod pinned_bundle;
 pub mod policy;

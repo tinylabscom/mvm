@@ -242,6 +242,10 @@ pub(in crate::commands) struct RunArgs {
     /// Read grants (CPU, wall clock, egress) from a JSON file.
     #[arg(long = "grants-file", value_name = "PATH")]
     pub grants_file: Option<PathBuf>,
+    /// Grant this workload a mailbox, named by a 64-character hex id. The host
+    /// signer is the authority; no flag means no mailbox.
+    #[arg(long, value_name = "ID")]
+    pub mailbox: Option<String>,
     /// Set memory (for example, 512M or 1G).
     #[arg(long, default_value = "512M")]
     pub memory: String,
@@ -411,7 +415,8 @@ pub(in crate::commands) struct RunArgs {
 /// Every flag that authors policy. A resolved manifest is the whole policy,
 /// so `--plan` stands alone: mixing it with any of these would leave two
 /// answers to one question.
-const PLAN_EXCLUDES: [&str; 11] = [
+const PLAN_EXCLUDES: [&str; 12] = [
+    "mailbox",
     "policy",
     "net",
     "network_preset",
@@ -631,6 +636,10 @@ pub(in crate::commands) fn run_secure_started(
     // Prepare outputs before admission binds them to the grant.
     let outputs = super::outputs::PreparedOutputs::prepare(&args.outputs, &args.mounts)?;
     let admit_outputs = outputs.grants();
+    let admit_mailbox = mvm_client::admission::mailbox_grant::resolve(
+        args.mailbox.as_deref(),
+        args.from_workload_ir.as_deref(),
+    )?;
     let host_config = mvm_core::user_config::load(None);
     let ai_policy = application_source::ai_policy(&args)?;
     let routes = super::run_routes::launch_routes(&args)?;
@@ -752,7 +761,7 @@ pub(in crate::commands) fn run_secure_started(
         // running beside the VMM boot, and activation waits for it.
         let configured_images_dir = mvm_build::image_source::configured_images_dir();
         let params = super::up::AdmitPlanForBootParams {
-            mailbox: None,
+            mailbox: admit_mailbox,
             gpu: admit_gpu,
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
                 .with_mount_roots(&[])

@@ -289,6 +289,7 @@ pub fn start_machine_spec(
         tools: spec.tools.clone(),
         has_ad_hoc_argv: params.has_ad_hoc_argv,
         grants: spec.grants.clone(),
+        mailbox: None,
         gpu: spec.gpu,
         gpu_device: spec.gpu_device,
         workload_dir: workload_dir.as_deref(),

@@ -93,6 +93,7 @@ pub struct PersistentImageStartParams<'a> {
     /// [`network_policy`](Self::network_policy), which the caller derived from
     /// the same spec.
     pub grants: Option<mvm_contract::grants::Grants>,
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// GPU remoting plane from the persisted spec (`--gpu` at create/start).
     pub gpu: bool,
     /// Optional host GPU ordinal persisted with the machine.
@@ -237,6 +238,7 @@ fn prepare_persistent_boot(
         tools,
         has_ad_hoc_argv,
         grants,
+        mailbox,
         gpu,
         gpu_device,
         workload_dir,
@@ -333,7 +335,7 @@ fn prepare_persistent_boot(
                 .collect::<Vec<_>>();
             admit_plan_for_boot_configured_ingress(
                 AdmitPlanForBootParams {
-                    mailbox: None,
+                    mailbox,
                     // What the backend will arm, so the admitted tier opens
                     // the GPU endpoint's vsock socket exactly when there is one.
                     gpu: config.gpu,
