@@ -812,47 +812,37 @@ fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
     assert!(host_trust(keys.path(), &foreign).is_err());
 }
 
-/// A granted plan through the launch helper serves the guest port from its
-/// own thread and queues what the guest sent; a plan without a grant builds
-/// and dials nothing.
+/// A granted plan's derived keys serve the guest port from their own thread
+/// and queue what the guest sent.
 #[test]
-fn the_launch_helper_serves_a_granted_plan_and_builds_nothing_without_one() {
-    use mvm_hostd::mailbox_launch::{MailboxPaths, authority_key_for, start_for_launch};
+fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
+    use mvm_hostd::mailbox_launch::{
+        LAUNCH_LIMITS, ServePaths, authority_key_for, derive_launch_keys, serve_derived,
+    };
     use std::os::unix::net::UnixListener;
 
     let dir = tempfile::tempdir().unwrap();
     host_keys(dir.path(), 5);
-    let paths = || MailboxPaths {
-        keys_dir: dir.path().to_owned(),
-        socket: dir.path().join("mailbox.sock"),
-        guest_port: dir.path().join("port.sock"),
-        firecracker_mux: dir.path().join("absent-mux"),
-    };
     let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
-    listener.set_nonblocking(true).unwrap();
-
-    let mut plain = mvm_core::plan::test_support::PlanFixture::new().build();
-    plain.mailbox = None;
-    assert!(
-        start_for_launch(plain.mailbox, paths(), LIMITS)
-            .unwrap()
-            .is_none()
-    );
-    assert!(!dir.path().join("mailbox.sock").exists());
-    assert!(listener.accept().is_err(), "no grant, nothing dialed");
-
     let authority = authority_key_for(dir.path(), &address().mailbox).unwrap();
-    let plan = granted_plan(authority.to_bytes());
+    let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
+    let keys = derive_launch_keys(dir.path(), &grant).unwrap();
     let outbox = dir.path().join("outbox");
     std::fs::write(&outbox, outbox_message().encode()).unwrap();
-    listener.set_nonblocking(false).unwrap();
     let guest = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox)
     });
-    let launch = start_for_launch(plan.mailbox, paths(), LIMITS)
-        .unwrap()
-        .unwrap();
+    let launch = serve_derived(
+        grant,
+        keys,
+        ServePaths {
+            socket: dir.path().join("mailbox.sock"),
+            guest_port: dir.path().join("port.sock"),
+            firecracker_mux: dir.path().join("absent-mux"),
+        },
+        LAUNCH_LIMITS,
+    );
     assert_eq!(guest.join().unwrap(), Ok(()));
     let received = (0..100).find_map(|_| {
         launch.receive().or_else(|| {
@@ -885,17 +875,6 @@ impl KillOnDrop {
         }
         panic!("the process never dialed; stderr:\n{}", self.stderr());
     }
-
-    /// Wait for exit within 20s, or fail with the child's stderr.
-    fn exit(&mut self) -> std::process::ExitStatus {
-        for _ in 0..400 {
-            if let Some(status) = self.0.try_wait().unwrap() {
-                return status;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        panic!("the process never exited; stderr:\n{}", self.stderr());
-    }
 }
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
@@ -904,85 +883,61 @@ impl Drop for KillOnDrop {
     }
 }
 
-fn spawn_collector_only(home: &std::path::Path, config: serde_json::Value) -> KillOnDrop {
+fn spawn_mailbox_process(config: &[u8]) -> KillOnDrop {
     use std::io::Write;
-    let (log_file, log) = tempfile::NamedTempFile::new_in(home.parent().unwrap())
-        .unwrap()
-        .keep()
-        .unwrap();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_mvm-network-endpoint"))
-        .env("MVM_HOME", home)
-        .env("HOME", home)
+    let (log_file, log) = tempfile::NamedTempFile::new().unwrap().keep().unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_mvm-mailbox"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(log_file)
         .spawn()
         .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(config.to_string().as_bytes()).unwrap();
+    child.stdin.take().unwrap().write_all(config).unwrap();
     KillOnDrop(child, log)
 }
 
-/// The per-VM process a launch spawns, handed only the signed grant and the
-/// VM's state dir, serves that guest's mailbox from the host key directory
-/// with telemetry off; given no mailbox and no telemetry it refuses to run.
+/// The separate mailbox process, handed only derived keys and the guest's
+/// paths on stdin, dials the guest's mailbox port and binds the VM's mailbox
+/// socket; the host signing seed is in its config nowhere.
 #[test]
-fn the_per_vm_process_serves_a_granted_mailbox_with_telemetry_off() {
+fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
+    use mvm_hostd::mailbox_process::build_config;
     use std::os::unix::net::UnixListener;
 
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path().join("home");
-    let keys = mvm_core::config::mvm_keys_dir_at(&home);
+    let keys = dir.path().join("keys");
     std::fs::create_dir_all(&keys).unwrap();
     host_keys(&keys, 5);
     let state_dir = dir.path().join("vm");
     std::fs::create_dir_all(&state_dir).unwrap();
-    let port = mvm_core::config::vm_hvf_vsock_port_socket_at(
-        &state_dir,
-        mvm_contract::protocol::mailbox::MAILBOX_PORT,
-    );
-    std::fs::create_dir_all(port.parent().unwrap()).unwrap();
-    let listener = UnixListener::bind(&port).unwrap();
-
     let authority = mvm_hostd::mailbox_launch::authority_key_for(&keys, &address().mailbox)
         .unwrap()
         .to_bytes();
     let grant = granted_plan(authority).mailbox.unwrap();
-    let embed = mvm_hostd::mailbox_launch::MailboxEmbed {
-        grant,
-        state_dir: state_dir.clone(),
-    };
+    let config = build_config(&keys, &grant, &state_dir).unwrap();
+    std::fs::create_dir_all(config.guest_port.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(&config.guest_port).unwrap();
+    let wire = serde_json::to_vec(&config).unwrap();
+    let seed = std::fs::read(keys.join("host-signer.ed25519")).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&wire).contains(&hex::encode(&seed)),
+        "the seed is not in the process config"
+    );
+
     let outbox = dir.path().join("outbox");
     std::fs::write(&outbox, outbox_message().encode()).unwrap();
-    let mut process = spawn_collector_only(
-        &home,
-        serde_json::json!({"telemetry_only": {
-            "instance_id": "vm",
-            "redaction": mvm_core::policy::RedactionPolicy::default(),
-            "mailbox": embed,
-        }}),
-    );
+    let mut process = spawn_mailbox_process(&wire);
     let mut stream = process.accept(&listener);
     assert_eq!(
         mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox),
         Ok(())
     );
-    let socket = mvm_core::config::vm_mailbox_socket_at(&state_dir);
     assert!(
         (0..100).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(50));
-            socket.exists()
+            mvm_core::config::vm_mailbox_socket_at(&state_dir).exists()
         }),
         "the host service bound its socket; stderr:\n{}",
         process.stderr()
     );
-
-    let mut idle = spawn_collector_only(
-        &home,
-        serde_json::json!({"telemetry_only": {
-            "instance_id": "vm",
-            "redaction": mvm_core::policy::RedactionPolicy::default(),
-        }}),
-    );
-    assert!(!idle.exit().success(), "nothing to serve");
 }

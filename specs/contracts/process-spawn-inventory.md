@@ -91,7 +91,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-builder-guest | `src/bin/mvm-host-vm-init/boot_stage.rs` | 1 | builder init | exec the next boot stage | builder VM | CH | - | RAW_SITES (builder) | guest-side |
 | mvm-builder-guest | `src/bin/mvm-host-vm-init/builder_hooks.rs` | 4 | builder init | fsck and loop-device hooks | builder VM | CH | - | RAW_SITES (builder) | guest-side |
 | mvm-builder-guest | `src/bin/mvm-host-vm-init/install.rs` | 1 | builder job | dependency install job (uv/pnpm) | builder VM | CH | - | RAW_SITES (builder) | guest-side |
-| mvm-builder-guest | `src/bin/mvm-host-vm-init/workload.rs` | 1 | builder init | start Firecracker for a nested workload | builder VM | CH | CH | RAW_SITES (builder) | guest-side |
+| mvm-builder-guest | `src/bin/mvm-host-vm-init/workload.rs` | 1 | builder init | start Firecracker for a nested workload | builder VM | CH | - | RAW_SITES (builder) | guest-side |
 | mvm-builder-guest | `src/bin/stage0-init.rs` | 5 | builder init | Stage 0 bootstrap: network, mkfs, nix | builder VM | CH | - | RAW_SITES (builder) | guest-side |
 | mvm-builder-guest | `src/bin/stage0-init/kernel_emit.rs` | 1 | builder job | nix build of the emitted kernel | builder VM | CH | - | RAW_SITES (builder) | guest-side |
 | mvm-builder-guest | `src/bin/stage0-init/store_gc.rs` | 2 | builder job | nix store garbage collection | builder VM | CH | - | RAW_SITES (builder) | guest-side |
@@ -132,6 +132,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-hostd | `src/bin/mvm-hvf-supervisor.rs` | 3 | codesign / self re-exec | ad-hoc codesign of the binary, then re-exec self signed | per-VM supervisor bin | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/bin/mvm-network-endpoint.rs` | 1 | helper bin | keeper re-execs the endpoint binary for a long-lived VM | per-VM endpoint bin | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/health_probe.rs` | 1 | mvmctl self re-exec | `mvmctl machine restart` after a failed healthcheck (embedder-refused) | host daemon role | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
+| mvm-hostd | `src/mailbox_process.rs` | 1 | helper bin | launch path starts the per-VM mailbox process with derived keys on stdin | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/supervisor/firewall/linux_nft.rs` | 1 | net (nft) | install host nftables rules | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-hostd | `src/supervisor/services/spawn.rs` | 1 | helper bin | ProcessSpawner: start a signed, integrity-checked host service binary | host daemon role | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-runtime | `src/host_shell.rs` | 3 | shell script | bash -c for ShellEnvironment host commands | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
@@ -148,7 +149,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-vmm | `src/host/network_endpoint_spawn/owned.rs` | 1 | helper bin | spawn an owned network endpoint | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; check-single-network-path | required-host-primitive |
 | mvm-vmm | `src/host/shell/exec.rs` | 6 | shell script | run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
 
-Totals: 188 production sites in 97 files.
+Totals: 189 production sites in 98 files.
 
 | Crate | Sites |
 |---|--:|
@@ -162,7 +163,7 @@ Totals: 188 production sites in 97 files.
 | mvm-conformance | 3 |
 | mvm-core | 14 |
 | mvm-fs | 2 |
-| mvm-hostd | 9 |
+| mvm-hostd | 10 |
 | mvm-runtime | 11 |
 | mvm-setpriv | 1 |
 | mvm-vmm | 17 |
@@ -177,7 +178,7 @@ Totals: 188 production sites in 97 files.
 | fixed-argv-utility | 7 | 4 |
 | guest-side | 64 | 29 |
 | open-review | 12 | 3 |
-| required-host-primitive | 37 | 21 |
+| required-host-primitive | 38 | 22 |
 | test-only | 4 | 2 |
 
 Reviewed library-reachable sites (disposition, then why):
@@ -205,7 +206,7 @@ Still open-review, and the concrete missing piece:
 | `mvm-vmm/src/host/linux_env.rs` | `NativeEnv::{run, run_visible, run_capture}` run `bash -c <script>` for every `LinuxEnv` caller. Same gap as `shell/exec.rs`: callers are audited and tested, the wrapper is not constrained. |
 | `mvm-vmm/src/host/shell/exec.rs` | `run_in_vm*`/`run_on_vm*` hand a caller-built script to `bash -c` (host bash on native Linux and for custom VM names); `run_host` runs a caller-named program but has CLI callers only. Every library caller was read (see the shell-wrapper caller audit) and the unquoted ones fixed, but the seam itself still accepts any string, so nothing stops a new caller interpolating raw. Missing: a gate or typed command form that makes unquoted interpolation into these scripts unrepresentable, and a wall-clock bound (builds are long-running, so the bound has to be per caller). |
 
-By construct: `Command::new` 58, `SYS_execve` 1, `helper_command` 116, `helper_command_with` 3, `libc::fork` 1, `openpty` 2, `raw:execve` 1, `raw:execveat_raw` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
+By construct: `Command::new` 58, `SYS_execve` 1, `helper_command` 117, `helper_command_with` 3, `libc::fork` 1, `openpty` 2, `raw:execve` 1, `raw:execveat_raw` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
 
 Linked and Traced are host-side facts about the crate and the call graph. A `guest` or `builder VM` row is crate-linked into the host closure (so `CHS`), but its binary only ever runs inside the microVM; the host never calls it. Read those rows by Authority.

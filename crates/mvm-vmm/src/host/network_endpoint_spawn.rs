@@ -34,10 +34,9 @@ pub use endpoint_identity::EndpointPid;
 use stderr_log::{endpoint_stderr_log_path, open_endpoint_stderr_log};
 mod collector;
 pub use collector::{
-    CollectorOnly, TELEMETRY_COLLECTOR_PID_FILE, reap_telemetry_collector,
-    spawn_telemetry_collector,
+    TELEMETRY_COLLECTOR_PID_FILE, reap_telemetry_collector, spawn_telemetry_collector,
 };
-use collector::{mailbox_section, provision_collector, telemetry_section};
+use collector::{provision_collector, telemetry_section};
 
 /// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
 /// `vhost-vsock` gives a real guest→host AF_VSOCK path, so the host binds an
@@ -569,9 +568,6 @@ pub struct SubstitutionSpawnParams<'a> {
     /// the workload spawner from the host's provisioning decision; the
     /// builder-VM and wasm endpoints never collect.
     pub telemetry: bool,
-    /// The signed plan's mailbox grant: when present the endpoint serves the
-    /// guest's mailbox port. `None` binds and dials nothing.
-    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// The VM's resolved claim-10 network policy. `Some` ⇒ the endpoint gates
     /// egress itself (the relay path — the run loop no longer gates); `None` ⇒
     /// ungated here (the legacy in-loop gate is the enforcer).
@@ -616,7 +612,6 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     transport: Option<EndpointTransport>,
     tls_intermediate: Option<(String, String)>,
     telemetry: bool,
-    mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
     network_limits: Option<mvm_core::plan::NetworkLimits>,
     ingress: Option<&'a [IngressMapping]>,
@@ -632,7 +627,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
     pub fn new() -> Self {
         Self {
             telemetry: false,
-            mailbox: None,
             vm_name: None,
             state_dir: None,
             lifetime: None,
@@ -727,16 +721,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self
     }
 
-    /// Serve the guest's mailbox from the endpoint when the plan grants one.
-    #[must_use]
-    pub fn mailbox(
-        mut self,
-        mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
-    ) -> Self {
-        self.mailbox = mailbox;
-        self
-    }
-
     /// Set `network_policy`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
     pub fn network_policy(
@@ -826,7 +810,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             ))?,
             tls_intermediate: self.tls_intermediate,
             telemetry: self.telemetry,
-            mailbox: self.mailbox,
             network_policy: self.network_policy,
             network_limits: self.network_limits.ok_or(BuilderError::missing(
                 "SubstitutionSpawnParams",
@@ -877,7 +860,6 @@ pub fn endpoint_config_for_identity(
         egress_proxy: None,
         session_marker: None,
         telemetry: false,
-        mailbox: None,
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
@@ -925,9 +907,6 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         // The embedded collector's inputs, derived here so the spawner's one
         // provisioning decision fans out to every path the endpoint needs.
         cfg["telemetry"] = telemetry_section(params.tenant, params.state_dir);
-    }
-    if let Some(grant) = params.mailbox {
-        cfg["mailbox"] = mailbox_section(&grant, params.state_dir);
     }
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
@@ -1043,7 +1022,6 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     }
     let SubstitutionSpawnParams {
         telemetry: _,
-        mailbox: _,
         vm_name,
         state_dir,
         lifetime,
@@ -2199,49 +2177,6 @@ mod tests {
     }
 
     #[test]
-    fn the_endpoint_config_names_a_mailbox_only_when_the_plan_grants_one() {
-        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
-        let redaction = mvm_core::policy::RedactionPolicy::default();
-        let config = |mailbox| {
-            build_endpoint_config_json(&SubstitutionSpawnParams {
-                telemetry: false,
-                mailbox,
-                vm_name: "mbx",
-                state_dir: Path::new("/nonexistent/vm"),
-                lifetime: EndpointLifetime::Launcher,
-                tenant: "t",
-                secrets: &[],
-                redaction: &redaction,
-                tools: None,
-                transport: EndpointTransport::Uds {
-                    path: PathBuf::from("/nonexistent/vsock-5253.sock"),
-                },
-                egress_proxy: None,
-                session_marker: None,
-                tls_intermediate: None,
-                network_policy: None,
-                network_limits: mvm_core::plan::NetworkLimits::default(),
-                ingress: &[],
-                resolver_remote: None,
-                binding_store_dir: None,
-                flowmux_identity: None,
-            })
-        };
-        assert!(config(None).get("mailbox").is_none());
-        let grant = MailboxGrant {
-            mailbox: MailboxId::from_bytes([7; 32]),
-            authority_key: [9; 32],
-            epoch: ExecutionEpoch::new(1).unwrap(),
-        };
-        let granted = config(Some(grant));
-        assert_eq!(granted["mailbox"]["state_dir"], "/nonexistent/vm");
-        assert_eq!(
-            serde_json::from_value::<MailboxGrant>(granted["mailbox"]["grant"].clone()).unwrap(),
-            grant
-        );
-    }
-
-    #[test]
     fn spawn_network_endpoint_emits_uds_transport() {
         let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
@@ -2281,7 +2216,6 @@ mod tests {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let res = spawn_network_endpoint(SubstitutionSpawnParams {
             telemetry: false,
-            mailbox: None,
             vm_name: "uds-xport-vm",
             state_dir: &dir,
             lifetime: EndpointLifetime::Launcher,
@@ -2348,7 +2282,6 @@ mod tests {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         spawn_network_endpoint(SubstitutionSpawnParams {
             telemetry: false,
-            mailbox: None,
             vm_name: vm,
             state_dir: &dir,
             lifetime: EndpointLifetime::Launcher,
@@ -2425,7 +2358,6 @@ mod tests {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let err = spawn_network_endpoint(SubstitutionSpawnParams {
             telemetry: false,
-            mailbox: None,
             vm_name: vm,
             state_dir: &dir,
             lifetime: EndpointLifetime::Launcher,
@@ -2498,7 +2430,6 @@ mod tests {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let result = spawn_network_endpoint(SubstitutionSpawnParams {
             telemetry: false,
-            mailbox: None,
             vm_name: "rollback-vm",
             state_dir: &state_dir,
             lifetime: EndpointLifetime::Launcher,
@@ -2565,7 +2496,6 @@ mod tests {
     ) -> SubstitutionSpawnParams<'a> {
         SubstitutionSpawnParams {
             telemetry: false,
-            mailbox: None,
             vm_name: "cfg-vm",
             state_dir: Path::new("/tmp"),
             lifetime: EndpointLifetime::Launcher,

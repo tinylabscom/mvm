@@ -109,12 +109,6 @@ pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
             .add_rule(PathBeneath::new(fd, access))
             .map_err(|e| JailerError::LandlockApply(format!("{e:?}")))?;
     }
-    for p in &spec.make_sock_paths {
-        let fd = PathFd::new(p).map_err(|e| path_open_error(p, e))?;
-        ruleset = ruleset
-            .add_rule(PathBeneath::new(fd, AccessFs::MakeSock))
-            .map_err(|e| JailerError::LandlockApply(format!("{e:?}")))?;
-    }
     let status: RestrictionStatus = ruleset
         .restrict_self()
         .map_err(|e| JailerError::LandlockApply(format!("{e:?}")))?;

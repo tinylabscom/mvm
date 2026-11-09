@@ -288,6 +288,7 @@ A = {
     "mvm-hostd/src/bin/mvm-host-agent.rs": ("helper bin", "re-exec self as a worker process"),
     "mvm-hostd/src/bin/mvm-hvf-supervisor.rs": ("codesign / self re-exec", "ad-hoc codesign of the binary, then re-exec self signed"),
     "mvm-hostd/src/bin/mvm-network-endpoint.rs": ("helper bin", "keeper re-execs the endpoint binary for a long-lived VM"),
+    "mvm-hostd/src/mailbox_process.rs": ("helper bin", "launch path starts the per-VM mailbox process with derived keys on stdin"),
     "mvm-hostd/src/health_probe.rs": ("mvmctl self re-exec", "`mvmctl machine restart` after a failed healthcheck (embedder-refused)"),
     "mvm-hostd/src/supervisor/firewall/linux_nft.rs": ("net (nft)", "install host nftables rules"),
     "mvm-hostd/src/supervisor/services/spawn.rs": ("helper bin", "ProcessSpawner: start a signed, integrity-checked host service binary"),

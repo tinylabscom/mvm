@@ -144,10 +144,24 @@ pub fn serve_granted_guest(
     let Some(grant) = grant else {
         return Ok(None);
     };
+    serve_grant(grant, trust, sealer, limits, socket, guest).map(Some)
+}
+
+/// [`serve_granted_guest`] for a caller that already holds the grant rather
+/// than the whole plan: the separate mailbox process is handed the grant and
+/// the derived trust, never the plan.
+pub fn serve_grant(
+    grant: &MailboxGrant,
+    trust: MailboxPolicy,
+    sealer: GuestSealer,
+    limits: MailboxLimits,
+    socket: &Path,
+    guest: (&Path, &Path),
+) -> std::io::Result<MailboxService> {
     let mut sealer = sealer.with_grant(grant)?;
     let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
     service.serve_guest(guest.0, guest.1, &mut sealer)?;
-    Ok(Some(service))
+    Ok(service)
 }
 
 struct State {
