@@ -10,15 +10,12 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use mvm_agentd::mailbox_outbox::{OUTBOX_PATH, forward_outbox};
+use mvm_agentd::mailbox_outbox::{MAILBOX_CMDLINE_TOKEN, OUTBOX_PATH, forward_outbox};
 use mvm_contract::protocol::mailbox::MAILBOX_PORT;
 
 use crate::globals::SHUTDOWN_REQUESTED;
 use crate::telemetry::cmdline_asserts;
 use crate::transport::{accept_vsock, bind_vsock_listener, unix_transport_selected};
-
-/// The launch assertion that turns the mailbox listener on.
-const MAILBOX_CMDLINE_TOKEN: &str = "mvm.mailbox=1";
 
 /// Spawn the mailbox listener on a boot that asserts one. Called after PID-1
 /// activation; a bind failure is logged and abandoned, never boot-fatal.
