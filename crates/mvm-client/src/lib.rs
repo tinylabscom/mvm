@@ -76,6 +76,7 @@ pub mod inventory;
 pub mod launch;
 pub mod linux_shell;
 pub mod local;
+pub mod mailbox;
 pub mod manifest;
 pub mod notices;
 pub mod oci_bundle;

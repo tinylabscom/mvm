@@ -18,6 +18,7 @@ mod checkpoint;
 mod create_policy;
 pub(crate) mod lifecycle;
 mod list;
+mod mailbox;
 mod manifest_source;
 mod portable;
 pub(crate) mod prewarm;
@@ -64,6 +65,7 @@ use lifecycle::{
     exec_machine, quarantine_machine, replace_machine, run_restart, run_start, shell_machine,
     stop_machine,
 };
+use mailbox::{MachineMailboxAction, recv_mailbox};
 use manifest_source::{absolutize_manifest_volume_spec, load_machine_manifest_source};
 #[cfg(test)]
 use receipt::verify_machine_start_receipt;
@@ -125,6 +127,9 @@ pub(in crate::commands) enum MachineAction {
     /// Authorize a quarantined workload's replacement under a fresh epoch
     #[command(display_order = 5)]
     Replace(MachineReplaceArgs),
+    /// Read messages a granted guest sent to its mailbox
+    #[command(display_order = 5, subcommand)]
+    Mailbox(MachineMailboxAction),
     /// Remove one or more persistent named machine specs (or --all)
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
@@ -202,6 +207,7 @@ impl MachineAction {
             | MachineAction::Stop(_)
             | MachineAction::Quarantine(_)
             | MachineAction::Replace(_)
+            | MachineAction::Mailbox(_)
             | MachineAction::Reconfigure(_)
             | MachineAction::Rm(_)
             | MachineAction::Ls(_)
@@ -1557,6 +1563,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
         MachineAction::Quarantine(args) => quarantine_machine(cli, args, cfg),
         MachineAction::Replace(args) => replace_machine(&args),
+        MachineAction::Mailbox(MachineMailboxAction::Recv { name }) => recv_mailbox(&name),
         MachineAction::Reconfigure(args) => run_reconfigure(args),
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
         MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),
