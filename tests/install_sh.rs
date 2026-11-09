@@ -524,8 +524,13 @@ impl Release {
             let name = self.guest_runtime_name();
             checks.push_str(&format!("{}  {name}\n", runtime.recorded_sha256));
             routes.push((format!("{base}/{name}"), runtime.bytes.clone()));
+            routes.push((
+                format!("{base}/{name}.sha256"),
+                format!("{}  {name}\n", runtime.recorded_sha256).into_bytes(),
+            ));
             if runtime.publish_bundle {
                 routes.push((format!("{base}/{name}.bundle"), b"bundle".to_vec()));
+                routes.push((format!("{base}/{name}.sha256.bundle"), b"bundle".to_vec()));
             }
         }
         routes.insert(
@@ -1282,10 +1287,50 @@ fn install_sh_stages_the_verified_guest_runtime_beside_mvmctl() {
         release.guest_runtime.as_ref().unwrap().bytes,
         "the runtime must sit in the release directory's guest-runtime/"
     );
+    let runtime_dir = staged.parent().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(runtime_dir.join(format!("{name}.sha256"))).unwrap(),
+        format!(
+            "{}  {name}\n",
+            release.guest_runtime.as_ref().unwrap().recorded_sha256
+        ),
+    );
+    for suffix in [".bundle", ".sha256.bundle"] {
+        assert_eq!(
+            std::fs::read(runtime_dir.join(format!("{name}{suffix}"))).unwrap(),
+            b"bundle"
+        );
+    }
     assert!(
         !host.bin().join("guest-runtime").exists() && !host.bin().join(&name).exists(),
         "the runtime is not a command and must not be linked onto PATH"
     );
+}
+
+#[test]
+fn install_sh_refuses_a_runtime_with_a_mismatched_checksum_sidecar() {
+    let release = Release::new("v9.9.9").with_guest_runtime();
+    let sidecar = format!("/{}.sha256", release.guest_runtime_name());
+    let mut routes = release.routes();
+    let (_, bytes) = routes
+        .iter_mut()
+        .find(|(path, _)| path.ends_with(&sidecar))
+        .expect("fixture publishes the runtime checksum sidecar");
+    *bytes = b"wrong digest  mvm-guest-bins-v9.9.9.tar.gz\n".to_vec();
+    let (base, _stop) = serve(routes);
+    let host = Host::new();
+
+    let output = host.install(&base, "v9.9.9");
+    assert!(
+        !output.status.success(),
+        "mismatched sidecar must prevent install"
+    );
+    assert!(
+        stderr(&output).contains("checksum sidecar mismatch"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!host.lib().exists(), "no release directory on failure");
 }
 
 /// A release published before the guest runtime asset installs without it.

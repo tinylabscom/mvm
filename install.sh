@@ -889,9 +889,17 @@ stage_guest_runtime() {
   fi
   verify_release_checksum "$runtime"
   verify_release_signature "$runtime"
+  # Host services re-verify the runtime independently after the CLI starts.
+  curl -fsSL "$REL/$runtime.sha256" -o "$TMP/$runtime.sha256" \
+    || die "could not download checksum for $runtime"
+  [ "$(cat "$TMP/$runtime.sha256")" = "$(sha256_of "$TMP/$runtime")  $runtime" ] \
+    || die "checksum sidecar mismatch for $runtime"
+  verify_release_signature "$runtime.sha256"
   mkdir -p "$SRC/guest-runtime"
-  mv "$TMP/$runtime" "$SRC/guest-runtime/$runtime" \
-    || die "could not stage $runtime beside mvmctl"
+  for member in "$runtime" "$runtime.sha256" "$runtime.bundle" "$runtime.sha256.bundle"; do
+    mv "$TMP/$member" "$SRC/guest-runtime/$member" \
+      || die "could not stage $member beside mvmctl"
+  done
 }
 
 # --- Backend component selection ---------------------------------------------

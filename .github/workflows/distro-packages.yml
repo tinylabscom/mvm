@@ -72,6 +72,7 @@ jobs:
     outputs:
       version: ${{ steps.source.outputs.version }}
       pkgver: ${{ steps.source.outputs.pkgver }}
+      artifact_attempt: ${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v6
 
@@ -263,13 +264,13 @@ jobs:
       - name: Download the packages
         uses: actions/download-artifact@v8
         with:
-          name: ${{ format('{0}-attempt-{1}', inputs.published_packages && 'published-distro-packages' || 'distro-packages', github.run_attempt) }}
+          name: ${{ format('{0}-attempt-{1}', inputs.published_packages && 'published-distro-packages' || 'distro-packages', needs.package.outputs.artifact_attempt) }}
           path: distro-packages
 
       - name: Download the payload manifests
         uses: actions/download-artifact@v8
         with:
-          name: distro-package-payloads-attempt-${{ github.run_attempt }}
+          name: distro-package-payloads-attempt-${{ needs.package.outputs.artifact_attempt }}
           path: distro-packages
 
       - name: Install, run, and remove the package

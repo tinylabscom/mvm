@@ -80,6 +80,18 @@ class BootEvidenceTests(unittest.TestCase):
         self.args = SimpleNamespace(tag=TAG, assets=self.assets, lanes=self.lanes,
                                     out=self.root / "report/installed-boot.json")
 
+    def test_release_smoke_installs_gh_and_reuses_producer_attempt(self):
+        workflows = Path(__file__).resolve().parents[1] / ".github/workflows"
+        first_run = (workflows / "first-run-smoke.yml").read_text()
+        packages = (workflows / "distro-packages.yml").read_text()
+        self.assertIn("brew install gh", first_run)
+        self.assertLess(first_run.index("brew install gh"),
+                        first_run.index("python3 scripts/published-installed-boot.py lane"))
+        self.assertIn("artifact_attempt: ${{ github.run_attempt }}", packages)
+        consumer = packages.split("  install-smoke:", 1)[1]
+        self.assertIn("needs.package.outputs.artifact_attempt", consumer)
+        self.assertNotIn("github.run_attempt", consumer)
+
     def aggregate(self):
         with patch.object(boot, "authenticate", return_value=self.asset_records):
             boot.aggregate(self.args)

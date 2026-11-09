@@ -75,6 +75,14 @@ jobs:
         if: runner.os == 'macOS'
         uses: ./.github/actions/python3-via-uv
 
+      - name: Install GitHub CLI for release authentication
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install gh
+          fi
+          command -v gh
+
       - name: Install cosign for authoritative evidence
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: sigstore/cosign-installer@v3
