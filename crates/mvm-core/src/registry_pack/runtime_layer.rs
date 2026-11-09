@@ -576,6 +576,18 @@ pub fn require_offline_runtime_policy(
     require_offline_policy_shape(inputs.policies())
 }
 
+/// Recheck a retained signed policy independently of its original acquisition.
+///
+/// # Errors
+///
+/// Refuses changed policy bytes, stale revocations, or non-offline requests.
+pub fn require_offline_runtime_policies(
+    policies: &VerifiedRuntimeLayerPolicies,
+) -> Result<(), OfflineRuntimePolicyError> {
+    policies.reverify()?;
+    require_offline_policy_shape(policies)
+}
+
 fn require_offline_policy_shape(
     policies: &VerifiedRuntimeLayerPolicies,
 ) -> Result<(), OfflineRuntimePolicyError> {
@@ -606,6 +618,8 @@ fn require_offline_group(bytes: &[u8]) -> Result<(), OfflineRuntimePolicyError> 
 pub enum OfflineRuntimePolicyError {
     #[error(transparent)]
     Input(#[from] RuntimeLayerInputError),
+    #[error(transparent)]
+    Policy(#[from] RuntimeLayerPolicyError),
     #[error(
         "the first composable runtime requires a signed, required deny-all group with no other policy requests"
     )]

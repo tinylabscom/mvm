@@ -15,8 +15,8 @@ use mvm_core::packs::Sha256Hex;
 use mvm_core::registry_pack::runtime_layer::{
     OfflineRuntimePolicyError, RuntimeLayerArchiveError, RuntimeLayerInputError,
     RuntimeLayerPolicyError, RuntimeLayerResolveError, VerifiedRuntimeLayerArchive,
-    VerifiedRuntimeLayerInputs, VerifiedRuntimeLayerPolicies, require_offline_runtime_policy,
-    resolve_requested_runtime_layers,
+    VerifiedRuntimeLayerInputs, VerifiedRuntimeLayerPolicies, require_offline_runtime_policies,
+    require_offline_runtime_policy, resolve_requested_runtime_layers,
 };
 use mvm_core::registry_pack::{AuthenticatedRegistryManifest, PackPin};
 use mvm_core::registry_pack_store::RegistryPackStoreError;
@@ -204,7 +204,7 @@ impl ComposedApplicationRootfs {
             return Err(RuntimeLayerStageError::InconsistentLayers);
         }
         for policy in &self.tree.runtime_policies {
-            policy.reverify()?;
+            require_offline_runtime_policies(policy)?;
         }
         Ok(ResolvedComposableLock {
             schema: ComposableLockSchema::V1,
