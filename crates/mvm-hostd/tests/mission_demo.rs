@@ -738,3 +738,121 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
     assert_eq!(guest.join().unwrap(), Ok(()));
     assert_eq!(service.receive().unwrap(), b"hello");
 }
+
+/// A host key directory in a tempdir: the signing key, its public half and the
+/// operator template. Never the real `~/.mvm`.
+fn host_keys(dir: &std::path::Path, seed: u8) {
+    use std::os::unix::fs::PermissionsExt;
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    let secret = dir.join("host-signer.ed25519");
+    std::fs::write(&secret, key.to_bytes()).unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(dir.join("host-signer.pub"), key.verifying_key().to_bytes()).unwrap();
+    let (mut capability, mut header, mut routing) =
+        (grant(&[MailboxOperation::Send]), header(1, 1), routing());
+    let far = 4_000_000_000_000;
+    capability.not_before_unix_ms = 0;
+    capability.expires_at_unix_ms = far;
+    header.recipient = aircraft_principal();
+    header.expires_at_unix_ms = far;
+    routing.expires_at_unix_ms = far;
+    let template = mvm_hostd::mailbox_launch::MailboxTemplate {
+        capability,
+        header,
+        routing,
+    };
+    std::fs::write(
+        dir.join("mailbox-template.json"),
+        serde_json::to_vec(&template).unwrap(),
+    )
+    .unwrap();
+}
+
+fn granted_plan(authority_key: [u8; 32]) -> ExecutionPlan {
+    let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+    plan.mailbox = Some(mvm_contract::protocol::mailbox::MailboxGrant {
+        mailbox: address().mailbox,
+        authority_key,
+        epoch: MbEpoch::new(1).unwrap(),
+    });
+    plan
+}
+
+/// The sealing keys are derived from the host key per mailbox: they differ
+/// between mailboxes and hosts, and none is the host signing key.
+#[test]
+fn derived_mailbox_keys_differ_per_mailbox_and_are_not_the_host_key() {
+    use mvm_hostd::mailbox_launch::{authority_key_for, host_trust};
+    let (keys, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    host_keys(keys.path(), 5);
+    host_keys(other.path(), 6);
+    let (m1, m2) = (
+        MailboxId::from_bytes([1; 32]),
+        MailboxId::from_bytes([2; 32]),
+    );
+    let a1 = authority_key_for(keys.path(), &m1).unwrap();
+    assert_ne!(a1, authority_key_for(keys.path(), &m2).unwrap());
+    assert_ne!(a1, authority_key_for(other.path(), &m1).unwrap());
+    assert_ne!(a1, SigningKey::from_bytes(&[5; 32]).verifying_key());
+
+    let mut plan = granted_plan(a1.to_bytes());
+    plan.mailbox.as_mut().unwrap().mailbox = m1;
+    let grant = plan.mailbox.unwrap();
+    let (policy, sealer) = host_trust(keys.path(), &grant).unwrap();
+    assert_eq!(policy.authority_key, a1);
+    assert_ne!(sealer.sender_key.to_bytes(), [5; 32]);
+    assert_ne!(sealer.authority_key.to_bytes(), [5; 32]);
+    assert_ne!(
+        sealer.sender_key.to_bytes(),
+        sealer.authority_key.to_bytes()
+    );
+    // An authority the host does not derive for this mailbox is refused.
+    let mut foreign = grant;
+    foreign.authority_key = authority_key_for(keys.path(), &m2).unwrap().to_bytes();
+    assert!(host_trust(keys.path(), &foreign).is_err());
+}
+
+/// A granted plan through the launch helper serves the guest port from its
+/// own thread and queues what the guest sent; a plan without a grant builds
+/// and dials nothing.
+#[test]
+fn the_launch_helper_serves_a_granted_plan_and_builds_nothing_without_one() {
+    use mvm_hostd::mailbox_launch::{MailboxPaths, authority_key_for, start_for_launch};
+    use std::os::unix::net::UnixListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    host_keys(dir.path(), 5);
+    let paths = || MailboxPaths {
+        keys_dir: dir.path().to_owned(),
+        socket: dir.path().join("mailbox.sock"),
+        guest_port: dir.path().join("port.sock"),
+        firecracker_mux: dir.path().join("absent-mux"),
+    };
+    let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    let mut plain = mvm_core::plan::test_support::PlanFixture::new().build();
+    plain.mailbox = None;
+    assert!(start_for_launch(&plain, paths(), LIMITS).unwrap().is_none());
+    assert!(!dir.path().join("mailbox.sock").exists());
+    assert!(listener.accept().is_err(), "no grant, nothing dialed");
+
+    let authority = authority_key_for(dir.path(), &address().mailbox).unwrap();
+    let plan = granted_plan(authority.to_bytes());
+    let outbox = dir.path().join("outbox");
+    std::fs::write(&outbox, outbox_message().encode()).unwrap();
+    listener.set_nonblocking(false).unwrap();
+    let guest = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox)
+    });
+    let launch = start_for_launch(&plan, paths(), LIMITS).unwrap().unwrap();
+    assert_eq!(guest.join().unwrap(), Ok(()));
+    let received = (0..100).find_map(|_| {
+        launch.receive().or_else(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            None
+        })
+    });
+    assert_eq!(received.unwrap(), b"hello");
+}
