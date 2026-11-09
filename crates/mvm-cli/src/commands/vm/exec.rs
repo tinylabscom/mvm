@@ -242,8 +242,7 @@ pub(in crate::commands) struct RunArgs {
     /// Read grants (CPU, wall clock, egress) from a JSON file.
     #[arg(long = "grants-file", value_name = "PATH")]
     pub grants_file: Option<PathBuf>,
-    /// Grant this workload a mailbox, named by a 64-character hex id. The host
-    /// signer is the authority; no flag means no mailbox.
+    /// Grant a mailbox, named by a 64-character hex id.
     #[arg(long, value_name = "ID")]
     pub mailbox: Option<String>,
     /// Set memory (for example, 512M or 1G).
