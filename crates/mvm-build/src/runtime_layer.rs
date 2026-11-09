@@ -189,13 +189,6 @@ impl ComposedApplicationRootfs {
         spec.check_mode_request(BuildMode::Production)?;
         let spec_sha256 = Sha256Hex::from_bytes(&spec.canonical_json()?);
         if self.tree.authored_spec_sha256.as_ref() != Some(&spec_sha256)
-            || self.tree.runtime_policies.len() != self.tree.runtime_pins().len()
-            || self
-                .tree
-                .runtime_policies
-                .iter()
-                .zip(self.tree.runtime_pins())
-                .any(|(policy, pin)| policy.descriptor().manifest_sha256() != pin.manifest_sha256())
             || producer_revision.len() != 40
             || !producer_revision
                 .bytes()
@@ -203,9 +196,7 @@ impl ComposedApplicationRootfs {
         {
             return Err(RuntimeLayerStageError::InconsistentLayers);
         }
-        for policy in &self.tree.runtime_policies {
-            require_offline_runtime_policies(policy)?;
-        }
+        self.tree.reverify_runtime_policies()?;
         Ok(ResolvedComposableLock {
             schema: ComposableLockSchema::V1,
             spec_sha256,
@@ -234,6 +225,25 @@ impl ComposedApplicationRootfs {
 }
 
 impl ComposedWorkloadRootfs {
+    fn reverify_runtime_policies(&self) -> Result<(), RuntimeLayerStageError> {
+        if self.runtime_policies.len() != self.runtime_pins().len()
+            || self
+                .runtime_policies
+                .iter()
+                .zip(self.runtime_pins())
+                .any(|(policy, pin)| {
+                    policy.descriptor().reference() != pin.reference()
+                        || policy.descriptor().manifest_sha256() != pin.manifest_sha256()
+                })
+        {
+            return Err(RuntimeLayerStageError::InconsistentLayers);
+        }
+        for policy in &self.runtime_policies {
+            require_offline_runtime_policies(policy)?;
+        }
+        Ok(())
+    }
+
     /// Bytes ready for application composition, not yet a bootable image.
     pub fn root(&self) -> &Path {
         self.tree.root()
@@ -294,11 +304,13 @@ impl ComposedWorkloadRootfs {
     ///
     /// # Errors
     ///
-    /// Refuses a changed tree or a directory that can no longer be restored.
+    /// Refuses missing or withdrawn runtime policy inputs, a changed tree or
+    /// a directory that can no longer be restored.
     pub fn materialize_candidate(
         &self,
         output: &Path,
     ) -> Result<crate::rootfs::MaterializedExt4, RuntimeLayerStageError> {
+        self.reverify_runtime_policies()?;
         self.tree.restore_base_directory_modes()?;
         let input = crate::rootfs::MaterializeExt4Input::new(
             self.root().to_path_buf(),
@@ -307,7 +319,9 @@ impl ComposedWorkloadRootfs {
         )
         .with_owners(self.ownership().clone())
         .with_verity();
-        Ok(crate::rootfs::materialize_ext4_pure(&input)?)
+        let result = crate::rootfs::materialize_ext4_pure(&input)?;
+        self.reverify_runtime_policies()?;
+        Ok(result)
     }
 }
 
@@ -1249,6 +1263,32 @@ mod tests {
                 .read_regular_file_no_symlinks("srv/app/main.py", 128)
                 .unwrap(),
             b"print('ready')\n"
+        );
+
+        let missing_policy = ComposedWorkloadRootfs {
+            tree: ComposedRuntimeLayers::new(vec![
+                PackPin::new(
+                    "runtime/example@1.0.0".parse().unwrap(),
+                    Sha256Hex::from_bytes(b"signed runtime manifest"),
+                )
+                .unwrap(),
+            ])
+            .unwrap(),
+            base_manifest_sha256: Sha256Hex::from_bytes(b"test base"),
+            profile: WorkloadImageProfile::DefaultTenant,
+            authored_spec_sha256: None,
+            runtime_policies: Vec::new(),
+        }
+        .with_application_archive(&app, &digest)
+        .unwrap();
+        let refused = out.path().join("refused.ext4");
+        assert!(matches!(
+            missing_policy.materialize_candidate(&refused),
+            Err(RuntimeLayerStageError::InconsistentLayers)
+        ));
+        assert!(
+            !refused.exists(),
+            "no image may be materialized without signed policy inputs"
         );
 
         let candidate = ComposedWorkloadRootfs {

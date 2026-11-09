@@ -17,9 +17,12 @@ use mvm_contract::pack_spec_v2::ComposablePackSpec;
 use super::application::{deserialize_object, validate_application_source};
 use super::{
     AuthenticatedRegistryManifest, MAX_REGISTRY_DESCRIPTOR_BYTES, PackPin, PackReference,
-    RegistryPackFile, RegistryPackVerificationError, VerifiedRegistryRuntimeLayer,
+    RegistryPackFile, RegistryPackPublisherPolicy, RegistryPackSignatureChecker,
+    RegistryPackVerification, RegistryPackVerificationError, VerifiedRegistryManifest,
+    VerifiedRegistryRuntimeLayer,
 };
 use crate::plan::bundle::HashingWriter;
+use crate::registry_pack_store::RegistryPackStoreError;
 
 /// A runtime layer is not an application or a legacy policy-only pack.
 pub const RUNTIME_LAYER_MANIFEST_SCHEMA_VERSION: u32 = 3;
@@ -327,6 +330,44 @@ fn visit<'a>(
     Ok(())
 }
 
+impl VerifiedRegistryRuntimeLayer {
+    /// Reauthenticate retained descriptor bytes under today's publisher policy.
+    ///
+    /// # Errors
+    ///
+    /// Refuses withdrawn publisher enrollment, changed signature evidence or
+    /// a descriptor that no longer matches its exact manifest pin.
+    pub fn reverify_publisher(&self) -> Result<(), RegistryPackStoreError> {
+        let policy = crate::registry_pack_store::load_publisher_policy_or_official_default(
+            &crate::config::registry_pack_publisher_policy_path(),
+        )?;
+        self.reverify_publisher_with(&policy.policy, super::check_registry_pack_signature)
+    }
+
+    fn reverify_publisher_with(
+        &self,
+        policy: &RegistryPackPublisherPolicy,
+        check: RegistryPackSignatureChecker,
+    ) -> Result<(), RegistryPackStoreError> {
+        let pin = PackPin::new(self.reference().clone(), self.manifest_sha256().clone())?;
+        let lock = super::PackLockfile::new(vec![pin])?;
+        let request = RegistryPackVerification::new(
+            self.reference(),
+            self.manifest_bytes(),
+            self.signature_bundle(),
+            &lock,
+            policy,
+        );
+        match super::dispatch::verify_with(&request, check)? {
+            VerifiedRegistryManifest::RuntimeLayer(current) if current == *self => Ok(()),
+            _ => Err(RegistryPackVerificationError::ManifestParse(
+                "retained runtime layer publisher identity changed".into(),
+            )
+            .into()),
+        }
+    }
+}
+
 /// A private copy of descriptor-pinned bytes, not an extracted or runnable layer.
 #[derive(Debug)]
 pub struct VerifiedRuntimeLayerArchive {
@@ -461,6 +502,7 @@ impl VerifiedRuntimeLayerPolicies {
     ///
     /// Refuses altered policy bytes or withdrawn or stale publisher trust.
     pub fn reverify(&self) -> Result<(), RuntimeLayerPolicyError> {
+        self.descriptor.reverify_publisher()?;
         self.reverify_with(VerifiedRegistryRuntimeLayer::check_current_revocations)
     }
 
@@ -497,7 +539,7 @@ pub enum RuntimeLayerPolicyError {
     #[error("runtime layer policy differs from the signed descriptor")]
     Digest,
     #[error(transparent)]
-    Revocation(#[from] crate::registry_pack_store::RegistryPackStoreError),
+    Trust(#[from] crate::registry_pack_store::RegistryPackStoreError),
 }
 
 /// Snapshot every declared policy document from a private staging directory.
@@ -757,6 +799,21 @@ mod tests {
             json!(crate::packs::Sha256Hex::from_bytes(b"test tar").as_str());
         signed["runtime_layer"]["archive"]["archive_size"] = json!(b"test tar".len());
         authenticated(&signed)
+    }
+
+    #[test]
+    fn retained_layer_rechecks_current_publisher_enrollment() {
+        use super::super::tests::{accept_signature, publisher_policy};
+
+        let layer = authenticated_layer();
+        layer
+            .reverify_publisher_with(&publisher_policy(), accept_signature)
+            .expect("retained signed descriptor still matches the enrolled publisher");
+        let withdrawn = RegistryPackPublisherPolicy::new(Vec::new()).unwrap();
+        assert!(matches!(
+            layer.reverify_publisher_with(&withdrawn, accept_signature),
+            Err(RegistryPackStoreError::Verification(_))
+        ));
     }
 
     #[test]

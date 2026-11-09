@@ -847,7 +847,7 @@ it:
 ```sh
 mvmctl run alpine:3.20 -- echo hi          # an OCI image
 mvmctl run ./app.mvmpkg -- python app.py   # a signed bundle
-mvmctl run agent/claude -- true           # an installed application, explicit command
+mvmctl run agent/claude -- true           # acquire and run an application, explicit command
 mvmctl run -- npm test                     # infer the runtime from the command
 ```
 
@@ -866,20 +866,20 @@ pulled from a registry. The guest command must follow `--`: a command written
 without it is a parse error.
 
 `run` accepts three inputs: an OCI image reference, a signed `.mvmpkg` path, and
-an installed application reference `NAMESPACE/NAME[@VERSION]`. An application is
-installed with `mvmctl pack pull <ref>`. As a positional, a value is read as an
-application only when it parses as a reference and names an installed
-application. A pinned coordinate with missing, unreadable or invalid cached
-metadata is refused, not silently treated as an image. Repair the registry
-metadata before retrying, or use `--image` for an intentional image selection.
-Never-pinned image references and bundle paths keep their existing route while
-the registry lock is readable; an unreadable or corrupt lock refuses every
-reference-shaped positional rather than guessing at pin status. `-a`, `--app` and
-`--application` are one flag that takes the value strictly as an application
-reference, with no fallback: a missing install is refused and names
-`mvmctl pack pull`. The flag conflicts with `--image`, `--manifest`, `--flake`,
-`--deployment` and a positional source. Without a version the installed version
-is used; with one it must be the installed version. The descriptor, its
+an application reference `NAMESPACE/NAME[@VERSION]`. As a positional, a value
+names an application when installed, or when it parses as an unpinned `agent/*`
+reference. A missing application is pulled and authenticated within the run;
+a repeat run uses the installed bundle but rechecks trust. A pinned coordinate
+with missing, unreadable or invalid cached metadata is refused, not silently
+treated as an image or repaired by a pull. Repair the registry metadata
+explicitly, or use `--image` for an intentional image selection. Never-pinned
+image references outside `agent/*` and bundle paths keep their existing route
+while the registry lock is readable; an unreadable or corrupt lock refuses
+every reference-shaped positional rather than guessing at pin status. `-a`,
+`--app` and `--application` are one flag that takes any namespace's application
+reference strictly, with no image fallback. The flag conflicts with `--image`,
+`--manifest`, `--flake`, `--deployment` and a positional source. An explicitly
+requested version is pulled if a different version is installed. The descriptor, its
 publisher policy and revocations, and the archive under your enrolled keys are
 checked again at launch, and the run then continues as
 `--manifest <bundle-sha256>`, so the signed plan and admit-time bundle
@@ -887,11 +887,9 @@ re-verification are the ones a `.mvmpkg` gets. The exact application reference
 and descriptor digest are also bound into that signed plan; client and host
 admission each reopen the typed descriptor, and host boot preparation retains
 the independently reverified archive while checking the final boot files. The
-normal installed application workflow needs no launch flags:
+normal application workflow needs no separate pull:
 
 ```sh
-mvmctl search agent/claude
-mvmctl pull agent/claude
 printf '%s\n' 'tell me a joke' | mvmctl run agent/claude
 ```
 
@@ -986,7 +984,7 @@ never served from a standby and always boots cold.
 | `mvmctl run -- <cmd>...`                                            | Boot the bundled default microVM image, run `<cmd>`, exit                                                                                                                                                                                                                                                                                                                             |
 | `mvmctl run <image> -- <cmd>...`                                    | Boot an OCI image; the same as `--image <image>`                                                                                                    |
 | `mvmctl run ./app.mvmpkg -- <cmd>...`                               | Verify and boot a publisher-trusted bundle or a same-host local build; local builds are reported as not release-verified and refused under `--prod` |
-| `mvmctl run <namespace/name[@version]> -- <cmd>...`                 | Boot an installed application (`mvmctl pack pull` first); `-a`, `--app` and `--application` take the same reference with no fallback to an image |
+| `mvmctl run <namespace/name[@version]> -- <cmd>...`                 | Acquire and run an `agent/*` application, or run another installed application; `-a`, `--app` and `--application` acquire any application reference with no image fallback |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...`                  | Boot a registered manifest/template instead of the default                                                                                                                                                                                                                                                                                                                            |
 | `mvmctl run --manifest <app.mvmpkg> -- <cmd>...`                    | Verify, install, and boot a signed `.mvmpkg` bundle, as `machine run --manifest <app.mvmpkg>` does |
 | `mvmctl run -- npm test`                                            | Infer the runtime when no source is given (see **Runtime detection** below)                                                                                                                                                                                                                                                                                                           |
@@ -2491,7 +2489,8 @@ the complete reference committed with uncertain durability; retry the pull to
 reverify rather than assume rollback. These filesystem syncs do not certify
 hardware power-loss behavior. Installation is not a launch
 grant: host/backend compatibility and current admission checks remain required at
-execution; `mvmctl run <ref>` launches an installed application (see `run`).
+execution; `mvmctl run agent/<name>` acquires a missing application and launches it
+after verification (see `run`).
 Applications cannot satisfy a policy-pack dependency.
 
 `pack info` and `pack verify` reopen the original application descriptor and

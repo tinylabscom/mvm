@@ -171,7 +171,7 @@ pub(in crate::commands) struct RunArgs {
     /// Boot an OCI image (resolved through the local cache first).
     #[arg(long, value_name = "REF", conflicts_with_all = SOURCES_EXCEPT_IMAGE)]
     pub image: Option<String>,
-    /// Boot an installed application (NAMESPACE/NAME[@VERSION]).
+    /// Acquire and boot an application (NAMESPACE/NAME[@VERSION]).
     #[arg(
         short = 'a',
         long = "application",
