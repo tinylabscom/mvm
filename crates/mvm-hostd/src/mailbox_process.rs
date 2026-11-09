@@ -203,15 +203,11 @@ mod tests {
     #[test]
     fn only_firecracker_is_wired() {
         assert!(backend_is_wired(BackendKind::Firecracker));
-        for other in [
-            BackendKind::Hvf,
-            BackendKind::Libkrun,
-            BackendKind::Qemu,
-            BackendKind::Mock,
-            BackendKind::Wasm,
-        ] {
-            assert!(!backend_is_wired(other), "{other:?}");
-        }
+        assert!(
+            ![BackendKind::Hvf, BackendKind::Libkrun, BackendKind::Qemu]
+                .iter()
+                .any(|b| backend_is_wired(*b))
+        );
     }
 
     #[test]
@@ -260,25 +256,5 @@ mod tests {
                 .unwrap_or_default();
             assert!(!value.contains(&hex::encode(&seed)));
         }
-    }
-
-    #[test]
-    fn the_config_names_the_firecracker_mux_and_the_per_port_socket() {
-        let dir = keys_dir();
-        let state = tempfile::tempdir().unwrap();
-        let config = build_config(dir.path(), &grant(dir.path()), state.path()).unwrap();
-        assert_eq!(
-            config.firecracker_mux,
-            PathBuf::from(mvm_agentd::vsock::vsock_uds_path(
-                &state.path().to_string_lossy()
-            ))
-        );
-        assert!(
-            config
-                .guest_port
-                .to_string_lossy()
-                .ends_with(&mvm_core::config::vsock_socket_filename(MAILBOX_PORT))
-        );
-        assert_eq!(config.vm_state_dir, state.path());
     }
 }

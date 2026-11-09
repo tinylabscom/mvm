@@ -16,11 +16,7 @@ fn run_with(stdin: &[u8]) -> std::process::ExitStatus {
 }
 
 #[test]
-fn an_empty_config_is_refused() {
+fn an_empty_config_and_an_unknown_field_are_refused() {
     assert!(!run_with(b"").success());
-}
-
-#[test]
-fn a_config_with_an_unknown_field_is_refused() {
     assert!(!run_with(br#"{"seed":"00"}"#).success());
 }
