@@ -65,6 +65,7 @@ pub mod jailer;
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
 pub mod mailbox_launch;
+pub mod mailbox_process;
 pub mod mailbox_service;
 pub mod operator_admitted_trial_booter;
 /// Redacting panic hook for the daemon bins. A panic payload is the one

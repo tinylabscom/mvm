@@ -2162,6 +2162,22 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
                     err,
                 }));
             }
+            // Last, so no earlier rollback leaves a mailbox process behind.
+            // A grant that cannot be served is refused rather than booting a
+            // guest whose mailbox port nobody answers.
+            if let Err(err) =
+                crate::mailbox_process::spawn_for_launch(admitted.plan(), backend.kind(), &vm_name)
+            {
+                return Err(undo_launch(UndoLaunch {
+                    backend,
+                    vm_id: &vm_id,
+                    admitted: &admitted,
+                    emitter: params.emitter,
+                    stage: "mailbox-process",
+                    reason: "the granted guest mailbox could not be served",
+                    err: err.into(),
+                }));
+            }
             Ok(StartedMachine {
                 vm_id,
                 admitted,
