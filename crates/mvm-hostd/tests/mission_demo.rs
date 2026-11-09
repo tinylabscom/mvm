@@ -10,14 +10,20 @@
 //! Mailbox delivery is real as far as one host: the ship's sealed envelope
 //! crosses a Unix domain socket to the aircraft node's `MailboxService`, which
 //! opens it and enqueues it under a bounded queue; a refusal comes back to the
-//! sender as a typed reply.
+//! sender as a typed reply. Between nodes it also crosses a loopback TCP
+//! `PeerTransport` (`two_nodes_deliver_over_a_loopback_tcp_peer_transport`):
+//! two nodes with separate state directories and audit chains, the sender
+//! gated by a signed transport binding and the destination re-checking
+//! signature, capability, epoch and replay. The guest mailbox port is served
+//! by a separate host process (`mvm-mailbox`) in its own tests below.
 //!
 //! What is simulated, on purpose: no booted guest runs the mailbox
 //! client or reads the queue (the guest end is a test driving the same
-//! `send_frame` over a Firecracker-style mux), no cross-host
-//! Iroh or relay transport (both ends share this process's host), and the VMs
-//! (a launch is gated and audited, but nothing boots). Only the aircraft node
-//! runs a service. Run with `--nocapture` to read the timeline.
+//! `send_frame` over a Firecracker-style mux), no Iroh or relay transport
+//! (the TCP transport is loopback and the two nodes are threads of one test
+//! process on one physical host; only the guest mailbox is a separate process), and the VMs (a launch is gated and
+//! audited, but nothing boots). Only the aircraft node runs a service. Run
+//! with `--nocapture` to read the timeline.
 
 use ed25519_dalek::SigningKey;
 use mvm_contract::protocol::mailbox::{
@@ -38,6 +44,12 @@ use mvm_core::host_interface::{
     workload::WorkloadLedger,
 };
 use mvm_core::mailbox::frame::{OutboxMessage, send_outbox_message};
+use mvm_core::mailbox::transport::{
+    AuthorizedRoute, CancellationToken, ChannelLimits, OutboundAuthorization, PeerTransport,
+    RouteId, RouteLocator, TransportAssurance, TransportBindingClaims, TransportBindingContext,
+    TransportBindingError, TransportError, TransportIdentity, TransportPath, authorize_outbound,
+    authorize_route, prepare_mailbox_envelope, sign_transport_binding,
+};
 use mvm_core::mailbox::{MailboxError, OpenContext, SealRequest, seal_envelope, sign_capability};
 use mvm_core::plan::ExecutionPlan;
 use mvm_hostd::audit::{
@@ -49,6 +61,10 @@ use mvm_hostd::mailbox_service::{
     GuestSealer, MailboxLimits, MailboxPolicy, MailboxService, Refusal, send, serve_granted_guest,
 };
 use mvm_hostd::supervisor::verify_audit_chain;
+#[path = "support/tcp_peer_transport.rs"]
+mod tcp_peer_transport;
+use std::io::{Read, Write};
+use tcp_peer_transport::{TcpListenerLimits, TcpPeerListener, TcpPeerTransport};
 
 const NOW: u64 = 1_000;
 
@@ -507,7 +523,7 @@ fn contain_terminate_and_rebuild() {
     }
     let timeline = ship.timeline("analyst");
     println!(
-        "\nsimulated: mailbox delivery is a local Unix socket between node services (no vsock guest service, no cross-host transport), VMs (gated and audited, none boot)"
+        "\nsimulated: mailbox delivery is a local Unix socket or a loopback TCP transport between node services in one test process, with the guest mailbox in a separate host process (no booted guest, no vsock guest service, no Iroh, no cross-host transport), VMs (gated and audited, none boot)"
     );
     println!("\n--- evidence timeline: ship / analyst ---");
     for line in &timeline {
@@ -940,4 +956,176 @@ fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
         "the host service bound its socket; stderr:\n{}",
         process.stderr()
     );
+}
+
+// ---- two nodes over a loopback TCP PeerTransport ----------------------------
+
+fn tcp_limits() -> TcpListenerLimits {
+    TcpListenerLimits {
+        max_frame_bytes: 64 * 1024,
+        max_pending_bytes: 128 * 1024,
+        max_connections: 4,
+        io_timeout: std::time::Duration::from_secs(2),
+    }
+}
+
+/// A signed binding to the aircraft's listener, valid for `epoch` until `expires`.
+fn route_to(
+    addr: std::net::SocketAddr,
+    epoch: u64,
+    expires: i64,
+    authority: &SigningKey,
+) -> Result<AuthorizedRoute, TransportBindingError> {
+    let r = routing();
+    let claims = TransportBindingClaims {
+        protocol_version: ProtocolVersion::V1,
+        signature_algorithm: SignatureAlgorithm::ED25519,
+        binding_id: r.transport_binding_id,
+        issuer: issuer(),
+        address: address(),
+        execution_epoch: MbEpoch::new(epoch).unwrap(),
+        transport_identity: TransportIdentity::from_bytes([9; 32]),
+        route_id: RouteId::from_bytes([20; 32]),
+        authorization_domain_route_label: r.authorization_domain_route_label,
+        destination_route_token: r.destination_route_token,
+        path: TransportPath::Direct,
+        locator: RouteLocator::parse(addr.to_string()).unwrap(),
+        assurance: TransportAssurance::IsolatedProduction,
+        policy_epoch: 4,
+        not_before_unix_ms: 900,
+        expires_at_unix_ms: expires,
+    };
+    let signed = sign_transport_binding(claims, authority).unwrap();
+    let ctx = TransportBindingContext {
+        expected_issuer: issuer(),
+        expected_address: address(),
+        current_execution_epoch: MbEpoch::new(1).unwrap(),
+        current_policy_epoch: 4,
+        minimum_assurance: TransportAssurance::IsolatedProduction,
+        now_unix_ms: 1_500,
+        revoked_bindings: vec![],
+    };
+    authorize_route(&signed, &ctx, &authority.verifying_key())
+}
+
+#[test]
+fn two_nodes_deliver_over_a_loopback_tcp_peer_transport() {
+    let (aircraft, ship) = (Node::new("aircraft", 1), Node::new("ship", 2));
+    let channel = Channel::new(&aircraft);
+    let capability = sign_capability(grant(&[MailboxOperation::Send]), &channel.authority_key);
+    let cancel = CancellationToken::default();
+    let listener = TcpPeerListener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        channel.socket.clone(),
+        capability.unwrap(),
+        tcp_limits(),
+        cancel.clone(),
+    )
+    .unwrap();
+    let addr = listener.local_addr();
+    let transport = TcpPeerTransport {
+        io_timeout: std::time::Duration::from_secs(2),
+    };
+    let limits = ChannelLimits::new(64 * 1024, 128 * 1024).unwrap();
+    let transport_authority = SigningKey::from_bytes(&[24; 32]);
+    let sender_cancel = CancellationToken::default();
+    let frame_for = |id: u8, route: &AuthorizedRoute| {
+        let prepared = prepare_mailbox_envelope(
+            SealRequest {
+                routing: routing(),
+                header: header(1, id),
+                plaintext: b"hello",
+            },
+            &channel.encryption_key,
+            &channel.sender_key,
+        )
+        .unwrap();
+        let capability =
+            sign_capability(grant(&[MailboxOperation::Send]), &channel.authority_key).unwrap();
+        authorize_outbound(OutboundAuthorization {
+            prepared: &prepared,
+            capability: &capability,
+            context: &context(1),
+            capability_authority_key: &channel.authority_key.verifying_key(),
+            route,
+        })
+        .unwrap()
+    };
+    let route = route_to(addr, 1, 2_000, &transport_authority).unwrap();
+    let mut peer = transport.connect(&route, limits, &sender_cancel).unwrap();
+
+    // Delivery: the aircraft's queue holds the ship's plaintext, and the
+    // aircraft's own chain records it.
+    let frame = frame_for(1, &route);
+    peer.try_send(&frame, &sender_cancel).unwrap();
+    assert_eq!(channel.service.receive().unwrap(), b"hello");
+    ship.emitter
+        .emit_admitted(&ship.plan("mailbox"), "peer:aircraft")
+        .unwrap();
+    aircraft
+        .emitter
+        .emit_admitted(&aircraft.plan("mailbox"), "peer:ship")
+        .unwrap();
+
+    // Replay of the same frame is refused at the destination.
+    assert_eq!(
+        peer.try_send(&frame, &sender_cancel),
+        Err(TransportError::Refused)
+    );
+    // A tampered frame and an oversize frame are refused at the destination.
+    let raw = |body: &[u8], claimed: u32| {
+        let mut s = std::net::TcpStream::connect(addr).unwrap();
+        let _ = s.write_all(&claimed.to_be_bytes());
+        let _ = s.write_all(body);
+        let mut reply = Vec::new();
+        s.read_to_end(&mut reply).unwrap();
+        serde_json::from_slice::<Result<(), Refusal>>(&reply).unwrap()
+    };
+    let mut tampered = frame_for(2, &route).as_bytes().to_vec();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    assert!(raw(&tampered, tampered.len() as u32).is_err());
+    assert_eq!(raw(&[], 1 << 20), Err(Refusal::Oversized(64 * 1024)));
+    assert!(
+        channel.service.receive().is_none(),
+        "nothing refused queued"
+    );
+    for reason in ["replay", "tampered", "oversize"] {
+        aircraft.record_denial("mailbox", "peer_transport", reason);
+    }
+
+    // Binding refusals happen before a byte leaves the sender.
+    assert_eq!(
+        route_to(addr, 1, 1_500, &transport_authority).err(),
+        Some(TransportBindingError::Expired)
+    );
+    assert_eq!(
+        route_to(addr, 2, 2_000, &transport_authority).err(),
+        Some(TransportBindingError::StaleExecutionEpoch)
+    );
+    // A frame larger than the channel bound never leaves the sender.
+    let small = ChannelLimits::new(16, 32).unwrap();
+    let mut tiny = transport.connect(&route, small, &sender_cancel).unwrap();
+    assert_eq!(
+        tiny.try_send(&frame, &sender_cancel),
+        Err(TransportError::FrameTooLarge)
+    );
+
+    // Shutdown joins cleanly, and a partition fails closed with no delivery.
+    drop(listener);
+    assert!(cancel.is_cancelled());
+    assert!(matches!(
+        transport.connect(&route, limits, &sender_cancel),
+        Err(TransportError::Partitioned)
+    ));
+    assert_eq!(
+        peer.try_send(&frame_for(3, &route), &sender_cancel),
+        Err(TransportError::Partitioned)
+    );
+    assert!(channel.service.receive().is_none());
+    for node in [&aircraft, &ship] {
+        verify_audit_chain(&node.chain(), &node.audit_key.verifying_key()).unwrap();
+    }
+    assert_eq!(aircraft.lines().len(), 4);
+    assert_eq!(ship.lines().len(), 1);
 }
