@@ -36,6 +36,24 @@ const CLI_SIDE: &[&str] = &["mvm-cli", "mvm-capture", "mvm-conformance"];
 /// Crates nothing below the CLI may depend on.
 const NOT_LINKABLE: &[&str] = &["mvm-cli", "mvm-capture"];
 
+/// Files that build a process and resolve the CLI today. Some only hold the
+/// resolver or run a test binary; the list pins the set, not a verdict. Shrink-only: pay a site down by replacing it
+/// with a typed client call and deleting its line here.
+const KNOWN_REACHES: &[&str] = &[
+    "crates/mvm-backends/src/driver/qemu_process.rs",
+    "crates/mvm-build/src/builder_egress_process.rs",
+    "crates/mvm-build/src/builder_vm_bootstrap.rs",
+    "crates/mvm-capture/src/verify.rs",
+    "crates/mvm-cli/src/commands/build/kernel.rs",
+    "crates/mvm-cli/src/commands/env/builder_vm/vm_helpers.rs",
+    "crates/mvm-cli/src/commands/env/uninstall.rs",
+    "crates/mvm-cli/src/commands/pool/refill.rs",
+    "crates/mvm-cli/src/test_boot_payload.rs",
+    "crates/mvm-cli/src/update.rs",
+    "crates/mvm-hostd/src/health_probe.rs",
+    "crates/mvm-vmm/src/host/aux_bin.rs",
+];
+
 fn regex(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("valid static pattern"))
 }
@@ -71,16 +89,48 @@ fn production_code(source: &str) -> String {
     blank_ranges(&blank_comments(source, CommentSyntax::Rust), &tests)
 }
 
-/// `Some(reason)` when `file` is a library file that runs the CLI unguarded.
-fn unguarded_cli_reach(file: &str, source: &str) -> Option<String> {
-    let crate_name = file.strip_prefix("crates/")?.split('/').next()?;
-    let skipped = CLI_SIDE.contains(&crate_name)
-        || file.contains("/src/bin/")
+/// Files the inventory does not read: separate processes, tests and benches.
+fn is_test_or_bin(file: &str) -> bool {
+    file.contains("/src/bin/")
         || file.contains("/tests/")
         || file.contains("/benches/")
         || file.ends_with("tests.rs")
-        || file.ends_with("/test_support.rs");
-    if skipped {
+        || file.ends_with("/test_support.rs")
+}
+
+/// Whether production code in `source` both builds a process and resolves the
+/// CLI: a place `mvmctl` can be run from.
+fn reaches_the_cli(file: &str, source: &str) -> bool {
+    if is_test_or_bin(file) {
+        return false;
+    }
+    let code = production_code(source);
+    builds_a_process(&code) && resolves_the_cli(&code)
+}
+
+/// Every file that reaches the CLI must be listed in [`KNOWN_REACHES`], and
+/// every listed file must still reach it: the list only shrinks.
+fn inventory_findings(seen: &[String]) -> Vec<String> {
+    let new = seen
+        .iter()
+        .filter(|f| !KNOWN_REACHES.contains(&f.as_str()))
+        .map(|f| {
+            format!(
+                "{f}: builds a process and resolves the CLI but is not in KNOWN_REACHES; \
+                 a new CLI-reaching spawn site needs a typed client call instead"
+            )
+        });
+    let stale = KNOWN_REACHES
+        .iter()
+        .filter(|k| !seen.iter().any(|f| f == *k))
+        .map(|k| format!("{k}: listed in KNOWN_REACHES but no longer reaches the CLI; remove it"));
+    new.chain(stale).collect()
+}
+
+/// `Some(reason)` when `file` is a library file that runs the CLI unguarded.
+fn unguarded_cli_reach(file: &str, source: &str) -> Option<String> {
+    let crate_name = file.strip_prefix("crates/")?.split('/').next()?;
+    if CLI_SIDE.contains(&crate_name) || is_test_or_bin(file) {
         return None;
     }
     let code = production_code(source);
@@ -104,6 +154,7 @@ fn cli_side_dependency(manifest: &str) -> Option<&'static str> {
 
 pub(crate) fn findings(workspace: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
+    let mut seen = Vec::new();
     // This module is compiled only for tests and the explicit test-support feature.
     // Its current-exe spawn runs the exact test binary, not the application CLI.
     let test_env_is_gated =
@@ -125,6 +176,9 @@ pub(crate) fn findings(workspace: &Path) -> Result<Vec<String>> {
                 return;
             }
             out.extend(unguarded_cli_reach(&rel, text));
+            if reaches_the_cli(&rel, text) {
+                seen.push(rel);
+            }
         } else if rel.ends_with("/Cargo.toml") {
             let owner = rel.split('/').nth(1).unwrap_or_default();
             if !CLI_SIDE.contains(&owner)
@@ -136,6 +190,12 @@ pub(crate) fn findings(workspace: &Path) -> Result<Vec<String>> {
             }
         }
     })?;
+    // The shrink-only list describes the whole workspace, not the partial
+    // source trees used by check-no-cli-shellout's fixture tests.
+    if workspace.join("Cargo.toml").is_file() {
+        seen.sort();
+        out.extend(inventory_findings(&seen));
+    }
     Ok(out)
 }
 
@@ -216,6 +276,61 @@ mod tests {
         );
         assert_eq!(cli_side_dependency("mvm-client.workspace = true\n"), None);
         assert_eq!(cli_side_dependency("# mvm-cli is the CLI\n"), None);
+    }
+
+    #[test]
+    fn an_unlisted_reach_and_a_stale_entry_both_fail() {
+        let seen = vec!["crates/mvm-build/src/new_site.rs".to_owned()];
+        let found = inventory_findings(&seen);
+        assert!(
+            found
+                .iter()
+                .any(|f| f.contains("new_site.rs") && f.contains("not in"))
+        );
+        let listed: Vec<String> = KNOWN_REACHES.iter().map(|s| (*s).to_owned()).collect();
+        assert!(inventory_findings(&listed).is_empty());
+        if let Some(first) = KNOWN_REACHES.first() {
+            let missing: Vec<String> = listed.into_iter().skip(1).collect();
+            assert!(
+                inventory_findings(&missing)
+                    .iter()
+                    .any(|f| f.contains(first))
+            );
+        }
+    }
+
+    #[test]
+    fn the_inventory_reads_cli_side_crates_but_not_tests() {
+        let src = "fn f() { helper_command(current_exe().unwrap()); }";
+        assert!(reaches_the_cli("crates/mvm-cli/src/x.rs", src));
+        assert!(!reaches_the_cli("crates/mvm-cli/tests/x.rs", src));
+        assert!(!reaches_the_cli(
+            "crates/mvm-cli/src/x.rs",
+            "fn f() { helper_command(\"a\"); }"
+        ));
+    }
+
+    #[test]
+    fn partial_fixtures_skip_the_workspace_inventory_but_not_the_structural_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("crates/mvm-build/src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("x.rs"),
+            "fn f() { helper_command(current_exe()?); }",
+        )
+        .unwrap();
+        let found = findings(tmp.path()).unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|f| f.contains("without `refuse_cli_spawn`"))
+        );
+        assert!(!found.iter().any(|f| f.contains("KNOWN_REACHES")));
+
+        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        let found = findings(tmp.path()).unwrap();
+        assert!(found.iter().any(|f| f.contains("KNOWN_REACHES")));
     }
 
     #[test]
