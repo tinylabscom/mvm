@@ -13,8 +13,8 @@ use mvm_core::registry_pack_store as store;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::policy_profiles::model::NetworkSection;
-use crate::policy_profiles::{GroupFile, PolicyRef, ProfileFile, builtin};
+use crate::policy_profiles::{PolicyRef, ProfileFile, builtin};
+pub use mvm_core::registry_pack::runtime_layer::require_offline_runtime_policy;
 
 /// Explicit bounded paths to small sidecars and the exact ready payload root.
 #[derive(Clone, Debug)]
@@ -82,49 +82,6 @@ pub fn acquire_local_runtime_layer(
     let held = verify_runtime_layer_inputs(&layer, archive, &paths.files)?;
     require_offline_runtime_policy(&held)?;
     Ok(held)
-}
-
-/// Admit only a signed, deny-all group for the first composable Python slice.
-///
-/// The full policy intersection is a separate contract. Until it is signed
-/// and enforced at both build and launch, unsupported requests cannot become
-/// implicit host grants or silently disappear from a production package.
-///
-/// # Errors
-///
-/// Refuses stale proof, a profile, malformed TOML or any other policy shape.
-pub fn require_offline_runtime_policy(inputs: &VerifiedRuntimeLayerInputs) -> Result<()> {
-    inputs.reverify()?;
-    ensure!(
-        inputs.policies().profile().is_none(),
-        "the first composable runtime cannot inherit a policy profile"
-    );
-    let group = inputs
-        .policies()
-        .group()
-        .context("the first composable runtime requires a signed policy group")?;
-    require_offline_group(group)
-}
-
-fn require_offline_group(bytes: &[u8]) -> Result<()> {
-    let text = std::str::from_utf8(bytes).context("signed runtime group is not UTF-8")?;
-    let group: GroupFile =
-        toml::from_str(text).map_err(|_| anyhow::anyhow!("invalid signed runtime group"))?;
-    ensure!(
-        group.required
-            && group.network
-                == NetworkSection {
-                    block: Some(true),
-                    ..NetworkSection::default()
-                }
-            && group.secrets.is_empty()
-            && group.shares.is_empty()
-            && group.env.is_empty()
-            && group.tools.is_empty()
-            && group.resources.is_empty(),
-        "the first composable runtime requires a deny-all group with no other policy requests"
-    );
-    Ok(())
 }
 
 /// Authenticate small metadata first, freeze the complete signed inventory,
@@ -310,26 +267,5 @@ mod runtime_layer_tests {
                 .to_string()
                 .contains("reading local runtime manifest")
         );
-    }
-
-    #[test]
-    fn first_runtime_policy_is_closed_and_does_not_drop_requests() {
-        require_offline_group(
-            b"description = 'Offline Python runtime'\nrequired = true\n[network]\nblock = true\n",
-        )
-        .unwrap();
-        for document in [
-            b"[network]\nblock = true\n".as_slice(),
-            b"required = false\n[network]\nblock = true\n".as_slice(),
-            b"required = true\n[network]\nallow = ['pypi.org:443']\n".as_slice(),
-            b"required = true\n[network]\nblock = false\n".as_slice(),
-            b"required = true\n[network]\nblock = true\nallow = ['pypi.org:443']\n".as_slice(),
-            b"required = true\n[[secrets.bind]]\nname = 'token'\n[network]\nblock = true\n".as_slice(),
-            b"required = true\n[[shares.mount]]\nhost = '.'\nguest = '/work'\n[network]\nblock = true\n".as_slice(),
-            b"required = true\n[network]\nblock = true\n[resources]\nmax_cpus = 2\n".as_slice(),
-            b"required = true\n[network]\nblock = true\nnet = true\n".as_slice(),
-        ] {
-            assert!(require_offline_group(document).is_err(), "{document:?}");
-        }
     }
 }

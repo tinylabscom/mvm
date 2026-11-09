@@ -13,9 +13,10 @@ use mvm_core::arch::GuestArch;
 use mvm_core::image_set::WorkloadImageProfile;
 use mvm_core::packs::Sha256Hex;
 use mvm_core::registry_pack::runtime_layer::{
-    RuntimeLayerArchiveError, RuntimeLayerInputError, RuntimeLayerPolicyError,
-    RuntimeLayerResolveError, VerifiedRuntimeLayerArchive, VerifiedRuntimeLayerInputs,
-    VerifiedRuntimeLayerPolicies, resolve_requested_runtime_layers,
+    OfflineRuntimePolicyError, RuntimeLayerArchiveError, RuntimeLayerInputError,
+    RuntimeLayerPolicyError, RuntimeLayerResolveError, VerifiedRuntimeLayerArchive,
+    VerifiedRuntimeLayerInputs, VerifiedRuntimeLayerPolicies, require_offline_runtime_policy,
+    resolve_requested_runtime_layers,
 };
 use mvm_core::registry_pack::{AuthenticatedRegistryManifest, PackPin};
 use mvm_core::registry_pack_store::RegistryPackStoreError;
@@ -423,6 +424,8 @@ pub enum RuntimeLayerStageError {
     #[error(transparent)]
     Policy(#[from] RuntimeLayerPolicyError),
     #[error(transparent)]
+    OfflinePolicy(#[from] OfflineRuntimePolicyError),
+    #[error(transparent)]
     Unpack(#[from] UnpackError),
     #[error("runtime layer staging I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -511,7 +514,7 @@ pub fn compose_authored_candidate(
 ) -> Result<ComposedWorkloadRootfs, RuntimeLayerStageError> {
     spec.validate()?;
     for input in inputs {
-        input.policies().reverify()?;
+        require_offline_runtime_policy(input)?;
     }
     let archives: Vec<&VerifiedRuntimeLayerArchive> =
         inputs.iter().map(|input| input.archive()).collect();
@@ -536,7 +539,7 @@ pub fn compose_authored_candidate(
     for input in inputs {
         // add_runtime_archives already rehashes each archive before and after
         // extraction; the small signed policy bytes still need a final check.
-        input.policies().reverify()?;
+        require_offline_runtime_policy(input)?;
     }
     composed.authored_spec_sha256 = Some(Sha256Hex::from_bytes(&spec.canonical_json()?));
     composed.runtime_policies = inputs

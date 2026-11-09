@@ -549,6 +549,69 @@ pub struct VerifiedRuntimeLayerInputs {
     policies: VerifiedRuntimeLayerPolicies,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OfflineGroup {
+    #[serde(default, rename = "description")]
+    _description: Option<String>,
+    required: bool,
+    network: OfflineNetwork,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OfflineNetwork {
+    block: bool,
+}
+
+/// The first composable slice admits only a non-excludable, deny-all signed group.
+///
+/// # Errors
+///
+/// Refuses changed inputs, stale revocations, profiles, or any other policy request.
+pub fn require_offline_runtime_policy(
+    inputs: &VerifiedRuntimeLayerInputs,
+) -> Result<(), OfflineRuntimePolicyError> {
+    inputs.reverify()?;
+    require_offline_policy_shape(inputs.policies())
+}
+
+fn require_offline_policy_shape(
+    policies: &VerifiedRuntimeLayerPolicies,
+) -> Result<(), OfflineRuntimePolicyError> {
+    if policies.profile().is_some() {
+        return Err(OfflineRuntimePolicyError::Unsupported);
+    }
+    let group = policies
+        .group()
+        .ok_or(OfflineRuntimePolicyError::Unsupported)?;
+    require_offline_group(group)
+}
+
+fn require_offline_group(bytes: &[u8]) -> Result<(), OfflineRuntimePolicyError> {
+    if bytes.len() > MAX_REGISTRY_DESCRIPTOR_BYTES {
+        return Err(OfflineRuntimePolicyError::Unsupported);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| OfflineRuntimePolicyError::Unsupported)?;
+    let group: OfflineGroup =
+        toml::from_str(text).map_err(|_| OfflineRuntimePolicyError::Unsupported)?;
+    if !group.required || !group.network.block {
+        return Err(OfflineRuntimePolicyError::Unsupported);
+    }
+    Ok(())
+}
+
+/// Why a verified runtime layer cannot enter the first offline composition.
+#[derive(Debug, Error)]
+pub enum OfflineRuntimePolicyError {
+    #[error(transparent)]
+    Input(#[from] RuntimeLayerInputError),
+    #[error(
+        "the first composable runtime requires a signed, required deny-all group with no other policy requests"
+    )]
+    Unsupported,
+}
+
 impl VerifiedRuntimeLayerInputs {
     /// The held archive, not a live publisher URL or mutable cache file.
     pub fn archive(&self) -> &VerifiedRuntimeLayerArchive {
@@ -731,6 +794,59 @@ mod tests {
                 verify_runtime_layer_policies(&layer, root.path()),
                 Err(RuntimeLayerPolicyError::Io(_))
             ));
+        }
+    }
+
+    #[test]
+    fn signed_offline_group_refuses_optional_and_granting_policy() {
+        require_offline_group(
+            b"description = 'Offline Python runtime'\nrequired = true\n[network]\nblock = true\n",
+        )
+        .unwrap();
+        for document in [
+            b"[network]\nblock = true\n".as_slice(),
+            b"required = false\n[network]\nblock = true\n".as_slice(),
+            b"required = true\n[network]\nblock = false\n".as_slice(),
+            b"required = true\n[network]\nblock = true\nallow = ['pypi.org:443']\n".as_slice(),
+            b"required = true\n[[secrets.bind]]\nname = 'token'\n[network]\nblock = true\n".as_slice(),
+            b"required = true\n[[shares.mount]]\nhost = '.'\nguest = '/work'\n[network]\nblock = true\n".as_slice(),
+            b"required = true\n[network]\nblock = true\n[resources]\nmax_cpus = 2\n".as_slice(),
+            b"required = true\n[network]\nblock = true\nnet = true\n".as_slice(),
+            b"required = true\n[network]\nblock = true\n[network]\nblock = true\n".as_slice(),
+        ] {
+            assert!(require_offline_group(document).is_err(), "{document:?}");
+        }
+    }
+
+    #[test]
+    fn authenticated_policy_bytes_cannot_bypass_offline_shape_check() {
+        for (group_bytes, allowed) in [
+            (
+                b"required = true\n[network]\nblock = true\n".as_slice(),
+                true,
+            ),
+            (
+                b"required = false\n[network]\nblock = true\n".as_slice(),
+                false,
+            ),
+            (
+                b"required = true\n[network]\nblock = true\nallow = ['pypi.org:443']\n".as_slice(),
+                false,
+            ),
+        ] {
+            let mut signed = document();
+            signed["files"] = json!([{
+                "path": GROUP_FILE,
+                "sha256": crate::packs::Sha256Hex::from_bytes(group_bytes),
+                "size": group_bytes.len()
+            }]);
+            let descriptor = authenticated(&signed);
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("pack")).unwrap();
+            std::fs::write(root.path().join(GROUP_FILE), group_bytes).unwrap();
+            let held = verify_runtime_layer_policies(&descriptor, root.path()).unwrap();
+            held.reverify_with(|_| Ok(())).unwrap();
+            assert_eq!(require_offline_policy_shape(&held).is_ok(), allowed);
         }
     }
 
