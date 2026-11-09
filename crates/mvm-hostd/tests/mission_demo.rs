@@ -899,6 +899,123 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
     assert_eq!(received.unwrap(), b"hello");
 }
 
+/// One framed request to the mailbox socket as a host peer; the raw reply.
+fn host_frame(socket: &std::path::Path, body: &[u8]) -> String {
+    host_frame_on(
+        &mut std::os::unix::net::UnixStream::connect(socket).unwrap(),
+        body,
+    )
+}
+
+/// Queue `bodies` through the guest port, in order, on a mux that answers
+/// CONNECT. A body that is itself a read request is sent as the raw frame.
+fn guest_sends(node: &Node, channel: &Channel, bodies: &[&[u8]]) -> Vec<Result<(), Refusal>> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut sealer = sealer(channel, &[MailboxOperation::Send]);
+    let mux = node.home.path().join("fc.vsock");
+    let listener = std::os::unix::net::UnixListener::bind(&mux).unwrap();
+    let owned: Vec<Vec<u8>> = bodies.iter().map(|b| b.to_vec()).collect();
+    let guest = std::thread::spawn(move || {
+        owned
+            .iter()
+            .map(|body| {
+                let (stream, _) = listener.accept().unwrap();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut String::new())
+                    .unwrap();
+                (&stream).write_all(b"OK 1\n").unwrap();
+                let mut stream = stream;
+                if body.first() == Some(&b'{') {
+                    let reply = host_frame_on(&mut stream, body);
+                    serde_json::from_str::<Result<(), Refusal>>(&reply).unwrap()
+                } else {
+                    let message = OutboxMessage {
+                        recipient: aircraft_principal(),
+                        body: body.clone(),
+                    };
+                    send_outbox_message(&mut stream, &message)
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    let absent = node.home.path().join("absent.sock");
+    for _ in bodies {
+        channel
+            .service
+            .serve_guest(&absent, &mux, &mut sealer)
+            .unwrap();
+    }
+    guest.join().unwrap()
+}
+
+fn host_frame_on(stream: &mut std::os::unix::net::UnixStream, body: &[u8]) -> String {
+    use std::io::{Read, Write};
+    // A service that refuses on length alone closes early; the verdict is still readable.
+    let _ = stream
+        .write_all(&(body.len() as u32).to_be_bytes())
+        .and_then(|()| stream.write_all(body));
+    let mut reply = String::new();
+    let _ = stream.read_to_string(&mut reply);
+    reply
+}
+
+fn recv_message(socket: &std::path::Path) -> (Option<Vec<u8>>, u64, u64) {
+    let got = mvm_hostd::mailbox_service::recv(socket).unwrap();
+    let body = got.message.map(|m| hex::decode(m).unwrap());
+    (body, got.accepted, got.read)
+}
+
+/// A host reader takes messages oldest first, with lifetime counts, and an
+/// empty queue answers with none.
+#[test]
+fn a_host_reader_takes_the_queue_in_order_and_an_empty_queue_is_none() {
+    let (node, channel) = channel_with_one_node();
+    assert_eq!(recv_message(&channel.socket), (None, 0, 0));
+    let verdicts = guest_sends(&node, &channel, &[b"first", b"second"]);
+    assert!(verdicts.iter().all(Result::is_ok));
+    assert_eq!(
+        recv_message(&channel.socket),
+        (Some(b"first".to_vec()), 2, 1)
+    );
+    assert_eq!(
+        recv_message(&channel.socket),
+        (Some(b"second".to_vec()), 2, 2)
+    );
+    assert_eq!(recv_message(&channel.socket), (None, 2, 2));
+}
+
+/// The read request is strict and bounded, and the guest's connection never
+/// reaches it: a guest that sends one is refused and the queue is untouched.
+#[test]
+fn the_read_request_is_strict_bounded_and_not_reachable_by_the_guest() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (node, channel) = channel_with_one_node();
+    let mode = std::fs::metadata(&channel.socket)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "the socket is owner-only");
+
+    for bad in [
+        &br#"{"request":"drain"}"#[..],
+        br#"{"request":"recv","extra":1}"#,
+        br#"{"request":"recv"} trailing"#,
+        br#"{}"#,
+    ] {
+        let reply = host_frame(&channel.socket, bad);
+        assert!(reply.contains("Malformed"), "{reply}");
+    }
+    let oversized = host_frame(&channel.socket, &vec![b'{'; LIMITS.max_frame_bytes + 1]);
+    assert!(oversized.contains("Oversized"), "{oversized}");
+
+    let verdicts = guest_sends(&node, &channel, &[b"kept", br#"{"request":"recv"}"#]);
+    assert!(verdicts[0].is_ok() && verdicts[1].is_err());
+    assert_eq!(
+        recv_message(&channel.socket),
+        (Some(b"kept".to_vec()), 1, 1)
+    );
+}
+
 struct KillOnDrop(std::process::Child, std::path::PathBuf);
 
 impl KillOnDrop {
@@ -985,6 +1102,25 @@ fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
         }),
         "the host service bound its socket; stderr:\n{}",
         process.stderr()
+    );
+    // The same process answers a host reader with what the guest sent.
+    let socket = mvm_core::config::vm_mailbox_socket_at(&state_dir);
+    let got = (0..100).find_map(|_| {
+        let got = mvm_hostd::mailbox_service::recv(&socket).ok()?;
+        got.message
+            .is_none()
+            .then(|| std::thread::sleep(std::time::Duration::from_millis(50)));
+        got.message.map(|m| (m, got.accepted, got.read))
+    });
+    assert_eq!(
+        got,
+        Some((hex::encode("hello"), 1, 1)),
+        "{}",
+        process.stderr()
+    );
+    assert_eq!(
+        mvm_hostd::mailbox_service::recv(&socket).unwrap().message,
+        None
     );
 }
 
