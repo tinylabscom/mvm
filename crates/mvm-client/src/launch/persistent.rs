@@ -93,6 +93,7 @@ pub struct PersistentImageStartParams<'a> {
     /// [`network_policy`](Self::network_policy), which the caller derived from
     /// the same spec.
     pub grants: Option<mvm_contract::grants::Grants>,
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// GPU remoting plane from the persisted spec (`--gpu` at create/start).
     pub gpu: bool,
     /// Optional host GPU ordinal persisted with the machine.
@@ -237,6 +238,7 @@ fn prepare_persistent_boot(
         tools,
         has_ad_hoc_argv,
         grants,
+        mailbox,
         gpu,
         gpu_device,
         workload_dir,
@@ -333,6 +335,7 @@ fn prepare_persistent_boot(
                 .collect::<Vec<_>>();
             admit_plan_for_boot_configured_ingress(
                 AdmitPlanForBootParams {
+                    mailbox,
                     // What the backend will arm, so the admitted tier opens
                     // the GPU endpoint's vsock socket exactly when there is one.
                     gpu: config.gpu,
@@ -495,6 +498,7 @@ fn finish_legacy_persistent(
     let started = match (|| -> Result<_> {
         let mut images = prepared_volumes.take_writable_images();
         complete_writable_images(&start_config, &mut images)?;
+        mvm_hostd::mailbox_process::require_servable(&start_config, backend.kind())?;
         Ok(crate::boot::start_prepared_custodied(
             backend,
             &start_config,
@@ -517,6 +521,17 @@ fn finish_legacy_persistent(
             return Err(err);
         }
     };
+    // The guest asserts a mailbox exactly when the plan grants one, so the
+    // host side starts here or the launch is rolled back.
+    if let Err(error) =
+        mvm_hostd::mailbox_process::serve_started(started.backend(), started.vm_id(), &start_config)
+    {
+        emit_failed(&admission, "mailbox-process", &error);
+        if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
+            tracing::warn!(error = %cleanup_error, machine = name, "removing runtime state after a refused mailbox failed");
+        }
+        return Err(error);
+    }
     // A backend accepting a start only means its host process was spawned.
     // Detached callers must not observe success until the authenticated guest
     // control plane is actually serving; failure rolls the partial start back

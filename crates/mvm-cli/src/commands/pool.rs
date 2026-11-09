@@ -408,6 +408,7 @@ fn admit_standby_parent_plan(
     mem_mib: u32,
 ) -> Result<AdmittedPlan> {
     let input = SynthesisInput {
+        mailbox: None,
         outputs: Vec::new(),
         grants: None,
         kernel_sha256: None,
@@ -1018,6 +1019,9 @@ fn warm_eligible_launch(cfg: &VmStartConfig, late_volume_slots: u8) -> bool {
     cfg.bundle_boot_assets.is_none()
         && late_volumes_attachable(cfg, late_volume_slots)
         && !mvm_vmm::host::egress_shared::launch_terminates_egress_tls(cfg)
+        // A standby parent boots without the `mvm.mailbox` token and its host
+        // process is per launch, so a granted launch cold-boots.
+        && mvm_vmm::host::egress_bridge::mailbox_cmdline_token(cfg).is_none()
 }
 
 /// Attempt a warm-pool claim for this launch: the claimed `VmId` (the standby

@@ -174,6 +174,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         mvm_client::launch::machine_start::MachineStartParams {
             hypervisor: &effective_hypervisor,
             has_ad_hoc_argv: args.has_ad_hoc_argv,
+            mailbox: args.mailbox,
         },
     )?;
     let boot_digest = started.resolved_digest;

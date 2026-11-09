@@ -1140,6 +1140,7 @@ mod tests {
         const FIXTURE_SHA: &str =
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         SynthesisInput {
+            mailbox: None,
             outputs: Vec::new(),
             grants: None,
             stream_edges: Vec::new(),

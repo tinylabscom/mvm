@@ -480,6 +480,7 @@ pub(crate) struct BootParams {
     /// The request's permission set, carried into the signed plan and — for
     /// its egress dimension — into the policy the gate enforces.
     pub(crate) grants: Option<mvm_contract::grants::Grants>,
+    pub(crate) mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// A fleet-issued signed plan to admit instead of synthesizing one.
     /// `Some` only when the launch request carried one; admission then
     /// verifies it against the operator-pinned `trusted_plan_signers` and the
@@ -563,6 +564,7 @@ impl LocalBackend {
             volumes: params.volumes,
             destroy_on_exit: params.transient,
             grants: params.grants.clone(),
+            mailbox: params.mailbox,
             secret_release: params.secrets.secret_release,
             secrets: params.secrets.secrets,
             signed_plan: params.signed_plan.clone(),
@@ -986,6 +988,7 @@ impl LocalBackend {
             machine_start::MachineStartParams {
                 hypervisor: &backend,
                 has_ad_hoc_argv,
+                mailbox: None,
             },
         )
         .map_err(|e| crate::local::backend_err(format!("{e:#}")))?;
@@ -1100,6 +1103,7 @@ impl LocalBackend {
                 volumes,
                 transient,
                 grants: request.grants.clone(),
+                mailbox: request.mailbox,
                 signed_plan: request.signed_plan.clone(),
                 assurance_campaign: request.assurance_campaign.clone(),
                 secrets,

@@ -73,6 +73,10 @@ pub struct MachineStartParams<'a> {
     /// Whether the caller will run an ad-hoc command after boot, which issues
     /// a DevOnly verb and so rules out an attenuated ProdSafe grant.
     pub has_ad_hoc_argv: bool,
+    /// The mailbox this start grants, minted into its plan. Not persisted with
+    /// the definition: a grant belongs to one start, so a later start without
+    /// one boots without.
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
 }
 
 /// What a start resolved, for the caller to record once the machine is up.
@@ -289,6 +293,7 @@ pub fn start_machine_spec(
         tools: spec.tools.clone(),
         has_ad_hoc_argv: params.has_ad_hoc_argv,
         grants: spec.grants.clone(),
+        mailbox: params.mailbox,
         gpu: spec.gpu,
         gpu_device: spec.gpu_device,
         workload_dir: workload_dir.as_deref(),

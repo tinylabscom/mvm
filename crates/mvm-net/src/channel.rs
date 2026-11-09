@@ -32,6 +32,8 @@ pub enum GuestService {
     Telemetry,
     /// View-only screencast frames sent from the guest to the host.
     DisplayFrame,
+    /// Typed mailbox calls and casts, on a dedicated connection and queue.
+    Mailbox,
     /// GPU compute by API remoting: the guest's CUDA/NVML shims dial the
     /// host GPU endpoint on this channel. The endpoint owns the real driver
     /// (or the deterministic stub); the guest carries neither.
@@ -67,6 +69,7 @@ impl GuestService {
             Self::NetworkFlow => mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT,
             Self::Telemetry => mvm_core::protocol::telemetry::TELEMETRY_PORT,
             Self::DisplayFrame => mvm_contract::stream::DISPLAY_FRAME_PORT,
+            Self::Mailbox => mvm_contract::protocol::mailbox::MAILBOX_PORT,
             // The constant lives in `mvm-contract` so the guest shims —
             // which link only that crate — name the same number. Pinned by
             // the tests below exactly like NetworkFlow above.
@@ -90,6 +93,7 @@ impl GuestService {
             Self::NetworkFlow => "network-flow",
             Self::Telemetry => "telemetry",
             Self::DisplayFrame => "display-frame",
+            Self::Mailbox => "mailbox",
             Self::Gpu => "gpu",
             Self::ConsoleData { .. } => "console-data",
             Self::BuilderDispatch => "builder-dispatch",
@@ -137,6 +141,7 @@ mod tests {
         assert_eq!(GuestService::Broker.port(), 5300);
         assert_eq!(GuestService::Telemetry.port(), 5254);
         assert_eq!(GuestService::DisplayFrame.port(), 5255);
+        assert_eq!(GuestService::Mailbox.port(), 5257);
         // Pins the wire value. The constant it derives from lives in
         // `mvm-contract` so the guest shims — which cannot depend on this
         // crate — name the same number.
@@ -156,6 +161,8 @@ mod tests {
             GuestService::NetworkFlow.port(),
             GuestService::Telemetry.port(),
             GuestService::DisplayFrame.port(),
+            GuestService::Gpu.port(),
+            GuestService::Mailbox.port(),
             GuestService::BuilderDispatch.port(),
             GuestService::BuilderdControl.port(),
         ];
