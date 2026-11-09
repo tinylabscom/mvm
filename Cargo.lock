@@ -4019,6 +4019,7 @@ dependencies = [
  "chrono",
  "core-foundation 0.10.1",
  "ed25519-dalek",
+ "flate2",
  "hex",
  "hmac",
  "ipnet",

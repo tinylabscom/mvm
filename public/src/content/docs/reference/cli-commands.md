@@ -1745,7 +1745,10 @@ in the bundle registry. The run then continues as
 `mvmctl machine run --manifest <bundle-sha256>`, so admission is unchanged: the
 plan is synthesized and signed by the host, and the bundle is re-verified at
 admit time. A bundle that is already installed is verified again and reused
-rather than re-extracted. An unsigned, tampered, or unknown-publisher archive
+rather than re-extracted. Installed archives are gzip-compressed at rest under
+`~/.mvm/bundles/<sha256>.mvmpkg.gz`; older plain `.mvmpkg` installs remain
+readable. Admission re-verifies the original signed tar bytes, not the gzip
+wrapper. An unsigned, tampered, or unknown-publisher archive
 is refused with the verifier's error before anything boots, and nothing is
 written to the registry.
 

@@ -15,9 +15,9 @@
 //! `~/.mvm/bundles/<bundle_sha256>/` by
 //! [`mvm_core::plan::BundleRegistry::install_file`], each artifact hashed on
 //! its way in and the directory promoted only once all of them verified; the
-//! archive is also copied to `<bundle_sha256>.mvmpkg` so the
-//! `FsBundleResolver` admit-time path finds it too. Nothing reads the archive
-//! into memory whole.
+//! archive is also retained as `<bundle_sha256>.mvmpkg.gz` so the
+//! `FsBundleResolver` admit-time path can reverify its original signed bytes.
+//! Nothing reads the archive into memory whole during installation.
 
 use std::path::{Path, PathBuf};
 

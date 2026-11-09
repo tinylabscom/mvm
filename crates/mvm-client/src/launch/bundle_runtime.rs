@@ -569,7 +569,14 @@ mod tests {
             path
         };
         let mut proof = selected.legacy_portable_runtime.clone().unwrap();
-        proof.archive = copy(&proof.archive, "bundle.mvmpkg");
+        let archive = retained.path().join("bundle.mvmpkg");
+        std::fs::write(
+            &archive,
+            mvm_core::plan::bundle::read_bundle_archive(&proof.archive).unwrap(),
+        )
+        .unwrap();
+        mvm_core::private_fs::set_mode(&archive, 0o400).unwrap();
+        proof.archive = archive;
         let binding = RuntimeLaunchBinding::LegacyPortable {
             proof,
             rootfs_path: copy(Path::new(&selected.rootfs_path), "rootfs"),

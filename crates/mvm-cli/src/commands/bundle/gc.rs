@@ -11,7 +11,7 @@
 //! a host-side "last used" tracker — deferred to a future commit.
 //!
 //! Removal is symmetric to `mvmctl bundle install`: both the
-//! cached `<sha>.mvmpkg` and the extracted `<sha>/` directory are
+//! cached `<sha>.mvmpkg.gz` (or legacy `<sha>.mvmpkg`) and the extracted `<sha>/` directory are
 //! unlinked. Successful sweeps emit a single
 //! `LocalAuditKind::BundleGc` audit line with the removed count
 //! and the truncated sha list.

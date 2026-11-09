@@ -59,10 +59,8 @@
 //!     └── initrd          # optional NixOS stage-1
 //! ```
 //!
-//! The archive layout is plain tar (no gzip) because the rootfs and
-//! kernel are already binary blobs that compress poorly; gzip would
-//! buy little and add a transitive dep. A future `.mvmpkg.gz`
-//! wrapper can layer on if size becomes a real concern.
+//! The signed archive is plain tar. Installed copies may be gzip-compressed
+//! at rest; verification always reads the original tar bytes.
 
 use std::collections::BTreeMap;
 #[cfg(feature = "host-state")]
@@ -117,6 +115,8 @@ pub use lookup::{
     TrustStore,
 };
 pub use signer::ManifestSigner;
+#[cfg(feature = "host-state")]
+pub(crate) use stream::archive_sha256;
 // The streaming archive I/O half of the bundle surface (seal/verify/install)
 // is host-state; the captured-canonical-inputs type stays because
 // `canonical_linux::PreparedCanonicalLinux` holds one and is named by
@@ -125,8 +125,8 @@ pub use signer::ManifestSigner;
 pub(crate) use stream::HashingWriter;
 #[cfg(feature = "host-state")]
 pub use stream::{
-    BundlePayload, VerifiedBundleFile, capture_canonical_linux_inputs, verify_bundle_file,
-    write_bundle_to,
+    BundlePayload, VerifiedBundleFile, capture_canonical_linux_inputs, open_archive,
+    read_bundle_archive, verify_bundle_file, write_bundle_to,
 };
 pub use stream::{CapturedCanonicalLinuxInputs, MAX_IMAGE_SET_MANIFEST_BYTES};
 pub use verify_error::{BundleVerifyError, ensure_safe_path};
@@ -301,13 +301,7 @@ pub fn inspect_bundle_manifest_for_refusal(
 pub fn inspect_bundle_manifest_file_for_refusal(
     path: &Path,
 ) -> Result<BundleManifest, BundleVerifyError> {
-    let file = std::fs::File::open(path).map_err(|error| {
-        BundleVerifyError::ManifestParse(format!(
-            "opening bundle archive {}: {error}",
-            path.display()
-        ))
-    })?;
-    inspect_bundle_manifest_for_refusal(file)
+    inspect_bundle_manifest_for_refusal(stream::open_archive(path)?)
 }
 
 /// Errors specific to bundle install.
@@ -347,8 +341,7 @@ impl BundleRegistry {
     }
 
     /// Default path: `~/.mvm/bundles/`. Same root [`FsBundleResolver`]
-    /// uses — the archive (`<sha>.mvmpkg`) and the unpacked
-    /// directory (`<sha>/`) cohabit under one tree.
+    /// uses for the compressed archive and the extracted directory.
     pub fn default_path() -> anyhow::Result<Self> {
         let p = crate::config::mvm_home_strict()?.join("bundles");
         Ok(Self::new(p))
@@ -358,9 +351,17 @@ impl BundleRegistry {
         &self.root
     }
 
-    /// Absolute path to the archive cache file for a given sha256.
+    /// Path to the installed archive. Older installs retain a plain `.mvmpkg`;
+    /// new installs store the same signed bytes gzip-compressed at rest.
     pub fn archive_path(&self, bundle_sha256: &str) -> PathBuf {
-        self.root.join(format!("{bundle_sha256}.mvmpkg"))
+        let compressed = self.root.join(format!("{bundle_sha256}.mvmpkg.gz"));
+        if std::fs::symlink_metadata(&compressed)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            self.root.join(format!("{bundle_sha256}.mvmpkg"))
+        } else {
+            compressed
+        }
     }
 
     /// Absolute path to the extracted-bundle directory for a given
@@ -381,7 +382,7 @@ impl BundleRegistry {
     /// Install a verified archive into the registry. Verifies the
     /// archive against `trust`, extracts every declared artifact
     /// atomically (stage to `<sha>.partial/`, rename to `<sha>/`),
-    /// and writes the archive bytes to `<sha>.mvmpkg` so a later
+    /// and writes a compressed copy to `<sha>.mvmpkg.gz` so a later
     /// `BundleResolver::resolve` finds them.
     ///
     /// Idempotent when `force == false`: if `<sha>/` already exists
@@ -413,7 +414,7 @@ impl BundleRegistry {
 
     /// Remove an installed bundle. Best-effort symmetric to
     /// [`install`](Self::install): unlinks both the
-    /// `<sha>.mvmpkg` cached archive AND the extracted
+    /// cached archive (compressed or legacy plain) AND the extracted
     /// `<sha>/` directory. Idempotent on already-absent entries
     /// (returns `Ok(false)`); returns `Ok(true)` when at least
     /// one of the two artifacts was found and removed.
@@ -433,15 +434,19 @@ impl BundleRegistry {
         let _lease = self.lock_entry(bundle_sha256).map_err(anyhow::Error::msg)?;
         let mut removed_any = false;
 
-        let archive = self.archive_path(bundle_sha256);
-        match std::fs::remove_file(&archive) {
-            Ok(()) => removed_any = true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "removing archive {}: {e}",
-                    archive.display()
-                ));
+        for archive in [
+            self.root.join(format!("{bundle_sha256}.mvmpkg.gz")),
+            self.root.join(format!("{bundle_sha256}.mvmpkg")),
+        ] {
+            match std::fs::remove_file(&archive) {
+                Ok(()) => removed_any = true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "removing archive {}: {e}",
+                        archive.display()
+                    ));
+                }
             }
         }
 
@@ -517,17 +522,13 @@ impl BundleRegistry {
         trust: &dyn TrustStore,
     ) -> Result<Option<BundleManifest>, BundleVerifyError> {
         let path = self.archive_path(bundle_sha256);
-        let file = match std::fs::File::open(&path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(BundleVerifyError::ManifestParse(format!(
-                    "opening installed bundle archive {}: {e}",
-                    path.display()
-                )));
-            }
-        };
-        let (manifest_bytes, sig_bytes) = stream::read_manifest_entries(file)?;
+        if std::fs::symlink_metadata(&path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Ok(None);
+        }
+        let (manifest_bytes, sig_bytes) =
+            stream::read_manifest_entries(stream::open_archive(&path)?)?;
         verify_signed_manifest(&manifest_bytes, &sig_bytes, trust)
             .map(|(manifest, _)| Some(manifest))
     }
@@ -1515,6 +1516,12 @@ mod tests {
             rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         }
+    }
+
+    fn overwrite_compressed(path: &Path, bytes: &[u8]) {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        std::fs::write(path, encoder.finish().unwrap()).unwrap();
     }
 
     fn make_manifest(key_id: KeyId, artifacts: Vec<BundleArtifact>) -> BundleManifest {
@@ -3151,7 +3158,8 @@ mod tests {
             "archive missing at {:?}",
             archive_path
         );
-        let archive_back = std::fs::read(&archive_path).unwrap();
+        assert_eq!(archive_path.extension().unwrap(), "gz");
+        let archive_back = read_bundle_archive(&archive_path).unwrap();
         assert_eq!(archive_back, archive);
 
         // Extracted dir landed.
@@ -3169,6 +3177,44 @@ mod tests {
             .expect("entry present");
         assert_eq!(recovered.sha256, installed.sha256);
         assert_eq!(recovered.manifest, installed.manifest);
+    }
+
+    #[test]
+    fn installed_archive_is_smaller_and_verifies_from_compressed_storage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let sk = fresh_key();
+        let archive = build_bundle(&sk, b"kernel", &vec![b'x'; 1024 * 1024]);
+        let trust = trust(&sk);
+        let installed = registry.install(&archive, &trust, false).unwrap();
+        let path = registry.archive_path(&installed.sha256);
+        assert_eq!(path.extension().unwrap(), "gz");
+        assert!(std::fs::metadata(&path).unwrap().len() < archive.len() as u64 / 3);
+        assert_eq!(
+            FsBundleResolver::new(tmp.path())
+                .resolve(&installed.sha256)
+                .unwrap(),
+            archive
+        );
+        assert_eq!(
+            registry
+                .verified_manifest(&installed.sha256, &trust)
+                .unwrap(),
+            Some(installed.manifest.clone())
+        );
+
+        let mut compressed = std::fs::read(&path).unwrap();
+        compressed.extend_from_slice(b"extra data");
+        std::fs::write(&path, compressed).unwrap();
+        assert!(verify_bundle_file(&path, &trust).is_err());
+        assert!(
+            FsBundleResolver::new(tmp.path())
+                .resolve(&installed.sha256)
+                .is_err()
+        );
+        assert!(registry.remove(&installed.sha256).unwrap());
+        assert!(!path.exists());
+        assert!(!registry.install_dir(&installed.sha256).exists());
     }
 
     #[test]
@@ -3969,14 +4015,14 @@ mod tests {
             hand_sealed_bundle(&sk, vec![BundleMember::SecurityPosture(sealed_posture())]);
         let installed = registry.install(&archive, &trust(&sk), false).unwrap();
         let path = registry.archive_path(&installed.sha256);
-        let mut bytes = std::fs::read(&path).unwrap();
+        let mut bytes = read_bundle_archive(&path).unwrap();
         let needle = br#""allows_egress":false"#;
         let at = bytes
             .windows(needle.len())
             .position(|window| window == needle)
             .unwrap();
         bytes[at..at + needle.len()].copy_from_slice(br#""allows_egress":true "#);
-        std::fs::write(&path, bytes).unwrap();
+        overwrite_compressed(&path, &bytes);
 
         assert!(matches!(
             registry.verified_manifest(&installed.sha256, &trust(&sk)),
@@ -4060,14 +4106,14 @@ mod tests {
         let host = fresh_key();
         let (_tmp, registry, sha) = installed_with(&host, true);
         let path = registry.archive_path(&sha);
-        let mut bytes = std::fs::read(&path).unwrap();
+        let mut bytes = read_bundle_archive(&path).unwrap();
         let needle = b"test-publisher";
         let at = bytes
             .windows(needle.len())
             .position(|w| w == needle)
             .unwrap();
         bytes[at] = b'T';
-        std::fs::write(&path, bytes).unwrap();
+        overwrite_compressed(&path, &bytes);
         assert!(matches!(
             registry.verified_launch_manifest(&sha, no_release_keys(), Some(host.verifying_key())),
             Err(BundleVerifyError::SignatureInvalid { .. })

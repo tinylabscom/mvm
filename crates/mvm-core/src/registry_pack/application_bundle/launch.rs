@@ -276,7 +276,7 @@ pub fn trust_for_installed_archive<T: TrustStore>(
     inner: T,
     archive: &Path,
 ) -> crate::registry_pack::BuiltinAuthorTrust<T> {
-    match crate::crypto::image_verify::sha256_file(archive) {
+    match crate::plan::bundle::archive_sha256(archive) {
         Ok(digest) => trust_for_installed_bundle(inner, &digest),
         Err(_) => crate::registry_pack::BuiltinAuthorTrust::without_builtin(inner),
     }
@@ -294,7 +294,7 @@ pub(super) fn trust_for_installed_archive_with<T: TrustStore>(
     check_signature: RegistryPackSignatureChecker,
     check_revocations: RevocationChecker,
 ) -> crate::registry_pack::BuiltinAuthorTrust<T> {
-    match crate::crypto::image_verify::sha256_file(archive) {
+    match crate::plan::bundle::archive_sha256(archive) {
         Ok(digest) => trust_for_installed_bundle_with(
             inner,
             &digest,

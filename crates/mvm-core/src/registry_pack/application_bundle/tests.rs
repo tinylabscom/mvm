@@ -415,7 +415,8 @@ fn repeated_install_rechecks_trust_and_repairs_poisoned_cache_without_digest_dri
     assert_eq!(first.bundle().sha256, second.bundle().sha256);
     assert_eq!(std::fs::read(rootfs).unwrap(), b"rootfs");
     assert_eq!(
-        std::fs::read(registry.archive_path(&first.bundle().sha256)).unwrap(),
+        crate::plan::bundle::read_bundle_archive(&registry.archive_path(&first.bundle().sha256))
+            .unwrap(),
         bytes
     );
     assert_eq!(
@@ -736,7 +737,7 @@ fn held_application_keeps_original_descriptor_and_snapshot_after_locator_changes
     let installed = installed();
     let archive =
         BundleRegistry::new(&installed.store.bundle_root).archive_path(&installed.bundle_sha256);
-    let original = std::fs::read(&archive).unwrap();
+    let original = crate::plan::bundle::read_bundle_archive(&archive).unwrap();
     let pin_before = std::fs::read(&installed.store.lock_path).unwrap();
     let held = resolve_held(&installed, "runtime/python").unwrap();
     let snapshot = held.archive_path().to_path_buf();
@@ -925,9 +926,11 @@ fn held_application_rechecks_archive_and_independent_key_without_enrollment() {
     let archive =
         BundleRegistry::new(&installed.store.bundle_root).archive_path(&installed.bundle_sha256);
     let original = std::fs::read(&archive).unwrap();
-    let mut altered = original.clone();
+    let mut altered = crate::plan::bundle::read_bundle_archive(&archive).unwrap();
     altered[0] ^= 1;
-    std::fs::write(&archive, altered).unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, &altered).unwrap();
+    std::fs::write(&archive, encoder.finish().unwrap()).unwrap();
     assert!(matches!(
         resolve_held(&installed, "runtime/python"),
         Err(ApplicationLaunchError::Bundle(
@@ -1274,7 +1277,7 @@ fn the_resolved_bundle_is_the_archive_a_mvmpkg_run_would_install() {
     let installed = installed();
     let archive = crate::plan::bundle::BundleRegistry::new(&installed.store.bundle_root)
         .archive_path(&installed.bundle_sha256);
-    let bytes = std::fs::read(archive).unwrap();
+    let bytes = crate::plan::bundle::read_bundle_archive(&archive).unwrap();
     let resolved = resolve(&installed, "runtime/python").unwrap();
     assert_eq!(resolved.bundle_sha256, sha256_hex(&bytes));
 }
