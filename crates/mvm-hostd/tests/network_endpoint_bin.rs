@@ -574,6 +574,7 @@ fn test_config(transport: EndpointTransport) -> EndpointConfig {
         approval_socket: None,
         flowmux_identity: None,
         telemetry: None,
+        mailbox: None,
     }
 }
 
@@ -1429,4 +1430,66 @@ fn tool_route_and_trace_through_ingress(guest_broker: bool) {
         !audit.contains(binding.as_str()),
         "the chain must not carry a usable binding"
     );
+}
+
+/// A granted mailbox the host cannot honor (no host key, no template) costs
+/// the guest its mailbox, never the endpoint its egress.
+#[test]
+fn an_endpoint_whose_mailbox_cannot_start_keeps_serving() {
+    use base64::Engine as _;
+    use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+    use mvm_core::net::session::Session;
+    use mvm_hostd::mailbox_launch::MailboxEmbed;
+    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let sock = state_dir.join("network.sock");
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let host_key = ed25519_dalek::SigningKey::from_bytes(&[31u8; 32]);
+    let guest_key = ed25519_dalek::SigningKey::from_bytes(&[37u8; 32]);
+
+    let cfg = EndpointConfig {
+        mailbox: Some(MailboxEmbed {
+            grant: MailboxGrant {
+                mailbox: MailboxId::from_bytes([7; 32]),
+                authority_key: [9; 32],
+                epoch: ExecutionEpoch::new(1).unwrap(),
+            },
+            state_dir: state_dir.clone(),
+        }),
+        instance_id: "mbx-vm".into(),
+        egress_mode: EgressMode::FlowMux,
+        session_marker: Some(state_dir.join("session.marker")),
+        flowmux_identity: Some(FlowMuxIdentity {
+            session_id: "mbx-vm".into(),
+            host_signing_key_base64: b64.encode(host_key.to_bytes()),
+            guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
+        }),
+        ..test_config(EndpointTransport::Uds { path: sock.clone() })
+    };
+    let mut child = Command::new(BIN)
+        .env("MVM_HOME", &home)
+        .env("HOME", dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn endpoint bin");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+    drop(stdin);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let _guard = Kill(child);
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read handshake line");
+
+    let mut conn = UnixStream::connect(&sock).expect("endpoint accepts guest sessions");
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    Session::guest(&mut conn, guest_key, &host_key.verifying_key())
+        .expect("endpoint still authenticates a guest session");
 }

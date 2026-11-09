@@ -27,6 +27,16 @@ pub(super) fn telemetry_section(tenant: &str, state_dir: &Path) -> serde_json::V
     })
 }
 
+/// The mailbox section an endpoint or collector-only config carries: the
+/// signed grant and the VM's state dir, from which the serving process derives
+/// every path.
+pub(super) fn mailbox_section(
+    grant: &mvm_contract::protocol::mailbox::MailboxGrant,
+    state_dir: &Path,
+) -> serde_json::Value {
+    serde_json::json!({ "grant": grant, "state_dir": state_dir })
+}
+
 /// Provision what the collector needs beyond its config: the tenant's
 /// resident signer it authenticates through, and this VM's records key.
 ///
@@ -64,6 +74,13 @@ pub(super) fn provision_collector(
 /// Where the collector-only process's pid is recorded, beside the VM.
 pub const TELEMETRY_COLLECTOR_PID_FILE: &str = "telemetry-collector.pid";
 
+/// What a collector-only process serves: telemetry collection, a granted
+/// guest mailbox, or both.
+pub struct CollectorOnly {
+    pub telemetry: bool,
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
+}
+
 /// Start the VM-lifetime telemetry collector for a VM that has no network
 /// endpoint to embed it in: the endpoint binary in collector-only mode, under
 /// a keeper that ends it with the VM.
@@ -77,18 +94,23 @@ pub fn spawn_telemetry_collector(
     tenant: &str,
     state_dir: &Path,
     redaction: &mvm_core::policy::RedactionPolicy,
+    shape: CollectorOnly,
 ) -> Result<()> {
     use std::io::Write;
-    let mut telemetry = telemetry_section(tenant, state_dir);
-    provision_collector(&mut telemetry, tenant, state_dir)?;
-    let cfg = serde_json::json!({
-        "telemetry_only": {
-            "instance_id": vm_name,
-            "redaction": serde_json::to_value(redaction)
-                .expect("RedactionPolicy serializes to JSON"),
-            "telemetry": telemetry,
-        }
+    let mut inner = serde_json::json!({
+        "instance_id": vm_name,
+        "redaction": serde_json::to_value(redaction)
+            .expect("RedactionPolicy serializes to JSON"),
     });
+    if shape.telemetry {
+        let mut telemetry = telemetry_section(tenant, state_dir);
+        provision_collector(&mut telemetry, tenant, state_dir)?;
+        inner["telemetry"] = telemetry;
+    }
+    if let Some(grant) = &shape.mailbox {
+        inner["mailbox"] = mailbox_section(grant, state_dir);
+    }
+    let cfg = serde_json::json!({ "telemetry_only": inner });
 
     let bin = resolve_network_endpoint_path()?;
     let log_file = open_collector_stderr_log(state_dir)?;

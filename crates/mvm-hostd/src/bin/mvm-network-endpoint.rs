@@ -216,6 +216,17 @@ fn main() -> Result<()> {
             })
             .ok()
         });
+        // Same ownership as the collector: threads of this confined process,
+        // gone with it, never waited on. A grant that cannot be honored costs
+        // the guest its mailbox, never its egress.
+        let _mailbox = cfg.mailbox.as_ref().and_then(|mailbox| {
+            mailbox
+                .start()
+                .inspect_err(|error| {
+                    warn!(error = %error, "guest mailbox did not start; serving without it");
+                })
+                .ok()
+        });
         serve(
             ServeParams::builder()
                 .cfg(&cfg)
@@ -234,34 +245,65 @@ fn main() -> Result<()> {
 }
 
 /// Collector-only mode: the VM-lifetime home of the telemetry collector for a
-/// VM that has no egress to mediate and so no endpoint to embed it in. It
+/// VM that has no egress to mediate and so no endpoint to embed it in; also
+/// the home of a granted guest mailbox for such a VM. It
 /// holds no secrets, binds nothing, reports no handshake and serves no guest
 /// flow — it dials the guest's telemetry listener and writes the sealed
 /// records file, confined to the VM's state directory, until the keeper
 /// stops it with the VM.
 fn run_telemetry_only(only: mvm_hostd::telemetry_collector::TelemetryOnlyConfig) -> Result<()> {
+    anyhow::ensure!(
+        only.telemetry.is_some() || only.mailbox.is_some(),
+        "collector-only config names neither telemetry nor a mailbox"
+    );
     #[cfg(target_os = "linux")]
     {
         use mvm_hostd::jailer::{ConfinementSpec, confine_self};
+        let state_dir = only
+            .telemetry
+            .as_ref()
+            .map(|t| &t.state_dir)
+            .or(only.mailbox.as_ref().map(|m| &m.state_dir))
+            .context("collector-only config has no state dir")?;
         let spec = ConfinementSpec::telemetry_collector(
-            &only.telemetry.state_dir,
-            only.telemetry.telemetry_sock.parent(),
+            state_dir,
+            only.telemetry
+                .as_ref()
+                .and_then(|t| t.telemetry_sock.parent()),
             mvm_core::config::mvm_keys_dir(),
         );
         confine_self(&spec).context("confine the telemetry collector")?;
         info!("telemetry collector self-confined (landlock + seccomp)");
     }
-    let collector = mvm_hostd::telemetry_collector::start_embedded(
-        &only.instance_id,
-        &only.telemetry,
-        Vec::new(),
-        mvm_hostd::stream::redact::StreamRedaction::curated(&only.redaction),
-    )
-    .context("starting the telemetry collector")?;
-    info!(vm = %only.instance_id, "telemetry collector serving");
-    // The collector's threads do the work; this thread only keeps the process
+    let collector = only
+        .telemetry
+        .as_ref()
+        .map(|telemetry| {
+            mvm_hostd::telemetry_collector::start_embedded(
+                &only.instance_id,
+                telemetry,
+                Vec::new(),
+                mvm_hostd::stream::redact::StreamRedaction::curated(&only.redaction),
+            )
+            .context("starting the telemetry collector")
+        })
+        .transpose()?;
+    // A mailbox that cannot start costs the guest its mailbox, not the
+    // collector beside it; a process left serving nothing exits.
+    let mailbox = only.mailbox.as_ref().and_then(|mailbox| {
+        mailbox
+            .start()
+            .inspect_err(|error| warn!(error = %error, "guest mailbox did not start"))
+            .ok()
+    });
+    anyhow::ensure!(
+        collector.is_some() || mailbox.is_some(),
+        "collector-only process has nothing to serve"
+    );
+    info!(vm = %only.instance_id, "collector-only process serving");
+    // The worker threads do the work; this thread only keeps the process
     // alive. The keeper ends it when the VM is gone.
-    let _collector = collector;
+    let _serving = (collector, mailbox);
     loop {
         std::thread::park();
     }
@@ -646,7 +688,12 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<ConfinedEndpoint> {
         resolver_uds_path(cfg),
     )
     .with_session_marker_parent(session_marker_parent)
-    .with_telemetry_state(cfg.telemetry.as_ref().map(|t| t.state_dir.as_path()))
+    .with_telemetry_state(
+        cfg.telemetry
+            .as_ref()
+            .map(|t| t.state_dir.as_path())
+            .or(cfg.mailbox.as_ref().map(|m| m.state_dir.as_path())),
+    )
     .with_approval_socket_parent(
         cfg.approval_socket
             .as_deref()
@@ -1363,6 +1410,7 @@ mod tests {
     fn uds_cfg() -> EndpointConfig {
         EndpointConfig {
             telemetry: None,
+            mailbox: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),
             secrets: Vec::new(),
@@ -1403,6 +1451,7 @@ mod tests {
     fn config_with_resolver(resolver: ResolverBackend) -> EndpointConfig {
         EndpointConfig {
             telemetry: None,
+            mailbox: None,
             tenant_id: "acme".into(),
             instance_id: "test".into(),
             secrets: vec![],
@@ -1917,6 +1966,7 @@ mod tests {
         let guest_key = [2u8; 32];
         let cfg = EndpointConfig {
             telemetry: None,
+            mailbox: None,
             tenant_id: "tenant".into(),
             instance_id: "test".into(),
             secrets: Vec::new(),

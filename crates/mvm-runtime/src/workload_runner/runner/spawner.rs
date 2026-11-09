@@ -42,6 +42,8 @@ pub struct NetworkEndpointSpawnRequest<'a> {
     pub ingress: &'a [mvm_core::plan::IngressMapping],
     /// Where the guest's half of the authenticated session comes from.
     pub identity: FlowMuxIdentitySource<'a>,
+    /// The admitted plan's mailbox grant; `None` serves nothing.
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
 }
 
 /// A stood-up endpoint: the channel, and the drive the guest reads its identity
@@ -61,7 +63,8 @@ pub trait NetworkEndpointSpawner: Send + Sync {
     /// Provision authentication without starting an endpoint or granting egress.
     fn prepare_identity(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<Option<PathBuf>>;
     /// For a boot with no endpoint, start its VM-lifetime telemetry collector
-    /// on its own and record whether the boot is provisioned for it. Never
+    /// and granted guest mailbox on their own and record whether the boot is
+    /// provisioned for telemetry. Never
     /// fails a launch: a collector that cannot start costs telemetry only.
     fn start_telemetry_without_endpoint(
         &self,
@@ -80,7 +83,8 @@ pub trait NetworkEndpointSpawner: Send + Sync {
 /// it for the host and the guest.
 #[derive(Default)]
 pub struct TelemetryStart {
-    /// The boot is provisioned: its guest serves the telemetry listener.
+    /// A per-VM collector-only process is owed (for telemetry, a granted
+    /// mailbox, or both), so a failed launch must reap it.
     pub provisioned: bool,
     pending: Option<std::thread::JoinHandle<()>>,
     deferred: Option<Box<dyn FnOnce() + Send>>,
@@ -194,6 +198,7 @@ pub(super) fn prepare_standby_identity(
             network_limits: mvm_core::plan::NetworkLimits::default(),
             ingress: &[],
             identity: FlowMuxIdentitySource::Mint,
+            mailbox: None,
         })
         .map_err(|error| {
             StandbyError::SpawnFailed(format!("provision standby guest identity: {error:#}"))
@@ -213,34 +218,44 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
         &self,
         req: &NetworkEndpointSpawnRequest<'_>,
     ) -> TelemetryStart {
-        if !telemetry_for_boot(
+        let mut telemetry = telemetry_for_boot(
             mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled(),
             req.identity,
-        ) {
+        );
+        if !telemetry && req.mailbox.is_none() {
             return TelemetryStart::default();
         }
         // The provisioning decision is made now, because the guest's command
         // line is built from it; the collector itself starts beside the boot.
         // If it cannot start, its absent status says so and the guest's
         // listener simply waits to be dialed.
-        if let Err(error) =
-            mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(req.state_dir, true)
+        if telemetry
+            && let Err(error) =
+                mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(req.state_dir, true)
         {
             tracing::warn!(
                 vm = req.vm_name,
                 error = %error,
                 "recording telemetry provisioning failed; booting without it"
             );
-            return TelemetryStart::default();
+            telemetry = false;
+            if req.mailbox.is_none() {
+                return TelemetryStart::default();
+            }
         }
         let vm_name = req.vm_name.to_string();
         let tenant = req.tenant.to_string();
         let state_dir = req.state_dir.to_path_buf();
         let redaction = req.redaction.clone();
+        let mailbox = req.mailbox;
         let start = move || {
             let started = std::time::Instant::now();
             let outcome = mvm_vmm::host::network_endpoint_spawn::spawn_telemetry_collector(
-                &vm_name, &tenant, &state_dir, &redaction,
+                &vm_name,
+                &tenant,
+                &state_dir,
+                &redaction,
+                mvm_vmm::host::network_endpoint_spawn::CollectorOnly { telemetry, mailbox },
             );
             tracing::debug!(
                 vm = vm_name,
@@ -342,6 +357,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             // endpoint must too, and must stop when the machine does.
             lifetime: mvm_vmm::host::network_endpoint_spawn::EndpointLifetime::Vm,
             telemetry,
+            mailbox: req.mailbox,
             tenant: req.tenant,
             secrets: req.secrets,
             redaction: req.redaction,
@@ -629,6 +645,7 @@ mod tests {
                 network_limits: mvm_core::plan::NetworkLimits::default(),
                 ingress: &[],
                 identity,
+                mailbox: None,
             },
             anchor,
         )
