@@ -28,11 +28,12 @@ use std::time::Duration;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::mailbox::{
     ExecutionEpoch, MailboxCapabilityGrant, MailboxEnvelope, MailboxEnvelopeHeader, MailboxGrant,
-    MailboxRoutingFrame, MessageId, ReplayNonce, SequenceNumber, SignedMailboxCapability,
+    MailboxRoutingFrame, MessageId, PrincipalId, ReplayNonce, SequenceNumber,
+    SignedMailboxCapability,
 };
 use mvm_core::crypto::aead::Key;
 pub use mvm_core::mailbox::frame::Refusal;
-use mvm_core::mailbox::frame::{OutboxMessage, decode_frame, send_frame};
+use mvm_core::mailbox::frame::{OWN_MAILBOX_RECIPIENT, OutboxMessage, decode_frame, send_frame};
 use mvm_core::mailbox::{
     InMemoryReplayProtector, OpenContext, SealRequest, open_envelope, seal_envelope,
     sign_capability,
@@ -101,6 +102,20 @@ impl GuestSealer {
         Ok(self)
     }
 
+    /// The guest names its mailbox by what it can know: the mailbox id, or
+    /// [`OWN_MAILBOX_RECIPIENT`]. Either means the template's recipient, a
+    /// value derived from host keys the guest never sees. Anything else is
+    /// passed through unchanged for admission to refuse.
+    fn resolve_recipient(&self, named: PrincipalId) -> PrincipalId {
+        if named.as_bytes() == self.header.mailbox.as_bytes()
+            || named.as_bytes() == &OWN_MAILBOX_RECIPIENT
+        {
+            self.header.recipient
+        } else {
+            named
+        }
+    }
+
     fn seal(
         &mut self,
         message: OutboxMessage,
@@ -114,7 +129,7 @@ impl GuestSealer {
             bytes
         };
         let mut header = self.header.clone();
-        header.recipient = message.recipient;
+        header.recipient = self.resolve_recipient(message.recipient);
         header.message_id = MessageId::from_bytes(counter(32).try_into().unwrap());
         header.nonce = ReplayNonce::from_bytes(counter(16).try_into().unwrap());
         header.sequence = SequenceNumber::new(n).map_err(|_| Refusal::Malformed)?;
@@ -238,6 +253,9 @@ pub fn recv(path: &Path) -> std::io::Result<Received> {
         .map_err(|r| io_err(format!("mailbox refused the request: {r:?}")))
 }
 
+/// How often the accept loop looks for a connection and for the stop flag.
+const ACCEPT_POLL: Duration = Duration::from_millis(20);
+
 pub struct MailboxService {
     shared: Arc<Shared>,
     path: PathBuf,
@@ -255,6 +273,9 @@ impl MailboxService {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        // Polled rather than blocked on, so stopping never depends on the
+        // socket path still existing.
+        listener.set_nonblocking(true)?;
         let shared = Arc::new(Shared {
             limits,
             state: Mutex::new(State {
@@ -269,12 +290,14 @@ impl MailboxService {
         let worker = {
             let (shared, stop) = (shared.clone(), stop.clone());
             std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    if let Ok(stream) = stream {
-                        serve_peer(&shared, stream);
+                while !stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            // A listener's non-blocking mode is inherited on some hosts.
+                            let _ = stream.set_nonblocking(false);
+                            serve_peer(&shared, stream);
+                        }
+                        Err(_) => std::thread::sleep(ACCEPT_POLL),
                     }
                 }
             })
@@ -335,7 +358,6 @@ impl MailboxService {
 impl Drop for MailboxService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = UnixStream::connect(&self.path); // wake the accept loop
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
