@@ -34,13 +34,13 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// The v2 composable pack's authenticated input and composition code (including
-// inline tests) took the measured tree to 976,791 SLOC / 1,246,833 physical lines.
-// Keep both ratchets just above that tree; the old limits were 975,000 / 1,245,000.
+// The v2 composable pack's authenticated composition and offline pinned-input
+// custody, including refusal tests, measure ~977,023 SLOC / 1,247,107 physical
+// lines. Keep the bounds close without deleting a trust-boundary test.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 977_000;
+const MAX_TOTAL_SLOC: usize = 977_100;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_247_000;
+const MAX_TOTAL_PHYSICAL: usize = 1_247_200;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 

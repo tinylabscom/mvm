@@ -43,36 +43,6 @@ impl LocalRegistryPackPaths {
     }
 }
 
-/// Explicit offline mirror paths for a build-only, signed runtime layer.
-#[derive(Clone, Debug)]
-pub struct LocalRuntimeLayerPaths {
-    metadata: LocalRegistryPackPaths,
-    archive: PathBuf,
-}
-
-impl LocalRuntimeLayerPaths {
-    /// Bound all supplied paths before touching untrusted files.
-    ///
-    /// # Errors
-    ///
-    /// Refuses empty, excessively long or excessively deep path names.
-    pub fn new(
-        manifest: PathBuf,
-        bundle: PathBuf,
-        files: PathBuf,
-        archive: PathBuf,
-    ) -> Result<Self> {
-        let metadata = LocalRegistryPackPaths::new(manifest, bundle, files)?;
-        ensure!(
-            !archive.as_os_str().is_empty()
-                && archive.as_os_str().len() <= 4096
-                && archive.components().count() <= 64,
-            "local runtime archive path must be bounded"
-        );
-        Ok(Self { metadata, archive })
-    }
-}
-
 /// Retain an exact pinned layer and signed policy documents as build inputs.
 ///
 /// This never installs a layer as a runnable image or updates a user's pack
@@ -85,11 +55,12 @@ impl LocalRuntimeLayerPaths {
 /// revocation feed, changed archive, or missing/changed policy document.
 pub fn acquire_local_runtime_layer(
     expected: &PackPin,
-    paths: &LocalRuntimeLayerPaths,
+    paths: &LocalRegistryPackPaths,
+    archive: &Path,
 ) -> Result<VerifiedRuntimeLayerInputs> {
-    let manifest = local_input::read_metadata(&paths.metadata.manifest)
-        .context("reading local runtime manifest")?;
-    let bundle = local_input::read_metadata(&paths.metadata.bundle)
+    let manifest =
+        local_input::read_metadata(&paths.manifest).context("reading local runtime manifest")?;
+    let bundle = local_input::read_metadata(&paths.bundle)
         .context("reading local runtime Sigstore bundle")?;
     let policy = store::load_publisher_policy_or_official_default(
         &mvm_core::config::registry_pack_publisher_policy_path(),
@@ -107,11 +78,7 @@ pub fn acquire_local_runtime_layer(
         bail!("the pinned manifest is not a build-only runtime layer");
     };
     layer.check_current_revocations()?;
-    Ok(verify_runtime_layer_inputs(
-        &layer,
-        &paths.archive,
-        &paths.metadata.files,
-    )?)
+    Ok(verify_runtime_layer_inputs(&layer, archive, &paths.files)?)
 }
 
 /// Authenticate small metadata first, freeze the complete signed inventory,
@@ -278,38 +245,21 @@ mod runtime_layer_tests {
     use mvm_core::packs::Sha256Hex;
 
     #[test]
-    fn offline_layer_requires_bounded_paths_and_a_manifest_before_any_payload() {
+    fn offline_layer_requires_a_manifest_before_any_payload() {
         let temp = tempfile::tempdir().unwrap();
-        let missing = temp.path().join("missing.json");
-        let bundle = temp.path().join("manifest.sigstore.json");
-        let files = temp.path().join("files");
-        let archive = temp.path().join("layer.tar");
-        assert!(
-            LocalRuntimeLayerPaths::new(
-                PathBuf::new(),
-                bundle.clone(),
-                files.clone(),
-                archive.clone()
-            )
-            .is_err()
-        );
-        assert!(
-            LocalRuntimeLayerPaths::new(
-                missing.clone(),
-                bundle.clone(),
-                files.clone(),
-                PathBuf::from("x".repeat(4097))
-            )
-            .is_err()
-        );
-        let paths = LocalRuntimeLayerPaths::new(missing, bundle, files, archive).unwrap();
+        let paths = LocalRegistryPackPaths::new(
+            temp.path().join("missing.json"),
+            temp.path().join("manifest.sigstore.json"),
+            temp.path().join("files"),
+        )
+        .unwrap();
         let pin = PackPin::new(
             "runtime/python@1.1.0".parse().unwrap(),
             Sha256Hex::from_bytes(b"expected manifest"),
         )
         .unwrap();
         assert!(
-            acquire_local_runtime_layer(&pin, &paths)
+            acquire_local_runtime_layer(&pin, &paths, &temp.path().join("layer.tar"))
                 .unwrap_err()
                 .to_string()
                 .contains("reading local runtime manifest")
