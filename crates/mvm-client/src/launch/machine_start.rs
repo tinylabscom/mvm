@@ -181,9 +181,9 @@ fn resolve_boot_source(spec: &mp::MachineSpec, host: &dyn StartHost) -> Result<B
     }
     if let Some(slot_hash) = &spec.manifest {
         let (_, vmlinux, _initrd, rootfs, rev) =
-            mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot(slot_hash)
+            mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(slot_hash)
                 .with_context(|| {
-                    format!("loading manifest slot {slot_hash:?} for machine start")
+                    format!("resolving manifest source {slot_hash:?} for machine start")
                 })?;
         return Ok(BootSource {
             kernel: super::bundle_runtime::installed_archive_for_rootfs(Path::new(&rootfs))?
@@ -625,6 +625,57 @@ mod tests {
         assert_eq!(boot.rootfs, PathBuf::from("/cache/rootfs.ext4"));
         assert_eq!(boot.digest, "sha256:abc");
         assert_eq!(boot.kernel, None, "the host's kernel is used");
+    }
+
+    #[test]
+    fn an_installed_bundle_manifest_resolves_from_the_bundle_registry() {
+        let home = tempfile::tempdir().expect("home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        env.remove("MVM_DIRECT_BOOT");
+        let sha = "e".repeat(64);
+        let bundle = mvm_core::config::bundles_dir().join(&sha);
+        std::fs::create_dir_all(bundle.join("artifacts")).expect("bundle directory");
+        std::fs::write(bundle.join("artifacts/vmlinux"), b"kernel").expect("kernel");
+        std::fs::write(bundle.join("artifacts/rootfs.ext4"), b"rootfs").expect("rootfs");
+        let manifest = serde_json::json!({
+            "schema_version": mvm_core::plan::bundle::BUNDLE_SCHEMA_VERSION,
+            "publisher": "machine-start-test",
+            "key_id": "0123456789abcdef0123456789abcdef",
+            "arch": mvm_core::arch::GuestArch::host().to_string(),
+            "created_at": "2026-08-28T00:00:00Z",
+            "artifacts": [
+                {
+                    "name": "kernel",
+                    "role": "kernel",
+                    "path": "artifacts/vmlinux",
+                    "sha256": "0".repeat(64),
+                    "size_bytes": 6
+                },
+                {
+                    "name": "rootfs",
+                    "role": "rootfs",
+                    "path": "artifacts/rootfs.ext4",
+                    "sha256": "1".repeat(64),
+                    "size_bytes": 6
+                }
+            ]
+        });
+        std::fs::write(
+            bundle.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("manifest JSON"),
+        )
+        .expect("bundle manifest");
+        let mut machine = spec("bundle");
+        machine.manifest = Some(sha.clone());
+
+        let boot = resolve_boot_source(&machine, &image_host()).expect("installed bundle source");
+        assert_eq!(boot.rootfs, bundle.join("artifacts/rootfs.ext4"));
+        assert_eq!(
+            boot.kernel.as_deref(),
+            bundle.join("artifacts/vmlinux").to_str()
+        );
+        assert_eq!(boot.digest, sha);
     }
 
     #[test]
