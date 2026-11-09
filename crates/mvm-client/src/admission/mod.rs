@@ -104,6 +104,8 @@ fn services_with_tool_decision(
 }
 
 pub struct AdmitPlanForBootParams<'a> {
+    /// Mailbox this launch grants, minted into the plan before signing.
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     pub tenant: &'a str,
     pub vm_name: &'a str,
     pub backend_name: &'a str,
@@ -710,7 +712,7 @@ fn admit(
         );
     }
     let input = SynthesisInput {
-        mailbox: None,
+        mailbox: p.mailbox,
         outputs: p.outputs.clone(),
         // The resolved permission set rides into the plan body, so the ceiling
         // check below measures what the user actually asked for and the
@@ -1282,6 +1284,7 @@ pub(crate) mod admit_plan_tests {
         ledger: &'a InMemoryNonceLedger,
     ) -> AdmitPlanForBootParams<'a> {
         AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
@@ -1335,6 +1338,7 @@ pub(crate) mod admit_plan_tests {
         std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name,
             backend_name: "libkrun",
             keys_dir: Some(keys_dir.path()),
@@ -1623,6 +1627,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
@@ -1672,6 +1677,7 @@ pub(crate) mod admit_plan_tests {
         let admit = |kind| {
             let ledger = InMemoryNonceLedger::new();
             admit_plan_for_boot(AdmitPlanForBootParams {
+                mailbox: None,
                 gpu: false,
                 instructions: Default::default(),
                 outputs: Vec::new(),
@@ -1711,6 +1717,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
@@ -1744,6 +1751,7 @@ pub(crate) mod admit_plan_tests {
         let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).unwrap();
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-happy",
             boot_artifact_identity: Some(&boot_artifact),
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Network,
@@ -1786,6 +1794,7 @@ pub(crate) mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-missing",
             cpus: 1,
             mem_mib: 128,
@@ -1842,6 +1851,7 @@ pub(crate) mod admit_plan_tests {
         ] {
             let ledger = InMemoryNonceLedger::new();
             let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+                mailbox: None,
                 network_mode: mode,
                 vm_name: "vm-transport",
                 cpus: 1,
@@ -1877,6 +1887,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let a1 = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-1",
             cpus: 1,
             mem_mib: 128,
@@ -1886,6 +1897,7 @@ pub(crate) mod admit_plan_tests {
         })
         .unwrap();
         let a2 = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-2",
             cpus: 1,
             mem_mib: 128,
@@ -1909,6 +1921,7 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), vm_name.as_bytes());
         let ledger = InMemoryNonceLedger::new();
         admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name,
             cpus: 1,
             mem_mib: 128,
@@ -2031,6 +2044,7 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"local-default-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-local-default",
             cpus: 1,
             mem_mib: 128,
@@ -2068,6 +2082,7 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"allow-list-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-allow-list",
             backend_name: "libkrun",
             cpus: 1,
@@ -2123,6 +2138,7 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"unrestricted-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-unrestricted",
             backend_name: "hvf",
             cpus: 1,
@@ -2212,6 +2228,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
@@ -2276,6 +2293,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-non-shell-granted",
             cpus: 1,
             mem_mib: 128,
@@ -2319,6 +2337,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-shell-ungranted",
             cpus: 1,
             mem_mib: 128,
@@ -2350,6 +2369,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-shell-granted",
             cpus: 1,
             mem_mib: 128,
@@ -2409,6 +2429,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-entrypoint-unknown",
             cpus: 1,
             mem_mib: 128,
@@ -2445,6 +2466,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-entrypoint-unknown-ungranted",
             cpus: 1,
             mem_mib: 128,
@@ -2472,6 +2494,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-dev-shell",
             cpus: 1,
             mem_mib: 128,
@@ -2528,6 +2551,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
@@ -2559,6 +2583,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
@@ -2580,6 +2605,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
@@ -2641,6 +2667,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
@@ -2664,6 +2691,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
@@ -2863,6 +2891,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-shares",
             cpus: 1,
             keys_dir: Some(keys_dir.path()),
@@ -2946,6 +2975,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-granted",
             cpus: 4,
             keys_dir: Some(keys_dir.path()),
@@ -3096,6 +3126,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-over-ceiling",
             cpus: 4,
             keys_dir: Some(keys_dir.path()),
@@ -3140,6 +3171,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             vm_name: "vm-ungranted",
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),

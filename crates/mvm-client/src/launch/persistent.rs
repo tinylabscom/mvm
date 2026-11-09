@@ -333,6 +333,7 @@ fn prepare_persistent_boot(
                 .collect::<Vec<_>>();
             admit_plan_for_boot_configured_ingress(
                 AdmitPlanForBootParams {
+                    mailbox: None,
                     // What the backend will arm, so the admitted tier opens
                     // the GPU endpoint's vsock socket exactly when there is one.
                     gpu: config.gpu,

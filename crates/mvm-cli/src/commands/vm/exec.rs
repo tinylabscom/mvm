@@ -752,6 +752,7 @@ pub(in crate::commands) fn run_secure_started(
         // running beside the VMM boot, and activation waits for it.
         let configured_images_dir = mvm_build::image_source::configured_images_dir();
         let params = super::up::AdmitPlanForBootParams {
+            mailbox: None,
             gpu: admit_gpu,
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
                 .with_mount_roots(&[])

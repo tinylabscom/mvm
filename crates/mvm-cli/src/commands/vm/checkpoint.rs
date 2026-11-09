@@ -1021,6 +1021,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        mailbox: None,
         gpu: false,
         instructions: Default::default(),
         outputs: Vec::new(),
