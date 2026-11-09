@@ -99,7 +99,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-builder-guest | `src/builderd.rs` | 2 | builder job | builderd runs job argv and the rootfs runner | builder VM | CH | - | RAW_SITES (builder) | guest-side |
 | mvm-capture | `src/collect/package.rs` | 3 | capture probe | dpkg / dpkg-query / nix-locate package ownership | library: caller's process (CLI, daemon, embedder) | - | - | `helper_command` env scrub | cli-only |
 | mvm-capture | `src/collect/trace.rs` | 2 | capture probe | strace under timeout to trace a project command | library: caller's process (CLI, daemon, embedder) | - | - | `helper_command` env scrub | cli-only |
-| mvm-capture | `src/verify.rs` | 1 | mvmctl self re-exec | run `mvmctl __builder-shell-job` to verify a capture | library: caller's process (CLI, daemon, embedder) | - | - | `helper_command` env scrub | cli-only |
+| mvm-capture | `src/verify.rs` | 1 | mvmctl self re-exec | run `mvmctl __builder-shell-job` to verify a capture | library: caller's process (CLI, daemon, embedder) | - | - | `helper_command` env scrub; embedder refusal | cli-only |
 | mvm-cli | `src/bench/cold_launch_runner.rs` | 2 | mvmctl self re-exec | `mvmctl pool status` / launch for the bench harness | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/bootstrap.rs` | 1 | host probe | wsl.exe on Windows hosts | CLI (`mvmctl`) | - | - | `helper_command` env scrub | cli-only |
 | mvm-cli | `src/commands/bootstrap.rs` | 1 | helper bin | builder egress supervisor runs the endpoint binary | CLI hidden verb | - | - | `helper_command` env scrub | cli-only |

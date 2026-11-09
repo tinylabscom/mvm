@@ -190,8 +190,12 @@ pub(crate) fn findings(workspace: &Path) -> Result<Vec<String>> {
             }
         }
     })?;
-    seen.sort();
-    out.extend(inventory_findings(&seen));
+    // The shrink-only list describes the whole workspace, not the partial
+    // source trees used by check-no-cli-shellout's fixture tests.
+    if workspace.join("Cargo.toml").is_file() {
+        seen.sort();
+        out.extend(inventory_findings(&seen));
+    }
     Ok(out)
 }
 
@@ -304,6 +308,29 @@ mod tests {
             "crates/mvm-cli/src/x.rs",
             "fn f() { helper_command(\"a\"); }"
         ));
+    }
+
+    #[test]
+    fn partial_fixtures_skip_the_workspace_inventory_but_not_the_structural_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("crates/mvm-build/src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("x.rs"),
+            "fn f() { helper_command(current_exe()?); }",
+        )
+        .unwrap();
+        let found = findings(tmp.path()).unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|f| f.contains("without `refuse_cli_spawn`"))
+        );
+        assert!(!found.iter().any(|f| f.contains("KNOWN_REACHES")));
+
+        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        let found = findings(tmp.path()).unwrap();
+        assert!(found.iter().any(|f| f.contains("KNOWN_REACHES")));
     }
 
     #[test]
