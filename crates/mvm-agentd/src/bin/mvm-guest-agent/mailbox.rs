@@ -10,7 +10,7 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use mvm_agentd::mailbox_outbox::forward_outbox;
+use mvm_agentd::mailbox_outbox::{OUTBOX_PATH, forward_outbox};
 use mvm_contract::protocol::mailbox::MAILBOX_PORT;
 
 use crate::globals::SHUTDOWN_REQUESTED;
@@ -19,9 +19,6 @@ use crate::transport::{accept_vsock, bind_vsock_listener, unix_transport_selecte
 
 /// The launch assertion that turns the mailbox listener on.
 const MAILBOX_CMDLINE_TOKEN: &str = "mvm.mailbox=1";
-
-/// Where the workload leaves its plaintext message for the agent to forward.
-const OUTBOX: &str = "/run/mvm/mailbox/outbox";
 
 /// Spawn the mailbox listener on a boot that asserts one. Called after PID-1
 /// activation; a bind failure is logged and abandoned, never boot-fatal.
@@ -51,7 +48,7 @@ fn accept_loop(listener_fd: RawFd) {
         // SAFETY: `cfd` is the just-accepted connection fd, owned here and
         // closed on drop.
         let mut stream = unsafe { std::fs::File::from_raw_fd(cfd) };
-        if let Err(refusal) = forward_outbox(&mut stream, Path::new(OUTBOX)) {
+        if let Err(refusal) = forward_outbox(&mut stream, Path::new(OUTBOX_PATH)) {
             eprintln!("mvm-guest-agent: mailbox frame not delivered: {refusal}");
         }
     }
