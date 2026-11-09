@@ -26,8 +26,9 @@ use mvm_core::plan::ExecutionPlan;
 use mvm_core::vm_backend::BackendKind;
 use mvm_vmm::host::aux_bin::AuxBin;
 
-use crate::mailbox_launch::{DerivedMailboxKeys, ServePaths, derive_launch_keys, serve_derived};
-use crate::mailbox_service::MailboxLimits;
+use crate::mailbox_launch::{
+    DerivedMailboxKeys, LAUNCH_LIMITS, ServePaths, derive_launch_keys, serve_derived,
+};
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
 /// The helper binary this module spawns.
@@ -36,12 +37,7 @@ pub const MAILBOX_BIN: &str = "mvm-mailbox";
 pub const MAILBOX_BIN_ENV: &str = "MVM_MAILBOX_PATH";
 /// Where the process's pid is recorded, beside the VM.
 pub const MAILBOX_PID_FILE: &str = "mailbox.pid";
-const MAILBOX_SOCKET: &str = "mailbox.sock";
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-const LIMITS: MailboxLimits = MailboxLimits {
-    max_depth: 64,
-    max_frame_bytes: 64 * 1024,
-};
 
 /// What the process reads on stdin. `deny_unknown_fields`, so a field a newer
 /// launcher adds fails closed here.
@@ -82,7 +78,7 @@ pub fn serve(config: MailboxProcessConfig) -> i32 {
             guest_port,
             firecracker_mux,
         },
-        LIMITS,
+        LAUNCH_LIMITS,
     );
     while endpoint_needed(launcher_is_alive(launcher), vm_is_alive(&vm_state_dir)) {
         std::thread::sleep(POLL_INTERVAL);
@@ -109,7 +105,7 @@ pub fn build_config(
     Ok(MailboxProcessConfig {
         grant: *grant,
         keys: derive_launch_keys(keys_dir, grant)?,
-        socket: mvm_core::config::vm_socket_dir_at(state_dir).join(MAILBOX_SOCKET),
+        socket: mvm_core::config::vm_mailbox_socket_at(state_dir),
         guest_port: mvm_core::config::vm_hvf_vsock_port_socket_at(state_dir, MAILBOX_PORT),
         firecracker_mux: PathBuf::from(mvm_agentd::vsock::vsock_uds_path(
             &state_dir.to_string_lossy(),

@@ -335,14 +335,6 @@ pub struct ServePaths {
     pub firecracker_mux: PathBuf,
 }
 
-/// [`ServePaths`] plus the host key directory the trust is derived from.
-pub struct MailboxPaths {
-    pub keys_dir: PathBuf,
-    pub socket: PathBuf,
-    pub guest_port: PathBuf,
-    pub firecracker_mux: PathBuf,
-}
-
 /// Dial the guest's mailbox port from its own thread, retrying for up to 30 s
 /// while the guest comes up, and serve it under `keys`. Returns at once.
 pub fn serve_derived(
@@ -373,65 +365,11 @@ pub fn serve_derived(
     MailboxLaunch { stop, service }
 }
 
-/// Serve the guest mailbox for a launch, only when the signed plan's `grant` is present.
-/// Returns at once: no grant yields `None` with nothing built or dialed; a
-/// grant derives the host trust now (so a bad key or template is refused here)
-/// and dials the guest from its own thread, waiting up to 30 s for the guest
-/// to listen.
-pub fn start_for_launch(
-    grant: Option<MailboxGrant>,
-    paths: MailboxPaths,
-    limits: MailboxLimits,
-) -> Result<Option<MailboxLaunch>> {
-    let Some(grant) = grant else {
-        return Ok(None);
-    };
-    let keys = derive_launch_keys(&paths.keys_dir, &grant)?;
-    let serve = ServePaths {
-        socket: paths.socket,
-        guest_port: paths.guest_port,
-        firecracker_mux: paths.firecracker_mux,
-    };
-    Ok(Some(serve_derived(grant, keys, serve, limits)))
-}
-
 /// Bounds a launch-time mailbox holds and accepts.
 pub const LAUNCH_LIMITS: MailboxLimits = MailboxLimits {
     max_depth: 64,
     max_frame_bytes: 64 * 1024,
 };
-
-/// What the per-VM process that serves a guest's mailbox is handed: the signed
-/// plan's grant and the VM's state dir. Every path is derived from those and
-/// the host key directory, so nothing else crosses the process boundary.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MailboxEmbed {
-    pub grant: MailboxGrant,
-    pub state_dir: PathBuf,
-}
-
-impl MailboxEmbed {
-    fn paths(&self) -> MailboxPaths {
-        let port = mvm_core::config::vm_hvf_vsock_port_socket_at(
-            &self.state_dir,
-            mvm_contract::protocol::mailbox::MAILBOX_PORT,
-        );
-        MailboxPaths {
-            keys_dir: mvm_core::config::mvm_keys_dir(),
-            socket: mvm_core::config::vm_mailbox_socket_at(&self.state_dir),
-            guest_port: port,
-            firecracker_mux: mvm_agentd::vsock::vsock_uds_path(&self.state_dir.to_string_lossy())
-                .into(),
-        }
-    }
-
-    /// Start serving this VM's mailbox on its own thread; never waits on the guest.
-    pub fn start(&self) -> Result<MailboxLaunch> {
-        start_for_launch(Some(self.grant), self.paths(), LAUNCH_LIMITS)?
-            .ok_or_else(|| Error::other("mailbox grant vanished"))
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -496,23 +434,6 @@ mod tests {
             .err()
             .expect("malformed template refused");
         assert_eq!(err.kind(), ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn an_ungranted_plan_builds_and_dials_nothing() {
-        let dir = keys_dir();
-        let paths = MailboxPaths {
-            keys_dir: dir.path().to_path_buf(),
-            socket: dir.path().join("m.sock"),
-            guest_port: dir.path().join("p"),
-            firecracker_mux: dir.path().join("mux"),
-        };
-        let limits = MailboxLimits {
-            max_depth: 4,
-            max_frame_bytes: 1024,
-        };
-        assert!(start_for_launch(None, paths, limits).unwrap().is_none());
-        assert!(!dir.path().join("m.sock").exists());
     }
 
     #[test]

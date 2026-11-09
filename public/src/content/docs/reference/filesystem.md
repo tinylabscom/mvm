@@ -191,10 +191,13 @@ which VMM owns a running VM.
 ### Guest mailbox template
 
 A launch whose signed plan carries a mailbox grant serves that guest's mailbox
-from the per-VM host process. The host holds the sealing keys, derived per
-mailbox from `host-signer.ed25519` in `~/.mvm/keys/`; nothing is provisioned
-separately and the guest never sees a key. What the host seals under is an
-operator file beside that key, `~/.mvm/keys/mailbox-template.json`:
+from a separate per-VM mailbox process (`mvm-mailbox`). The launcher derives
+the sealing keys, per mailbox, from `host-signer.ed25519` in `~/.mvm/keys/` and
+hands that process only the derived keys; the process never reads the host key
+directory and never sees the signing key. Nothing is provisioned separately and
+the guest never sees a key. By default the identities and capability the host
+seals under are derived from the same key too; an operator file beside it,
+`~/.mvm/keys/mailbox-template.json`, overrides them:
 
 ```json
 {
@@ -211,8 +214,9 @@ guest's messages are sealed under; `header` and `routing` carry the tenant,
 authorization domain, recipient, epochs and content type. The plan's grant must
 name an authority key equal to the one this host derives for its mailbox
 (`mvm_hostd::mailbox_launch::authority_key_for`; no CLI verb prints it yet), or
-the mailbox is not served. A missing or malformed template, or a plan with no
-grant, serves nothing; the VM still launches. Encryption is host to host, so a
+the launch is refused, as it is for a malformed template. A plan with no grant
+serves nothing and starts no process. The process is started on Firecracker
+only. Encryption is host to host, so a
 peer host cannot open what this one seals.
 
 The shared guest-runtime overlay cache lives separately — under
