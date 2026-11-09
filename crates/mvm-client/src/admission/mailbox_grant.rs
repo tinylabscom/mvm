@@ -76,9 +76,13 @@ pub fn resolve(
     let Some(id) = combine(flag, declared)? else {
         return Ok(None);
     };
-    let signer = mvm_hostd::audit::host_keypair::load_or_init()
+    let keys_dir = mvm_core::config::mvm_keys_dir();
+    // Ensure the host signer exists; the authority is derived from it.
+    mvm_hostd::audit::host_keypair::load_or_init_at(&keys_dir)
         .context("loading the host signer as the mailbox authority")?;
-    Ok(Some(grant_for(id, &signer.verifying)))
+    let authority = mvm_hostd::mailbox_launch::authority_key_for(&keys_dir, &id)
+        .context("deriving the mailbox authority")?;
+    Ok(Some(grant_for(id, &authority)))
 }
 
 #[cfg(test)]
