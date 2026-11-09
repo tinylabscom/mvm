@@ -11,7 +11,7 @@
 .codex/
 /.cursor/
 /.mcp.json
-/.trail/
+.trail/
 /.zed/
 /.delta/
 .claude/*
