@@ -1,4 +1,5 @@
 use ed25519_dalek::SigningKey;
+use mvm_contract::plan::{Nonce, PlanId};
 use mvm_contract::protocol::mailbox::{
     AuthorizationDomainId, AuthorizationDomainRouteLabel, BootId, CapabilityId,
     CapabilityOperations, CausationId, CiphertextPadding, ContentType, CorrelationId, DeliveryId,
@@ -7,6 +8,10 @@ use mvm_contract::protocol::mailbox::{
     MailboxId, MailboxMessageKind, MailboxOperation, MailboxRoutingFrame, MessageId, OrderingScope,
     PrincipalId, ProtocolVersion, ReplayNonce, ReplyRoute, RevocationId, SequenceNumber,
     SignatureAlgorithm, TenantId, TransportBindingId,
+};
+use mvm_contract::protocol::workload_report::{
+    ReportError, ReportIdentity, ReportKind, WORKLOAD_REPORT_CONTENT_TYPE, WORKLOAD_REPORT_VERSION,
+    WorkloadReport,
 };
 use mvm_core::crypto::aead::Key;
 use mvm_core::mailbox::{
@@ -965,6 +970,87 @@ fn cast_is_admitted_only_when_the_capability_names_it_and_bounds_it() {
             &mut InMemoryReplayProtector::default()
         )
         .expect_err("over the capability's payload bound"),
+        MailboxError::CapabilityPayloadExceeded
+    );
+}
+
+#[test]
+fn typed_workload_report_uses_the_verified_canonical_cast() {
+    let report_type =
+        ContentType::parse(WORKLOAD_REPORT_CONTENT_TYPE, WORKLOAD_REPORT_VERSION).expect("type");
+    let mut cast = header();
+    cast.kind = MailboxMessageKind::Cast;
+    cast.reply_to = None;
+    cast.content_type = report_type.clone();
+    let identity = ReportIdentity {
+        plan_id: PlanId("sha256:".to_owned() + &"a".repeat(64)),
+        plan_nonce: Nonce::from_bytes([24; 16]),
+        message_id: cast.message_id,
+    };
+    let report = WorkloadReport::new(
+        identity.clone(),
+        ReportKind::Result,
+        ContentType::parse("application/json", 1).expect("application content type"),
+        b"{\"private\":\"result\"}".to_vec(),
+    )
+    .expect("report");
+    let bytes = report.encode().expect("bounded report");
+    cast.plaintext_len = u32::try_from(bytes.len()).expect("mailbox bound fits u32");
+    let envelope = seal_with(cast, &bytes);
+    let encoded = encode_envelope(&envelope).expect("canonical envelope");
+    assert!(
+        !String::from_utf8_lossy(&encoded).contains("private"),
+        "routing frame must not disclose report content"
+    );
+
+    let mut permitted = grant();
+    permitted.message_kinds.push(MailboxMessageKind::Cast);
+    let mut receiving = context();
+    receiving.accepted_content_types.push(report_type.clone());
+    assert_eq!(
+        open_under(
+            &envelope,
+            permitted.clone(),
+            &receiving,
+            &mut InMemoryReplayProtector::default()
+        )
+        .expect_err("the signed capability did not grant this report content type"),
+        MailboxError::ContentTypeNotAuthorized
+    );
+    permitted.content_types.push(report_type.clone());
+    assert_eq!(
+        report_type.name(),
+        WORKLOAD_REPORT_CONTENT_TYPE,
+        "the signed envelope must declare the typed report content"
+    );
+    let opened = open_under(
+        &envelope,
+        permitted.clone(),
+        &receiving,
+        &mut InMemoryReplayProtector::default(),
+    )
+    .expect("capability-authorized result");
+    let decoded = WorkloadReport::decode(&opened).expect("typed report");
+    assert_eq!(decoded, report);
+    decoded
+        .verify_identity(&identity)
+        .expect("report matches admitted run and signed message");
+    let mut wrong_run = identity;
+    wrong_run.plan_nonce = Nonce::from_bytes([25; 16]);
+    assert_eq!(
+        decoded.verify_identity(&wrong_run),
+        Err(ReportError::WrongIdentity)
+    );
+
+    permitted.max_payload_bytes = u32::try_from(bytes.len() - 1).expect("bounded report");
+    assert_eq!(
+        open_under(
+            &envelope,
+            permitted,
+            &receiving,
+            &mut InMemoryReplayProtector::default()
+        )
+        .expect_err("the signed grant must bound the whole encoded report"),
         MailboxError::CapabilityPayloadExceeded
     );
 }

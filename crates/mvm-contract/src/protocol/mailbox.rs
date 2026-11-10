@@ -9,6 +9,8 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use crate::plan::{Nonce, PlanId};
+
 /// Dedicated mailbox vsock service. Its own port, so mailbox traffic never
 /// shares a queue or credit with machine control (5252), `NetworkFlow` (5253),
 /// telemetry (5254), display (5255) or GPU (5256).
@@ -23,6 +25,8 @@ pub const AES_256_GCM_ALGORITHM: u16 = 1;
 pub const MAX_MAILBOX_PAYLOAD_BYTES: usize = 1024 * 1024;
 /// Maximum encoded envelope accepted before deserialization.
 pub const MAX_ENCODED_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum encoded delivery lease or ACK before parsing untrusted JSON.
+pub const MAX_MAILBOX_DELIVERY_CONTROL_BYTES: usize = 16 * 1024;
 /// Maximum number of operations, kinds, or content types in one capability.
 pub const MAX_CAPABILITY_LIST_ITEMS: usize = 32;
 /// Ed25519 signature length.
@@ -106,6 +110,17 @@ fixed_id!(
     16,
     "Fresh sender nonce authenticated with the message; stable IDs, not this nonce, key replay detection."
 );
+fixed_id!(
+    ConsumerSessionId,
+    32,
+    "Fresh MVM-bound authenticated reader session; a caller-supplied transport ID is not authority."
+);
+fixed_id!(
+    DeliveryLeaseNonce,
+    16,
+    "Fresh nonce for one delivery lease."
+);
+fixed_id!(DeliveryAckNonce, 16, "Fresh nonce for one application ACK.");
 
 /// Protocol version carried on every signed object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,6 +653,465 @@ pub struct SignedDestinationReceipt {
     pub receipt: DestinationReceipt,
     #[serde(with = "base64_bytes")]
     pub signature: Vec<u8>,
+}
+
+/// Versioned signature domains for guest reader enrollment, lease, and ACK.
+pub const READER_ENROLLMENT_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.reader-enrollment.v1\0";
+pub const DELIVERY_LEASE_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.delivery-lease.v1\0";
+pub const DELIVERY_ACK_SIGNATURE_DOMAIN: &[u8] = b"mvm.mailbox.delivery-ack.v1\0";
+
+/// Guest-held mailbox ACK key enrolled for one signed plan and fresh boot.
+///
+/// Host-prepared seeds are permitted only in the trusted-host profile. A
+/// host-blind profile must instead release keys inside a measured guest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxGuestReaderEnrollment {
+    pub protocol_version: ProtocolVersion,
+    pub signature_algorithm: SignatureAlgorithm,
+    pub plan_id: PlanId,
+    pub plan_nonce: Nonce,
+    pub address: MailboxAddress,
+    pub consumer: PrincipalId,
+    pub consumer_boot: BootId,
+    pub consumer_session: ConsumerSessionId,
+    pub receive_capability_id: CapabilityId,
+    pub ack_public_key: [u8; 32],
+    pub execution_epoch: ExecutionEpoch,
+    pub policy_epoch: u64,
+    pub issued_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+}
+
+/// Plan- and boot-derived expectations supplied by the verifying runtime.
+///
+/// Construct these only from an authenticated current execution; transport
+/// claims and unverified plan JSON are not trusted sources of this context.
+#[derive(Clone, Copy)]
+pub struct MailboxGuestReaderScope<'a> {
+    pub plan: &'a MailboxGrant,
+    pub plan_id: &'a PlanId,
+    pub plan_nonce: &'a Nonce,
+    pub receive: &'a MailboxCapabilityGrant,
+    pub current_boot: BootId,
+    pub current_session: ConsumerSessionId,
+    pub now_unix_ms: i64,
+}
+
+/// Enrollment signed by the authority pinned in the admitted mailbox grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedMailboxGuestReaderEnrollment {
+    pub enrollment: MailboxGuestReaderEnrollment,
+    #[serde(with = "base64_bytes")]
+    pub signature: Vec<u8>,
+}
+
+impl SignedMailboxGuestReaderEnrollment {
+    fn validate_shape(&self) -> Result<(), MailboxDeliveryError> {
+        let enrollment = &self.enrollment;
+        if enrollment.protocol_version != ProtocolVersion::V1 {
+            return Err(MailboxDeliveryError::UnsupportedVersion);
+        }
+        if enrollment.signature_algorithm != SignatureAlgorithm::ED25519 {
+            return Err(MailboxDeliveryError::UnsupportedAlgorithm);
+        }
+        if self.signature.len() != ED25519_SIGNATURE_BYTES {
+            return Err(MailboxDeliveryError::InvalidSignatureLength);
+        }
+        if enrollment.plan_id.0.is_empty() || enrollment.plan_id.0.len() > 128 {
+            return Err(MailboxDeliveryError::WrongPlanIdentity);
+        }
+        if enrollment.ack_public_key == [0; 32] {
+            return Err(MailboxDeliveryError::InvalidReaderKey);
+        }
+        if enrollment.expires_at_unix_ms <= enrollment.issued_at_unix_ms {
+            return Err(MailboxDeliveryError::InvalidTimeWindow);
+        }
+        Ok(())
+    }
+
+    /// Encodes a bounded enrollment; runtime still verifies its signature.
+    pub fn encode(&self) -> Result<Vec<u8>, MailboxDeliveryError> {
+        self.validate_shape()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| MailboxDeliveryError::Malformed)?;
+        if bytes.len() > MAX_MAILBOX_DELIVERY_CONTROL_BYTES {
+            return Err(MailboxDeliveryError::Oversized);
+        }
+        Ok(bytes)
+    }
+
+    /// Bounds an untrusted enrollment before parsing its JSON and signature.
+    pub fn decode(bytes: &[u8]) -> Result<Self, MailboxDeliveryError> {
+        if bytes.len() > MAX_MAILBOX_DELIVERY_CONTROL_BYTES {
+            return Err(MailboxDeliveryError::Oversized);
+        }
+        let enrolled: Self =
+            serde_json::from_slice(bytes).map_err(|_| MailboxDeliveryError::Malformed)?;
+        enrolled.validate_shape()?;
+        Ok(enrolled)
+    }
+
+    /// Checks structure against an authenticated current plan, boot, and reader.
+    ///
+    /// The runtime must verify this enrollment's signature under the plan's
+    /// mailbox authority key, the Receive capability signature/revocation,
+    /// and guest possession of the bound per-boot key before accepting an ACK.
+    pub fn check_scope(
+        &self,
+        scope: &MailboxGuestReaderScope<'_>,
+    ) -> Result<(), MailboxDeliveryError> {
+        self.validate_shape()?;
+        let enrolled = &self.enrollment;
+        if enrolled.address.mailbox != scope.plan.mailbox {
+            return Err(MailboxDeliveryError::WrongPlanMailbox);
+        }
+        if &enrolled.plan_id != scope.plan_id || &enrolled.plan_nonce != scope.plan_nonce {
+            return Err(MailboxDeliveryError::WrongPlanIdentity);
+        }
+        if enrolled.execution_epoch != scope.plan.epoch
+            || enrolled.execution_epoch < scope.receive.minimum_execution_epoch
+            || enrolled.execution_epoch > scope.receive.maximum_execution_epoch
+        {
+            return Err(MailboxDeliveryError::StaleExecutionEpoch);
+        }
+        if enrolled.address != scope.receive.address {
+            return Err(MailboxDeliveryError::WrongAddress);
+        }
+        if enrolled.consumer != scope.receive.subject {
+            return Err(MailboxDeliveryError::WrongConsumer);
+        }
+        if enrolled.consumer_boot != scope.current_boot {
+            return Err(MailboxDeliveryError::StaleConsumerBoot);
+        }
+        if enrolled.consumer_session != scope.current_session {
+            return Err(MailboxDeliveryError::StaleConsumerSession);
+        }
+        if enrolled.receive_capability_id != scope.receive.capability_id {
+            return Err(MailboxDeliveryError::WrongCapability);
+        }
+        if !scope.receive.operations.allows(MailboxOperation::Receive) {
+            return Err(MailboxDeliveryError::ReceiveNotAuthorized);
+        }
+        if enrolled.policy_epoch != scope.receive.policy_epoch {
+            return Err(MailboxDeliveryError::StalePolicyEpoch);
+        }
+        if scope.now_unix_ms < enrolled.issued_at_unix_ms
+            || enrolled.issued_at_unix_ms < scope.receive.not_before_unix_ms
+        {
+            return Err(MailboxDeliveryError::NotYetValid);
+        }
+        if scope.now_unix_ms >= enrolled.expires_at_unix_ms
+            || scope.now_unix_ms >= scope.receive.expires_at_unix_ms
+            || enrolled.expires_at_unix_ms > scope.receive.expires_at_unix_ms
+        {
+            return Err(MailboxDeliveryError::Expired);
+        }
+        Ok(())
+    }
+}
+
+/// One destination-issued lease to an authorized consumer of a specific message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxDeliveryLease {
+    pub protocol_version: ProtocolVersion,
+    pub signature_algorithm: SignatureAlgorithm,
+    pub address: MailboxAddress,
+    pub sender: PrincipalId,
+    pub sender_boot: BootId,
+    pub message_id: MessageId,
+    pub delivery_id: DeliveryId,
+    pub execution_epoch: ExecutionEpoch,
+    pub consumer: PrincipalId,
+    pub consumer_session: ConsumerSessionId,
+    pub receive_capability_id: CapabilityId,
+    pub policy_epoch: u64,
+    pub ciphertext_commitment: [u8; 32],
+    pub issued_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub lease_nonce: DeliveryLeaseNonce,
+}
+
+/// Lease signed by the destination mailbox authority, not by a transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedMailboxDeliveryLease {
+    pub lease: MailboxDeliveryLease,
+    #[serde(with = "base64_bytes")]
+    pub signature: Vec<u8>,
+}
+
+impl MailboxDeliveryLease {
+    fn validate_shape(&self) -> Result<(), MailboxDeliveryError> {
+        if self.protocol_version != ProtocolVersion::V1 {
+            return Err(MailboxDeliveryError::UnsupportedVersion);
+        }
+        if self.signature_algorithm != SignatureAlgorithm::ED25519 {
+            return Err(MailboxDeliveryError::UnsupportedAlgorithm);
+        }
+        if self.expires_at_unix_ms <= self.issued_at_unix_ms {
+            return Err(MailboxDeliveryError::InvalidTimeWindow);
+        }
+        Ok(())
+    }
+
+    /// Checks data consistency with a verified plan and Receive capability.
+    ///
+    /// This does not verify signatures, authenticate the supplied current session,
+    /// or check replay. The destination must do so before payload disclosure.
+    pub fn check_scope(
+        &self,
+        plan: &MailboxGrant,
+        receive: &MailboxCapabilityGrant,
+        consumer_session: ConsumerSessionId,
+        now_unix_ms: i64,
+    ) -> Result<(), MailboxDeliveryError> {
+        let lease = self;
+        lease.validate_shape()?;
+        if lease.address.mailbox != plan.mailbox {
+            return Err(MailboxDeliveryError::WrongPlanMailbox);
+        }
+        if lease.execution_epoch != plan.epoch
+            || lease.execution_epoch < receive.minimum_execution_epoch
+            || lease.execution_epoch > receive.maximum_execution_epoch
+        {
+            return Err(MailboxDeliveryError::StaleExecutionEpoch);
+        }
+        if lease.address != receive.address {
+            return Err(MailboxDeliveryError::WrongAddress);
+        }
+        if lease.consumer != receive.subject {
+            return Err(MailboxDeliveryError::WrongConsumer);
+        }
+        if lease.consumer_session != consumer_session {
+            return Err(MailboxDeliveryError::StaleConsumerSession);
+        }
+        if lease.receive_capability_id != receive.capability_id {
+            return Err(MailboxDeliveryError::WrongCapability);
+        }
+        if !receive.operations.allows(MailboxOperation::Receive) {
+            return Err(MailboxDeliveryError::ReceiveNotAuthorized);
+        }
+        if lease.policy_epoch != receive.policy_epoch {
+            return Err(MailboxDeliveryError::StalePolicyEpoch);
+        }
+        if now_unix_ms < lease.issued_at_unix_ms
+            || lease.issued_at_unix_ms < receive.not_before_unix_ms
+            || now_unix_ms < receive.not_before_unix_ms
+        {
+            return Err(MailboxDeliveryError::NotYetValid);
+        }
+        if now_unix_ms >= lease.expires_at_unix_ms
+            || now_unix_ms >= receive.expires_at_unix_ms
+            || lease.expires_at_unix_ms > receive.expires_at_unix_ms
+        {
+            return Err(MailboxDeliveryError::Expired);
+        }
+        Ok(())
+    }
+}
+
+impl SignedMailboxDeliveryLease {
+    fn validate_shape(&self) -> Result<(), MailboxDeliveryError> {
+        self.lease.validate_shape()?;
+        if self.signature.len() != ED25519_SIGNATURE_BYTES {
+            return Err(MailboxDeliveryError::InvalidSignatureLength);
+        }
+        Ok(())
+    }
+
+    /// Encodes a bounded lease after checking its version and signature shape.
+    pub fn encode(&self) -> Result<Vec<u8>, MailboxDeliveryError> {
+        self.validate_shape()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| MailboxDeliveryError::Malformed)?;
+        if bytes.len() > MAX_MAILBOX_DELIVERY_CONTROL_BYTES {
+            return Err(MailboxDeliveryError::Oversized);
+        }
+        Ok(bytes)
+    }
+
+    /// Bounds untrusted input before parsing a destination-signed lease.
+    pub fn decode(bytes: &[u8]) -> Result<Self, MailboxDeliveryError> {
+        if bytes.len() > MAX_MAILBOX_DELIVERY_CONTROL_BYTES {
+            return Err(MailboxDeliveryError::Oversized);
+        }
+        let lease: Self =
+            serde_json::from_slice(bytes).map_err(|_| MailboxDeliveryError::Malformed)?;
+        lease.validate_shape()?;
+        Ok(lease)
+    }
+
+    /// Checks the signature length and structural scope, not signature validity.
+    pub fn check_scope(
+        &self,
+        plan: &MailboxGrant,
+        receive: &MailboxCapabilityGrant,
+        consumer_session: ConsumerSessionId,
+        now_unix_ms: i64,
+    ) -> Result<(), MailboxDeliveryError> {
+        self.validate_shape()?;
+        self.lease
+            .check_scope(plan, receive, consumer_session, now_unix_ms)
+    }
+}
+
+/// Consumer-authored acknowledgement of the exact destination-signed lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxDeliveryAck {
+    pub protocol_version: ProtocolVersion,
+    pub signature_algorithm: SignatureAlgorithm,
+    pub lease: SignedMailboxDeliveryLease,
+    pub ack_nonce: DeliveryAckNonce,
+    pub acknowledged_at_unix_ms: i64,
+}
+
+/// ACK signed by the Receive capability's consumer after application acceptance.
+///
+/// The consumer holds an independently scoped mailbox signing key: a local host
+/// reader may hold one in host custody, a user holds their own, and a guest must
+/// enroll a boot-bound key before guest ACK can be enabled. The FlowMux key is
+/// not mailbox authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedMailboxDeliveryAck {
+    pub ack: MailboxDeliveryAck,
+    #[serde(with = "base64_bytes")]
+    pub signature: Vec<u8>,
+}
+
+/// One ACK operation per lease; changed signed ACK bytes conflict on retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxAckReplayIdentity {
+    address: MailboxAddress,
+    consumer: PrincipalId,
+    consumer_session: ConsumerSessionId,
+    delivery_id: DeliveryId,
+    lease_nonce: DeliveryLeaseNonce,
+}
+
+impl SignedMailboxDeliveryAck {
+    fn validate_shape(&self) -> Result<(), MailboxDeliveryError> {
+        self.ack.lease.validate_shape()?;
+        if self.ack.protocol_version != ProtocolVersion::V1 {
+            return Err(MailboxDeliveryError::UnsupportedVersion);
+        }
+        if self.ack.signature_algorithm != SignatureAlgorithm::ED25519 {
+            return Err(MailboxDeliveryError::UnsupportedAlgorithm);
+        }
+        if self.signature.len() != ED25519_SIGNATURE_BYTES {
+            return Err(MailboxDeliveryError::InvalidSignatureLength);
+        }
+        if self.ack.acknowledged_at_unix_ms < self.ack.lease.lease.issued_at_unix_ms
+            || self.ack.acknowledged_at_unix_ms >= self.ack.lease.lease.expires_at_unix_ms
+        {
+            return Err(MailboxDeliveryError::AckOutsideLease);
+        }
+        Ok(())
+    }
+
+    /// Encodes a bounded ACK; runtime signature verification is still required.
+    pub fn encode(&self) -> Result<Vec<u8>, MailboxDeliveryError> {
+        self.validate_shape()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| MailboxDeliveryError::Malformed)?;
+        if bytes.len() > MAX_MAILBOX_DELIVERY_CONTROL_BYTES {
+            return Err(MailboxDeliveryError::Oversized);
+        }
+        Ok(bytes)
+    }
+
+    /// Bounds untrusted input before parsing a consumer-signed ACK.
+    pub fn decode(bytes: &[u8]) -> Result<Self, MailboxDeliveryError> {
+        if bytes.len() > MAX_MAILBOX_DELIVERY_CONTROL_BYTES {
+            return Err(MailboxDeliveryError::Oversized);
+        }
+        let ack: Self =
+            serde_json::from_slice(bytes).map_err(|_| MailboxDeliveryError::Malformed)?;
+        ack.validate_shape()?;
+        Ok(ack)
+    }
+
+    /// Stable key for the runtime's bounded, crash-recoverable ACK replay ledger.
+    ///
+    /// Use only after verifying both signatures and current reader authority.
+    /// Retain the signed ACK commitment with this key: changing even the ACK
+    /// nonce on retry is a conflict, not a second acknowledgement.
+    #[must_use]
+    pub fn replay_identity(&self) -> MailboxAckReplayIdentity {
+        let lease = &self.ack.lease.lease;
+        MailboxAckReplayIdentity {
+            address: lease.address,
+            consumer: lease.consumer,
+            consumer_session: lease.consumer_session,
+            delivery_id: lease.delivery_id,
+            lease_nonce: lease.lease_nonce,
+        }
+    }
+
+    /// Checks the nested lease and ACK time, not signatures or replay state.
+    pub fn check_scope(
+        &self,
+        plan: &MailboxGrant,
+        receive: &MailboxCapabilityGrant,
+        consumer_session: ConsumerSessionId,
+        now_unix_ms: i64,
+    ) -> Result<(), MailboxDeliveryError> {
+        self.validate_shape()?;
+        self.ack
+            .lease
+            .check_scope(plan, receive, consumer_session, now_unix_ms)?;
+        if self.ack.acknowledged_at_unix_ms > now_unix_ms {
+            return Err(MailboxDeliveryError::AckOutsideLease);
+        }
+        Ok(())
+    }
+}
+
+/// Data-only lease/ACK refusals; cryptographic and replay errors are runtime-owned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MailboxDeliveryError {
+    #[error("delivery control frame exceeds the encoded bound")]
+    Oversized,
+    #[error("delivery control frame is malformed")]
+    Malformed,
+    #[error("delivery protocol version is unsupported")]
+    UnsupportedVersion,
+    #[error("delivery signature algorithm is unsupported")]
+    UnsupportedAlgorithm,
+    #[error("delivery signature length is invalid")]
+    InvalidSignatureLength,
+    #[error("delivery time window is invalid")]
+    InvalidTimeWindow,
+    #[error("delivery mailbox is absent from the signed plan")]
+    WrongPlanMailbox,
+    #[error("reader enrollment is bound to a different signed plan")]
+    WrongPlanIdentity,
+    #[error("delivery execution epoch is stale")]
+    StaleExecutionEpoch,
+    #[error("delivery address does not match the receive capability")]
+    WrongAddress,
+    #[error("delivery consumer does not match the receive capability")]
+    WrongConsumer,
+    #[error("reader enrollment is bound to a stale boot")]
+    StaleConsumerBoot,
+    #[error("delivery consumer session is stale")]
+    StaleConsumerSession,
+    #[error("reader enrollment signing key is invalid")]
+    InvalidReaderKey,
+    #[error("delivery receive capability does not match")]
+    WrongCapability,
+    #[error("receive operation is not authorized")]
+    ReceiveNotAuthorized,
+    #[error("delivery policy epoch is stale")]
+    StalePolicyEpoch,
+    #[error("delivery lease is not yet valid")]
+    NotYetValid,
+    #[error("delivery lease or capability has expired")]
+    Expired,
+    #[error("acknowledgement is outside its delivery lease")]
+    AckOutsideLease,
 }
 
 /// Data-only contract validation failures.

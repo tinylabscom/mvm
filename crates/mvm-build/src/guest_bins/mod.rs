@@ -1058,8 +1058,9 @@ mod tests {
 
     #[test]
     fn the_producer_records_the_producing_tree_and_every_member() {
-        let workspace = guest_agent_build::detect_source_workspace()
-            .expect("the test runs inside the mvm workspace");
+        let workspace =
+            guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .expect("the test crate lives inside the mvm workspace");
         let tmp = tempfile::tempdir().unwrap();
         let cache_root = tmp.path().join("cache");
         for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
