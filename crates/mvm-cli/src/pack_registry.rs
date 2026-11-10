@@ -91,11 +91,7 @@ pub fn download_pack(
     })
 }
 
-/// Acquire one explicitly pinned runtime layer as private build input only.
-///
-/// This path does not install a boot image, update the user's pack lock, or
-/// treat signed policy requests as host grants. The caller must resolve and
-/// verify the entire layer dependency graph before composing a workload.
+/// Acquire an already resolved, exact-version-and-manifest-digest runtime.
 ///
 /// # Errors
 ///

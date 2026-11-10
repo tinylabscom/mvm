@@ -8,6 +8,7 @@ use mvm_build::published_image_set::PublishedImageSet;
 use mvm_build::runtime_layer::compose_authored_candidate;
 use mvm_client::bundle::{BundleExportInputs, BundleSigner, HostBundleSigner, PostureInputs};
 use mvm_client::portable_boot_assets::PreparedPortableBootAssets;
+use mvm_client::registry_application::discovery::resolve_runtime_layer_pin;
 use mvm_contract::pack_spec::PackTarget;
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::WorkloadImageProfile;
@@ -256,18 +257,7 @@ fn resolve_inputs(
                 .with_context(|| {
                     format!("runtime {requested} is not in the signed-input catalog")
                 })?;
-            let selected =
-                pack_registry::resolve_version_for_arch(entry, &requested, &arch.to_string())?;
-            let version = entry
-                .versions
-                .iter()
-                .find(|version| {
-                    selected
-                        .version()
-                        .is_some_and(|selected| selected.as_str() == version.version)
-                })
-                .context("selected runtime has no advertised manifest digest")?;
-            PackPin::new(selected, version.manifest_sha256.clone()).map_err(Into::into)
+            resolve_runtime_layer_pin(entry, &requested, &arch.to_string())
         })
         .collect::<Result<_>>()?;
     let mut seen = BTreeMap::new();
