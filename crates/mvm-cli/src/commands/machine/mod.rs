@@ -62,8 +62,8 @@ use super::vm::{console, down};
 use crate::ui;
 use checkpoint::{ForkVmFullMachineInput, fork_vm_full_machine};
 use lifecycle::{
-    exec_machine, quarantine_machine, replace_machine, run_restart, run_start, shell_machine,
-    stop_machine,
+    quarantine_machine, replace_machine, run_exec_with_journal, run_restart, run_start,
+    shell_machine, stop_machine,
 };
 use mailbox::{MachineMailboxAction, recv_mailbox};
 use manifest_source::{absolutize_manifest_volume_spec, load_machine_manifest_source};
@@ -1550,14 +1550,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
         MachineAction::Start(start_cmd) => run_start(start_cmd),
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
-        MachineAction::Exec(exec_args) => {
-            let state_dir = config::machine_state_dir(&exec_args.name);
-            let _journal_lock = input_journal::lock(&state_dir)?;
-            let pending = input_journal::begin_exec(&state_dir, &exec_args.argv)?;
-            let outcome = exec_machine(cli, exec_args, cfg);
-            input_journal::finish_exec(&state_dir, pending, outcome.is_ok())?;
-            outcome
-        }
+        MachineAction::Exec(exec_args) => run_exec_with_journal(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
