@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repack one digest-pinned, static x86_64 CPython build as an offline layer input.
+"""Repack digest-pinned, static CPython for one Linux guest architecture.
 
 This is an unsigned producer, not a pack publisher. The registry signer must
 bind the resulting tar's exact size and SHA-256 to its own signed descriptor.
@@ -15,11 +15,19 @@ import subprocess
 import tarfile
 import tempfile
 
-SOURCE_URL = (
-    "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/"
-    "cpython-3.13.18%2B20261026-x86_64-unknown-linux-musl-lto%2Bstatic-full.tar.zst"
-)
-SOURCE_SHA256 = "e0bb0840e127aa95dbb1212202a29cde715711ae6826132e548f5eb04a958533"
+SOURCE_BASE = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/"
+SOURCES = {
+    "x86_64": (
+        SOURCE_BASE + "cpython-3.13.18%2B20261026-x86_64-unknown-linux-musl-lto%2Bstatic-full.tar.zst",
+        "e0bb0840e127aa95dbb1212202a29cde715711ae6826132e548f5eb04a958533",
+        62,
+    ),
+    "aarch64": (
+        SOURCE_BASE + "cpython-3.13.18%2B20261026-aarch64-unknown-linux-musl-lto%2Bstatic-full.tar.zst",
+        "9968a4b1fc3db172ba3b3ab36235fa76fab91c3ec83204f269adca756c87261d",
+        183,
+    ),
+}
 SOURCE_SIZE_LIMIT = 80 * 1024 * 1024
 TREE_SIZE_LIMIT = 256 * 1024 * 1024
 STDLIB = "python/install/lib/python3.13/"
@@ -46,7 +54,7 @@ def snapshot(source: Path, expected: str, output: Path) -> None:
             raise ValueError("Python source bytes differ from the pinned digest")
 
 
-def selected_files(source: io.BufferedReader) -> list[tuple[str, int, bytes]]:
+def selected_files(source: io.BufferedReader, arch: str) -> list[tuple[str, int, bytes]]:
     """Select runtime-only files without extracting upstream paths to the host."""
     process = subprocess.Popen(
         ["zstd", "-dc"], stdin=source, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
@@ -87,8 +95,12 @@ def selected_files(source: io.BufferedReader) -> list[tuple[str, int, bytes]]:
         if process.poll() is None:
             process.kill()
             process.wait()
-    if not REQUIRED.issubset(files) or not files["usr/bin/python3"][1].startswith(b"\x7fELF"):
+    if not REQUIRED.issubset(files):
         raise ValueError("Python runtime is missing its executable or standard library")
+    binary = files["usr/bin/python3"][1]
+    if (len(binary) < 20 or binary[:6] != b"\x7fELF\x02\x01"
+            or int.from_bytes(binary[18:20], "little") != SOURCES[arch][2]):
+        raise ValueError("Python runtime ELF architecture differs from the pinned source")
     return [(path, *files[path]) for path in sorted(files)]
 
 
@@ -108,15 +120,17 @@ def write_layer(entries: list[tuple[str, int, bytes]], output: Path) -> str:
     return digest.hexdigest()
 
 
-def build(source: Path, destination: Path, expected: str = SOURCE_SHA256) -> tuple[str, int]:
+def build(source: Path, destination: Path, expected: str, arch: str = "x86_64") -> tuple[str, int]:
     """Refuse an existing destination and publish only a complete checked layer."""
+    if arch not in SOURCES:
+        raise ValueError("unsupported Python runtime architecture")
     if destination.exists() or destination.is_symlink():
         raise ValueError("Python layer destination already exists")
     with tempfile.TemporaryDirectory(prefix="mvm-python-input-") as private:
         held = Path(private) / "source.tar.zst"
         snapshot(source, expected, held)
         with held.open("rb") as source_file:
-            entries = selected_files(source_file)
+            entries = selected_files(source_file, arch)
         with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".python-layer-", delete=False) as tmp:
             staged = Path(tmp.name)
         try:
@@ -132,8 +146,10 @@ def build(source: Path, destination: Path, expected: str = SOURCE_SHA256) -> tup
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=Path, help="pinned upstream tar.zst (see SOURCE_URL)")
+    parser.add_argument("--arch", required=True, choices=SOURCES, help="Linux guest architecture")
+    parser.add_argument("source", type=Path, help="pinned upstream tar.zst")
     parser.add_argument("destination", type=Path, help="new, unsigned layer.tar")
     args = parser.parse_args()
-    sha256, size = build(args.source, args.destination)
-    print(f"archive_sha256={sha256} archive_size={size} source_sha256={SOURCE_SHA256}")
+    source_url, source_sha256, _ = SOURCES[args.arch]
+    sha256, size = build(args.source, args.destination, source_sha256, args.arch)
+    print(f"arch={args.arch} archive_sha256={sha256} archive_size={size} source_sha256={source_sha256} source_url={source_url}")
