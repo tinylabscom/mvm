@@ -55,8 +55,8 @@ const REQUIRED_STEPS: &[(&str, &str)] = &[
         "the runtime dirs the rest writes into",
     ),
     (
-        "mount_mediated_tools",
-        "stand-ins for tools a NIC-less guest cannot run",
+        "mount_network_utilities",
+        "the ping replacement that uses the NIC-less guest's egress lane",
     ),
     (
         "provision_egress_ca",

@@ -203,9 +203,6 @@ pub struct EndpointConfig {
     /// baseline; a profile opts a destination into entropy/name redaction.
     #[serde(default)]
     pub redaction: mvm_core::policy::RedactionPolicy,
-    /// Resolved per-tool rules projected from the admitted signed plan.
-    #[serde(default)]
-    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     /// Embed the per-VM telemetry collector in this endpoint process: the
     /// collector's inputs when this boot is provisioned for collection,
     /// absent otherwise. See `mvm_hostd::telemetry_collector`.
@@ -246,10 +243,9 @@ pub struct EndpointConfig {
     /// trust bundle.
     #[serde(default)]
     pub tls_intermediate: Option<TlsIntermediate>,
-    /// The VM's resolved network policy for claim-10 egress. When set, the endpoint
-    /// gates every destination itself (the run loop relays without gating); absent ⇒
-    /// the endpoint does not gate (the legacy in-loop gate is still active). Fail
-    /// closed when set: an unadmitted destination is refused before any forward.
+    /// The VM's resolved network policy for claim-10 egress. The endpoint
+    /// gates every destination itself; absent projects a default-deny gate.
+    /// An unadmitted destination is refused before any forward.
     #[serde(default)]
     pub network_policy: Option<mvm_core::policy::network_policy::NetworkPolicy>,
     /// Transport-neutral resource ceilings from the admitted execution plan.
@@ -262,8 +258,8 @@ pub struct EndpointConfig {
     #[serde(default)]
     pub ingress: Vec<mvm_core::plan::IngressMapping>,
     /// Which egress protocol the relayed guest stream carries. `Wire` (default,
-    /// secret-bearing) keeps the existing WireRequest substitution serve loop; `Raw`
-    /// selects the raw-TCP splice serve loop. Fixed at admission — never sniffed.
+    /// secret-bearing) keeps the WireRequest substitution serve loop; `FlowMux`
+    /// serves authenticated guest networking. Fixed at admission — never sniffed.
     #[serde(default)]
     pub egress_mode: EgressMode,
     /// Where to record that a guest completed an authenticated session.
@@ -300,7 +296,7 @@ pub struct EndpointConfig {
     #[serde(default)]
     pub resolver: ResolverBackend,
     /// Identity material for the authenticated FlowMux session. Required when
-    /// `egress_mode` is `FlowMux`; ignored for `Wire` and `Raw`.
+    /// `egress_mode` is `FlowMux`; ignored for `Wire`.
     #[serde(default)]
     pub flowmux_identity: Option<FlowMuxIdentity>,
 }
@@ -550,18 +546,6 @@ pub fn assemble_projected(
         service = service.with_shared_recorder(Arc::clone(recorder));
     }
     let approver = approval_supervisor(cfg, projection.recorder.clone())?;
-    if !cfg.tools.is_empty() {
-        let recorder = projection
-            .recorder()
-            .context("tool rules require the endpoint audit recorder")?;
-        service = service.with_tool_gate(Arc::new(
-            crate::supervisor::tool_decision::ToolDecisionGate::new(
-                cfg.tools.clone(),
-                Arc::clone(&approver),
-                recorder,
-            ),
-        ));
-    }
     service = service.with_approver(approver);
 
     Ok((Arc::new(service), handed, oauth_refresh))
@@ -658,7 +642,7 @@ fn oauth_refresh_driver(
         Arc::new(AdmittedAddresses::default()),
         projection.gate(),
     ));
-    let http = crate::supervisor::tools::http_hardening::hardened_client_builder_via(
+    let http = crate::supervisor::http_hardening::hardened_client_builder_via(
         crate::keyholder::oauth::EXCHANGE_TIMEOUT.as_secs(),
         proxy,
     )
@@ -859,77 +843,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn admitted_tool_rules_decide_through_the_endpoints_recorder() {
-        let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
-        std::fs::create_dir_all(dir.path().join("bindings")).unwrap();
-        let mut cfg = vsock_cfg(vec![], dir.path());
-        cfg.tools.allow.push("shell".into());
-        cfg.tools.detail.insert(
-            "shell".into(),
-            mvm_contract::policy::tool_rules::ToolRuleDetail {
-                executable: Some("/bin/echo".into()),
-                ..Default::default()
-            },
-        );
-
-        let signer = Arc::new(crate::supervisor::audit::CapturingAuditSigner::new());
-        let recorder = Arc::new(crate::supervisor::audit_recorder::Recorder::new(
-            signer.clone(),
-            mvm_core::plan::TenantId("local".into()),
-        ));
-        let projection = EndpointNetworkProjection {
-            gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
-            recorder: Some(recorder),
-        };
-        let (service, _, oauth_refresh) =
-            assemble_projected(&cfg, &projection).expect("assemble endpoint");
-        assert!(oauth_refresh.is_none());
-        assert_eq!(
-            service
-                .decide_tool(
-                    &mvm_contract::protocol::network_flow::tool::ToolCheckRequest {
-                        tool: "shell".into(),
-                        executable: Some("/bin/echo".into()),
-                        argv: "echo ok".into(),
-                    }
-                )
-                .await
-                .expect("audit allow"),
-            crate::supervisor::tool_decision::ToolVerdict::Allow
-        );
-        assert!(matches!(
-            service
-                .decide_tool(
-                    &mvm_contract::protocol::network_flow::tool::ToolCheckRequest {
-                        tool: "other".into(),
-                        executable: Some("/bin/other".into()),
-                        argv: "other".into(),
-                    }
-                )
-                .await
-                .expect("audit deny"),
-            crate::supervisor::tool_decision::ToolVerdict::Deny(_)
-        ));
-        let entries = signer.entries();
-        assert_eq!(entries.len(), 2);
-        let recorded = serde_json::to_string(&entries).expect("serialize entries");
-        assert!(!recorded.contains("echo ok"));
-    }
-
     #[test]
-    fn tool_rules_refuse_to_assemble_without_chain_audit() {
-        let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
-        std::fs::create_dir_all(dir.path().join("bindings")).unwrap();
-        let mut cfg = vsock_cfg(vec![], dir.path());
-        cfg.tools.allow.push("shell".into());
-        let projection = EndpointNetworkProjection {
-            gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
-            recorder: None,
-        };
-        assert!(assemble_projected(&cfg, &projection).is_err());
+    fn legacy_tool_rules_are_refused_before_endpoint_assembly() {
+        let cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        let mut value = serde_json::to_value(&cfg).expect("encode endpoint config");
+        value["tools"] = serde_json::json!({"allow": ["shell"]});
+        assert!(serde_json::from_value::<EndpointConfig>(value.clone()).is_err());
+        assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     /// A loopback listener that counts the connections it accepts, so a test
@@ -1177,7 +1097,6 @@ mod tests {
             secrets,
             transport: EndpointTransport::Vsock { port: 5253 },
             redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             forward_timeout_secs: 30,
             proxy_https: None,
@@ -1463,12 +1382,13 @@ mod tests {
     }
 
     #[test]
-    fn admitted_tool_rules_round_trip_through_endpoint_config() {
-        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
-        cfg.tools.allow.push("shell".into());
-        let bytes = serde_json::to_vec(&cfg).expect("encode endpoint config");
-        let round = parse(&bytes).expect("decode endpoint config");
-        assert_eq!(round.tools, cfg.tools);
+    fn admitted_tool_rules_cannot_round_trip_through_endpoint_config() {
+        let cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        let mut value = serde_json::to_value(&cfg).expect("encode endpoint config");
+        value["tools"] = serde_json::json!({});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let err = parse(&bytes).expect_err("legacy tools must not be admitted");
+        assert!(err.to_string().contains("unknown field `tools`"), "{err}");
     }
 
     #[test]

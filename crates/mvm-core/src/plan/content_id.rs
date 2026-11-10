@@ -262,7 +262,7 @@ mod tests {
             check(
                 "base",
                 compute_plan_id(&plan).0.as_str(),
-                "sha256:f2c0d04314f13724cdeb31bf3d777a19a3893695ae9d17905473e71099174aca",
+                "sha256:c4a2ad41836d01d61a4b06722485ac67118d3953aa8a0cc214e763668ffaf3fd",
             );
         }
 
@@ -274,7 +274,7 @@ mod tests {
             check(
                 "differing-stored-id-addresses-the-same",
                 compute_plan_id(&plan).0.as_str(),
-                "sha256:f2c0d04314f13724cdeb31bf3d777a19a3893695ae9d17905473e71099174aca",
+                "sha256:c4a2ad41836d01d61a4b06722485ac67118d3953aa8a0cc214e763668ffaf3fd",
             );
         }
 
@@ -285,13 +285,13 @@ mod tests {
             check(
                 "tenant-differs",
                 compute_plan_id(&tenant).0.as_str(),
-                "sha256:737552065ab25ce5b16c59a01199e2739431a4d5c70f50bdd8689e7b529fa9e4",
+                "sha256:7233ecb39165cef53fa9828bd4f0f80f9249e99d4ccd0c46c7e640658fadecef",
             );
             let nonce = fixture("acme", 8).build();
             check(
                 "nonce-differs",
                 compute_plan_id(&nonce).0.as_str(),
-                "sha256:afa366afa2a1d9583ec0dddd9a7c80e1174705af658dde54aee667ddfc3e9697",
+                "sha256:d7d85076997d1565ace19dd921255ba2087fa5fa6f3c84ba0b8dee41da718243",
             );
         }
     }

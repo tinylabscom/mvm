@@ -138,7 +138,7 @@ test("new serialized types in dedicated wire modules need a catalogue dispositio
   // Its reachable control payloads are already covered by the generated schema.
   paths.delete("crates/mvm-contract/src/policy/security.rs");
   const exclusions = new Set([
-    "ToolCheckDenial", "ToolOrigin", "LoopbackBinding",
+    "LoopbackBinding",
     "WireRequest", "WireResponse", "ResolveWireRequest", "ResolveWireResponse",
   ]);
   const page = readRepoFile(pagePath);
@@ -160,8 +160,7 @@ test("new serialized types in dedicated wire modules need a catalogue dispositio
 test("FlowMux documents the actual payload types for every typed frame family", () => {
   const flowTypes = wireDefinitions("flow").map((item) => item.name);
   for (const name of [
-    "FrameHeader", "Opcode", "Handshake", "ToolCheckRequest", "ToolDecisionReply",
-    "ToolInvocationBinding", "HttpFlowHead", "HttpFlowResponseHead",
+    "FrameHeader", "Opcode", "Handshake", "HttpFlowHead", "HttpFlowResponseHead",
     "DnsRecordType", "DnsQuestion", "DnsRcode", "IcmpEchoRequest", "IcmpEchoReply",
   ]) {
     assert.ok(flowTypes.includes(name), name);

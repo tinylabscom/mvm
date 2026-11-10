@@ -1023,8 +1023,6 @@ mod tests {
             &o.addon_dns,
             &o.exit_report,
             &o.ping,
-            &o.tool_shim,
-            &o.tool_helper,
             &oci.agent,
             &oci.netinit,
             &oci.egress_client,
@@ -1105,8 +1103,6 @@ mod tests {
                 "mvm-ping",
                 "mvm-oci-entrypoint",
                 "mvm-setpriv",
-                "mvm-tool-shim",
-                "mvm-tool-helper",
             ]
             .iter()
             .map(|name| format!("{arch}/bin/{name}"))

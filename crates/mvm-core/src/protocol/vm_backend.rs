@@ -945,7 +945,6 @@ mod tests {
             not_after: now + Duration::minutes(5),
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
             drive: None,
-            tool_mediation: None,
             application_terminal: None,
             sig: vec![],
         };
@@ -978,7 +977,6 @@ mod tests {
                 VerbId::new("ping").unwrap(),
             ],
             drive: None,
-            tool_mediation: None,
             application_terminal: None,
             sig: vec![],
         };

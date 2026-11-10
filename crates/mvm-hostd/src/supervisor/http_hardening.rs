@@ -1,12 +1,9 @@
-//! Shared HTTP-client hardening for the search/fetch tools.
+//! Shared HTTP-client hardening for host-side network requests.
 //!
-//! Before this module existed, each search provider built its own bare client
-//! with a timeout but neither a redirect policy nor any SSRF guarding — so
-//! poisoning DNS for `api.search.brave.com` to a private IP would have routed
-//! credentials at a local attacker.
+//! Host-side network requests must not send credentials to private addresses
+//! reached through poisoned DNS or follow an unapproved redirect.
 //!
-//! Every HTTP-using tool surface goes through [`hardened_client_builder`],
-//! which carries:
+//! [`hardened_client_builder`] carries:
 //!
 //! - **No auto-redirect.** `mvm-http` never follows one, so this is an absence
 //!   rather than a setting. An upstream 3xx surfaces its status and headers to
@@ -42,7 +39,7 @@ use crate::supervisor::ssrf_guard::SsrfGuard;
 pub const MIN_TLS_VERSION: mvm_http::TlsVersion = mvm_http::TlsVersion::Tls13;
 
 /// Build a client pre-configured with the SSRF-filtering resolver and the
-/// TLS-1.3 floor. Callers add their own per-tool config (headers, user-agent)
+/// TLS-1.3 floor. Callers add their own request config (headers, user-agent)
 /// before `.build()`. Redirects are not a setting: `mvm-http` never follows
 /// them.
 ///

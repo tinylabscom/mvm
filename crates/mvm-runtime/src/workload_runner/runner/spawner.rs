@@ -34,7 +34,6 @@ pub struct NetworkEndpointSpawnRequest<'a> {
     pub tenant: &'a str,
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
-    pub tools: &'a mvm_contract::policy::tool_rules::ToolRules,
     pub network_policy: &'a NetworkPolicy,
     /// Transport-neutral resource ceilings from the admitted plan.
     pub network_limits: mvm_core::plan::NetworkLimits,
@@ -189,7 +188,6 @@ pub(super) fn prepare_standby_identity(
             tenant: "local",
             secrets: &[],
             redaction: &RedactionPolicy::default(),
-            tools: &mvm_contract::policy::tool_rules::ToolRules::default(),
             network_policy: &NetworkPolicy::deny_all(),
             network_limits: mvm_core::plan::NetworkLimits::default(),
             ingress: &[],
@@ -345,7 +343,6 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             tenant: req.tenant,
             secrets: req.secrets,
             redaction: req.redaction,
-            tools: Some(req.tools),
             transport: EndpointTransport::Uds { path: uds.clone() },
             // None ⇒ resolve host config, then ambient proxy variables inside
             // `spawn_network_endpoint` for every backend.
@@ -624,7 +621,6 @@ mod tests {
                 tenant: "tenant",
                 secrets: &[],
                 redaction: &RedactionPolicy::default(),
-                tools: &mvm_contract::policy::tool_rules::ToolRules::default(),
                 network_policy: &NetworkPolicy::deny_all(),
                 network_limits: mvm_core::plan::NetworkLimits::default(),
                 ingress: &[],
