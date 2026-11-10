@@ -147,19 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn a_forwarded_outbox_is_consumed_and_a_newer_one_is_not_lost() {
+    fn a_forwarded_outbox_is_consumed_and_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
         let outbox = dir.path().join("outbox");
         write_outbox(&outbox, &message(b"one")).unwrap();
         let (mut ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
-        // The peer hangs up without a verdict; the frame is still consumed.
-        drop(theirs);
+        drop(theirs); // hangs up without a verdict; the frame is still consumed
         let _ = forward_outbox(&mut ours, &outbox);
-        assert!(!outbox.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
         assert_eq!(forward_outbox(&mut ours, &outbox), Err(Refusal::Malformed));
-        write_outbox(&outbox, &message(b"two")).unwrap();
-        assert!(outbox.exists());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

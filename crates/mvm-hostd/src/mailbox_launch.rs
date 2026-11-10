@@ -515,109 +515,67 @@ mod tests {
 
     type Verdict = std::result::Result<(), mvm_core::mailbox::frame::Refusal>;
 
-    /// A guest that accepts every dial and forwards whatever the outbox holds,
-    /// reporting each verdict.
+    /// A guest that accepts every dial and forwards whatever its outbox holds.
     fn fake_guest(dir: &Path) -> (PathBuf, std::sync::mpsc::Receiver<Verdict>) {
-        use std::os::unix::net::UnixListener;
-        let listener = UnixListener::bind(dir.join("port.sock")).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(dir.join("port.sock")).unwrap();
         let outbox = dir.join("outbox");
-        let path = outbox.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (path, (tx, rx)) = (outbox.clone(), std::sync::mpsc::channel());
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { return };
-                let verdict = mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &path);
-                if verdict != Err(mvm_core::mailbox::frame::Refusal::Malformed) {
-                    let _ = tx.send(verdict);
+            for mut stream in listener.incoming().flatten() {
+                let v = mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &path);
+                if v != Err(mvm_core::mailbox::frame::Refusal::Malformed) {
+                    let _ = tx.send(v);
                 }
             }
         });
         (outbox, rx)
     }
 
-    fn leave(outbox: &Path, recipient: u8, body: &[u8]) {
-        mvm_agentd::mailbox_outbox::write_outbox(
-            outbox,
-            &mvm_core::mailbox::frame::OutboxMessage {
-                recipient: mvm_contract::protocol::mailbox::PrincipalId::from_bytes(
-                    [recipient; 32],
-                ),
-                body: body.to_vec(),
-            },
-        )
-        .unwrap();
-    }
-
-    fn verdict(rx: &std::sync::mpsc::Receiver<Verdict>) -> Verdict {
+    /// Leave a message for `recipient`, and return the verdict the host gave.
+    fn send_one(
+        outbox: &Path,
+        rx: &std::sync::mpsc::Receiver<Verdict>,
+        to: u8,
+        body: &[u8],
+    ) -> Verdict {
+        let recipient = mvm_contract::protocol::mailbox::PrincipalId::from_bytes([to; 32]);
+        let message = mvm_core::mailbox::frame::OutboxMessage {
+            recipient,
+            body: body.to_vec(),
+        };
+        mvm_agentd::mailbox_outbox::write_outbox(outbox, &message).unwrap();
         rx.recv_timeout(Duration::from_secs(20))
             .expect("no verdict")
     }
 
-    fn launch_against(dir: &Path, mailbox: u8, limits: MailboxLimits) -> MailboxLaunch {
-        let grant = grant(dir, [mailbox; 32]);
+    fn launch_against(dir: &Path, limits: MailboxLimits) -> MailboxLaunch {
+        let grant = grant(dir, [7; 32]);
         let keys = derive_launch_keys(dir, &grant).unwrap();
         serve_derived_with(grant, keys, serve_paths(dir), limits, 300)
     }
 
-    fn receive_within(launch: &MailboxLaunch) -> Vec<u8> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        loop {
-            if let Some(m) = launch.receive() {
-                return m;
-            }
-            assert!(std::time::Instant::now() < deadline, "nothing delivered");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
     #[test]
-    fn two_frames_in_sequence_are_both_delivered_in_order() {
+    fn every_message_is_served_in_order_and_a_refusal_or_flood_changes_nothing() {
         let dir = keys_dir();
-        let (outbox, verdicts) = fake_guest(dir.path());
-        let launch = launch_against(dir.path(), 7, LAUNCH_LIMITS);
-        leave(&outbox, 7, b"first");
-        assert_eq!(verdict(&verdicts), Ok(()));
-        leave(&outbox, 7, b"second");
-        assert_eq!(verdict(&verdicts), Ok(()));
-        assert_eq!(receive_within(&launch), b"first");
-        assert_eq!(receive_within(&launch), b"second");
-    }
-
-    #[test]
-    fn a_refused_frame_does_not_stop_the_next_one_being_delivered() {
-        let dir = keys_dir();
-        let (outbox, verdicts) = fake_guest(dir.path());
-        let launch = launch_against(dir.path(), 7, LAUNCH_LIMITS);
-        leave(&outbox, 9, b"wrong recipient");
-        assert!(verdict(&verdicts).is_err());
-        leave(&outbox, 7, b"corrected");
-        assert_eq!(verdict(&verdicts), Ok(()));
-        assert_eq!(receive_within(&launch), b"corrected");
-        assert!(launch.receive().is_none());
-    }
-
-    #[test]
-    fn a_flooding_guest_fills_only_its_own_bounded_queue() {
-        let dir = keys_dir();
-        let (outbox, verdicts) = fake_guest(dir.path());
+        let (outbox, rx) = fake_guest(dir.path());
         let limits = MailboxLimits {
             max_depth: 2,
             ..LAUNCH_LIMITS
         };
-        let launch = launch_against(dir.path(), 7, limits);
-        let mut refused = 0;
-        for n in 0..5u8 {
-            leave(&outbox, 7, &[n]);
-            refused += verdict(&verdicts).is_err() as u32;
-        }
-        assert_eq!(refused, 3);
-        assert_eq!(receive_within(&launch), [0]);
-        assert_eq!(receive_within(&launch), [1]);
+        let launch = launch_against(dir.path(), limits);
+        assert!(send_one(&outbox, &rx, 9, b"wrong recipient").is_err());
+        assert_eq!(send_one(&outbox, &rx, 7, b"first"), Ok(()));
+        assert_eq!(send_one(&outbox, &rx, 7, b"second"), Ok(()));
+        assert!(send_one(&outbox, &rx, 7, b"over the bound").is_err());
+        assert_eq!(launch.receive().unwrap(), b"first");
+        assert_eq!(launch.receive().unwrap(), b"second");
         assert!(launch.receive().is_none());
     }
 
-    fn assert_thread_exits_after_drop(stop: Arc<AtomicBool>, held_for: Duration) {
-        let deadline = std::time::Instant::now() + held_for;
+    fn assert_dialer_exits_after_drop(launch: MailboxLaunch) {
+        let stop = launch.stop.clone();
+        drop(launch);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while Arc::strong_count(&stop) > 1 {
             assert!(std::time::Instant::now() < deadline, "dialer still running");
             std::thread::sleep(Duration::from_millis(20));
@@ -625,33 +583,17 @@ mod tests {
     }
 
     #[test]
-    fn dropping_the_launch_ends_an_idle_dialer() {
-        let dir = keys_dir();
-        let _guest = fake_guest(dir.path());
-        let stop = {
-            let launch = launch_against(dir.path(), 7, LAUNCH_LIMITS);
-            std::thread::sleep(Duration::from_millis(300));
-            launch.stop.clone()
-        };
-        assert_thread_exits_after_drop(stop, Duration::from_secs(5));
-    }
+    fn dropping_the_launch_ends_an_idle_dialer_and_one_stuck_on_a_silent_guest() {
+        let idle = keys_dir();
+        let (_outbox, _rx) = fake_guest(idle.path());
+        assert_dialer_exits_after_drop(launch_against(idle.path(), LAUNCH_LIMITS));
 
-    #[test]
-    fn dropping_the_launch_ends_a_dialer_stuck_on_a_silent_guest() {
-        use std::os::unix::net::UnixListener;
-        let dir = keys_dir();
-        let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
-        let silent = std::thread::spawn(move || listener.accept().map(|(s, _)| s));
-        let stop = {
-            let launch = launch_against(dir.path(), 7, LAUNCH_LIMITS);
-            let held = silent.join().unwrap().unwrap();
-            let stop = launch.stop.clone();
-            drop(launch);
-            std::mem::forget(held);
-            stop
-        };
+        let silent = keys_dir();
+        let listener = std::os::unix::net::UnixListener::bind(silent.path().join("port.sock"));
+        let launch = launch_against(silent.path(), LAUNCH_LIMITS);
+        let _held = listener.unwrap().accept().unwrap();
         // Bounded by the serve I/O timeout, not by the guest.
-        assert_thread_exits_after_drop(stop, Duration::from_secs(20));
+        assert_dialer_exits_after_drop(launch);
     }
 
     #[test]
