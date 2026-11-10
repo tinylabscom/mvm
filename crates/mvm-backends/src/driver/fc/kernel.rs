@@ -60,7 +60,7 @@ pub(super) fn boot_descriptor_custodied(
     driver: &super::FcDriver,
     spec: &VmmSpec,
     kernel: &mvm_vmm::host::restore_image::VerifiedRestoreFile,
-    handoff: mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+    handoff: mvm_vmm::driver::prepared_disks::LaunchWritableHandoff,
 ) -> Result<Box<dyn mvm_vmm::driver::traits::RunningVm>> {
     #[cfg(any(target_os = "linux", all(test, unix)))]
     {
