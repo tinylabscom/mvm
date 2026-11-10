@@ -11,9 +11,10 @@ use mvm_contract::protocol::mailbox::{
     AES_256_GCM_ALGORITHM, AuthorizationDomainId, BootId, ContentType, DestinationReceipt,
     ED25519_ALGORITHM, ED25519_SIGNATURE_BYTES, ExecutionEpoch, MAILBOX_PROTOCOL_VERSION,
     MAX_ENCODED_ENVELOPE_BYTES, MAX_MAILBOX_PAYLOAD_BYTES, MailboxCapabilityGrant,
-    MailboxContractError, MailboxEnvelope, MailboxEnvelopeHeader, MailboxId, MailboxMessage,
-    MailboxOperation, MailboxRoutingFrame, MessageId, PrincipalId, ProtocolVersion, RevocationId,
-    SignedDestinationReceipt, SignedMailboxCapability, SignedMailboxMessage, TenantId,
+    MailboxContractError, MailboxDeliveryError, MailboxEnvelope, MailboxEnvelopeHeader, MailboxId,
+    MailboxMessage, MailboxOperation, MailboxRoutingFrame, MessageId, PrincipalId, ProtocolVersion,
+    RevocationId, SignedDestinationReceipt, SignedMailboxCapability, SignedMailboxMessage,
+    TenantId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,6 +31,9 @@ pub mod frame;
 
 /// Bounded destination-side ciphertext journal and durable acceptance.
 pub mod journal;
+
+/// Cryptographic guest reader enrollment, separate from transport admission.
+pub mod reader;
 
 /// Overlay resolution and authenticated, bounded byte-transport seams.
 pub mod transport;
@@ -122,12 +126,26 @@ pub enum MailboxError {
     UnsupportedContentType,
     #[error("mailbox contract bounds are invalid: {0}")]
     Contract(MailboxContractError),
+    #[error("mailbox delivery contract is invalid: {0}")]
+    DeliveryContract(MailboxDeliveryError),
     #[error("mailbox sender signature is invalid")]
     SignatureInvalid,
     #[error("mailbox capability signature is invalid")]
     CapabilitySignatureInvalid,
     #[error("destination receipt signature is invalid")]
     ReceiptSignatureInvalid,
+    #[error("guest reader enrollment signature is invalid")]
+    ReaderEnrollmentSignatureInvalid,
+    #[error("guest reader key is invalid")]
+    ReaderKeyInvalid,
+    #[error("guest reader possession signature is invalid")]
+    ReaderPossessionInvalid,
+    #[error("destination delivery lease signature is invalid")]
+    DeliveryLeaseSignatureInvalid,
+    #[error("guest delivery ACK signature is invalid")]
+    DeliveryAckSignatureInvalid,
+    #[error("delivery lease does not identify the committed message")]
+    DeliveryLeaseMismatch,
     #[error("mailbox ciphertext commitment is invalid")]
     CiphertextCommitmentInvalid,
     #[error("mailbox payload decryption failed")]
@@ -179,6 +197,12 @@ pub enum MailboxError {
 impl From<MailboxContractError> for MailboxError {
     fn from(value: MailboxContractError) -> Self {
         Self::Contract(value)
+    }
+}
+
+impl From<MailboxDeliveryError> for MailboxError {
+    fn from(value: MailboxDeliveryError) -> Self {
+        Self::DeliveryContract(value)
     }
 }
 
