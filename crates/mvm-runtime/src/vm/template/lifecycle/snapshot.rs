@@ -201,13 +201,21 @@ pub(super) fn installed_bundle_verified_manifest(
         return Ok(None);
     }
     let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
-    let trust = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
-        mvm_core::plan::FsTrustStore::default_path()?,
-        &registry.archive_path(id_or_slot),
-    );
+    let trust = release_trust_for_installed_archive(&registry.archive_path(id_or_slot))?;
     registry
         .verified_launch_manifest(id_or_slot, trust, host_verifying_key()?)
         .map_err(|e| anyhow::anyhow!("installed bundle {id_or_slot}: {e}"))
+}
+
+pub(super) fn release_trust_for_installed_archive(
+    archive: &std::path::Path,
+) -> Result<mvm_core::registry_pack::BuiltinAuthorTrust<mvm_core::plan::FsTrustStore>> {
+    Ok(
+        mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
+            mvm_core::plan::FsTrustStore::default_path()?,
+            archive,
+        ),
+    )
 }
 
 /// This host's bundle-signing public key, or `None` when no host key exists

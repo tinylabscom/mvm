@@ -150,15 +150,13 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         )?;
         attach_cli_runtime(config, &installed, runtime)?;
         if needs_owner {
-            let owner = std::sync::Arc::new(
-                mvm_core::canonical_linux::prepare_canonical_linux_with_trust(
-                    &archive,
-                    &verified.plan_artifact(),
-                    kind,
-                    mvm_build::stage0_kernel::current_image_set_protocol_support(),
-                    trust.as_ref(),
-                )?,
-            );
+            let owner = std::sync::Arc::new(mvm_core::canonical_linux::prepare_canonical_linux(
+                &archive,
+                &verified.plan_artifact(),
+                kind,
+                mvm_build::stage0_kernel::current_image_set_protocol_support(),
+                trust.as_ref(),
+            )?);
             owner.bind_to_config(config)?;
         }
         return Ok(true);

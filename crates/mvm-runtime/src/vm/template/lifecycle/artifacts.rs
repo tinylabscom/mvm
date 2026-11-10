@@ -299,10 +299,7 @@ pub(super) fn bundle_artifacts_for_sha(
                     )
                 })?;
             let archive = registry.archive_path(bundle_sha256);
-            let trust = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
-                mvm_core::plan::FsTrustStore::default_path()?,
-                &archive,
-            );
+            let trust = super::snapshot::release_trust_for_installed_archive(&archive)?;
             match super::snapshot::host_verifying_key()? {
                 Some(key) => {
                     let id = mvm_core::plan::bundle::key_id_from_pubkey(&key);
