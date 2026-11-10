@@ -1210,7 +1210,9 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(format!("{error:#}").contains("verifying bundle boot assets"));
+        let error = format!("{error:#}");
+        assert!(error.contains("verifying bundle boot assets"), "{error}");
+        assert!(error.contains("opening bundle archive"), "{error}");
         assert!(config.runtime_overlay_path.is_none());
         assert!(config.initrd_path.is_none());
         assert!(!home.path().join("cache").exists());

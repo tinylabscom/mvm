@@ -119,6 +119,29 @@ pub trait TrustStore {
     fn lookup(&self, key_id: &KeyId) -> Option<VerifyingKey>;
 }
 
+/// Read this host's existing public signing key without creating new trust.
+///
+/// # Errors
+///
+/// Refuses a malformed or linked public key instead of treating it as a publisher.
+#[cfg(feature = "host-state")]
+pub fn existing_local_build_key() -> anyhow::Result<Option<VerifyingKey>> {
+    let path = crate::config::mvm_keys_dir().join("host-signer.pub");
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_file() && metadata.len() == 32,
+        "local build public key is not a regular 32-byte key"
+    );
+    let key: [u8; 32] = std::fs::read(path)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("local build public key changed during read"))?;
+    Ok(Some(VerifyingKey::from_bytes(&key)?))
+}
+
 /// Release trust extended with exactly this host's signing key.
 ///
 /// This store is for the local-build execution path only. Callers must still

@@ -36,6 +36,7 @@ const MUST_COMPOSE: &[&str] = &[
     "crates/mvm-runtime/src/vm/template/lifecycle/snapshot.rs",
     "crates/mvm-cli/src/pack_registry.rs",
     "crates/mvm-cli/src/commands/pack/inspect.rs",
+    "crates/mvm-cli/src/commands/vm/exec/composition.rs",
 ];
 
 const MUST_DELEGATE: &str = "crates/mvm-core/src/canonical_linux.rs";
