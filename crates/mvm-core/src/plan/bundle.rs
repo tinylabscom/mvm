@@ -3364,7 +3364,11 @@ mod tests {
         assert!(registry.install(&archive, &trust, true).is_err());
         assert!(!registry.release_after_stop(sha, "first").unwrap());
         assert!(installed.root.exists());
-        assert!(registry.release_after_stop(sha, "second").unwrap());
+        assert!(
+            registry
+                .release_after_stop(sha, "second")
+                .unwrap_or_else(|error| panic!("{error:#}"))
+        );
         assert!(!installed.root.exists());
         assert!(registry.archive_path(sha).exists());
         let rebuilt = registry.materialize_cached(sha, &trust).unwrap();

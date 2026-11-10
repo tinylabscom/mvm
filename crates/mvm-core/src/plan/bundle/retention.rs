@@ -1,6 +1,7 @@
 //! Durable bundle users and fail-closed extraction eviction.
 
 use super::{BundleRegistry, stream};
+use anyhow::Context;
 use std::path::PathBuf;
 
 impl BundleRegistry {
@@ -122,15 +123,18 @@ impl BundleRegistry {
         crate::naming::validate_vm_name(vm)?;
         let _lease = self.lock_entry(sha).map_err(anyhow::Error::msg)?;
         let dir = self.bundle_users_dir(sha);
-        self.has_bundle_users(sha)?;
+        self.has_bundle_users(sha)
+            .context("checking unresolved bundle users before release")?;
         match std::fs::remove_file(dir.join(vm)) {
-            Ok(()) => crate::private_fs::sync_managed_directory_chain(&self.root, &dir)?,
+            Ok(()) => crate::private_fs::sync_managed_directory_chain(&self.root, &dir)
+                .context("syncing released bundle user")?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 anyhow::bail!("bundle use for {vm} is missing; retain the extraction")
             }
             Err(error) => return Err(error.into()),
         }
         self.evict_extracted_locked(sha)
+            .context("evicting extraction after final bundle user release")
     }
 
     /// Keep only the exact signed archive for a fresh install with no VM users.
@@ -148,10 +152,14 @@ impl BundleRegistry {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         }
-        if self.has_bundle_users(sha)? {
+        if self
+            .has_bundle_users(sha)
+            .context("checking remaining bundle users before eviction")?
+        {
             return Ok(false);
         }
-        let actual = stream::archive_sha256(&self.archive_path(sha))?;
+        let actual = stream::archive_sha256(&self.archive_path(sha))
+            .with_context(|| format!("verifying retained archive for {sha}"))?;
         anyhow::ensure!(
             actual == sha,
             "retained archive differs from installed bundle {sha}"
@@ -161,9 +169,10 @@ impl BundleRegistry {
         let stale = self.root.join(format!(".{sha}.evicting"));
         match std::fs::symlink_metadata(&stale) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                std::fs::remove_dir_all(&stale)?;
+                std::fs::remove_dir_all(&stale).context("removing old bundle eviction staging")?;
             }
             Ok(_) => anyhow::bail!("bundle eviction staging is not a directory"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
         match std::fs::symlink_metadata(&extracted) {
@@ -172,10 +181,12 @@ impl BundleRegistry {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         }
-        std::fs::rename(&extracted, &stale)?;
-        crate::private_fs::sync_managed_directory_chain(&self.root, &self.root)?;
-        std::fs::remove_dir_all(&stale)?;
-        crate::private_fs::sync_managed_directory_chain(&self.root, &self.root)?;
+        std::fs::rename(&extracted, &stale).context("staging bundle extraction for eviction")?;
+        crate::private_fs::sync_managed_directory_chain(&self.root, &self.root)
+            .context("syncing staged bundle eviction")?;
+        std::fs::remove_dir_all(&stale).context("removing staged bundle extraction")?;
+        crate::private_fs::sync_managed_directory_chain(&self.root, &self.root)
+            .context("syncing completed bundle eviction")?;
         Ok(true)
     }
 
