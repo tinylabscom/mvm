@@ -576,10 +576,11 @@ launch's life into the same queue; manual, not a CI lane). Observed:
   served `recv`. Pool-claimed VMs lacked `launch.sh`; whether that predates this
   work is not confirmed.
 
-The outbox is one file. A writer must let the guest agent consume the previous
-frame before writing the next: two writes back to back, or 100 with no gap,
-delivered only the last, and the others were overwritten, not queued. The agent
-consumes it per frame (rename to `.outbox.forwarding`, forward, unlink).
+The outbox is a spool directory, `/run/mvm/mailbox/outbox/`: one file per
+message, delivered oldest first, one frame per host dial. A writer adds a file
+atomically and is refused (`QueueFull`) once 256 are waiting. This replaced a
+single file in which a second write overwrote the first. The burst fix is
+hermetic-tested only; a live back-to-back burst has not been re-run.
 
 Guest console noise is bounded: while the host re-dials, the guest logs
 `mailbox frame not delivered` (9 to 17 lines over a 20 s run), and an idle VM
@@ -596,8 +597,9 @@ MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build ./target/debug/mvmctl bootstrap
 ./target/debug/mvmctl machine run --image alpine --mailbox <64-hex id> \
     --hypervisor firecracker --name n -- sleep 900
 # as uid 901 in the guest (machine cp / machine exec), run a writer that
-# calls mvm_agentd::mailbox_outbox::write_outbox; let each frame be consumed
-# (about a second) before writing the next
+# calls mvm_agentd::mailbox_outbox::write_outbox (or writes a dot-prefixed
+# temp file in /run/mvm/mailbox/outbox/ and renames it to a name that sorts
+# after every earlier one); no need to wait between frames
 ./target/debug/mvmctl machine mailbox recv n  # each plaintext once, then empty
 ./target/debug/mvmctl trust audit verify
 ./target/debug/mvmctl machine stop n --yes    # no mvm-mailbox process remains
@@ -619,8 +621,8 @@ All witnesses are in the dev profile and manual.
 - Late frames: the host re-dials every 100 ms for about 30 s, then every 2 s
   for the VM's life, so a late frame is delivered. Firecracker witnessed this;
   HVF has not been re-witnessed.
-- Single-file outbox: a burst loses frames (see above), and a full queue of 64
-  drops newer messages. Neither is a delivery guarantee.
+- A full host queue of 64 drops newer messages, and a full spool of 256 refuses
+  the writer. Neither is a delivery guarantee.
 - Multi-message delivery is Firecracker-witnessed only; HVF delivered one
   message per VM when last run.
 - `build_config` still names the per-port socket and the Firecracker mux path

@@ -789,7 +789,8 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
     let (node, channel) = channel_with_one_node();
     let ops = [MailboxOperation::Send, MailboxOperation::Receive];
     let outbox = node.home.path().join("outbox");
-    std::fs::write(&outbox, outbox_message().encode()).unwrap();
+    std::fs::create_dir(&outbox).unwrap();
+    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
     let per_port = node.home.path().join("port.sock");
     let socket = node.home.path().join("granted.sock");
     let absent_mux = node.home.path().join("absent-mux");
@@ -937,7 +938,8 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
     let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
     let keys = derive_launch_keys(dir.path(), &grant).unwrap();
     let outbox = dir.path().join("outbox");
-    std::fs::write(&outbox, outbox_message().encode()).unwrap();
+    std::fs::create_dir(&outbox).unwrap();
+    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
     let guest = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox)
@@ -1148,7 +1150,8 @@ fn served_mailbox_process(dir: &std::path::Path) -> (KillOnDrop, std::path::Path
     );
 
     let outbox = dir.join("outbox");
-    std::fs::write(&outbox, outbox_message().encode()).unwrap();
+    std::fs::create_dir(&outbox).unwrap();
+    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
     let mut process = spawn_mailbox_process(&wire);
     let mut stream = process.accept(&listener);
     assert_eq!(
