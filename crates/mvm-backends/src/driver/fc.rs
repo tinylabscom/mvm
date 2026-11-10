@@ -1029,6 +1029,9 @@ impl VmmDriver for FcDriver {
             // GPU remoting rides the multiplexed vsock device; the
             // guest-dial bridge lands the GPU port on its host UDS.
             gpu: true,
+            // The host reaches any guest port through the vsock mux's
+            // `CONNECT` handshake.
+            guest_mailbox: true,
             tap_networking: false,
             no_routable_guest_nic: true,
             host_vsock_proxy: true,

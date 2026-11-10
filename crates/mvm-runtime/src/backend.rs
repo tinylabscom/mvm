@@ -1183,6 +1183,25 @@ mod tests {
     }
 
     #[test]
+    fn only_backends_that_reach_the_mailbox_port_declare_it() {
+        for (name, declared) in [
+            ("firecracker", true),
+            ("hvf", true),
+            ("libkrun", false),
+            ("qemu", false),
+            ("wasm", false),
+        ] {
+            assert_eq!(
+                AnyBackend::from_hypervisor(name)
+                    .capabilities()
+                    .guest_mailbox,
+                declared,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn test_firecracker_capabilities() {
         let backend = fc_runner();
         let caps = backend.capabilities();

@@ -458,6 +458,13 @@ pub struct VmCapabilities {
     /// vsock for the shim to ride.
     #[serde(default)]
     pub gpu: bool,
+    /// Backend can reach a guest listener on the dedicated mailbox port from
+    /// a host process: either it bridges a host-dialed `Mailbox` port to the
+    /// per-port socket the launch names, or the host reaches it through the
+    /// VMM's own vsock mux. A launch whose plan grants a mailbox is refused,
+    /// before boot, on a backend that does not declare this.
+    #[serde(default)]
+    pub guest_mailbox: bool,
     /// Which resource dimensions this backend can actually bound. Declared
     /// separately from what a caller requests so a refusal can name the gap.
     #[serde(default)]
