@@ -14,7 +14,16 @@
 #
 #   MVMCTL       the mvmctl to drive (default: mvmctl on PATH)
 #   HYPERVISOR   passed as --hypervisor when set (firecracker, hvf)
+#   BUILDER      passed as --builder when set (hvf, firecracker, qemu, libkrun)
 #   MVM_HOME     default: a new empty directory, removed on exit
+#   MVM_FIRECRACKER_BIN, MVM_MAILBOX_PATH
+#                read by mvmctl itself; set them to point a source build at
+#                its helper binaries. Leave them unset to test an install.
+#
+# Messages are sent one at a time, each read before the next is written. A
+# back-to-back burst is a separate known gap, being fixed by the outbox spool
+# change (#5295); when that lands the frame layout changes, and write_frame is
+# the only place that knows it.
 set -euo pipefail
 
 MVMCTL="${MVMCTL:-mvmctl}"
@@ -25,16 +34,25 @@ CONTROL="mbx-witness-ungranted-$$"
 FIRST="witness-message-one"
 SECOND="witness-message-two"
 hyp=(); [ -z "${HYPERVISOR:-}" ] || hyp=(--hypervisor "$HYPERVISOR")
+bld=(); [ -z "${BUILDER:-}" ] || bld=(--builder "$BUILDER")
 
 own_home=""
 if [ -z "${MVM_HOME:-}" ]; then
   own_home="$(mktemp -d)"; export MVM_HOME="$own_home"
 fi
-mvm() { "$MVMCTL" "$@"; }
+errlog="$(mktemp)"
+# Every mvmctl call logs its stderr, so the exit trap can tell whether the
+# install asked the user to run bootstrap.
+mvm() { "$MVMCTL" ${bld[@]+"${bld[@]}"} "$@" 2> >(tee -a "$errlog" >&2); }
 say() { echo "PASS $*"; }
 fail() { echo "FAIL $*" >&2; exit 1; }
 
 cleanup() {
+  local status=$?
+  if [ "$status" -ne 0 ] && grep -q 'mvmctl bootstrap' "$errlog"; then
+    echo "FINDING: the install asked for 'mvmctl bootstrap'. A release must run with no bootstrap step." >&2
+  fi
+  rm -f "$errlog"
   for vm in "$NAME" "$CONTROL"; do mvm machine stop "$vm" --yes >/dev/null 2>&1 || true; done
   for vm in "$NAME" "$CONTROL"; do mvm machine rm "$vm" --yes >/dev/null 2>&1 || true; done
   [ -z "$own_home" ] || rm -rf "$own_home"
@@ -72,7 +90,7 @@ MAILBOX_ID="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 
 echo "mvmctl: $(mvm --version)"
 mvm image pull "$IMAGE" >/dev/null
-mvm machine run -d --image "$IMAGE" --mailbox "$MAILBOX_ID" "${hyp[@]}" --name "$NAME" -- sleep 900 >/dev/null
+mvm machine run -d --image "$IMAGE" --mailbox "$MAILBOX_ID" ${hyp[@]+"${hyp[@]}"} --name "$NAME" -- sleep 900 >/dev/null
 wait_for "the guest to take commands" mvm machine exec "$NAME" -- true
 say "granted guest booted from an install with no bootstrap"
 
@@ -109,7 +127,7 @@ mvm machine stop "$NAME" --yes >/dev/null
 wait_for "the mailbox process to exit" sh -c "! kill -0 $pid"
 say "stopping the machine stopped its mailbox process"
 
-mvm machine run -d --image "$IMAGE" "${hyp[@]}" --name "$CONTROL" -- sleep 900 >/dev/null
+mvm machine run -d --image "$IMAGE" ${hyp[@]+"${hyp[@]}"} --name "$CONTROL" -- sleep 900 >/dev/null
 wait_for "the control guest to take commands" mvm machine exec "$CONTROL" -- true
 mvm machine exec "$CONTROL" -- test ! -e /run/mvm/mailbox || fail "an ungranted guest has a mailbox directory"
 ! mvm machine exec "$CONTROL" -- grep -q 'mvm.mailbox=1' /proc/cmdline || fail "an ungranted guest carries the token"

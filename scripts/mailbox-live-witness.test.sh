@@ -17,6 +17,7 @@ case "$1 $2" in
   "--version "*) echo "mvmctl fake" ;;
   "image pull") ;;
   "machine run")
+    if [ "$mode" = needs-bootstrap ]; then echo "Error: runtime not prepared; run \`mvmctl bootstrap\` first" >&2; exit 1; fi
     shift 2; name=""; granted=no
     while [ $# -gt 0 ]; do
       case "$1" in --name) name="$2"; shift ;; --mailbox) granted=yes ;; esac; shift
@@ -65,6 +66,8 @@ grep -q '^WITNESS_RESULT=pass$' <<<"${out}" || fail "no pass line: ${out}"
 run no-token >/dev/null && fail "a guest without the token passed"
 run no-queue >/dev/null && fail "a run where nothing arrives passed"
 run leaks-body >/dev/null && fail "a body in the audit log passed"
+out="$(run needs-bootstrap)" && fail "an install that needs bootstrap passed"
+grep -q "^FINDING: the install asked for 'mvmctl bootstrap'" <<<"${out}" || fail "no bootstrap finding: ${out}"
 
 # The frame builder below must stay the one the script runs in the guest.
 # shellcheck disable=SC2016  # a literal fragment, deliberately unexpanded
