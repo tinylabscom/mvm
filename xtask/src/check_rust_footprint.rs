@@ -35,10 +35,10 @@ use std::process::Command;
 use crate::rust_source::{CommentSyntax, blank_comments};
 
 /// Ceiling on total SLOC, all categories. Raised for durable bundle-use
-/// custody and archive-only install/launch regressions (#5179).
-const MAX_TOTAL_SLOC: usize = 975_800;
-/// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_245_700;
+/// custody and archive-only install/launch regressions.
+const MAX_TOTAL_SLOC: usize = 976_200;
+/// Ceiling on total physical lines, all categories, including the retention module.
+const MAX_TOTAL_PHYSICAL: usize = 1_246_100;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 
