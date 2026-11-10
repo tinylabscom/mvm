@@ -34,7 +34,7 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// The composable-run candidate measures 979,909 SLOC / 1,250,438 physical
+// The composable-run candidate measures 979,961 SLOC / 1,250,494 physical
 // lines. This single bounded increase covers its typed local evidence,
 // admission rechecks, CLI path and tests; it is not a rolling budget.
 /// Ceiling on total SLOC, all categories.

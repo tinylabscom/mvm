@@ -204,7 +204,10 @@ fn verify_cached_bundle(path: &Path, lock: &[u8]) -> Result<()> {
     );
     let signer = HostBundleSigner::load()?;
     let id = signer.key_id();
-    let release = FsTrustStore::default_path()?;
+    let release = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
+        FsTrustStore::default_path()?,
+        path,
+    );
     let trust = LocalBundleTrustStore::new(release, id.clone(), signer.verifying_key());
     let verified = verify_bundle_file(path, &trust)?;
     ensure!(

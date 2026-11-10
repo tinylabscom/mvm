@@ -173,12 +173,15 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
+      - name: Select reviewed test-only Linux source
+        id: test-images-ref
+        run: echo "ref=$(cat tests/fixtures/composable-images-source.ref)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v6
         with:
           repository: tinylabscom/mvm-images
-          ref: 8c947dc9ac15741e10b627540dbd2641259ab8c3
+          ref: ${{ steps.test-images-ref.outputs.ref }}
           path: mvm-images
-      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: sigstore/cosign-installer@v3
       - name: Read an authored value in a QEMU guest from a signed-input composition
