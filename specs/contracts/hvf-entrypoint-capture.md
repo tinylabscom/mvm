@@ -19,6 +19,9 @@ The inspected MVM source baseline is
   obtain a caller-local `EntrypointSink::for_vm`. The current
   `CaptureReport.recorded` samples whether that local capture exists at call
   start; it is not a per-frame receipt or durability barrier.
+- The existing entrypoint event route records fd-3 control headers as
+  `StreamKind::Trace` when a caller-local broker is present. This proposal
+  does not convert control headers or their payloads into mailbox messages.
 - [`StreamPlane::attach`](../../crates/mvm-hostd/src/stream/plane.rs)
   deliberately skips `supervisor_owned` capture, even when the supervisor
   socket is absent. Starting a second writer is not a repair.
@@ -47,9 +50,12 @@ start/dispatch verb to recovery or relaxes those contracts' activation gates.
 
 Keep execution and the authenticated guest channel where the admitted call
 already owns them. Send a separate, run-authorized typed capture copy from
-`mvm-client` to the existing supervisor's `CaptureOwner`. Both existing dispatch
-paths need the same capture semantics; switching to owned dispatch alone does
-not supply this connection.
+`mvm-client` to the existing supervisor's `CaptureOwner`. The first positive
+producer is limited to **owned HVF entrypoint calls** through the original
+authenticated native channel. Ordinary name-resolved and session dispatch
+receive no new producer, writer, fallback or positive recorded-copy claim from
+this proposal; their existing behavior is unchanged. Any later path needs its
+own reviewed authorization under its original execution custody.
 
 The owner is the only redaction, sequence/chain, persistence and fan-out seam.
 Studio continues to call typed `mvm-client` operations through Tauri and reads
@@ -61,10 +67,20 @@ dispatch and cancellation merely to connect recording; that broader change is
 not recommended. A caller-local broker, console scrape, raw-byte relay into
 history, or mailbox message republished as output is rejected.
 
+Typed workload `result`/`error` messages belong to the separately authorized
+[mailbox reporting design](https://github.com/tinylabscom/mvm/issues/5260),
+not this capture path. Stdout/stderr remain diagnostics, never automatically
+published as application results. Mailbox destination acceptance, delivery,
+consumer ACK and publication verdict do not follow from an entrypoint frame,
+fd-3 control header, guest exit or capture receipt. Conversely, a mailbox
+receipt does not prove the protected stream was captured or durably readable.
+The mailbox work may evolve independently; this contract adds no mailbox
+grant, envelope, key, recipient or storage dependency to HVF capture.
+
 ## Required producer authority
 
 The receiving owner must authorize a producer against independently retained
-context for the exact admitted boot, native generation and entrypoint call:
+context for the exact owned HVF boot, native generation and entrypoint call:
 
 - controlling principal/enrollment and tenant;
 - actual admitted plan/effective configuration, not caller-declared hashes;
@@ -96,8 +112,12 @@ explicitly unrecorded; it must not silently discover name-only write access.
 1. Accept only bounded typed stdout/stderr frames for the authorized call.
    Derive `Entrypoint` provenance from that admitted operation; do not accept
    arbitrary source labels or treat console's merged bytes as stderr.
-   Any permitted terminal/control record needs its own closed schema and must
-   remain distinguishable from host exit and execution-completion evidence.
+   The existing fd-3 control/Trace route is not a mailbox transport and is
+   not included in this first cross-process producer. Its existing observer
+   behavior remains unchanged; the first producer does not claim parity for
+   control records or silently turn them into application results. Any later
+   capture of control headers needs its own closed, bounded schema, with
+   payload, host-exit and execution-completion authority excluded.
 2. Preserve the caller's returned stdout/stderr byte for byte. Redact only
    inside the protected owner before hashing, persistence or follower fan-out.
    Report masking rule names, withholding and loss without returning raw
@@ -111,11 +131,12 @@ explicitly unrecorded; it must not silently discover name-only write access.
    admitted live-only retention and verified durable readback. Owner acceptance
    does not prove disk persistence or successful sealing.
 5. The current boolean alone cannot express partial acceptance or mid-call
-   owner loss. Review the typed `mvm-client` report/compatibility change before
-   upgrading its meaning. Do not synthesize `recorded = true` from connection
-   success, returned bytes, guest exit, queue admission or a fixture. A client
-   claiming a complete recorded call must account for every output frame;
-   uncertainty is explicit rather than a clean report.
+   owner loss. Review the typed `mvm-client` report change for the owned path
+   before upgrading its meaning; no new legacy/name-resolved producer or
+   compatibility path is required. Do not synthesize `recorded = true` from
+   connection success, returned bytes, guest exit, queue admission or a
+   fixture. A client claiming a complete recorded call must account for every
+   output frame; uncertainty is explicit rather than a clean report.
 
 The chain attests to the protected, possibly redacted host record. It is not
 off-host cryptographic proof that arbitrary bytes supplied by a host producer
@@ -131,8 +152,13 @@ Zero never means unlimited.
 
 - No follower or storage wait can block guest output indefinitely. Capture
   pressure sheds with explicit byte/frame loss, without killing or throttling
-  execution to satisfy recording. Cancellation/control cannot queue behind
-  output. This does not weaken independently admitted execution limits.
+  execution merely to satisfy recording. Cancellation/control cannot queue
+  behind output. A full recorder queue is a capture loss, not an execution
+  output-limit event. If the cold owner's separately proposed 16 MiB
+  stdout/stderr qualification bound is approved and activated, count guest
+  output bytes at the execution boundary independently of recorder admission:
+  exceeding that bound requests cancellation even when capture sheds bytes.
+  This proposal neither enables nor relaxes that owner qualification profile.
 - Reject oversized, malformed, unsupported, wrong-run, stale and replayed
   traffic before broker mutation. Per-call frame order and broker sequence
   remain authoritative; cross-source ordering is still best-effort host
@@ -174,7 +200,7 @@ reviewed run-authorized producer.
 
 | Studio use case | Required test before claiming support |
 | --- | --- |
-| Show both output channels for an actual call | Original dispatch to protected owner to public reader; separate stdout/stderr, one record per accepted frame, correct live provenance; no invented durable source fields. Exercise ordinary and owned paths where authorized. |
+| Show both output channels for an actual owned HVF call | Original owned dispatch to protected owner to public reader; separate stdout/stderr, one record per accepted frame, correct live provenance; no invented durable source fields. Ordinary name-resolved/session dispatch has no new producer in this slice. |
 | Separate returned bytes from the protected copy | Real owner masks/withholds under admitted policy; caller bytes unchanged; owner-confirmed divergence reaches `mvm-client`; no unredacted follower or persisted copy. |
 | Refuse unrelated/stale producers | Real transport refuses absent/wrong principal, tenant, plan, owner, native generation, capture run or call; forwarded/replayed proofs and stale frames cause no append or sequence consumption. |
 | Stay responsive and report incomplete capture | Saturated queue, slow reader, blocked storage, malformed/oversized frames, disconnect and owner death; bounded waits and memory, execution/control remains responsive, losses/unconfirmed acceptance are visible. |
