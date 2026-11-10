@@ -5,7 +5,9 @@ use mvm_core::checkpoint::ContentBlob;
 
 use mvm_core::config::{ARCH, FC_CI_ASSETS_VERSION, fc_version};
 use mvm_vmm::host::config::*;
-use mvm_vmm::host::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible};
+#[cfg(not(target_os = "linux"))]
+use mvm_vmm::host::shell::run_in_vm_stdout;
+use mvm_vmm::host::shell::{run_in_vm, run_in_vm_visible};
 use mvm_vmm::host::ui;
 
 /// Check if Firecracker is installed on the Linux host.
