@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 use mvm_core::packs::Sha256Hex;
-use mvm_core::registry_pack::{PackReference, local_input};
+use mvm_core::registry_pack::{PackPin, PackReference, local_input};
 use serde::Deserialize;
 
 pub const PACK_REGISTRY_ENV: &str = "MVM_PACK_REGISTRY";
@@ -165,6 +165,49 @@ pub fn resolve_version_for_arch(
 ) -> Result<PackReference> {
     resolve_matching(entry, requested, |version| version.runs_on(host_arch))
         .or_else(|_| resolve_version(entry, requested))
+}
+
+/// Resolve a build-only runtime to an exact version and manifest digest for one guest arch.
+///
+/// Unlike display-oriented discovery, production resolution never falls back to
+/// another architecture or an entry whose architecture is absent. The signed
+/// manifest must independently confirm the returned pin and guest architecture.
+pub fn resolve_runtime_layer_pin(
+    entry: &PackIndexEntry,
+    requested: &PackReference,
+    guest_arch: &str,
+) -> Result<PackPin> {
+    if requested.namespace() != "runtime"
+        || !matches!(guest_arch, "x86_64" | "aarch64")
+        || entry.namespace != requested.namespace()
+        || entry.name != requested.name()
+    {
+        bail!("runtime layer coordinate or guest architecture is invalid");
+    }
+    let eligible: Vec<_> = entry
+        .versions
+        .iter()
+        .filter(|version| version.guest_arch.as_deref() == Some(guest_arch))
+        .cloned()
+        .collect();
+    if eligible.is_empty() {
+        bail!("no runtime layer for {guest_arch} is advertised");
+    }
+    let selected = PackIndexEntry {
+        namespace: entry.namespace.clone(),
+        name: entry.name.clone(),
+        description: entry.description.clone(),
+        versions: eligible,
+    };
+    let reference = resolve_version(&selected, requested)?;
+    let digest = selected
+        .versions
+        .iter()
+        .find(|version| Some(version.version.as_str()) == reference.version().map(|v| v.as_str()))
+        .context("resolved runtime layer has no manifest digest")?
+        .manifest_sha256
+        .clone();
+    PackPin::new(reference, digest).context("invalid pinned runtime layer")
 }
 
 fn resolve_matching(
@@ -424,6 +467,40 @@ mod tests {
             resolve_version(&index[0], &request).unwrap().to_string(),
             "runtime/python@2.0.0"
         );
+    }
+
+    #[test]
+    fn production_runtime_resolution_requires_exact_arch_and_digest() {
+        let index = parse(&with_versions(serde_json::json!([
+            {"version":"1.2.0", "manifest_sha256":"a".repeat(64), "guest_arch":"x86_64"},
+            {"version":"1.3.0", "manifest_sha256":"b".repeat(64), "guest_arch":"aarch64"},
+            {"version":"9.0.0", "manifest_sha256":"c".repeat(64)}
+        ])))
+        .unwrap();
+        let entry = &index[0];
+        let request = "runtime/python".parse().unwrap();
+        let pin = resolve_runtime_layer_pin(entry, &request, "x86_64").unwrap();
+        assert_eq!(pin.reference().to_string(), "runtime/python@1.2.0");
+        assert_eq!(pin.manifest_sha256().as_str(), "a".repeat(64));
+        let arm = resolve_runtime_layer_pin(entry, &request, "aarch64").unwrap();
+        assert_eq!(arm.reference().to_string(), "runtime/python@1.3.0");
+        assert_eq!(arm.manifest_sha256().as_str(), "b".repeat(64));
+        for (requested, arch) in [
+            ("runtime/python@1.3.0", "x86_64"),
+            ("runtime/python@9.0.0", "aarch64"),
+            ("agent/python", "aarch64"),
+            ("runtime/python", "riscv64"),
+        ] {
+            assert!(
+                resolve_runtime_layer_pin(entry, &requested.parse().unwrap(), arch).is_err(),
+                "{requested} must not select {arch}"
+            );
+        }
+        let mut missing = entry.clone();
+        missing
+            .versions
+            .retain(|version| version.guest_arch.as_deref() != Some("aarch64"));
+        assert!(resolve_runtime_layer_pin(&missing, &request, "aarch64").is_err());
     }
 
     #[test]
