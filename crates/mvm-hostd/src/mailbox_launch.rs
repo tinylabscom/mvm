@@ -38,8 +38,33 @@ const SIGNER_PUBLIC: &str = "host-signer.pub";
 /// Optional operator override of the derived identities and capability,
 /// beside the host key.
 const TEMPLATE_FILE: &str = "mailbox-template.json";
-const DIAL_ATTEMPTS: u32 = 300;
-const DIAL_INTERVAL: Duration = Duration::from_millis(100);
+/// Dials at the fast cadence while the guest is coming up (about 30 s), then
+/// at the slow one for as long as the VM lives, so a workload that writes its
+/// outbox late is still forwarded without an idle VM being polled hard.
+const FAST_DIAL_ATTEMPTS: u32 = 300;
+const FAST_DIAL_INTERVAL: Duration = Duration::from_millis(100);
+const SLOW_DIAL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long to wait after the `attempt`th failed dial (0-based).
+fn dial_delay(attempt: u32, fast_attempts: u32) -> Duration {
+    if attempt < fast_attempts {
+        FAST_DIAL_INTERVAL
+    } else {
+        SLOW_DIAL_INTERVAL
+    }
+}
+
+/// Sleep `delay` in short slices so a stop is noticed promptly.
+fn sleep_unless_stopped(stop: &AtomicBool, delay: Duration) {
+    let deadline = std::time::Instant::now() + delay;
+    while !stop.load(Ordering::SeqCst) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(FAST_DIAL_INTERVAL));
+    }
+}
 
 /// What the host seals a guest's message under, apart from keys.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -335,19 +360,30 @@ pub struct ServePaths {
     pub firecracker_mux: PathBuf,
 }
 
-/// Dial the guest's mailbox port from its own thread, retrying for up to 30 s
-/// while the guest comes up, and serve it under `keys`. Returns at once.
+/// Dial the guest's mailbox port from its own thread and serve it under
+/// `keys`, retrying until the guest delivers a frame or the launch is dropped:
+/// every 100 ms for the first 30 s, every 2 s after. Returns at once.
 pub fn serve_derived(
     grant: MailboxGrant,
     keys: DerivedMailboxKeys,
     paths: ServePaths,
     limits: MailboxLimits,
 ) -> MailboxLaunch {
+    serve_derived_with(grant, keys, paths, limits, FAST_DIAL_ATTEMPTS)
+}
+
+fn serve_derived_with(
+    grant: MailboxGrant,
+    keys: DerivedMailboxKeys,
+    paths: ServePaths,
+    limits: MailboxLimits,
+    fast_attempts: u32,
+) -> MailboxLaunch {
     let stop = Arc::new(AtomicBool::new(false));
     let service = Arc::new(OnceLock::new());
     let (thread_stop, thread_service) = (stop.clone(), service.clone());
     std::thread::spawn(move || {
-        for _ in 0..DIAL_ATTEMPTS {
+        for attempt in 0.. {
             if thread_stop.load(Ordering::SeqCst) {
                 return;
             }
@@ -358,7 +394,7 @@ pub fn serve_derived(
                     let _ = thread_service.set(served);
                     return;
                 }
-                Err(_) => std::thread::sleep(DIAL_INTERVAL),
+                Err(_) => sleep_unless_stopped(&thread_stop, dial_delay(attempt, fast_attempts)),
             }
         }
     });
@@ -389,6 +425,73 @@ mod tests {
             authority_key: authority_key_for(dir, &mailbox).unwrap().to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
         }
+    }
+
+    #[test]
+    fn the_dial_schedule_is_fast_then_slow_and_bounded() {
+        assert_eq!(dial_delay(0, 300), FAST_DIAL_INTERVAL);
+        assert_eq!(dial_delay(299, 300), FAST_DIAL_INTERVAL);
+        assert_eq!(dial_delay(300, 300), SLOW_DIAL_INTERVAL);
+        assert_eq!(dial_delay(u32::MAX, 300), SLOW_DIAL_INTERVAL);
+    }
+
+    fn serve_paths(dir: &Path) -> ServePaths {
+        ServePaths {
+            socket: dir.join("mailbox.sock"),
+            guest_port: dir.join("port.sock"),
+            firecracker_mux: dir.join("absent-mux"),
+        }
+    }
+
+    #[test]
+    fn a_frame_written_after_the_fast_window_is_still_delivered() {
+        use std::os::unix::net::UnixListener;
+        let dir = keys_dir();
+        let grant = grant(dir.path(), [7; 32]);
+        let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+        // The guest port does not exist yet: every early dial fails, and with
+        // a zero-length fast window all of them are on the slow schedule.
+        let launch = serve_derived_with(grant, keys, serve_paths(dir.path()), LAUNCH_LIMITS, 0);
+        std::thread::sleep(Duration::from_millis(300));
+        let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
+        let outbox = dir.path().join("outbox");
+        std::fs::write(
+            &outbox,
+            mvm_core::mailbox::frame::OutboxMessage {
+                recipient: mvm_contract::protocol::mailbox::PrincipalId::from_bytes([7; 32]),
+                body: b"late".to_vec(),
+            }
+            .encode(),
+        )
+        .unwrap();
+        let guest = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while launch.receive().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "late frame not served"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        guest.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn dropping_the_launch_stops_an_idle_slow_dialer_promptly() {
+        let dir = keys_dir();
+        let grant = grant(dir.path(), [8; 32]);
+        let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+        let stop = {
+            let launch = serve_derived_with(grant, keys, serve_paths(dir.path()), LAUNCH_LIMITS, 0);
+            launch.stop.clone()
+        };
+        assert!(stop.load(Ordering::SeqCst));
+        let started = std::time::Instant::now();
+        sleep_unless_stopped(&stop, Duration::from_secs(60));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

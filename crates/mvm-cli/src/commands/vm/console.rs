@@ -294,7 +294,7 @@ pub(in crate::commands) fn run_declared_command(
     tool: &str,
     argv: Vec<String>,
     force: bool,
-) -> Result<()> {
+) -> Result<i32> {
     validate_vm_name(name).context("invalid VM name for declared tool")?;
     enforce_accessible_gate(name, force)?;
     let call = mvm_agentd::vsock::MediatedExecCall {
@@ -340,7 +340,7 @@ pub(in crate::commands) fn run_declared_command(
              {error:#}"
         ));
     }
-    finish_exec_terminal(terminal?)
+    terminal_exit_code(terminal?)
 }
 
 /// The guest's form of the endpoint's decision.
@@ -372,14 +372,6 @@ fn emit_exec_event(event: &mvm_agentd::vsock::ExecEvent) {
     }
 }
 
-fn finish_exec_terminal(terminal: mvm_agentd::vsock::ExecEvent) -> Result<()> {
-    let code = terminal_exit_code(terminal)?;
-    if code != 0 {
-        crate::observability::exit(code);
-    }
-    Ok(())
-}
-
 fn terminal_exit_code(terminal: mvm_agentd::vsock::ExecEvent) -> Result<i32> {
     match terminal {
         mvm_agentd::vsock::ExecEvent::Exit { code } => Ok(code),
@@ -408,23 +400,6 @@ fn command_with_env(cmd: &str, env: &[(String, String)]) -> String {
 /// never blocks console attach.
 fn touch_activity(name: &str) {
     mvm_client::touch_activity(name);
-}
-
-/// Open an interactive PTY console to a running VM.
-///
-/// Supports Firecracker (via UDS vsock), libkrun (via per-port Unix
-/// sockets), Apple Container (via direct vsock), and vsock proxy (via
-/// daemon Unix socket for cross-process access).
-pub(crate) fn console_pty_command(
-    name: &str,
-    command: String,
-    env: Vec<(String, String)>,
-) -> Result<()> {
-    let exit_code = run_pty_command_for_exit(name, command, env)?;
-    if exit_code != 0 {
-        crate::observability::exit(exit_code);
-    }
-    Ok(())
 }
 
 pub(crate) fn run_pty_command_for_exit(
