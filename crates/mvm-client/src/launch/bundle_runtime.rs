@@ -59,14 +59,15 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
     let verified = if let Some(host) = mvm_core::plan::bundle::existing_local_build_key()? {
         let id = key_id_from_pubkey(&host);
         let trust = LocalBundleTrustStore::new(release, id.clone(), host);
-        let verified = verify_bundle_file(&archive, &trust)?;
+        let verified =
+            verify_bundle_file(&archive, &trust).context("verifying bundle boot assets")?;
         ensure!(
             bundle_origin(&verified.manifest, &id, trust.release()) != BundleOrigin::Untrusted,
             "bundle boot assets refuse an unlabelled or foreign host build"
         );
         verified
     } else {
-        verify_bundle_file(&archive, &release)?
+        verify_bundle_file(&archive, &release).context("verifying bundle boot assets")?
     };
     let canonical = verified.manifest.members.iter().any(|member| {
         matches!(
@@ -1078,7 +1079,9 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(format!("{error:#}").contains("verifying bundle boot assets"));
+        let error = format!("{error:#}");
+        assert!(error.contains("verifying bundle boot assets"), "{error}");
+        assert!(error.contains("opening bundle archive"), "{error}");
         assert!(config.runtime_overlay_path.is_none());
         assert!(config.initrd_path.is_none());
         assert!(!home.path().join("cache").exists());

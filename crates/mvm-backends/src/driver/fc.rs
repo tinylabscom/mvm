@@ -1029,6 +1029,9 @@ impl VmmDriver for FcDriver {
             // GPU remoting rides the multiplexed vsock device; the
             // guest-dial bridge lands the GPU port on its host UDS.
             gpu: true,
+            // The host reaches any guest port through the vsock mux's
+            // `CONNECT` handshake.
+            guest_mailbox: true,
             tap_networking: false,
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
@@ -1666,6 +1669,12 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        // A Firecracker that resolves, so the launch reaches the retirement it
+        // is testing instead of refusing earlier for want of a binary.
+        env.set(
+            crate::fc::binary::OVERRIDE_ENV,
+            std::env::current_exe().unwrap(),
+        );
         std::fs::write(scratch.path().join("fc.pid"), b"11111").unwrap();
         std::fs::create_dir(scratch.path().join(".fc-pid")).unwrap();
         let _handler = mvm_vmm::host::shell::mock::install_handler(|_| {
@@ -1693,6 +1702,8 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path()).unwrap();
+        let named = std::env::current_exe().unwrap();
+        env.set(crate::fc::binary::OVERRIDE_ENV, &named);
         for publish_new_marker in [false, true] {
             std::fs::write(scratch.path().join("fc.pid"), b"11111").unwrap();
             std::fs::write(scratch.path().join(".fc-pid"), b"22222").unwrap();
@@ -1737,7 +1748,14 @@ mod tests {
             );
             let scripts = scripts.lock().unwrap();
             assert_eq!(scripts.len(), 2, "launch followed by cleanup");
-            assert!(scripts[0].contains("exec firecracker"));
+            assert!(
+                scripts[0].contains(&format!(
+                    "exec {}",
+                    mvm_vmm::host::shell::shell_quote(named.to_str().unwrap())
+                )),
+                "the launch must exec the Firecracker it resolved: {}",
+                scripts[0]
+            );
             assert!(scripts[1].contains("sudo kill"));
         }
     }

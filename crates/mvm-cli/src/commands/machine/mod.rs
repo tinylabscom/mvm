@@ -18,6 +18,7 @@ mod checkpoint;
 mod create_policy;
 pub(crate) mod lifecycle;
 mod list;
+mod mailbox;
 mod manifest_source;
 mod portable;
 pub(crate) mod prewarm;
@@ -61,9 +62,10 @@ use super::vm::{console, down};
 use crate::ui;
 use checkpoint::{ForkVmFullMachineInput, fork_vm_full_machine};
 use lifecycle::{
-    exec_machine, quarantine_machine, replace_machine, run_restart, run_start, shell_machine,
-    stop_machine,
+    quarantine_machine, replace_machine, run_exec_with_journal, run_restart, run_start,
+    shell_machine, stop_machine,
 };
+use mailbox::{MachineMailboxAction, recv_mailbox};
 use manifest_source::{absolutize_manifest_volume_spec, load_machine_manifest_source};
 #[cfg(test)]
 use receipt::verify_machine_start_receipt;
@@ -125,6 +127,9 @@ pub(in crate::commands) enum MachineAction {
     /// Authorize a quarantined workload's replacement under a fresh epoch
     #[command(display_order = 5)]
     Replace(MachineReplaceArgs),
+    /// Read messages a granted guest sent to its mailbox
+    #[command(display_order = 5, subcommand)]
+    Mailbox(MachineMailboxAction),
     /// Remove one or more persistent named machine specs (or --all)
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
@@ -202,6 +207,7 @@ impl MachineAction {
             | MachineAction::Stop(_)
             | MachineAction::Quarantine(_)
             | MachineAction::Replace(_)
+            | MachineAction::Mailbox(_)
             | MachineAction::Reconfigure(_)
             | MachineAction::Rm(_)
             | MachineAction::Ls(_)
@@ -898,6 +904,10 @@ pub(in crate::commands) struct MachineStartArgs {
     /// is up. Not a CLI flag — set programmatically by `run_persistent`.
     #[arg(skip)]
     pub has_ad_hoc_argv: bool,
+    /// The mailbox grant resolved from `machine run --mailbox`. Not a flag
+    /// here: `machine start` grants none.
+    #[arg(skip)]
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
 }
 
 /// CLI surface for `machine start`: one or more machine names plus the shared
@@ -950,6 +960,7 @@ impl MachineStartCmd {
             hypervisor: self.hypervisor.clone(),
             kernel_pin: self.kernel_pin.clone(),
             has_ad_hoc_argv: false,
+            mailbox: None,
         }
     }
 }
@@ -1539,19 +1550,13 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
         MachineAction::Start(start_cmd) => run_start(start_cmd),
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
-        MachineAction::Exec(exec_args) => {
-            let state_dir = config::machine_state_dir(&exec_args.name);
-            let _journal_lock = input_journal::lock(&state_dir)?;
-            let pending = input_journal::begin_exec(&state_dir, &exec_args.argv)?;
-            let outcome = exec_machine(cli, exec_args, cfg);
-            input_journal::finish_exec(&state_dir, pending, outcome.is_ok())?;
-            outcome
-        }
+        MachineAction::Exec(exec_args) => run_exec_with_journal(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
         MachineAction::Quarantine(args) => quarantine_machine(cli, args, cfg),
         MachineAction::Replace(args) => replace_machine(&args),
+        MachineAction::Mailbox(MachineMailboxAction::Recv { name }) => recv_mailbox(&name),
         MachineAction::Reconfigure(args) => run_reconfigure(args),
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
         MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),

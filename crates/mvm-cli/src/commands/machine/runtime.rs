@@ -113,7 +113,7 @@ fn run_persistent(
             "machine {name:?}: config changed ({changed}) — stopping the old instance and recreating it"
         );
     }
-    let start = start_args_for_run(&args, &name);
+    let start = start_args_with_grant(&args, &name)?;
     let booted = mvm_client::launch::detached::persist_and_boot(
         mvm_client::launch::detached::DetachedBoot {
             name: &name,
@@ -329,7 +329,19 @@ pub(crate) fn start_args_for_run(args: &MachineRunArgs, name: &str) -> MachineSt
         hypervisor: args.run.hypervisor.clone(),
         kernel_pin: args.kernel_pin.clone(),
         has_ad_hoc_argv: !args.run.argv.is_empty(),
+        mailbox: None,
     }
+}
+
+/// [`start_args_for_run`] carrying the run's mailbox grant, so a detached or
+/// named machine boots under the same grant a transient run would.
+pub(crate) fn start_args_with_grant(args: &MachineRunArgs, name: &str) -> Result<MachineStartArgs> {
+    let mut start = start_args_for_run(args, name);
+    start.mailbox = mvm_client::admission::mailbox_grant::resolve(
+        args.run.mailbox.as_deref(),
+        args.run.from_workload_ir.as_deref(),
+    )?;
+    Ok(start)
 }
 
 /// Resolve the post-start behaviour from the flags alone, so the choice is

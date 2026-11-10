@@ -1,8 +1,8 @@
 ---
-title: "OpenSSH 10.6p2: the SSH server MVM doesn't need"
-description: "OpenSSH's latest release works around a critical password-authentication bypass on some musl-based Linux systems. MVM removes SSH from workload management, but hosts and deliberately exposed services still need patching."
+title: "OpenSSH 10.6p2: a password that should never work"
+description: "An AI-assisted search found that an oversized password could unlock supposedly key-only SSH accounts on affected musl systems. How the bypass works, why it matters, and where MVM breaks the attack path."
 date: 2026-11-06
-shareHook: "OpenSSH patched a password-authentication bypass. MVM's workload control plane doesn't use SSH. Removing that login path helps—but it doesn't patch your host."
+shareHook: "A key-only account. A 300-byte password. A login that should never succeed. How an AI-assisted search exposed an SSH bypass—and why MVM doesn't need that login path."
 tags:
   - security
   - openssh
@@ -13,88 +13,119 @@ heroImage: /blog/openssh-10-6p2-no-ssh.svg
 heroAlt: "An Internet SSH login attempt has no default path into an MVM workload. The host manages the NIC-less guest over typed vsock RPC instead. Host SSH and explicitly published services remain separate patching responsibilities."
 ---
 
-An SSH authentication bypass matters because the service guarding the machine's front door can let someone through without the intended proof of identity. One way to reduce that risk is to harden the door. Another is not to install it where the workload doesn't need it.
+You create a deployment account, give it an SSH public key, and leave it without a usable password. The intention is straightforward: someone holding the private key can log in; someone guessing passwords cannot.
 
-[OpenSSH 10.6p2](https://www.openssh.org/releasenotes.html#10.6p2), released November 5, 2026, includes a critical security workaround for a password-authentication bypass affecting some Linux systems using musl libc with PAM disabled. MVM's workload-management path doesn't use SSH: the host talks to a guest agent over vsock, and workload guests have no network card.
+On an affected Alpine Linux server, that account could instead accept a password consisting of 300 `A` characters. No stolen key. No cracked hash. Just a password that should never have worked.
 
-That removes the normal SSH login path from the workload's attack surface. **It does not fix the underlying bug, patch the host, or make an SSH server you deliberately publish safe.**
+That is the failure addressed by [OpenSSH 10.6p2](https://www.openssh.org/releasenotes.html#10.6p2), released November 5, 2026. It is also a useful example of what AI-assisted security research changes: not the existence of subtle bugs, but the cost of searching the combinations in which they become exploitable.
 
-## What OpenSSH actually disclosed
+## AI found the combination, not a weakness in encryption
 
-The release notes are specific about both the impact and the scope:
+In his [disclosure](https://sshhole.com/), Özgün Kültekin of Wakefield describes building OpenSSH across different C libraries, authentication configurations, and password-storage arrangements. He reports using AI agent swarms to exercise about 17,600 unusual login tests: malformed hashes, broken accounts, oversized passwords. Most configurations agreed about which attempts to reject. One combination—musl libc without PAM—accepted attempts it should have refused.
 
-> This release contains a critical security workaround that affects Linux systems that use the musl libc and PAM disabled.
+The OpenSSH maintainers put that discovery in a wider context. Their release notes say they have seen security bugs identified by AI tools subsequently rediscovered by independent researchers:
 
-The security entry describes a password-authentication bypass exploitable through `sshd` on some Linux systems when built and run without PAM support. The OpenSSH team considers the root cause to be outside `sshd`, but says it can be exploited through the daemon and avoided there. They credit Özgün Kültekin of Wakefield for the report.
+> This suggests that adversaries who do not report bugs to OSS projects are likely to be able to discover these bugs too.
 
-That is narrower than “SSH authentication is broken everywhere.” The notes do not establish that every musl-based system is affected, do not describe a public-key authentication bypass, and do not assign a CVE identifier in this entry. This post does not infer an exploit mechanism or a complete affected-version range from that short disclosure.
+Their response is more frequent releases, so fixes reach users sooner. That is not evidence that this particular bug has been exploited in the wild. It is a warning against assuming that an obscure interaction will stay obscure.
 
-If you operate an affected server, apply OpenSSH 10.6p2 or your distribution's corresponding security update. Check the vendor advisory for your package's build configuration and backport status; an upstream version string alone is not a complete assessment.
+For an operator, the problem now has two parts: deploy fixes faster, and reduce the number of services whose next authentication bug could become a way into a workload.
 
-## MVM doesn't need an SSH server to manage a workload
+## How an error became a successful login
 
-A conventional VM often carries an SSH daemon so an operator can start a process, inspect its state, or debug a failed deployment. Even if the application doesn't need inbound network access, the management workflow does.
+Normally, an SSH password check does not compare the supplied password with a stored plaintext secret. It hashes the attempt using the account's stored hashing parameters and compares the result with the stored hash.
 
-MVM separates those concerns:
+An account intended for key-only access can have `*` in its password field instead. That is not a real password hash. No password should match it. Crucially, **an account with no usable password is not the same as a server with password authentication disabled**: the server may still accept password attempts, even though this account should reject every one.
 
-- **Workload management uses a guest agent, not `sshd`.** Health, status, and lifecycle requests travel over a typed vsock protocol. There is no SSH password check in that path.
-- **The guest has no NIC or routable guest IP.** It isn't a machine with port 22 hidden behind a firewall. There is no ordinary IP route to a guest SSH listener.
-- **Production control is not a general-purpose remote shell.** The sealed-production profile rejects development-only control requests such as arbitrary `Exec` and console operations. Profile checks and verb grants limit the guest-agent API.
-- **Application networking is declared separately.** Ingress and egress use a host-owned endpoint and authenticated FlowMux over vsock. An outbound grant does not implicitly publish an inbound service.
+On the affected non-PAM path, OpenSSH still performs a hashing operation when the account's field is too short to supply hashing parameters. It borrows those parameters from another account, a behavior introduced to reduce timing differences that could reveal which usernames exist.
 
-The [networking guide](/guides/networking/#no-ssh) documents the no-SSH design and the [vsock reference](/reference/vsock-messages/) describes the replacement protocols.
+Then two meanings of the same character collide. musl's password-hashing function, `crypt()`, returns `*` as an error indicator when the relevant hashing operation receives a password longer than 256 bytes. The target account's stored field is also `*`. The old comparison sees identical strings:
 
-For the ordinary workload-management path, the relevant distinction is simple: an attacker cannot bypass an SSH password check that the workflow never invokes.
+**Stored “no usable password” marker: `*`. Hashing error result: `*`. Comparison: equal.**
 
-## No NIC does not mean no reachable applications
+A failed hashing operation has become evidence of a correct password.
 
-This is the important exception.
+[Alpine's advisory](https://alpinelinux.org/posts/2026-11-05-openssh-password-authentication-bypass/) spells out the conditions: a reachable affected SSH server using musl without PAM, password authentication enabled, a target account with `*` as its password field, and another local account with a `$5$` or `$6$` password hash. In that configuration, a password between 257 and 1,024 bytes can produce a successful login. Alpine describes a single-connection attack that needs no guessing or retries.
 
-MVM can publish a guest service through a declared host listener. Traffic arrives at the host, crosses FlowMux over vsock, and reaches a specific loopback address and port inside the guest. That is how a NIC-less guest can serve an application.
+This does not break SSH encryption or forge a public-key signature. It goes around the key requirement by making a different authentication method incorrectly succeed.
 
-If you deliberately run an affected `sshd` in a custom workload and publish it through such a mapping, you have made the vulnerable service reachable. **FlowMux authorizes the connection; it does not repair SSH authentication or inspect away this bypass.** The same caution applies to any other explicitly arranged path to that daemon.
+## Why that is a big deal
 
-| Deployment | What the MVM boundary changes | What still needs attention |
-|---|---|---|
-| Standard workload management, with no SSH service published | Guest control does not depend on SSH authentication; there is no default inbound SSH route | Keep the guest agent, host, hypervisor, and workload dependencies updated |
-| An affected SSH daemon deliberately published from a guest | Exposure is limited to the declared ingress path, but that path still carries attacker input | Patch or remove the daemon and withdraw unnecessary ingress |
-| An affected SSH daemon on the host or separate administration infrastructure | The workload boundary does not protect that daemon | Apply the vendor update and review host access independently |
+The damage depends on the account that opens up. A deployment user might be able to modify application code or read configuration. A more privileged account can turn a login into control of the machine.
 
-The host case is especially consequential. MVM trusts the host operating system and hypervisor. A successful login to a privileged host account is not an incident the guest boundary is designed to contain. See the [threat-model limits](/security/matryoshka/#what-mvm-does-not-defend).
+Alpine gives a concrete example: affected official tiny-cloud images ship an `alpine` user with a `*` password field and passwordless `doas`, allowing that user to become root. Those images are not exploitable at first boot merely because the account exists. But adding a qualifying password hash elsewhere—for example, by setting a console password—can complete the vulnerable configuration. An administrator can expose a supposedly key-only account without changing that account at all.
 
-## If a deliberately exposed service is compromised
+That is what makes the bug more troubling than “someone chose a weak password.” The target need not have a password to steal. The failure comes from a composition of otherwise familiar choices: a minimal Linux distribution, non-PAM authentication, a key-only account, and an error convention in a library.
 
-Removing SSH from management prevents this particular exposure by default. Containment is a separate question for operators who add it back.
+The [OpenSSH fix](https://github.com/openssh/openssh-portable/commit/4353fdc43ef646c43a8dda7025cc1a898caf1482) adds a minimum stored-hash length check before accepting that comparison. The project calls it a workaround for a root cause outside `sshd`. For an affected operator, the immediate action is to install 10.6p2 or the distribution's backported fix **and restart the daemon**. Alpine also documents disabling password authentication and restarting as an interim mitigation.
 
-An attacker who obtains a session inside a workload can use whatever that account can access: process memory, readable files, writable mounts, application data, and admitted services. An authentication bypass does not automatically mean guest root, but the affected account's permissions matter.
+But after fixing this login path, it is worth asking why a workload needs the path at all.
 
-The microVM boundary and host-owned network gate are intended to keep that access from becoming unrestricted host or network access. Egress defaults to deny-all, and permitted destinations remain subject to host-side policy. A compromised process cannot add a network card or expand the signed plan just by opening a socket.
+## MVM removes the SSH entry point this attack needs
 
-That still leaves meaningful damage within the granted authority. Allowed destinations can be abused. Writable persistent data can be changed. Secrets manually placed in the guest may be exposed. Containment is not a reason to leave a vulnerable service running.
+Imagine that deployment account existed because you needed to start a worker, check whether it was healthy, and inspect a failed run. SSH provided a convenient way to do those jobs, so the VM carried an administrative login service alongside the application.
 
-## Faster disclosures favor smaller attack surfaces
+MVM keeps the jobs and removes that dependency.
 
-The release notes also explain why OpenSSH is making more frequent releases: bugs reported with AI assistance have sometimes been independently rediscovered, suggesting that adversaries can find them too. The team's response is to get fixes to users sooner.
+When the host asks an MVM guest for its status, the request goes to the guest agent over **vsock**: a host–guest communication channel, not an IP connection to an SSH daemon. The agent receives a typed request for a particular operation. It does not ask for a Unix account's password or hand back an SSH session.
 
-Operators still have to deploy those fixes. MVM's contribution is different: avoid making every workload depend on a remotely reachable administrative daemon in the first place. Typed control over vsock replaces that dependency; it does not eliminate the need to secure the replacement protocol.
+Now follow the attack from the outside. The attacker wants a reachable `sshd` to which they can submit that oversized password. A normal MVM workload has no network interface and no routable guest IP, and MVM does not require an SSH server for management. There is no default guest SSH endpoint waiting for the attempt. This isn't port 22 moved to a less obvious number; the management workflow no longer uses SSH.
 
-For this release, the operator checklist is:
+```mermaid
+flowchart TB
+  subgraph attack["The SSH attack path"]
+    direction TB
+    Attacker["Attacker sends oversized password"]
+    NoSSH["No default guest SSH endpoint"]
+    Stop["No password check to exploit"]
+    Attacker --> NoSSH
+    NoSSH --> Stop
+  end
 
-1. **Inventory SSH servers outside the workload boundary.** Include the host and any builder or administration machines. Check each vendor's affected-package guidance and apply the update where needed.
-2. **Review declared ingress.** Don't publish an SSH service merely to recreate a management path MVM already provides.
-3. **Replace affected custom guest images.** If a workload includes a vulnerable daemon, rebuild with the fixed package and relaunch. Restricting exposure is an interim measure, not the fix.
-4. **Investigate suspected access separately from patching.** Review account activity, writable data, and potentially exposed credentials. An update doesn't undo an earlier compromise.
+  subgraph management["MVM manages the workload instead"]
+    direction TB
+    Host["Host requests status"]
+    Agent["Guest agent"]
+    Policy["Profile and verb-grant checks"]
+    Status["Authorized status operation"]
+    Host -->|"Typed vsock RPC"| Agent
+    Agent --> Policy
+    Policy --> Status
+  end
 
-The lesson isn't that microVMs make OpenSSH bugs harmless. It's that workload management need not expose an SSH authentication boundary at all—and every service you choose to expose still needs its own security updates.
+  attack ~~~ management
+```
 
-## Evidence and scope
+*The SSH attempt has no entry point into the standard workload. Legitimate management uses a separate host–guest channel, not a password login. This assumes no custom SSH service has been published; host SSH is outside this diagram.*
 
-This is an architecture-backed analysis of the OpenSSH disclosure, not an exploit reproduction. We have not run this authentication bypass against an affected system or demonstrated containment of it inside MVM. The [security claims ledger](/security/ci-claims/) records the project's existing witnesses; those are not an end-to-end test of this OpenSSH issue.
+Nor is the replacement intended to be an unrestricted shell with a different transport. In the sealed-production profile, the guest agent rejects development-only requests such as arbitrary `Exec` and console operations. Profile checks and verb grants constrain the control API. That API still needs security review and updates, but this particular Unix-password comparison is not part of it.
 
-### Sources
+The [networking guide](/guides/networking/#no-ssh) and [vsock reference](/reference/vsock-messages/) describe those paths. The direct mitigation here is **removing the vulnerable login service from workload management**, not claiming that a microVM can recognize a malicious password.
+
+## Follow the network boundary one step further
+
+The worker may still need to call an API, and a web workload may still need to receive requests. No NIC does not mean no useful networking.
+
+For outbound traffic, the guest asks a host-owned endpoint to open a connection. FlowMux carries the request over vsock; the host checks the destination against the signed plan before opening the external socket. Egress defaults to deny-all. For inbound traffic, the operator explicitly declares a host listener and the guest-loopback service it will reach. Granting outbound access does not silently publish an inbound port.
+
+This separates two protections that are easy to blur together:
+
+| Attacker's next move | Where MVM changes the path |
+|---|---|
+| Submit the oversized password to a workload's administrative SSH service | Normal workload management uses the guest agent, not SSH, and exposes no default guest SSH route |
+| Try to use the replacement control API as a general-purpose shell | The sealed-production profile rejects arbitrary `Exec` and console requests; verb grants further limit operations |
+| After a guest compromise, connect to another machine | No guest NIC; the host-owned endpoint enforces the admitted egress policy |
+
+## A smaller attack surface for the next discovery
+
+As AI makes it easier to uncover overlooked interactions, keeping up cannot depend only on patching faster. It also means giving attackers fewer entry points to try. MVM lets operators manage workloads without making each one a remotely accessible SSH server: typed vsock requests handle management, production profiles narrow the available operations, and host-owned policy controls network access. For this bug, the benefit is concrete—the standard workload has no SSH login path through which to submit the malicious password. For the next discovery, the same design leaves fewer exposed services and more explicit limits on what a workload can reach.
+
+## Sources
 
 - [OpenSSH 10.6p2 release notes](https://www.openssh.org/releasenotes.html#10.6p2)
-- [Standalone OpenSSH 10.6p2 announcement](https://www.openssh.org/txt/release-10.6p2)
+- [Researcher's disclosure: mechanism and AI-assisted discovery](https://sshhole.com/)
+- [Alpine Linux advisory: affected configurations, cloud images, and remediation](https://alpinelinux.org/posts/2026-11-05-openssh-password-authentication-bypass/)
+- [OpenSSH authentication-bypass fix](https://github.com/openssh/openssh-portable/commit/4353fdc43ef646c43a8dda7025cc1a898caf1482)
 - [MVM networking: no SSH, declared ingress, and default-deny egress](/guides/networking/)
 - [MVM vsock message reference](/reference/vsock-messages/)
 - [MVM security architecture and trust boundaries](/security/matryoshka/)

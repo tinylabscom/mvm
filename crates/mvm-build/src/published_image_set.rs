@@ -530,6 +530,59 @@ impl PublishedImageSet {
         Ok(tar[0].sha256.clone())
     }
 
+    /// Fetch a signed production base's composition source, not a boot image.
+    ///
+    /// Historical sets lacking this input cannot silently fall back to
+    /// extracting ext4. The caller must still check the tar and seal the
+    /// assembled output before it becomes a bootable application.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing or ambiguous inputs, wrong schema and changed bytes.
+    pub fn fetch_workload_composition_tar(
+        &self,
+        arch: GuestArch,
+        profile: WorkloadImageProfile,
+        dest: &Path,
+    ) -> Result<Sha256Hex> {
+        anyhow::ensure!(
+            self.manifest.schema_version == mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION,
+            "composition tar requires a signed Linux-layer image set"
+        );
+        let members: Vec<_> = self
+            .manifest
+            .members
+            .iter()
+            .filter(|member| {
+                member.role == ImageSetRole::WorkloadRootfs(profile)
+                    && member.target == MemberTarget::Arch(arch)
+                    && member.build_mode.is_none()
+            })
+            .collect();
+        anyhow::ensure!(
+            members.len() == 1,
+            "expected one production base for {arch}"
+        );
+        let tar: Vec<_> = members[0]
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.format == mvm_core::image_set::ArtifactFormat::TarGz
+                    && artifact.name.as_str().ends_with(".tar.gz")
+            })
+            .collect();
+        anyhow::ensure!(
+            tar.len() == 1,
+            "expected one signed base composition tar for {arch}"
+        );
+        anyhow::ensure!(
+            tar[0].size > 0 && tar[0].size <= 2 * 1024 * 1024 * 1024,
+            "signed base composition tar exceeds its size bound"
+        );
+        self.fetch_artifact(tar[0], dest)?;
+        Ok(tar[0].sha256.clone())
+    }
+
     /// The `image-set/v*` release tag these members were published under.
     pub fn release_tag(&self) -> &ReleaseTag {
         &self.release_tag

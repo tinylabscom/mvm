@@ -46,12 +46,16 @@ pub mod env_hygiene;
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.
 pub mod exit_capture;
+/// Pure health-state reducer: fold probe results into a health state and
+/// decide restart/give-up actions. No I/O.
+/// The checked-in lock over the Firecracker VMM mvm ships and boots.
+/// Host-state only: only the host downloads or runs a Firecracker binary.
+#[cfg(feature = "host-state")]
+pub mod firecracker_lock;
 /// Shared guest loopback-egress helpers (proxy env-var injection for cooperative apps).
 pub mod guest_netd;
 /// The filename of the sidecar manifest that sits beside a built rootfs.
 pub mod guest_sidecar;
-/// Pure health-state reducer: fold probe results into a health state and
-/// decide restart/give-up actions. No I/O.
 pub mod health;
 /// Transport-independent host interface: contract, fail-closed preflight, local adapter.
 pub mod host_interface;

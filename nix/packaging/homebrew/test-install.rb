@@ -55,7 +55,7 @@ class Formula
 end
 
 load ARGV.fetch(0)
-names = %w[mvmctl mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-gpu-endpoint]
+names = %w[mvmctl mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-mailbox mvm-gpu-endpoint]
 names << "mvm-hvf-supervisor" if OS.mac?
 library = OS.mac? ? "libmvm_hostlib.dylib" : "libmvm_hostlib.so"
 payload = names + [library]
