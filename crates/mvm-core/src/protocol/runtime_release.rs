@@ -17,6 +17,16 @@ pub struct RuntimeReleaseProof {
     pub arch: GuestArch,
 }
 
+/// Untrusted PR-workflow runtime input. A release proof cannot stand in for it.
+#[cfg(feature = "pr-test-guest-runtime")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PrTestRuntimeProof {
+    pub input: RuntimeReleaseProof,
+    pub pull_request: u64,
+}
+
 /// Untrusted record of the artifacts selected for a launch. A checkpoint must
 /// authenticate this record and reverify its release and artifact bytes before
 /// using it; reading a metadata file does not create runtime authority.
@@ -67,6 +77,10 @@ pub enum RuntimeBindingProvenance {
         arch: GuestArch,
         archive_sha256: String,
     },
+    #[cfg(feature = "pr-test-guest-runtime")]
+    PrTest {
+        proof: PrTestRuntimeProof,
+    },
 }
 
 impl RuntimeLaunchBinding {
@@ -97,6 +111,10 @@ impl RuntimeLaunchBinding {
                 config.legacy_portable_runtime = Some(proof.clone());
                 config.legacy_bundle_runtime = None;
                 config.runtime_release_proof = None;
+                #[cfg(feature = "pr-test-guest-runtime")]
+                {
+                    config.pr_test_runtime_proof = None;
+                }
                 config.source_runtime_archive_sha256 = None;
                 config.unsigned_runtime_development = false;
                 config.bundle_boot_assets = None;
@@ -118,6 +136,10 @@ impl RuntimeLaunchBinding {
                 config.runtime_overlay_verity_path = None;
                 config.runtime_overlay_roothash = None;
                 config.runtime_release_proof = None;
+                #[cfg(feature = "pr-test-guest-runtime")]
+                {
+                    config.pr_test_runtime_proof = None;
+                }
                 config.unsigned_runtime_development = false;
                 config.source_runtime_archive_sha256 = None;
             }
@@ -138,10 +160,25 @@ impl CliRuntimeLaunchBinding {
         config.initrd_path = Some(self.initramfs_path.display().to_string());
         config.runtime_overlay_roothash = Some(self.overlay_roothash.clone());
         config.runtime_release_proof = self.release_proof().cloned();
-        config.unsigned_runtime_development = self.release_proof().is_none();
+        #[cfg(feature = "pr-test-guest-runtime")]
+        {
+            config.pr_test_runtime_proof = match &self.provenance {
+                RuntimeBindingProvenance::PrTest { proof } => Some(proof.clone()),
+                RuntimeBindingProvenance::Release { .. }
+                | RuntimeBindingProvenance::Source { .. } => None,
+            };
+        }
+        config.unsigned_runtime_development = match &self.provenance {
+            RuntimeBindingProvenance::Source { .. } => true,
+            RuntimeBindingProvenance::Release { .. } => false,
+            #[cfg(feature = "pr-test-guest-runtime")]
+            RuntimeBindingProvenance::PrTest { .. } => false,
+        };
         config.source_runtime_archive_sha256 = match &self.provenance {
             RuntimeBindingProvenance::Release { .. } => None,
             RuntimeBindingProvenance::Source { archive_sha256, .. } => Some(archive_sha256.clone()),
+            #[cfg(feature = "pr-test-guest-runtime")]
+            RuntimeBindingProvenance::PrTest { .. } => None,
         };
     }
 
@@ -149,6 +186,8 @@ impl CliRuntimeLaunchBinding {
         match &self.provenance {
             RuntimeBindingProvenance::Release { proof } => Some(proof),
             RuntimeBindingProvenance::Source { .. } => None,
+            #[cfg(feature = "pr-test-guest-runtime")]
+            RuntimeBindingProvenance::PrTest { .. } => None,
         }
     }
 
@@ -156,6 +195,8 @@ impl CliRuntimeLaunchBinding {
         match &self.provenance {
             RuntimeBindingProvenance::Release { proof } => &proof.version,
             RuntimeBindingProvenance::Source { version, .. } => version,
+            #[cfg(feature = "pr-test-guest-runtime")]
+            RuntimeBindingProvenance::PrTest { proof } => &proof.input.version,
         }
     }
 
@@ -163,6 +204,8 @@ impl CliRuntimeLaunchBinding {
         match &self.provenance {
             RuntimeBindingProvenance::Release { proof } => proof.arch,
             RuntimeBindingProvenance::Source { arch, .. } => *arch,
+            #[cfg(feature = "pr-test-guest-runtime")]
+            RuntimeBindingProvenance::PrTest { proof } => proof.input.arch,
         }
     }
 }
@@ -233,5 +276,46 @@ mod tests {
         assert_eq!(config.source_runtime_archive_sha256, Some("c".repeat(64)));
         wrapped.apply_to_config(&mut config);
         assert_eq!(config.source_runtime_archive_sha256, None);
+    }
+
+    #[cfg(feature = "pr-test-guest-runtime")]
+    #[test]
+    fn pr_test_proof_stays_distinct_from_release_and_rejects_claimed_verification() {
+        let proof = PrTestRuntimeProof {
+            input: RuntimeReleaseProof {
+                archive: "/pr/archive".into(),
+                checksum: "/pr/checksum".into(),
+                signature_bundle: "/pr/archive.bundle".into(),
+                archive_sha256: "a".repeat(64),
+                version: "1.2.3".into(),
+                arch: GuestArch::X86_64,
+            },
+            pull_request: 42,
+        };
+        let binding = RuntimeLaunchBinding::CliAssembly(CliRuntimeLaunchBinding {
+            provenance: RuntimeBindingProvenance::PrTest {
+                proof: proof.clone(),
+            },
+            overlay_path: "/pr/overlay".into(),
+            overlay_verity_path: "/pr/verity".into(),
+            initramfs_path: "/pr/initrd".into(),
+            overlay_roothash: "b".repeat(64),
+        });
+        let json = serde_json::to_value(&binding).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RuntimeLaunchBinding>(json.clone()).unwrap(),
+            binding
+        );
+        let mut forged = json.clone();
+        forged["provenance"]["proof"]["verified"] = true.into();
+        assert!(serde_json::from_value::<RuntimeLaunchBinding>(forged).is_err());
+        let mut impersonated = json;
+        impersonated["provenance"]["kind"] = "release".into();
+        assert!(serde_json::from_value::<RuntimeLaunchBinding>(impersonated).is_err());
+        let mut config = super::super::vm_backend::VmStartConfig::default();
+        binding.apply_to_config(&mut config);
+        assert_eq!(config.pr_test_runtime_proof, Some(proof));
+        assert!(config.runtime_release_proof.is_none());
+        assert!(!config.unsigned_runtime_development);
     }
 }

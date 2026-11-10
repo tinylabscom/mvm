@@ -579,6 +579,7 @@ template-registry-s3 = [
 # in-process) needs it turned on. `mvm-runtime` is named directly too since
 # this crate depends on it straight, not only through `mvm-cli`.
 test-support = ["mvm-cli/test-support", "mvm-runtime/test-support"]
+pr-test-guest-runtime = ["mvm-cli/pr-test-guest-runtime"]
 # Debug-only Apple Silicon warm-restore validation. The runtime additionally
 # requires a debug build on macOS/aarch64 before advertising the capability.
 hvf-live-validation = [

@@ -660,6 +660,10 @@ pub(crate) fn verify_assurance_guest_protocol(
         Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::Source(_)) => {
             anyhow::bail!("assurance requires a released runtime, not a source runtime");
         }
+        #[cfg(feature = "pr-test-guest-runtime")]
+        Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::PrTest(_)) => {
+            anyhow::bail!("assurance refuses PR test runtime provenance");
+        }
         Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::LegacyBundle(_))
         | Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::LegacyPortable(_)) => Ok(None),
         None => anyhow::bail!("assurance requires authenticated guest runtime provenance"),

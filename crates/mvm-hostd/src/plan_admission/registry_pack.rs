@@ -300,6 +300,12 @@ fn finalize_registry_images(
             VerifiedRegistryManifest::RuntimeLayer(_) => {
                 anyhow::bail!("a runtime layer cannot be used as a boot image");
             }
+            VerifiedRegistryManifest::ApplicationComponent(_) => {
+                anyhow::bail!("an application component cannot be used as a boot image");
+            }
+            VerifiedRegistryManifest::ComponentLayer(_) => {
+                anyhow::bail!("a runtime/tool component cannot be used as a boot image");
+            }
             VerifiedRegistryManifest::Application(_) => {
                 anyhow::ensure!(
                     !built,

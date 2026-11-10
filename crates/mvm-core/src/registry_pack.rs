@@ -1045,7 +1045,9 @@ fn validate_registry_pack_manifest(
 
 pub mod application;
 pub mod application_bundle;
+pub mod application_component;
 mod builtin_author_keys;
+pub mod component_layer;
 #[cfg(any(test, feature = "test-support"))]
 pub use builtin_author_keys::register_test_author_key;
 pub use builtin_author_keys::{
@@ -1054,8 +1056,9 @@ pub use builtin_author_keys::{
 mod dispatch;
 pub mod runtime_layer;
 pub use dispatch::{
-    AuthenticatedRegistryManifest, VerifiedRegistryApplication, VerifiedRegistryManifest,
-    VerifiedRegistryRuntimeLayer, adopt_registry_manifest, verify_registry_manifest,
+    AuthenticatedRegistryManifest, VerifiedRegistryApplication,
+    VerifiedRegistryApplicationComponent, VerifiedRegistryManifest, VerifiedRegistryRuntimeLayer,
+    adopt_registry_manifest, verify_registry_manifest,
 };
 
 pub(crate) fn verify_registry_manifest_with(

@@ -32,6 +32,8 @@ pub const GUEST_RPC_PROTOCOL_VERSION: u32 = mvm_agentd::vsock::PROTOCOL_VERSION;
 #[derive(Debug)]
 pub enum VerifiedLaunchRuntime {
     Release(VerifiedRuntimeManifest),
+    #[cfg(feature = "pr-test-guest-runtime")]
+    PrTest(VerifiedRuntimeManifest),
     Source(CheckedSourceRuntime),
     LegacyBundle(crate::legacy_bundle_runtime::VerifiedLegacyBundleRuntime),
     LegacyPortable(crate::legacy_portable_runtime::VerifiedLegacyPortableRuntime),
@@ -45,6 +47,8 @@ impl VerifiedLaunchRuntime {
     pub fn declaration(&self, arch: GuestArch) -> Result<&RuntimeAssembly> {
         match self {
             Self::Release(runtime) => Ok(runtime.declaration(arch)?),
+            #[cfg(feature = "pr-test-guest-runtime")]
+            Self::PrTest(runtime) => Ok(runtime.declaration(arch)?),
             Self::Source(runtime) => Ok(runtime.declaration(arch)?),
             Self::LegacyBundle(_) | Self::LegacyPortable(_) => {
                 bail!("a legacy runtime has no CLI runtime assembly")
@@ -59,6 +63,8 @@ impl VerifiedLaunchRuntime {
     ) -> Result<VerifiedRuntimeArtifacts> {
         match self {
             Self::Release(runtime) => Ok(runtime.snapshot_artifacts_in(selection, parent)?),
+            #[cfg(feature = "pr-test-guest-runtime")]
+            Self::PrTest(runtime) => Ok(runtime.snapshot_artifacts_in(selection, parent)?),
             Self::Source(runtime) => Ok(runtime.snapshot_artifacts_in(selection, parent)?),
             Self::LegacyBundle(_) | Self::LegacyPortable(_) => {
                 bail!("a legacy runtime has no CLI runtime assembly")
@@ -118,6 +124,26 @@ pub fn verify_runtime_for_claim(
     if checked.is_release() != parent_assembly.release_proof().is_some() {
         bail!("warm child cannot change its parent's runtime provenance tier");
     }
+    #[cfg(feature = "pr-test-guest-runtime")]
+    if matches!(checked, VerifiedLaunchRuntime::PrTest(_))
+        != matches!(
+            parent_assembly.provenance,
+            RuntimeBindingProvenance::PrTest { .. }
+        )
+    {
+        bail!("warm child cannot change PR test runtime provenance");
+    }
+    #[cfg(feature = "pr-test-guest-runtime")]
+    if let (Some(requested), RuntimeBindingProvenance::PrTest { proof: parent }) = (
+        config.pr_test_runtime_proof.as_ref(),
+        &parent_assembly.provenance,
+    ) {
+        anyhow::ensure!(
+            requested.pull_request == parent.pull_request
+                && requested.input.archive_sha256 == parent.input.archive_sha256,
+            "warm child requested a different PR test runtime"
+        );
+    }
     if let (
         VerifiedLaunchRuntime::Source(checked),
         RuntimeBindingProvenance::Source { archive_sha256, .. },
@@ -169,6 +195,14 @@ pub fn verify_runtime_binding(binding: &RuntimeLaunchBinding) -> Result<()> {
     let verified = match &binding.provenance {
         RuntimeBindingProvenance::Release { proof } => VerifiedLaunchRuntime::Release(
             verify_runtime_release_proof(proof, binding.version(), GuestArch::host())?,
+        ),
+        #[cfg(feature = "pr-test-guest-runtime")]
+        RuntimeBindingProvenance::PrTest { proof } => VerifiedLaunchRuntime::PrTest(
+            mvm_build::guest_runtime::evidence::verify_pr_test_runtime_proof(
+                proof,
+                binding.version(),
+                GuestArch::host(),
+            )?,
         ),
         RuntimeBindingProvenance::Source {
             version,
@@ -474,7 +508,13 @@ fn validate_generation_paths(binding: &CliRuntimeLaunchBinding) -> Result<PathBu
         }
         check_owner(&metadata)?;
     }
-    if let Some(proof) = binding.release_proof() {
+    let proof = binding.release_proof();
+    #[cfg(feature = "pr-test-guest-runtime")]
+    let proof = proof.or(match &binding.provenance {
+        RuntimeBindingProvenance::PrTest { proof } => Some(&proof.input),
+        RuntimeBindingProvenance::Release { .. } | RuntimeBindingProvenance::Source { .. } => None,
+    });
+    if let Some(proof) = proof {
         for (path, name) in [
             (&proof.archive, "archive"),
             (&proof.checksum, "checksum"),
@@ -511,6 +551,11 @@ pub fn verify_release_runtime_for_launch(
     minimum_protocol: u32,
 ) -> Result<VerifiedRuntimeManifest> {
     check_runtime_provenance(config)?;
+    #[cfg(feature = "pr-test-guest-runtime")]
+    anyhow::ensure!(
+        config.pr_test_runtime_proof.is_none(),
+        "PR test runtime cannot satisfy release runtime assurance"
+    );
     if config.unsigned_runtime_development
         || config.source_runtime_archive_sha256.is_some()
         || config.legacy_bundle_runtime.is_some()
@@ -569,12 +614,32 @@ fn verify_runtime_for_launch_at(
             version,
             GuestArch::host(),
         )?),
-        None => VerifiedLaunchRuntime::Source(checked_source(
-            version,
-            GuestArch::host(),
-            bound_home,
-            config.source_runtime_archive_sha256.as_deref(),
-        )?),
+        None => {
+            #[cfg(feature = "pr-test-guest-runtime")]
+            if let Some(proof) = &config.pr_test_runtime_proof {
+                VerifiedLaunchRuntime::PrTest(
+                    mvm_build::guest_runtime::evidence::verify_pr_test_runtime_proof(
+                        proof,
+                        version,
+                        GuestArch::host(),
+                    )?,
+                )
+            } else {
+                VerifiedLaunchRuntime::Source(checked_source(
+                    version,
+                    GuestArch::host(),
+                    bound_home,
+                    config.source_runtime_archive_sha256.as_deref(),
+                )?)
+            }
+            #[cfg(not(feature = "pr-test-guest-runtime"))]
+            VerifiedLaunchRuntime::Source(checked_source(
+                version,
+                GuestArch::host(),
+                bound_home,
+                config.source_runtime_archive_sha256.as_deref(),
+            )?)
+        }
     };
     let declaration = verified.declaration(GuestArch::host())?;
     if declaration.protocol_version < minimum_protocol
@@ -593,6 +658,8 @@ fn check_runtime_provenance(config: &VmStartConfig) -> Result<()> {
         config.runtime_release_proof.is_some(),
         config.legacy_bundle_runtime.is_some(),
         config.legacy_portable_runtime.is_some(),
+        #[cfg(feature = "pr-test-guest-runtime")]
+        config.pr_test_runtime_proof.is_some(),
     ]
     .into_iter()
     .filter(|present| *present)
@@ -609,6 +676,16 @@ fn check_runtime_provenance(config: &VmStartConfig) -> Result<()> {
 
 fn has_external_runtime(config: &VmStartConfig) -> bool {
     config.runtime_release_proof.is_some()
+        || {
+            #[cfg(feature = "pr-test-guest-runtime")]
+            {
+                config.pr_test_runtime_proof.is_some()
+            }
+            #[cfg(not(feature = "pr-test-guest-runtime"))]
+            {
+                false
+            }
+        }
         || config.source_runtime_archive_sha256.is_some()
         || config.runtime_overlay_path.is_some()
         || config.runtime_overlay_verity_path.is_some()
@@ -797,9 +874,24 @@ impl RuntimeLifecycleLease {
                 )?,
             );
         }
-        bound.unsigned_runtime_development = !verified.is_release();
+        #[cfg(feature = "pr-test-guest-runtime")]
+        if let VerifiedLaunchRuntime::PrTest(pr_test) = &verified {
+            let proof = config
+                .pr_test_runtime_proof
+                .as_ref()
+                .context("PR test proof missing")?;
+            bound.pr_test_runtime_proof =
+                Some(mvm_core::protocol::runtime_release::PrTestRuntimeProof {
+                    input: pr_test
+                        .retain_release_proof_in(&proof.input, artifacts.directory_path())?,
+                    pull_request: proof.pull_request,
+                });
+        }
+        bound.unsigned_runtime_development = matches!(verified, VerifiedLaunchRuntime::Source(_));
         bound.source_runtime_archive_sha256 = match &verified {
             VerifiedLaunchRuntime::Source(source) => Some(source.archive_sha256().to_owned()),
+            #[cfg(feature = "pr-test-guest-runtime")]
+            VerifiedLaunchRuntime::PrTest(_) => None,
             VerifiedLaunchRuntime::Release(_)
             | VerifiedLaunchRuntime::LegacyBundle(_)
             | VerifiedLaunchRuntime::LegacyPortable(_) => None,
@@ -809,9 +901,18 @@ impl RuntimeLifecycleLease {
             Some(artifacts.overlay_verity_path().display().to_string());
         bound.initrd_path = Some(artifacts.initramfs_path().display().to_string());
         let binding = artifacts.directory_path().join("launch.json");
+        let provenance = match &verified {
+            VerifiedLaunchRuntime::Release(_) => "release",
+            #[cfg(feature = "pr-test-guest-runtime")]
+            VerifiedLaunchRuntime::PrTest(_) => "pr_test",
+            VerifiedLaunchRuntime::Source(_) => "source",
+            VerifiedLaunchRuntime::LegacyBundle(_) | VerifiedLaunchRuntime::LegacyPortable(_) => {
+                unreachable!("legacy runtimes returned before CLI assembly")
+            }
+        };
         let record = serde_json::json!({
             "vm_name": config.name,
-            "provenance": if verified.is_release() { "release" } else { "source" },
+            "provenance": provenance,
             "archive_sha256": artifacts.archive_sha256(),
             "overlay_roothash": artifacts.declaration().overlay_roothash,
             "overlay": bound.runtime_overlay_path,

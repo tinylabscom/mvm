@@ -61,6 +61,14 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
         VerifiedRegistryManifest::Application(application) => {
             return inspect_application(&application, json, verify_only);
         }
+        VerifiedRegistryManifest::ApplicationComponent(_) => {
+            anyhow::bail!(
+                "portable application component inspection requires verified archive custody"
+            );
+        }
+        VerifiedRegistryManifest::ComponentLayer(_) => {
+            anyhow::bail!("runtime/tool component inspection requires verified archive custody");
+        }
         VerifiedRegistryManifest::RuntimeLayer(_) => {
             anyhow::bail!("runtime layer inspection requires verified archive custody");
         }

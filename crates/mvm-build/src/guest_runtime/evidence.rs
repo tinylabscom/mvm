@@ -349,12 +349,73 @@ pub fn verify_runtime_release_proof(
     Ok(verified)
 }
 
+/// Authenticate PR-only runtime bytes, without representing them as a release.
+#[cfg(feature = "pr-test-guest-runtime")]
+pub fn verify_pr_test_runtime_proof(
+    proof: &mvm_core::protocol::runtime_release::PrTestRuntimeProof,
+    expected_version: &str,
+    expected_arch: GuestArch,
+) -> Result<VerifiedRuntimeManifest, GuestRuntimeError> {
+    if !crate::artifact_acquisition::compiled_channel().permits_automatic_builds()
+        || proof.pull_request == 0
+        || proof.input.version != expected_version
+        || proof.input.arch != expected_arch
+        || !super::is_archive_digest(&proof.input.archive_sha256)
+    {
+        return Err(GuestRuntimeError::Cache(
+            "PR test runtime selection does not match this CLI".into(),
+        ));
+    }
+    let identity = format!(
+        "https://github.com/tinylabscom/mvm/.github/workflows/composable-python-layer-smoke.yml@refs/pull/{}/merge",
+        proof.pull_request
+    );
+    let verified = verify_archive_with_identities(
+        &proof.input.archive,
+        &proof.input.checksum,
+        &proof.input.signature_bundle,
+        expected_version,
+        expected_arch,
+        &[identity],
+        true,
+    )?;
+    if verified.archive_sha256() != proof.input.archive_sha256 {
+        return Err(GuestRuntimeError::Cache(
+            "PR test runtime archive digest changed".into(),
+        ));
+    }
+    verified
+        .declaration(expected_arch)?
+        .validate(expected_arch)?;
+    Ok(verified)
+}
+
 pub(super) fn verify_release_archive(
     archive: &Path,
     checksum: &Path,
     bundle: &Path,
     version: &str,
     arch: GuestArch,
+) -> Result<VerifiedRuntimeManifest, GuestRuntimeError> {
+    verify_archive_with_identities(
+        archive,
+        checksum,
+        bundle,
+        version,
+        arch,
+        &mvm_core::release_trust::accepted_release_identities(version),
+        false,
+    )
+}
+
+fn verify_archive_with_identities(
+    archive: &Path,
+    checksum: &Path,
+    bundle: &Path,
+    version: &str,
+    arch: GuestArch,
+    identities: &[String],
+    require_checksum_signature: bool,
 ) -> Result<VerifiedRuntimeManifest, GuestRuntimeError> {
     let asset = crate::guest_bins::guest_bins_archive_name(version);
     let bytes = std::fs::read(archive)?;
@@ -366,8 +427,17 @@ pub(super) fn verify_release_archive(
     // still verify; portable acquisition separately requires that fourth file.
     let checksum_signature = if checksum_bundle_present(&checksum_bundle)? {
         let signature = std::fs::read(&checksum_bundle)?;
-        verify_checksum_signature_bytes(&checksum_bytes, &signature, version)?;
+        verify_checksum_signature_bytes_for_identities(
+            &checksum_bytes,
+            &signature,
+            version,
+            identities,
+        )?;
         Some(signature)
+    } else if require_checksum_signature {
+        return Err(GuestRuntimeError::Cache(
+            "PR test runtime checksum signature is missing".into(),
+        ));
     } else {
         None
     };
@@ -385,7 +455,7 @@ pub(super) fn verify_release_archive(
         &bytes,
         &signature,
         &asset,
-        &mvm_core::release_trust::accepted_release_identities(version),
+        identities,
         mvm_core::release_trust::RELEASE_OIDC_ISSUER,
     )?;
     let mut snapshot = tempfile::NamedTempFile::new()?;
@@ -435,6 +505,20 @@ fn verify_checksum_signature_bytes(
     bundle: &[u8],
     version: &str,
 ) -> Result<(), GuestRuntimeError> {
+    verify_checksum_signature_bytes_for_identities(
+        checksum_bytes,
+        bundle,
+        version,
+        &mvm_core::release_trust::accepted_release_identities(version),
+    )
+}
+
+fn verify_checksum_signature_bytes_for_identities(
+    checksum_bytes: &[u8],
+    bundle: &[u8],
+    version: &str,
+    identities: &[String],
+) -> Result<(), GuestRuntimeError> {
     crate::release_signature::verify_release_archive_bytes(
         checksum_bytes,
         bundle,
@@ -442,7 +526,7 @@ fn verify_checksum_signature_bytes(
             "{}.sha256",
             crate::guest_bins::guest_bins_archive_name(version)
         ),
-        &mvm_core::release_trust::accepted_release_identities(version),
+        identities,
         mvm_core::release_trust::RELEASE_OIDC_ISSUER,
     )?;
     Ok(())
@@ -620,6 +704,131 @@ mod tests {
             },
         };
         (dir, verified)
+    }
+
+    #[cfg(all(feature = "pr-test-guest-runtime", not(feature = "release-channel")))]
+    #[test]
+    #[ignore = "requires a real keyless-signed archive and checksum from the PR smoke workflow"]
+    fn signed_pr_runtime_authenticates_exact_identity_and_refuses_tampering() {
+        use mvm_core::protocol::runtime_release::PrTestRuntimeProof;
+        let directory = PathBuf::from(
+            std::env::var_os("MVM_PR_TEST_RUNTIME_DIR").expect("PR smoke fixture directory"),
+        );
+        let pull_request: u64 = std::env::var("MVM_PR_TEST_PULL_REQUEST")
+            .expect("PR smoke fixture number")
+            .parse()
+            .expect("numeric PR number");
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::X86_64;
+        let asset = crate::guest_bins::guest_bins_archive_name(version);
+        let archive = directory.join(&asset);
+        let input = RuntimeReleaseProof {
+            archive: archive.clone(),
+            checksum: directory.join(format!("{asset}.sha256")),
+            signature_bundle: directory.join(format!("{asset}.bundle")),
+            archive_sha256: hex::encode(Sha256::digest(std::fs::read(&archive).unwrap())),
+            version: version.into(),
+            arch,
+        };
+        let mut proof = PrTestRuntimeProof {
+            input,
+            pull_request,
+        };
+        let verified = verify_pr_test_runtime_proof(&proof, version, arch)
+            .expect("exact GitHub PR workflow identity signs both archive and checksum");
+        assert_eq!(verified.archive_sha256(), proof.input.archive_sha256);
+        assert!(
+            verify_runtime_release_proof(&proof.input, version, arch).is_err(),
+            "PR workflow signature never impersonates release identity"
+        );
+        proof.pull_request += 1;
+        assert!(
+            verify_pr_test_runtime_proof(&proof, version, arch).is_err(),
+            "another PR identity cannot authorize the archive"
+        );
+        proof.pull_request -= 1;
+        let copy = tempfile::tempdir().unwrap();
+        for (source, name) in [
+            (&proof.input.archive, asset.as_str()),
+            (&proof.input.checksum, "checksum"),
+            (&proof.input.signature_bundle, "archive.bundle"),
+            (
+                &checksum_bundle_path(&proof.input.checksum),
+                "checksum.bundle",
+            ),
+        ] {
+            std::fs::copy(source, copy.path().join(name)).unwrap();
+        }
+        proof.input.archive = copy.path().join(&asset);
+        proof.input.checksum = copy.path().join("checksum");
+        proof.input.signature_bundle = copy.path().join("archive.bundle");
+        std::fs::write(&proof.input.archive, b"tampered").unwrap();
+        assert!(verify_pr_test_runtime_proof(&proof, version, arch).is_err());
+        std::fs::copy(&archive, &proof.input.archive).unwrap();
+        std::fs::write(&proof.input.checksum, b"tampered").unwrap();
+        assert!(verify_pr_test_runtime_proof(&proof, version, arch).is_err());
+    }
+
+    #[cfg(all(feature = "pr-test-guest-runtime", not(feature = "release-channel")))]
+    #[test]
+    fn pr_test_runtime_requires_nonzero_pr_and_signed_checksum() {
+        use mvm_core::protocol::runtime_release::PrTestRuntimeProof;
+        let directory = tempfile::tempdir().unwrap();
+        let version = "1.2.3";
+        let arch = GuestArch::X86_64;
+        let asset = crate::guest_bins::guest_bins_archive_name(version);
+        let archive = directory.path().join(&asset);
+        let checksum = directory.path().join(format!("{asset}.sha256"));
+        std::fs::write(&archive, b"unsigned archive").unwrap();
+        let digest = hex::encode(Sha256::digest(b"unsigned archive"));
+        std::fs::write(&checksum, format!("{digest}  {asset}\n")).unwrap();
+        let mut proof = PrTestRuntimeProof {
+            input: RuntimeReleaseProof {
+                archive,
+                checksum,
+                signature_bundle: directory.path().join(format!("{asset}.bundle")),
+                archive_sha256: digest,
+                version: version.into(),
+                arch,
+            },
+            pull_request: 0,
+        };
+        assert!(
+            verify_pr_test_runtime_proof(&proof, version, arch)
+                .unwrap_err()
+                .to_string()
+                .contains("selection")
+        );
+        proof.pull_request = 42;
+        assert!(
+            verify_pr_test_runtime_proof(&proof, version, arch)
+                .unwrap_err()
+                .to_string()
+                .contains("checksum signature")
+        );
+    }
+
+    #[cfg(all(feature = "pr-test-guest-runtime", feature = "release-channel"))]
+    #[test]
+    fn release_channel_refuses_pr_runtime_without_reading_input() {
+        let proof = mvm_core::protocol::runtime_release::PrTestRuntimeProof {
+            input: RuntimeReleaseProof {
+                archive: "/missing/pr/archive".into(),
+                checksum: "/missing/pr/checksum".into(),
+                signature_bundle: "/missing/pr/bundle".into(),
+                archive_sha256: "a".repeat(64),
+                version: "1.2.3".into(),
+                arch: GuestArch::host(),
+            },
+            pull_request: 42,
+        };
+        assert!(
+            verify_pr_test_runtime_proof(&proof, "1.2.3", GuestArch::host())
+                .unwrap_err()
+                .to_string()
+                .contains("PR test runtime selection"),
+            "a release-channel build cannot opt into PR-test runtime evidence"
+        );
     }
 
     fn selection<'a>(paths: &'a [PathBuf; 3], root: &'a str) -> RuntimeArtifactSelection<'a> {

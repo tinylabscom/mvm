@@ -164,6 +164,7 @@ pub fn export_builder_result(
             boot_assets: None,
             cli_boot_assets: None,
             canonical_linux_proof: None,
+            local_development_base_proof: None,
             supplemental_artifacts: &[],
             local_composition: None,
             out: &request.bundle_out,

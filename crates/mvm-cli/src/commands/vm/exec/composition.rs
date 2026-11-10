@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use mvm_build::published_image_set::PublishedImageSet;
-use mvm_build::runtime_layer::compose_authored_candidate;
+use mvm_build::runtime_layer::{
+    ResolvedComposableLock, compose_authored_candidate, compose_local_authored_candidate,
+};
 use mvm_client::bundle::{BundleExportInputs, BundleSigner, HostBundleSigner, PostureInputs};
 use mvm_client::portable_boot_assets::PreparedPortableBootAssets;
 use mvm_client::registry_application::discovery::resolve_runtime_layer_pin;
@@ -39,7 +41,25 @@ impl PreparedComposition {
     }
 }
 
-pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
+pub(super) enum Base<'a> {
+    SignedDefault,
+    Local {
+        manifest: &'a Path,
+        kernel: &'a Path,
+        tar: &'a Path,
+        #[cfg(feature = "pr-test-guest-runtime")]
+        pr_test: Option<PrTestInput<'a>>,
+    },
+}
+
+#[cfg(feature = "pr-test-guest-runtime")]
+#[derive(Clone, Copy)]
+pub(super) struct PrTestInput<'a> {
+    pub directory: &'a Path,
+    pub pull_request: u64,
+}
+
+pub(super) fn prepare(path: &Path, base: Base<'_>) -> Result<PreparedComposition> {
     let metadata = std::fs::symlink_metadata(path)?;
     ensure!(
         metadata.file_type().is_file() && metadata.len() <= 64 * 1024,
@@ -79,9 +99,55 @@ pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
             })
             .collect::<Result<_>>()?
     };
-    let images = PublishedImageSet::acquire_workload()?;
     let profile = WorkloadImageProfile::DefaultTenant;
-    let tree = compose_authored_candidate(&spec, &images, profile, &ordered)?;
+    #[cfg(feature = "pr-test-guest-runtime")]
+    let pr_test = match &base {
+        Base::SignedDefault => None,
+        Base::Local { pr_test, .. } => *pr_test,
+    };
+    let local = match base {
+        Base::SignedDefault => None,
+        Base::Local {
+            manifest,
+            kernel,
+            tar,
+            ..
+        } => {
+            let metadata = std::fs::symlink_metadata(manifest)?;
+            ensure!(
+                metadata.file_type().is_file()
+                    && metadata.len() <= mvm_core::plan::bundle::MAX_IMAGE_SET_MANIFEST_BYTES,
+                "local base manifest must be a bounded regular file"
+            );
+            for input in [kernel, tar] {
+                ensure!(
+                    std::fs::symlink_metadata(input)?.file_type().is_file(),
+                    "local base kernel and tar must be regular, not links"
+                );
+            }
+            Some((
+                manifest.to_path_buf(),
+                std::fs::read(manifest)?,
+                std::fs::canonicalize(kernel)?,
+                std::fs::canonicalize(tar)?,
+            ))
+        }
+    };
+    let images = if local.is_none() {
+        Some(PublishedImageSet::acquire_workload()?)
+    } else {
+        None
+    };
+    let tree = if let Some((_, manifest, kernel, tar)) = &local {
+        compose_local_authored_candidate(&spec, manifest, kernel, tar, profile, &ordered)?
+    } else {
+        compose_authored_candidate(
+            &spec,
+            images.as_ref().context("signed base was not acquired")?,
+            profile,
+            &ordered,
+        )?
+    };
     let prepared = prepare_composable_application(&spec, directory)?;
     prepared.reverify()?;
     let archive_sha = Sha256Hex::new(prepared.archive_sha256())?;
@@ -90,43 +156,192 @@ pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
     let lock = application.development_lock(&spec, &source_sha, env!("MVM_SOURCE_COMMIT"))?;
     let lock_bytes = serde_json::to_vec(&lock)?;
     let lock_sha = Sha256Hex::from_bytes(&lock_bytes);
+    let filesystem_identity = lock.filesystem_identity()?;
+    #[cfg(feature = "pr-test-guest-runtime")]
+    let pr_test_proof = if let Some(input) = pr_test {
+        let name = mvm_build::guest_bins::guest_bins_archive_name(env!("CARGO_PKG_VERSION"));
+        let archive = input.directory.join(&name);
+        let proof = mvm_core::protocol::runtime_release::PrTestRuntimeProof {
+            input: mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                archive: archive.clone(),
+                checksum: input.directory.join(format!("{name}.sha256")),
+                signature_bundle: input.directory.join(format!("{name}.bundle")),
+                archive_sha256: mvm_core::crypto::image_verify::sha256_file(&archive)?,
+                version: env!("CARGO_PKG_VERSION").into(),
+                arch,
+            },
+            pull_request: input.pull_request,
+        };
+        mvm_build::guest_runtime::evidence::verify_pr_test_runtime_proof(
+            &proof,
+            env!("CARGO_PKG_VERSION"),
+            arch,
+        )?;
+        Some(proof)
+    } else {
+        None
+    };
+    // Local source custody is path-bound, even when two paths have identical bytes.
+    let cache_sha = if let Some((_, _, _, tar)) = &local {
+        #[cfg(feature = "pr-test-guest-runtime")]
+        if let Some(proof) = &pr_test_proof {
+            Sha256Hex::from_bytes(
+                &[
+                    lock_bytes.as_slice(),
+                    tar.as_os_str().as_encoded_bytes(),
+                    &proof.pull_request.to_be_bytes(),
+                    proof.input.archive_sha256.as_bytes(),
+                ]
+                .concat(),
+            )
+        } else {
+            Sha256Hex::from_bytes(
+                &[lock_bytes.as_slice(), tar.as_os_str().as_encoded_bytes()].concat(),
+            )
+        }
+        #[cfg(not(feature = "pr-test-guest-runtime"))]
+        Sha256Hex::from_bytes(&[lock_bytes.as_slice(), tar.as_os_str().as_encoded_bytes()].concat())
+    } else {
+        lock_sha.clone()
+    };
     let cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("compositions");
     mvm_core::config::create_private_dir(&cache)?;
-    let target = cache.join(format!("{}.mvmpkg", lock_sha.as_str()));
+    let target = cache.join(format!("{}.mvmpkg", cache_sha.as_str()));
     let reverify_inputs = || -> Result<()> {
         prepared.reverify()?;
+        #[cfg(feature = "pr-test-guest-runtime")]
+        if let Some(proof) = &pr_test_proof {
+            mvm_build::guest_runtime::evidence::verify_pr_test_runtime_proof(
+                proof,
+                env!("CARGO_PKG_VERSION"),
+                arch,
+            )?;
+        }
         for input in &inputs {
             mvm_core::registry_pack::runtime_layer::require_offline_runtime_policy(input)?;
         }
-        images.retained_publisher_proof()?;
+        if let Some((manifest_path, original, kernel, tar)) = &local {
+            let metadata = std::fs::symlink_metadata(manifest_path)?;
+            ensure!(
+                metadata.file_type().is_file()
+                    && metadata.len() == original.len() as u64
+                    && std::fs::read(manifest_path)? == *original,
+                "local base manifest changed before signing"
+            );
+            let declared: mvm_core::image_set::ImageSetManifest = serde_json::from_slice(original)?;
+            mvm_core::image_set::check_workload_protocol_compatibility(
+                &declared.compatibility,
+                &mvm_build::stage0_kernel::current_image_set_protocol_support(),
+            )?;
+            let (selected_kernel, selected_tar) =
+                mvm_core::plan::bundle::select_local_development_source(&declared, arch, profile)?;
+            for (file, artifact) in [(kernel, selected_kernel), (tar, selected_tar)] {
+                ensure!(
+                    std::fs::symlink_metadata(file)?.file_type().is_file()
+                        && std::fs::metadata(file)?.len() == artifact.size
+                        && mvm_core::crypto::image_verify::sha256_file(file)?
+                            == artifact.sha256.as_str(),
+                    "selected local base input changed before signing"
+                );
+            }
+        } else {
+            images
+                .as_ref()
+                .context("signed base was not acquired")?
+                .retained_publisher_proof()?;
+        }
         Ok(())
     };
     if std::fs::symlink_metadata(&target).is_ok() {
         reverify_inputs()?;
-        verify_cached_bundle(&target, &lock_bytes)?;
+        verify_cached_bundle(
+            &target,
+            &lock_bytes,
+            local.as_ref().map(|(_, _, _, tar)| tar.as_path()),
+            #[cfg(feature = "pr-test-guest-runtime")]
+            pr_test_proof
+                .as_ref()
+                .map(|proof| (proof.pull_request, proof.input.archive_sha256.as_str())),
+            #[cfg(not(feature = "pr-test-guest-runtime"))]
+            None,
+        )?;
         eprintln!(
             "[mvm] authenticated cached composition {}",
-            lock_sha.as_str()
+            cache_sha.as_str()
         );
         return Ok(PreparedComposition { archive: target });
     }
-    let boot = PreparedPortableBootAssets::acquire(arch)?;
-    ensure!(
-        boot.image_set_manifest_sha256() == lock.base_manifest_sha256(),
-        "composition and signed CLI boot closure selected different Linux roots"
-    );
+    #[cfg(feature = "pr-test-guest-runtime")]
+    let boot = if let Some(input) = pr_test {
+        PreparedPortableBootAssets::acquire_pr_test_local(
+            arch,
+            input.directory,
+            input.pull_request,
+        )?
+    } else if local.is_some() {
+        PreparedPortableBootAssets::acquire_local(arch)?
+    } else {
+        PreparedPortableBootAssets::acquire(arch)?
+    };
+    #[cfg(not(feature = "pr-test-guest-runtime"))]
+    let boot = if local.is_some() {
+        PreparedPortableBootAssets::acquire_local(arch)?
+    } else {
+        PreparedPortableBootAssets::acquire(arch)?
+    };
+    if local.is_none() {
+        ensure!(
+            boot.image_set_manifest_sha256() == lock.base_manifest_sha256(),
+            "composition and signed CLI boot closure selected different Linux roots"
+        );
+    }
+    reverify_inputs()?;
+    let prior = previous_filesystem_bundle(&cache, &filesystem_identity)?;
+    let reused = prior
+        .map(|(verified, archive)| verified.extract_rootfs_with_verity(archive))
+        .transpose()?;
     let directory = tempfile::tempdir()?;
     mvm_core::config::create_private_dir(directory.path())?;
-    let image = directory.path().join("rootfs.ext4");
-    let materialized = application.materialize_candidate(&image)?;
-    let roothash = materialized
-        .verity_root_hash
-        .as_deref()
-        .context("composed rootfs did not produce dm-verity")?;
+    let image = reused.as_ref().map_or_else(
+        || directory.path().join("rootfs.ext4"),
+        |root| root.rootfs.clone(),
+    );
+    let (roothash, verity_path) = if let Some(root) = &reused {
+        (root.roothash.clone(), root.verity.clone())
+    } else {
+        let materialized = application.materialize_candidate(&image)?;
+        (
+            materialized
+                .verity_root_hash
+                .context("composed rootfs did not produce dm-verity")?,
+            directory.path().join("rootfs.verity"),
+        )
+    };
     let output_sha256 = mvm_core::crypto::image_verify::sha256_file(&image)?;
-    images
-        .workload_sidecar(&spec.identity.name, spec.entrypoint.clone())
-        .write_to_dir(directory.path())?;
+    let mut sidecar = mvm_build::builder_vm::GuestSidecar {
+        name: spec.identity.name.clone(),
+        accessible: false,
+        sealed: true,
+        entrypoint_kind: "command".to_owned(),
+        entrypoint_argv: spec.entrypoint.clone(),
+        init_system: "cli-initramfs".to_owned(),
+        expected_boot_ms: 300,
+        agent_binary: String::new(),
+        rootless_entrypoint: true,
+        hypervisor: "firecracker".to_owned(),
+        overlay_aware: true,
+        runtime_lean: true,
+        image_tag: String::new(),
+        source: String::new(),
+        built_at: String::new(),
+        protocol_version: 0,
+        generator_rev: String::new(),
+        libc: Default::default(),
+    };
+    if let Some(images) = &images {
+        sidecar = images.workload_sidecar(&spec.identity.name, spec.entrypoint.clone());
+    }
+    sidecar.write_to_dir(directory.path())?;
     let (member, evidence) = retain_evidence(directory.path(), &lock_bytes, &ordered)?;
     let supplemental: Vec<(&str, &Path)> = evidence
         .iter()
@@ -150,10 +365,11 @@ pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
         capabilities: Vec::new(),
         services: Vec::new(),
     };
-    let verity = std::fs::read(directory.path().join("rootfs.verity"))?;
+    let verity = std::fs::read(&verity_path)?;
     let arch_label = arch.to_string();
-    let kernel = boot
-        .kernel_path()
+    let kernel = local
+        .as_ref()
+        .map_or_else(|| boot.kernel_path(), |(_, _, kernel, _)| kernel.as_path())
         .to_str()
         .context("kernel path is not UTF-8")?;
     let rootfs = image.to_str().context("rootfs path is not UTF-8")?;
@@ -163,7 +379,7 @@ pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
         .context("initramfs path is not UTF-8")?;
     let mut export = BundleExportInputs::new(kernel, rootfs, &arch_label, &target)
         .initrd(initrd)
-        .verity(&verity, roothash)
+        .verity(&verity, &roothash)
         .profile("dev")
         .resources(spec.resources.cpu_cores.into(), spec.resources.memory_mb)
         .posture(PostureInputs::new(AgentProfile::Dev))
@@ -178,7 +394,34 @@ pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
         .local_build();
     export.local_composition = Some(member);
     export.supplemental_artifacts = &supplemental;
-    let signed = boot.stage(&export, &HostBundleSigner::load()?)?;
+    let signed = if let Some((_, manifest_bytes, _, tar)) = &local {
+        let source: mvm_core::image_set::ImageSetManifest = serde_json::from_slice(manifest_bytes)?;
+        let member = source
+            .members
+            .iter()
+            .find(|member| {
+                member.role == mvm_core::image_set::ImageSetRole::WorkloadRootfs(profile)
+                    && member.target == mvm_core::image_set::MemberTarget::Arch(arch)
+            })
+            .context("selected local base root is missing")?;
+        let tar_artifact = member
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.format == mvm_core::image_set::ArtifactFormat::TarGz)
+            .context("selected local composition tar is missing")?;
+        let proof = mvm_core::plan::bundle::LocalDevelopmentBaseProof {
+            manifest_artifact: "boot-image-set.json".to_owned(),
+            composition_tar_sha256: tar_artifact.sha256.as_str().to_owned(),
+            composition_tar_size: tar_artifact.size,
+            composition_tar_path: tar
+                .to_str()
+                .context("local tar path is not UTF-8")?
+                .to_owned(),
+        };
+        boot.stage_local(&export, &HostBundleSigner::load()?, manifest_bytes, proof)?
+    } else {
+        boot.stage(&export, &HostBundleSigner::load()?)?
+    };
     reverify_inputs()?;
     ensure!(
         mvm_core::crypto::image_verify::sha256_file(&image)? == output_sha256,
@@ -190,15 +433,34 @@ pub(super) fn prepare(path: &Path) -> Result<PreparedComposition> {
         }
         reverify_inputs()?;
     }
-    verify_cached_bundle(&target, &lock_bytes)?;
-    eprintln!(
-        "[mvm] assembled and cached composition {}",
-        lock_sha.as_str()
-    );
+    record_filesystem_bundle(&cache, &filesystem_identity, &cache_sha)?;
+    verify_cached_bundle(
+        &target,
+        &lock_bytes,
+        local.as_ref().map(|(_, _, _, tar)| tar.as_path()),
+        #[cfg(feature = "pr-test-guest-runtime")]
+        pr_test_proof
+            .as_ref()
+            .map(|proof| (proof.pull_request, proof.input.archive_sha256.as_str())),
+        #[cfg(not(feature = "pr-test-guest-runtime"))]
+        None,
+    )?;
+    if reused.is_some() {
+        eprintln!(
+            "[mvm] reused verified filesystem {} for composition {}",
+            filesystem_identity.as_str(),
+            cache_sha.as_str()
+        );
+    } else {
+        eprintln!(
+            "[mvm] assembled and cached composition {}",
+            cache_sha.as_str()
+        );
+    }
     Ok(PreparedComposition { archive: target })
 }
 
-fn verify_cached_bundle(path: &Path, lock: &[u8]) -> Result<()> {
+fn verified_local_bundle(path: &Path) -> Result<mvm_core::plan::bundle::VerifiedBundleFile> {
     ensure!(
         std::fs::symlink_metadata(path)?.file_type().is_file(),
         "composed cache entry must be a regular file"
@@ -215,6 +477,92 @@ fn verify_cached_bundle(path: &Path, lock: &[u8]) -> Result<()> {
         bundle_origin(&verified.manifest, &id, trust.release()) == BundleOrigin::LocalBuild,
         "composed cache entry is not a host-signed local build"
     );
+    Ok(verified)
+}
+
+fn previous_filesystem_bundle(
+    cache: &Path,
+    identity: &Sha256Hex,
+) -> Result<Option<(mvm_core::plan::bundle::VerifiedBundleFile, std::fs::File)>> {
+    let index = cache.join(format!("rootfs-{}.ref", identity.as_str()));
+    let metadata = match std::fs::symlink_metadata(&index) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        metadata.file_type().is_file() && metadata.len() <= 128,
+        "filesystem cache index must be a bounded regular file"
+    );
+    let entry = std::fs::read_to_string(&index)?;
+    let digest = entry
+        .strip_suffix(".mvmpkg\n")
+        .context("filesystem cache index has an invalid archive name")?;
+    let digest = Sha256Hex::new(digest.to_owned())?;
+    let archive = cache.join(format!("{}.mvmpkg", digest.as_str()));
+    let verified = verified_local_bundle(&archive)?;
+    let member = verified
+        .manifest
+        .members
+        .iter()
+        .find_map(|member| match member {
+            BundleMember::LocalComposition(member) => Some(member),
+            _ => None,
+        })
+        .context("filesystem cache source has no signed composition lock")?;
+    let artifact = verified
+        .manifest
+        .find_by_name(&member.lock_artifact)
+        .context("filesystem cache source has no composition lock")?;
+    ensure!(
+        artifact.role == mvm_core::plan::bundle::ArtifactRole::Other,
+        "filesystem cache source lock has the wrong artifact role"
+    );
+    let original: ResolvedComposableLock =
+        serde_json::from_slice(&verified.read_small_verified_member(
+            std::fs::File::open(&archive)?,
+            &member.lock_artifact,
+            1024 * 1024,
+        )?)?;
+    ensure!(
+        original.filesystem_identity()? == *identity,
+        "filesystem cache source differs from today's ordered filesystem inputs"
+    );
+    Ok(Some((verified, std::fs::File::open(archive)?)))
+}
+
+fn record_filesystem_bundle(cache: &Path, identity: &Sha256Hex, archive: &Sha256Hex) -> Result<()> {
+    let index = cache.join(format!("rootfs-{}.ref", identity.as_str()));
+    if std::fs::symlink_metadata(&index).is_ok() {
+        ensure!(
+            previous_filesystem_bundle(cache, identity)?.is_some(),
+            "existing filesystem cache index has no verified source"
+        );
+        return Ok(());
+    }
+    let mut pending = tempfile::NamedTempFile::new_in(cache)?;
+    std::io::Write::write_all(
+        &mut pending,
+        format!("{}.mvmpkg\n", archive.as_str()).as_bytes(),
+    )?;
+    pending.as_file().sync_all()?;
+    match pending.persist_noclobber(&index) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            previous_filesystem_bundle(cache, identity)?;
+            Ok(())
+        }
+        Err(error) => Err(error.error.into()),
+    }
+}
+
+fn verify_cached_bundle(
+    path: &Path,
+    lock: &[u8],
+    local_tar: Option<&Path>,
+    pr_test_expected: Option<(u64, &str)>,
+) -> Result<()> {
+    let verified = verified_local_bundle(path)?;
     let member = verified
         .manifest
         .members
@@ -237,6 +585,43 @@ fn verify_cached_bundle(path: &Path, lock: &[u8]) -> Result<()> {
             )? == lock,
         "cached composition differs from today's resolved signed inputs"
     );
+    let selected_tar = verified
+        .manifest
+        .members
+        .iter()
+        .find_map(|member| match member {
+            BundleMember::LocalDevelopmentBaseProof(proof) => {
+                Some(proof.composition_tar_path.as_str())
+            }
+            _ => None,
+        });
+    ensure!(
+        selected_tar.map(Path::new) == local_tar,
+        "cached composition selected a different local base source"
+    );
+    let selected_pr_test = verified
+        .manifest
+        .members
+        .iter()
+        .find_map(|member| match member {
+            BundleMember::EmbeddedCliBootAssets(runtime) => Some(runtime),
+            _ => None,
+        });
+    ensure!(
+        selected_pr_test.and_then(|runtime| runtime.pr_test_pull_request)
+            == pr_test_expected.map(|(pull_request, _)| pull_request),
+        "cached composition selected a different PR test runtime"
+    );
+    if let Some((_, digest)) = pr_test_expected {
+        let runtime = selected_pr_test.context("cached PR test runtime declaration missing")?;
+        ensure!(
+            verified
+                .manifest
+                .find_by_name(&runtime.archive_artifact)
+                .is_some_and(|artifact| artifact.sha256 == digest),
+            "cached composition selected a different signed runtime archive"
+        );
+    }
     Ok(())
 }
 
@@ -332,4 +717,44 @@ fn retain_evidence(
         },
         files,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filesystem_index_is_only_a_hint_not_an_archive_authority() {
+        let cache = tempfile::tempdir().expect("private cache");
+        let identity = Sha256Hex::from_bytes(b"ordered filesystem inputs");
+        let index = cache
+            .path()
+            .join(format!("rootfs-{}.ref", identity.as_str()));
+        assert!(
+            previous_filesystem_bundle(cache.path(), &identity)
+                .expect("absent cache entry is a miss")
+                .is_none()
+        );
+        for value in [
+            "../other.mvmpkg\n".to_owned(),
+            "A".repeat(64),
+            format!("{}.mvmpkg\n", "a".repeat(64)),
+        ] {
+            std::fs::write(&index, &value).expect("write invalid hint");
+            assert!(
+                previous_filesystem_bundle(cache.path(), &identity).is_err(),
+                "untrusted hint {value:?} must not authorize reuse"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            std::fs::remove_file(&index).expect("remove invalid hint");
+            symlink(cache.path().join("elsewhere"), &index).expect("link cache hint");
+            assert!(
+                previous_filesystem_bundle(cache.path(), &identity).is_err(),
+                "a linked index cannot authorize a cached rootfs"
+            );
+        }
+    }
 }

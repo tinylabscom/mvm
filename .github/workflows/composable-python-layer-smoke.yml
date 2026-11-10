@@ -12,6 +12,10 @@ on:
       - crates/mvm-contract/src/plan/bundle.rs
       - crates/mvm-core/src/registry_pack/runtime_layer.rs
       - crates/mvm-core/examples/verify-runtime-layer-fixture.rs
+      - crates/mvm-build/src/guest_runtime/**
+      - crates/mvm-build/src/guest_runtime.rs
+      - crates/mvm-client/src/portable_boot_assets.rs
+      - crates/mvm-runtime/src/runtime_evidence.rs
   workflow_dispatch:
 
 permissions:
@@ -19,6 +23,54 @@ permissions:
   id-token: write
 
 jobs:
+  # Uses the ordinary unsigned guest builder, not a release signer. Signing
+  # happens only in the PR job below and nothing is published as a CLI release.
+  pr-guest-bins:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/guest-bins.yml
+    permissions:
+      contents: read
+
+  signed-pr-guest-runtime:
+    needs: pr-guest-bins
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: sigstore/cosign-installer@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: mvm-guest-bins-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr-runtime
+      - name: Sign and verify PR-only guest runtime inputs
+        env:
+          MVM_PR_TEST_RUNTIME_DIR: ${{ runner.temp }}/pr-runtime
+          MVM_PR_TEST_PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          archive="$MVM_PR_TEST_RUNTIME_DIR/mvm-guest-bins-v${version}.tar.gz"
+          test -f "$archive" && test ! -L "$archive"
+          test -f "${archive}.sha256" && test ! -L "${archive}.sha256"
+          (cd "$MVM_PR_TEST_RUNTIME_DIR" && sha256sum --check "$(basename "${archive}.sha256")")
+          for blob in "$archive" "${archive}.sha256"; do
+            cosign sign-blob --yes --new-bundle-format --bundle "${blob}.bundle" "$blob"
+          done
+          cargo test --locked -p mvm-build --features pr-test-guest-runtime --lib \
+            guest_runtime::evidence::tests::signed_pr_runtime_authenticates_exact_identity_and_refuses_tampering \
+            -- --ignored --exact
+          cargo test --locked -p mvm-client --features pr-test-guest-runtime --lib \
+            portable_boot_assets::tests::pr_test_local_acquisition_checks_assembled_runtime_independently \
+            -- --ignored --exact
+
   signed-input:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest

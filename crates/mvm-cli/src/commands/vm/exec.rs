@@ -442,6 +442,26 @@ pub(in crate::commands) struct SdkTransportArgs {
     /// Assemble a signed, digest-pinned pack recipe and run its entrypoint.
     #[arg(long = "compose", value_name = "PACK.TOML", conflicts_with_all = ["mode", "dev"])]
     pub compose: Option<PathBuf>,
+    /// Select the locked signed default or an explicitly supplied local base.
+    #[arg(long = "compose-base", value_enum, requires = "compose")]
+    pub compose_base: Option<ComposeBase>,
+    /// Local schema-3 image-set manifest declaring the selected kernel and tar.
+    #[arg(long = "compose-base-manifest", requires_all = ["compose", "compose_base_kernel", "compose_base_tar"])]
+    pub compose_base_manifest: Option<PathBuf>,
+    /// Kernel declared by the local image-set manifest.
+    #[arg(long = "compose-base-kernel", requires_all = ["compose", "compose_base_manifest", "compose_base_tar"])]
+    pub compose_base_kernel: Option<PathBuf>,
+    /// Composition tar declared by the local image-set manifest (not its ext4).
+    #[arg(long = "compose-base-tar", requires_all = ["compose", "compose_base_manifest", "compose_base_kernel"])]
+    pub compose_base_tar: Option<PathBuf>,
+    /// Test-only, keyless-signed PR runtime quartet directory; requires local development.
+    #[cfg(feature = "pr-test-guest-runtime")]
+    #[arg(long = "compose-pr-test-runtime-dir", requires_all = ["compose", "compose_pr_test_pull_request"])]
+    pub compose_pr_test_runtime_dir: Option<PathBuf>,
+    /// Exact PR whose workflow signed the runtime input, never a release identity.
+    #[cfg(feature = "pr-test-guest-runtime")]
+    #[arg(long = "compose-pr-test-pull-request", requires_all = ["compose", "compose_pr_test_runtime_dir"])]
+    pub compose_pr_test_pull_request: Option<u64>,
     /// SDK transport mode for `mvmctl run`.
     ///
     /// - `--mode plan`: synthesize an ExecutionPlan per Sandbox call
@@ -474,6 +494,12 @@ pub(in crate::commands) struct RunVerbArgs {
     pub machine: crate::commands::machine::MachineRunArgs,
     #[command(flatten)]
     pub sdk: SdkTransportArgs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(in crate::commands) enum ComposeBase {
+    SignedDefault,
+    Local,
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -588,7 +614,64 @@ pub(in crate::commands) fn run_verb(
 ) -> Result<()> {
     let composition = if let Some(path) = args.sdk.compose.take() {
         validate_composition_request(&args.machine)?;
-        let built = composition::prepare(&path)?;
+        let base = match args.sdk.compose_base {
+            Some(ComposeBase::Local) => {
+                let (Some(manifest), Some(kernel), Some(tar)) = (
+                    args.sdk.compose_base_manifest.as_deref(),
+                    args.sdk.compose_base_kernel.as_deref(),
+                    args.sdk.compose_base_tar.as_deref(),
+                ) else {
+                    anyhow::bail!(
+                        "--compose-base local requires --compose-base-manifest, --compose-base-kernel and --compose-base-tar"
+                    );
+                };
+                #[cfg(feature = "pr-test-guest-runtime")]
+                let pr_test = match (
+                    args.sdk.compose_pr_test_runtime_dir.as_deref(),
+                    args.sdk.compose_pr_test_pull_request,
+                ) {
+                    (Some(directory), Some(pull_request)) => {
+                        anyhow::ensure!(
+                            pull_request > 0
+                                && args.machine.run.profile == RunProfile::Dev
+                                && !args.machine.run.prod,
+                            "PR test runtime requires --compose-base local, --profile dev and no --prod"
+                        );
+                        Some(composition::PrTestInput {
+                            directory,
+                            pull_request,
+                        })
+                    }
+                    (None, None) => None,
+                    _ => anyhow::bail!(
+                        "PR test runtime requires both the quartet directory and pull request"
+                    ),
+                };
+                composition::Base::Local {
+                    manifest,
+                    kernel,
+                    tar,
+                    #[cfg(feature = "pr-test-guest-runtime")]
+                    pr_test,
+                }
+            }
+            Some(ComposeBase::SignedDefault) | None => {
+                #[cfg(feature = "pr-test-guest-runtime")]
+                anyhow::ensure!(
+                    args.sdk.compose_pr_test_runtime_dir.is_none()
+                        && args.sdk.compose_pr_test_pull_request.is_none(),
+                    "PR test runtime requires --compose-base local"
+                );
+                anyhow::ensure!(
+                    args.sdk.compose_base_manifest.is_none()
+                        && args.sdk.compose_base_kernel.is_none()
+                        && args.sdk.compose_base_tar.is_none(),
+                    "local base paths require --compose-base local"
+                );
+                composition::Base::SignedDefault
+            }
+        };
+        let built = composition::prepare(&path, base)?;
         args.machine.run.manifest = Some(built.archive().to_string_lossy().into_owned());
         args.machine.entrypoint = true;
         Some(built)
@@ -2127,10 +2210,10 @@ mod tests {
     /// shared `RunArgs` separately, so each case names which half it exercises.
     fn sdk(mode: Option<RunMode>, dev: bool) -> SdkTransportArgs {
         SdkTransportArgs {
-            compose: None,
             mode,
             dev,
             ack_divergence: Vec::new(),
+            ..Default::default()
         }
     }
 

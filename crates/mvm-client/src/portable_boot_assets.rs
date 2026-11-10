@@ -29,10 +29,12 @@ pub struct PreparedPortableBootAssets {
     pub(crate) initrd: PathBuf,
     pub(crate) binaries: MvmRuntimeBinaries,
     pub(crate) release_proof: RuntimeReleaseProof,
+    #[cfg(feature = "pr-test-guest-runtime")]
+    pub(crate) pr_test_proof: Option<mvm_core::protocol::runtime_release::PrTestRuntimeProof>,
     pub(crate) checksum_signature_bundle: PathBuf,
     pub(crate) runtime: EmbeddedCliBootAssets,
     _prepared: VerifiedRuntimeArtifacts,
-    publisher: RetainedPublisherProof,
+    publisher: Option<RetainedPublisherProof>,
     home: PathBuf,
     bindings: Vec<(PathBuf, String, u64)>,
 }
@@ -40,6 +42,45 @@ pub struct PreparedPortableBootAssets {
 impl PreparedPortableBootAssets {
     pub fn acquire(arch: GuestArch) -> Result<Self> {
         let image_set = PublishedImageSet::acquire_workload()?;
+        Self::acquire_with_set(Some(image_set), arch)
+    }
+
+    /// Acquire only the signed CLI guest runtime. An explicitly selected
+    /// local-development Linux source supplies its own kernel, not this
+    /// build's signed default image set.
+    pub fn acquire_local(arch: GuestArch) -> Result<Self> {
+        Self::acquire_with_set(None, arch)
+    }
+
+    /// Explicit PR-only input: genuine keyless-signed archive and checksum,
+    /// never a substitute for a published CLI release or a production run.
+    #[cfg(feature = "pr-test-guest-runtime")]
+    pub fn acquire_pr_test_local(
+        arch: GuestArch,
+        directory: &Path,
+        pull_request: u64,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            mvm_build::artifact_acquisition::compiled_channel().permits_automatic_builds(),
+            "PR test runtime cannot run in a release-channel binary"
+        );
+        let asset = mvm_build::guest_bins::guest_bins_archive_name(env!("CARGO_PKG_VERSION"));
+        let archive = directory.join(&asset);
+        let proof = mvm_core::protocol::runtime_release::PrTestRuntimeProof {
+            input: RuntimeReleaseProof {
+                archive: archive.clone(),
+                checksum: directory.join(format!("{asset}.sha256")),
+                signature_bundle: directory.join(format!("{asset}.bundle")),
+                archive_sha256: sha256_file(&archive)?,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                arch,
+            },
+            pull_request,
+        };
+        Self::from_source_with_pr_test(None, arch, &proof.input, Some(&proof))
+    }
+
+    fn acquire_with_set(image_set: Option<PublishedImageSet>, arch: GuestArch) -> Result<Self> {
         let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
         let runtime = mvm_build::guest_runtime::resolve_or_download_guest_runtime_quartet(
             &cache,
@@ -49,36 +90,84 @@ impl PreparedPortableBootAssets {
         let proof = runtime
             .release_proof
             .context("portable creation requires a signed CLI runtime release")?;
-        Self::from_set(image_set, arch, &proof)
+        Self::from_source(image_set, arch, &proof)
     }
 
+    #[cfg(test)]
     fn from_set(
         image_set: PublishedImageSet,
         arch: GuestArch,
         source_proof: &RuntimeReleaseProof,
     ) -> Result<Self> {
+        Self::from_source(Some(image_set), arch, source_proof)
+    }
+
+    fn from_source(
+        image_set: Option<PublishedImageSet>,
+        arch: GuestArch,
+        source_proof: &RuntimeReleaseProof,
+    ) -> Result<Self> {
+        Self::from_source_with_pr_test(image_set, arch, source_proof, None)
+    }
+
+    fn from_source_with_pr_test(
+        image_set: Option<PublishedImageSet>,
+        arch: GuestArch,
+        source_proof: &RuntimeReleaseProof,
+        #[cfg(feature = "pr-test-guest-runtime")] pr_test: Option<
+            &mvm_core::protocol::runtime_release::PrTestRuntimeProof,
+        >,
+        #[cfg(not(feature = "pr-test-guest-runtime"))] _pr_test: Option<&()>,
+    ) -> Result<Self> {
         anyhow::ensure!(
             source_proof.version == env!("CARGO_PKG_VERSION") && source_proof.arch == arch,
             "portable runtime proof differs from the selected CLI version or architecture"
         );
-        verify_runtime_release_proof(source_proof, &source_proof.version, arch).with_context(
-            || {
-                format!(
-                    "authenticate selected runtime archive {}",
-                    source_proof.archive.display()
+        #[cfg(feature = "pr-test-guest-runtime")]
+        let checked = match pr_test {
+            Some(pr_test) => {
+                anyhow::ensure!(
+                    &pr_test.input == source_proof && image_set.is_none(),
+                    "PR test input is not a local runtime selection"
+                );
+                mvm_build::guest_runtime::evidence::verify_pr_test_runtime_proof(
+                    pr_test,
+                    &source_proof.version,
+                    arch,
                 )
-            },
-        )?;
-        let publisher = image_set.retained_publisher_proof()?;
+            }
+            None => verify_runtime_release_proof(source_proof, &source_proof.version, arch),
+        };
+        #[cfg(not(feature = "pr-test-guest-runtime"))]
+        let checked = verify_runtime_release_proof(source_proof, &source_proof.version, arch);
+        checked.with_context(|| {
+            format!(
+                "authenticate selected runtime archive {}",
+                source_proof.archive.display()
+            )
+        })?;
+        let publisher = image_set
+            .as_ref()
+            .map(PublishedImageSet::retained_publisher_proof)
+            .transpose()?;
         let home = mvm_core::config::mvm_home_strict()?;
         let directory = tempfile::tempdir().context("stage portable release boot assets")?;
         mvm_core::config::create_private_dir(directory.path())?;
         let root = directory.path();
-        let kernel_member =
-            mvm_core::plan::bundle::select_cli_boot_kernel(image_set.manifest(), arch)?;
-        let kernel_artifact = single_artifact(kernel_member)?;
         let kernel = root.join("vmlinux");
-        image_set.fetch_artifact(kernel_artifact, &kernel)?;
+        let kernel_binding = if let Some(image_set) = &image_set {
+            let kernel_member =
+                mvm_core::plan::bundle::select_cli_boot_kernel(image_set.manifest(), arch)?;
+            let kernel_artifact = single_artifact(kernel_member)?;
+            image_set.fetch_artifact(kernel_artifact, &kernel)?;
+            Some((
+                kernel.clone(),
+                kernel_artifact.sha256.as_str().to_owned(),
+                kernel_artifact.size,
+            ))
+        } else {
+            None
+        };
         let archive = root.join("guest-runtime.tar.gz");
         let checksum = root.join("guest-runtime.sha256");
         let signature_bundle = root.join("guest-runtime.bundle");
@@ -101,8 +190,40 @@ impl PreparedPortableBootAssets {
             signature_bundle,
             ..source_proof.clone()
         };
+        #[cfg(feature = "pr-test-guest-runtime")]
+        let pr_test_proof =
+            pr_test.map(
+                |proof| mvm_core::protocol::runtime_release::PrTestRuntimeProof {
+                    input: release_proof.clone(),
+                    pull_request: proof.pull_request,
+                },
+            );
+        #[cfg(feature = "pr-test-guest-runtime")]
+        let verified = match &pr_test_proof {
+            Some(proof) => mvm_build::guest_runtime::evidence::verify_pr_test_runtime_proof(
+                proof,
+                &source_proof.version,
+                arch,
+            )?,
+            None => verify_runtime_release_proof(&release_proof, &source_proof.version, arch)?,
+        };
+        #[cfg(not(feature = "pr-test-guest-runtime"))]
         let verified = verify_runtime_release_proof(&release_proof, &source_proof.version, arch)?;
         let cache = root.join("runtime-cache");
+        #[cfg(feature = "pr-test-guest-runtime")]
+        let guest_runtime = if let Some(proof) = &pr_test_proof {
+            mvm_build::guest_runtime::install_pr_test_guest_runtime_archive(&cache, proof)?
+        } else {
+            mvm_build::guest_runtime::install_signed_guest_runtime_archive(
+                &cache,
+                &release_proof.archive,
+                &release_proof.checksum,
+                &release_proof.signature_bundle,
+                &release_proof.version,
+                arch,
+            )?
+        };
+        #[cfg(not(feature = "pr-test-guest-runtime"))]
         let guest_runtime = mvm_build::guest_runtime::install_signed_guest_runtime_archive(
             &cache,
             &release_proof.archive,
@@ -150,6 +271,16 @@ impl PreparedPortableBootAssets {
             overlay_roothash: declaration.overlay_roothash.clone(),
             protocol_version: declaration.protocol_version,
             min_supported_protocol_version: declaration.min_supported_protocol_version,
+            pr_test_pull_request: {
+                #[cfg(feature = "pr-test-guest-runtime")]
+                {
+                    pr_test_proof.as_ref().map(|proof| proof.pull_request)
+                }
+                #[cfg(not(feature = "pr-test-guest-runtime"))]
+                {
+                    None
+                }
+            },
         };
         let bin = guest_runtime.root.join(arch.to_string()).join("bin");
         let binaries = MvmRuntimeBinaries {
@@ -158,11 +289,7 @@ impl PreparedPortableBootAssets {
             egress_client: bin.join("mvm-egress-client"),
             entrypoint_runner: bin.join("mvm-oci-entrypoint"),
         };
-        let mut bindings = vec![(
-            kernel.clone(),
-            kernel_artifact.sha256.as_str().to_owned(),
-            kernel_artifact.size,
-        )];
+        let mut bindings = kernel_binding.into_iter().collect::<Vec<_>>();
         for path in [
             &runtime_overlay,
             &runtime_overlay_verity,
@@ -190,6 +317,8 @@ impl PreparedPortableBootAssets {
             initrd,
             binaries,
             release_proof,
+            #[cfg(feature = "pr-test-guest-runtime")]
+            pr_test_proof,
             checksum_signature_bundle,
             runtime,
             _prepared: prepared,
@@ -204,20 +333,30 @@ impl PreparedPortableBootAssets {
             mvm_core::config::mvm_home_strict()? == self.home,
             "portable producer closure belongs to another home"
         );
-        let current = mvm_core::image_set_revocation::ImageSetRevocationStore::in_mvm_home()
-            .load(chrono::Utc::now())?;
-        anyhow::ensure!(
-            current.checkpoint() == self.publisher.revocations().verified().checkpoint(),
-            "portable publisher policy advanced; capture a fresh closure"
-        );
-        let request = mvm_core::image_set::ImageSetVerification::new(
-            self.publisher.root().manifest_bytes(),
-            self.publisher.root().signature_bundle(),
-            &mvm_core::image_set::image_train_lock().image_set,
-            Path::new(""),
-        )
-        .with_revocations(&current);
-        mvm_core::image_set::verify_image_set_root(&request)?;
+        #[cfg(feature = "pr-test-guest-runtime")]
+        if let Some(proof) = &self.pr_test_proof {
+            mvm_build::guest_runtime::evidence::verify_pr_test_runtime_proof(
+                proof,
+                env!("CARGO_PKG_VERSION"),
+                GuestArch::host(),
+            )?;
+        }
+        if let Some(publisher) = &self.publisher {
+            let current = mvm_core::image_set_revocation::ImageSetRevocationStore::in_mvm_home()
+                .load(chrono::Utc::now())?;
+            anyhow::ensure!(
+                current.checkpoint() == publisher.revocations().verified().checkpoint(),
+                "portable publisher policy advanced; capture a fresh closure"
+            );
+            let request = mvm_core::image_set::ImageSetVerification::new(
+                publisher.root().manifest_bytes(),
+                publisher.root().signature_bundle(),
+                &mvm_core::image_set::image_train_lock().image_set,
+                Path::new(""),
+            )
+            .with_revocations(&current);
+            mvm_core::image_set::verify_image_set_root(&request)?;
+        }
         verify_bindings(&self.bindings)
     }
 
@@ -232,7 +371,12 @@ impl PreparedPortableBootAssets {
 
     /// Original signed Linux root selected for the portable boot closure.
     pub fn image_set_manifest_sha256(&self) -> &mvm_core::packs::Sha256Hex {
-        self.publisher.root().root().manifest_sha256()
+        self.publisher
+            .as_ref()
+            .expect("signed boot closure has a Linux publisher")
+            .root()
+            .root()
+            .manifest_sha256()
     }
 
     /// Private producer input directories, for retention diagnostics only.
@@ -243,6 +387,10 @@ impl PreparedPortableBootAssets {
 
     /// Check the built slot rather than silently replacing its selected kernel.
     pub fn verify_build_kernel(&self, kernel: &Path) -> Result<()> {
+        anyhow::ensure!(
+            self.publisher.is_some(),
+            "local runtime-only closure cannot attest a signed Linux kernel"
+        );
         self.verify_integrity()?;
         verify_kernel_selection(kernel, &self.bindings[0].1)?;
         Ok(())
@@ -316,6 +464,58 @@ impl PreparedPortableBootAssets {
         signer: &dyn mvm_bundler::BundleSigner,
     ) -> Result<mvm_bundler::StagedBundle> {
         self.verify_build_kernel(Path::new(inputs.vmlinux))?;
+        let publisher = self
+            .publisher
+            .as_ref()
+            .context("signed boot closure has no Linux publisher")?;
+        self.stage_selected(
+            inputs,
+            signer,
+            publisher.root().manifest_bytes(),
+            publisher.root().root().manifest_sha256(),
+            None,
+        )
+    }
+
+    /// Seal an explicitly selected local-development kernel and base while
+    /// retaining the separately signed CLI guest runtime unchanged.
+    pub fn stage_local(
+        &self,
+        inputs: &mvm_bundler::BundleExportInputs<'_>,
+        signer: &dyn mvm_bundler::BundleSigner,
+        manifest_bytes: &[u8],
+        proof: mvm_core::plan::bundle::LocalDevelopmentBaseProof,
+    ) -> Result<mvm_bundler::StagedBundle> {
+        self.verify_integrity()?;
+        #[cfg(feature = "pr-test-guest-runtime")]
+        anyhow::ensure!(
+            self.pr_test_proof.is_none() || inputs.profile == Some("dev"),
+            "PR test runtime cannot be sealed with a production profile"
+        );
+        anyhow::ensure!(
+            inputs.profile == Some("dev")
+                && inputs.local_build
+                && proof.manifest_artifact == self.runtime.manifest_artifact,
+            "local base requires a host-signed development bundle"
+        );
+        let manifest_sha256 = mvm_core::packs::Sha256Hex::from_bytes(manifest_bytes);
+        self.stage_selected(
+            inputs,
+            signer,
+            manifest_bytes,
+            &manifest_sha256,
+            Some(proof),
+        )
+    }
+
+    fn stage_selected(
+        &self,
+        inputs: &mvm_bundler::BundleExportInputs<'_>,
+        signer: &dyn mvm_bundler::BundleSigner,
+        manifest_bytes: &[u8],
+        manifest_sha256: &mvm_core::packs::Sha256Hex,
+        local: Option<mvm_core::plan::bundle::LocalDevelopmentBaseProof>,
+    ) -> Result<mvm_bundler::StagedBundle> {
         verify_export_selection(inputs, &self.runtime.arch, &sha256_file(&self.initrd)?)?;
         let files = [
             (
@@ -349,15 +549,23 @@ impl PreparedPortableBootAssets {
         ];
         let mut selected = inputs.clone();
         selected.cli_boot_assets = Some(mvm_bundler::CliBootAssetsInputs {
-            manifest_bytes: self.publisher.root().manifest_bytes(),
-            manifest_sha256: self.publisher.root().root().manifest_sha256(),
+            manifest_bytes,
+            manifest_sha256,
             runtime: &self.runtime,
             artifacts: &files,
         });
-        selected.canonical_linux_proof = Some(mvm_bundler::CanonicalLinuxProofInputs {
-            root: self.publisher.root(),
-            revocations: self.publisher.revocations(),
-        });
+        if let Some(proof) = local {
+            selected.local_development_base_proof = Some(proof);
+        } else {
+            let publisher = self
+                .publisher
+                .as_ref()
+                .context("signed boot closure has no Linux publisher")?;
+            selected.canonical_linux_proof = Some(mvm_bundler::CanonicalLinuxProofInputs {
+                root: publisher.root(),
+                revocations: publisher.revocations(),
+            });
+        }
         let output = mvm_bundler::stage_bundle_with_signer(&selected, signer)?;
         if let Err(error) = self.verify_integrity() {
             return Err(output.abort(error));
@@ -458,6 +666,62 @@ mod tests {
     use mvm_build::published_image_set::fixture::ImageSetFixture;
     use mvm_core::image_set::{ImageSetRole, MemberTarget, WorkloadImageProfile};
     use mvm_core::util::test_env::TestEnv;
+
+    #[cfg(feature = "pr-test-guest-runtime")]
+    #[test]
+    #[ignore = "requires the PR workflow's real keyless-signed guest runtime quartet"]
+    fn pr_test_local_acquisition_checks_assembled_runtime_independently() {
+        let directory = PathBuf::from(
+            std::env::var_os("MVM_PR_TEST_RUNTIME_DIR").expect("PR runtime quartet directory"),
+        );
+        let pull_request: u64 = std::env::var("MVM_PR_TEST_PULL_REQUEST")
+            .expect("PR number")
+            .parse()
+            .expect("numeric PR number");
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let assets = PreparedPortableBootAssets::acquire_pr_test_local(
+            GuestArch::host(),
+            &directory,
+            pull_request,
+        )
+        .expect("PR-signed runtime assembles from the exact archive");
+        assert_eq!(assets.runtime.pr_test_pull_request, Some(pull_request));
+        assets
+            .verify_integrity()
+            .expect("assembled runtime unchanged");
+        let proof = assets
+            .pr_test_proof
+            .as_ref()
+            .expect("distinct PR provenance");
+        let verified = mvm_build::guest_runtime::evidence::verify_pr_test_runtime_proof(
+            proof,
+            env!("CARGO_PKG_VERSION"),
+            GuestArch::host(),
+        )
+        .unwrap();
+        let mut selection = RuntimeArtifactSelection {
+            arch: GuestArch::host(),
+            overlay: &assets.runtime_overlay,
+            overlay_verity: &assets.runtime_overlay_verity,
+            overlay_roothash: &assets.runtime.overlay_roothash,
+            initramfs: &assets.initrd,
+            minimum_protocol: mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+            host_protocol: mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+        };
+        verified.verify_selected_artifacts(&selection).unwrap();
+        let wrong = tempfile::tempdir().unwrap();
+        let altered_overlay = wrong.path().join("overlay");
+        let altered_initrd = wrong.path().join("initrd");
+        std::fs::write(&altered_overlay, b"altered overlay").unwrap();
+        std::fs::write(&altered_initrd, b"altered initramfs").unwrap();
+        selection.overlay = &altered_overlay;
+        assert!(verified.verify_selected_artifacts(&selection).is_err());
+        selection.overlay = &assets.runtime_overlay;
+        selection.initramfs = &altered_initrd;
+        assert!(verified.verify_selected_artifacts(&selection).is_err());
+    }
 
     #[test]
     #[ignore = "requires genuine signed runtime, published Linux proofs, and an existing sealed workload"]

@@ -4871,6 +4871,150 @@ fn composed_run_parses_one_command_and_refuses_other_boot_sources() {
 }
 
 #[test]
+fn composed_run_requires_an_explicit_complete_local_base_selection() {
+    let parsed = Cli::try_parse_from([
+        "mvmctl",
+        "run",
+        "--compose",
+        "./pack.toml",
+        "--compose-base",
+        "local",
+        "--compose-base-manifest",
+        "./local-image-set.json",
+        "--compose-base-kernel",
+        "./vmlinux",
+        "--compose-base-tar",
+        "./rootfs.tar.gz",
+    ])
+    .unwrap();
+    let Commands::Run(exec::RunVerbArgs { sdk, .. }) = parsed.command else {
+        panic!("expected run command");
+    };
+    assert_eq!(sdk.compose_base, Some(exec::ComposeBase::Local));
+    assert_eq!(
+        sdk.compose_base_manifest.as_deref(),
+        Some(std::path::Path::new("./local-image-set.json"))
+    );
+    for args in [
+        vec![
+            "mvmctl",
+            "run",
+            "--compose",
+            "./pack.toml",
+            "--compose-base-manifest",
+            "./local-image-set.json",
+        ],
+        vec![
+            "mvmctl",
+            "run",
+            "--compose-base",
+            "local",
+            "--compose-base-kernel",
+            "./vmlinux",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+    let parsed = Cli::try_parse_from([
+        "mvmctl",
+        "run",
+        "--compose",
+        "./pack.toml",
+        "--compose-base",
+        "signed-default",
+    ])
+    .unwrap();
+    let Commands::Run(exec::RunVerbArgs { sdk, .. }) = parsed.command else {
+        panic!("expected run command");
+    };
+    assert_eq!(sdk.compose_base, Some(exec::ComposeBase::SignedDefault));
+    let parsed = Cli::try_parse_from([
+        "mvmctl",
+        "run",
+        "--compose",
+        "./pack.toml",
+        "--compose-base",
+        "local",
+        "--compose-base-manifest",
+        "./local-image-set.json",
+        "--compose-base-kernel",
+        "./vmlinux",
+        "--compose-base-tar",
+        "./rootfs.tar.gz",
+        "--prod",
+    ])
+    .unwrap();
+    let Commands::Run(exec::RunVerbArgs { machine, .. }) = parsed.command else {
+        panic!("expected run command");
+    };
+    assert!(
+        exec::validate_composition_request(&machine).is_err(),
+        "a local composition must never inherit a production request"
+    );
+}
+
+#[cfg(feature = "pr-test-guest-runtime")]
+#[test]
+fn pr_test_runtime_flags_are_explicit_and_require_the_complete_pair() {
+    let local = [
+        "mvmctl",
+        "run",
+        "--compose",
+        "./pack.toml",
+        "--compose-base",
+        "local",
+        "--compose-base-manifest",
+        "./local-image-set.json",
+        "--compose-base-kernel",
+        "./vmlinux",
+        "--compose-base-tar",
+        "./rootfs.tar.gz",
+    ];
+    for suffix in [
+        vec!["--compose-pr-test-runtime-dir", "./quartet"],
+        vec!["--compose-pr-test-pull-request", "42"],
+    ] {
+        assert!(Cli::try_parse_from(local.iter().copied().chain(suffix)).is_err());
+    }
+    let parsed = Cli::try_parse_from(local.iter().copied().chain([
+        "--profile",
+        "dev",
+        "--compose-pr-test-runtime-dir",
+        "./quartet",
+        "--compose-pr-test-pull-request",
+        "42",
+    ]))
+    .unwrap();
+    let Commands::Run(exec::RunVerbArgs { sdk, machine }) = parsed.command else {
+        panic!("expected run command");
+    };
+    assert_eq!(
+        sdk.compose_pr_test_runtime_dir.as_deref(),
+        Some(std::path::Path::new("./quartet"))
+    );
+    assert_eq!(sdk.compose_pr_test_pull_request, Some(42));
+    assert!(!machine.run.prod);
+}
+
+#[cfg(not(feature = "pr-test-guest-runtime"))]
+#[test]
+fn ordinary_binary_does_not_parse_pr_test_runtime_flags() {
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "run",
+            "--compose",
+            "./pack.toml",
+            "--compose-pr-test-runtime-dir",
+            "./quartet",
+            "--compose-pr-test-pull-request",
+            "42",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn run_transient_launch_plan_conflicts_with_argv() {
     let cli = Cli::try_parse_from([
         "mvmctl",

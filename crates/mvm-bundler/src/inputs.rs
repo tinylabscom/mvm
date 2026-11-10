@@ -53,6 +53,8 @@ pub struct BundleExportInputs<'a> {
     pub boot_assets: Option<BootAssetsInputs<'a>>,
     pub cli_boot_assets: Option<CliBootAssetsInputs<'a>>,
     pub canonical_linux_proof: Option<CanonicalLinuxProofInputs<'a>>,
+    /// Same-host, measured source evidence; never a canonical publisher proof.
+    pub local_development_base_proof: Option<mvm_core::plan::bundle::LocalDevelopmentBaseProof>,
     /// Path to the kernel image.
     pub vmlinux: &'a str,
     /// Path to the initrd, when the template boots with one.
@@ -105,6 +107,7 @@ impl<'a> BundleExportInputs<'a> {
             boot_assets: None,
             cli_boot_assets: None,
             canonical_linux_proof: None,
+            local_development_base_proof: None,
             vmlinux,
             initrd: None,
             rootfs,

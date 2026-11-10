@@ -133,6 +133,31 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             "bundle boot-assets architecture differs from host"
         );
         let kind = BackendKind::from_label(backend).context("unknown bundle boot backend")?;
+        if let Some(proof) = &boot.local_development_base {
+            ensure!(
+                (cfg!(unix) && kind == BackendKind::Hvf)
+                    || (cfg!(target_os = "linux") && kind == BackendKind::Firecracker),
+                "local development kernel requires native descriptor custody on this backend"
+            );
+            ensure!(
+                config.canonical_kernel.is_none(),
+                "local development base cannot borrow canonical kernel authority"
+            );
+            mvm_core::plan::bundle::verify_local_development_source(proof)
+                .context("local base composition source changed before launch")?;
+            let kernel = verified
+                .manifest
+                .find_by_role(&ArtifactRole::Kernel)
+                .context("local base kernel missing")?;
+            ensure!(
+                config
+                    .kernel_read_sha256
+                    .as_deref()
+                    .is_none_or(|digest| digest == kernel.sha256),
+                "local base conflicts with another kernel descriptor pin"
+            );
+            config.kernel_read_sha256 = Some(kernel.sha256.clone());
+        }
         // A canonical bundle retains a kernel generation only where the
         // backend can prove that generation's exit; refuse the rest before
         // paying for image selection or runtime assembly, not after.
@@ -148,7 +173,12 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             &support,
             &mvm_build::stage0_kernel::current_image_set_protocol_support(),
         )?;
-        attach_cli_runtime(config, &installed, runtime)?;
+        attach_cli_runtime(
+            config,
+            &installed,
+            runtime,
+            boot.local_development_base.is_some(),
+        )?;
         if needs_owner {
             let owner = std::sync::Arc::new(mvm_core::canonical_linux::prepare_canonical_linux(
                 &archive,
@@ -280,6 +310,7 @@ fn attach_cli_runtime(
     config: &mut VmStartConfig,
     installed: &mvm_core::plan::bundle::InstalledBundle,
     runtime: &mvm_core::plan::bundle::EmbeddedCliBootAssets,
+    local_development_base: bool,
 ) -> Result<()> {
     use mvm_build::guest_runtime::evidence::{
         RuntimeArtifactSelection, verify_runtime_release_proof,
@@ -309,7 +340,49 @@ fn attach_cli_runtime(
         version: runtime.version.clone(),
         arch: GuestArch::host(),
     };
+    #[cfg(feature = "pr-test-guest-runtime")]
+    let pr_test = if let Some(pull_request) = runtime.pr_test_pull_request {
+        ensure!(
+            pull_request > 0
+                && local_development_base
+                && installed.manifest.schema_version
+                    >= mvm_contract::plan::bundle::PR_TEST_RUNTIME_MIN_SCHEMA
+                && installed.manifest.profile.as_deref() == Some("dev")
+                && installed
+                    .manifest
+                    .labels
+                    .get(mvm_core::plan::bundle::BUNDLE_ORIGIN_LABEL)
+                    .is_some_and(|origin| origin == mvm_core::plan::bundle::LOCAL_BUILD_ORIGIN),
+            "PR test runtime requires a host-signed local development bundle"
+        );
+        Some(mvm_core::protocol::runtime_release::PrTestRuntimeProof {
+            input: proof.clone(),
+            pull_request,
+        })
+    } else {
+        None
+    };
+    #[cfg(not(feature = "pr-test-guest-runtime"))]
+    ensure!(
+        runtime.pr_test_pull_request.is_none(),
+        "PR test runtime requires an explicitly compiled test-only binary"
+    );
+    #[cfg(not(feature = "pr-test-guest-runtime"))]
+    let _ = local_development_base;
+    #[cfg(feature = "pr-test-guest-runtime")]
+    ensure!(
+        config
+            .pr_test_runtime_proof
+            .as_ref()
+            .is_none_or(|existing| Some(existing) == pr_test.as_ref()),
+        "PR test runtime selection conflicts with the signed bundle"
+    );
     if let Some(existing) = &config.runtime_release_proof {
+        #[cfg(feature = "pr-test-guest-runtime")]
+        ensure!(
+            pr_test.is_none(),
+            "PR test runtime cannot impersonate a release selection"
+        );
         ensure!(
             existing == &proof,
             "CLI portable runtime proof conflicts with the signed bundle"
@@ -329,6 +402,17 @@ fn attach_cli_runtime(
     let overlay_path = artifact(&runtime.overlay_artifact)?;
     let overlay_verity_path = artifact(&runtime.overlay_verity_artifact)?;
     let initramfs_path = artifact(&runtime.initramfs_artifact)?;
+    #[cfg(feature = "pr-test-guest-runtime")]
+    let verified = match &pr_test {
+        Some(pr_test) => mvm_build::guest_runtime::evidence::verify_pr_test_runtime_proof(
+            pr_test,
+            &runtime.version,
+            proof.arch,
+        ),
+        None => verify_runtime_release_proof(&proof, &runtime.version, proof.arch),
+    }
+    .context("verifying retained portable CLI runtime proof")?;
+    #[cfg(not(feature = "pr-test-guest-runtime"))]
     let verified = verify_runtime_release_proof(&proof, &runtime.version, proof.arch)
         .context("verifying retained portable CLI runtime release proof")?;
     let declaration = verified.declaration(proof.arch)?;
@@ -347,8 +431,15 @@ fn attach_cli_runtime(
         minimum_protocol: mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
         host_protocol: mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
     })?;
+    #[cfg(feature = "pr-test-guest-runtime")]
+    let provenance = match pr_test {
+        Some(proof) => RuntimeBindingProvenance::PrTest { proof },
+        None => RuntimeBindingProvenance::Release { proof },
+    };
+    #[cfg(not(feature = "pr-test-guest-runtime"))]
+    let provenance = RuntimeBindingProvenance::Release { proof };
     RuntimeLaunchBinding::CliAssembly(CliRuntimeLaunchBinding {
-        provenance: RuntimeBindingProvenance::Release { proof },
+        provenance,
         overlay_path,
         overlay_verity_path,
         initramfs_path,
@@ -620,6 +711,7 @@ mod tests {
             overlay_roothash: "a".repeat(64),
             protocol_version: 2,
             min_supported_protocol_version: 2,
+            pr_test_pull_request: None,
         };
         let artifacts = [
             "runtime.tar.gz",
@@ -667,13 +759,29 @@ mod tests {
             ..Default::default()
         };
         let before = format!("{config:?}");
-        let error = attach_cli_runtime(&mut config, &installed, &runtime).unwrap_err();
+        let error = attach_cli_runtime(&mut config, &installed, &runtime, false).unwrap_err();
         assert!(
-            format!("{error:#}").contains("verifying retained portable CLI runtime release proof")
+            format!("{error:#}").contains(if cfg!(feature = "pr-test-guest-runtime") {
+                "verifying retained portable CLI runtime proof"
+            } else {
+                "verifying retained portable CLI runtime release proof"
+            })
+        );
+        assert_eq!(format!("{config:?}"), before);
+        let mut pr_runtime = runtime.clone();
+        pr_runtime.pr_test_pull_request = Some(42);
+        let error = attach_cli_runtime(&mut config, &installed, &pr_runtime, false).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(if cfg!(feature = "pr-test-guest-runtime") {
+                "host-signed local development bundle"
+            } else {
+                "explicitly compiled test-only binary"
+            }),
+            "test provenance cannot be used as a release: {error:#}"
         );
         assert_eq!(format!("{config:?}"), before);
         std::fs::write(home.path().join("overlay.ext4"), b"changed").unwrap();
-        let error = attach_cli_runtime(&mut config, &installed, &runtime).unwrap_err();
+        let error = attach_cli_runtime(&mut config, &installed, &runtime, false).unwrap_err();
         assert!(format!("{error:#}").contains("digest") || format!("{error:#}").contains("size"));
         assert_eq!(format!("{config:?}"), before);
     }
@@ -1282,6 +1390,7 @@ mod tests {
             overlay_roothash: "a".repeat(64),
             protocol_version: 2,
             min_supported_protocol_version: 2,
+            pr_test_pull_request: None,
         };
         let mut payload: Vec<(String, Vec<u8>)> = vec![
             ("kernel".into(), kernel),

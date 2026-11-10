@@ -52,7 +52,9 @@ use crate::policy::security::AgentProfile;
 /// Version 6 separates the signed CLI runtime from the original Linux image set.
 /// Version 7 carries original canonical Linux publisher and revocation proofs.
 /// Version 8 binds a host-local composition to its authenticated input inventory.
-pub const BUNDLE_SCHEMA_VERSION: u32 = 8;
+/// Version 9 distinguishes a measured local development base from publisher proof.
+/// Version 10 records a PR-only test-runtime signing ref in a host-signed development bundle.
+pub const BUNDLE_SCHEMA_VERSION: u32 = 10;
 
 /// The first schema that may carry [`BundleMember::Environment`].
 pub const ENVIRONMENT_MEMBER_MIN_SCHEMA: u32 = 5;
@@ -68,6 +70,12 @@ pub const CANONICAL_LINUX_PROOF_MIN_SCHEMA: u32 = 7;
 
 /// The first schema that carries a host-local composition input inventory.
 pub const LOCAL_COMPOSITION_MIN_SCHEMA: u32 = 8;
+
+/// The first schema that may carry measured, development-only base evidence.
+pub const LOCAL_DEVELOPMENT_BASE_PROOF_MIN_SCHEMA: u32 = 9;
+
+/// A PR-workflow test runtime requires an explicit schema bump.
+pub const PR_TEST_RUNTIME_MIN_SCHEMA: u32 = 10;
 
 /// The first schema that may carry backend-neutral members.
 pub const BUNDLE_MEMBERS_MIN_SCHEMA: u32 = 3;
@@ -204,6 +212,8 @@ pub enum BundleMember {
     /// Original canonical Linux root and revocation proof inventory references.
     /// Data to reverify at admission, never a publisher-authored permission.
     CanonicalLinuxProof(CanonicalLinuxProof),
+    /// A measured local source, not a publisher signature or release permission.
+    LocalDevelopmentBaseProof(LocalDevelopmentBaseProof),
     /// Development-only assembly inputs, not a publisher signature or a grant.
     /// The bundle's rootfs and verity declarations bind the measured output.
     LocalComposition(LocalComposition),
@@ -232,8 +242,15 @@ impl BundleMember {
     pub const fn minimum_schema_version(&self) -> u32 {
         match self {
             Self::EmbeddedBootAssets { .. } => BOOT_ASSETS_MEMBER_MIN_SCHEMA,
-            Self::EmbeddedCliBootAssets(_) => CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA,
+            Self::EmbeddedCliBootAssets(runtime) => {
+                if runtime.pr_test_pull_request.is_some() {
+                    PR_TEST_RUNTIME_MIN_SCHEMA
+                } else {
+                    CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA
+                }
+            }
             Self::CanonicalLinuxProof(_) => CANONICAL_LINUX_PROOF_MIN_SCHEMA,
+            Self::LocalDevelopmentBaseProof(_) => LOCAL_DEVELOPMENT_BASE_PROOF_MIN_SCHEMA,
             Self::LocalComposition(_) => LOCAL_COMPOSITION_MIN_SCHEMA,
             Self::Environment(_) => ENVIRONMENT_MEMBER_MIN_SCHEMA,
             Self::EmbeddedImageSet { .. }
@@ -262,6 +279,10 @@ pub struct EmbeddedCliBootAssets {
     pub overlay_roothash: String,
     pub protocol_version: u32,
     pub min_supported_protocol_version: u32,
+    /// Exact PR ref whose keyless workflow signed this synthetic runtime.
+    /// Never grants release provenance or substitutes for signature verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_test_pull_request: Option<u64>,
 }
 
 /// Archive inventory names, not host paths, trust roots or verification flags.
@@ -275,6 +296,17 @@ pub struct CanonicalLinuxProof {
     pub signature_bundle_artifact: String,
     pub revocation_document_artifact: String,
     pub revocation_signature_bundle_artifact: String,
+}
+
+/// Exact local base manifest and external composition source for a same-host dev run.
+/// The source path is never publisher authority; consumers rehash it at admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalDevelopmentBaseProof {
+    pub manifest_artifact: String,
+    pub composition_tar_sha256: String,
+    pub composition_tar_size: u64,
+    pub composition_tar_path: String,
 }
 
 /// Signed artifact names for the exact source lock and original layer evidence.
@@ -545,14 +577,55 @@ mod tests {
     }
 
     #[test]
-    fn bundle_schema_version_is_eight() {
+    fn bundle_schema_version_is_ten() {
         // Pin the current version constant — bumps are deliberate;
         // a silent rev should trip this test.
-        assert_eq!(BUNDLE_SCHEMA_VERSION, 8);
+        assert_eq!(BUNDLE_SCHEMA_VERSION, 10);
         assert_eq!(ENVIRONMENT_MEMBER_MIN_SCHEMA, 5);
         assert_eq!(CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA, 6);
         assert_eq!(CANONICAL_LINUX_PROOF_MIN_SCHEMA, 7);
         assert_eq!(LOCAL_COMPOSITION_MIN_SCHEMA, 8);
+        assert_eq!(LOCAL_DEVELOPMENT_BASE_PROOF_MIN_SCHEMA, 9);
+        assert_eq!(PR_TEST_RUNTIME_MIN_SCHEMA, 10);
+    }
+
+    #[test]
+    fn local_development_proof_is_closed_complete_and_requires_schema_nine() {
+        let value = serde_json::json!({
+            "class": "local_development_base_proof",
+            "manifest_artifact": "boot-image-set.json",
+            "composition_tar_sha256": "a".repeat(64),
+            "composition_tar_size": 1024,
+            "composition_tar_path": "/local/base/rootfs.tar.gz"
+        });
+        let member: BundleMember = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(member.minimum_schema_version(), 9);
+        assert_eq!(serde_json::to_value(member).unwrap(), value);
+        for field in value
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| *key != "class")
+        {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<BundleMember>(missing).is_err(),
+                "{field}"
+            );
+        }
+        for field in [
+            "publisher_verified",
+            "release",
+            "revocation_document_artifact",
+        ] {
+            let mut forged = value.clone();
+            forged[field] = true.into();
+            assert!(
+                serde_json::from_value::<BundleMember>(forged).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]
@@ -625,6 +698,11 @@ mod tests {
         let member: BundleMember = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(member.minimum_schema_version(), 6);
         assert_eq!(serde_json::to_value(member).unwrap(), value);
+        let mut pr_test = value.clone();
+        pr_test["pr_test_pull_request"] = 42.into();
+        let member: BundleMember = serde_json::from_value(pr_test.clone()).unwrap();
+        assert_eq!(member.minimum_schema_version(), 10);
+        assert_eq!(serde_json::to_value(member).unwrap(), pr_test);
         for field in value
             .as_object()
             .unwrap()

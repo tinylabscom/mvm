@@ -559,6 +559,7 @@ mod tests {
             overlay_roothash: "a".repeat(64),
             protocol_version: 2,
             min_supported_protocol_version: 2,
+            pr_test_pull_request: None,
         };
         let mut members = vec![BundleMember::EmbeddedCliBootAssets(runtime)];
         if canonical {

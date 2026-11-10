@@ -114,6 +114,14 @@ pub fn attach_universal_initramfs_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
 ) -> Result<()> {
+    #[cfg(feature = "pr-test-guest-runtime")]
+    if start_config.pr_test_runtime_proof.is_some() {
+        crate::runtime_evidence::verify_runtime_for_launch(
+            start_config,
+            crate::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        )?;
+        return Ok(());
+    }
     if start_config.legacy_portable_runtime.is_some() {
         crate::runtime_evidence::verify_runtime_for_launch(
             start_config,

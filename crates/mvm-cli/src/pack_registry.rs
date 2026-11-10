@@ -603,6 +603,12 @@ fn pull_one(
             // authenticated bytes and digest for that later transaction.
             return Ok((VerifiedPull::Application(Box::new(application)), Vec::new()));
         }
+        VerifiedRegistryManifest::ApplicationComponent(_) => {
+            bail!("portable application component acquisition requires verified archive custody");
+        }
+        VerifiedRegistryManifest::ComponentLayer(_) => {
+            bail!("runtime/tool component acquisition requires verified archive custody");
+        }
         VerifiedRegistryManifest::RuntimeLayer(_) => {
             bail!("runtime layer acquisition requires verified archive custody");
         }
