@@ -50,8 +50,7 @@ fn write_boot_config(state: &Path) {
         "policy": {
             "network_policy_ref": "provider-deny-all-v1",
             "egress_policy_ref": "provider-deny-all-v1",
-            "fs_policy_ref": "provider-readonly-v1",
-            "tool_policy_ref": "provider-assurance-probe-v1"
+            "fs_policy_ref": "provider-readonly-v1"
         },
         "authority": {
             "ceiling": {

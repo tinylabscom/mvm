@@ -15,7 +15,7 @@
 use std::sync::Once;
 use std::time::Duration;
 
-use mvm_hostd::supervisor::tools::http_hardening::read_capped;
+use mvm_hostd::supervisor::http_hardening::read_capped;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Bind a TCP listener on 127.0.0.1:0, accept one connection, drain

@@ -387,11 +387,6 @@ pub fn remote_templates_dir() -> std::path::PathBuf {
         .join("remote")
 }
 
-/// Host tool staging root: `<mvm_home>/tool-staging`.
-pub fn tool_staging_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_home()).join("tool-staging")
-}
-
 /// Host attestation identity root: `<mvm_home>/attestation`.
 pub fn attestation_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("attestation")
@@ -1890,10 +1885,6 @@ mod tests {
         assert_eq!(
             instances_root(),
             std::path::PathBuf::from("/custom/root/instances")
-        );
-        assert_eq!(
-            tool_staging_dir(),
-            std::path::PathBuf::from("/custom/root/tool-staging")
         );
         assert_eq!(
             oci_policy_path(),

@@ -50,14 +50,10 @@ pub(in crate::commands) fn require_entrypoint_request(args: &RunArgs) -> Result<
             && args.gpu_device.is_none()
             && args.mounts.is_empty()
             && args.env.is_empty()
-            && args.allow_env.is_empty()
-            && args
-                .applied_policy
-                .as_ref()
-                .is_none_or(|policy| policy.tools.to_tool_rules().is_empty()),
+            && args.allow_env.is_empty(),
         "application --entrypoint cannot yet preserve --grants-file, --cpu-limit, \
          --dry-run, --launch-plan, --peer, --host-service, --asset, --receipt, \
-         GPU options, --mount, --env, --allow-env or policy tool rules"
+         GPU options, --mount, --env or --allow-env"
     );
     Ok(())
 }

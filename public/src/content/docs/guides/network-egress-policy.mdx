@@ -365,38 +365,26 @@ network: mvm.network({
 Use [Declaration cookbook](/sdk/declaration-cookbook/) for the full decorator
 shape.
 
-## Agent tool policy
+## Application tools and network policy
 
-Do not let a model choose arbitrary network destinations. The application
-should map a capability to a fixed grant:
-
-```json
-{
-  "tool": "web_fetch",
-  "network": {
-    "mode": "bridge",
-    "allow": [
-      {
-        "host": "api.openai.com",
-        "port": 443
-      }
-    ]
-  }
-}
-```
+MVM does not inspect or authorize the guest application's tool names. Admit
+destinations for the microVM through its network policy; the same destination
+decision applies whether the guest uses a browser, a model tool, or a shell.
+Keep a model from choosing arbitrary network destinations in the application
+itself, and do not treat that application rule as a host egress grant.
 
 Validation rules:
 
 - reject wildcard hosts, CIDRs, and user-provided raw proxy URLs unless the
   policy explicitly supports them;
-- allow only expected ports for each tool capability;
+- allow only expected ports for the workload;
 - keep DNS policy explicit when the workload depends on names;
 - treat outbound detect/replace and inbound plaintext reinjection as separate
   policy decisions;
 - store the grant decision with the audit/run identifier;
 - return policy denial distinctly from transport or guest command failure.
 
-If a tool path is allowed to send secrets or user data to a remote service,
+If a workload is allowed to send secrets or user data to a remote service,
 prefer runtime-owned mediation over raw pass-through. On owned cleartext paths,
 the runtime can detect secrets and structured PII, replace them with opaque
 flow-scoped tokens, and restore the original bytes only when the exact token

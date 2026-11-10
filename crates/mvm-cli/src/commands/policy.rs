@@ -287,7 +287,6 @@ fn sections(policy: &PolicyBody) -> Vec<&'static str> {
         ("secrets", policy.secrets.is_empty()),
         ("shares", policy.shares.is_empty()),
         ("env", policy.env.is_empty()),
-        ("tools", policy.tools.is_empty()),
         ("resources", policy.resources.is_empty()),
     ] {
         if !empty {
@@ -373,35 +372,6 @@ pub(in crate::commands) fn policy_diff(a: &PolicyBody, b: &PolicyBody) -> Vec<Di
             .readmit
             .iter()
             .for_each(|v| add("env.readmit", v.clone()));
-        policy
-            .tools
-            .allow
-            .iter()
-            .for_each(|v| add("tools.allow", v.clone()));
-        policy
-            .tools
-            .ask
-            .iter()
-            .for_each(|v| add("tools.ask", v.clone()));
-        policy
-            .tools
-            .deny
-            .iter()
-            .for_each(|v| add("tools.deny", v.clone()));
-        for (tool, detail) in &policy.tools.detail {
-            for pattern in &detail.argv {
-                add(&format!("tools.detail.{tool}.argv"), pattern.clone());
-            }
-            for pattern in &detail.deny {
-                add(&format!("tools.detail.{tool}.deny"), pattern.clone());
-            }
-            for route in &detail.routes {
-                add(&format!("tools.detail.{tool}.routes"), route.clone());
-            }
-            for secret in &detail.secrets {
-                add(&format!("tools.detail.{tool}.secrets"), secret.clone());
-            }
-        }
         let r = &policy.resources;
         if let Some(v) = r.cpu_millicores {
             add("resources.cpu_millicores", v.to_string());

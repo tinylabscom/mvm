@@ -199,7 +199,6 @@ pub struct EndpointSpawnInputs<'a> {
     pub tenant: &'a str,
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
-    pub tools: &'a mvm_contract::policy::tool_rules::ToolRules,
     pub network_policy: &'a NetworkPolicy,
     /// Transport-neutral resource ceilings from the admitted plan.
     pub network_limits: mvm_core::plan::NetworkLimits,
@@ -309,7 +308,6 @@ impl<'a> ClaimGuards<'a> {
             tenant: inputs.tenant,
             secrets: inputs.secrets,
             redaction: inputs.redaction,
-            tools: inputs.tools,
             network_policy: inputs.network_policy,
             network_limits: inputs.network_limits,
             ingress: inputs.ingress,
@@ -318,7 +316,6 @@ impl<'a> ClaimGuards<'a> {
         if inputs.secrets.is_empty()
             && !inputs.network_policy.admits_outbound()
             && inputs.ingress.is_empty()
-            && inputs.tools.is_empty()
         {
             let identity_drive = self.spawner.prepare_identity(&request)?;
             // No endpoint, but still a VM-lifetime collector: telemetry does
@@ -461,9 +458,6 @@ mod tests {
     use mvm_core::policy::network_policy::NetworkPolicy;
     use std::sync::Mutex;
 
-    static EMPTY_TOOLS: std::sync::LazyLock<mvm_contract::policy::tool_rules::ToolRules> =
-        std::sync::LazyLock::new(mvm_contract::policy::tool_rules::ToolRules::default);
-
     /// An `NetworkEndpointSpawner` double: records the `vm_name` it was handed and,
     /// mirroring `RealNetworkEndpointSpawner`, returns the per-VM socket keyed on that
     /// name — so a test can prove `ClaimGuards` threads the child's own id
@@ -522,7 +516,6 @@ mod tests {
             tenant: "tenant-x",
             secrets: &[],
             redaction,
-            tools: &EMPTY_TOOLS,
             network_policy: policy,
             network_limits: mvm_core::plan::NetworkLimits::default(),
             ingress: &[],
@@ -628,27 +621,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_rules_keep_the_endpoint_available_without_network_egress() {
+    fn deny_all_workload_does_not_spawn_an_egress_endpoint() {
         let spawner = FakeSpawner::default();
         let guards = ClaimGuards::new(&spawner);
         let redaction = RedactionPolicy::default();
         let policy = NetworkPolicy::deny_all();
-        let tools = mvm_contract::policy::tool_rules::ToolRules {
-            allow: vec!["shell".into()],
-            ..Default::default()
-        };
         let state = tempfile::tempdir().unwrap();
-        let mut inputs = endpoint_inputs(state.path(), &redaction, &policy);
-        inputs.tools = &tools;
+        let inputs = endpoint_inputs(state.path(), &redaction, &policy);
 
         let mut child = guards
-            .spawn_endpoint(&VmId("child-tool-only".into()), &inputs)
-            .expect("tool policy needs an endpoint");
-        assert!(child.egress_uds().is_some());
-        assert_eq!(
-            spawner.seen_vm.lock().unwrap().as_deref(),
-            Some("child-tool-only")
-        );
+            .spawn_endpoint(&VmId("child-denied".into()), &inputs)
+            .expect("deny-all workload needs no egress process");
+        assert!(child.egress_uds().is_none());
+        assert!(spawner.seen_vm.lock().unwrap().is_none());
         child.defuse();
     }
 

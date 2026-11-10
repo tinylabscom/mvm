@@ -58,8 +58,8 @@ pub use outcome::{
     TrialEvidenceRecord, TrialOutcome, TrialResultCandidate, TrialVerdict, evaluate,
 };
 pub use policy::{
-    EGRESS_POLICY_REF, FILESYSTEM_POLICY_REF, NETWORK_POLICY_REF, POLICY_DIGEST_ALGORITHM_V1,
-    PUBLISHED_POLICY_DIGEST, TOOL_POLICY_REF, policy_digest_from_refs,
+    EGRESS_POLICY_REF, FILESYSTEM_POLICY_REF, NETWORK_POLICY_REF, POLICY_DIGEST_ALGORITHM_V2,
+    PUBLISHED_POLICY_DIGEST, policy_digest_from_refs,
 };
 pub use probe::{
     HOST_ASSURANCE_SERVICE, PROBE_OBSERVATION_SCHEMA, PROBE_REQUEST_SCHEMA, ProbeInvocation,
