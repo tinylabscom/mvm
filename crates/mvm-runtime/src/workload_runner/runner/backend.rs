@@ -182,6 +182,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
             #[cfg(not(unix))]
             anyhow::bail!("kernel generation retained: lifetime release unsupported");
         }
+        lifecycle.release_installed_bundle_after_stop(&id.0)?;
 
         let timing = StopTiming {
             attach,

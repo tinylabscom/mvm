@@ -739,6 +739,7 @@ dependencies = [
  "chrono",
  "core-foundation",
  "ed25519-dalek",
+ "flate2",
  "hex",
  "hmac",
  "libc",
