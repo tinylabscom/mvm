@@ -10,7 +10,9 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use mvm_agentd::mailbox_outbox::{MAILBOX_CMDLINE_TOKEN, OUTBOX_PATH, forward_outbox};
+use mvm_agentd::mailbox_outbox::{
+    MAILBOX_CMDLINE_TOKEN, MAILBOX_IO_TIMEOUT, OUTBOX_PATH, bound_socket_io, forward_outbox,
+};
 use mvm_contract::protocol::mailbox::MAILBOX_PORT;
 
 use crate::globals::SHUTDOWN_REQUESTED;
@@ -46,6 +48,7 @@ fn accept_loop(listener_fd: RawFd) {
         // SAFETY: `cfd` is the just-accepted connection fd, owned here and
         // closed on drop.
         let mut stream = unsafe { std::fs::File::from_raw_fd(cfd) };
+        let _ = bound_socket_io(cfd, MAILBOX_IO_TIMEOUT);
         if let Err(refusal) = forward_outbox(&mut stream, Path::new(OUTBOX_PATH)) {
             // The host re-dials until the workload writes its frame; log the
             // first few refusals and then one in a hundred.

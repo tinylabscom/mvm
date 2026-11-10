@@ -38,6 +38,38 @@ pub const OUTBOX_FILE_MODE: u32 = 0o640;
 /// The recipient bytes beside the largest body the host will seal.
 const MAX_OUTBOX_BYTES: u64 = MAX_MAILBOX_PAYLOAD_BYTES as u64 + 32;
 
+/// How long a host may stall a mailbox connection, in either direction,
+/// before the agent drops it and serves the next dial.
+pub const MAILBOX_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Bound every read and write on the socket `fd` to `timeout`, so a peer that
+/// stalls fails the exchange instead of blocking the agent's one listener.
+pub fn bound_socket_io(
+    fd: std::os::fd::RawFd,
+    timeout: std::time::Duration,
+) -> std::io::Result<()> {
+    let tv = libc::timeval {
+        tv_sec: timeout.as_secs() as libc::time_t,
+        tv_usec: 0,
+    };
+    for opt in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
+        // SAFETY: `tv` outlives the call and the length is its exact size.
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                opt,
+                (&raw const tv).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// Forward the outbox message over `stream` and consume it, whatever the
 /// verdict, so the next dial sees only a newer message. The file is renamed
 /// aside first, so a writer's rename of the next message is never lost. An
@@ -125,11 +157,27 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_that_never_answers_fails_the_forward_within_the_bound() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = dir.path().join("outbox");
+        write_outbox(&outbox, &message(b"one")).unwrap();
+        let (mut ours, _silent_but_open) = std::os::unix::net::UnixStream::pair().unwrap();
+        bound_socket_io(ours.as_raw_fd(), std::time::Duration::from_secs(1)).unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(forward_outbox(&mut ours, &outbox), Err(Refusal::Malformed));
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
     fn a_written_outbox_is_forwarded_as_the_same_message() {
         let dir = tempfile::tempdir().unwrap();
         let outbox = dir.path().join("outbox");
         write_outbox(&outbox, &message(b"hello")).unwrap();
         let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        theirs
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
         let host = std::thread::spawn(move || {
             let mut len = [0u8; 4];
             theirs.read_exact(&mut len).unwrap();
@@ -281,6 +329,9 @@ mod tests {
         let message = [&[9u8; 32][..], b"hello"].concat();
         std::fs::write(&outbox, &message).unwrap();
         let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        theirs
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
         let host = std::thread::spawn(move || {
             let mut len = [0u8; 4];
             theirs.read_exact(&mut len).unwrap();
