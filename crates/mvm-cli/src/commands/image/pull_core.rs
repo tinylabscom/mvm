@@ -74,6 +74,7 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
 ) -> Result<ResolvedOciRunImage> {
     ensure_prod_digest_pin(reference, prod)?;
     ensure_prod_registry_reference_policy(reference, prod)?;
+    crate::release_guest_runtime::ensure_release_pieces_prepared()?;
     mvm_client::launch::runtime_overlay::require_prepared_oci_guest_runtime(cache_root)?;
     resolve_run_image_with(
         cache_root,
@@ -93,6 +94,7 @@ pub(in crate::commands) fn acquire_run_image(
 ) -> Result<ResolvedOciRunImage> {
     ensure_prod_digest_pin(reference, prod)?;
     ensure_prod_registry_reference_policy(reference, prod)?;
+    crate::release_guest_runtime::ensure_release_pieces_prepared()?;
     mvm_client::launch::runtime_overlay::require_prepared_oci_guest_runtime(cache_root)?;
     resolve_run_image_with(
         cache_root,
@@ -508,12 +510,10 @@ pub(super) fn pull_image_with_trust(
     reference: &str,
     prod: bool,
 ) -> Result<(CachedOciImage, OciTrustDecision, String)> {
-    pull_image_with_trust_with_prepare(
-        cache_root,
-        reference,
-        prod,
-        mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime,
-    )
+    pull_image_with_trust_with_prepare(cache_root, reference, prod, |root| {
+        crate::release_guest_runtime::ensure_release_pieces_prepared()?;
+        mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(root)
+    })
 }
 
 fn pull_image_with_trust_with_prepare(

@@ -141,6 +141,40 @@ pub(crate) fn prepare_launch_pieces_for_running_binary(cache_root: &Path) -> Res
     Ok(())
 }
 
+/// Whether this binary's guest-runtime pieces were already assembled from its
+/// release archive: the adoption record is written last, after every piece,
+/// and the OCI shims are what an image launch needs beside it.
+fn release_pieces_ready(cache_root: &Path, oci_cache_root: &Path) -> bool {
+    let version = crate::update::current_version();
+    let arch = mvm_core::arch::GuestArch::host();
+    matches!(
+        mvm_build::runtime_pieces::adopted_release_archive(cache_root, version, arch),
+        Ok(Some(_))
+    ) && mvm_build::guest_agent_build::cached_guest_binaries(oci_cache_root, version, arch)
+        .is_some()
+}
+
+/// First use of a release binary: assemble this version's guest-runtime pieces
+/// from the archive its release ships, once, when they are missing. The
+/// archive is acquired and verified exactly as `mvmctl bootstrap` does (beside
+/// the binary, cached, or downloaded and held to its digest and signature), so
+/// no launch ever boots another version's pieces. A no-op for source builds,
+/// which keep their explicit preparation, and once the pieces exist.
+pub(crate) fn ensure_release_pieces_prepared() -> Result<()> {
+    let published = compiled_channel() == DistributionChannel::Release
+        && mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode()
+            == mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode::DownloadPublishedArtifact;
+    let cache_root = cache_root();
+    if !published || release_pieces_ready(&cache_root, &mvm_core::config::oci_cache_dir()) {
+        return Ok(());
+    }
+    ui::notice(&format!(
+        "Preparing the guest runtime of mvmctl {} from its release archive (first use only, about a minute)...",
+        crate::update::current_version()
+    ));
+    prepare_launch_pieces_for_running_binary(&cache_root)
+}
+
 /// Fetch and verify the guest runtime the release `tag` ships, for
 /// `mvmctl env update` to call before it replaces the binary. A failure here
 /// leaves the installed CLI as it was, so an update never produces a CLI
@@ -157,6 +191,22 @@ pub(crate) fn stage_for_update(tag: &str) -> Result<ReleaseGuestRuntime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pieces_are_not_ready_before_any_release_archive_is_adopted() {
+        let cache = tempfile::TempDir::new().unwrap();
+        assert!(!release_pieces_ready(
+            cache.path(),
+            &cache.path().join("oci")
+        ));
+    }
+
+    #[test]
+    fn a_source_build_never_prepares_release_pieces_implicitly() {
+        if compiled_channel() == DistributionChannel::Source {
+            ensure_release_pieces_prepared().expect("a source build is a no-op here");
+        }
+    }
 
     #[test]
     fn a_version_is_published_under_its_v_tag() {
