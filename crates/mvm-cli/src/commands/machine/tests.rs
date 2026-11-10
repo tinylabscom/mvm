@@ -1,3 +1,4 @@
+use super::lifecycle::finish_machine_exec;
 use super::receipt::MachineStartInitPolicy;
 use super::remove::{
     remove_machine_runtime_state, remove_machine_spec, resolve_remove_targets, rm_running_refusal,

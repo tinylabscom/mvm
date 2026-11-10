@@ -323,6 +323,36 @@ pub(super) fn require_console_target(name: &str) -> Result<()> {
     )
 }
 
+pub(super) fn run_exec_with_journal(
+    cli: &Cli,
+    args: MachineExecArgs,
+    cfg: &MvmConfig,
+) -> Result<()> {
+    let state_dir = config::machine_state_dir(&args.name);
+    let exit_code = {
+        let _journal_lock = input_journal::lock(&state_dir)?;
+        let pending = input_journal::begin_exec(&state_dir, &args.argv)?;
+        finish_machine_exec(&state_dir, pending, exec_machine(cli, args, cfg))?
+    };
+    if exit_code != 0 {
+        crate::observability::exit(exit_code);
+    }
+    Ok(())
+}
+
+pub(super) fn finish_machine_exec(
+    state_dir: &Path,
+    pending: Option<input_journal::PendingExec>,
+    outcome: Result<i32>,
+) -> Result<i32> {
+    input_journal::finish_exec(
+        state_dir,
+        pending,
+        outcome.as_ref().is_ok_and(|code| *code == 0),
+    )?;
+    outcome
+}
+
 pub(in crate::commands) fn exec_machine(
     cli: &Cli,
     args: MachineExecArgs,

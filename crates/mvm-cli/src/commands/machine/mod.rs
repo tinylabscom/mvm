@@ -62,8 +62,8 @@ use super::vm::{console, down};
 use crate::ui;
 use checkpoint::{ForkVmFullMachineInput, fork_vm_full_machine};
 use lifecycle::{
-    exec_machine, quarantine_machine, replace_machine, run_restart, run_start, shell_machine,
-    stop_machine,
+    quarantine_machine, replace_machine, run_exec_with_journal, run_restart, run_start,
+    shell_machine, stop_machine,
 };
 use mailbox::{MachineMailboxAction, recv_mailbox};
 use manifest_source::{absolutize_manifest_volume_spec, load_machine_manifest_source};
@@ -1550,18 +1550,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
         MachineAction::Start(start_cmd) => run_start(start_cmd),
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
-        MachineAction::Exec(exec_args) => {
-            let state_dir = config::machine_state_dir(&exec_args.name);
-            let exit_code = {
-                let _journal_lock = input_journal::lock(&state_dir)?;
-                let pending = input_journal::begin_exec(&state_dir, &exec_args.argv)?;
-                finish_machine_exec(&state_dir, pending, exec_machine(cli, exec_args, cfg))?
-            };
-            if exit_code != 0 {
-                crate::observability::exit(exit_code);
-            }
-            Ok(())
-        }
+        MachineAction::Exec(exec_args) => run_exec_with_journal(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
@@ -1590,19 +1579,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
     }
-}
-
-fn finish_machine_exec(
-    state_dir: &Path,
-    pending: Option<input_journal::PendingExec>,
-    outcome: Result<i32>,
-) -> Result<i32> {
-    input_journal::finish_exec(
-        state_dir,
-        pending,
-        outcome.as_ref().is_ok_and(|code| *code == 0),
-    )?;
-    outcome
 }
 
 /// Run `machine warm-restore`: fork a vm_full checkpoint into a fresh child VM.

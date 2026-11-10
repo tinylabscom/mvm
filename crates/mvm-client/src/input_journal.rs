@@ -275,7 +275,10 @@ fn scan(machine_state_dir: &Path) -> Result<Vec<CompletedEvent>> {
     }
     if let Some((seq, _, _)) = pending {
         bail!(
-            "machine input sequence {seq} has no durable finish; refuse exec and checkpoint until the ambiguous operation is recovered"
+            "machine input sequence {seq} has no durable finish; refuse exec and checkpoint \
+             on this machine. Do not retry an operation with unknown effects; restore a \
+             vm_full checkpoint from before this input to a fresh machine with \
+             `mvmctl machine restore`"
         );
     }
     Ok(entries)
@@ -609,6 +612,32 @@ mod tests {
         begin_exec(dir.path(), &["ambiguous".into()]).expect("begin");
         let error = read(dir.path()).expect_err("unfinished input must refuse");
         assert!(error.to_string().contains("no durable finish"), "{error:#}");
+        assert!(
+            error.to_string().contains("mvmctl machine restore"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_machine_journal_does_not_inherit_the_interrupted_parents_input() {
+        let (_dir, _env) = isolated();
+        let parent = mvm_core::config::machine_state_dir("interrupted");
+        let child = mvm_core::config::machine_state_dir("restored-child");
+        let _parent_lock = lock(&parent).expect("parent lock");
+        begin_exec(&parent, &["ambiguous".into()]).expect("begin parent input");
+        let parent_bytes = std::fs::read(journal_path(&parent)).expect("parent journal");
+        assert!(cursor(&parent).is_err(), "parent remains ambiguous");
+
+        let _child_lock = lock(&child).expect("child lock");
+        assert_eq!(cursor(&child).expect("fresh machine cursor"), 0);
+        let pending = begin_exec(&child, &["safe-next".into()]).expect("new child input");
+        finish_exec(&child, pending, true).expect("finish child input");
+        assert_eq!(cursor(&child).expect("child cursor"), 1);
+        assert_eq!(
+            std::fs::read(journal_path(&parent)).expect("parent journal"),
+            parent_bytes
+        );
+        assert!(cursor(&parent).is_err(), "old journal stays blocked");
     }
 
     #[test]
