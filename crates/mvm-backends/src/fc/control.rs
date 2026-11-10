@@ -31,7 +31,7 @@ pub fn pause_vm(name: &str) -> Result<()> {
 
     let q_socket = shell_quote(&socket);
     run_in_vm(&format!(
-        r#"sudo curl -fsS -X PATCH --unix-socket {q_socket} \
+        r#"curl -fsS -X PATCH --unix-socket {q_socket} \
             -H 'Content-Type: application/json' \
             -d '{{"state":"Paused"}}' \
             'http://localhost/vm'"#,
@@ -57,7 +57,7 @@ pub fn resume_vm(name: &str) -> Result<()> {
 
     let q_socket = shell_quote(&socket);
     run_in_vm(&format!(
-        r#"sudo curl -fsS -X PATCH --unix-socket {q_socket} \
+        r#"curl -fsS -X PATCH --unix-socket {q_socket} \
             -H 'Content-Type: application/json' \
             -d '{{"state":"Resumed"}}' \
             'http://localhost/vm'"#,
@@ -90,7 +90,7 @@ pub fn balloon_set_target(name: &str, target_inflate_mib: u32) -> Result<()> {
 
     let q_socket = shell_quote(&socket);
     run_in_vm(&format!(
-        r#"sudo curl -fsS -X PATCH --unix-socket {q_socket} \
+        r#"curl -fsS -X PATCH --unix-socket {q_socket} \
             -H 'Content-Type: application/json' \
             -d '{{"amount_mib":{target}}}' \
             'http://localhost/balloon'"#,
@@ -123,7 +123,7 @@ pub fn balloon_state(name: &str) -> Result<u32> {
 
     let q_socket = shell_quote(&socket);
     let body = run_in_vm_stdout(&format!(
-        r#"sudo curl -fsS --unix-socket {q_socket} 'http://localhost/balloon'"#,
+        r#"curl -fsS --unix-socket {q_socket} 'http://localhost/balloon'"#,
     ))
     .with_context(|| format!("GET /balloon for VM '{name}'"))?;
 
@@ -180,7 +180,7 @@ fn cleanup_stopped_vm_state(
 fn send_ctrl_alt_del_script(socket: &str) -> String {
     let socket = shell_quote(socket);
     format!(
-        r#"sudo curl -s -X PUT --unix-socket {socket} \
+        r#"curl -s -X PUT --unix-socket {socket} \
             --data '{{"action_type": "SendCtrlAltDel"}}' \
             "http://localhost/actions" 2>/dev/null || true"#
     )

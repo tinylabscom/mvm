@@ -363,17 +363,6 @@ pub(crate) fn handle_exec(
     do_exec_streaming(ctx.file, &command, stdin.as_deref(), timeout_secs)
 }
 
-pub(crate) fn handle_mediated_exec(
-    ctx: &mut HandlerCtx,
-    command: mvm_agentd::exec_stream::MediatedCommand<'_>,
-) -> GuestResponse {
-    eprintln!("[audit] mediated exec request");
-    let terminal = mvm_agentd::exec_stream::stream_exec_mediated(command, |event| {
-        write_response(ctx.file, &GuestResponse::ExecEvent(event));
-    });
-    GuestResponse::ExecEvent(terminal)
-}
-
 pub(crate) fn handle_exec_batch(
     stages: Vec<mvm_agentd::vsock::StageFile>,
     commands: Vec<Vec<String>>,

@@ -184,34 +184,6 @@ required_witness = "Authenticated host collector receives producer startup, stan
 
 [[binary]]
 package = "mvm-agentd"
-name = "mvm-tool-shim"
-source = "crates/mvm-agentd/src/bin/mvm-tool-shim.rs"
-required_features = []
-[binary.capture]
-kind = "runtime-gap"
-role = "workload-guest"
-owner = "Guest workload process"
-signals = ["diagnostics", "events", "logs", "spans", "stdio"]
-entrypoint = "fn main("
-gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
-required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
-
-[[binary]]
-package = "mvm-agentd"
-name = "mvm-tool-helper"
-source = "crates/mvm-agentd/src/bin/mvm-tool-helper.rs"
-required_features = []
-[binary.capture]
-kind = "runtime-gap"
-role = "workload-guest"
-owner = "Guest init"
-signals = ["diagnostics", "events", "logs", "spans"]
-entrypoint = "fn main("
-gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
-required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
-
-[[binary]]
-package = "mvm-agentd"
 name = "mvm-runner"
 source = "crates/mvm-agentd/src/bin/mvm-runner.rs"
 required_features = []
@@ -505,6 +477,20 @@ signals = ["diagnostics", "events", "logs", "spans", "stdio"]
 entrypoint = "fn main("
 gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
 required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
+name = "mvm-mailbox"
+source = "crates/mvm-hostd/src/bin/mvm-mailbox.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Per-VM guest mailbox process"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Installs no subscriber and runs with stderr discarded; its diagnostics are not collected."
+required_witness = "Host collection receives the mailbox process's startup and refusal events correlated to the VM it serves."
 
 [[binary]]
 package = "mvm-hostd"

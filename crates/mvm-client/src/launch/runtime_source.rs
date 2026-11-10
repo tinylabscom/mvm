@@ -126,17 +126,6 @@ pub fn attach_runtime_overlay_if_cached(
     attach_runtime_overlay_if_cached_version(start_config, hypervisor, None, None)
 }
 
-/// The selected-checkout form takes a local image checkout through
-/// [`attach_runtime_overlay_if_cached_version`]; this convenience is for
-/// callers with no selection to offer (tests, non-CLI consumers).
-pub fn attach_runtime_overlay_if_cached_version_unpaired(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    hypervisor: &str,
-    expected_version: Option<&str>,
-) -> Result<()> {
-    attach_runtime_overlay_if_cached_version(start_config, hypervisor, expected_version, None)
-}
-
 pub fn attach_runtime_overlay_if_cached_version(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,

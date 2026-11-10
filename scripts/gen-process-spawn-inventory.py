@@ -225,14 +225,11 @@ A = {
     "mvm-agentd/src/late_volumes.rs": ("guest helper", "re-exec self as the late-volume mount helper"),
     "mvm-agentd/src/lifecycle_hooks.rs": ("guest workload", "before_/after_ lifecycle hook scripts"),
     "mvm-agentd/src/process_rpc.rs": ("guest workload", "process-control RPC start of a requested program"),
-    "mvm-agentd/src/tool_helper.rs": ("guest helper", "fork and execveat of a mediated tool invocation"),
-    "mvm-agentd/src/tool_install.rs": ("guest helper", "start the declared-command tool helper before privilege drop"),
     "mvm-agentd/src/worker_pool.rs": ("guest workload", "warm worker-pool process"),
     "mvm-setpriv/src/lib.rs": ("guest helper", "privilege-drop-and-exec of the target command"),
     # builder VM
     "mvm-agentd/src/bin/mvm-builder-agent.rs": ("builder job", "run a builder job's command"),
     "mvm-agentd/src/builder_agent.rs": ("builder job", "run a builder job's command"),
-    "mvm-agentd/src/builder_build.rs": ("builder job", "nix build and artifact staging via sh"),
     "mvm-builder-guest/src/bin/mvm-host-vm-init.rs": ("builder init", "builder VM PID 1: busybox/mount/network setup, nix-store, mkfs, workload netns, agent fork"),
     "mvm-builder-guest/src/bin/mvm-host-vm-init/boot_stage.rs": ("builder init", "exec the next boot stage"),
     "mvm-builder-guest/src/bin/mvm-host-vm-init/builder_hooks.rs": ("builder init", "fsck and loop-device hooks"),
@@ -243,8 +240,6 @@ A = {
     "mvm-builder-guest/src/bin/stage0-init/store_gc.rs": ("builder job", "nix store garbage collection"),
     "mvm-builder-guest/src/builderd.rs": ("builder job", "builderd runs job argv and the rootfs runner"),
     # host libraries
-    "mvm-vmm/src/driver/prepared_disks.rs": ("systemd-run / sudo", "inventory a Firecracker process's descriptors through sudo find on Linux"),
-    "mvm-backends/src/driver/fc.rs": ("systemd-run / sudo", "signal a Firecracker process through sudo kill on Linux"),
     "mvm-backends/src/driver/hvf.rs": ("hypervisor supervisor", "spawn mvm-hvf-supervisor for an HVF VM (cold and restore)"),
     "mvm-backends/src/driver/hvf_restore.rs": ("hypervisor supervisor", "spawn mvm-hvf-supervisor for a snapshot restore"),
     "mvm-backends/src/driver/libkrun.rs": ("hypervisor supervisor", "spawn mvm-libkrun-supervisor"),
@@ -274,7 +269,6 @@ A = {
     "mvm-fs/src/oci_to_rootfs/ext4.rs": ("storage tool", "mke2fs to materialize an OCI rootfs (Linux)"),
     "mvm-fs/src/oci_to_rootfs/verity.rs": ("storage tool", "veritysetup format of a rootfs (Linux)"),
     "mvm-runtime/src/host_shell.rs": ("shell script", "bash -c for ShellEnvironment host commands"),
-    "mvm-runtime/src/microvm/run_info.rs": ("process control", "kill of a recorded VM pid"),
     "mvm-runtime/src/storage/backend.rs": ("storage tool", "dmsetup thin-pool operations"),
     "mvm-runtime/src/storage/volume/encrypted_linux.rs": ("storage tool", "cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume"),
     "mvm-vmm/src/host/aux_bin.rs": ("helper bin", "`--contract-version` probe of a helper; cargo build of helpers from source"),
@@ -290,6 +284,7 @@ A = {
     "mvm-hostd/src/bin/mvm-host-agent.rs": ("helper bin", "re-exec self as a worker process"),
     "mvm-hostd/src/bin/mvm-hvf-supervisor.rs": ("codesign / self re-exec", "ad-hoc codesign of the binary, then re-exec self signed"),
     "mvm-hostd/src/bin/mvm-network-endpoint.rs": ("helper bin", "keeper re-execs the endpoint binary for a long-lived VM"),
+    "mvm-hostd/src/mailbox_process.rs": ("helper bin", "launch path starts the per-VM mailbox process with derived keys on stdin"),
     "mvm-hostd/src/health_probe.rs": ("mvmctl self re-exec", "`mvmctl machine restart` after a failed healthcheck (embedder-refused)"),
     "mvm-hostd/src/supervisor/firewall/linux_nft.rs": ("net (nft)", "install host nftables rules"),
     "mvm-hostd/src/supervisor/services/spawn.rs": ("helper bin", "ProcessSpawner: start a signed, integrity-checked host service binary"),
@@ -323,7 +318,7 @@ AUTH = {
     "mvm-conformance": "dev harness, not shipped",
 }
 AUTH_OVERRIDE = {f: "builder VM" for f in (
-    "mvm-agentd/src/bin/mvm-builder-agent.rs", "mvm-agentd/src/builder_agent.rs", "mvm-agentd/src/builder_build.rs")}
+    "mvm-agentd/src/bin/mvm-builder-agent.rs", "mvm-agentd/src/builder_agent.rs")}
 AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-hvf-supervisor.rs"] = "per-VM supervisor bin"
 AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-network-endpoint.rs"] = "per-VM endpoint bin"
 AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-host-agent.rs"] = "host daemon bin"

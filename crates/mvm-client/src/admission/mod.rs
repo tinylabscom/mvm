@@ -83,27 +83,6 @@ pub enum AssetSpec {
     RegistryPack(mvm_core::registry_pack::PackPin),
 }
 
-/// Add the tool-decision service binding when the plan declares tools.
-///
-/// Keeps caller order and deduplicates: a caller that already bound
-/// `host.tool.v1` does not get a duplicate entry.
-fn services_with_tool_decision(
-    mut services: Vec<mvm_contract::protocol::broker::ServiceId>,
-    tools: &mvm_contract::policy::tool_rules::ToolRules,
-) -> Vec<mvm_contract::protocol::broker::ServiceId> {
-    if tools.is_empty() {
-        return services;
-    }
-    let tool_decision = mvm_contract::protocol::broker::ServiceId::parse(
-        mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE,
-    )
-    .expect("host.tool.v1 is a valid ServiceId");
-    if !services.contains(&tool_decision) {
-        services.push(tool_decision);
-    }
-    services
-}
-
 pub struct AdmitPlanForBootParams<'a> {
     /// Mailbox this launch grants, minted into the plan before signing.
     pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
@@ -212,9 +191,6 @@ pub struct AdmitPlanForBootParams<'a> {
     /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
     /// Default (all-off) preserves the curated-only baseline.
     pub redaction: mvm_core::policy::RedactionPolicy,
-    /// Resolved per-tool rules an authored policy contributed. Default
-    /// (empty) keeps the tool dimension unused.
-    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     /// The resolved runtime egress policy (`--allow-host`,
     /// template default, or deny-all default). Non-deny
     /// policies are lowered into a generated PolicyBundle and referenced by the
@@ -734,7 +710,6 @@ fn admit(
         network_policy_ref: generated_policy_ref,
         fs_policy_ref: generated_policy_ref,
         egress_policy_ref: generated_policy_ref,
-        tool_policy_ref: generated_policy_ref,
         secret_release: p.secret_release,
         secrets: p.secrets.clone(),
         audit_event_prefix: None,
@@ -760,7 +735,6 @@ fn admit(
         },
         redaction: p.redaction.clone(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        tools: p.tools.clone(),
         caller_commitment: p.caller_commitment.clone(),
         audit_labels: bundle_audit_labels,
         agent_verbs: crate::admission::agent_verbs::parse_agent_verb_override(
@@ -773,13 +747,7 @@ fn admit(
                 mvm_contract::stream::input::grants_input_for(&p.services),
             )
         }),
-        // Tool rules need a guest-origin decision channel: the in-guest spawn
-        // helper asks `host.tool.v1` over the broker, and the broker refuses
-        // any service the signed plan does not bind. Injecting the binding
-        // here (before signing) means an authored `[tools]` section always
-        // carries its enforcement channel; an author cannot forget it, and
-        // dropping it while tools remain is not expressible.
-        services: services_with_tool_decision(p.services.clone(), &p.tools),
+        services: p.services.clone(),
         extensions: Vec::new(),
         // Recorded, always, and not reachable from a flag. A caller who could
         // turn the transcript off from the command line would leave an absent
@@ -1188,37 +1156,6 @@ pub(crate) mod admit_plan_tests {
     use super::*;
     use std::io::Write;
 
-    #[test]
-    fn tool_decision_service_is_appended_once_without_reordering_callers() {
-        use mvm_contract::policy::tool_rules::ToolRules;
-        use mvm_contract::protocol::broker::ServiceId;
-
-        let caller = ServiceId::parse(mvm_contract::stream::input::INPUT_GRANT_SERVICE)
-            .expect("valid caller service");
-        let decision = ServiceId::parse(mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE)
-            .expect("valid tool service");
-        let tools = ToolRules {
-            allow: vec!["shell".to_string()],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            services_with_tool_decision(vec![caller.clone()], &tools),
-            vec![caller.clone(), decision.clone()],
-            "declared tools need their decision endpoint"
-        );
-        assert_eq!(
-            services_with_tool_decision(vec![decision.clone(), caller.clone()], &tools),
-            vec![decision, caller.clone()],
-            "an existing endpoint keeps its position and is not duplicated"
-        );
-        assert_eq!(
-            services_with_tool_decision(vec![caller.clone()], &ToolRules::default()),
-            vec![caller],
-            "an unused tool dimension adds no endpoint"
-        );
-    }
-
     fn isolated_home() -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().expect("tempdir");
@@ -1314,7 +1251,6 @@ pub(crate) mod admit_plan_tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
@@ -1859,6 +1795,15 @@ pub(crate) mod admit_plan_tests {
                 mem_mib: 128,
                 keys_dir: Some(keys_dir.path()),
                 audit_dir: Some(audit_dir.path()),
+                policy_dir: None,
+                bundle_pin: None,
+                bundle_posture: None,
+                deps_volume: None,
+                shares: Vec::new(),
+                assets: Vec::new(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
+                network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+                agent_verb_override: vec![],
                 restrict_agent_verbs: false,
                 entrypoint: crate::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                     "test",
@@ -2090,6 +2035,12 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: NetworkPolicy::allow_list(vec![HostPort::new("93.184.216.34", 443)]),
             ..pinning_params(&rootfs, &ledger)
         })
@@ -2146,6 +2097,12 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::unrestricted(),
             ..pinning_params(&rootfs, &ledger)
         })
@@ -2309,6 +2266,11 @@ pub(crate) mod admit_plan_tests {
                 encrypted: false,
                 content_sha256: None,
             }],
+            assets: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec!["python".to_string(), "-m".to_string(), "app".to_string()],
@@ -2344,6 +2306,16 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            assets: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
             services: Vec::new(), // no host.stream.v1 grant
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec![
@@ -2376,6 +2348,16 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            assets: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec![
@@ -2436,6 +2418,16 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            assets: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
             entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
             ..pinning_params(&rootfs, &ledger)
@@ -2473,6 +2465,19 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            assets: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
             ..pinning_params(&rootfs, &ledger)
         })
@@ -2501,6 +2506,15 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            ledger: &ledger,
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
             restrict_agent_verbs: false,
             services: vec![stream_grant_service()],
             entrypoint: ResolvedEntrypoint::Known {
@@ -2920,6 +2934,9 @@ allow_hosts = ["localhost:8443"]
                     None,
                 ),
             ],
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
             restrict_agent_verbs: false,
             backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
             ..pinning_params(&rootfs, &ledger)
@@ -2981,6 +2998,12 @@ allow_hosts = ["localhost:8443"]
             cpus: 4,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: resolved.network_policy.clone(),
             // A dev posture: the grant is recorded and, on a tier without a
             // CPU mechanism, warned about rather than refused. The refusal
@@ -3132,6 +3155,12 @@ allow_hosts = ["localhost:8443"]
             cpus: 4,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: resolved.network_policy.clone(),
             restrict_agent_verbs: false,
             grants: resolved.plan_grants.clone(),
@@ -3176,6 +3205,12 @@ allow_hosts = ["localhost:8443"]
             vm_name: "vm-ungranted",
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: resolved.network_policy.clone(),
             grants: resolved.plan_grants.clone(),
             backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
@@ -3198,51 +3233,3 @@ mod instruction_admission_tests;
 #[cfg(test)]
 #[path = "bundle_admission_tests.rs"]
 mod bundle_admission_tests;
-
-#[cfg(test)]
-mod tool_decision_binding_tests {
-    use super::services_with_tool_decision;
-    use mvm_contract::policy::tool_rules::ToolRules;
-    use mvm_contract::protocol::broker::ServiceId;
-    use mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE;
-
-    fn tool_decision() -> ServiceId {
-        ServiceId::parse(HOST_TOOL_SERVICE).unwrap()
-    }
-
-    fn rules_with_a_tool() -> ToolRules {
-        ToolRules {
-            allow: vec!["read_file".into()],
-            ..ToolRules::default()
-        }
-    }
-
-    /// A plan that declares tools gets the tool-decision binding, once,
-    /// whether or not the caller already bound it. The deleted `!` survived
-    /// because nothing checked that the binding is *added* when absent, only
-    /// that a present one is not duplicated; the mutant keeps the second
-    /// promise while breaking the first, leaving every tool call unbound and
-    /// refused by the broker's binding gate.
-    #[test]
-    fn declaring_tools_binds_the_tool_decision_service_exactly_once() {
-        let other = ServiceId::parse("host.other.v1").unwrap();
-        let bound = services_with_tool_decision(vec![other.clone()], &rules_with_a_tool());
-        assert_eq!(bound, vec![other.clone(), tool_decision()]);
-
-        let already_bound =
-            services_with_tool_decision(vec![tool_decision(), other.clone()], &rules_with_a_tool());
-        assert_eq!(already_bound, vec![tool_decision(), other]);
-    }
-
-    /// Without tools there is nothing to decide, so no binding is minted and
-    /// the caller's services come back untouched.
-    #[test]
-    fn a_plan_without_tools_keeps_its_services_unchanged() {
-        let other = ServiceId::parse("host.other.v1").unwrap();
-        assert_eq!(
-            services_with_tool_decision(vec![other.clone()], &ToolRules::default()),
-            vec![other]
-        );
-        assert!(services_with_tool_decision(Vec::new(), &ToolRules::default()).is_empty());
-    }
-}

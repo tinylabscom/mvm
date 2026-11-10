@@ -34,14 +34,14 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// The v2 baseline (978,750 SLOC / 1,249,200 physical) grew by the
-// architecture-exact runtime resolver and its refusal tests: measured
-// 978,874 SLOC / 1,249,332 physical. Do not trim security checks to meet
-// an unrelated count; keep the new ceiling close to the measurement.
+// The guest-tool retirement reduces the tracked tree; keep the ceilings near
+// the measured PR merge candidate. The architecture-exact runtime resolver
+// and its refusal tests add 124 SLOC over the pre-merge v2 baseline, but
+// remain below these reduced limits (962,080 SLOC / 1,226,824 physical).
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 978_900;
+const MAX_TOTAL_SLOC: usize = 966_000;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_249_360;
+const MAX_TOTAL_PHYSICAL: usize = 1_232_000;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 

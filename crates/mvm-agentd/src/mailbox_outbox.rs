@@ -1,9 +1,10 @@
-//! Guest side of the mailbox port: when the host dials it, send the one
-//! plaintext message the workload left in the outbox and return the host's
-//! verdict.
+//! Guest side of the mailbox port: when the host dials it, send the
+//! plaintext message the workload left in the outbox, consume it, and return
+//! the host's verdict.
 //!
 //! The guest holds no key and seals nothing. The outbox carries a recipient
-//! and a body; the host seals and signs it under the capability the signed
+//! (`OWN_MAILBOX_RECIPIENT` or the mailbox id, which the host maps to the
+//! recipient its policy names) and a body; the host seals and signs it under the capability the signed
 //! plan granted, then admits it. Encryption is host to host.
 //!
 //! [`write_outbox`] is the workload side: it leaves that one message where
@@ -20,21 +21,68 @@ use mvm_core::mailbox::frame::{OutboxMessage, Refusal, send_outbox_message};
 /// Where the workload leaves its message and the agent reads it.
 pub const OUTBOX_PATH: &str = "/run/mvm/mailbox/outbox";
 
-/// Owner read/write, group read: the agent reads it as the directory's group.
-/// Nobody else may read the plaintext.
+/// The launch assertion that grants a guest a mailbox. The agent creates the
+/// outbox directory and binds the mailbox port only when the kernel cmdline
+/// carries it.
+pub const MAILBOX_CMDLINE_TOKEN: &str = "mvm.mailbox=1";
+
+/// Owner only. The agent and the workload both run as the one fixed workload
+/// identity (one guest, one workload), so the owner is both writer and
+/// reader. No other uid in the guest, including the egress and DNS helpers,
+/// can list, read or replace anything in it.
+pub const OUTBOX_DIR_MODE: u32 = 0o700;
+
+/// Owner read/write, group read. Nobody else may read the plaintext.
 pub const OUTBOX_FILE_MODE: u32 = 0o640;
 
 /// The recipient bytes beside the largest body the host will seal.
 const MAX_OUTBOX_BYTES: u64 = MAX_MAILBOX_PAYLOAD_BYTES as u64 + 32;
 
-/// Forward the outbox message over `stream`. An absent, oversized or
-/// malformed outbox is refused here, before a byte is sent to the host.
+/// Forward the outbox message over `stream` and consume it, whatever the
+/// verdict, so the next dial sees only a newer message. The file is renamed
+/// aside first, so a writer's rename of the next message is never lost. An
+/// absent, oversized or malformed outbox is refused here, before a byte is
+/// sent to the host.
 pub fn forward_outbox<S: Read + Write>(stream: &mut S, outbox: &Path) -> Result<(), Refusal> {
+    let claimed = outbox.with_file_name(".outbox.forwarding");
+    std::fs::rename(outbox, &claimed).map_err(|_| Refusal::Malformed)?;
     let mut bytes = Vec::new();
-    std::fs::File::open(outbox)
-        .and_then(|file| file.take(MAX_OUTBOX_BYTES + 1).read_to_end(&mut bytes))
-        .map_err(|_| Refusal::Malformed)?;
+    let read = std::fs::File::open(&claimed)
+        .and_then(|file| file.take(MAX_OUTBOX_BYTES + 1).read_to_end(&mut bytes));
+    let _ = std::fs::remove_file(&claimed);
+    read.map_err(|_| Refusal::Malformed)?;
     send_outbox_message(stream, &OutboxMessage::decode(&bytes)?)
+}
+
+/// Create the outbox directory, owned by `uid`:`gid` at [`OUTBOX_DIR_MODE`].
+/// Idempotent. The caller must hold root to chown to another identity, and
+/// must call this only on a boot that asserts [`MAILBOX_CMDLINE_TOKEN`].
+pub fn provision_outbox_dir(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(OUTBOX_DIR_MODE)
+        .create(dir)?;
+    // The mode above is subject to the umask and skipped when the directory exists.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(OUTBOX_DIR_MODE))?;
+    std::os::unix::fs::chown(dir, Some(uid), Some(gid))
+}
+
+/// [`provision_outbox_dir`], but only when `cmdline` asserts a mailbox; an
+/// ungranted guest creates nothing. Returns whether it created the directory.
+pub fn provision_outbox_dir_if_asserted(
+    cmdline: &str,
+    dir: &Path,
+    uid: u32,
+    gid: u32,
+) -> std::io::Result<bool> {
+    if !cmdline
+        .split_ascii_whitespace()
+        .any(|t| t == MAILBOX_CMDLINE_TOKEN)
+    {
+        return Ok(false);
+    }
+    provision_outbox_dir(dir, uid, gid).map(|()| true)
 }
 
 /// Workload side: atomically leave `message` at `outbox`. The directory must
@@ -99,6 +147,18 @@ mod tests {
     }
 
     #[test]
+    fn a_forwarded_outbox_is_consumed_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = dir.path().join("outbox");
+        write_outbox(&outbox, &message(b"one")).unwrap();
+        let (mut ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(theirs); // hangs up without a verdict; the frame is still consumed
+        let _ = forward_outbox(&mut ours, &outbox);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(forward_outbox(&mut ours, &outbox), Err(Refusal::Malformed));
+    }
+
+    #[test]
     fn the_outbox_file_is_group_readable_never_world_readable_and_leaves_no_temp() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -109,6 +169,49 @@ mod tests {
         assert_eq!(mode & !OUTBOX_FILE_MODE, 0);
         assert_eq!(mode & 0o007, 0);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn the_outbox_dir_is_owner_only_owned_by_the_given_identity_and_idempotent() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("mailbox");
+        let (uid, gid) = (
+            root.path().metadata().unwrap().uid(),
+            root.path().metadata().unwrap().gid(),
+        );
+        for _ in 0..2 {
+            provision_outbox_dir(&dir, uid, gid).unwrap();
+            let meta = std::fs::metadata(&dir).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o7777, OUTBOX_DIR_MODE);
+            assert_eq!((meta.uid(), meta.gid()), (uid, gid));
+        }
+        // A loosened directory is tightened again.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        provision_outbox_dir(&dir, uid, gid).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o7777,
+            OUTBOX_DIR_MODE
+        );
+        // The writer works inside it.
+        write_outbox(&dir.join("outbox"), &message(b"x")).unwrap();
+    }
+
+    #[test]
+    fn no_outbox_dir_is_created_unless_the_cmdline_asserts_a_mailbox() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("mailbox");
+        for cmdline in ["console=ttyS0", "mvm.mailbox=0", "xmvm.mailbox=1", ""] {
+            assert!(!provision_outbox_dir_if_asserted(cmdline, &dir, 0, 0).unwrap());
+            assert!(!dir.exists());
+        }
+        let meta = root.path().metadata().unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert!(
+            provision_outbox_dir_if_asserted("a mvm.mailbox=1", &dir, meta.uid(), meta.gid())
+                .unwrap()
+        );
+        assert!(dir.is_dir());
     }
 
     #[test]

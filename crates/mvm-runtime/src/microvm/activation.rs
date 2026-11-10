@@ -6,7 +6,7 @@
 //! virtio-blk slot layout produced by [`mvm_vmm::host::spec_map::workload_blocks`],
 //! then sends it over the agent vsock channel.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -14,7 +14,7 @@ use mvm_agentd::vsock::{
     ActivateEnvironment, ExtensionConfig, GuestRequest, GuestResponse, RootfsConfig,
     RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind,
 };
-use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan, ToolMediationGrant};
+use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
 use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, VmStartConfig};
 
 use crate::driver::traits::RunningVm;
@@ -299,7 +299,7 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
     let volumes = build_volume_configs(config)?;
     let extensions = build_extension_configs(config)?;
     let verb_grant_envelope = read_verb_grant_envelope(&config.name)?;
-    let tool_commands = activation_tool_commands(config, verb_grant_envelope.as_ref())?;
+    refuse_legacy_tool_authority(config)?;
 
     Ok(ActivateEnvironment {
         rootfs,
@@ -307,34 +307,17 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
         volumes,
         extensions,
         verb_grant_envelope,
-        tool_commands,
     })
 }
 
-fn activation_tool_commands(
-    config: &VmStartConfig,
-    envelope: Option<&VerbGrantEnvelope>,
-) -> Result<BTreeMap<String, String>> {
-    let Some(expected) = envelope
-        .and_then(|envelope| envelope.grant.tool_mediation.as_ref())
-        .and_then(|mediation| mediation.command_map_digest.as_ref())
-    else {
-        return Ok(BTreeMap::new());
-    };
-    let plan_json = config
-        .plan_json
-        .as_deref()
-        .context("signed tool executable map requires the admitted plan")?;
-    let signed: SignedExecutionPlan =
-        serde_json::from_str(plan_json).context("decode signed plan for tool executable map")?;
-    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)
-        .context("decode admitted plan for tool executable map")?;
-    let commands = plan.tools.command_executables();
-    let actual = ToolMediationGrant::digest_commands(&commands).map_err(anyhow::Error::msg)?;
-    if actual.as_ref() != Some(expected) {
-        bail!("admitted plan's tool executable map differs from the signed guest grant");
+fn refuse_legacy_tool_authority(config: &VmStartConfig) -> Result<()> {
+    if let Some(plan_json) = config.plan_json.as_deref() {
+        let signed: SignedExecutionPlan =
+            serde_json::from_str(plan_json).context("decode admitted signed plan")?;
+        let _: ExecutionPlan =
+            serde_json::from_slice(&signed.0.payload).context("decode admitted plan")?;
     }
-    Ok(commands)
+    Ok(())
 }
 
 fn build_extension_configs(config: &VmStartConfig) -> Result<Vec<ExtensionConfig>> {
@@ -470,7 +453,6 @@ mod tests {
                 not_after,
                 verbs: Vec::new(),
                 drive: None,
-                tool_mediation: None,
                 application_terminal: None,
                 sig: vec![0u8; 64],
             },
@@ -863,7 +845,6 @@ mod tests {
             not_after: chrono::Utc::now(),
             verbs: vec![mvm_core::plan::VerbId::new("ping").unwrap()],
             drive: None,
-            tool_mediation: None,
             application_terminal: None,
             sig: vec![0u8; 64],
         };
@@ -892,52 +873,22 @@ mod tests {
     }
 
     #[test]
-    fn activation_projects_only_the_signed_command_map() {
-        use mvm_contract::policy::tool_rules::ToolRuleDetail;
-
-        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
-        plan.tools.detail.insert(
-            "shell".into(),
-            ToolRuleDetail {
-                executable: Some("/bin/sh".into()),
-                ..ToolRuleDetail::default()
-            },
-        );
-        plan.tools.allow.push("shell".into());
-        let signed = mvm_core::plan::sign_plan(
+    fn activation_refuses_legacy_tool_plans() {
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let mut signed = mvm_core::plan::sign_plan(
             &plan,
             &ed25519_dalek::SigningKey::from_bytes(&[3; 32]),
             "test",
         );
+        let mut legacy = serde_json::to_value(&plan).expect("serialize plan");
+        legacy["tools"] = serde_json::json!({"allow": ["shell"]});
+        signed.0.payload = serde_json::to_vec(&legacy).expect("serialize legacy plan");
         let config = VmStartConfig {
             plan_json: Some(serde_json::to_string(&signed).expect("signed plan")),
             ..base_config()
         };
-        let commands = plan.tools.command_executables();
-        let digest = ToolMediationGrant::digest_commands(&commands)
-            .expect("valid map")
-            .expect("nonempty map");
-        let mut envelope = grant_until(chrono::Utc::now() + chrono::Duration::minutes(1));
-        envelope.grant.tool_mediation = Some(ToolMediationGrant {
-            class_gate_only: true,
-            command_map_digest: Some(digest),
-        });
-        assert_eq!(
-            activation_tool_commands(&config, Some(&envelope)).expect("matching plan"),
-            commands
-        );
-        let mut mismatched = config.clone();
-        mismatched.plan_json = None;
-        assert!(activation_tool_commands(&mismatched, Some(&envelope)).is_err());
-        let altered = BTreeMap::from([("shell".into(), "/bin/bash".into())]);
-        envelope
-            .grant
-            .tool_mediation
-            .as_mut()
-            .expect("mediation")
-            .command_map_digest =
-            ToolMediationGrant::digest_commands(&altered).expect("valid altered map");
-        assert!(activation_tool_commands(&config, Some(&envelope)).is_err());
+        assert!(refuse_legacy_tool_authority(&config).is_err());
+        assert!(refuse_legacy_tool_authority(&base_config()).is_ok());
     }
 
     #[test]
@@ -1019,7 +970,6 @@ mod tests {
                 not_after: chrono::Utc::now() - chrono::Duration::seconds(1),
                 verbs: vec![mvm_core::plan::VerbId::new("activate-environment").unwrap()],
                 drive: None,
-                tool_mediation: None,
                 application_terminal: None,
                 sig: vec![0u8; 64],
             },

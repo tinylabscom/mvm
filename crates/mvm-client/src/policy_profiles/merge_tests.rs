@@ -85,11 +85,11 @@ fn denies_union_across_every_section() {
         user(
             "a",
             "[[secrets.bind]]\nname = \"gh\"\n[[secrets.bind]]\nname = \"npm\"\n\
-             [env]\nallow = [\"MODE\", \"TOKEN_HINT\"]\n[tools]\nallow = [\"git\", \"curl\"]\n",
+             [env]\nallow = [\"MODE\", \"TOKEN_HINT\"]\n",
         ),
         user(
             "b",
-            "[secrets]\ndeny = [\"npm\"]\n[env]\ndeny = [\"TOKEN_HINT\"]\n[tools]\ndeny = [\"curl\"]\n",
+            "[secrets]\ndeny = [\"npm\"]\n[env]\ndeny = [\"TOKEN_HINT\"]\n",
         ),
     ]);
     let names: Vec<&str> = resolved
@@ -101,7 +101,6 @@ fn denies_union_across_every_section() {
         .collect();
     assert_eq!(names, ["gh"]);
     assert_eq!(resolved.policy.env.allow, ["MODE"]);
-    assert_eq!(resolved.policy.tools.allow, ["git"]);
 }
 
 #[test]
@@ -452,7 +451,7 @@ fn unknown_keys_are_refused_at_every_level() {
         "[[shares.mount]]\nhost = \"/a\"\nguest = \"/b\"\nrw = true\n",
         "[env]\nreadmitted = []\n",
         "[resources]\ncpus = 2\n",
-        "[tools]\npermit = []\n",
+        "[tools]\nallow = [\"git\"]\n",
     ] {
         assert!(
             toml::from_str::<GroupFile>(text).is_err(),
@@ -472,6 +471,24 @@ fn unknown_keys_are_refused_at_every_level() {
             "must refuse: {text}"
         );
     }
+}
+
+#[test]
+fn legacy_tool_tables_fail_closed_at_parse_boundary() {
+    for group in [
+        "[tools]\nallow = [\"git\"]\n",
+        "[tools.detail.git]\nargv = [\"git *\"]\n",
+        "[tools]\n",
+    ] {
+        assert!(toml::from_str::<GroupFile>(group).is_err(), "{group}");
+    }
+    for profile in [
+        "[overrides.tools]\nallow = [\"git\"]\n",
+        "[[when]]\n[when.overrides.tools]\nask = [\"git\"]\n",
+    ] {
+        assert!(toml::from_str::<ProfileFile>(profile).is_err(), "{profile}");
+    }
+    assert!(serde_json::from_str::<PolicyBody>(r#"{"tools":{"deny":["git"]}}"#).is_err());
 }
 
 #[test]
@@ -538,277 +555,4 @@ fn the_published_schema_page_carries_the_generated_schema() {
         .and_then(|rest| rest.split("\n```").next())
         .expect("the page has a json block");
     assert_eq!(block, crate::policy_profiles::model::json_schema_pretty());
-}
-
-// ---- tools: whole-tool decisions and per-tool detail ----------------------
-
-#[test]
-fn tools_ask_unions_and_beats_allow() {
-    let resolved = merged(&[
-        user("a", "[tools]\nallow = [\"git\", \"bash\"]\n"),
-        user("b", "[tools]\nask = [\"git\"]\nallow = [\"make\"]\n"),
-    ]);
-    assert_eq!(resolved.policy.tools.allow, ["bash", "make"]);
-    assert_eq!(resolved.policy.tools.ask, ["git"]);
-}
-
-#[test]
-fn tools_deny_beats_ask_and_allow_and_drops_detail() {
-    let resolved = merged(&[
-        user(
-            "a",
-            "[tools]\nallow = [\"git\", \"bash\"]\nask = [\"git\"]\n\
-             [tools.detail.bash]\nargv = [\"ls *\"]\n",
-        ),
-        user("b", "[tools]\ndeny = [\"git\", \"bash\"]\n"),
-    ]);
-    assert!(resolved.policy.tools.allow.is_empty());
-    assert!(resolved.policy.tools.ask.is_empty());
-    let mut deny = resolved.policy.tools.deny.clone();
-    deny.sort();
-    assert_eq!(deny, ["bash", "git"]);
-    assert!(resolved.policy.tools.detail.is_empty());
-}
-
-#[test]
-fn tool_detail_unions_denies_and_narrows_the_rest() {
-    let resolved = merged(&[
-        user(
-            "a",
-            "[tools]\nallow = [\"bash\"]\n\
-             [tools.detail.bash]\nargv = [\"git *\", \"cargo *\"]\n\
-             deny = [\"rm *\"]\nroutes = [\"github.com:443\"]\nsecrets = [\"GITHUB_TOKEN\"]\n",
-        ),
-        user(
-            "b",
-            "[tools.detail.bash]\nargv = [\"git *\"]\ndeny = [\"sudo *\"]\n",
-        ),
-    ]);
-    let detail = resolved
-        .policy
-        .tools
-        .detail
-        .get("bash")
-        .expect("bash detail survives");
-    assert_eq!(detail.argv, ["git *"]);
-    assert_eq!(detail.deny, ["rm *", "sudo *"]);
-    assert_eq!(detail.routes, ["github.com:443"]);
-    assert_eq!(detail.secrets, ["GITHUB_TOKEN"]);
-}
-
-#[test]
-fn tool_detail_widening_is_refused_with_the_layer_and_key() {
-    let error = refused(&[
-        user(
-            "a",
-            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nargv = [\"git *\"]\n",
-        ),
-        user("b", "[tools.detail.bash]\nargv = [\"npm *\"]\n"),
-    ]);
-    assert!(
-        error.message.contains("composition only narrows"),
-        "{error}"
-    );
-    assert!(
-        error
-            .key
-            .as_deref()
-            .is_some_and(|key| key.contains("tools.detail.bash.argv")),
-        "{error}"
-    );
-}
-
-#[test]
-fn tool_detail_routes_and_secrets_only_narrow() {
-    let error = refused(&[
-        user(
-            "a",
-            "[tools]\nallow = [\"bash\"]\n\
-             [tools.detail.bash]\nroutes = [\"github.com:443\"]\nsecrets = [\"GITHUB_TOKEN\"]\n",
-        ),
-        user(
-            "b",
-            "[tools.detail.bash]\nroutes = [\"evil.example:443\"]\n",
-        ),
-    ]);
-    assert!(
-        error.message.contains("composition only narrows"),
-        "{error}"
-    );
-
-    let error = refused(&[
-        user(
-            "a",
-            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nsecrets = [\"GITHUB_TOKEN\"]\n",
-        ),
-        user("b", "[tools.detail.bash]\nsecrets = [\"OTHER\"]\n"),
-    ]);
-    assert!(
-        error.message.contains("composition only narrows"),
-        "{error}"
-    );
-}
-
-#[test]
-fn tool_detail_first_definition_wins_then_narrows() {
-    // A later layer may define a tool the earlier ones did not.
-    let resolved = merged(&[
-        user("a", "[tools]\nallow = [\"bash\"]\n"),
-        user("b", "[tools.detail.bash]\nargv = [\"git *\"]\n"),
-        user("c", "[tools.detail.bash]\nargv = [\"git *\"]\n"),
-    ]);
-    let detail = resolved
-        .policy
-        .tools
-        .detail
-        .get("bash")
-        .expect("bash detail survives");
-    assert_eq!(detail.argv, ["git *"]);
-}
-
-#[test]
-fn tool_detail_narrowing_to_a_pattern_outside_the_grant_is_refused() {
-    let error = refused(&[
-        user("a", "[tools]\nallow = [\"bash\"]\n"),
-        user("b", "[tools.detail.bash]\nargv = [\"git *\"]\n"),
-        user("c", "[tools.detail.bash]\nargv = [\"git status *\"]\n"),
-    ]);
-    assert!(
-        error.message.contains("composition only narrows"),
-        "{error}"
-    );
-}
-
-#[test]
-fn invalid_tool_names_are_refused() {
-    for (key, body) in [
-        ("tools.allow", "[tools]\nallow = [\"Bad Name\"]\n"),
-        ("tools.ask", "[tools]\nask = [\".hidden\"]\n"),
-        ("tools.deny", "[tools]\ndeny = [\"UPPER\"]\n"),
-        (
-            "tools.detail",
-            "[tools.detail.\"bad name\"]\nargv = [\"x\"]\n",
-        ),
-    ] {
-        let error = refused(&[user("a", body)]);
-        assert!(
-            error.key.as_deref().is_some_and(|at| at.starts_with(key)),
-            "{key}: {error}"
-        );
-    }
-}
-
-#[test]
-fn invalid_tool_detail_entries_are_refused() {
-    for (field, body) in [
-        (
-            "argv",
-            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nargv = [\"\"]\n",
-        ),
-        (
-            "deny",
-            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\ndeny = [\"line\\nbreak\"]\n",
-        ),
-        (
-            "routes",
-            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nroutes = [\"https://evil.example/x\"]\n",
-        ),
-        (
-            "secrets",
-            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nsecrets = [\"has space\"]\n",
-        ),
-        (
-            "executable",
-            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nexecutable = \"/bin/../bin/bash\"\n",
-        ),
-        (
-            "executable",
-            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nexecutable = \"bin/bash\"\n",
-        ),
-    ] {
-        let error = refused(&[user("a", body)]);
-        assert!(
-            error.key.as_deref().is_some_and(|at| at.contains(field)),
-            "{field}: {error}"
-        );
-    }
-}
-
-#[test]
-fn signed_executable_path_cannot_be_added_or_redirected_by_later_layers() {
-    let preserved = merged(&[
-        user(
-            "a",
-            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nexecutable = \"/bin/bash\"\n",
-        ),
-        user("b", "[tools.detail.bash]\nexecutable = \"/bin/bash\"\n"),
-    ]);
-    assert_eq!(
-        preserved.policy.tools.detail["bash"].executable.as_deref(),
-        Some("/bin/bash")
-    );
-    for first in ["", "executable = \"/bin/bash\"\n"] {
-        let error = refused(&[
-            user(
-                "a",
-                &format!("[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\n{first}"),
-            ),
-            user("b", "[tools.detail.bash]\nexecutable = \"/usr/bin/bash\"\n"),
-        ]);
-        assert_eq!(error.key.as_deref(), Some("tools.detail.bash.executable"));
-    }
-}
-
-#[test]
-fn tools_section_with_detail_round_trips_through_resolution() {
-    let text = "[tools]\nallow = [\"bash\"]\nask = [\"git\"]\n\
-                [tools.detail.bash]\nexecutable = \"/bin/bash\"\nargv = [\"git *\"]\nroutes = [\"github.com:443\"]\n";
-    let group: GroupFile = toml::from_str(text).expect("test body parses");
-    let reparsed: GroupFile =
-        toml::from_str(&toml::to_string_pretty(&group).expect("group serializes"))
-            .expect("group re-parses");
-    assert_eq!(group, reparsed);
-    let resolved = merged(&[user("a", text)]);
-    let detail = resolved
-        .policy
-        .tools
-        .detail
-        .get("bash")
-        .expect("bash detail survives");
-    assert_eq!(detail.argv, ["git *"]);
-    assert_eq!(detail.executable.as_deref(), Some("/bin/bash"));
-    assert_eq!(resolved.policy.tools.ask, ["git"]);
-}
-
-#[test]
-fn fold_carries_the_resolved_tools_as_contract_rules() {
-    let text = "[tools]\nallow = [\"bash\"]\nask = [\"git\"]\ndeny = [\"curl\"]\n\
-                [tools.detail.bash]\nexecutable = \"/bin/bash\"\nargv = [\"git *\"]\nroutes = [\"github.com:443\"]\n\
-                secrets = [\"GITHUB_TOKEN\"]\n";
-    let resolved = merged(&[user("a", text)]);
-    let folded = crate::policy_profiles::fold(
-        &resolved.policy,
-        &crate::policy_profiles::LaunchFlags::default(),
-    )
-    .expect("folds");
-    let rules = folded.tools;
-    assert_eq!(rules.allow, ["bash"]);
-    assert_eq!(rules.ask, ["git"]);
-    assert_eq!(rules.deny, ["curl"]);
-    let detail = rules.detail.get("bash").expect("bash detail");
-    assert_eq!(detail.argv, ["git *"]);
-    assert_eq!(detail.executable.as_deref(), Some("/bin/bash"));
-    assert_eq!(detail.routes, ["github.com:443"]);
-    assert_eq!(detail.secrets, ["GITHUB_TOKEN"]);
-}
-
-#[test]
-fn fold_without_tools_yields_empty_rules() {
-    let resolved = merged(&[user("a", "[network]\nallow = [\"a.test:443\"]\n")]);
-    let folded = crate::policy_profiles::fold(
-        &resolved.policy,
-        &crate::policy_profiles::LaunchFlags::default(),
-    )
-    .expect("folds");
-    assert!(folded.tools.is_empty());
 }

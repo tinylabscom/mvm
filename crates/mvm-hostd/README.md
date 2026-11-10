@@ -22,6 +22,7 @@ protocols and security behavior.
 | `mvm-audit-signer` | Append and chain-sign audit events |
 | `mvm-host-agent` | Serve host lifecycle/control requests |
 | `mvm-network-endpoint` | Mediate admitted workload network traffic |
+| `mvm-mailbox` | Serve one granted guest's mailbox port from derived keys |
 | HVF/libkrun supervisors | Isolate backend-specific VMM process lifetime |
 
 Each role receives a bounded configuration envelope and inherited descriptors,

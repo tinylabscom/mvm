@@ -156,7 +156,7 @@ pub fn generated_policy_bundle_for_network_policy(
     use mvm_core::policy::bundle::{PolicyId, SCHEMA_VERSION as POLICY_SCHEMA_VERSION};
     use mvm_core::policy::policies::{
         ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, L4RuleSpec,
-        PiiPolicy, ToolPolicy, WasiCapPolicy,
+        PiiPolicy, WasiCapPolicy,
     };
     use std::net::{IpAddr, ToSocketAddrs};
 
@@ -176,7 +176,6 @@ pub fn generated_policy_bundle_for_network_policy(
                 network: BundleNetworkPolicy::default(),
                 egress,
                 pii: PiiPolicy::default(),
-                tool: ToolPolicy::default(),
                 artifact: ArtifactPolicy::default(),
                 keys: KeyPolicy::default(),
                 audit: AuditPolicy {
@@ -258,7 +257,6 @@ pub fn generated_policy_bundle_for_network_policy(
             ..Default::default()
         },
         pii: PiiPolicy::default(),
-        tool: ToolPolicy::default(),
         artifact: ArtifactPolicy::default(),
         keys: KeyPolicy::default(),
         audit: AuditPolicy {
@@ -274,14 +272,14 @@ pub fn generated_policy_bundle_for_network_policy(
 }
 
 #[cfg(test)]
-pub(super) mod bundle_pin_tests {
+pub(crate) mod bundle_pin_tests {
     use super::*;
     use rand::Rng;
 
     /// Build a signed `.mvmpkg` archive in-memory so the
     /// `--bundle-pin` test path doesn't need a real fetched bundle.
     /// Uses mvm_plan's own writer + signing primitives.
-    pub(in crate::admission) fn make_bundle_for_pin(
+    pub(crate) fn make_bundle_for_pin(
         sk: &ed25519_dalek::SigningKey,
     ) -> (Vec<u8>, mvm_core::plan::KeyId) {
         make_bundle_for_pin_with(sk, Vec::new())

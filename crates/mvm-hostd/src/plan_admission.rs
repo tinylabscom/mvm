@@ -2106,6 +2106,9 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
         &admitted,
         params.emitter,
     )?;
+    // Before the boot, so a grant this backend cannot serve never reaches a
+    // guest that would assert it.
+    crate::mailbox_process::require_servable(&config, backend)?;
     // Spent before the backend starts, so an admission that reached dispatch
     // can never authorize another launch, whatever the start's outcome.
     admitted.dispatched = true;
@@ -2160,6 +2163,22 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
                     stage: "assurance-session",
                     reason: "the declared assurance campaign could not be opened",
                     err,
+                }));
+            }
+            // Last, so no earlier rollback leaves a mailbox process behind.
+            // A grant that cannot be served is refused rather than booting a
+            // guest whose mailbox port nobody answers.
+            if let Err(err) =
+                crate::mailbox_process::spawn_for_launch(admitted.plan(), backend, &vm_name)
+            {
+                return Err(undo_launch(UndoLaunch {
+                    backend,
+                    vm_id: &vm_id,
+                    admitted: &admitted,
+                    emitter: params.emitter,
+                    stage: "mailbox-process",
+                    reason: "the granted guest mailbox could not be served",
+                    err: err.into(),
                 }));
             }
             Ok(StartedMachine {
@@ -2498,7 +2517,6 @@ mod tests {
             network_policy_ref: None,
             fs_policy_ref: None,
             egress_policy_ref: None,
-            tool_policy_ref: None,
             secret_release: SecretReleasePolicy::None,
             secrets: Vec::new(),
             audit_event_prefix: None,
@@ -2513,7 +2531,6 @@ mod tests {
             assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-            tools: Default::default(),
             caller_commitment: None,
             audit_labels: Default::default(),
             agent_verbs: None,
@@ -5037,7 +5054,6 @@ mod tests {
             network: Default::default(),
             egress: Default::default(),
             pii: Default::default(),
-            tool: Default::default(),
             artifact: Default::default(),
             keys: Default::default(),
             audit: Default::default(),

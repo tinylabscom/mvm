@@ -206,7 +206,7 @@ impl PinnedBundle<'_> {
 
     /// Check the extraction beside the archive, when there is one.
     ///
-    /// The registry keeps `<sha256>.mvmpkg` and `<sha256>/` side by side, so an
+    /// The registry keeps a compressed archive and `<sha256>/` side by side, so an
     /// archive with no extraction beside it was never installed and the boot
     /// cannot be reading one; the role check above still binds what it does
     /// read. Digests go through the same size-and-mtime cache admission already

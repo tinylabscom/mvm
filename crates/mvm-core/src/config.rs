@@ -387,11 +387,6 @@ pub fn remote_templates_dir() -> std::path::PathBuf {
         .join("remote")
 }
 
-/// Host tool staging root: `<mvm_home>/tool-staging`.
-pub fn tool_staging_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_home()).join("tool-staging")
-}
-
 /// Host attestation identity root: `<mvm_home>/attestation`.
 pub fn attestation_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("attestation")
@@ -501,15 +496,6 @@ pub fn mvm_volumes_env() -> Vec<String> {
 /// area the atomic rename-promote moves out of.
 pub fn pack_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_cache_dir()).join("packs")
-}
-
-/// Work directory `mvmctl build` compiles one locked pack spec into,
-/// keyed by the lock's workload digest. The flake built from it records this
-/// path, so rebuilding the same lock reuses the same template slot.
-pub fn pack_build_dir(workload_sha256: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_cache_dir())
-        .join("pack-builds")
-        .join(workload_sha256)
 }
 
 /// Resolve `<pack_cache_dir>/<pack_hash>` for a single promoted pack.
@@ -884,6 +870,11 @@ pub const VM_APPROVAL_SOCKET: &str = "approval.sock";
 /// connects to it when a decision is `ask`.
 pub fn vm_approval_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     vm_socket_dir_at(state_dir).join(VM_APPROVAL_SOCKET)
+}
+
+/// Where a VM's launch-time mailbox service binds for host consumers.
+pub fn vm_mailbox_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join("mailbox.sock")
 }
 
 /// [`vm_approval_socket_at`] for a named VM.
@@ -1894,10 +1885,6 @@ mod tests {
         assert_eq!(
             instances_root(),
             std::path::PathBuf::from("/custom/root/instances")
-        );
-        assert_eq!(
-            tool_staging_dir(),
-            std::path::PathBuf::from("/custom/root/tool-staging")
         );
         assert_eq!(
             oci_policy_path(),

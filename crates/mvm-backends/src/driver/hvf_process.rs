@@ -119,21 +119,6 @@ fn hvf_supervisor_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
     .signed_with(mvm_vmm::host::codesign::RequiredEntitlement::Hypervisor)
 }
 
-/// The per-VM gating endpoint is the sole egress gate on hvf (claim-10
-/// default-deny plus optional secret substitution). It only needs to run for a
-/// workload that can actually reach the network: an admitted egress policy, or a
-/// bound-secret authority whose credentials are substituted on the egress path.
-/// A deny-all run carrying no secrets has no reachable egress, so the endpoint is
-/// skipped and `EGRESS_PORT` is left unwired — any guest dial then fails closed,
-/// mirroring libkrun's no-secrets no-op.
-pub fn hvf_endpoint_needed(
-    network_policy: &mvm_core::policy::network_policy::NetworkPolicy,
-    state_dir: &Path,
-) -> bool {
-    network_policy.allows_egress()
-        || mvm_vmm::host::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false)
-}
-
 pub fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
     if let Some(verity_path) = config
         .verity_path

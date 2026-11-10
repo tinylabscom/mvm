@@ -36,7 +36,7 @@ pub(super) fn prepare_pinned_bundle(
 ) -> Result<PreparedPinnedBundle<'_>> {
     let pin = params.pin;
     let path = pin.archive();
-    let bytes = std::fs::read(path)
+    let bytes = mvm_core::plan::bundle::read_bundle_archive(path)
         .with_context(|| format!("reading bundle archive at {}", path.display()))?;
     let release_trust = FsTrustStore::default_path()
         .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?;

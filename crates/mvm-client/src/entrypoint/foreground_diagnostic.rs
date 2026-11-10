@@ -120,7 +120,7 @@ fn signed_diagnostic_script(
     archive: &std::path::Path,
     proof: &ApprovedProvenance,
 ) -> Result<String> {
-    use mvm_core::plan::bundle::{FsTrustStore, verify_bundle_file};
+    use mvm_core::plan::bundle::{FsTrustStore, open_archive, verify_bundle_file};
     use std::io::{Read as _, Seek as _, SeekFrom};
     const MAX_ARCHIVE: u64 = 4 * 1024 * 1024 * 1024;
     ensure!(
@@ -129,7 +129,7 @@ fn signed_diagnostic_script(
     );
     let mut snapshot = tempfile::NamedTempFile::new()?;
     let copied = std::io::copy(
-        &mut std::fs::File::open(archive)?.take(MAX_ARCHIVE + 1),
+        &mut open_archive(archive)?.take(MAX_ARCHIVE + 1),
         snapshot.as_file_mut(),
     )?;
     ensure!(

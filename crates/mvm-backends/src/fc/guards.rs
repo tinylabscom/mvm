@@ -62,13 +62,13 @@ fn orphan_cleanup_script(dir: &str) -> String {
     format!(
         r#"
                 if [ -f {pid} ]; then
-                    sudo kill "$(cat {pid})" 2>/dev/null || true
+                    kill "$(cat {pid})" 2>/dev/null || true
                     rm -f {pid}
                 elif [ -f {old_pid} ]; then
-                    sudo kill "$(cat {old_pid})" 2>/dev/null || true
+                    kill "$(cat {old_pid})" 2>/dev/null || true
                     rm -f {old_pid}
                 fi
-                sudo rm -f {socket}
+                rm -f {socket}
                 "#
     )
 }

@@ -19,7 +19,6 @@ pub mod broker_client;
 pub mod builder_agent;
 /// The hvf-VMM builder's guest-side nix build (stages artifacts for the
 /// session to stream back).
-pub mod builder_build;
 /// The hvf-VMM builder's host↔guest build session over one vsock stream.
 pub mod builder_session;
 /// Builder-VM file transfer over vsock (the hvf VMM has no virtio-fs).
@@ -156,19 +155,6 @@ pub mod telemetry_capture;
 /// Guest side of the dedicated telemetry service (authenticated session per
 /// host connection on the reserved telemetry port).
 pub mod telemetry_service;
-/// Attributes loopback egress connections to a host-admitted tool invocation.
-/// Linux only: it reads `/proc`, and no egress client runs anywhere else.
-#[cfg(any(target_os = "linux", test))]
-pub mod tool_attribution;
-/// Same gate as `tool_attribution`: the decision socket exists to coordinate
-/// with the attribution registry, and both read `/proc`.
-#[cfg(any(target_os = "linux", test))]
-pub mod tool_decision_socket;
-/// The declared-command tool helper. The spawn path is Linux-only; the policy
-/// core (`approve`, `verify_stash`) compiles and tests everywhere.
-pub mod tool_helper;
-pub mod tool_install;
-pub mod tool_map;
 pub mod trusted_env;
 pub mod volume;
 pub mod vsock;

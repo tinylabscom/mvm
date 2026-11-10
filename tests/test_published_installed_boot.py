@@ -307,5 +307,29 @@ class BootEvidenceTests(unittest.TestCase):
                     self.aggregate()
 
 
+WORKFLOWS = Path(__file__).resolve().parents[1] / ".github/workflows"
+
+
+class ReleaseSmokeWorkflowShapeTests(unittest.TestCase):
+    """The post-publish smoke must survive a failed-job rerun, and the macOS
+    lane must have the gh CLI before the script that calls it."""
+
+    def test_the_macos_lane_provides_gh_before_the_published_bytes_check(self):
+        first_run = (WORKFLOWS / "first-run-smoke.yml").read_text()
+        provider = first_run.index("uses: ./.github/actions/gh-cli")
+        caller = first_run.index("python3 scripts/published-installed-boot.py lane")
+        self.assertLess(provider, caller)
+
+    def test_the_package_smoke_downloads_the_producing_attempts_artifacts(self):
+        # On a failed-jobs rerun the producer keeps its attempt-1 outputs while
+        # github.run_attempt of the consumer is 2; naming the consumer's own
+        # attempt would look for artifacts that were never uploaded.
+        packages = (WORKFLOWS / "distro-packages.yml").read_text()
+        self.assertIn("artifact_attempt: ${{ github.run_attempt }}", packages)
+        consumer = packages.split("  install-smoke:", 1)[1]
+        self.assertEqual(consumer.count("needs.package.outputs.artifact_attempt"), 2)
+        self.assertNotIn("github.run_attempt", consumer)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,13 +1,12 @@
 ---
 title: OpenCode with MVM
-description: Connect OpenCode to MVM's local MCP server under a narrow tool policy, and use the signed agent/opencode policy pack for an OpenCode workload in a microVM.
+description: Connect OpenCode to MVM's local MCP server, and use the signed agent/opencode policy pack for an OpenCode workload in a microVM.
 ---
 
 MVM meets OpenCode in two places. On the host, OpenCode can call MVM's MCP
 tools through a local stdio process. In a microVM, the signed `agent/opencode`
-policy pack decides what an OpenCode workload may reach. The two are
-independent: the MCP gate governs which MVM tools the host client may call, and
-the pack governs a guest's network and secrets.
+policy pack decides what an OpenCode workload may reach. The host MCP server
+exposes backend operations; the pack governs a guest's network and secrets.
 
 Neither one confines OpenCode's own shell and file tools when OpenCode runs on
 the host. To put the agent itself behind the microVM boundary, it has to run in
@@ -17,43 +16,12 @@ Run the host integration on a host where `mvmctl` can manage machines.
 Repository contributors run MVM runtime commands in the project builder VM, not
 on the macOS development host.
 
-## Set a narrow tool policy
+## Permissions
 
-In the project directory, add `policy/mcp-readonly.toml`:
-
-```toml
-description = "Read-only machine discovery for the local MCP client"
-
-[overrides.tools]
-allow = ["mvm.machine.list"]
-```
-
-Reference that policy from the project's `mvm.toml`:
-
-```toml
-[policy]
-profile = "./policy/mcp-readonly.toml"
-```
-
-The file is a profile, so its own policy sits under `[overrides]`. An active
-`[tools]` section admits only listed tools: this one allows machine listing and
-refuses create, stop, and every unlisted tool. From the project directory,
-check that the policy resolves and query individual tools before connecting
-the client:
-
-```sh
-mvmctl policy validate
-mvmctl policy show
-mvmctl why --tool mvm.machine.list
-mvmctl why --tool mvm.machine.stop
-```
-
-The MCP gate uses this project's resolved policy. A policy that exists but
-fails to resolve prevents the server from starting. Without any `[tools]`
-section, the MCP adapter has no tool gate; do not treat a missing policy as a
-read-only configuration. Per-tool command, route, and secret detail is not
-enforced at the MCP JSON-argument boundary. See
-[Policy and profiles](/guides/policy-and-profiles/) for that limit.
+The local MCP server is not read-only: it exposes operations supported by
+the backend. Only give access to a host client authorized to manage those
+machines. An old project policy containing `[tools]` refuses MCP startup;
+tool-specific policy is not applied to MCP calls.
 
 ## Connect OpenCode
 
@@ -78,24 +46,19 @@ Then check the connection from the same directory:
 opencode mcp list
 ```
 
-OpenCode starts a local server in the project directory, which is how MVM
-finds the `mvm.toml` whose policy gates the tools. The server speaks over
+OpenCode starts a local server in the project directory, where MVM checks for
+an unsupported `[tools]` section before serving. The server speaks over
 local stdin/stdout, not a network listener. `opencode mcp list` reports `mvm`
 as connected once the handshake and the tool listing succeed. See
 [OpenCode's MCP documentation](https://opencode.ai/docs/mcp-servers/) for its
 current config keys.
 
-The tool listing shows every tool the server offers; the policy is applied
-when a tool is called. With the policy above, `mvm.machine.list` returns the
-machine list and `mvm.machine.stop` returns a policy denial. Keep OpenCode's
-own permissions separate: MVM cannot stop an agent from using a native shell
-tool on the host.
-
-If a tool rule says `ask`, `mvmctl ops mcp stdio` prompts on its controlling
-terminal. A client session with no answering terminal is denied rather than
-silently approved. This MCP-local decision is recorded in the local tool-gate
-audit; it is not a substitute for the chain-signed audit of decisions inside
-an admitted VM. For VM-bound execution and its audit boundary, see
+The tool listing shows the operations the backend offers; there is no
+per-tool policy for these host-side MCP calls. Only give OpenCode access if
+it may manage those machines. Keep OpenCode's own permissions separate: MVM
+cannot stop an agent from using a native shell tool on the host. System-level
+decisions inside an admitted VM have a chain-signed audit. For VM-bound
+execution and its audit boundary, see
 [Agent tool contract](/guides/agent-tool-contract/).
 
 This setup was checked with OpenCode 1.18.22, which opens the session with MCP

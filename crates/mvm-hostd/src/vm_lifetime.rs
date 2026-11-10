@@ -95,7 +95,7 @@ struct Probes<'a> {
 }
 
 /// Whether the endpoint still has someone to serve.
-fn endpoint_needed(launcher_alive: bool, vm_alive: bool) -> bool {
+pub(crate) fn endpoint_needed(launcher_alive: bool, vm_alive: bool) -> bool {
     launcher_alive || vm_alive
 }
 
@@ -121,7 +121,7 @@ fn keep(mut child: Child, probes: &Probes<'_>, interval: Duration) -> i32 {
 /// Whether the process that started the keeper is still its parent. A
 /// re-parented keeper reports a different parent (init, or a subreaper), never
 /// the launcher's pid again.
-fn launcher_is_alive(launcher: libc::pid_t) -> bool {
+pub(crate) fn launcher_is_alive(launcher: libc::pid_t) -> bool {
     // SAFETY: `getppid` is async-signal-safe and infallible.
     let parent = unsafe { libc::getppid() };
     launcher > 1 && parent == launcher

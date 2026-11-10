@@ -21,6 +21,8 @@ The root names three documents:
   `mvmctl run --plan` reads.
 
 Every object sets `additionalProperties: false`: an unknown key is an error.
+Legacy `[tools]` sections are rejected, including in groups and resolved
+manifests; use system-level network, filesystem, credential and resource policy.
 
 Regenerate it with:
 
@@ -227,9 +229,6 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
         },
         "shares": {
           "$ref": "#/definitions/SharesSection"
-        },
-        "tools": {
-          "$ref": "#/definitions/ToolsSection"
         }
       },
       "additionalProperties": false
@@ -403,14 +402,6 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
           "allOf": [
             {
               "$ref": "#/definitions/SharesSection"
-            }
-          ]
-        },
-        "tools": {
-          "description": "Per-tool privileges. Command decisions are enforced; endpoint scope is pending.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/ToolsSection"
             }
           ]
         }
@@ -633,83 +624,6 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
           "type": "array",
           "items": {
             "$ref": "#/definitions/ShareGrant"
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "ToolDetail": {
-      "description": "Per-tool detail under `[tools.detail.<name>]`.",
-      "type": "object",
-      "properties": {
-        "argv": {
-          "description": "Argv patterns permitted for this tool, glob-style and matched against the command line (`git *`). An empty list means any argv the tool is invoked with. Composition narrows: a later layer may only name patterns an earlier layer set.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "deny": {
-          "description": "Argv patterns refused whatever `argv` allows. Unions across layers and beats `argv` on conflict.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "executable": {
-          "description": "Exact absolute executable path in the guest for declared-command mediation. A command with no path is refused, while an MCP-only tool may omit it. Composition cannot redirect a path an earlier layer named.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "routes": {
-          "description": "Destinations (`HOST[:PORT]`) that belong to this tool. The network policy must still admit each one; only flows from a declared invocation of the tool may reach them, and its invocations may reach only these. Composition narrows like secret destinations: a later layer may list a subset, never a destination outside them.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "secrets": {
-          "description": "Stored secret names that belong to this tool: only flows from a declared invocation of it have them substituted, and its invocations may use only these. Composition narrows like `routes`.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "ToolsSection": {
-      "description": "`[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny` decisions are enforced at the seams the host controls (the MCP tool-call gate and declared `machine exec --tool` invocations); declared commands also require the exact signed `executable` path and enforce `argv`. A declared command spawned by the workload itself is intercepted by the in-guest shim and decided by the per-VM endpoint before it runs. A tool's `routes` and `secrets` are enforced at the per-VM endpoint against flows attributed to an admitted invocation of that tool.\n\nComposition only narrows. Whole-tool lists union (`deny` beats `ask` beats `allow`); per-tool detail is first-defined-then-narrowed: a later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them, and `deny` argv patterns union. The first executable path cannot be changed or added after a detail is defined.",
-      "type": "object",
-      "properties": {
-        "allow": {
-          "description": "Tool names allowed.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "ask": {
-          "description": "Tool names where every call asks the runtime approver first.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "deny": {
-          "description": "Tool names refused whatever allows them.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "detail": {
-          "description": "Per-tool executable, argv, route and secret restrictions, keyed by tool name.",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/definitions/ToolDetail"
           }
         }
       },

@@ -45,6 +45,11 @@ stdenv.mkDerivation {
     install -m644 ${guest} "$out/lib/mvmctl/guest-runtime/${guestName}"
     install -m644 ${guestChecksum} "$out/lib/mvmctl/guest-runtime/${guestName}.sha256"
     install -m644 ${guestBundle} "$out/lib/mvmctl/guest-runtime/${guestName}.bundle"
+    # The pinned Firecracker, beside mvmctl and not linked into bin, so a first
+    # run boots with it and it cannot shadow the user's own.
+    mkdir -p "$out/lib/mvmctl/firecracker"
+    install -m755 firecracker/firecracker "$out/lib/mvmctl/firecracker/firecracker"
+    install -m644 firecracker/LICENSE firecracker/NOTICE "$out/lib/mvmctl/firecracker/"
     mkdir -p "$out/share/mvmctl"
     printf 'nix\n' > "$out/share/mvmctl/package-managed"
     runHook postInstall

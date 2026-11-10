@@ -28,8 +28,8 @@ three #4839 checklist boxes named in §0; it does not touch #3731.
 
 | Package | Bins | Binaries |
 |---|---|---|
-| `mvm-agentd` | 20 | `audit-probe`, `emit_protocol_schema`, `fake-runner`, `mvm-addon-dns`, `mvm-addon-vsock-bridge`, `mvm-builder-agent`, `mvm-display-bridge`, `mvm-egress-client`, `mvm-entrypoint-test-wrapper`, `mvm-exit-report`, `mvm-guest-agent`, `mvm-guest-netinit`, `mvm-oci-entrypoint`, `mvm-ping`, `mvm-runner`, `mvm-seccomp-apply`, `mvm-setpriv-fixture`, `mvm-tool-helper`, `mvm-tool-shim`, `syscall-probe` |
-| `mvm-build` | 1 | `mvm-test-image-lock-holder` |
+| `mvm-agentd` | 18 | `audit-probe`, `emit_protocol_schema`, `fake-runner`, `mvm-addon-dns`, `mvm-addon-vsock-bridge`, `mvm-builder-agent`, `mvm-display-bridge`, `mvm-egress-client`, `mvm-entrypoint-test-wrapper`, `mvm-exit-report`, `mvm-guest-agent`, `mvm-guest-netinit`, `mvm-oci-entrypoint`, `mvm-ping`, `mvm-runner`, `mvm-seccomp-apply`, `mvm-setpriv-fixture`, `syscall-probe` |
+| `mvm-build` | 2 | `mvm-egress-proxy`, `mvm-test-image-lock-holder` |
 | `mvm-builder-guest` | 3 | `mvm-builderd`, `mvm-host-vm-init`, `stage0-init` |
 | `mvm-client` | 2 | `emit_instruction_trust_schema`, `emit_policy_schema` |
 | `mvm-contract` | 2 | `emit_assurance_schema`, `emit_pack_spec_schema` |
@@ -527,7 +527,6 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_BOOT_IMAGE` | live-read | `crates/mvm-build/src/boot_image_select.rs:32` | 1 | yes | yes |
 | `MVM_BOOT_IMAGE_TAG` | live-read | `crates/mvm-core/src/config.rs:43` | 1 | NO | - |
 | `MVM_BROKER_PATH` | live-read | `crates/mvm-vmm/src/host/broker_services_spawn.rs:508` | 1 | NO | - |
-| `MVM_BUILDER_AGENT_PORT` | live-read | `crates/mvm-build/src/pipeline/vsock_builder.rs:9` | 1 | yes | - |
 | `MVM_BUILDER_BACKEND` | live-read | `crates/mvm-build/src/builder_backend_select.rs:139` | 1 | yes | yes |
 | `MVM_BUILDER_BOOT_STAGE` | live-read | `crates/mvm-builder-guest/src/builder_boot.rs:65` | 1 | NO | - |
 | `MVM_BUILDER_CLOSURE_NAR` | live-read | `crates/mvm-runtime/examples/hvf-builder-transport.rs:72` | 1 | NO | - |
@@ -634,7 +633,6 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_HOST_AGENT_IDLE_TIMEOUT` | live-read | `crates/mvm-hostd/src/host_agent_idle.rs:48` | 1 | NO | - |
 | `MVM_HOST_AGENT_PATH` | live-read | `crates/mvm-cli/src/commands/env/uninstall.rs:187` | 4 | NO | yes |
 | `MVM_HOST_AGENT_WORKER` | live-read | `crates/mvm-hostd/src/bin/mvm-host-agent.rs:39` | 1 | NO | - |
-| `MVM_HOST_BIN_DIR` | set-only | `crates/mvm-agentd/src/builder_build.rs:88` | 0 | NO | - |
 | `MVM_HVF_AGENT_DEBUG` | live-read | `crates/mvm-vmm/src/agent_debug.rs:18` | 1 | NO | yes |
 | `MVM_HVF_AGENT_SOCKET` | live-read | `crates/mvm-runtime/examples/hvf-agent-ping.rs:22` | 1 | NO | - |
 | `MVM_HVF_BOOTARGS` | live-read | `crates/mvm-client/src/entrypoint/caller_registration_live_hvf.rs:216` | 3 | NO | - |
@@ -810,16 +808,9 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_TEST_SUDO_MARKER` | test-only | `crates/mvm-cli/src/update.rs:2581` | 0 | NO | - |
 | `MVM_TEST_SUDO_PID_FILE` | test-only | `crates/mvm-backends/src/fc/daemon.rs:1336` | 0 | NO | - |
 | `MVM_TEST_VAR` | test-only | `crates/mvm-agentd/tests/entrypoint_execute.rs:158` | 0 | NO | - |
-| `MVM_TEST_WEB_FETCH_ALLOWLIST_DEFINITELY_NOT_SET_XYZZY` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_fetch.rs:711` | 0 | NO | - |
-| `MVM_TEST_WEB_FETCH_ALLOWLIST_PARSE` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_fetch.rs:685` | 0 | NO | - |
-| `MVM_TEST_WEB_FETCH_ALLOWLIST_TRIM` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_fetch.rs:697` | 0 | NO | - |
-| `MVM_TEST_WEB_SEARCH_ALLOWLIST_PARSE` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_search.rs:1444` | 0 | NO | - |
-| `MVM_TEST_WEB_SEARCH_DEFINITELY_NOT_SET_PLUGH` | test-only | `crates/mvm-hostd/src/supervisor/tools/web_search.rs:1455` | 0 | NO | - |
 | `MVM_TOOL_CAPABILITY_TEST_STAGE` | live-read | `crates/mvm-agentd/src/tool_helper/capability_tests.rs:8` | 1 | NO | - |
 | `MVM_TOOL_CAPABILITY_TEST_STASH` | live-read | `crates/mvm-agentd/src/tool_helper/capability_tests.rs:9` | 1 | NO | - |
-| `MVM_TOOL_READY_FD` | live-read | `crates/mvm-agentd/src/bin/mvm-tool-helper.rs:24` | 1 | NO | - |
-| `MVM_TOOL_STAGING_DIR` | live-read | `crates/mvm-hostd/src/supervisor/tools/staging.rs:86` | 1 | NO | - |
-| `MVM_TRUSTED_APFS_LIVE` | test-only | `crates/mvm-fs/src/trusted_snapshot.rs:906` | 0 | NO | - |
+| `MVM_TRUSTED_APFS_LIVE` | test-only | `crates/mvm-fs/src/trusted_snapshot.rs:910` | 0 | NO | - |
 | `MVM_TRUSTED_ENV_PROBE` | test-only | `crates/mvm-agentd/src/trusted_env.rs:177` | 0 | NO | - |
 | `MVM_TSX` | live-read | `crates/mvm-cli/src/commands/build/sandbox_record.rs:239` | 1 | yes | - |
 | `MVM_TS_SDK_ROOT` | test-only | `crates/mvm-conformance/tests/steps/doc_examples.rs:1235` | 0 | NO | - |
@@ -832,10 +823,8 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_UPDATE_MCP_TOOL_CONTRACT` | live-read | `crates/mvm-cli/src/mcp/protocol.rs:562` | 1 | NO | - |
 | `MVM_VERIFY_TIMING_MEMORY_MIB` | live-read | `crates/mvm-runtime/src/checkpoint/durability_tests.rs:423` | 1 | NO | - |
 | `MVM_VERIFY_TIMING_ROOTFS_MIB` | live-read | `crates/mvm-runtime/src/checkpoint/durability_tests.rs:424` | 1 | NO | - |
-| `MVM_VOLUMES` | live-read | `crates/mvm-core/src/config.rs:484` | 1 | NO | - |
-| `MVM_WEB_FETCH_ALLOWLIST` | live-read | `crates/mvm-hostd/src/supervisor/tools/web_fetch.rs:213` | 1 | NO | - |
-| `MVM_WEB_SEARCH_ALLOWLIST` | live-read | `crates/mvm-hostd/src/supervisor/tools/web_search.rs:752` | 1 | NO | - |
-| `MVM_WORKLOAD_KERNEL_VARIANT` | live-read | `crates/mvm-build/src/kernel_fetch.rs:249` | 1 | yes | - |
+| `MVM_VOLUMES` | live-read | `crates/mvm-core/src/config.rs:500` | 1 | NO | - |
+| `MVM_WORKLOAD_KERNEL_VARIANT` | live-read | `crates/mvm-build/src/kernel_fetch.rs:255` | 1 | yes | - |
 | `MVM_WORKSPACE_PATH` | set-only | `crates/mvm-build/src/image_source/build.rs:398` | 0 | NO | yes |
 | `MVM_WRAPPER_CONFIG_PATH` | set-only | `crates/mvm-cli/src/commands/vm/sdk_no_vm.rs:131` | 0 | NO | yes |
 

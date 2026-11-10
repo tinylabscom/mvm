@@ -22,67 +22,6 @@ struct PreparedDisk {
 /// Original materialization resources before final slot binding.
 pub type WritableVolumeImages = Vec<(PathBuf, LockedWritableImage)>;
 
-#[cfg(target_os = "linux")]
-fn privileged_writer_descriptor_objects(
-    pid: u32,
-) -> Result<std::collections::BTreeMap<(u64, u64), usize>> {
-    let output = privileged_fd_inventory_command(pid)
-        .output()
-        .context("running privileged Firecracker descriptor inventory")?;
-    ensure!(
-        output.status.success(),
-        "privileged Firecracker descriptor inventory failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    parse_fd_inventory(&output.stdout)
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn privileged_fd_inventory_command(pid: u32) -> std::process::Command {
-    let mut command = mvm_core::env_hygiene::helper_command("sudo");
-    command.args([
-        "--",
-        "/usr/bin/find",
-        &format!("/proc/{pid}/fd"),
-        "-mindepth",
-        "1",
-        "-maxdepth",
-        "1",
-        "-exec",
-        "/usr/bin/stat",
-        "-Lc",
-        "%d:%i",
-        "--",
-        "{}",
-        "+",
-    ]);
-    command
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn parse_fd_inventory(bytes: &[u8]) -> Result<std::collections::BTreeMap<(u64, u64), usize>> {
-    const MAX_INVENTORY_BYTES: usize = 16 * 1024 * 1024;
-    const MAX_INVENTORY_ENTRIES: usize = 65_536;
-    ensure!(
-        bytes.len() <= MAX_INVENTORY_BYTES,
-        "privileged descriptor inventory exceeds its byte bound"
-    );
-    let text = std::str::from_utf8(bytes).context("descriptor inventory is not UTF-8")?;
-    let mut actual = std::collections::BTreeMap::new();
-    for line in text.lines() {
-        ensure!(
-            actual.len() < MAX_INVENTORY_ENTRIES,
-            "privileged descriptor inventory exceeds its entry bound"
-        );
-        let (dev, ino) = line
-            .split_once(':')
-            .with_context(|| format!("invalid privileged descriptor inventory line {line:?}"))?;
-        let identity = (dev.parse()?, ino.parse()?);
-        *actual.entry(identity).or_insert(0usize) += 1;
-    }
-    Ok(actual)
-}
-
 /// Bounded original file owners, assigned to the final spec's writable slots.
 #[must_use = "retain prepared files through original-writer handoff"]
 #[derive(Debug)]
@@ -116,16 +55,16 @@ impl PreparedBootFiles<'_> {
     }
 }
 
-/// Original descriptions compacted for a sudo-launched Firecracker.
+/// Original descriptions compacted for the Firecracker launcher.
 #[derive(Debug)]
-pub struct SudoWritableHandoff {
+pub struct LaunchWritableHandoff {
     _files: Vec<std::fs::File>,
     first: u32,
     last: u32,
     projected: VmmSpec,
 }
 
-impl SudoWritableHandoff {
+impl LaunchWritableHandoff {
     pub fn first(&self) -> u32 {
         self.first
     }
@@ -133,16 +72,9 @@ impl SudoWritableHandoff {
     /// Require the live writer to retain every original backing and sidecar.
     #[cfg(target_os = "linux")]
     pub fn verify_writer_descriptors(&self, pid: u32) -> Result<()> {
-        // A sudo-launched Firecracker's /proc/<pid>/fd is not ordinarily
-        // readable by the invoking user. Inspect objects through the same
-        // privilege boundary as the writer; never treat EACCES as success.
-        // SAFETY: geteuid has no arguments and cannot fail.
-        if unsafe { libc::geteuid() } == 0 {
-            self.verify_writer_descriptors_at(std::path::Path::new(&format!("/proc/{pid}/fd")))
-        } else {
-            let actual = privileged_writer_descriptor_objects(pid)?;
-            self.verify_writer_descriptor_objects(&actual)
-        }
+        // Firecracker runs as the invoking user, so its descriptor table is
+        // readable directly. Never treat EACCES as success.
+        self.verify_writer_descriptors_at(std::path::Path::new(&format!("/proc/{pid}/fd")))
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -235,12 +167,12 @@ impl PreparedWritableDisks {
         Self::bind(spec, bound)
     }
 
-    /// Duplicate original descriptions for the actual sudo-launched writer.
-    pub fn into_sudo_handoff(self, spec: &VmmSpec) -> Result<SudoWritableHandoff> {
+    /// Duplicate original descriptions for the actual writer.
+    pub fn into_launch_handoff(self, spec: &VmmSpec) -> Result<LaunchWritableHandoff> {
         self.validate_spec(spec)?;
         anyhow::ensure!(
             !self.disks.is_empty(),
-            "sudo handoff requires persistent writable resources"
+            "launch handoff requires persistent writable resources"
         );
         let projected = spec.clone();
         let mut minimum = 1000;
@@ -274,7 +206,7 @@ impl PreparedWritableDisks {
                 minimum = returned;
                 continue;
             }
-            return Ok(SudoWritableHandoff {
+            return Ok(LaunchWritableHandoff {
                 _files: files,
                 first: first.context("writable handoff has no descriptors")?,
                 last: next - 1,
@@ -697,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn sudo_handoff_duplicates_original_descriptors_into_one_cloexec_range() {
+    fn launch_handoff_duplicates_original_descriptors_into_one_cloexec_range() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("image");
         let sidecar = tmp.path().join("image.lock");
@@ -710,7 +642,7 @@ mod tests {
             PreparedWritableDisks::bind(&spec(vec![block(&path, 0)]), vec![(0, held)]).unwrap();
 
         let handoff = disks
-            .into_sudo_handoff(&spec(vec![block(&path, 0)]))
+            .into_launch_handoff(&spec(vec![block(&path, 0)]))
             .unwrap();
         assert_eq!(handoff._files.len(), 2);
         assert_eq!(handoff.first + 1, handoff.last);
@@ -732,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_sudo_handoffs_always_acquire_contiguous_ranges() {
+    fn concurrent_launch_handoffs_always_acquire_contiguous_ranges() {
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 scope.spawn(|| {
@@ -746,7 +678,7 @@ mod tests {
                         let spec = spec(vec![block(&path, 0)]);
                         let handoff = PreparedWritableDisks::bind(&spec, vec![(0, held)])
                             .unwrap()
-                            .into_sudo_handoff(&spec)
+                            .into_launch_handoff(&spec)
                             .unwrap();
                         assert_eq!(handoff.first + 1, handoff.last);
                         assert_eq!(handoff._files[0].as_raw_fd() as u32, handoff.first);
@@ -758,41 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn non_root_writer_inventory_uses_bounded_privileged_object_inspection() {
-        let command = privileged_fd_inventory_command(4242);
-        let args: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy())
-            .collect();
-        assert!(command.get_program().to_string_lossy().ends_with("sudo"));
-        assert_eq!(
-            args,
-            [
-                "--",
-                "/usr/bin/find",
-                "/proc/4242/fd",
-                "-mindepth",
-                "1",
-                "-maxdepth",
-                "1",
-                "-exec",
-                "/usr/bin/stat",
-                "-Lc",
-                "%d:%i",
-                "--",
-                "{}",
-                "+",
-            ]
-        );
-        assert!(!args.iter().any(|arg| arg == "-c"));
-        let actual = parse_fd_inventory(b"7:11\n7:11\n7:12\n").unwrap();
-        assert_eq!(actual.get(&(7, 11)), Some(&2));
-        assert_eq!(actual.get(&(7, 12)), Some(&1));
-        assert!(parse_fd_inventory(b"not-an-object").is_err());
-    }
-
-    #[test]
-    fn sudo_writer_verification_requires_original_objects_not_alias_paths() {
+    fn writer_verification_requires_original_objects_not_alias_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("image");
         let sidecar = tmp.path().join("image.lock");
@@ -800,7 +698,7 @@ mod tests {
         let spec = spec(vec![block(&path, 0)]);
         let handoff = PreparedWritableDisks::bind(&spec, vec![(0, held)])
             .unwrap()
-            .into_sudo_handoff(&spec)
+            .into_launch_handoff(&spec)
             .unwrap();
         let fds = tmp.path().join("writer-fds");
         std::fs::create_dir(&fds).unwrap();

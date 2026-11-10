@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use mvm_contract::substitution::PreparedRequest;
 
 use super::MAX_FRAME_BYTES;
-use crate::supervisor::tools::http_hardening::hardened_client_builder_via;
+use crate::supervisor::http_hardening::hardened_client_builder_via;
 
 /// The response body must fit inside the bounded guest-facing response frame.
 const MAX_FORWARD_RESPONSE_BYTES: usize = MAX_FRAME_BYTES;

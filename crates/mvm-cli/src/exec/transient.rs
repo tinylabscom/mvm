@@ -164,6 +164,7 @@ pub(super) fn boot_transient_vm(
         };
 
     if !booted {
+        mvm_hostd::mailbox_process::require_servable(attempt.start_config, attempt.backend)?;
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
         if mvm_runtime::catalog::descriptor(attempt.backend.kind()).is_workload
             && let Err(error) =
@@ -184,6 +185,17 @@ pub(super) fn boot_transient_vm(
         ) {
             drop(phase);
             emit_guest_console_diagnostic(&vm_name);
+            remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
+            return Err(e).context("starting transient microVM");
+        }
+        // The guest was told to serve a mailbox iff the plan grants one, and
+        // the host side of it starts here or the launch fails.
+        if let Err(e) = mvm_hostd::mailbox_process::serve_started(
+            attempt.backend,
+            &VmId(vm_name.clone()),
+            attempt.start_config,
+        ) {
+            drop(phase);
             remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
             return Err(e).context("starting transient microVM");
         }
@@ -664,6 +676,47 @@ mod tests {
             plan_json: Some("{}".into()),
             ..Default::default()
         }
+    }
+
+    /// A grant on a backend that cannot serve it refuses the cold boot before
+    /// the backend is touched, rather than booting a guest that asserts a
+    /// mailbox nobody serves. A launch with no grant is unaffected.
+    #[test]
+    fn a_granted_launch_on_a_backend_that_cannot_serve_it_never_boots() {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(tmp.path());
+        env.remove("MVM_RESIDENCY");
+        let boot = |grant: Option<MailboxGrant>| {
+            let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+            plan.mailbox = grant;
+            let start_config = VmStartConfig {
+                name: "mailbox-launch".into(),
+                plan_json: Some(serde_json::to_string(&plan).unwrap()),
+                ..claimable_config_without_a_pool()
+            };
+            let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new());
+            let resolved = resolved_image();
+            let mut images = Vec::new();
+            let mut attempt = BootAttempt {
+                backend: &backend,
+                start_config: &start_config,
+                resolved: &resolved,
+                user_named: true,
+                writable_images: &mut images,
+            };
+            let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(false);
+            boot_transient_vm("mailbox-launch".into(), false, &mut attempt, None, &mut sub)
+        };
+        let granted = MailboxGrant {
+            mailbox: MailboxId::from_bytes([1; 32]),
+            authority_key: [2; 32],
+            epoch: ExecutionEpoch::new(1).unwrap(),
+        };
+        let error = boot(Some(granted)).err().expect("the grant is refused");
+        assert!(format!("{error:#}").contains("mailbox"), "{error:#}");
+        assert!(boot(None).is_ok());
     }
 
     #[test]
