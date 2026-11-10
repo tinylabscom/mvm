@@ -864,6 +864,83 @@ fn a_dev_variant_member_is_invisible_to_production_selection() {
 }
 
 #[test]
+fn composition_tar_is_verified_separately_from_existing_boot_artifacts() {
+    use mvm_core::image_set::ArtifactFormat;
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let root = ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant);
+    let kernel = ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant);
+    let target = MemberTarget::Arch(ARCH);
+    let tar = "default-microvm-rootfs-aarch64.tar.gz";
+    let fixture = ImageSetFixture::complete()
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+        .publish(
+            kernel,
+            target,
+            "default-microvm-vmlinux-aarch64",
+            b"kernel".to_vec(),
+        )
+        .publish(
+            root,
+            target,
+            "default-microvm-rootfs-aarch64.ext4",
+            contract_root(Some(b"1\n"), None),
+        )
+        .publish_extra(
+            root,
+            target,
+            "default-microvm-rootfs-aarch64.verity",
+            b"tree".to_vec(),
+        )
+        .with_artifact_format(
+            "default-microvm-rootfs-aarch64.verity",
+            ArtifactFormat::VerityHashTree,
+        )
+        .publish_extra(
+            root,
+            target,
+            "default-microvm-rootfs-aarch64.roothash",
+            b"hash".to_vec(),
+        )
+        .with_artifact_format(
+            "default-microvm-rootfs-aarch64.roothash",
+            ArtifactFormat::VerityRootHash,
+        )
+        .publish_extra(root, target, tar, b"composition source".to_vec());
+    let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    set.fetch_default_workload(ARCH, out.path()).unwrap();
+    assert!(!out.path().join("rootfs.tar.gz").exists());
+    let dest = out.path().join("composition.tar.gz");
+    set.fetch_workload_composition_tar(ARCH, WorkloadImageProfile::DefaultTenant, &dest)
+        .unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), b"composition source");
+    std::fs::write(served.path().join(tar), b"composition sourcE").unwrap();
+    assert!(
+        set.fetch_workload_composition_tar(ARCH, WorkloadImageProfile::DefaultTenant, &dest)
+            .is_err()
+    );
+    assert!(
+        !dest.exists(),
+        "a mismatched source must not remain available"
+    );
+    let legacy_dir = tempfile::tempdir().unwrap();
+    let legacy =
+        PublishedImageSet::acquire_from(ImageSetFixture::complete().serve_from(legacy_dir.path()))
+            .unwrap();
+    assert!(
+        legacy
+            .fetch_workload_composition_tar(
+                ARCH,
+                WorkloadImageProfile::DefaultTenant,
+                &legacy_dir.path().join("legacy.tar.gz"),
+            )
+            .is_err(),
+        "historical sets have no composition source and must not extract ext4"
+    );
+}
+
+#[test]
 fn a_member_whose_bytes_differ_from_the_root_is_refused_and_removed() {
     let _env = unsigned_env();
     let served = tempfile::tempdir().unwrap();

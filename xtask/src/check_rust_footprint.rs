@@ -18,8 +18,8 @@
 //!   (line, block and doc) are blanked. String literal bodies are kept, so a
 //!   multi-line literal counts line by line.
 //!
-//! The ratchet: the SLOC and physical-line ceilings below are the figures at
-//! the last time they were lowered. The gate fails when either is exceeded and
+//! The ratchet: the SLOC and physical-line ceilings below are the last
+//! accepted limits. The gate fails when either is exceeded and
 //! also when the tree has fallen far enough under a ceiling that it should be
 //! lowered, so a reduction is locked in rather than spent. No category is
 //! excluded from the totals.
@@ -34,11 +34,12 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-/// Ceiling on total SLOC, all categories. Raised for durable bundle-use
-/// custody and archive-only install/launch regressions.
-const MAX_TOTAL_SLOC: usize = 977_800;
-/// Ceiling on total physical lines, all categories, including the retention module.
-const MAX_TOTAL_PHYSICAL: usize = 1_248_000;
+// The v2 composable pack's trust-boundary tests and durable bundle-use custody
+// require these bounds after removing the unused vendored ext4 test oracle.
+/// Ceiling on total SLOC, all categories.
+const MAX_TOTAL_SLOC: usize = 976_300;
+/// Ceiling on total physical lines, all categories.
+const MAX_TOTAL_PHYSICAL: usize = 1_244_700;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 

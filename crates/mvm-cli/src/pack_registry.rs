@@ -19,9 +19,12 @@ use mvm_core::registry_pack::application_bundle::{
     ApplicationInstallStore, InstalledRegistryApplication, install_application_bundle,
     verify_application_bundle,
 };
+use mvm_core::registry_pack::runtime_layer::{
+    VerifiedRuntimeLayerInputs, verify_runtime_layer_inputs,
+};
 use mvm_core::registry_pack::{
-    AuthenticatedRegistryManifest, InstalledRegistryPack, PackAdoption, PackReference,
-    RegistryPackImage, RegistryPackVerification, VerifiedRegistryApplication,
+    AuthenticatedRegistryManifest, InstalledRegistryPack, PackAdoption, PackLockfile, PackPin,
+    PackReference, RegistryPackImage, RegistryPackVerification, VerifiedRegistryApplication,
     VerifiedRegistryManifest, VerifiedRegistryPack, adopt_registry_manifest,
     verify_registry_manifest,
 };
@@ -85,6 +88,76 @@ pub fn download_pack(
         manifest_bytes,
         signature_bundle,
         staged,
+    })
+}
+
+/// Acquire one explicitly pinned runtime layer as private build input only.
+///
+/// This path does not install a boot image, update the user's pack lock, or
+/// treat signed policy requests as host grants. The caller must resolve and
+/// verify the entire layer dependency graph before composing a workload.
+///
+/// # Errors
+///
+/// Refuses changed manifest/payload bytes, untrusted publishers, stale
+/// revocations, and external sources outside the supported release origin.
+pub fn acquire_runtime_layer(
+    config: &PackRegistryConfig,
+    expected: &PackPin,
+) -> Result<VerifiedRuntimeLayerInputs> {
+    let fetched = download_pack(config, expected.reference())?;
+    let policy = load_publisher_policy_or_official_default(
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+    )?
+    .policy;
+    let lock = PackLockfile::new(vec![expected.clone()])?;
+    let verified = verify_registry_manifest(&RegistryPackVerification::new(
+        expected.reference(),
+        &fetched.manifest_bytes,
+        &fetched.signature_bundle,
+        &lock,
+        &policy,
+    ))?;
+    let VerifiedRegistryManifest::RuntimeLayer(layer) = verified else {
+        bail!("pinned pack is not a build-only runtime layer");
+    };
+    layer.check_current_revocations()?;
+    let source = &layer.manifest().runtime_layer.archive;
+    if !supported_runtime_layer_source(&source.source) {
+        bail!("runtime layer source is not a supported pinned HTTPS release asset");
+    }
+    for file in &layer.manifest().files {
+        let target = fetched.staged_path().join(&file.path);
+        std::fs::create_dir_all(target.parent().context("runtime policy has no parent")?)?;
+        let url = pack_url(
+            config,
+            layer.reference(),
+            &format!("{FILES_DIR}/{}", file.path),
+        );
+        download_payload_file(&url, &target, file.size, false)?;
+    }
+    let archive = fetched.staged_path().join("layer.tar");
+    download_payload_file(&source.source, &archive, source.archive_size, true)?;
+    let held = verify_runtime_layer_inputs(&layer, &archive, fetched.staged_path())?;
+    mvm_client::registry_pack_local::require_offline_runtime_policy(&held)?;
+    Ok(held)
+}
+
+fn supported_runtime_layer_source(source: &str) -> bool {
+    let prefix = "/tinylabscom/mvm-packs/releases/download/";
+    mvm_http::Url::parse(source).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("github.com")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.path().strip_prefix(prefix).is_some_and(|suffix| {
+                let mut parts = suffix.split('/');
+                matches!((parts.next(), parts.next(), parts.next()), (Some(tag), Some(asset), None)
+                    if !tag.is_empty() && !asset.is_empty())
+            })
     })
 }
 
@@ -534,6 +607,9 @@ fn pull_one(
             // authenticated bytes and digest for that later transaction.
             return Ok((VerifiedPull::Application(Box::new(application)), Vec::new()));
         }
+        VerifiedRegistryManifest::RuntimeLayer(_) => {
+            bail!("runtime layer acquisition requires verified archive custody");
+        }
         VerifiedRegistryManifest::Legacy(legacy) => legacy,
     };
     check_registry_pack_revocations_if_configured(&verified)?;
@@ -596,6 +672,25 @@ mod tests {
             DEFAULT_PACK_REGISTRY,
             "https://raw.githubusercontent.com/tinylabscom/mvm-packs/main"
         );
+    }
+
+    #[test]
+    fn build_only_layer_source_has_one_bounded_github_release_origin() {
+        assert!(supported_runtime_layer_source(
+            "https://github.com/tinylabscom/mvm-packs/releases/download/pack-runtime-python-v1.1.0/runtime-python-1.1.0-x86_64.layer.tar"
+        ));
+        for source in [
+            "https://github.com.evil.test/tinylabscom/mvm-packs/releases/download/v1/layer.tar",
+            "http://github.com/tinylabscom/mvm-packs/releases/download/v1/layer.tar",
+            "https://github.com/other/mvm-packs/releases/download/v1/layer.tar",
+            "https://github.com/tinylabscom/mvm-packs/releases/download/v1/",
+            "https://github.com/tinylabscom/mvm-packs/releases/download/v1/layer.tar/extra",
+            "https://github.com/tinylabscom/mvm-packs/releases/download/v1/layer.tar?override=1",
+            "https://example.invalid/unpublished/runtime/python/1.1.0/layer.tar",
+            "oci://registry.example.test/python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(!supported_runtime_layer_source(source), "{source}");
+        }
     }
 
     fn entry(namespace: &str, name: &str, versions: &[&str]) -> PackIndexEntry {

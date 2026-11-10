@@ -222,6 +222,12 @@ required-features = ["schema"]
 name = "verify-pack-signature"
 required-features = ["manifest-verify"]
 
+# Ephemeral OIDC test identity: verify a signed layer and exact archive/policy
+# inputs without making it an installed or published pack.
+[[example]]
+name = "verify-runtime-layer-fixture"
+required-features = ["host-state", "manifest-verify"]
+
 # Same purpose for the pack revocation list, calling
 # `pack_revocation::verify_pack_revocation_list` directly.
 [[example]]

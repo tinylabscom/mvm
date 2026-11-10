@@ -59,6 +59,9 @@ pub mod pack_scenario;
 /// Language-neutral authored pack input, not a resolved build or release.
 #[cfg(feature = "protocol")]
 pub mod pack_spec;
+/// Versioned composition authoring, separate from the existing Nix pack contract.
+#[cfg(feature = "protocol")]
+pub mod pack_spec_v2;
 /// Names one workload uses to address another over the existing
 /// host-mediated egress path.
 #[cfg(feature = "protocol")]
