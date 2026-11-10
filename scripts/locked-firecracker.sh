@@ -16,7 +16,9 @@ set -eu
 field="${1:-version}"
 arch="${2:-}"
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-lock="$root/crates/mvm-core/firecracker.lock"
+# FIRECRACKER_LOCK_FILE exists so the staging script's tests can read a lock
+# that names bytes they built; nothing in a workflow or a release sets it.
+lock="${FIRECRACKER_LOCK_FILE:-$root/crates/mvm-core/firecracker.lock}"
 
 if [ ! -f "$lock" ]; then
   echo "locked-firecracker: $lock does not exist" >&2

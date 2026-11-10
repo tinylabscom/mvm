@@ -72,6 +72,13 @@ class RenderTests(unittest.TestCase):
             self.assertIn("libmvm_hostlib.so", text)
             self.assertIn("lib/mvmctl", text)
             self.assertIn("guest-runtime", text)
+            # The pinned Firecracker ships beside mvmctl, its licence files with
+            # it, and is never linked into bin: a first run boots with it, and a
+            # link would shadow a Firecracker the user already has.
+            for installed in ("firecracker/firecracker", "firecracker/LICENSE",
+                              "firecracker/NOTICE"):
+                self.assertIn(installed, text)
+            self.assertNotRegex(text, r"ln -s [^\n]*firecracker")
             self.assertNotIn("runtime-overlay", text)
             self.assertNotIn("@@", text)
             self.assertNotIn("SKIP", text)

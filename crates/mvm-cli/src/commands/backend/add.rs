@@ -454,7 +454,13 @@ mod tests {
     fn componentless_backends_have_nothing_to_add() {
         assert!(row_for(BackendKind::Wasm).files.is_empty());
         assert!(row_for(BackendKind::Qemu).files.is_empty());
-        assert!(row_for(BackendKind::Firecracker).files.is_empty());
         assert!(!row_for(BackendKind::Libkrun).files.is_empty());
+    }
+
+    /// Firecracker ships its pinned binary now, so `backend add firecracker`
+    /// has something to place and is no longer a no-op.
+    #[test]
+    fn firecracker_has_a_component_to_add() {
+        assert!(!row_for(BackendKind::Firecracker).files.is_empty());
     }
 }
