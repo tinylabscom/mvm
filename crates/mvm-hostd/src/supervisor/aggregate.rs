@@ -1258,13 +1258,84 @@ mod tests {
     }
 
     fn sample_plan() -> ExecutionPlan {
-        let mut plan = mvm_core::plan::signing::test_support::sample_plan();
-        plan.plan_id = PlanId(String::new());
-        plan.admission_profile =
-            AdmissionProfile::local_default("vm:boot", PlanSeccompTier::Standard);
-        plan.tool_policy = PolicyRef("read-only".into());
-        plan.audit_labels.clear();
-        // Sign and audit the content-address of the final fixture, not a stale ID.
+        let mut plan = ExecutionPlan {
+            execution_epoch: 1,
+            mailbox: None,
+            grants: None,
+            environment: None,
+            build_provenance: Default::default(),
+            snapshot_at: Default::default(),
+            network_mode: Default::default(),
+            stream_retention: Default::default(),
+            action_budget: None,
+            protected_paths: Default::default(),
+            ingress: Vec::new(),
+            network_limits: Default::default(),
+            schema_version: SCHEMA_VERSION,
+            // Overwritten below with the content-address, matching what
+            // sign_plan stamps — so a test's `plan.plan_id` equals the id that
+            // actually launches and is audited.
+            plan_id: PlanId(String::new()),
+            plan_version: 1,
+            tenant: TenantId("tenant-a".to_string()),
+            workload: WorkloadId("workload-1".to_string()),
+            runtime_profile: RuntimeProfileRef("firecracker".to_string()),
+            image: SignedImageRef {
+                name: "tenant-worker-aarch64".to_string(),
+                sha256: "a".repeat(64),
+                cosign_bundle: None,
+                entrypoint_present: true,
+            },
+            resources: Resources {
+                cpus: 2,
+                mem_mib: 1024,
+                disk_mib: 4096,
+                timeouts: TimeoutSpec {
+                    boot_secs: 30,
+                    exec_secs: 600,
+                },
+            },
+            admission_profile: AdmissionProfile::local_default(
+                "vm:boot",
+                PlanSeccompTier::Standard,
+            ),
+            network_policy: PolicyRef("default-deny".to_string()),
+            fs_policy: FsPolicyRef("default".to_string()),
+            secrets: vec![],
+            egress_policy: PolicyRef("agent-l7".to_string()),
+            redaction: Default::default(),
+            reversible_replacement: Default::default(),
+            artifact_policy: ArtifactPolicy {
+                capture_paths: vec!["/artifacts".to_string()],
+                retention_days: 30,
+            },
+            caller_commitment: None,
+            audit_labels: BTreeMap::new(),
+            key_rotation: KeyRotationSpec { interval_days: 7 },
+            attestation: AttestationRequirement {
+                mode: AttestationMode::Noop,
+            },
+            release_pin: None,
+            post_run: PostRunLifecycle {
+                destroy_on_exit: true,
+                snapshot_on_idle: false,
+                idle_secs: 0,
+            },
+            // Stable validity window and nonce for admission tests.
+            valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
+            valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
+            nonce: Nonce::from_bytes([0xab; 16]),
+            bundle: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            asset_identities: Vec::new(),
+            outputs: Vec::new(),
+            agent_verbs: None,
+            services: Vec::new(),
+            extensions: Vec::new(),
+            stream_edges: Vec::new(),
+            sdk_uses_sidecar: true,
+        };
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         plan
     }

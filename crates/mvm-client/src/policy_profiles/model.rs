@@ -9,8 +9,6 @@
 //! - the **body** ([`PolicyBody`]) both of them carry, which is also what a
 //!   resolved policy is expressed in.
 
-use std::collections::BTreeMap;
-
 use mvm_contract::policy::routes::EgressRoute;
 use mvm_contract::protocol::vm_backend::BackendKind;
 use serde::{Deserialize, Serialize};
@@ -33,9 +31,6 @@ pub struct PolicyBody {
     /// Environment variables the workload may be handed.
     #[serde(default, skip_serializing_if = "EnvSection::is_empty")]
     pub env: EnvSection,
-    /// Per-tool privileges. Command decisions are enforced; endpoint scope is pending.
-    #[serde(default, skip_serializing_if = "ToolsSection::is_empty")]
-    pub tools: ToolsSection,
     /// Resource bounds.
     #[serde(default, skip_serializing_if = "ResourcesSection::is_empty")]
     pub resources: ResourcesSection,
@@ -49,7 +44,6 @@ impl PolicyBody {
             && self.secrets.is_empty()
             && self.shares.is_empty()
             && self.env.is_empty()
-            && self.tools.is_empty()
             && self.resources.is_empty()
     }
 }
@@ -181,111 +175,6 @@ impl EnvSection {
     }
 }
 
-/// `[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny`
-/// decisions are enforced at the seams the host controls (the MCP tool-call
-/// gate and declared `machine exec --tool` invocations); declared commands
-/// also require the exact signed `executable` path and enforce `argv`. A
-/// declared command spawned by the workload itself is intercepted by the
-/// in-guest shim and decided by the per-VM endpoint before it runs.
-/// A tool's `routes` and `secrets` are enforced at the
-/// per-VM endpoint against flows attributed to an admitted invocation of
-/// that tool.
-///
-/// Composition only narrows. Whole-tool lists union (`deny` beats `ask`
-/// beats `allow`); per-tool detail is first-defined-then-narrowed: a later
-/// layer may repeat or restrict the `argv`, `routes` and `secrets` an
-/// earlier layer set for a tool, never extend them, and `deny` argv
-/// patterns union. The first executable path cannot be changed or added
-/// after a detail is defined.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ToolsSection {
-    /// Tool names allowed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<String>,
-    /// Tool names where every call asks the runtime approver first.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ask: Vec<String>,
-    /// Tool names refused whatever allows them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deny: Vec<String>,
-    /// Per-tool executable, argv, route and secret restrictions, keyed by tool name.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub detail: BTreeMap<String, ToolDetail>,
-}
-
-impl ToolsSection {
-    /// The resolved section in the contract's plan-carried shape.
-    #[must_use]
-    pub fn to_tool_rules(&self) -> mvm_contract::policy::tool_rules::ToolRules {
-        use mvm_contract::policy::tool_rules::{ToolRuleDetail, ToolRules};
-        ToolRules {
-            allow: self.allow.clone(),
-            ask: self.ask.clone(),
-            deny: self.deny.clone(),
-            detail: self
-                .detail
-                .iter()
-                .map(|(name, detail)| {
-                    (
-                        name.clone(),
-                        ToolRuleDetail {
-                            executable: detail.executable.clone(),
-                            argv: detail.argv.clone(),
-                            deny: detail.deny.clone(),
-                            routes: detail.routes.clone(),
-                            secrets: detail.secrets.clone(),
-                        },
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.allow.is_empty()
-            && self.ask.is_empty()
-            && self.deny.is_empty()
-            && self.detail.is_empty()
-    }
-}
-
-/// Per-tool detail under `[tools.detail.<name>]`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ToolDetail {
-    /// Exact absolute executable path in the guest for declared-command
-    /// mediation. A command with no path is refused, while an MCP-only tool
-    /// may omit it. Composition cannot redirect a path an earlier layer named.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executable: Option<String>,
-    /// Argv patterns permitted for this tool, glob-style and matched against
-    /// the command line (`git *`). An empty list means any argv the tool is
-    /// invoked with. Composition narrows: a later layer may only name
-    /// patterns an earlier layer set.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub argv: Vec<String>,
-    /// Argv patterns refused whatever `argv` allows. Unions across layers
-    /// and beats `argv` on conflict.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deny: Vec<String>,
-    /// Destinations (`HOST[:PORT]`) that belong to this tool. The network
-    /// policy must still admit each one; only flows from a declared
-    /// invocation of the tool may reach them, and its invocations may reach
-    /// only these. Composition narrows like secret destinations: a later
-    /// layer may list a subset, never a destination outside them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub routes: Vec<String>,
-    /// Stored secret names that belong to this tool: only flows from a
-    /// declared invocation of it have them substituted, and its invocations
-    /// may use only these. Composition narrows like `routes`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub secrets: Vec<String>,
-}
-
 /// `[resources]` — bounds. Every value is a ceiling: across layers the
 /// smallest wins, so no layer can raise one another set.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,8 +224,6 @@ pub struct GroupFile {
     pub shares: SharesSection,
     #[serde(default, skip_serializing_if = "EnvSection::is_empty")]
     pub env: EnvSection,
-    #[serde(default, skip_serializing_if = "ToolsSection::is_empty")]
-    pub tools: ToolsSection,
     #[serde(default, skip_serializing_if = "ResourcesSection::is_empty")]
     pub resources: ResourcesSection,
 }
@@ -350,7 +237,6 @@ impl GroupFile {
             secrets: self.secrets.clone(),
             shares: self.shares.clone(),
             env: self.env.clone(),
-            tools: self.tools.clone(),
             resources: self.resources.clone(),
         }
     }

@@ -117,7 +117,7 @@ The plan now carries an `admission_profile`: a compact record of the workload's 
 
 - intent, for example `vm:boot`, `code:execute`, or `agent:web-research`
 - seccomp tier selected for the run
-- network, filesystem, egress, and tool policy refs
+- network, filesystem, and egress policy refs
 - secret-release posture (`none`, plan-bound, or attestation-bound)
 - audit taxonomy and required labels
 

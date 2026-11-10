@@ -17,7 +17,7 @@ use super::KeyId;
 ///
 /// The supervisor calls this on every admission whose `ExecutionPlan`
 /// carries a `PlanArtifact`. Production impls read from
-/// `~/.mvm/bundles/<bundle_sha256>.mvmpkg`; tests inject in-memory
+/// `~/.mvm/bundles/<bundle_sha256>.mvmpkg.gz` (or legacy `.mvmpkg`); tests inject in-memory
 /// resolvers. The trait stays in `mvm_plan` rather than alongside
 /// `FsTrustStore` so the supervisor doesn't need a filesystem dep
 /// to consume admissions.
@@ -45,7 +45,7 @@ pub enum BundleResolveError {
 }
 
 /// Filesystem-backed resolver rooted at `~/.mvm/bundles/`.
-/// `<bundle_sha256>.mvmpkg` is the on-disk filename — content-
+/// `<bundle_sha256>.mvmpkg.gz` is the on-disk filename — content-
 /// addressed so two bundles with the same bytes share a cache
 /// entry. The cache is populated by `mvmctl bundle fetch` once
 /// the registry-replacement follow-up lands; until then,
@@ -74,8 +74,26 @@ impl FsBundleResolver {
 
 impl BundleResolver for FsBundleResolver {
     fn resolve(&self, bundle_sha256: &str) -> Result<Vec<u8>, BundleResolveError> {
-        let path = self.root.join(format!("{bundle_sha256}.mvmpkg"));
-        match std::fs::read(&path) {
+        let path = super::BundleRegistry::new(&self.root).archive_path(bundle_sha256);
+        if std::fs::symlink_metadata(&path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Err(BundleResolveError::MissingBundle {
+                bundle_sha256: bundle_sha256.to_string(),
+            });
+        }
+        #[cfg(feature = "host-state")]
+        let read = super::stream::read_bundle_archive(&path)
+            .map_err(|error| std::io::Error::other(error.to_string()));
+        #[cfg(not(feature = "host-state"))]
+        let read = if path.extension().is_some_and(|ext| ext == "gz") {
+            Err(std::io::Error::other(
+                "compressed bundle resolution requires host-state",
+            ))
+        } else {
+            std::fs::read(&path)
+        };
+        match read {
             Ok(bytes) => Ok(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(BundleResolveError::MissingBundle {

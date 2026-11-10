@@ -2,12 +2,10 @@
 //!
 //! Operators provision policy bundles as TOML at
 //! `~/.mvm/policies/<tenant>/<workload>.toml`. The policy
-//! resolver maps the four `PolicyRef`/`FsPolicyRef` fields on an
-//! `ExecutionPlan` onto a single bundle file: a workload's
-//! `(network_policy, fs_policy, egress_policy, tool_policy)` refs
+//! resolver maps policy refs on an `ExecutionPlan` onto a single
+//! bundle file: a workload's `(network_policy, fs_policy, egress_policy)` refs
 //! all point at one TOML, which carries the per-policy sections
-//! the supervisor's component slots (`SupervisorEgressProxy`, `ToolGate`,
-//! `KeystoreReleaser`, `ArtifactCollector`) consume at admission.
+//! the supervisor's egress and secret controls consume at admission.
 //!
 //! ## Schema
 //!
@@ -28,9 +26,6 @@
 //! mode = "redact"
 //! categories = ["email", "ssn"]
 //!
-//! [tool]
-//! allowed = ["web_search", "web_fetch"]
-//!
 //! [artifact]
 //! capture_paths = ["/artifacts"]
 //! retention_days = 7
@@ -47,6 +42,7 @@
 //!
 //! `deny_unknown_fields` is enforced by every type so a typo fails
 //! loud at parse time rather than silently dropping settings. The
+//! retired `[tool]` section and tenant tool overlays are rejected as well.
 //! `schema_version` field gates the whole bundle — older agents
 //! refuse newer versions before per-field deserialization.
 //!
@@ -58,12 +54,8 @@
 //!   This loader reads bare TOML for the single-host posture —
 //!   suitable for `local` tenant; mvmd-signed bundles layer on
 //!   later via the same parse + then verify-against-trusted-keys.
-//! - **Construct concrete `SupervisorEgressProxy` / `ToolGate` impls.** That
-//!   wiring is the consumer's job (the L4/L7 proxies are built
-//!   elsewhere; this loader returns the parsed bundle). Until
-//!   those proxies ship, the resolver returns Noops even for
-//!   parsed bundles — the goal here is to ship the file format
-//!   so operators can stage bundles ahead of the proxies.
+//! - **Construct enforcement implementations.** The consumer builds
+//!   L4/L7 egress controls from the parsed bundle.
 
 use std::path::{Path, PathBuf};
 
@@ -167,7 +159,6 @@ bundle_version = 1
 [network]
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -208,9 +199,6 @@ disabled_inspectors = ["pii_redactor"]
 mode = "redact"
 categories = ["email", "ssn"]
 
-[tool]
-allowed = ["web_search", "web_fetch", "code_eval"]
-
 [artifact]
 capture_paths = ["/artifacts", "/output"]
 retention_days = 30
@@ -229,7 +217,6 @@ stream_destinations = ["file:///var/log/mvm/audit.jsonl"]
         assert_eq!(bundle.egress.allow_list[0].0, "api.example.com");
         assert_eq!(bundle.egress.allow_list[0].1, 443);
         assert_eq!(bundle.pii.categories, vec!["email", "ssn"]);
-        assert_eq!(bundle.tool.allowed.len(), 3);
         assert_eq!(bundle.artifact.retention_days, 30);
         assert_eq!(bundle.keys.rotation_interval_days, 14);
         assert!(bundle.audit.chain_signing);
@@ -265,7 +252,6 @@ port_hi  = 0
 
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -315,7 +301,6 @@ typo     = "oops"
 
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -335,7 +320,6 @@ bundle_version = 1
 [network]
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -365,7 +349,6 @@ oops_typo      = true
 [network]
 [egress]
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -391,7 +374,6 @@ mode = "default"
 typo_field = "nope"
 
 [pii]
-[tool]
 [artifact]
 [keys]
 [audit]
@@ -399,6 +381,18 @@ typo_field = "nope"
         );
         let err = parse_bundle(&text).unwrap_err();
         assert!(matches!(err, LoadError::Parse { .. }));
+    }
+
+    #[test]
+    fn parse_bundle_rejects_retired_tool_sections_and_overlay_fields() {
+        let base = minimal_bundle_toml();
+        for legacy in [
+            "\n[tool]\nallowed = [\"shell\"]\n",
+            "\n[tenant_overlays.acme.tool]\nallowed = [\"shell\"]\n",
+        ] {
+            let err = parse_bundle(&format!("{base}{legacy}")).unwrap_err();
+            assert!(matches!(err, LoadError::Parse { .. }), "{legacy}: {err}");
+        }
     }
 
     #[test]
@@ -419,6 +413,22 @@ typo_field = "nope"
         std::fs::write(tenant_dir.join("web.toml"), minimal_bundle_toml()).unwrap();
         let bundle = load_bundle_from_path(tmp.path(), "acme", "web").unwrap();
         assert_eq!(bundle.bundle_id, PolicyId("acme/web-worker".to_string()));
+    }
+
+    #[test]
+    fn load_bundle_rejects_legacy_tool_restrictions_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tenant_dir = tmp.path().join("acme");
+        std::fs::create_dir(&tenant_dir).unwrap();
+        std::fs::write(
+            tenant_dir.join("web.toml"),
+            format!("{}\n[tool]\nallowed = [\"shell\"]\n", minimal_bundle_toml()),
+        )
+        .unwrap();
+        assert!(matches!(
+            load_bundle_from_path(tmp.path(), "acme", "web"),
+            Err(LoadError::Parse { .. })
+        ));
     }
 
     #[test]

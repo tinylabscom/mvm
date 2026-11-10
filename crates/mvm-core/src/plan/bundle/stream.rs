@@ -552,7 +552,6 @@ pub fn capture_canonical_linux_inputs(
     pin: &super::PlanArtifact,
     trust: &dyn TrustStore,
 ) -> Result<CapturedCanonicalLinuxInputs> {
-    use std::io::{Seek, SeekFrom};
     anyhow::ensure!(
         cfg!(unix),
         "canonical Linux proof capture is unsupported on this platform"
@@ -566,8 +565,8 @@ pub fn capture_canonical_linux_inputs(
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let mut input = options.open(archive)?;
-    let metadata = input.metadata()?;
+    let source = options.open(archive)?;
+    let metadata = source.metadata()?;
     anyhow::ensure!(
         metadata.is_file() && metadata.len() <= MAX_RAW_ARCHIVE,
         "bundle archive is not regular or exceeds the capture bound"
@@ -575,7 +574,7 @@ pub fn capture_canonical_linux_inputs(
     // An authenticated metadata preflight can refuse an oversized selected
     // kernel before copying a multi-GiB workload archive. It is not authority
     // for the later snapshot: that exact snapshot is independently verified.
-    let (head, signature) = read_manifest_entries(input.try_clone()?)?;
+    let (head, signature) = read_manifest_entries(open_archive(archive)?)?;
     let (head, key) = verify_signed_manifest(&head, &signature, trust)?;
     let pinned_signature = pin.signature_bytes().context("invalid pinned signature")?;
     anyhow::ensure!(
@@ -595,7 +594,6 @@ pub fn capture_canonical_linux_inputs(
         preflight_kernel.size_bytes > 0 && preflight_kernel.size_bytes <= MAX_KERNEL,
         "selected kernel exceeds the capture bound"
     );
-    input.seek(SeekFrom::Start(0))?;
     let parent = crate::config::mvm_home_strict()?.join("canonical-kernel-generations");
     crate::config::create_private_dir(&parent)?;
     anyhow::ensure!(
@@ -613,7 +611,10 @@ pub fn capture_canonical_linux_inputs(
         .create_new(true)
         .open(&snapshot_path)?;
     let mut writer = HashingWriter::new(&mut snapshot);
-    io::copy(&mut input.take(MAX_RAW_ARCHIVE + 1), &mut writer)?;
+    io::copy(
+        &mut open_archive(archive)?.take(MAX_RAW_ARCHIVE + 1),
+        &mut writer,
+    )?;
     let (size, digest) = writer.finish();
     anyhow::ensure!(
         size <= MAX_RAW_ARCHIVE && digest == pin.bundle_sha256,
@@ -708,17 +709,55 @@ pub fn capture_canonical_linux_inputs(
 }
 
 #[cfg(feature = "host-state")]
-fn open_archive(path: &Path) -> Result<File, BundleVerifyError> {
-    File::open(path).map_err(|e| {
+pub fn open_archive(path: &Path) -> Result<Box<dyn Read>, BundleVerifyError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|e| {
         BundleVerifyError::ManifestParse(format!("opening bundle archive {}: {e}", path.display()))
-    })
+    })?;
+    let metadata = file.metadata().map_err(|e| {
+        BundleVerifyError::ManifestParse(format!("stat bundle archive {}: {e}", path.display()))
+    })?;
+    if !metadata.is_file() || metadata.len() > super::MAX_BUNDLE_TOTAL_BYTES + 64 * 1024 * 1024 {
+        return Err(BundleVerifyError::ManifestParse(
+            "bundle archive is not regular or exceeds the size bound".into(),
+        ));
+    }
+    if path.extension().is_some_and(|extension| extension == "gz") {
+        Ok(Box::new(flate2::read::MultiGzDecoder::new(file).take(
+            super::MAX_BUNDLE_TOTAL_BYTES + 64 * 1024 * 1024 + 1,
+        )))
+    } else {
+        Ok(Box::new(file))
+    }
 }
 
 #[cfg(feature = "host-state")]
-fn archive_sha256(path: &Path) -> Result<String, BundleVerifyError> {
+pub(crate) fn archive_sha256(path: &Path) -> Result<String, BundleVerifyError> {
     crate::crypto::image_verify::sha256_reader(open_archive(path)?).map_err(|e| {
         BundleVerifyError::ManifestParse(format!("hashing bundle archive {}: {e}", path.display()))
     })
+}
+
+/// Read the signed tar bytes from a compressed or legacy plain installed copy.
+#[cfg(feature = "host-state")]
+pub fn read_bundle_archive(path: &Path) -> Result<Vec<u8>, BundleVerifyError> {
+    let mut bytes = Vec::new();
+    open_archive(path)?
+        .take(super::MAX_BUNDLE_TOTAL_BYTES + 64 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| BundleVerifyError::ManifestParse(error.to_string()))?;
+    if bytes.len() as u64 > super::MAX_BUNDLE_TOTAL_BYTES + 64 * 1024 * 1024 {
+        return Err(BundleVerifyError::ManifestParse(
+            "bundle archive exceeds the size bound".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Verify the manifest at the head of the archive at `path`.
@@ -787,13 +826,47 @@ impl BundleRegistry {
             .map(|installed| installed.bundle)
     }
 
+    /// Recreate an absent extracted tree from this registry's retained archive.
+    /// The filename alone is not authority: the signed bytes must hash to `sha`.
+    pub fn materialize_cached(
+        &self,
+        sha: &str,
+        trust: &dyn TrustStore,
+    ) -> Result<InstalledBundle, BundleInstallError> {
+        if !crate::manifest::is_slot_hash_dirname(sha) {
+            return Err(BundleInstallError::Io {
+                bundle_sha256: sha.to_string(),
+                reason: "bundle address must be canonical SHA-256".into(),
+            });
+        }
+        self.install_leased_file_expected(&self.archive_path(sha), trust, false, Some(sha))
+            .map(|installed| installed.bundle)
+    }
+
     pub(crate) fn install_leased_file(
         &self,
         archive: &Path,
         trust: &dyn TrustStore,
         force: bool,
     ) -> Result<BundleInstallLease, BundleInstallError> {
+        self.install_leased_file_expected(archive, trust, force, None)
+    }
+
+    fn install_leased_file_expected(
+        &self,
+        archive: &Path,
+        trust: &dyn TrustStore,
+        force: bool,
+        expected_sha: Option<&str>,
+    ) -> Result<BundleInstallLease, BundleInstallError> {
         let sha = archive_sha256(archive).map_err(BundleInstallError::Verify)?;
+        if expected_sha.is_some_and(|expected| expected != sha) {
+            return Err(BundleInstallError::Verify(
+                BundleVerifyError::ManifestParse(
+                    "cached bundle archive differs from its requested sha256".into(),
+                ),
+            ));
+        }
         let io_error = |reason: String| BundleInstallError::Io {
             bundle_sha256: sha.clone(),
             reason,
@@ -802,11 +875,57 @@ impl BundleRegistry {
             verify_head(archive, trust).map_err(BundleInstallError::Verify)?;
         let lease = self.lock_entry(&sha).map_err(io_error)?;
         let install_dir = self.install_dir(&sha);
+        let fresh_install =
+            expected_sha.is_none() && !install_dir.exists() && !self.archive_path(&sha).exists();
+        if force
+            && self
+                .has_bundle_users(&sha)
+                .map_err(|error| io_error(error.to_string()))?
+        {
+            return Err(io_error(
+                "bundle extraction is retained by an unresolved VM".into(),
+            ));
+        }
         if install_dir.exists() && !force {
-            verify_bundle_file(archive, trust).map_err(BundleInstallError::Verify)?;
+            let verified =
+                verify_bundle_file(archive, trust).map_err(BundleInstallError::Verify)?;
+            if expected_sha.is_some() {
+                let installed = self
+                    .find(&sha)
+                    .map_err(|error| io_error(error.to_string()))?
+                    .ok_or_else(|| io_error("materialized bundle disappeared".into()))?;
+                if installed.manifest != verified.manifest {
+                    return Err(BundleInstallError::Verify(
+                        BundleVerifyError::ManifestParse(
+                            "materialized bundle manifest differs from its signed archive".into(),
+                        ),
+                    ));
+                }
+                return Ok(BundleInstallLease {
+                    bundle: installed,
+                    _lease: lease,
+                });
+            }
             return Err(BundleInstallError::AlreadyInstalled {
                 bundle_sha256: sha.clone(),
             });
+        }
+        if !install_dir.exists() && !force && expected_sha.is_none() {
+            let cached = self.archive_path(&sha);
+            if cached.exists() {
+                let verified =
+                    verify_bundle_file(&cached, trust).map_err(BundleInstallError::Verify)?;
+                if verified.bundle_sha256 != sha {
+                    return Err(BundleInstallError::Verify(
+                        BundleVerifyError::ManifestParse(
+                            "cached bundle archive differs from its requested sha256".into(),
+                        ),
+                    ));
+                }
+                return Err(BundleInstallError::AlreadyInstalled {
+                    bundle_sha256: sha.clone(),
+                });
+            }
         }
         let staging = self.root.join(format!("{sha}.partial"));
         if staging.exists() {
@@ -865,7 +984,13 @@ impl BundleRegistry {
         if std::fs::symlink_metadata(&staging).is_ok() {
             let _ = std::fs::remove_dir_all(&staging);
         }
-        self.persist_archive(archive, &sha).map_err(io_error)?;
+        if expected_sha.is_none() {
+            self.persist_archive(archive, &sha).map_err(io_error)?;
+            if fresh_install {
+                self.mark_fresh_install_evictable(&sha)
+                    .map_err(|error| io_error(error.to_string()))?;
+            }
+        }
 
         Ok(BundleInstallLease {
             bundle: InstalledBundle {
@@ -979,15 +1104,21 @@ impl BundleRegistry {
         Ok(file)
     }
 
-    /// Copy the archive to `<sha>.mvmpkg`, atomically.
+    /// Compress the verified archive to `<sha>.mvmpkg.gz`, atomically.
     fn persist_archive(&self, archive: &Path, sha: &str) -> Result<(), String> {
-        let destination = self.archive_path(sha);
+        let destination = self.root.join(format!("{sha}.mvmpkg.gz"));
         let mut tmp = tempfile::NamedTempFile::new_in(&self.root)
             .map_err(|e| format!("creating archive tempfile: {e}"))?;
-        let mut source = File::open(archive)
+        let mut source = open_archive(archive)
             .map_err(|e| format!("reopening archive {}: {e}", archive.display()))?;
-        io::copy(&mut source, tmp.as_file_mut())
-            .map_err(|e| format!("copying archive bytes: {e}"))?;
+        let mut encoder =
+            flate2::write::GzEncoder::new(tmp.as_file_mut(), flate2::Compression::default());
+        io::copy(&mut source, &mut encoder)
+            .map_err(|e| format!("compressing archive bytes: {e}"))?;
+        encoder
+            .try_finish()
+            .map_err(|e| format!("finishing compressed archive: {e}"))?;
+        drop(encoder);
         tmp.as_file()
             .sync_all()
             .map_err(|e| format!("syncing archive: {e}"))?;
@@ -998,6 +1129,12 @@ impl BundleRegistry {
                 destination.display()
             )
         })?;
+        let legacy = self.root.join(format!("{sha}.mvmpkg"));
+        match std::fs::remove_file(&legacy) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("removing old archive {}: {e}", legacy.display())),
+        }
         Ok(())
     }
 }
@@ -1486,7 +1623,7 @@ mod tests {
             b"rootfs bytes"
         );
         assert_eq!(
-            std::fs::read(registry.archive_path(&installed.sha256)).unwrap(),
+            read_bundle_archive(&registry.archive_path(&installed.sha256)).unwrap(),
             std::fs::read(&path).unwrap()
         );
         assert!(
@@ -1494,6 +1631,43 @@ mod tests {
                 .verified_manifest(&installed.sha256, &trust())
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn missing_extraction_rematerializes_only_from_its_signed_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = sealed_from_files(dir.path());
+        let registry = BundleRegistry::new(dir.path().join("registry"));
+        let installed = registry.install_file(&path, &trust(), false).unwrap();
+        let sha = installed.sha256;
+        let archive = registry.archive_path(&sha);
+        std::fs::remove_dir_all(&installed.root).unwrap();
+
+        let rebuilt = registry.materialize_cached(&sha, &trust()).unwrap();
+        assert_eq!(rebuilt.root, installed.root);
+        assert_eq!(
+            std::fs::read(rebuilt.root.join("artifacts/rootfs.ext4")).unwrap(),
+            b"rootfs bytes"
+        );
+        assert_eq!(archive, registry.archive_path(&sha));
+        assert_eq!(
+            registry.materialize_cached(&sha, &trust()).unwrap().root,
+            rebuilt.root
+        );
+
+        std::fs::remove_dir_all(&rebuilt.root).unwrap();
+        let mut wrong = std::fs::read(&path).unwrap();
+        wrong[0] ^= 1;
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&wrong).unwrap();
+        std::fs::write(&archive, gzip.finish().unwrap()).unwrap();
+        assert!(registry.materialize_cached(&sha, &trust()).is_err());
+        assert!(!rebuilt.root.exists());
+        assert!(
+            registry
+                .materialize_cached("../not-a-digest", &trust())
+                .is_err()
         );
     }
 

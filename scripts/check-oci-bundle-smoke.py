@@ -2,7 +2,13 @@
 """Platform-aware host-local OCI witness; never builds binaries or seals prod images.
 
 With previously prepared, source-matched host binaries:
-  python3 scripts/check-oci-bundle-smoke.py --backend hvf --bin-dir "$CARGO_TARGET_DIR/debug"
+  curl -fsSL https://github.com/tinylabscom/mvm-images/releases/download/revocations/revocations.json \
+    -o /tmp/revocations.json
+  curl -fsSL https://github.com/tinylabscom/mvm-images/releases/download/revocations/revocations.json.bundle \
+    -o /tmp/revocations.json.bundle
+  python3 scripts/check-oci-bundle-smoke.py --backend hvf --bin-dir "$CARGO_TARGET_DIR/debug" \
+    --revocation-document /tmp/revocations.json \
+    --revocation-bundle /tmp/revocations.json.bundle
 
 --self-test never invokes mvmctl. Live artifacts remain in a new private /tmp
 directory. Only evidence/ is for review: local-host/ contains private signing keys.
@@ -230,31 +236,43 @@ def digest(path):
     return h.hexdigest()
 
 
-def installed_snapshot(directory):
-    require(directory.is_dir(), "content-addressed install directory absent")
-    result = {}
-    for path in sorted(directory.rglob("*")):
-        require(not path.is_symlink(), "installed asset is a symlink")
-        if path.is_file():
-            stat = path.stat()
-            result[str(path.relative_to(directory))] = {
-                "sha256": digest(path), "inode": stat.st_ino,
-                "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
-            }
-    require(bool(result), "empty bundle install")
-    return result
+def retained_archive_snapshot(directory):
+    require(not directory.exists(), "confirmed stop retained the extracted bundle")
+    archive = directory.with_name(directory.name + ".mvmpkg.gz")
+    require(archive.is_file() and not archive.is_symlink(),
+            "compressed installed archive is missing or linked")
+    stat = archive.stat()
+    return {"sha256": digest(archive), "inode": stat.st_ino,
+            "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
-def require_reused_install(initial, current):
-    require(all(current.get(name) == value for name, value in initial.items()),
-            "installed content was rewritten")
-    # Admission may create its ordinary hash memoization files on first use.
-    # Those are not signed payloads; every originally installed file must still
-    # retain its exact bytes, inode, size, and modification time.
-    added = current.keys() - initial.keys()
-    require(all(name.endswith(".sha256cache")
-                and name.removesuffix(".sha256cache") in initial for name in added),
-            "unexpected file added to installed bundle")
+def checked_revocations(document, bundle):
+    require(bool(document) == bool(bundle),
+            "supply both the signed revocation document and its signature bundle")
+    if document is None:
+        return None
+    for path in (document, bundle):
+        mode = path.lstat().st_mode
+        require(stat.S_ISREG(mode) and path.stat().st_size <= 16 * 1024 * 1024,
+                f"revocation input is not a bounded regular file: {path}")
+    return document, bundle
+
+
+def checked_build_summary(debug, package_sha):
+    summary = json.loads(debug.read_text())
+    require(summary.get("bundle_sha256") == package_sha, "debug/package digest mismatch")
+    manifest = summary.get("manifest", {})
+    schema = manifest.get("schema_version")
+    require(type(schema) is int and schema >= 7
+            and any(member.get("class") == "canonical_linux_proof"
+                    for member in manifest.get("members", [])),
+            "expected canonical sealed boot package")
+    return summary
+
+
+def vm_name(root, attempt):
+    identity = hashlib.sha256(root.name.encode()).hexdigest()[:8]
+    return f"bundle-{identity}-{attempt}"
 
 
 class Runner:
@@ -416,6 +434,17 @@ def live(args):
             )
         probe = runner.run("sandbox-probe", offline + probe_argv, recipient_env, timeout=15)
         require(probe_marker in probe["stdout"], "offline isolation proof absent")
+        revocations = checked_revocations(args.revocation_document, args.revocation_bundle)
+        if revocations:
+            document, signature = revocations
+            runner.run("image-set-revocations", offline + [
+                cli, "image", "revocations", "update",
+                "--document", document, "--bundle", signature,
+            ], recipient_env)
+            report["revocation_inputs"] = {
+                "document_sha256": digest(document),
+                "signature_bundle_sha256": digest(signature),
+            }
         archive = evidence / "alpine.mvmpkg"
         debug = evidence / "build-report.json"
         built = runner.run("bundle-build", [cli, "build", IMAGE, "--from", "image",
@@ -424,14 +453,12 @@ def live(args):
         match = re.search(r"^OCI digest: (sha256:[0-9a-f]{64})$", built["stdout"], re.M)
         require(match is not None, "build did not report resolved OCI digest")
         package_sha = digest(archive)
-        summary = json.loads(debug.read_text())
-        require(summary["bundle_sha256"] == package_sha, "debug/package digest mismatch")
-        require(summary["manifest"]["schema_version"] == 4, "expected schema 4 package")
+        summary = checked_build_summary(debug, package_sha)
         report.update(package_sha256=package_sha, source_oci_digest=match.group(1))
         installed = Path(recipient_env["MVM_HOME"]) / "bundles" / package_sha
         initial = None
         for attempt in ("first", "repeat"):
-            name = f"bundle-{root.name.rsplit('-', 1)[-1]}-{attempt}"
+            name = vm_name(root, attempt)
             marker = f"{args.backend.upper()}_OCI_BUNDLE_{attempt.upper()}_OK"
             active.append(name)
             output = runner.run(attempt, offline + [
@@ -447,16 +474,23 @@ def live(args):
                     f"{attempt}: missing verified content-addressed install evidence")
             require(str(producer) not in output["stdout"] + output["stderr"],
                     f"{attempt}: runtime output references producer")
-            runner.run(f"{attempt}-stop", offline + [
-                cli, "machine", "stop", name, "--yes"], recipient_env)
+            # This is a synchronous transient run: successful return already
+            # includes backend exit. `machine stop` has no live HVF control
+            # socket at that point and is not evidence of a failed release.
+            listing = runner.run(f"{attempt}-ps", offline + [
+                cli, "machine", "ps", "--all", "--json"], recipient_env)
+            machines = json.loads(listing["stdout"])
+            require(isinstance(machines, list) and all(
+                isinstance(machine, dict) and machine.get("name") != name
+                for machine in machines), f"{attempt}: VM still listed after run")
             active.remove(name)
-            report["cleanup"].append({"name": name, "status": "stopped"})
-            current = installed_snapshot(installed)
+            report["cleanup"].append({"name": name, "status": "exited"})
+            current = retained_archive_snapshot(installed)
             if initial is None:
                 initial = current
-                report["installed_assets"] = initial
+                report["retained_archive"] = initial
             else:
-                require_reused_install(initial, current)
+                require(current == initial, "the second launch rewrote the retained archive")
             report[attempt] = {"marker": marker, "exit_code": 0,
                                "install_unchanged": attempt == "repeat"}
         probe = runner.run("sandbox-probe-after", offline + probe_argv,
@@ -626,7 +660,7 @@ class HelperTests(unittest.TestCase):
         self.assertIn('a\\"b', text)
         self.assertNotIn("deny network*", text)
 
-    def test_runner_and_snapshot(self):
+    def test_runner_and_archive_snapshot(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temp:
             directory = Path(temp)
             runner = Runner(directory, {"commands": []})
@@ -642,15 +676,54 @@ class HelperTests(unittest.TestCase):
                 runner.run("overflow", [sys.executable, "-c",
                            f"import sys; sys.stdout.write('x' * {LIMIT + 1})"], env)
             self.assertEqual((directory / "overflow.stdout").stat().st_size, LIMIT)
-            before = installed_snapshot(directory)
-            self.assertEqual(before, installed_snapshot(directory))
-            require_reused_install(before, {**before, "ok.stdout.sha256cache": {}})
+            installed = directory / ("a" * 64)
+            archive = installed.with_name(installed.name + ".mvmpkg.gz")
+            archive.write_bytes(b"archive")
+            before = retained_archive_snapshot(installed)
+            self.assertEqual(before, retained_archive_snapshot(installed))
+            installed.mkdir()
             with self.assertRaises(Blocked):
-                require_reused_install(before, {**before, "ok.stdout": {}})
+                retained_archive_snapshot(installed)
+            installed.rmdir()
+            archive.write_bytes(b"changed")
+            self.assertNotEqual(before, retained_archive_snapshot(installed))
+
+    def test_revocation_inputs_require_two_bounded_regular_files(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp:
+            document = Path(temp) / "revocations.json"
+            signature = Path(temp) / "revocations.json.bundle"
+            document.write_text("{}")
+            signature.write_text("{}")
+            self.assertEqual(checked_revocations(document, signature),
+                             (document, signature))
             with self.assertRaises(Blocked):
-                require_reused_install(before, {**before, "unknown.sha256cache": {}})
-            (directory / "new").write_text("changed")
-            self.assertNotEqual(before, installed_snapshot(directory))
+                checked_revocations(document, None)
+            linked = Path(temp) / "linked"
+            linked.symlink_to(document)
+            with self.assertRaises(Blocked):
+                checked_revocations(linked, signature)
+
+    def test_build_summary_requires_canonical_boot_without_pinning_one_schema(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp:
+            path = Path(temp) / "report.json"
+            summary = {"bundle_sha256": "a" * 64, "manifest": {
+                "schema_version": 7, "members": [{"class": "canonical_linux_proof"}],
+            }}
+            path.write_text(json.dumps(summary))
+            self.assertEqual(checked_build_summary(path, "a" * 64), summary)
+            for changed in (
+                {**summary, "bundle_sha256": "b" * 64},
+                {**summary, "manifest": {**summary["manifest"], "schema_version": 4}},
+                {**summary, "manifest": {**summary["manifest"], "members": []}},
+            ):
+                path.write_text(json.dumps(changed))
+                with self.assertRaises(Blocked):
+                    checked_build_summary(path, "a" * 64)
+
+    def test_vm_name_is_valid_even_when_tempdir_contains_underscores(self):
+        root = Path("/tmp/mvm-hvf-bundle-da_9z09f")
+        self.assertRegex(vm_name(root, "first"), r"^bundle-[0-9a-f]{8}-first$")
+        self.assertNotIn("_", vm_name(root, "repeat"))
 
     def test_one_shot_stdin_is_exact_and_not_logged(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temp:
@@ -684,6 +757,8 @@ def main():
         "CARGO_TARGET_DIR", "target")) / "debug"))
     parser.add_argument("--build-timeout", type=int, default=900)
     parser.add_argument("--run-timeout", type=int, default=240)
+    parser.add_argument("--revocation-document", type=Path)
+    parser.add_argument("--revocation-bundle", type=Path)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:

@@ -398,7 +398,6 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             shares: Vec::new(),
             assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: Default::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: parent_agent_verbs.clone(),
             restrict_agent_verbs,

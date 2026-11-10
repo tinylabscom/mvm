@@ -382,3 +382,14 @@ fn unknown_keys_in_a_manifest_are_refused() {
     assert!(err.message.contains("unknown field"), "{err}");
     assert!(ResolvedManifest::from_json(b"not json", "m", None).is_err());
 }
+
+#[test]
+fn legacy_tool_rules_in_a_resolved_manifest_are_refused() {
+    let err = ResolvedManifest::from_json(
+        br#"{"policy":{"tools":{"allow":["git"]}}}"#,
+        "old manifest",
+        None,
+    )
+    .unwrap_err();
+    assert!(err.message.contains("tools"), "{err}");
+}

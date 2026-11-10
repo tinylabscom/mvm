@@ -2,12 +2,12 @@
 
 use super::write_secret_file;
 use anyhow::{Context, Result};
-use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan, ToolMediationGrant, VerbId};
+use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan, VerbId};
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 use std::path::Path;
 
 /// Mint a signed `VerbGrantEnvelope` when the plan carries agent, drive,
-/// tool-mediation or application-terminal authority and write it to `<state_dir>/verb-grant.json` at mode 0600.
+/// or application-terminal authority and write it to `<state_dir>/verb-grant.json` at mode 0600.
 ///
 /// The sidecar is consumed by the backend's `verb_grant_cmdline_token` at
 /// launch time and carried to the guest on the kernel command line.
@@ -30,23 +30,20 @@ pub(super) fn mint_verb_grant_sidecar(
     let Ok(signed) = serde_json::from_str::<SignedExecutionPlan>(plan_json) else {
         return Ok(None);
     };
-    let Ok(plan) = serde_json::from_slice::<ExecutionPlan>(&signed.0.payload) else {
-        return Ok(None);
-    };
+    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)
+        .context("decode admitted plan for guest grant")?;
 
     // The grant expires with the plan's validity window. Minting one that is
     // already dead guarantees the guest refuses activation, and the guest can
     // only say `VerbNotAuthorized`; refusing here says what actually expired.
     refuse_expired_plan(&plan, chrono::Utc::now())?;
-    let tool_mediation = tool_mediation_for(&plan)?;
     let drive = plan.grants.as_ref().and_then(|grants| grants.drive.clone());
     let application_terminal = plan
         .grants
         .as_ref()
         .and_then(|grants| grants.application_terminal.as_ref())
         .map(mvm_contract::grants::ApplicationTerminalBinding::from);
-    let other_authority =
-        drive.is_some() || tool_mediation.is_some() || application_terminal.is_some();
+    let other_authority = drive.is_some() || application_terminal.is_some();
     let Some(verbs) = granted_verbs(&plan, other_authority) else {
         return Ok(None);
     };
@@ -64,7 +61,6 @@ pub(super) fn mint_verb_grant_sidecar(
         verbs,
         crate::host_signer::VerbGrantAuthority {
             drive,
-            tool_mediation,
             application_terminal,
         },
     )
@@ -103,21 +99,6 @@ fn granted_verbs(plan: &ExecutionPlan, other_authority: bool) -> Option<Vec<Verb
         }
     }
     Some(verbs)
-}
-
-fn tool_mediation_for(plan: &ExecutionPlan) -> Result<Option<ToolMediationGrant>> {
-    if plan.tools.is_empty() {
-        return Ok(None);
-    }
-    // The digest binds the exact tool-to-executable map the guest substitutes
-    // at activation: every admitted declared command is intercepted before it
-    // runs and only the root-only stash still holds the original bytes.
-    let grant = ToolMediationGrant {
-        class_gate_only: plan.agent_verbs.is_none(),
-        command_map_digest: ToolMediationGrant::digest_commands(&plan.tools.command_executables())
-            .map_err(anyhow::Error::msg)?,
-    };
-    Ok(Some(grant))
 }
 
 /// Refuse to mint a grant from a plan whose validity window has closed.
@@ -200,98 +181,17 @@ mod tests {
     }
 
     #[test]
-    fn tool_rules_require_a_signed_guest_mediation_grant() {
-        let mut plan = plan_valid(5, 600);
-        assert!(tool_mediation_for(&plan).expect("empty plan").is_none());
-        plan.tools.allow.push("shell".to_string());
-        assert_eq!(
-            tool_mediation_for(&plan).expect("tool plan"),
-            Some(ToolMediationGrant {
-                class_gate_only: true,
-                command_map_digest: None,
-            })
-        );
-        plan.agent_verbs = Some(Vec::new());
-        assert_eq!(
-            tool_mediation_for(&plan).expect("explicit verbs"),
-            Some(ToolMediationGrant {
-                class_gate_only: false,
-                command_map_digest: None,
-            })
-        );
-    }
-
-    #[test]
-    fn signed_guest_map_comes_from_plan_paths_and_refuses_ambiguous_ownership() {
-        use mvm_contract::policy::tool_rules::ToolRuleDetail;
-
-        let mut plan = plan_valid(5, 600);
-        plan.tools.allow.push("shell".into());
-        plan.tools.detail.insert(
-            "shell".into(),
-            ToolRuleDetail {
-                executable: Some("/bin/sh".into()),
-                ..ToolRuleDetail::default()
-            },
-        );
-        let map = tool_mediation_for(&plan)
-            .expect("valid map")
-            .expect("tool grant");
-        assert_eq!(
-            map.command_map_digest,
-            ToolMediationGrant::digest_commands(&plan.tools.command_executables())
-                .expect("valid map")
-        );
-
-        // Two admitted tools claiming the same path are ambiguous at the
-        // command boundary: the guest cannot know which identity an
-        // invocation of that path names.
-        plan.tools.allow.push("other".into());
-        plan.tools.detail.insert(
-            "other".into(),
-            ToolRuleDetail {
-                executable: Some("/bin/sh".into()),
-                ..ToolRuleDetail::default()
-            },
-        );
-        assert!(tool_mediation_for(&plan).is_err());
-        plan.tools
-            .detail
-            .get_mut("other")
-            .expect("other detail")
-            .executable = Some("relative/sh".into());
-        assert!(tool_mediation_for(&plan).is_err());
-        // A deny-only tool names no executable: it is decided at the gate
-        // without substituting anything.
-        plan.tools.allow.retain(|tool| tool != "other");
-        plan.tools.deny.push("other".into());
-        plan.tools
-            .detail
-            .get_mut("other")
-            .expect("other detail")
-            .executable = Some("/bin/zsh".into());
-        let map = tool_mediation_for(&plan)
-            .expect("deny-only tool maps")
-            .expect("tool grant");
-        assert_eq!(
-            map.command_map_digest,
-            ToolMediationGrant::digest_commands(&plan.tools.command_executables())
-                .expect("valid map")
-        );
-    }
-
-    #[test]
-    fn tool_only_plan_mints_a_verifiable_guest_grant() {
+    fn legacy_tool_only_plan_is_refused_without_a_guest_grant() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().expect("isolated home");
         env.isolate_mvm_home(home.path());
         let state_dir = home.path().join("tool-guest");
         std::fs::create_dir_all(&state_dir).expect("state dir");
-        let mut plan = plan_valid(5, 600);
-        let signed = |plan: &ExecutionPlan| {
+        let plan = plan_valid(5, 600);
+        let signed = |payload: Vec<u8>| {
             serde_json::to_string(&SignedExecutionPlan(
                 mvm_core::protocol::signing::SignedPayload {
-                    payload: serde_json::to_vec(plan).expect("plan payload"),
+                    payload,
                     signature: vec![],
                     signer_id: "test".into(),
                 },
@@ -299,36 +199,25 @@ mod tests {
             .expect("signed plan envelope")
         };
         assert!(
-            mint_verb_grant_sidecar(&signed(&plan), "tool-guest", &state_dir)
-                .expect("no-tool plan")
-                .is_none()
+            mint_verb_grant_sidecar(
+                &signed(serde_json::to_vec(&plan).unwrap()),
+                "tool-guest",
+                &state_dir
+            )
+            .expect("no-tool plan")
+            .is_none()
         );
 
-        plan.tools.allow.push("shell".into());
-        let envelope = mint_verb_grant_sidecar(&signed(&plan), "tool-guest", &state_dir)
-            .expect("tool plan")
-            .expect("tool policy requires a grant");
-        assert_eq!(
-            envelope.grant.tool_mediation,
-            Some(ToolMediationGrant {
-                class_gate_only: true,
-                command_map_digest: None,
-            })
-        );
-        let key = crate::audit::host_keypair::load_or_init_at(&mvm_core::config::mvm_keys_dir())
-            .expect("host signer");
-        assert!(
-            envelope
-                .grant
-                .verify(
-                    &key.verifying,
-                    "tool-guest",
-                    &plan.nonce,
-                    chrono::Utc::now()
-                )
-                .is_ok()
-        );
-        assert!(state_dir.join("verb-grant.json").is_file());
+        let mut legacy = serde_json::to_value(&plan).unwrap();
+        legacy["tools"] = serde_json::json!({"allow": ["shell"]});
+        let error = mint_verb_grant_sidecar(
+            &signed(serde_json::to_vec(&legacy).unwrap()),
+            "tool-guest",
+            &state_dir,
+        )
+        .expect_err("legacy tool policy must be refused");
+        assert!(error.to_string().contains("decode admitted plan"));
+        assert!(!state_dir.join("verb-grant.json").exists());
     }
 
     #[test]

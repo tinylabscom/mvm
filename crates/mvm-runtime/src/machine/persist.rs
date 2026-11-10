@@ -55,13 +55,6 @@ pub struct MachineSpec {
     /// reopens it under current publisher trust before signing the plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
-    /// Resolved tool mediation carried across stop/start, not reloaded from
-    /// a mutable policy path.
-    #[serde(
-        default,
-        skip_serializing_if = "mvm_contract::policy::tool_rules::ToolRules::is_empty"
-    )]
-    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     pub net: bool,
     pub allow_host: Vec<String>,
     /// Peer routes this machine may dial (`NAME:PORT=ADDR:PORT`), persisted so
@@ -288,7 +281,6 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.deployment == b.deployment
         && a.runtime_pack == b.runtime_pack
         && a.registry_pack_image == b.registry_pack_image
-        && a.tools == b.tools
         && a.net == b.net
         && same_allow_host(&a.allow_host, &b.allow_host)
         && a.peer == b.peer
@@ -325,9 +317,6 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     }
     if current.net != desired.net {
         changed.push("net");
-    }
-    if current.tools != desired.tools {
-        changed.push("tools");
     }
     if !same_allow_host(&current.allow_host, &desired.allow_host) {
         changed.push("allow-host");
@@ -515,7 +504,6 @@ mod tests {
             resolved_digest: None,
             runtime_pack: false,
             registry_pack_image: None,
-            tools: Default::default(),
             net: false,
             allow_host: vec![],
             peer: Vec::new(),
@@ -895,7 +883,6 @@ mod tests {
             resolved_digest: None,
             runtime_pack: false,
             registry_pack_image: None,
-            tools: Default::default(),
             net: false,
             allow_host: vec![],
             peer: Vec::new(),
@@ -1010,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_identity_and_tool_rules_survive_persistence_and_trigger_recreate() {
+    fn pack_identity_survives_persistence_and_legacy_tools_are_refused() {
         let old = spec_fixture("web");
         let mut desired = old.clone();
         desired.image = None;
@@ -1022,19 +1009,19 @@ mod tests {
             )
             .expect("versioned pin"),
         );
-        desired.tools.allow.push("python".to_string());
         let encoded = serde_json::to_vec(&desired).expect("serialize machine spec");
         let decoded: MachineSpec = serde_json::from_slice(&encoded).expect("deserialize spec");
         assert_eq!(decoded, desired);
         assert!(!machine_config_matches(&old, &decoded));
         let changed = machine_config_diff(&old, &decoded);
         assert!(changed.contains("source"), "{changed}");
-        assert!(changed.contains("tools"), "{changed}");
 
         let legacy = serde_json::to_vec(&old).expect("serialize legacy-shaped spec");
         let decoded: MachineSpec = serde_json::from_slice(&legacy).expect("default new fields");
         assert!(decoded.registry_pack_image.is_none());
-        assert!(decoded.tools.is_empty());
+        let mut legacy: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+        legacy["tools"] = serde_json::json!({"allow": ["python"]});
+        assert!(serde_json::from_value::<MachineSpec>(legacy).is_err());
     }
 
     #[test]

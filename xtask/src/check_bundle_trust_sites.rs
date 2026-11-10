@@ -9,6 +9,8 @@
 //!
 //! - `MUST_COMPOSE`: files that handle an application bundle and must contain a
 //!   composing call, so reverting one to the raw store fails here.
+//! - `MUST_DELEGATE`: the canonical verifier receives already-classified trust
+//!   from its callers rather than constructing publisher policy itself.
 //! - `RAW_ALLOWED`: files that legitimately use the raw store, each with the
 //!   reason it is not an application-bundle path.
 //!
@@ -27,15 +29,17 @@ const COMPOSING_CALLS: &[&str] = &[
 
 /// Files that verify an application bundle and must compose the pinned keys.
 const MUST_COMPOSE: &[&str] = &[
-    "crates/mvm-core/src/canonical_linux.rs",
     "crates/mvm-hostd/src/supervisor/caller_registration.rs",
     "crates/mvm-client/src/admission/pinned_bundle.rs",
     "crates/mvm-client/src/launch/bundle_runtime.rs",
+    "crates/mvm-client/src/launch/canonical_linux.rs",
     "crates/mvm-runtime/src/vm/template/lifecycle/snapshot.rs",
     "crates/mvm-cli/src/pack_registry.rs",
     "crates/mvm-cli/src/commands/pack/inspect.rs",
     "crates/mvm-cli/src/commands/vm/exec/composition.rs",
 ];
+
+const MUST_DELEGATE: &str = "crates/mvm-core/src/canonical_linux.rs";
 
 /// Files that use the raw store, with why that is not an application path.
 const RAW_ALLOWED: &[(&str, &str)] = &[
@@ -160,7 +164,14 @@ fn problems(files: &[(String, String)]) -> Vec<String> {
         let composes = COMPOSING_CALLS.iter().any(|call| body.contains(call));
         let must = MUST_COMPOSE.contains(&rel.as_str());
         let allowed = RAW_ALLOWED.iter().any(|(file, _)| file == rel);
-        if must && !composes {
+        if rel == MUST_DELEGATE
+            && (!body.contains("trust: &dyn TrustStore")
+                || !body.contains("capture_canonical_linux_inputs(archive, pin, trust)"))
+        {
+            out.push(format!(
+                "{rel}: canonical capture no longer uses caller-classified trust"
+            ));
+        } else if must && !composes {
             out.push(format!(
                 "{rel}: handles an application bundle but composes no pinned-key trust"
             ));
@@ -170,9 +181,8 @@ fn problems(files: &[(String, String)]) -> Vec<String> {
             ));
         }
     }
-    for entry in MUST_COMPOSE
-        .iter()
-        .copied()
+    for entry in std::iter::once(MUST_DELEGATE)
+        .chain(MUST_COMPOSE.iter().copied())
         .chain(RAW_ALLOWED.iter().map(|(file, _)| *file))
     {
         if !files.iter().any(|(rel, _)| rel == entry) {
@@ -209,6 +219,11 @@ mod tests {
         let mut files: Vec<(String, String)> = MUST_COMPOSE
             .iter()
             .map(|f| (f.to_string(), "trust_for_installed_bundle(raw)".to_string()))
+            .chain(std::iter::once((
+                MUST_DELEGATE.to_string(),
+                "trust: &dyn TrustStore; capture_canonical_linux_inputs(archive, pin, trust)"
+                    .to_string(),
+            )))
             .chain(
                 RAW_ALLOWED
                     .iter()
@@ -239,6 +254,15 @@ mod tests {
     #[test]
     fn a_composing_site_reverted_to_the_raw_store_fails() {
         let files = corpus(&[(MUST_COMPOSE[0], "let t = FsTrustStore::default_path()?;")]);
+        assert_eq!(problems(&files).len(), 1);
+    }
+
+    #[test]
+    fn a_canonical_capture_that_ignores_caller_trust_fails() {
+        let files = corpus(&[(
+            MUST_DELEGATE,
+            "capture_canonical_linux_inputs(archive, pin, &raw)",
+        )]);
         assert_eq!(problems(&files).len(), 1);
     }
 

@@ -34,8 +34,6 @@ stdin?: (string | null)
 timeout_secs?: (number | null)
 }
 } | {
-MediatedExec: MediatedExecCall
-} | {
 ExecBatch: {
 commands: string[][]
 stages: StageFile[]
@@ -353,7 +351,7 @@ export type VolumeConfigKind = ("virtio_fs" | "block")
 /**
  * Guest-agent control protocol capability. Closed enum so host and guest fail loudly on drift instead of accepting arbitrary strings.
  */
-export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "drive" | "run_extension" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "agent_prompt" | "mediated_exec" | "unix_socket_forward" | "readiness")
+export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "drive" | "run_extension" | "filesystem_rpc" | "process_rpc" | "volume_mount" | "update_idle_timeout") | "agent_prompt" | "console" | "unix_socket_forward" | "readiness")
 /**
  * Filesystem operations exposed by the grant-gated production drive surface. Deliberately excludes mkdir, remove, and move: the issue's authority is the smallest useful read/write/list/stat set, while the wider `Fs*` family remains DevOnly.
  */
@@ -525,8 +523,6 @@ reason: DriveRefusal
 }
 } | "ExtensionCancellationAck" | {
 ExecEvent: ExecEvent
-} | {
-ToolCheckRequired: ToolCheckRequest
 } | {
 ExecBatchResult: {
 outcomes: ExecOutcomeWire[]
@@ -921,12 +917,6 @@ rootfs: RootfsConfig
  */
 runtime?: (RuntimeOverlayConfig | null)
 /**
- * Full tool-to-executable map, authenticated by the host control channel and matched to the boot-pinned grant before activation changes mounts.
- */
-tool_commands?: {
-[k: string]: string
-}
-/**
  * Optional verb-grant envelope to pin before serving operational RPCs.  When present, the activation message itself must be signed by the host-signer trust anchor.
  */
 verb_grant_envelope?: (VerbGrantEnvelope | null)
@@ -1095,10 +1085,6 @@ session_id: string
  * Raw Ed25519 signature bytes (64) over signing_bytes(), serialized as base64. A `Vec<u8>` would otherwise render as a JSON array of 64 decimal numbers — roughly 230 characters against base64's 88 — and this grant rides the guest kernel cmdline, where the budget is finite and silently enforced. `sig` is excluded from `signing_bytes`, so how it is encoded cannot affect signature validity.
  */
 sig: string
-/**
- * Presence requires arbitrary guest command RPCs to use the mediated path. The host signer derives this from the admitted plan's tool rules.
- */
-tool_mediation?: (ToolMediationGrant | null)
 verbs: VerbId[]
 }
 /**
@@ -1119,19 +1105,6 @@ program_id: string
  */
 ttl: number
 workspace_roots: string[]
-}
-/**
- * How a tool-mediated guest preserves the prior verb-grant posture.
- */
-export interface ToolMediationGrant {
-/**
- * A dev plan without an agent-verb list continues to use the profile class gate for non-command verbs. Command RPCs are still mediated.
- */
-class_gate_only: boolean
-/**
- * Digest of the exact tool-to-executable map sent at activation. The complete map cannot ride this grant's bounded kernel command line.
- */
-command_map_digest?: (Sha256Digest | null)
 }
 /**
  * User volume to mount after rootfs activation.
@@ -1163,19 +1136,6 @@ read_only?: boolean
  * Stable attachment identifier. For virtio-fs this is the advertised tag; for block devices it preserves the host's `uvol{index}` identity.
  */
 tag: string
-}
-/**
- * One declared command. The checked command line is derived from `argv` on both sides of the control channel; the guest executes these same arguments directly, never through a shell.
- */
-export interface MediatedExecCall {
-argv: string[]
-/**
- * Host-provisioned variables applied over the workload environment: the egress proxy, the CA bundle, and secret placeholders. Never part of the decided command line.
- */
-env?: [string, string][]
-stdin?: (string | null)
-timeout_secs?: (number | null)
-tool: string
 }
 /**
  * A file to stage into the guest before an [`GuestRequest::ExecBatch`] runs.
@@ -1341,23 +1301,6 @@ name: string
 output?: {
 [k: string]: unknown
 }
-}
-/**
- * One guest-reported invocation, sent before the command is spawned.
- */
-export interface ToolCheckRequest {
-/**
- * Exact command line to compare with the admitted argv patterns.
- */
-argv: string
-/**
- * Actual argv[0] the guest will spawn. A missing or differing path cannot receive command authority from the signed plan.
- */
-executable?: (string | null)
-/**
- * Name in the admitted plan's tool rules.
- */
-tool: string
 }
 /**
  * One command's buffered outcome from an [`GuestRequest::ExecBatch`]. Agent- measured: `duration_ms` is the in-guest wall-clock and `peak_rss_kib` the `getrusage` high-water mark when the guest can report it.

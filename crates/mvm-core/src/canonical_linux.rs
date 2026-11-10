@@ -26,12 +26,9 @@ use mvm_core::image_set_revocation::{
 };
 #[cfg(feature = "host-state")]
 use mvm_core::packs::PackRevocationChecker;
-#[cfg(feature = "host-state")]
-use mvm_core::plan::bundle::{
-    BundleOrigin, FsTrustStore, LocalBundleTrustStore, bundle_origin,
-    capture_canonical_linux_inputs, existing_local_build_key, key_id_from_pubkey,
-};
 use mvm_core::plan::bundle::{CapturedCanonicalLinuxInputs, PlanArtifact};
+#[cfg(feature = "host-state")]
+use mvm_core::plan::bundle::{TrustStore, capture_canonical_linux_inputs};
 use mvm_core::vm_backend::BackendKind;
 #[cfg(feature = "host-state")]
 use std::fs::File;
@@ -278,29 +275,17 @@ pub fn supports_lifetime_custody(backend: BackendKind) -> bool {
 /// signed feed through the existing rollback-protected store. Missing, stale,
 /// invalid, revoked or rolled-back evidence refuses. No download, trust-key
 /// enrollment, source build, runtime selection or native start occurs here.
+/// The caller supplies the trust already used to authenticate the bundle's
+/// origin; host-local signing authority requires a signed local-build label.
 #[cfg(feature = "host-state")]
 pub fn prepare_canonical_linux(
     archive: &Path,
     pin: &PlanArtifact,
     backend: BackendKind,
     host_protocols: HostProtocolSupport,
+    trust: &dyn TrustStore,
 ) -> Result<PreparedCanonicalLinux> {
-    let release = crate::registry_pack::application_bundle::trust_for_installed_archive(
-        FsTrustStore::default_path()?,
-        archive,
-    );
-    let inputs = if let Some(host) = existing_local_build_key()? {
-        let id = key_id_from_pubkey(&host);
-        let trust = LocalBundleTrustStore::new(release, id.clone(), host);
-        let inputs = capture_canonical_linux_inputs(archive, pin, &trust)?;
-        ensure!(
-            bundle_origin(inputs.manifest(), &id, trust.release()) != BundleOrigin::Untrusted,
-            "canonical Linux owner refuses an unlabelled or foreign host bundle"
-        );
-        inputs
-    } else {
-        capture_canonical_linux_inputs(archive, pin, &release)?
-    };
+    let inputs = capture_canonical_linux_inputs(archive, pin, trust)?;
     prepare_with_clock(inputs, backend, host_protocols, Utc::now)
 }
 

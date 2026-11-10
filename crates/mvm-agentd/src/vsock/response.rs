@@ -250,9 +250,6 @@ pub enum GuestResponse {
     /// One event in the streaming response of a DevOnly `Exec` call.
     /// Terminated by `ExecEvent::Exit`.
     ExecEvent(ExecEvent),
-    /// A declared command is paused before spawn and needs a decision for
-    /// this exact invocation on the authenticated control session.
-    ToolCheckRequired(mvm_contract::protocol::network_flow::tool::ToolCheckRequest),
     /// Buffered outcomes of a DevOnly `ExecBatch` call, one per
     /// command in request order (truncated at the first non-zero exit).
     ExecBatchResult { outcomes: Vec<ExecOutcomeWire> },
@@ -403,7 +400,7 @@ name_enum! {
     pub enum Verb {
         ActivateEnvironment, ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, ResourceUsage,
         IntegrationStatus,
-        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, MediatedExec, ExecBatch, RunEntrypoint,
+        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
         AgentPrompt, DriveOpen, DriveFile, RunExtension,
         CancelExtension,
         RunDetached,
@@ -424,7 +421,7 @@ name_enum! {
         ActivateEnvironmentAck, ActivateEnvironmentError, NotActivated,
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, ResourceUsageReport, Error, UnsupportedInProfile, VerbNotAuthorized, WorkloadPrivilegeRefused, IntegrationStatusReport,
-        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, DriveEvent, DriveRefused, ExtensionCancellationAck, ExecEvent, ToolCheckRequired,
+        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, DriveEvent, DriveRefused, ExtensionCancellationAck, ExecEvent,
         ExecBatchResult, DetachedStarted,
         PostRestoreAck, FsDiffResult, FilesystemsSynced,
         UnixSocketForwardStarted, ConsoleOpened, ConsoleAttached, ConsoleBusy,
@@ -461,24 +458,6 @@ pub enum ResponseKind {
     Stream,
 }
 
-/// Host answer to a paused declared-command invocation. This is read only
-/// while a `MediatedExec` is waiting; it is not a standalone guest verb.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolCheckReply {
-    /// The host gate admitted and audited this invocation.
-    Allow,
-    /// Admitted, and the tool owns routes or secrets: the guest starts the
-    /// command in a session of its own and attributes that session's flows to
-    /// this binding while the command runs.
-    AllowBound {
-        /// The host-minted binding for this invocation.
-        binding: mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding,
-    },
-    /// The host gate refused it, or could not obtain an audited decision.
-    Deny,
-}
-
 /// Whether a verb carries bounded orchestration metadata or user-controlled
 /// payload bytes. The distinction drives dispatch capacity and audit handling;
 /// it is independent of the prod/dev profile gate.
@@ -506,7 +485,6 @@ impl Verb {
         use TrafficPlane::{Control, Data};
         match self {
             Self::Exec
-            | Self::MediatedExec
             | Self::ExecBatch
             | Self::RunEntrypoint
             | Self::AgentPrompt
@@ -577,7 +555,6 @@ impl Verb {
         match self {
             // Each of these ends in a process executing image or user code.
             Self::Exec
-            | Self::MediatedExec
             | Self::ExecBatch
             | Self::RunEntrypoint
             | Self::AgentPrompt
@@ -646,24 +623,6 @@ impl Verb {
         }
     }
 
-    /// Arbitrary command/control paths that must not run beside an admitted
-    /// tool policy without a host decision for the declared invocation.
-    /// Fixed image entrypoints, exact drive programs, and admitted extensions
-    /// have their own signed authority and are not arbitrary-command RPCs.
-    pub fn bypasses_tool_mediation(self) -> bool {
-        matches!(
-            self,
-            Self::Exec
-                | Self::ExecBatch
-                | Self::RunDetached
-                | Self::RunCode
-                | Self::ProcStart
-                | Self::ProcSendInput
-                | Self::ConsoleOpen
-                | Self::ConsoleAttach
-        )
-    }
-
     /// The declared host↔guest response contract for this verb — the
     /// machine-readable pairing previously implicit in the agent dispatch.
     pub fn response_contract(self) -> ResponseContract {
@@ -694,7 +653,6 @@ impl Verb {
             Verb::ProbeStatus => unary(&[R::ProbeStatusReport]),
             Verb::PrimedStatus => unary(&[R::PrimedStatusReport]),
             Verb::Exec => stream(&[R::ExecEvent]),
-            Verb::MediatedExec => stream(&[R::ToolCheckRequired, R::ExecEvent]),
             Verb::ExecBatch => unary(&[R::ExecBatchResult]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
             Verb::AgentPrompt => stream(&[R::EntrypointEvent]),
@@ -772,7 +730,6 @@ impl GuestResponse {
             GuestResponse::DriveRefused { .. } => ResponseVariant::DriveRefused,
             GuestResponse::ExtensionCancellationAck => ResponseVariant::ExtensionCancellationAck,
             GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
-            GuestResponse::ToolCheckRequired(_) => ResponseVariant::ToolCheckRequired,
             GuestResponse::ExecBatchResult { .. } => ResponseVariant::ExecBatchResult,
             GuestResponse::DetachedStarted { .. } => ResponseVariant::DetachedStarted,
             GuestResponse::PostRestoreAck { .. } => ResponseVariant::PostRestoreAck,
@@ -809,7 +766,6 @@ impl GuestResponse {
             GuestResponse::EntrypointEvent(e) => e.is_terminal(),
             GuestResponse::DriveEvent(e) => e.is_terminal(),
             GuestResponse::ExecEvent(e) => e.is_terminal(),
-            GuestResponse::ToolCheckRequired(_) => false,
             GuestResponse::ProcWaitEvent(e) => e.is_terminal(),
             _ => true,
         }
@@ -859,8 +815,7 @@ pub enum GuestCapability {
     RunExtension,
     FilesystemRpc,
     ProcessRpc,
-    /// Authenticated host decision required before a declared command spawn.
-    MediatedExec,
+    /// Legacy request, always refused rather than treated as an ordinary exec.
     Console,
     /// Unix-domain socket forwarding (`StartUnixSocketForward`). Not an SSH
     /// session capability — no SSH client/server or key material crosses the
@@ -906,7 +861,6 @@ pub fn supported_capabilities() -> Vec<GuestCapability> {
         GuestCapability::RunExtension,
         GuestCapability::FilesystemRpc,
         GuestCapability::ProcessRpc,
-        GuestCapability::MediatedExec,
         GuestCapability::Console,
         GuestCapability::UnixSocketForward,
         GuestCapability::VolumeMount,
@@ -1918,23 +1872,12 @@ mod tests {
                 "AgentPrompt",
                 "DriveOpen",
                 "Exec",
-                "MediatedExec",
                 "ProcWait",
                 "RunCode",
                 "RunEntrypoint",
                 "RunExtension",
             ])
         );
-    }
-
-    #[test]
-    fn tool_check_reply_round_trips_and_rejects_unknown_decisions() {
-        for reply in [ToolCheckReply::Allow, ToolCheckReply::Deny] {
-            let json = serde_json::to_string(&reply).expect("serialize reply");
-            let decoded: ToolCheckReply = serde_json::from_str(&json).expect("parse reply");
-            assert_eq!(decoded, reply);
-        }
-        assert!(serde_json::from_str::<ToolCheckReply>("\"maybe\"").is_err());
     }
 
     #[test]
@@ -2007,27 +1950,6 @@ mod tests {
             assert_eq!(verb.traffic_plane(), TrafficPlane::Control);
             assert!(!verb.spawns_workload_process(), "{}", verb.name());
         }
-    }
-
-    #[test]
-    fn every_arbitrary_spawn_path_requires_tool_mediation() {
-        for verb in Verb::ALL {
-            if verb.spawns_workload_process()
-                && !matches!(
-                    verb,
-                    Verb::MediatedExec
-                        | Verb::RunEntrypoint
-                        | Verb::AgentPrompt
-                        | Verb::DriveOpen
-                        | Verb::RunExtension
-                )
-            {
-                assert!(verb.bypasses_tool_mediation(), "{}", verb.name());
-            }
-        }
-        assert!(Verb::ConsoleAttach.bypasses_tool_mediation());
-        assert!(Verb::ProcSendInput.bypasses_tool_mediation());
-        assert!(!Verb::MediatedExec.bypasses_tool_mediation());
     }
 
     #[test]

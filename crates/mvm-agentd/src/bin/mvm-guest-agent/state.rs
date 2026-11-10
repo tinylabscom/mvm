@@ -475,7 +475,6 @@ mod tests {
             not_after: chrono::Utc::now() + chrono::Duration::minutes(10),
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
-            tool_mediation: None,
             application_terminal: None,
             sig: vec![],
         };
@@ -660,7 +659,6 @@ mod tests {
             not_after: chrono::Utc::now() + chrono::Duration::minutes(10),
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
-            tool_mediation: None,
             application_terminal: None,
             sig: vec![],
         };

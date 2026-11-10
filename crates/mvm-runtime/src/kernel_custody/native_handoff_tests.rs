@@ -87,6 +87,7 @@ fn prepared_owner(backend: BackendKind) -> Arc<PreparedCanonicalLinux> {
             &pin,
             backend,
             mvm_build::stage0_kernel::current_image_set_protocol_support(),
+            &enrolled,
         )
         .unwrap(),
     )

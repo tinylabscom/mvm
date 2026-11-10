@@ -11,13 +11,6 @@
 //!   exist? Is it mode 0600?
 //! - **Audit chain** — does `~/.mvm/audit/local.jsonl` exist?
 //!   Does it verify clean via [`mvm_client::audit::chain::supervisor::verify_audit_chain`]?
-//! - **Web-fetch allowlist** — count of hosts in
-//!   `$MVM_WEB_FETCH_ALLOWLIST`.
-//! - **Web-search allowlist** — count + names of providers in
-//!   `$MVM_WEB_SEARCH_ALLOWLIST`. Per provider: is its API key
-//!   resolvable via direct env var or `*_FROM_SECRET`?
-//! - **Tool staging dir** — `$MVM_TOOL_STAGING_DIR` (or default
-//!   `~/.mvm/tool-staging/`): exists? Mode 0700?
 //! - **Overlay root** — `~/.mvm/overlays/`: exists? Mode 0700?
 //!   How many tenants?
 //! - **Secret store** — `~/.mvm/secrets/`: exists? Mode 0700?
@@ -39,9 +32,7 @@ use serde::Serialize;
 pub(crate) enum PostureStatus {
     /// The check passed — the mitigation is active.
     Ok,
-    /// The check passed structurally but the operator may want
-    /// to act (e.g., allowlist is empty so the tool is fail-
-    /// closed but inactive).
+    /// The check passed structurally but the operator may want to act.
     Warn,
     /// The check failed — the mitigation is NOT active.
     Fail,
@@ -96,9 +87,6 @@ pub(crate) fn build_report(home: Option<&std::path::Path>) -> PostureReport {
     let checks = vec![
         check_host_signer(home),
         check_audit_chain(home),
-        check_web_fetch_allowlist(),
-        check_web_search_allowlist(),
-        check_tool_staging_dir(home),
         check_overlay_root(home),
         check_secret_store(home),
         check_tls_minimum(),
@@ -228,140 +216,6 @@ fn check_audit_chain(home: Option<&std::path::Path>) -> PostureCheck {
     }
 }
 
-fn check_web_fetch_allowlist() -> PostureCheck {
-    let raw =
-        std::env::var(mvm_client::audit::chain::supervisor::tools::web_fetch::ALLOWLIST_ENV_VAR)
-            .unwrap_or_default();
-    let count = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .count();
-    if count == 0 {
-        return PostureCheck {
-            name: "web_fetch_allowlist",
-            status: PostureStatus::Warn,
-            detail: format!(
-                "${} unset or empty — mvm.web_fetch is fail-closed (no host reachable)",
-                mvm_client::audit::chain::supervisor::tools::web_fetch::ALLOWLIST_ENV_VAR
-            ),
-        };
-    }
-    PostureCheck {
-        name: "web_fetch_allowlist",
-        status: PostureStatus::Ok,
-        detail: format!(
-            "{count} host(s) allowlisted via ${}",
-            mvm_client::audit::chain::supervisor::tools::web_fetch::ALLOWLIST_ENV_VAR
-        ),
-    }
-}
-
-fn check_web_search_allowlist() -> PostureCheck {
-    let raw =
-        std::env::var(mvm_client::audit::chain::supervisor::tools::web_search::ALLOWLIST_ENV_VAR)
-            .unwrap_or_default();
-    let providers: Vec<String> = raw
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if providers.is_empty() {
-        return PostureCheck {
-            name: "web_search_allowlist",
-            status: PostureStatus::Warn,
-            detail: format!(
-                "${} unset or empty — mvm.web_search is fail-closed (no provider reachable)",
-                mvm_client::audit::chain::supervisor::tools::web_search::ALLOWLIST_ENV_VAR
-            ),
-        };
-    }
-    // Inspect per-provider credential reachability via env var.
-    // (We don't peek into the secret_store here — that would
-    // require building one, which has side effects. Operators
-    // running --json against a monitoring agent expect a no-IO
-    // posture check.)
-    let mut details = Vec::new();
-    for p in &providers {
-        let configured = match p.as_str() {
-            "brave" => {
-                std::env::var(
-                    mvm_client::audit::chain::supervisor::tools::web_search::BRAVE_API_KEY_ENV_VAR,
-                )
-                .is_ok()
-                    || std::env::var("BRAVE_API_KEY_FROM_SECRET").is_ok()
-            }
-            "tavily" => {
-                std::env::var(
-                    mvm_client::audit::chain::supervisor::tools::web_search::TAVILY_API_KEY_ENV_VAR,
-                )
-                .is_ok()
-                    || std::env::var("TAVILY_API_KEY_FROM_SECRET").is_ok()
-            }
-            "google" => (std::env::var(
-                mvm_client::audit::chain::supervisor::tools::web_search::GOOGLE_API_KEY_ENV_VAR,
-            )
-            .is_ok()
-                || std::env::var("GOOGLE_API_KEY_FROM_SECRET").is_ok())
-                && (std::env::var(
-                    mvm_client::audit::chain::supervisor::tools::web_search::GOOGLE_CSE_ID_ENV_VAR,
-                )
-                .is_ok()
-                    || std::env::var("GOOGLE_CSE_ID_FROM_SECRET").is_ok()),
-            _ => false,
-        };
-        details.push(format!(
-            "{}={}",
-            p,
-            if configured {
-                "configured"
-            } else {
-                "missing-key"
-            }
-        ));
-    }
-    let any_missing = details.iter().any(|d| d.ends_with("missing-key"));
-    PostureCheck {
-        name: "web_search_allowlist",
-        status: if any_missing {
-            PostureStatus::Warn
-        } else {
-            PostureStatus::Ok
-        },
-        detail: details.join(", "),
-    }
-}
-
-fn check_tool_staging_dir(home: Option<&std::path::Path>) -> PostureCheck {
-    let path = match std::env::var_os(
-        mvm_client::audit::chain::supervisor::tools::staging::STAGING_DIR_ENV_VAR,
-    ) {
-        Some(p) => std::path::PathBuf::from(p),
-        None => match home {
-            Some(_) => mvm_core::config::tool_staging_dir(),
-            None => {
-                return PostureCheck {
-                    name: "tool_staging_dir",
-                    status: PostureStatus::Fail,
-                    detail: "no home root (MVM_HOME/$HOME unset) and $MVM_TOOL_STAGING_DIR not set"
-                        .into(),
-                };
-            }
-        },
-    };
-    if !path.exists() {
-        return PostureCheck {
-            name: "tool_staging_dir",
-            status: PostureStatus::Warn,
-            detail: format!(
-                "{} does not exist yet (created on first upload/download call)",
-                path.display()
-            ),
-        };
-    }
-    check_dir_mode_0700(&path, "tool_staging_dir")
-}
-
 fn check_overlay_root(home: Option<&std::path::Path>) -> PostureCheck {
     if home.is_none() {
         return PostureCheck {
@@ -421,7 +275,7 @@ fn check_tls_minimum() -> PostureCheck {
     // unit test `w7_min_tls_version_is_pinned_at_1_3` would have
     // caught a regression at compile time, but the operator-
     // visible report mentioning it adds confidence.
-    let v = mvm_client::audit::chain::supervisor::tools::http_hardening::MIN_TLS_VERSION;
+    let v = mvm_client::audit::chain::supervisor::http_hardening::MIN_TLS_VERSION;
     let detail = format!("pinned to {v:?} (plan 65 W7)");
     if v == mvm_http::TlsVersion::Tls13 {
         PostureCheck {
@@ -655,9 +509,6 @@ mod tests {
             vec![
                 "host_signer",
                 "audit_chain",
-                "web_fetch_allowlist",
-                "web_search_allowlist",
-                "tool_staging_dir",
                 "overlay_root",
                 "secret_store",
                 "tls_minimum",

@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use mvm_contract::policy::restricted_address::{RestrictedClass, classify};
 use mvm_contract::policy::routes::{RouteOutcome, RouteSet};
-use mvm_contract::policy::tool_rules::ToolDecision;
 use serde::Serialize;
 
 use super::merge::{ResolvedPolicy, canonical_allow, deny_covers, split_host_port};
@@ -23,7 +22,6 @@ pub enum PolicyQuery {
         path: String,
     },
     Path(PathBuf),
-    Tool(String),
     Secret(String),
 }
 
@@ -86,7 +84,6 @@ pub fn answer(resolved: &ResolvedPolicy, query: PolicyQuery) -> Result<PolicyAns
         PolicyQuery::Host(value) => answer_host(resolved, &value),
         PolicyQuery::Http { host, method, path } => answer_http(resolved, &host, &method, &path),
         PolicyQuery::Path(value) => Ok(answer_path(resolved, &value)),
-        PolicyQuery::Tool(value) => Ok(answer_tool(resolved, &value)),
         PolicyQuery::Secret(value) => Ok(answer_secret(resolved, &value)),
     }
 }
@@ -304,49 +301,6 @@ fn answer_path(resolved: &ResolvedPolicy, path: &Path) -> PolicyAnswer {
     )
 }
 
-fn answer_tool(resolved: &ResolvedPolicy, value: &str) -> PolicyAnswer {
-    let tools = &resolved.policy.tools;
-    let rules = tools.to_tool_rules();
-    let detail = tools.detail.get(value);
-    match rules.decide(value, None) {
-        ToolDecision::Allow => PolicyAnswer::allow(
-            "tool",
-            value.to_string(),
-            true,
-            if rules.is_empty() {
-                "the tool dimension is not in use; calls are admitted by default"
-            } else if detail.is_some() {
-                "the tool is named, subject to its per-call restrictions"
-            } else {
-                "the resolved policy allows this tool"
-            },
-            tools
-                .allow
-                .iter()
-                .any(|tool| tool == value)
-                .then(|| format!("tools.allow = {value:?}")),
-        ),
-        ToolDecision::Ask => PolicyAnswer::deny(
-            "tool",
-            value.to_string(),
-            true,
-            "this tool requires runtime approval before each call; it is not pre-authorized",
-            Some(format!("tools.ask = {value:?}")),
-        ),
-        ToolDecision::Deny(reason) => PolicyAnswer::deny(
-            "tool",
-            value.to_string(),
-            true,
-            reason,
-            tools
-                .deny
-                .iter()
-                .any(|tool| tool == value)
-                .then(|| format!("tools.deny = {value:?}")),
-        ),
-    }
-}
-
 fn answer_secret(resolved: &ResolvedPolicy, value: &str) -> PolicyAnswer {
     if resolved
         .policy
@@ -399,7 +353,6 @@ mod tests {
     use super::*;
     use crate::policy_profiles::model::{
         NetworkSection, PolicyBody, SecretGrant, SecretsSection, ShareGrant, SharesSection,
-        ToolsSection,
     };
 
     fn resolved(policy: PolicyBody) -> ResolvedPolicy {
@@ -464,11 +417,6 @@ mod tests {
                 }],
                 deny: vec!["/work/private".into()],
             },
-            tools: ToolsSection {
-                allow: vec!["read".into()],
-                deny: vec!["shell".into()],
-                ..ToolsSection::default()
-            },
             secrets: SecretsSection {
                 bind: vec![SecretGrant {
                     name: "API_TOKEN".into(),
@@ -486,13 +434,6 @@ mod tests {
         let private = answer(&policy, PolicyQuery::Path("/work/private/key".into())).unwrap();
         assert!(private.allowed);
         assert_eq!(private.matched.as_deref(), Some("shares.mount = \"/work\""));
-        let tool = answer(&policy, PolicyQuery::Tool("read".into())).unwrap();
-        assert!(tool.allowed && tool.enforced);
-        assert!(
-            !answer(&policy, PolicyQuery::Tool("other".into()))
-                .unwrap()
-                .allowed
-        );
         assert!(
             answer(&policy, PolicyQuery::Secret("API_TOKEN".into()))
                 .unwrap()
@@ -503,30 +444,6 @@ mod tests {
                 .unwrap()
                 .allowed
         );
-    }
-
-    #[test]
-    fn tool_query_uses_runtime_decision_including_ask_and_opt_in_default() {
-        let empty = resolved(PolicyBody::default());
-        let default = answer(&empty, PolicyQuery::Tool("shell".into())).unwrap();
-        assert!(default.allowed && default.enforced);
-
-        let policy = resolved(PolicyBody {
-            tools: ToolsSection {
-                allow: vec!["read".into()],
-                ask: vec!["shell".into()],
-                deny: vec!["remove".into()],
-                ..ToolsSection::default()
-            },
-            ..PolicyBody::default()
-        });
-        let asked = answer(&policy, PolicyQuery::Tool("shell".into())).unwrap();
-        assert!(!asked.allowed && asked.enforced);
-        assert!(asked.reason.contains("approval"));
-        let denied = answer(&policy, PolicyQuery::Tool("remove".into())).unwrap();
-        assert!(!denied.allowed && denied.enforced);
-        let unknown = answer(&policy, PolicyQuery::Tool("unknown".into())).unwrap();
-        assert!(!unknown.allowed && unknown.enforced);
     }
 
     #[test]

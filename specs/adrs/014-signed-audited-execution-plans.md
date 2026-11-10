@@ -7,7 +7,7 @@ Accepted
 ## Context
 
 A workload boot is a security-relevant event: it decides which image runs,
-under which network/filesystem/secret/tool policy, for how long, and with
+under which network/filesystem/secret policy, for how long, and with
 which host capabilities. Without a typed, signed record of that decision,
 "what did this VM see at admission" is only answerable by re-deriving it
 from CLI args and config — not from anything that survives tampering or a
@@ -64,13 +64,13 @@ intent-bound `admission_profile` (seccomp tier, secret-release posture,
 audit taxonomy), `network_policy` / `network_mode` (closed by default —
 no guest NIC, nothing reachable, until the plan says otherwise),
 `fs_policy`, `secrets`, `auth`, `egress_policy`, per-destination
-`redaction` and `reversible_replacement` policy, `tool_policy`,
+`redaction` and `reversible_replacement` policy,
 `artifact_policy`, `audit_labels`, `key_rotation`, `attestation`, an
 optional `release_pin`, `post_run` lifecycle, the `valid_from`/
 `valid_until` validity window, and a replay-protecting `nonce`.
 
 Several `*Ref`-typed fields (`network_policy`, `fs_policy`,
-`egress_policy`, `tool_policy`) resolve at admission through
+`egress_policy`) resolve at admission through
 `policy_resolver::validate_policy_refs`: a `"local-default"` ref keeps the
 host bridge's mandatory-deny posture without constructing placeholder
 controls; a `"<tenant>:<workload>"` ref loads and validates
@@ -136,15 +136,11 @@ identically regardless of which backend produced the entries.
   compromised host key defeats both. This mirrors the standing threat
   model's "malicious host is out of scope" carve-out, not a gap specific
   to this design.
-- The `*Ref` policy fields resolve to real fail-closed no-ops today, not
-  live enforcement — a plan can name a policy bundle and have it parsed,
-  but the enforcement components (`EgressProxy`, `KeystoreReleaser`,
-  `ArtifactCollector`) that would act on it are a forward-compatible
-  seam, not yet wired to a live consumer. Tool decisions do not use that
-  seam: the plan carries its resolved tool rules inline, and the per-VM
-  endpoint's `ToolDecisionGate` decides and audits them. The supervisor's
-  bundle-driven tool-gate slot never had a production caller and was
-  removed.
+- The `*Ref` policy fields identify the bundle validated at admission.
+  System-level network and credential controls govern the guest's traffic
+  regardless of which application produced it. Issue #5115 retired the
+  separate named guest-tool policy and decision gate; old plans or bundles
+  carrying those fields are refused rather than interpreted as broader grants.
 - `agent_verbs` gives the same signed-plan mechanism a guest-side
   capability dimension: least-privilege per workload, not just per
   profile class, without inventing a second signing authority — the

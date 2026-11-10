@@ -10,8 +10,9 @@ use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{BackendImageSupport, ImageSetMember};
 use mvm_core::plan::FsTrustStore;
 use mvm_core::plan::bundle::{
-    ArtifactRole, BundleOrigin, BundleRegistry, LocalBundleTrustStore, VerifiedEmbeddedImageSet,
-    bundle_origin, key_id_from_pubkey, select_boot_asset_members, verify_bundle_file,
+    ArtifactRole, BUNDLE_ORIGIN_LABEL, BundleOrigin, BundleRegistry, LOCAL_BUILD_ORIGIN,
+    LocalBundleTrustStore, TrustStore, VerifiedBundleFile, VerifiedEmbeddedImageSet, bundle_origin,
+    key_id_from_pubkey, select_boot_asset_members, verify_bundle_file,
 };
 use mvm_core::vm_backend::{BackendKind, BundleBootAssetsPin, VmStartConfig};
 
@@ -56,19 +57,31 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         FsTrustStore::default_path()?,
         &archive,
     );
-    let verified = if let Some(host) = mvm_core::plan::bundle::existing_local_build_key()? {
-        let id = key_id_from_pubkey(&host);
-        let trust = LocalBundleTrustStore::new(release, id.clone(), host);
-        let verified =
-            verify_bundle_file(&archive, &trust).context("verifying bundle boot assets")?;
-        ensure!(
-            bundle_origin(&verified.manifest, &id, trust.release()) != BundleOrigin::Untrusted,
-            "bundle boot assets refuse an unlabelled or foreign host build"
-        );
-        verified
-    } else {
-        verify_bundle_file(&archive, &release).context("verifying bundle boot assets")?
-    };
+    let (verified, trust): (VerifiedBundleFile, Box<dyn TrustStore>) =
+        if let Some(host_key) = crate::bundle::existing_host_verifying_key()? {
+            let host_key_id = key_id_from_pubkey(&host_key);
+            let trust = LocalBundleTrustStore::new(release, host_key_id.clone(), host_key);
+            let verified =
+                verify_bundle_file(&archive, &trust).context("verifying bundle boot assets")?;
+            ensure!(
+                bundle_origin(&verified.manifest, &host_key_id, trust.release())
+                    != BundleOrigin::Untrusted,
+                "installed bundle is neither release-verified nor a local build signed by this host"
+            );
+            (verified, Box::new(trust))
+        } else {
+            let verified =
+                verify_bundle_file(&archive, &release).context("verifying bundle boot assets")?;
+            ensure!(
+                verified
+                    .manifest
+                    .labels
+                    .get(BUNDLE_ORIGIN_LABEL)
+                    .is_none_or(|value| value != LOCAL_BUILD_ORIGIN),
+                "a local build requires this host's signing key"
+            );
+            (verified, Box::new(release))
+        };
     let canonical = verified.manifest.members.iter().any(|member| {
         matches!(
             member,
@@ -92,9 +105,12 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         registry.archive_path(&verified.bundle_sha256) == archive,
         "installed bundle archive identity changed"
     );
-    let installed = registry
-        .find(&verified.bundle_sha256)?
-        .context("installed bundle is missing")?;
+    let installed = match registry.find(&verified.bundle_sha256)? {
+        Some(installed) => installed,
+        None => registry
+            .materialize_cached(&verified.bundle_sha256, trust.as_ref())
+            .context("restoring installed bundle from its signed archive")?,
+    };
     ensure!(
         installed.manifest == verified.manifest,
         "installed bundle manifest changed"
@@ -134,10 +150,12 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         )?;
         attach_cli_runtime(config, &installed, runtime)?;
         if needs_owner {
-            let owner = std::sync::Arc::new(super::canonical_linux::prepare_canonical_linux(
+            let owner = std::sync::Arc::new(mvm_core::canonical_linux::prepare_canonical_linux(
                 &archive,
                 &verified.plan_artifact(),
                 kind,
+                mvm_build::stage0_kernel::current_image_set_protocol_support(),
+                trust.as_ref(),
             )?);
             owner.bind_to_config(config)?;
         }
@@ -479,6 +497,109 @@ mod tests {
     struct Publisher(SigningKey);
 
     #[test]
+    fn host_signed_local_build_rematerializes_only_with_its_signed_origin() {
+        use mvm_core::plan::bundle::{
+            BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, key_id_from_pubkey,
+            mark_local_build, sha256_hex, write_bundle,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let host = mvm_hostd::audit::host_keypair::load_or_init().unwrap();
+        let key_id = key_id_from_pubkey(&host.verifying);
+        let kernel = b"local kernel".to_vec();
+        let rootfs = b"local rootfs".to_vec();
+        let manifest = BundleManifest {
+            schema_version: BUNDLE_SCHEMA_VERSION,
+            publisher: "local-test".into(),
+            key_id: key_id.clone(),
+            arch: GuestArch::host().to_string(),
+            kernel_version: None,
+            profile: None,
+            workload_label: None,
+            created_at: "2026-11-09T00:00:00Z".into(),
+            labels: Default::default(),
+            artifacts: vec![
+                BundleArtifact {
+                    name: "vmlinux".into(),
+                    path: "artifacts/vmlinux".into(),
+                    role: ArtifactRole::Kernel,
+                    sha256: sha256_hex(&kernel),
+                    size_bytes: kernel.len() as u64,
+                },
+                BundleArtifact {
+                    name: "rootfs.ext4".into(),
+                    path: "artifacts/rootfs.ext4".into(),
+                    role: ArtifactRole::Rootfs,
+                    sha256: sha256_hex(&rootfs),
+                    size_bytes: rootfs.len() as u64,
+                },
+            ],
+            members: Vec::new(),
+            verity: None,
+            resources: None,
+        };
+        let registry = BundleRegistry::default_path().unwrap();
+        let release = FsTrustStore::default_path().unwrap();
+        let trust = LocalBundleTrustStore::new(release, key_id, host.verifying);
+
+        let mut local = manifest.clone();
+        mark_local_build(&mut local);
+        let archive = write_bundle(
+            &local,
+            &host.signing,
+            vec![
+                ("artifacts/vmlinux".into(), kernel.clone()),
+                ("artifacts/rootfs.ext4".into(), rootfs.clone()),
+            ],
+        )
+        .unwrap();
+        let installed = registry.install(&archive, &trust, false).unwrap();
+        let rootfs_path = installed.root.join("artifacts/rootfs.ext4");
+        std::fs::remove_dir_all(&installed.root).unwrap();
+        let mut config = VmStartConfig {
+            rootfs_path: rootfs_path.display().to_string(),
+            kernel_path: Some(
+                installed
+                    .root
+                    .join("artifacts/vmlinux")
+                    .display()
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        assert!(!attach_if_installed_bundle(&mut config, "qemu").unwrap());
+        assert_eq!(std::fs::read(rootfs_path).unwrap(), rootfs);
+
+        let unlabelled = write_bundle(
+            &manifest,
+            &host.signing,
+            vec![
+                ("artifacts/vmlinux".into(), kernel),
+                ("artifacts/rootfs.ext4".into(), rootfs),
+            ],
+        )
+        .unwrap();
+        let installed = registry.install(&unlabelled, &trust, false).unwrap();
+        let mut refused = VmStartConfig {
+            rootfs_path: installed
+                .root
+                .join("artifacts/rootfs.ext4")
+                .display()
+                .to_string(),
+            ..Default::default()
+        };
+        std::fs::remove_dir_all(&installed.root).unwrap();
+        let error = attach_if_installed_bundle(&mut refused, "qemu").unwrap_err();
+        assert!(format!("{error:#}").contains("neither release-verified nor a local build"));
+        assert!(
+            !installed.root.exists(),
+            "untrusted origin must not materialize"
+        );
+    }
+
+    #[test]
     fn cli_runtime_rejects_untrusted_release_inputs_without_changing_config() {
         use mvm_core::plan::bundle::{
             BundleArtifact, BundleManifest, EmbeddedCliBootAssets, InstalledBundle, KeyId,
@@ -581,7 +702,14 @@ mod tests {
             path
         };
         let mut proof = selected.legacy_portable_runtime.clone().unwrap();
-        proof.archive = copy(&proof.archive, "bundle.mvmpkg");
+        let archive = retained.path().join("bundle.mvmpkg");
+        std::fs::write(
+            &archive,
+            mvm_core::plan::bundle::read_bundle_archive(&proof.archive).unwrap(),
+        )
+        .unwrap();
+        mvm_core::private_fs::set_mode(&archive, 0o400).unwrap();
+        proof.archive = archive;
         let binding = RuntimeLaunchBinding::LegacyPortable {
             proof,
             rootfs_path: copy(Path::new(&selected.rootfs_path), "rootfs"),
@@ -768,8 +896,11 @@ mod tests {
             ..Default::default()
         };
         assert!(!Path::new(&mvm_core::config::mvm_cache_dir()).exists());
+        std::fs::remove_dir_all(&installed.root).unwrap();
+        assert!(!Path::new(&config.rootfs_path).exists());
         let mut attached = config.clone();
         assert!(attach_if_installed_bundle(&mut attached, "qemu").unwrap());
+        assert!(Path::new(&config.rootfs_path).is_file());
         assert!(attached.legacy_portable_runtime.is_some());
         assert_retained_portable_reentry(&attached);
         let mut dispatched = config.clone();

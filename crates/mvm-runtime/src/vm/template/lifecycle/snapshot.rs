@@ -168,7 +168,18 @@ fn installed_bundle(id_or_slot: &str) -> Result<Option<mvm_core::plan::bundle::I
     // A registry we cannot read must not silently skip the gate: propagate,
     // so an unparseable manifest refuses the boot rather than admitting it
     // unchecked.
-    registry.find(id_or_slot)
+    if let Some(installed) = registry.find(id_or_slot)? {
+        return Ok(Some(installed));
+    }
+    Ok(
+        installed_bundle_verified_manifest(id_or_slot)?.map(|manifest| {
+            mvm_core::plan::bundle::InstalledBundle {
+                sha256: id_or_slot.to_owned(),
+                root: registry.install_dir(id_or_slot),
+                manifest,
+            }
+        }),
+    )
 }
 
 /// Whether `id_or_slot` resolves to an installed bundle rather than a template
@@ -183,24 +194,45 @@ fn names_installed_bundle(id_or_slot: &str) -> bool {
 ///
 /// `None` when the key is a template slot or names no installed bundle. A
 /// manifest edited on disk after install refuses rather than reads.
-fn installed_bundle_verified_manifest(
+pub(super) fn installed_bundle_verified_manifest(
     id_or_slot: &str,
 ) -> Result<Option<mvm_core::plan::BundleManifest>> {
     if !names_installed_bundle(id_or_slot) {
         return Ok(None);
     }
     let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
-    let trust = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
-        mvm_core::plan::FsTrustStore::default_path()?,
-        &registry.archive_path(id_or_slot),
-    );
+    let trust = release_trust_for_installed_archive(&registry.archive_path(id_or_slot))?;
     registry
-        .verified_launch_manifest(
-            id_or_slot,
-            trust,
-            mvm_core::plan::bundle::existing_local_build_key()?,
-        )
+        .verified_launch_manifest(id_or_slot, trust, host_verifying_key()?)
         .map_err(|e| anyhow::anyhow!("installed bundle {id_or_slot}: {e}"))
+}
+
+pub(super) fn release_trust_for_installed_archive(
+    archive: &std::path::Path,
+) -> Result<mvm_core::registry_pack::BuiltinAuthorTrust<mvm_core::plan::FsTrustStore>> {
+    Ok(
+        mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
+            mvm_core::plan::FsTrustStore::default_path()?,
+            archive,
+        ),
+    )
+}
+
+/// This host's bundle-signing public key, or `None` when no host key exists
+/// yet. Read-only: checking a bundle must not mint a host identity.
+pub(super) fn host_verifying_key() -> Result<Option<ed25519_dalek::VerifyingKey>> {
+    let path = mvm_core::config::mvm_keys_dir().join("host-signer.pub");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{} is not a 32-byte Ed25519 public key", path.display()))?;
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        .map(Some)
+        .with_context(|| format!("parsing {}", path.display()))
 }
 
 /// The signed security posture of the installed bundle `id_or_slot` names.
@@ -533,5 +565,20 @@ mod tests {
             Some(environment)
         );
         assert_eq!(installed_bundle_environment("not-a-key").unwrap(), None);
+
+        let registry = BundleRegistry::default_path().unwrap();
+        std::fs::remove_dir_all(&installed.root).unwrap();
+        assert_eq!(
+            installed_bundle_arch(&installed.sha256).unwrap(),
+            Some(manifest.arch)
+        );
+        assert_eq!(
+            installed_bundle_archive(&installed.sha256).unwrap(),
+            Some(registry.archive_path(&installed.sha256))
+        );
+        assert_eq!(
+            installed_bundle_posture(&installed.sha256).unwrap(),
+            Some(posture)
+        );
     }
 }

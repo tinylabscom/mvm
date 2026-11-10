@@ -65,7 +65,6 @@ Ask one question of the resolved policy without booting anything:
 mvmctl why --host api.github.com:443
 mvmctl why --host api.github.com:443 --method GET --request-path /repos/org/project
 mvmctl why --path ./src
-mvmctl why --tool shell --profile agent-apis
 ```
 
 Without `--profile` or `--plan`, `why` discovers the current project's
@@ -127,18 +126,6 @@ deny = ["/home"]                         # no share may come from here
 allow = ["APP_MODE", "RUST_LOG"]         # once any layer lists names, --env is confined to them
 deny  = ["DEBUG"]
 # readmit = ["LD_PRELOAD"]               # escape hatch: user-authored profiles only
-
-[tools]                                  # see "Tool privileges" below
-allow = ["git", "bash"]
-ask = ["git"]                            # every call asks the approver first
-deny = ["curl"]
-
-[tools.detail.git]                       # per-tool restrictions
-executable = "/usr/bin/git"             # exact guest path required for command mediation
-argv = ["/usr/bin/git status *"]         # permitted command lines (glob)
-deny = ["* --force*"]                    # refused whatever argv allows
-routes = ["github.com:443"]              # destinations only this tool may reach
-secrets = ["GITHUB_TOKEN"]               # stored secrets only this tool may use
 
 [resources]                              # every value is a ceiling; the smallest wins
 cpu_millicores = 1500
@@ -423,7 +410,7 @@ does not automatically trust both identities.
 | `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check the profiles a launch would compose, or a single profile or group file. `--strict` turns every note into an error and checks each bound secret against the store. |
 | `mvmctl policy diff A B [--json]` | What each side allows or denies that the other does not. |
 | `mvmctl policy groups [--json]` | Built-in and user groups and profiles. |
-| `mvmctl why --host H[:P] [--method METHOD --request-path PATH] \| --path P \| --tool T \| --secret S [--profile PROFILE... \| --plan FILE] [--json]` | Resolve one deterministic allow/deny answer without starting a VM. For routed hosts, include method and path to check the endpoint rule. Several profiles compose in order, the last taking precedence. |
+| `mvmctl why --host H[:P] [--method METHOD --request-path PATH] \| --path P \| --secret S [--profile PROFILE... \| --plan FILE] [--json]` | Resolve one deterministic allow/deny answer without starting a VM. For routed hosts, include method and path to check the endpoint rule. Several profiles compose in order, the last taking precedence. |
 
 `--backend KIND` on `show`, `resolve`, `validate` and `diff` matches `[[when]]`
 blocks against a backend other than the host's default.
@@ -436,90 +423,18 @@ the Rust types they are parsed into. See the
 everywhere, so a misspelt restriction is an error rather than a silently
 missing one.
 
-## Tool privileges
+## Tool-specific policy
 
-`[tools]` is enforced at the seams the host controls:
-
-- `mvmctl ops mcp` binds a gate over the project's resolved `[tools]`: `deny`
-  refuses before any backend work, `ask` puts every call to the terminal
-  approver (fail-closed with no terminal), `allow` admits, and anything
-  unlisted fails closed. Every decision is chain-signed to the host audit
-  before backend work; if that audit is unavailable, the gate refuses the
-  call. Per-tool `argv`, `routes` and `secrets` are not applied there, because an MCP call's arguments are tool-specific JSON rather
-  than a command line or a destination.
-- `mvmctl machine exec <name> --tool TOOL -- <cmd>...` reports the exact argv
-  to the guest, which pauses before spawning it. The VM's endpoint decides it
-  against the admitted rules, `argv` and `deny` patterns included, and records
-  the decision in the chain-signed audit log before the guest may start it. A
-  signed tool-bearing plan also makes the guest refuse the command RPCs that
-  skip this step.
-- A process the workload starts itself is mediated too. Guest activation
-  substitutes the in-guest shim over every runnable path to a declared tool's
-  bytes — the exact signed path, its hard links, symlinks, and byte-identical
-  copies — and stashes the original bytes where only the tool helper can read
-  them. A workload that execs any of those paths reaches only the shim, which
-  reports the exact argv to the VM's endpoint through the authenticated
-  host channel (the `host.tool.v1` broker service, audited with the
-  `guest_broker` origin label) and runs nothing until the endpoint allows it.
-  The helper then executes the digest-verified stash as the tool identity —
-  uid 902 with the tool group — in a session of its own, so the workload can
-  neither signal nor trace the tool, and the tool's `routes` and `secrets`
-  bind to that invocation exactly as they do for `machine exec --tool`. A
-  denied or undecidable invocation never runs: the shim exits `126` (denied)
-  or `125` (mediation unavailable). A different applet name on a substituted
-  shared binary is refused; it never runs outside the tool gate. Activation
-  refuses a binary with more than eight alias paths, including typical
-  multi-call images. Use a standalone executable for a declared tool.
-- `routes` and `secrets` belong to their tool. When an allowed invocation's
-  tool declares either, the endpoint mints a binding for that invocation. The
-  guest agent starts the command as the leader of a new session, and the
-  egress client names the binding only on connections the agent traces to a
-  process in that session. At the endpoint, a destination in a tool's `routes`
-  is refused to every flow that is not an invocation of that tool, and an
-  invocation of a tool that declares routes reaches only those; a stored secret
-  in a tool's `secrets` is substituted only for that tool's invocations, and an
-  invocation of a tool that declares secrets uses only those. The network
-  policy must still admit each route. Every refusal is recorded as
-  `host.tool.scope_refused` with the route or secret and the rule; the audit
-  log carries a one-way identifier for the binding, never the binding. The
-  binding is released when the command exits, and the endpoint then ends any
-  connection still open under it. A UDP datagram is never an invocation's, so
-  one addressed to a tool's route is refused. DNS lookups of a tool's route
-  host are answered as usual: a name is not a connection, and the address it
-  returns is still a tool route when dialled.
-- A bound command runs in a group of its own while sharing the workload's
-  uid. The kernel's ptrace check compares groups, so a workload process cannot
-  attach to it, read or write its memory, or take its descriptors.
-- Named machines (`machine create --policy`, `machine run -d --policy`) record
-  `[tools]`, routes and secrets included, in their spec and re-admit it on
-  every start.
+MVM does not govern which tools an application calls. Authored profiles and
+groups, resolved manifests, and local MCP startup reject legacy `[tools]`
+sections rather than silently discarding their restrictions. Signed plans
+with retired `tools` or `tool_policy` fields, bundles with `[tool]`, and
+persisted machines with tool rules refuse to start. Grant
+ingress, egress and other permissions through system-level policy instead.
+Tool-specific routes and secrets are not converted into broader VM grants.
 
 ## Not yet
 
-- Workload-origin mediation executes the activation-stashed bytes and runs
-  the tool under its own uid, but a declared tool's libraries and
-  configuration still come from the workload rootfs. Declare only tools from
-  the read-only image whose behaviour workload-writable files cannot
-  redirect.
-- Host-initiated `machine exec --tool` children still run under the workload's
-  uid with only the tool group changed: the agent cannot setuid after its
-  privilege drop, so on that path alone the tool shares the workload's files
-  and can be signalled by it. The workload-origin shim path (above) closes
-  both with the tool uid; prefer it for tools whose scope matters.
-- Shared multi-call binaries are not supported as declared tools when they
-  have more than eight alias paths. With fewer aliases, an invocation under
-  another applet name is refused rather than executed directly. Package a
-  standalone executable for each tool that requires mediation.
-- Workload-origin mediation requires the runtime overlay to carry the shim and
-  helper binaries; an older overlay refuses a `[tools]` boot at activation
-  rather than starting it unmediated. `machine exec --tool` requires
-  `[tools.detail.<name>].executable` to name exactly the guest command path
-  passed after `--`: a missing, relative, or differently spelled path is
-  denied and audited.
-- Attribution needs the agent to be the guest's init (PID 1); a guest booted
-  by another init attributes nothing, so its tool routes and secrets stay
-  refused. The agent answers attribution questions one at a time, so a flood
-  of proxy connections can delay a tool's own; a late answer refuses.
 - Pack profiles require an installed, pinned, publisher-verified signed pack;
   use `mvmctl pull namespace/name` before selecting one.
 - Endpoint routes from a policy are refused on a persistent machine
