@@ -61,13 +61,13 @@ fn timeline_order(world: &mut CliWorld) {
     }
 }
 
-#[then("the demo output says the mailbox is local-only and the VMs are simulated")]
+#[then("the demo output says the nodes and VMs are simulated and the mailbox is not cross-host")]
 fn says_simulated(world: &mut CliWorld) {
     let out = stdout(world);
     assert!(
-        out.contains("simulated: mailbox delivery")
-            && out.contains("no Iroh")
-            && out.contains("VMs"),
+        out.contains(
+            "simulated: the three nodes are simulated nodes in one test process; their VMs are gated and audited but none boots here; node-to-node mailbox delivery is a local Unix socket or a loopback TCP transport (no Iroh, no cross-host transport); the booted-guest mailbox path is wired through the backend capability on Firecracker and HVF and live-witnessed by separate manual runs, not CI lanes: many messages per VM on Firecracker, HVF re-witness pending, see Demo status in specs/contracts/host-interface-distributed-execution.md"
+        ),
         "the demo must disclose what it simulates:\n{out}"
     );
 }

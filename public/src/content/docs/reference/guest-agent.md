@@ -144,8 +144,9 @@ JSON. See the [exact layouts](/reference/vsock-messages/#authenticated-session-f
 The enum is externally tagged: unit requests/replies are JSON strings such as
 `"Ping"` and `"Pong"`; payload variants use an object keyed by their exact
 variant name. There is no generic `type` field. Some requests are unary;
-others stream through a terminal event. `MediatedExec` also has a paused
-host-decision exchange. The [complete response contracts](/reference/vsock-messages/#request--response-contracts)
+others stream through a terminal event. Legacy `MediatedExec` requests are
+refused; ordinary exec remains subject to the signed guest-verb and system
+policies. The [complete response contracts](/reference/vsock-messages/#request--response-contracts)
 identify each case and its universal refusals.
 
 ### Frame Size Limits

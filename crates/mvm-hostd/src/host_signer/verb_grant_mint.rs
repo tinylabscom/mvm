@@ -2,14 +2,13 @@ use crate::host_signer::keystore::Keystore;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use mvm_contract::grants::{ApplicationTerminalBinding, DriveGrant};
-use mvm_core::plan::{Nonce, ToolMediationGrant, VerbGrant, VerbId};
+use mvm_core::plan::{Nonce, VerbGrant, VerbId};
 
 /// The plan-derived authority a verb grant carries beside its verb list.
 /// Every part is absent by default.
 #[derive(Debug, Clone, Default)]
 pub struct VerbGrantAuthority {
     pub drive: Option<DriveGrant>,
-    pub tool_mediation: Option<ToolMediationGrant>,
     pub application_terminal: Option<ApplicationTerminalBinding>,
 }
 
@@ -28,7 +27,6 @@ pub fn mint_verb_grant(
         not_after,
         verbs,
         drive: authority.drive,
-        tool_mediation: authority.tool_mediation,
         application_terminal: authority.application_terminal,
         sig: vec![],
     };
@@ -62,6 +60,11 @@ mod tests {
             VerbGrantAuthority::default(),
         )
         .unwrap();
+        assert!(
+            !serde_json::to_string(&grant)
+                .unwrap()
+                .contains("tool_mediation")
+        );
 
         // Reconstruct VerifyingKey from the signer's public key bytes.
         let pub_arr: [u8; 32] = signer.pub_key().try_into().unwrap();

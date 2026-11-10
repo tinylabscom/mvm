@@ -592,6 +592,17 @@ jobs:
             cp "${LIBKRUN_TIER}/SOURCE-OFFER.txt" \
               "${LIBKRUN_TIER}/SOURCE-PINS" "staging/${ARCHIVE_NAME}/"
           fi
+          # The pinned Firecracker, beside mvmctl: a Linux first run boots with
+          # it, and a downloaded install has no other source. The script
+          # refuses any tarball or binary that is not the one
+          # crates/mvm-core/firecracker.lock pins, so the archive signature
+          # covers the bytes the pin names. A directory, not a top-level
+          # executable, so install never links it onto PATH.
+          if [[ "${TARGET}" == *-unknown-linux-gnu ]]; then
+            scripts/release/stage-firecracker.sh "${TARGET%%-*}" \
+              "staging/${ARCHIVE_NAME}/firecracker"
+            echo "bundled firecracker"
+          fi
           # The SDK host library, beside mvmctl: the SDKs' third lookup is
           # the platform file name next to the resolved mvmctl, and a
           # downloaded install has no other source. Fail closed like the

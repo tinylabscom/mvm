@@ -451,7 +451,7 @@ fn split_cmdline(cmdline: &[u8]) -> Vec<String> {
 fn observe_process(pid: u32) -> Result<ProcessView> {
     let listing = run_in_vm_stdout(&format!(
         r#"if [ ! -e /proc/{pid} ]; then
-  if kill -0 {pid} 2>/dev/null || sudo -n kill -0 {pid} 2>/dev/null; then echo hidden; else echo gone; fi
+  if kill -0 {pid} 2>/dev/null; then echo hidden; else echo gone; fi
 elif [ ! -r /proc/{pid}/comm ]; then echo hidden
 elif [ "$(cat /proc/{pid}/comm)" != firecracker ]; then echo other
 else

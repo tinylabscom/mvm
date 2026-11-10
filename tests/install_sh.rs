@@ -194,6 +194,8 @@ enum EntitlementsLayout {
 
 const MVMCTL_ENTITLEMENTS: &[u8] = b"<plist><key>com.apple.security.virtualization</key></plist>\n";
 const SUPERVISOR_ENTITLEMENTS: &[u8] = b"<plist><key>com.apple.security.hypervisor</key></plist>\n";
+/// Stands in for the pinned Firecracker binary a Linux release stages.
+const FIRECRACKER_FIXTURE: &[u8] = b"\x7fELF fixture firecracker\n";
 // Only ever written under resources/ in a release that also carries the real
 // profile under assets/, so a test can assert assets/ won without inspecting
 // the fake codesign log.
@@ -230,6 +232,9 @@ struct Release {
     /// The generated backend component table (`components.tsv`), plus any
     /// extra rows a test appends. `None` builds a pre-selection archive.
     components_tsv: Option<String>,
+    /// Whether the archive carries the pinned Firecracker directory
+    /// (`firecracker/{firecracker,LICENSE,NOTICE}`) a Linux release stages.
+    firecracker_dir: bool,
     /// The guest runtime archive the release publishes, if any.
     guest_runtime: Option<GuestRuntimeAsset>,
 }
@@ -261,12 +266,19 @@ impl Release {
             libkrun_tier: false,
             tamper_libkrun_payload: false,
             components_tsv: None,
+            firecracker_dir: false,
             guest_runtime: None,
         }
     }
 
     fn without_bundle(mut self) -> Self {
         self.publish_bundle = false;
+        self
+    }
+
+    /// Carry the pinned Firecracker directory, as a Linux release does.
+    fn with_firecracker_dir(mut self) -> Self {
+        self.firecracker_dir = true;
         self
     }
 
@@ -520,6 +532,23 @@ impl Release {
             ] {
                 append(format!("{dir}/{path}"), payload, 0o644);
             }
+        }
+        if self.firecracker_dir {
+            append(
+                format!("{dir}/firecracker/firecracker"),
+                FIRECRACKER_FIXTURE,
+                0o755,
+            );
+            append(
+                format!("{dir}/firecracker/LICENSE"),
+                b"fixture licence\n",
+                0o644,
+            );
+            append(
+                format!("{dir}/firecracker/NOTICE"),
+                b"fixture notice\n",
+                0o644,
+            );
         }
         if let Some(tsv) = &self.components_tsv {
             append(format!("{dir}/components.tsv"), tsv.as_bytes(), 0o644);
@@ -1443,6 +1472,75 @@ fn install_sh_refuses_a_guest_runtime_whose_sidecar_describes_other_bytes() {
         stderr(&output)
     );
     assert!(!host.bin().join("mvmctl").exists(), "no binary on failure");
+}
+
+/// The pinned Firecracker travels as a directory. Install links every
+/// top-level executable onto PATH, so a `firecracker` file there would land as
+/// a command beside the user's own; a directory is staged and never linked.
+#[test]
+fn install_sh_stages_the_firecracker_directory_and_never_links_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let release = Release::new("v9.9.9").with_firecracker_dir();
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host.install(&base, "v9.9.9");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let staged = host.current_target().join("firecracker");
+    let binary = staged.join("firecracker");
+    assert_eq!(std::fs::read(&binary).unwrap(), FIRECRACKER_FIXTURE);
+    assert_ne!(
+        std::fs::metadata(&binary).unwrap().permissions().mode() & 0o111,
+        0,
+        "the staged firecracker must stay executable"
+    );
+    assert!(staged.join("LICENSE").is_file() && staged.join("NOTICE").is_file());
+    assert!(
+        std::fs::symlink_metadata(host.bin().join("firecracker")).is_err(),
+        "firecracker must not be linked onto PATH"
+    );
+}
+
+/// A host that picks another backend never receives Firecracker's files.
+#[cfg(target_os = "linux")]
+#[test]
+fn install_sh_drops_the_firecracker_directory_for_a_host_that_picks_qemu() {
+    let release = table_release("v9.9.9").with_firecracker_dir();
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host
+        .installer(&base, "v9.9.9")
+        .arg("--backend")
+        .arg("qemu")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        !host.current_target().join("firecracker").exists(),
+        "a qemu install must not carry the Firecracker directory"
+    );
+}
+
+/// On a Linux host with KVM the default backend is Firecracker, so its files
+/// are staged with the release.
+#[cfg(target_os = "linux")]
+#[test]
+fn install_sh_keeps_the_firecracker_directory_for_the_firecracker_backend() {
+    if !std::path::Path::new("/dev/kvm").exists() {
+        return; // no KVM: the default is qemu, which the test above covers
+    }
+    let release = table_release("v9.9.9").with_firecracker_dir();
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host.install(&base, "v9.9.9");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        std::fs::read(host.current_target().join("firecracker/firecracker")).unwrap(),
+        FIRECRACKER_FIXTURE
+    );
+    assert!(std::fs::symlink_metadata(host.bin().join("firecracker")).is_err());
 }
 
 #[test]

@@ -45,8 +45,9 @@ fn fake_mvmctl(version: &str, run_body: &str) -> String {
 
 /// [`fake_mvmctl`] with `prelude` in place of the overlay cache step.
 fn fake_mvmctl_with(version: &str, prelude: &str, run_body: &str) -> String {
+    // The run body expects `--`; cleanup's `machine stop --all` must not enter it.
     format!(
-        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'mvmctl {version}' ;;\n  machine) shift 2\n{prelude}\n{run_body}\n    ;;\nesac"
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'mvmctl {version}' ;;\n  machine) shift 2\n    [ \"$1\" != --all ] || exit 0\n{prelude}\n{run_body}\n    ;;\nesac"
     )
 }
 

@@ -943,22 +943,36 @@ pub(crate) fn dial_guest_port(
 ) -> std::io::Result<std::os::unix::net::UnixStream> {
     match std::os::unix::net::UnixStream::connect(per_port) {
         Ok(stream) => Ok(stream),
-        Err(_) if firecracker_mux.exists() => {
-            let stream = mvm_agentd::vsock::connect_to_port_once(
-                &firecracker_mux.to_string_lossy(),
-                port,
-                MUX_CONNECT_TIMEOUT_SECS,
-            )
-            .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
-            // The handshake's timeouts bounded the dial. A session
-            // is long and often quiet; left in place they would end it, and
-            // re-announce it, every few idle seconds.
-            stream.set_read_timeout(None)?;
-            stream.set_write_timeout(None)?;
-            Ok(stream)
-        }
+        Err(_) if firecracker_mux.exists() => dial_mux(firecracker_mux, port),
         Err(error) => Err(error),
     }
+}
+
+/// Dial the exact host route declared by the backend, without guessing an
+/// alternative socket when that route fails.
+pub(crate) fn dial_guest_route(
+    route: &mvm_core::vm_backend::HostDialRoute,
+    port: u32,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
+    match route {
+        mvm_core::vm_backend::HostDialRoute::PortSocket(path) => {
+            std::os::unix::net::UnixStream::connect(path)
+        }
+        mvm_core::vm_backend::HostDialRoute::Mux(path) => dial_mux(path, port),
+    }
+}
+
+fn dial_mux(path: &std::path::Path, port: u32) -> std::io::Result<std::os::unix::net::UnixStream> {
+    let stream = mvm_agentd::vsock::connect_to_port_once(
+        &path.to_string_lossy(),
+        port,
+        MUX_CONNECT_TIMEOUT_SECS,
+    )
+    .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    // Only the handshake is short-lived; a quiet session must stay open.
+    stream.set_read_timeout(None)?;
+    stream.set_write_timeout(None)?;
+    Ok(stream)
 }
 
 /// What a collector-only process reads on stdin: the collector's own inputs

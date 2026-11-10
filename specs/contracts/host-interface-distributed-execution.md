@@ -475,11 +475,6 @@ three nodes, and `features/suites/s40_mission_demo/` runs it as a conformance
 scenario. Run it with
 `cargo nextest run -p mvm-hostd --test mission_demo --no-capture`.
 
-Real in that run: the launch preflight and per-workload ledger, quarantine and
-replacement with chain-signed entries, the signed offline lease, the command
-replay gate, the reconnect challenge, and the sealed mailbox envelope with its
-capability, replay and execution-epoch checks.
-
 Mailbox encryption is host to host: a guest's outbox carries plaintext and a
 recipient, and the host service seals and signs it under keys the host holds,
 so the host sees the plaintext and a compromised host agent can read messages.
@@ -487,12 +482,155 @@ Guest-to-guest or host-blind delivery would need hardware-backed attestation
 (key release only to an attested guest), a separate high-assurance track that
 is not built.
 
-Mailbox delivery is real on one host: the sender's sealed envelope crosses a
-Unix domain socket to the receiving node's `MailboxService`
-(`mvm-hostd::mailbox_service`), which opens it and enqueues it under a bounded
-queue, and refusals return to the sender as typed replies.
+#### Hermetic (CI)
 
-Not wired, and therefore not claimed: no vsock guest service reads the queue
-(the typed guest service remains open work in #4622), there is no cross-host
-transport, and nothing boots a VM or attests hardware. Only one node runs a
-service in the demo. The demo prints this on its own output.
+- The three-node demo: launch preflight and per-workload ledger, quarantine and
+  replacement with chain-signed entries, the signed offline lease, the command
+  replay gate, the reconnect challenge, and the sealed mailbox envelope with its
+  capability, replay and execution-epoch checks. The nodes are simulated nodes
+  in one test process; their VMs are gated and audited, and none boots.
+- One-host delivery: the sender's sealed envelope crosses a Unix domain socket
+  to the receiving node's `MailboxService` (`mvm-hostd::mailbox_service`), which
+  opens it and enqueues it under a bounded queue; refusals return as typed
+  replies. Only the aircraft node runs a service.
+- Two-node delivery: `two_nodes_deliver_over_a_loopback_tcp_peer_transport`
+  uses a loopback TCP `PeerTransport` between two nodes with separate state
+  directories and audit chains, inside one test process. The transport is
+  test-support only.
+- The guest mailbox host process (`mvm-mailbox`) and the guest-side outbox are
+  covered by their own tests; no booted guest is involved.
+
+#### Live-witnessed (manual, Firecracker and HVF)
+
+The guest mailbox is a backend capability (`VmCapabilities::guest_mailbox`) with
+a host-dialed vsock port (`GuestService::Mailbox`). Firecracker and HVF declare
+it and serve it. Each was witnessed by its own manual run, and neither is a CI
+lane: Firecracker needs a KVM host and a runtime bootstrap of roughly 22
+minutes (recorded in issue #5121), and HVF needs a macOS 26+ Apple Silicon
+host with a source-built guest runtime.
+
+Firecracker: three runs on a real KVM host (dev profile, alpine guest)
+observed the guest-mailbox chain end to end, and a fifth run on a later source
+head observed multi-message delivery (below). Observed in the first three:
+
+- A granted run (`--mailbox <64-hex id>`) boots with exactly one `mvm.mailbox=1`
+  on the guest command line. Only then does the guest agent create
+  `/run/mvm/mailbox` (uid 901, mode 0700). The host spawns a separate
+  `mvm-mailbox` process holding derived keys only: its argv is just its path,
+  and its environment and argv contain no seed-like hex, mailbox id or
+  host-signer path. Its socket is mode 0600.
+- A test-only writer calling `mvm_agentd::mailbox_outbox::write_outbox` as uid
+  901 delivered one frame to the host. `mvmctl machine mailbox recv <name>`
+  returned the exact plaintext, then empty. The chain-signed `mailbox.read`
+  entry carries the length and totals but not the body (no plaintext or base64
+  match in the audit log), and `mvmctl trust audit verify` passed.
+- Addressing: the guest may name the all-zero recipient or its own mailbox id.
+  Any other recipient is refused: the guest console shows the refusal, `recv`
+  returns empty, and the refusal text leaks nothing.
+- `machine stop` leaves no `mvm-mailbox` process (gone within about 2 s). An
+  ungranted VM has no token, directory, process or socket.
+
+HVF (isolated `MVM_HOME`, `--builder hvf --hypervisor hvf`, source-built guest
+runtime): one run observed the same properties on the in-house VMM. That run
+predates multi-message delivery and the re-dial window change: it delivered one
+message per VM and the host dialed for about 30 s. HVF has not been
+re-witnessed with either, and a re-witness is pending. Observed:
+
+- Exactly one `mvm.mailbox=1` on the guest command line; `/run/mvm/mailbox` is
+  mode 0700 and owned by the workload user (uid 901).
+- The host `mvm-mailbox` process has a one-word argv and no mailbox id, key or
+  seed path in its environment. `mailbox.sock` is mode 0600.
+- A frame written as uid 901 (a 32-byte all-zero recipient followed by the body)
+  was returned exactly by `mvmctl machine mailbox recv`. The frame was written
+  from the workload's own boot command: a later `machine exec` missed the
+  host's dial window under heavy load.
+- `mvmctl trust audit verify` passed, and the `mailbox.read` entry carries
+  counts only, no body.
+- `machine stop --yes` ended the mailbox process within 1 s. An ungranted run
+  had no token, directory, process, socket or bridge.
+
+Many messages per granted VM (Firecracker, a real KVM host, source head at the
+change that makes the host bind one `MailboxService` and re-dial for the
+launch's life into the same queue; manual, not a CI lane). Observed:
+
+- Message A, then message B two seconds later, were each returned exactly by
+  `mvmctl machine mailbox recv`; an empty queue prints nothing and exits 0.
+- A frame addressed to a wrong recipient was refused and returned empty, and two
+  valid frames written afterwards were both delivered: a refused frame never
+  stops the loop.
+- `recv` in a tight loop for 20 s (186 calls) while three messages arrived 4 s
+  apart returned each exactly once, in order, with no loss, duplicate or hang.
+  The idle `mvm-mailbox` process used about 0.2% CPU and about 5 MB RSS.
+- 100 writes 0.15 s apart returned exactly the first 64: a full queue (64
+  messages) drops newer messages and keeps the oldest, the guest console logs
+  `mailbox queue is full (64 messages)`, and the process stayed alive with flat
+  RSS and `recv` still working.
+- `machine stop` ended `mvm-mailbox` about 2.6 s later for every VM, including
+  one that never received a frame, leaving no sockets.
+- Exactly one `mvm.mailbox=1`; `/run/mvm/mailbox` uid 901 mode 0700, socket
+  0600; no seed, mailbox id or host-signer path in the process environment or
+  argv; an ungranted VM has none of it; `recv` on a nonexistent or ungranted
+  name fails cleanly. `trust audit verify` passed and `mailbox.read` entries
+  carry counts only.
+- Three concurrent granted launches while a stop ran all had a `plan.json` and
+  served `recv`. Pool-claimed VMs lacked `launch.sh`; whether that predates this
+  work is not confirmed.
+
+The outbox is one file. A writer must let the guest agent consume the previous
+frame before writing the next: two writes back to back, or 100 with no gap,
+delivered only the last, and the others were overwritten, not queued. The agent
+consumes it per frame (rename to `.outbox.forwarding`, forward, unlink).
+
+Guest console noise is bounded: while the host re-dials, the guest logs
+`mailbox frame not delivered` (9 to 17 lines over a 20 s run), and an idle VM
+logs 6 to 9 `frame is malformed` lines in its first 70 s or so. The source of
+the `malformed` lines has not been traced.
+
+Reproduce, on a Linux host with KVM and a sibling or installed mvm-images set:
+
+```sh
+cargo build                                   # mvmctl
+export MVM_FIRECRACKER_BIN=<path to the pinned firecracker>  # Linux source build, first launch
+cargo build -p mvm-hostd --bin mvm-mailbox    # beside mvmctl; or set MVM_MAILBOX_PATH
+MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build ./target/debug/mvmctl bootstrap
+./target/debug/mvmctl machine run --image alpine --mailbox <64-hex id> \
+    --hypervisor firecracker --name n -- sleep 900
+# as uid 901 in the guest (machine cp / machine exec), run a writer that
+# calls mvm_agentd::mailbox_outbox::write_outbox; let each frame be consumed
+# (about a second) before writing the next
+./target/debug/mvmctl machine mailbox recv n  # each plaintext once, then empty
+./target/debug/mvmctl trust audit verify
+./target/debug/mvmctl machine stop n --yes    # no mvm-mailbox process remains
+```
+
+The HVF variant runs on macOS 26+ Apple Silicon with the same sequence, adding
+`--builder hvf` and using `--hypervisor hvf` in place of `--hypervisor
+firecracker`. The HVF run wrote its frame from the workload's own boot command.
+
+All witnesses are in the dev profile and manual.
+
+#### Not wired / not claimed
+
+- libkrun, QEMU, apple-container, wasm and the mock backend refuse a granted
+  plan before boot. libkrun and QEMU accept arbitrary host-dialed ports, but
+  they bind them at the flat per-port path while the mailbox process dials the
+  `vsock/` subdirectory path HVF uses; reconciling the two is a follow-up.
+- A granted warm-claimed or forked HVF child is untested.
+- Late frames: the host re-dials every 100 ms for about 30 s, then every 2 s
+  for the VM's life, so a late frame is delivered. Firecracker witnessed this;
+  HVF has not been re-witnessed.
+- Single-file outbox: a burst loses frames (see above), and a full queue of 64
+  drops newer messages. Neither is a delivery guarantee.
+- Multi-message delivery is Firecracker-witnessed only; HVF delivered one
+  message per VM when last run.
+- `build_config` still names the per-port socket and the Firecracker mux path
+  itself rather than taking them from the backend, because `GuestChannelInfo`
+  carries only a cid and a port. Moving that onto the backend is a follow-up.
+- `machine run -d` printed an unrelated `session i/o error` on the HVF run
+  although the machine ran.
+- There is no cross-host transport in the product and no node-to-node delivery
+  between physical hosts. Iroh is not wired (#4633 is open); the loopback TCP
+  transport above exists only in tests.
+- The live runs are manual witnesses, not CI lanes.
+- The three-node demo boots no VM, and no test attests hardware.
+- Mailbox encryption is host to host, as described above.

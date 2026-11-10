@@ -20,7 +20,6 @@ pub mod host_cost;
 pub mod host_kv;
 pub mod host_signer;
 pub mod host_time;
-pub mod host_tool;
 pub mod hvf_control;
 pub mod hvf_owner;
 pub mod hvf_owner_lifecycle;

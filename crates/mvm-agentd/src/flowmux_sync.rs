@@ -45,7 +45,6 @@ const RUN_MVM_DIR: &str = "/run/mvm";
 
 /// How long to wait for the host endpoint to accept a connection.
 const CONNECT_TIMEOUT_SECS: u64 = 10;
-
 /// Environment variable naming the host endpoint's Unix socket on the
 /// shared-kernel container tier: the endpoint lives on a host-owned directory
 /// bind-mounted into the container, so a guest client reaches it over AF_UNIX

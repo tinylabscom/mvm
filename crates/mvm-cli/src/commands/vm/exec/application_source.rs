@@ -1,13 +1,13 @@
 //! An installed application reference as the source of `run`.
 //!
-//! `mvmctl run agent/claude@1.0.1` and `mvmctl run --app agent/claude` resolve
-//! the reference to the bundle `mvmctl pack pull` installed, after verifying
-//! it again, and then continue as `--manifest <bundle-sha256>`: the same plan
+//! `mvmctl run agent/claude@1.0.1` and `mvmctl run --app agent/claude` acquire
+//! a missing published bundle, verify it again, and then continue as
+//! `--manifest <bundle-sha256>`: the same plan
 //! synthesis, signing and admit-time bundle re-verification a `.mvmpkg` gets.
 //!
-//! A flag treats its value strictly as a reference. Positional registry pins
-//! require readable, valid cached metadata; broken metadata must not select an
-//! OCI image instead. Never-pinned images and `.mvmpkg` paths keep their route.
+//! A flag treats its value strictly as a reference. Positional `agent/*` references
+//! acquire when unpinned; other never-pinned images and `.mvmpkg` paths keep their
+//! route. Broken pinned metadata must not select an OCI image instead.
 
 use anyhow::{Context, Result};
 use mvm_client::policy_profiles::environment::with_request_ceiling;
@@ -50,14 +50,10 @@ pub(in crate::commands) fn require_entrypoint_request(args: &RunArgs) -> Result<
             && args.gpu_device.is_none()
             && args.mounts.is_empty()
             && args.env.is_empty()
-            && args.allow_env.is_empty()
-            && args
-                .applied_policy
-                .as_ref()
-                .is_none_or(|policy| policy.tools.to_tool_rules().is_empty()),
+            && args.allow_env.is_empty(),
         "application --entrypoint cannot yet preserve --grants-file, --cpu-limit, \
          --dry-run, --launch-plan, --peer, --host-service, --asset, --receipt, \
-         GPU options, --mount, --env, --allow-env or policy tool rules"
+         GPU options, --mount, --env or --allow-env"
     );
     Ok(())
 }
@@ -215,6 +211,12 @@ pub(in crate::commands) fn apply_application_source(args: &mut RunArgs) -> Resul
             crate::official_revocations::ensure_official_feed_fresh();
             resolve_installed_application(reference, &store, &policy, &trust)
         },
+        |reference| match crate::pack_registry::pull(&reference.to_string())? {
+            crate::pack_registry::PullOutcome::InstalledApplication(_) => Ok(()),
+            crate::pack_registry::PullOutcome::Installed(_) => {
+                anyhow::bail!("{reference} is a policy pack, not a runnable application")
+            }
+        },
     )
 }
 
@@ -244,6 +246,7 @@ fn settle(
     args: &mut RunArgs,
     classify: impl Fn(&PackReference) -> Result<Option<PinnedRegistryKind>, ApplicationLaunchError>,
     resolve: impl Fn(&PackReference) -> Result<ResolvedApplication, ApplicationLaunchError>,
+    acquire: impl Fn(&PackReference) -> Result<()>,
 ) -> Result<()> {
     let reference = if let Some(raw) = args.application.take() {
         raw.parse::<PackReference>().with_context(|| {
@@ -268,12 +271,15 @@ fn settle(
                 "`{reference}` is installed as a policy pack, not an application, and cannot be run; \
                  to run an OCI image of that name use `--image {reference}`"
             ),
+            None if reference.namespace() == "agent" => {
+                args.source = None;
+                reference
+            }
             None => return Ok(()),
         }
     } else {
         return Ok(());
     };
-    let resolved = resolve(&reference)?;
     anyhow::ensure!(
         args.source.is_none()
             && args.image.is_none()
@@ -284,6 +290,18 @@ fn settle(
             && args.runtime.is_none(),
         "an application reference cannot be combined with another boot source"
     );
+    let resolved = match resolve(&reference) {
+        Ok(resolved) => resolved,
+        Err(
+            ApplicationLaunchError::NotInstalled { .. }
+            | ApplicationLaunchError::VersionNotInstalled { .. }
+            | ApplicationLaunchError::BundleMissing { .. },
+        ) => {
+            acquire(&reference)?;
+            resolve(&reference)?
+        }
+        Err(error) => return Err(error.into()),
+    };
     args.registry_pack_image = Some(mvm_core::registry_pack::PackPin::new(
         resolved.reference.clone(),
         mvm_core::packs::Sha256Hex::new(&resolved.descriptor_sha256)?,
@@ -503,7 +521,8 @@ mod tests {
             settle(
                 &mut args,
                 classified(Some(PinnedRegistryKind::Application)),
-                resolved
+                missing,
+                |_| panic!("must not acquire")
             )
             .is_err()
         );
@@ -667,6 +686,7 @@ mod tests {
             &mut args,
             classified(Some(PinnedRegistryKind::Application)),
             resolved,
+            |_| panic!("installed application must not be acquired again"),
         )
         .unwrap();
         assert_eq!(args.manifest.as_deref(), Some(SHA.repeat(32).as_str()));
@@ -692,6 +712,7 @@ mod tests {
                 &mut args,
                 classified(Some(PinnedRegistryKind::Application)),
                 |_| panic!("must not resolve"),
+                |_| panic!("must not acquire"),
             )
             .unwrap();
             assert_eq!(args.source.as_deref(), Some(value));
@@ -706,6 +727,7 @@ mod tests {
             &mut args,
             classified(Some(PinnedRegistryKind::Legacy)),
             |_| panic!("must not resolve"),
+            |_| panic!("must not acquire"),
         )
         .unwrap_err()
         .to_string();
@@ -718,26 +740,60 @@ mod tests {
             &mut oci,
             classified(Some(PinnedRegistryKind::Legacy)),
             resolved,
+            |_| panic!("must not acquire"),
         )
         .unwrap();
     }
 
     #[test]
-    fn a_positional_reference_that_is_not_installed_is_left_alone() {
+    fn an_unpinned_agent_reference_acquires_but_an_oci_reference_does_not() {
         let mut args = positional("agent/claude");
-        settle(&mut args, classified(None), |_| panic!("must not resolve")).unwrap();
-        assert_eq!(args.source.as_deref(), Some("agent/claude"));
+        let acquisitions = std::cell::Cell::new(0);
+        settle(
+            &mut args,
+            classified(None),
+            |reference| {
+                if acquisitions.get() == 0 {
+                    missing(reference)
+                } else {
+                    resolved(reference)
+                }
+            },
+            |_| {
+                acquisitions.set(acquisitions.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(acquisitions.get(), 1);
+        assert_eq!(
+            args.resolved_application.unwrap().reference.to_string(),
+            "agent/claude@1.0.1"
+        );
+        assert!(args.source.is_none());
+
+        let mut oci = positional("other/unpinned");
+        settle(
+            &mut oci,
+            classified(None),
+            |_| panic!("must not resolve"),
+            |_| panic!("must not acquire"),
+        )
+        .unwrap();
+        assert_eq!(oci.source.as_deref(), Some("other/unpinned"));
     }
 
     #[test]
-    fn the_flag_never_falls_back_and_names_the_pull() {
+    fn the_flag_never_falls_back_when_acquisition_fails() {
         let mut args = RunArgs {
             application: Some("agent/claude".to_string()),
             ..RunArgs::default()
         };
-        let error = settle(&mut args, classified(None), missing)
-            .unwrap_err()
-            .to_string();
+        let error = settle(&mut args, classified(None), missing, |reference| {
+            anyhow::bail!("mvmctl pack pull {reference} failed")
+        })
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("mvmctl pack pull agent/claude"), "{error}");
         assert!(args.manifest.is_none() && args.image.is_none());
     }
@@ -752,7 +808,8 @@ mod tests {
             settle(
                 &mut args,
                 classified(Some(PinnedRegistryKind::Application)),
-                resolved
+                resolved,
+                |_| panic!("must not acquire")
             )
             .is_err()
         );
@@ -764,8 +821,74 @@ mod tests {
             application: Some("agent/claude".to_string()),
             ..RunArgs::default()
         };
-        settle(&mut args, classified(None), resolved).unwrap();
+        settle(&mut args, classified(None), resolved, |_| {
+            panic!("must not acquire")
+        })
+        .unwrap();
         assert_eq!(args.manifest.as_deref(), Some(SHA.repeat(32).as_str()));
+    }
+
+    #[test]
+    fn cached_application_rechecks_without_acquisition_and_refuses_trust_failure() {
+        let mut args = positional("agent/claude");
+        settle(
+            &mut args,
+            classified(Some(PinnedRegistryKind::Application)),
+            resolved,
+            |_| panic!("repeat run must use the verified cache"),
+        )
+        .unwrap();
+        assert!(args.registry_pack_image.is_some());
+
+        let mut args = positional("agent/claude");
+        let error = settle(
+            &mut args,
+            classified(Some(PinnedRegistryKind::Application)),
+            |_| {
+                Err(ApplicationLaunchError::NotAnApplication {
+                    reference: "agent/claude".into(),
+                })
+            },
+            |_| panic!("a trust or kind failure must not trigger acquisition"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not an application"));
+        assert!(args.manifest.is_none());
+    }
+
+    #[test]
+    fn explicitly_requested_version_acquires_only_that_version() {
+        let mut args = RunArgs {
+            application: Some("acme/tool@1.2.3".into()),
+            ..RunArgs::default()
+        };
+        let acquired = std::cell::Cell::new(false);
+        settle(
+            &mut args,
+            classified(Some(PinnedRegistryKind::Application)),
+            |reference| {
+                if acquired.get() {
+                    resolved(reference)
+                } else {
+                    Err(ApplicationLaunchError::VersionNotInstalled {
+                        coordinate: "acme/tool".into(),
+                        requested: "1.2.3".into(),
+                        installed: "1.0.0".into(),
+                    })
+                }
+            },
+            |reference| {
+                assert_eq!(reference.to_string(), "acme/tool@1.2.3");
+                acquired.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(acquired.get());
+        assert_eq!(
+            args.registry_pack_image.unwrap().reference().to_string(),
+            "acme/tool@1.2.3"
+        );
     }
 
     fn parse(argv: &[&str]) -> Result<RunArgs, clap::Error> {

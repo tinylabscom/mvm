@@ -287,75 +287,6 @@ pub(in crate::commands) fn run_for_exit(_cli: &Cli, args: Args, _cfg: &MvmConfig
     }
 }
 
-/// Run a declared argv command only after the authenticated guest control
-/// session and this VM's admitted endpoint agree on the exact invocation.
-pub(in crate::commands) fn run_declared_command(
-    name: &str,
-    tool: &str,
-    argv: Vec<String>,
-    force: bool,
-) -> Result<()> {
-    validate_vm_name(name).context("invalid VM name for declared tool")?;
-    enforce_accessible_gate(name, force)?;
-    let call = mvm_agentd::vsock::MediatedExecCall {
-        tool: tool.to_string(),
-        argv,
-        stdin: None,
-        timeout_secs: None,
-        // The proxy, CA bundle and secret placeholders the VM was provisioned
-        // with: what a tool needs to reach the routes its rules give it.
-        env: mvm_client::entrypoint::dispatch::workload_egress_env(name),
-    };
-    anyhow::ensure!(
-        call.tool_check().is_some(),
-        "invalid declared tool invocation"
-    );
-    touch_activity(name);
-    let transport = pick_console_transport(name)?;
-    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
-    super::shared::emit_vsock_rpc_audit(
-        name,
-        &mvm_agentd::vsock::GuestRequest::MediatedExec(call.clone()),
-    );
-    let mut bound = None;
-    let terminal = mvm_agentd::vsock::send_attributed_mediated_exec_streaming(
-        &mut stream,
-        call,
-        |question| {
-            let reply = guest_tool_reply(mvm_client::tool_mediation::decide_declared_tool(
-                name, question,
-            )?);
-            if let mvm_agentd::vsock::ToolCheckReply::AllowBound { binding } = &reply {
-                bound = Some(binding.clone());
-            }
-            Ok(reply)
-        },
-        emit_exec_event,
-    );
-    if let Some(binding) = &bound
-        && let Err(error) = mvm_client::tool_mediation::release_declared_tool(name, binding)
-    {
-        crate::ui::warn(&format!(
-            "could not release the tool invocation's binding; the endpoint retires it later: \
-             {error:#}"
-        ));
-    }
-    finish_exec_terminal(terminal?)
-}
-
-/// The guest's form of the endpoint's decision.
-fn guest_tool_reply(
-    reply: mvm_contract::protocol::network_flow::tool::ToolDecisionReply,
-) -> mvm_agentd::vsock::ToolCheckReply {
-    use mvm_agentd::vsock::ToolCheckReply;
-    use mvm_contract::protocol::network_flow::tool::ToolDecisionReply;
-    match reply {
-        ToolDecisionReply::Allow => ToolCheckReply::Allow,
-        ToolDecisionReply::AllowBound { binding } => ToolCheckReply::AllowBound { binding },
-        ToolDecisionReply::Deny => ToolCheckReply::Deny,
-    }
-}
-
 fn emit_exec_event(event: &mvm_agentd::vsock::ExecEvent) {
     match event {
         mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
@@ -370,14 +301,6 @@ fn emit_exec_event(event: &mvm_agentd::vsock::ExecEvent) {
         }
         _ => {}
     }
-}
-
-fn finish_exec_terminal(terminal: mvm_agentd::vsock::ExecEvent) -> Result<()> {
-    let code = terminal_exit_code(terminal)?;
-    if code != 0 {
-        crate::observability::exit(code);
-    }
-    Ok(())
 }
 
 fn terminal_exit_code(terminal: mvm_agentd::vsock::ExecEvent) -> Result<i32> {
@@ -408,23 +331,6 @@ fn command_with_env(cmd: &str, env: &[(String, String)]) -> String {
 /// never blocks console attach.
 fn touch_activity(name: &str) {
     mvm_client::touch_activity(name);
-}
-
-/// Open an interactive PTY console to a running VM.
-///
-/// Supports Firecracker (via UDS vsock), libkrun (via per-port Unix
-/// sockets), Apple Container (via direct vsock), and vsock proxy (via
-/// daemon Unix socket for cross-process access).
-pub(crate) fn console_pty_command(
-    name: &str,
-    command: String,
-    env: Vec<(String, String)>,
-) -> Result<()> {
-    let exit_code = run_pty_command_for_exit(name, command, env)?;
-    if exit_code != 0 {
-        crate::observability::exit(exit_code);
-    }
-    Ok(())
 }
 
 pub(crate) fn run_pty_command_for_exit(
@@ -1224,28 +1130,6 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<Cons
 #[cfg(test)]
 mod console_relay_tests {
     use super::*;
-
-    #[test]
-    fn the_guest_gets_the_endpoints_decision_and_binding_unchanged() {
-        use mvm_agentd::vsock::ToolCheckReply;
-        use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
-        use mvm_contract::protocol::network_flow::tool::ToolDecisionReply;
-        let binding = ToolInvocationBinding::from_random([2; 16]);
-        assert_eq!(
-            guest_tool_reply(ToolDecisionReply::Allow),
-            ToolCheckReply::Allow
-        );
-        assert_eq!(
-            guest_tool_reply(ToolDecisionReply::AllowBound {
-                binding: binding.clone()
-            }),
-            ToolCheckReply::AllowBound { binding }
-        );
-        assert_eq!(
-            guest_tool_reply(ToolDecisionReply::Deny),
-            ToolCheckReply::Deny
-        );
-    }
 
     #[test]
     fn command_exit_status_survives_for_host_cleanup() {

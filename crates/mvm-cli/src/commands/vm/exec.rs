@@ -23,6 +23,7 @@ use super::Cli;
 use super::host_signer::{host_signer_id, load_or_init};
 
 pub(in crate::commands) mod application_source;
+mod composition;
 pub(in crate::commands) mod detect;
 mod image_source;
 pub(in crate::commands) mod positional_source;
@@ -171,7 +172,7 @@ pub(in crate::commands) struct RunArgs {
     /// Boot an OCI image (resolved through the local cache first).
     #[arg(long, value_name = "REF", conflicts_with_all = SOURCES_EXCEPT_IMAGE)]
     pub image: Option<String>,
-    /// Boot an installed application (NAMESPACE/NAME[@VERSION]).
+    /// Acquire and boot an application (NAMESPACE/NAME[@VERSION]).
     #[arg(
         short = 'a',
         long = "application",
@@ -438,6 +439,9 @@ const PLAN_EXCLUDES: [&str; 12] = [
 /// them here is what lets the rest be flattened.
 #[derive(ClapArgs, Debug, Clone, Default)]
 pub(in crate::commands) struct SdkTransportArgs {
+    /// Assemble a signed, digest-pinned pack recipe and run its entrypoint.
+    #[arg(long = "compose", value_name = "PACK.TOML", conflicts_with_all = ["mode", "dev"])]
+    pub compose: Option<PathBuf>,
     /// SDK transport mode for `mvmctl run`.
     ///
     /// - `--mode plan`: synthesize an ExecutionPlan per Sandbox call
@@ -582,6 +586,15 @@ pub(in crate::commands) fn run_verb(
     mut args: RunVerbArgs,
     cfg: &MvmConfig,
 ) -> Result<()> {
+    let composition = if let Some(path) = args.sdk.compose.take() {
+        validate_composition_request(&args.machine)?;
+        let built = composition::prepare(&path)?;
+        args.machine.run.manifest = Some(built.archive().to_string_lossy().into_owned());
+        args.machine.entrypoint = true;
+        Some(built)
+    } else {
+        None
+    };
     let run = &mut args.machine.run;
     // Checked before the script is moved into argv below: a script path never
     // looks like a flag, so it would hide a misplaced one behind it.
@@ -595,7 +608,34 @@ pub(in crate::commands) fn run_verb(
         return super::run_plan::dispatch_sdk_mode(mode, run, &args.sdk);
     }
     args.machine.default_image_when_sourceless = true;
-    crate::commands::machine::run_dispatch(cli, args.machine, cfg)
+    let result = crate::commands::machine::run_dispatch(cli, args.machine, cfg);
+    drop(composition);
+    result
+}
+
+pub(in crate::commands) fn validate_composition_request(
+    machine: &crate::commands::machine::MachineRunArgs,
+) -> Result<()> {
+    let run = &machine.run;
+    anyhow::ensure!(
+        run.source.is_none()
+            && run.application.is_none()
+            && run.image.is_none()
+            && run.manifest.is_none()
+            && run.flake.is_none()
+            && run.deployment.is_none()
+            && run.runtime.is_none()
+            && !run.runtime_pack
+            && !run.prod
+            && !run.dry_run
+            && run.launch_plan.is_none()
+            && run.argv.is_empty()
+            && !machine.interactive()
+            && !machine.persistent()
+            && !machine.attach,
+        "--compose requires an unambiguous transient development run without another boot source or command"
+    );
+    Ok(())
 }
 
 /// Run a transient workload through the admitted path from the instant launch
@@ -735,11 +775,6 @@ pub(in crate::commands) fn run_secure_started(
     let application_for_admit = args.resolved_application.clone();
     let denials = super::egress_denials::PendingWatch::for_run(args.json, args.pty);
     let denials_for_admit = std::rc::Rc::clone(&denials);
-    let applied_tool_rules = args
-        .applied_policy
-        .as_ref()
-        .map(|policy| policy.tools.to_tool_rules())
-        .unwrap_or_default();
     let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let crate::exec::AdmitInputs {
@@ -800,7 +835,6 @@ pub(in crate::commands) fn run_secure_started(
             // attachment has something to be checked against (claim 1).
             shares: mvm_client::admission::policy::admitted_shares_for_boot(volumes, sdk_sidecar),
             redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: applied_tool_rules.clone(),
             network_policy: admit_network_policy.clone(),
             agent_verb_override: admit_agent_verb.clone(),
             restrict_agent_verbs: crate::commands::vm::agent_verbs::grant_eligible(
@@ -2093,6 +2127,7 @@ mod tests {
     /// shared `RunArgs` separately, so each case names which half it exercises.
     fn sdk(mode: Option<RunMode>, dev: bool) -> SdkTransportArgs {
         SdkTransportArgs {
+            compose: None,
             mode,
             dev,
             ack_divergence: Vec::new(),

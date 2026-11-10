@@ -66,30 +66,6 @@ impl ServiceIdentity {
 pub const EGRESS_CLIENT_IDENTITY: ServiceIdentity =
     ServiceIdentity::new(989, 989, 1u64 << super::CAP_NET_BIND_SERVICE);
 
-/// Identity of the declared-command tool helper.
-///
-/// Linux-only: every consumer (the installer, the helper, the agent's
-/// decision socket, the shim's listener check) is Linux-only, and keeping
-/// the constant off other targets avoids a dead-code lint that an `allow`
-/// would only paper over.
-///
-/// The helper owns the root-only stash of substituted tool binaries and
-/// answers the in-guest shim, so it gets a uid of its own: the workload
-/// cannot signal it, pose as it on the agent's decision socket, or read the
-/// stash through its credentials. It keeps `CAP_SETUID` and `CAP_SETGID` —
-/// the two transitions a mediated tool invocation needs onto
-/// [`super::TOOL_UID`] and [`super::TOOL_GID`] — plus `CAP_SYS_PTRACE` for
-/// the attribution socket's descriptor-ownership check: a tool child is
-/// non-dumpable after its identity transition, so the kernel re-roots its
-/// `/proc/<pid>/fd` entries and `ptrace_may_access` refuses the read to
-/// anything but a `CAP_SYS_PTRACE` holder, even for a uid-matched reader.
-#[cfg(any(target_os = "linux", test))]
-pub const TOOL_HELPER_IDENTITY: ServiceIdentity = ServiceIdentity::new(
-    906,
-    906,
-    (1u64 << super::CAP_SETUID) | (1u64 << super::CAP_SETGID) | (1u64 << super::CAP_SYS_PTRACE),
-);
-
 /// Identity of the local-addon resolver (`mvm-addon-dns`).
 ///
 /// It parses every DNS query the workload sends, so it gets a uid of its own
@@ -101,22 +77,6 @@ pub const ADDON_DNS_IDENTITY: ServiceIdentity =
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_tool_helper_keeps_exactly_its_transition_and_inspection_capabilities() {
-        let identity = TOOL_HELPER_IDENTITY;
-        assert_eq!(identity.uid(), 906);
-        assert_eq!(identity.gid(), 906);
-        assert_eq!(
-            identity.capabilities(),
-            (1u64 << super::super::CAP_SETUID)
-                | (1u64 << super::super::CAP_SETGID)
-                | (1u64 << super::super::CAP_SYS_PTRACE)
-        );
-        assert_ne!(identity.uid(), super::super::WORKLOAD_UID);
-        assert_ne!(identity.uid(), super::EGRESS_CLIENT_IDENTITY.uid());
-        assert_ne!(identity.uid(), super::ADDON_DNS_IDENTITY.uid());
-    }
 
     #[test]
     fn identity_preserves_low_and_high_capability_bits() {

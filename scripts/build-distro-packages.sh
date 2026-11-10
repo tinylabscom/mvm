@@ -19,13 +19,17 @@
 # [package.metadata.generate-rpm]) and read from target/distro-pkg/, which
 # this script fills: bin/ with every file at the top of the archive except the
 # README, doc/ with the README, man/ with the man pages, guest-runtime/ with
-# the guest runtime, and package-managed/ with one marker per format, naming
+# the guest runtime, firecracker/ with the archive's pinned Firecracker and its
+# licence files (installed under /usr/lib/mvmctl/firecracker, never /usr/bin,
+# so it cannot shadow a Firecracker the user already has), and
+# package-managed/ with one marker per format, naming
 # it, which each package installs as /usr/share/mvmctl/package-managed. Writes
 # into <out-dir> the two packages and one `<package>.sha256` per package, the
 # format the release's combined checksum manifest is assembled from, plus
 # `payload-<target>.sha256sums`: a `sha256sum -c` manifest of the files the
-# packages install into /usr/bin and /usr/lib/mvmctl/guest-runtime, which
-# distro-package-smoke.sh checks the installed files against.
+# packages install into /usr/bin, /usr/lib/mvmctl/guest-runtime and
+# /usr/lib/mvmctl/firecracker, which distro-package-smoke.sh checks the
+# installed files against.
 #
 # Needs cargo-deb and cargo-generate-rpm (`cargo install --locked` at the
 # versions distro-packages.yml pins) and runs from the workspace root.
@@ -82,9 +86,20 @@ if [ "$(uname -s)/$(uname -m)" = "Linux/${host_arch}" ]; then
   esac
 fi
 
+# The pinned Firecracker travels as a directory beside mvmctl, so a first run
+# has a VMM to boot with. Refuse an archive without it rather than ship a
+# package whose first run fails.
+for fc_file in firecracker LICENSE NOTICE; do
+  [ -f "${src}/firecracker/${fc_file}" ] \
+    || { echo "build-distro-packages: ${tarball} has no mvmctl-${target}/firecracker/${fc_file}" >&2; exit 1; }
+done
+[ -x "${src}/firecracker/firecracker" ] \
+  || { echo "build-distro-packages: mvmctl-${target}/firecracker/firecracker is not executable" >&2; exit 1; }
+
 rm -rf "${stage}"
-mkdir -p "${stage}/bin" "${stage}/doc" "${stage}/man" "${stage}/guest-runtime" "${stage}/package-managed"
+mkdir -p "${stage}/bin" "${stage}/doc" "${stage}/man" "${stage}/guest-runtime" "${stage}/firecracker" "${stage}/package-managed"
 find "${src}" -maxdepth 1 -type f ! -name README.md -exec cp -p {} "${stage}/bin/" \;
+cp -p "${src}"/firecracker/{firecracker,LICENSE,NOTICE} "${stage}/firecracker/"
 cp -p "${src}/README.md" "${stage}/doc/"
 cp -p "${src}"/man/*.1 "${stage}/man/"
 cp -p "${runtime}" "${stage}/guest-runtime/"
@@ -114,6 +129,9 @@ rpm="${out_dir}/$(basename "${rpms[0]}")"
       printf '%s  /usr/bin/%s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"
     done )
   printf '%s  /usr/lib/mvmctl/guest-runtime/%s\n' "${runtime_got}" "${runtime_name}"
+  ( cd "${stage}/firecracker" && for f in *; do
+      printf '%s  /usr/lib/mvmctl/firecracker/%s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"
+    done )
 } > "${out_dir}/payload-${target}.sha256sums"
 
 for package in "${deb}" "${rpm}"; do

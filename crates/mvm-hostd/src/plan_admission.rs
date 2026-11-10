@@ -93,6 +93,7 @@ use sha2::{Digest, Sha256};
 mod assurance_runtime;
 mod bundle_environment;
 mod canonical_kernel;
+mod composition;
 mod display_grants;
 mod final_gates;
 mod host_gates;
@@ -573,6 +574,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         }
         .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
         bundle_environment::verify_environment(&verified, &verified_bundle.manifest, posture)?;
+        composition::verify(&verified, &verified_bundle)?;
         if !verified_bundle.embedded_image_sets.is_empty() {
             let image = ctx.image.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -2108,7 +2110,7 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
     )?;
     // Before the boot, so a grant this backend cannot serve never reaches a
     // guest that would assert it.
-    crate::mailbox_process::require_servable(&config, backend.kind())?;
+    crate::mailbox_process::require_servable(&config, backend)?;
     // Spent before the backend starts, so an admission that reached dispatch
     // can never authorize another launch, whatever the start's outcome.
     admitted.dispatched = true;
@@ -2169,7 +2171,7 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
             // A grant that cannot be served is refused rather than booting a
             // guest whose mailbox port nobody answers.
             if let Err(err) =
-                crate::mailbox_process::spawn_for_launch(admitted.plan(), backend.kind(), &vm_name)
+                crate::mailbox_process::spawn_for_launch(admitted.plan(), backend, &vm_name)
             {
                 return Err(undo_launch(UndoLaunch {
                     backend,
@@ -2517,7 +2519,6 @@ mod tests {
             network_policy_ref: None,
             fs_policy_ref: None,
             egress_policy_ref: None,
-            tool_policy_ref: None,
             secret_release: SecretReleasePolicy::None,
             secrets: Vec::new(),
             audit_event_prefix: None,
@@ -2532,7 +2533,6 @@ mod tests {
             assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-            tools: Default::default(),
             caller_commitment: None,
             audit_labels: Default::default(),
             agent_verbs: None,
@@ -5056,7 +5056,6 @@ mod tests {
             network: Default::default(),
             egress: Default::default(),
             pii: Default::default(),
-            tool: Default::default(),
             artifact: Default::default(),
             keys: Default::default(),
             audit: Default::default(),

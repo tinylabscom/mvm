@@ -39,7 +39,6 @@ mod redaction;
 mod reflection;
 mod routing;
 mod sign;
-mod tool_scope;
 
 /// Host-side AF_VSOCK listener for the QEMU (`vhost-vsock`) guest→host
 /// substitution path. Firecracker/libkrun bridge guest→host through a per-port
@@ -59,7 +58,6 @@ pub use ingress::HostMaterialError;
 pub(crate) use prepare::{PLACEHOLDER_IN_BODY_MESSAGE, REASON_PLACEHOLDER_IN_BODY};
 pub use prepare::{ProxyError, prepare_request};
 pub(crate) use routing::method_label;
-pub(crate) use tool_scope::FlowAttribution;
 
 /// 16 MiB cap on a single routed request/response frame.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -114,8 +112,6 @@ pub struct SubstitutionService {
     /// Answers `ask` decisions. [`crate::supervisor::runtime_approval::NoApprovalBackend`]
     /// until an approval backend is configured, which refuses every one.
     approver: Arc<dyn crate::supervisor::runtime_approval::RuntimeApprover>,
-    /// Per-VM tool decisions over the same approver and chain recorder.
-    tool_gate: Option<Arc<crate::supervisor::tool_decision::ToolDecisionGate>>,
     /// Secrets whose binding says `approve = "ask"`, by registry name. A
     /// request carrying one of their placeholders is held for an approval
     /// before anything is substituted.

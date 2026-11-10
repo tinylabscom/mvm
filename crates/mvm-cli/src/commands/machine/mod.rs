@@ -18,6 +18,7 @@ mod checkpoint;
 mod create_policy;
 pub(crate) mod lifecycle;
 mod list;
+mod mailbox;
 mod manifest_source;
 mod portable;
 pub(crate) mod prewarm;
@@ -61,9 +62,10 @@ use super::vm::{console, down};
 use crate::ui;
 use checkpoint::{ForkVmFullMachineInput, fork_vm_full_machine};
 use lifecycle::{
-    exec_machine, quarantine_machine, replace_machine, run_restart, run_start, shell_machine,
-    stop_machine,
+    quarantine_machine, replace_machine, run_exec_with_journal, run_restart, run_start,
+    shell_machine, stop_machine,
 };
+use mailbox::{MachineMailboxAction, recv_mailbox};
 use manifest_source::{absolutize_manifest_volume_spec, load_machine_manifest_source};
 #[cfg(test)]
 use receipt::verify_machine_start_receipt;
@@ -125,6 +127,9 @@ pub(in crate::commands) enum MachineAction {
     /// Authorize a quarantined workload's replacement under a fresh epoch
     #[command(display_order = 5)]
     Replace(MachineReplaceArgs),
+    /// Read messages a granted guest sent to its mailbox
+    #[command(display_order = 5, subcommand)]
+    Mailbox(MachineMailboxAction),
     /// Remove one or more persistent named machine specs (or --all)
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
@@ -202,6 +207,7 @@ impl MachineAction {
             | MachineAction::Stop(_)
             | MachineAction::Quarantine(_)
             | MachineAction::Replace(_)
+            | MachineAction::Mailbox(_)
             | MachineAction::Reconfigure(_)
             | MachineAction::Rm(_)
             | MachineAction::Ls(_)
@@ -404,7 +410,7 @@ impl MachineRunArgs {
     }
 
     /// `-t`/`--tty` or its `-i` alias requests an interactive PTY shell.
-    fn interactive(&self) -> bool {
+    pub(in crate::commands) fn interactive(&self) -> bool {
         self.tty || self.interactive
     }
 
@@ -413,7 +419,7 @@ impl MachineRunArgs {
     /// makes the machine survive the command. `--tty`/`--name` are deliberately
     /// not consulted — persistence, interactivity, and identity are independent
     /// axes.
-    fn persistent(&self) -> bool {
+    pub(in crate::commands) fn persistent(&self) -> bool {
         self.detach
             || self.up_json
             || self.ttl.is_some()
@@ -712,12 +718,6 @@ fn machine_run_spec(
         resolved_digest: None,
         runtime_pack: args.run.runtime_pack,
         registry_pack_image: args.run.registry_pack_image.clone(),
-        tools: args
-            .run
-            .applied_policy
-            .as_ref()
-            .map(|policy| policy.tools.to_tool_rules())
-            .unwrap_or_default(),
         net,
         allow_host,
         peer: Vec::new(),
@@ -973,10 +973,6 @@ pub(in crate::commands) struct MachineExecArgs {
     /// Accepted as an alias for `-t` so `-it` parses.
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
-    /// Declared tool name to authorize through this VM's admitted rules.
-    /// Requires a non-interactive command after `--`.
-    #[arg(long, value_name = "NAME")]
-    pub tool: Option<String>,
     /// Argv to run inside the guest (use `--` to separate). Omit to drop into
     /// an interactive shell, like `machine shell`.
     #[arg(trailing_var_arg = true)]
@@ -1262,11 +1258,6 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: policy
-            .policy
-            .as_ref()
-            .map(|body| body.tools.to_tool_rules())
-            .unwrap_or_default(),
         net,
         allow_host,
         peer: inputs.peer.to_vec(),
@@ -1544,19 +1535,13 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
         MachineAction::Start(start_cmd) => run_start(start_cmd),
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
-        MachineAction::Exec(exec_args) => {
-            let state_dir = config::machine_state_dir(&exec_args.name);
-            let _journal_lock = input_journal::lock(&state_dir)?;
-            let pending = input_journal::begin_exec(&state_dir, &exec_args.argv)?;
-            let outcome = exec_machine(cli, exec_args, cfg);
-            input_journal::finish_exec(&state_dir, pending, outcome.is_ok())?;
-            outcome
-        }
+        MachineAction::Exec(exec_args) => run_exec_with_journal(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
         MachineAction::Quarantine(args) => quarantine_machine(cli, args, cfg),
         MachineAction::Replace(args) => replace_machine(&args),
+        MachineAction::Mailbox(MachineMailboxAction::Recv { name }) => recv_mailbox(&name),
         MachineAction::Reconfigure(args) => run_reconfigure(args),
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
         MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),

@@ -36,8 +36,35 @@ const SIGNER_PUBLIC: &str = "host-signer.pub";
 /// Optional operator override of the derived identities and capability,
 /// beside the host key.
 const TEMPLATE_FILE: &str = "mailbox-template.json";
-const DIAL_ATTEMPTS: u32 = 300;
-const DIAL_INTERVAL: Duration = Duration::from_millis(100);
+/// Dials at the fast cadence while the guest is coming up or just sent a frame
+/// (about 30 s), then at the slow one for as long as the VM lives, so a workload that writes its
+/// outbox late is still forwarded without an idle VM being polled hard.
+const FAST_DIAL_ATTEMPTS: u32 = 300;
+const FAST_DIAL_INTERVAL: Duration = Duration::from_millis(100);
+const SLOW_DIAL_INTERVAL: Duration = Duration::from_secs(2);
+/// Pause after a served frame, so a burst is picked up without spinning.
+const POST_FRAME_PAUSE: Duration = Duration::from_millis(10);
+
+/// How long to wait after the `attempt`th failed dial (0-based).
+fn dial_delay(attempt: u32, fast_attempts: u32) -> Duration {
+    if attempt < fast_attempts {
+        FAST_DIAL_INTERVAL
+    } else {
+        SLOW_DIAL_INTERVAL
+    }
+}
+
+/// Sleep `delay` in short slices so a stop is noticed promptly.
+fn sleep_unless_stopped(stop: &AtomicBool, delay: Duration) {
+    let deadline = std::time::Instant::now() + delay;
+    while !stop.load(Ordering::SeqCst) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(FAST_DIAL_INTERVAL));
+    }
+}
 
 /// What the host seals a guest's message under, apart from keys.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -330,7 +357,7 @@ pub struct MailboxLaunch {
 }
 
 impl MailboxLaunch {
-    /// The oldest plaintext the guest sent, once its session has ended.
+    /// The oldest plaintext the guest sent that has not been read.
     pub fn receive(&self) -> Option<Vec<u8>> {
         self.service.get()?.receive()
     }
@@ -350,14 +377,23 @@ pub struct ServePaths {
     pub intent_dir: Option<PathBuf>,
 }
 
-/// Bind the local service and dial the guest for the VM's lifetime. The first
-/// guest connection has a bounded 30-second readiness window; after readiness
-/// an idle outbox is normal and does not stop later submissions.
+/// Bind the mailbox and dial for the VM lifetime: fast until a quiet window,
+/// slow while idle, and fast again after a guest frame. Returns immediately.
 pub fn serve_derived(
     grant: MailboxGrant,
     keys: DerivedMailboxKeys,
     paths: ServePaths,
     limits: MailboxLimits,
+) -> MailboxLaunch {
+    serve_derived_with(grant, keys, paths, limits, FAST_DIAL_ATTEMPTS)
+}
+
+fn serve_derived_with(
+    grant: MailboxGrant,
+    keys: DerivedMailboxKeys,
+    paths: ServePaths,
+    limits: MailboxLimits,
+    fast_attempts: u32,
 ) -> MailboxLaunch {
     let stop = Arc::new(AtomicBool::new(false));
     let service = Arc::new(OnceLock::new());
@@ -374,29 +410,20 @@ pub fn serve_derived(
             tracing::warn!("mailbox service could not bind");
             return;
         };
-        let _ = thread_service.set(served);
-        let Some(served) = thread_service.get() else {
-            return;
-        };
+        let served = thread_service.get_or_init(|| served);
         let guest = (paths.guest_port.as_path(), paths.firecracker_mux.as_path());
-        let mut ready = false;
-        let mut attempts = 0;
+        let mut attempts = 0u32;
         while !thread_stop.load(Ordering::SeqCst) {
             match served.serve_guest(guest.0, guest.1, &mut sealer) {
-                Ok(_) => {
-                    ready = true;
+                Ok(true) => {
                     attempts = 0;
+                    sleep_unless_stopped(&thread_stop, POST_FRAME_PAUSE);
                 }
-                Err(_) if !ready => {
-                    attempts += 1;
-                    if attempts >= DIAL_ATTEMPTS {
-                        tracing::warn!("mailbox guest port did not become ready");
-                        return;
-                    }
+                Ok(false) | Err(_) => {
+                    sleep_unless_stopped(&thread_stop, dial_delay(attempts, fast_attempts));
+                    attempts = attempts.saturating_add(1);
                 }
-                Err(_) => {}
             }
-            std::thread::sleep(DIAL_INTERVAL);
         }
     });
     MailboxLaunch { stop, service }
@@ -468,6 +495,159 @@ mod tests {
             sealer().seal(conflicting),
             Err(crate::mailbox_service::Refusal::Mailbox(_))
         ));
+    }
+
+    #[test]
+    fn the_dial_schedule_is_fast_then_slow_and_bounded() {
+        assert_eq!(dial_delay(0, 300), FAST_DIAL_INTERVAL);
+        assert_eq!(dial_delay(299, 300), FAST_DIAL_INTERVAL);
+        assert_eq!(dial_delay(300, 300), SLOW_DIAL_INTERVAL);
+        assert_eq!(dial_delay(u32::MAX, 300), SLOW_DIAL_INTERVAL);
+    }
+
+    fn serve_paths(dir: &Path) -> ServePaths {
+        ServePaths {
+            socket: dir.join("mailbox.sock"),
+            guest_port: dir.join("port.sock"),
+            firecracker_mux: dir.join("absent-mux"),
+            intent_dir: None,
+        }
+    }
+
+    #[test]
+    fn a_frame_written_after_the_fast_window_is_still_delivered() {
+        use std::os::unix::net::UnixListener;
+        let dir = keys_dir();
+        let grant = grant(dir.path(), [7; 32]);
+        let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+        // The guest port does not exist yet: every early dial fails, and with
+        // a zero-length fast window all of them are on the slow schedule.
+        let launch = serve_derived_with(grant, keys, serve_paths(dir.path()), LAUNCH_LIMITS, 0);
+        std::thread::sleep(Duration::from_millis(300));
+        let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
+        let outbox = dir.path().join("outbox");
+        std::fs::write(
+            &outbox,
+            mvm_core::mailbox::frame::OutboxMessage {
+                recipient: mvm_contract::protocol::mailbox::PrincipalId::from_bytes([7; 32]),
+                message_id: MessageId::from_bytes([45; 32]),
+                body: b"late".to_vec(),
+            }
+            .encode(),
+        )
+        .unwrap();
+        let guest = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while launch.receive().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "late frame not served"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        guest.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn dropping_the_launch_stops_an_idle_slow_dialer_promptly() {
+        let dir = keys_dir();
+        let grant = grant(dir.path(), [8; 32]);
+        let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+        let stop = {
+            let launch = serve_derived_with(grant, keys, serve_paths(dir.path()), LAUNCH_LIMITS, 0);
+            launch.stop.clone()
+        };
+        assert!(stop.load(Ordering::SeqCst));
+        let started = std::time::Instant::now();
+        sleep_unless_stopped(&stop, Duration::from_secs(60));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    type Verdict = std::result::Result<(), mvm_core::mailbox::frame::Refusal>;
+
+    /// A guest that accepts every dial and forwards whatever its outbox holds.
+    fn fake_guest(dir: &Path) -> (PathBuf, std::sync::mpsc::Receiver<Verdict>) {
+        let listener = std::os::unix::net::UnixListener::bind(dir.join("port.sock")).unwrap();
+        let outbox = dir.join("outbox");
+        let (path, (tx, rx)) = (outbox.clone(), std::sync::mpsc::channel());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let v = mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &path);
+                if v != Err(mvm_core::mailbox::frame::Refusal::Malformed) {
+                    let _ = tx.send(v);
+                }
+            }
+        });
+        (outbox, rx)
+    }
+
+    /// Leave a message for `recipient`, and return the verdict the host gave.
+    fn send_one(
+        outbox: &Path,
+        rx: &std::sync::mpsc::Receiver<Verdict>,
+        to: u8,
+        body: &[u8],
+    ) -> Verdict {
+        let recipient = mvm_contract::protocol::mailbox::PrincipalId::from_bytes([to; 32]);
+        let message = mvm_core::mailbox::frame::OutboxMessage {
+            recipient,
+            message_id: MessageId::from_bytes(rand::random()),
+            body: body.to_vec(),
+        };
+        mvm_agentd::mailbox_outbox::write_outbox(outbox, &message).unwrap();
+        rx.recv_timeout(Duration::from_secs(20))
+            .expect("no verdict")
+    }
+
+    fn launch_against(dir: &Path, limits: MailboxLimits) -> MailboxLaunch {
+        let grant = grant(dir, [7; 32]);
+        let keys = derive_launch_keys(dir, &grant).unwrap();
+        serve_derived_with(grant, keys, serve_paths(dir), limits, 300)
+    }
+
+    #[test]
+    fn every_message_is_served_in_order_and_a_refusal_or_flood_changes_nothing() {
+        let dir = keys_dir();
+        let (outbox, rx) = fake_guest(dir.path());
+        let limits = MailboxLimits {
+            max_depth: 2,
+            ..LAUNCH_LIMITS
+        };
+        let launch = launch_against(dir.path(), limits);
+        assert!(send_one(&outbox, &rx, 9, b"wrong recipient").is_err());
+        assert_eq!(send_one(&outbox, &rx, 7, b"first"), Ok(()));
+        assert_eq!(send_one(&outbox, &rx, 7, b"second"), Ok(()));
+        assert!(send_one(&outbox, &rx, 7, b"over the bound").is_err());
+        assert_eq!(launch.receive().unwrap(), b"first");
+        assert_eq!(launch.receive().unwrap(), b"second");
+        assert!(launch.receive().is_none());
+    }
+
+    fn assert_dialer_exits_after_drop(launch: MailboxLaunch) {
+        let stop = launch.stop.clone();
+        drop(launch);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while Arc::strong_count(&stop) > 1 {
+            assert!(std::time::Instant::now() < deadline, "dialer still running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn dropping_the_launch_ends_an_idle_dialer_and_one_stuck_on_a_silent_guest() {
+        let idle = keys_dir();
+        let (_outbox, _rx) = fake_guest(idle.path());
+        assert_dialer_exits_after_drop(launch_against(idle.path(), LAUNCH_LIMITS));
+
+        let silent = keys_dir();
+        let listener = std::os::unix::net::UnixListener::bind(silent.path().join("port.sock"));
+        let launch = launch_against(silent.path(), LAUNCH_LIMITS);
+        let _held = listener.unwrap().accept().unwrap();
+        // Bounded by the serve I/O timeout, not by the guest.
+        assert_dialer_exits_after_drop(launch);
     }
 
     #[test]

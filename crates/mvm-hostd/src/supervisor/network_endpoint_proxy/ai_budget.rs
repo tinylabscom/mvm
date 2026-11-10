@@ -480,10 +480,7 @@ mod ai_metering_tests {
             AiPolicy::metered(),
         );
         let stream = service
-            .process_stream(
-                wire_to("https://api.openai.com/v1/chat/completions"),
-                &Default::default(),
-            )
+            .process_stream(wire_to("https://api.openai.com/v1/chat/completions"))
             .await
             .expect("stream request succeeded");
         assert_eq!(stream.status, 200);
@@ -675,12 +672,7 @@ mod ai_metering_tests {
             let (service, _) = metered_service(forwarder.clone(), strict_policy());
             let first = service.process(strict_request()).await;
             assert_eq!(matches!(first, WireResponse::Ok { .. }), !fail);
-            assert!(
-                service
-                    .process_stream(strict_request(), &Default::default())
-                    .await
-                    .is_err()
-            );
+            assert!(service.process_stream(strict_request()).await.is_err());
             assert!(matches!(
                 service.process(strict_request()).await,
                 WireResponse::Refused { .. }
@@ -699,19 +691,9 @@ mod ai_metering_tests {
         let mut alias = strict_request();
         alias.body_b64 =
             B64.encode(br#"{"model":"claude-haiku-4-5","max_tokens":1,"messages":[]}"#);
-        assert!(
-            service
-                .process_stream(alias, &Default::default())
-                .await
-                .is_err()
-        );
+        assert!(service.process_stream(alias).await.is_err());
         assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert!(
-            service
-                .process_stream(strict_request(), &Default::default())
-                .await
-                .is_ok()
-        );
+        assert!(service.process_stream(strict_request()).await.is_ok());
         assert!(matches!(
             service.process(strict_request()).await,
             WireResponse::Refused { .. }
@@ -738,9 +720,7 @@ mod ai_metering_tests {
             let (sender, receiver) = tokio::sync::mpsc::channel(1);
             sender.send(zeroize::Zeroizing::new(bytes)).await.unwrap();
             drop(sender);
-            let result = service
-                .process_body_stream(head, receiver, &Default::default())
-                .await;
+            let result = service.process_body_stream(head, receiver).await;
             assert_eq!(result.is_ok(), expected_success);
         }
         assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -763,7 +743,7 @@ mod ai_metering_tests {
         let (_sender, receiver) = tokio::sync::mpsc::channel(1);
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            service.process_body_stream(head, receiver, &Default::default()),
+            service.process_body_stream(head, receiver),
         )
         .await;
         assert!(
@@ -800,7 +780,7 @@ mod ai_metering_tests {
             .unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            service.process_body_stream(head, receiver, &Default::default()),
+            service.process_body_stream(head, receiver),
         )
         .await;
         assert!(
@@ -835,12 +815,7 @@ mod ai_metering_tests {
                 .unwrap();
         }
         drop(sender);
-        assert!(
-            service
-                .process_body_stream(head, receiver, &Default::default())
-                .await
-                .is_ok()
-        );
+        assert!(service.process_body_stream(head, receiver).await.is_ok());
         assert_eq!(forwarder.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 

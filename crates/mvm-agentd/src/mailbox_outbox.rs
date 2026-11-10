@@ -1,9 +1,10 @@
-//! Guest side of the mailbox port: when the host dials it, send the one
-//! plaintext message the workload left in the outbox and return the host's
-//! verdict.
+//! Guest side of the mailbox port: when the host dials it, send the
+//! plaintext message the workload left in the outbox, consume it, and return
+//! the host's verdict.
 //!
 //! The guest holds no key and seals nothing. The outbox carries a stable
-//! message ID, recipient and body; the host seals and signs under the capability the signed
+//! message ID, recipient (`OWN_MAILBOX_RECIPIENT` or mailbox ID for its own
+//! mailbox), and body; the host seals and signs under the capability the signed
 //! plan granted, then admits it. Encryption is host to host.
 //!
 //! [`write_outbox`] is the workload side: it leaves that one message where
@@ -71,8 +72,10 @@ pub fn forward_outbox<S: Read + Write>(stream: &mut S, outbox: &Path) -> Result<
     let message = OutboxMessage::decode(&bytes)?;
     match send_outbox_message(stream, &message) {
         Ok(()) => {}
-        Err(refusal @ (Refusal::RetriesExhausted | Refusal::Oversized(_))) => {
-            let prefix = if matches!(refusal, Refusal::Oversized(_)) {
+        Err(
+            refusal @ (Refusal::RetriesExhausted | Refusal::Oversized(_) | Refusal::NotAuthorized),
+        ) => {
+            let prefix = if matches!(refusal, Refusal::Oversized(_) | Refusal::NotAuthorized) {
                 "rejected"
             } else {
                 "uncertain"
@@ -482,6 +485,38 @@ mod tests {
             OutboxMessage::decode(&std::fs::read(rejected).unwrap()),
             Ok(pending)
         );
+    }
+
+    #[test]
+    fn an_unauthorized_recipient_is_terminal_without_dropping_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = dir.path().join("outbox");
+        let pending = message(b"wrong recipient");
+        write_outbox(&outbox, &pending).unwrap();
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let host = std::thread::spawn(move || {
+            let mut len = [0u8; 4];
+            theirs.read_exact(&mut len).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(len) as usize];
+            theirs.read_exact(&mut body).unwrap();
+            theirs.write_all(b"{\"Err\":\"NotAuthorized\"}").unwrap();
+        });
+        assert_eq!(
+            forward_outbox(&mut ours, &outbox),
+            Err(Refusal::NotAuthorized)
+        );
+        host.join().unwrap();
+        let archived = dir.path().join(format!(
+            "rejected-{}",
+            pending
+                .message_id
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ));
+        assert!(!outbox.exists());
+        assert_eq!(std::fs::read(archived).unwrap(), pending.encode());
     }
 
     #[test]

@@ -389,7 +389,14 @@ impl PublishedImageSet {
                     && member.target == target
             })
             .collect();
-        let artifact_count: usize = members.iter().map(|member| member.artifacts.len()).sum();
+        let artifact_count: usize = members
+            .iter()
+            .flat_map(|member| &member.artifacts)
+            .filter(|artifact| {
+                self.manifest.schema_version != mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION
+                    || artifact.format != mvm_core::image_set::ArtifactFormat::TarGz
+            })
+            .count();
         if artifact_count != 4 {
             bail!(
                 "signed image set declares {} default-workload artifacts for {arch}, expected 4",
@@ -398,6 +405,16 @@ impl PublishedImageSet {
         }
         for member in members {
             for artifact in &member.artifacts {
+                if self.manifest.schema_version == mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION
+                    && artifact.format == mvm_core::image_set::ArtifactFormat::TarGz
+                {
+                    anyhow::ensure!(
+                        matches!(member.role, ImageSetRole::WorkloadRootfs(_))
+                            && artifact.name.as_str().ends_with(".tar.gz"),
+                        "unexpected composition input in selected workload"
+                    );
+                    continue;
+                }
                 let name = artifact.name.as_str();
                 let destination = if self.manifest.schema_version
                     == mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION
@@ -421,17 +438,28 @@ impl PublishedImageSet {
             }
         }
 
-        // A base image provides no evidence about the separately attached runtime.
-        let (protocol_version, init_system, agent_binary) = (0, "cli-initramfs", "");
+        self.workload_sidecar("mvm-default-microvm", Vec::new())
+            .write_to_dir(dir)
+            .context("write default image sidecar derived from signed manifest")?;
+        Ok(())
+    }
+
+    /// Describe a derived sealed rootfs without attributing its application
+    /// or separately signed CLI runtime to the Linux base publisher.
+    pub fn workload_sidecar(
+        &self,
+        name: &str,
+        entrypoint: Vec<String>,
+    ) -> crate::builder_vm::GuestSidecar {
         crate::builder_vm::GuestSidecar {
-            name: "mvm-default-microvm".to_string(),
+            name: name.to_string(),
             accessible: false,
             sealed: true,
             entrypoint_kind: "command".to_string(),
-            entrypoint_argv: Vec::new(),
-            init_system: init_system.to_string(),
+            entrypoint_argv: entrypoint,
+            init_system: "cli-initramfs".to_string(),
             expected_boot_ms: 300,
-            agent_binary: agent_binary.to_string(),
+            agent_binary: String::new(),
             rootless_entrypoint: true,
             hypervisor: "firecracker".to_string(),
             overlay_aware: true,
@@ -439,7 +467,7 @@ impl PublishedImageSet {
             image_tag: String::new(),
             source: String::new(),
             built_at: String::new(),
-            protocol_version,
+            protocol_version: 0,
             generator_rev: self
                 .manifest
                 .mvm_source_commit
@@ -447,9 +475,59 @@ impl PublishedImageSet {
                 .map_or_else(String::new, |commit| commit.as_str().to_string()),
             libc: Default::default(),
         }
-        .write_to_dir(dir)
-        .context("write default image sidecar derived from signed manifest")?;
-        Ok(())
+    }
+
+    /// Fetch a signed production base's composition source, not a boot image.
+    ///
+    /// Historical sets lacking this input cannot silently fall back to
+    /// extracting ext4. The caller must still check the tar and seal the
+    /// assembled output before it becomes a bootable application.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing or ambiguous inputs, wrong schema and changed bytes.
+    pub fn fetch_workload_composition_tar(
+        &self,
+        arch: GuestArch,
+        profile: WorkloadImageProfile,
+        dest: &Path,
+    ) -> Result<Sha256Hex> {
+        anyhow::ensure!(
+            self.manifest.schema_version == mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION,
+            "composition tar requires a signed Linux-layer image set"
+        );
+        let members: Vec<_> = self
+            .manifest
+            .members
+            .iter()
+            .filter(|member| {
+                member.role == ImageSetRole::WorkloadRootfs(profile)
+                    && member.target == MemberTarget::Arch(arch)
+                    && member.build_mode.is_none()
+            })
+            .collect();
+        anyhow::ensure!(
+            members.len() == 1,
+            "expected one production base for {arch}"
+        );
+        let tar: Vec<_> = members[0]
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.format == mvm_core::image_set::ArtifactFormat::TarGz
+                    && artifact.name.as_str().ends_with(".tar.gz")
+            })
+            .collect();
+        anyhow::ensure!(
+            tar.len() == 1,
+            "expected one signed base composition tar for {arch}"
+        );
+        anyhow::ensure!(
+            tar[0].size > 0 && tar[0].size <= 2 * 1024 * 1024 * 1024,
+            "signed base composition tar exceeds its size bound"
+        );
+        self.fetch_artifact(tar[0], dest)?;
+        Ok(tar[0].sha256.clone())
     }
 
     /// The `image-set/v*` release tag these members were published under.
@@ -702,6 +780,7 @@ fn installed_workload_artifact_name(
         ArtifactFormat::VerityHashTree => Ok(Some("rootfs.verity")),
         ArtifactFormat::VerityRootHash => Ok(Some("rootfs.roothash")),
         ArtifactFormat::Json | ArtifactFormat::Text => Ok(None),
+        ArtifactFormat::TarGz if artifact.name.as_str().ends_with(".tar.gz") => Ok(None),
         ArtifactFormat::Kernel(_) | ArtifactFormat::TarGz => {
             bail!("unexpected workload root artifact format")
         }
@@ -723,8 +802,8 @@ fn verify_installed_workload_files(
     }) {
         for artifact in &member.artifacts {
             let Some(installed) = installed_workload_artifact_name(member.role, artifact)? else {
-                // Acquisition stamps advisory metadata; rewritten fields
-                // are not authenticated boot bytes.
+                // Advisory metadata and signed composition input are not
+                // installed as boot artifacts by this path.
                 continue;
             };
             if installed == "vmlinux" {

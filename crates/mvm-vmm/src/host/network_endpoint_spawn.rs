@@ -161,7 +161,7 @@ pub enum EndpointLifetime {
     /// serving after its launcher exits for as long as a VM process recorded
     /// there is alive, and stops when neither is. A detached machine needs
     /// this: `machine start` returns while the VM keeps running, and an
-    /// endpoint that went with it left the VM's egress and tool-decision
+    /// endpoint that went with it would leave the VM's egress and credential
     /// sockets bound to nothing.
     Vm,
 }
@@ -544,8 +544,6 @@ pub struct SubstitutionSpawnParams<'a> {
     pub secrets: &'a [SecretBinding],
     /// Per-destination redaction policy from the signed plan.
     pub redaction: &'a mvm_core::policy::RedactionPolicy,
-    /// Resolved tool rules from the admitted execution plan.
-    pub tools: Option<&'a mvm_contract::policy::tool_rules::ToolRules>,
     /// Backend-shaped guest→host channel: `Vsock` (FC/QEMU) or `Uds`
     /// (libkrun/HVF, the per-VM socket the VMM proxies).
     pub transport: EndpointTransport,
@@ -608,7 +606,6 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     tenant: Option<&'a str>,
     secrets: Option<&'a [SecretBinding]>,
     redaction: Option<&'a mvm_core::policy::RedactionPolicy>,
-    tools: Option<&'a mvm_contract::policy::tool_rules::ToolRules>,
     transport: Option<EndpointTransport>,
     tls_intermediate: Option<(String, String)>,
     telemetry: bool,
@@ -633,7 +630,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             tenant: None,
             secrets: None,
             redaction: None,
-            tools: None,
             transport: None,
             tls_intermediate: None,
             network_policy: None,
@@ -685,13 +681,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
     #[must_use]
     pub fn redaction(mut self, redaction: &'a mvm_core::policy::RedactionPolicy) -> Self {
         self.redaction = Some(redaction);
-        self
-    }
-
-    /// Set resolved tool rules from the admitted plan.
-    #[must_use]
-    pub fn tools(mut self, tools: &'a mvm_contract::policy::tool_rules::ToolRules) -> Self {
-        self.tools = Some(tools);
         self
     }
 
@@ -803,7 +792,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
                 "SubstitutionSpawnParams",
                 "redaction",
             ))?,
-            tools: self.tools,
             transport: self.transport.ok_or(BuilderError::missing(
                 "SubstitutionSpawnParams",
                 "transport",
@@ -853,7 +841,6 @@ pub fn endpoint_config_for_identity(
         tenant: "local",
         secrets: &[],
         redaction: &redaction,
-        tools: None,
         transport: EndpointTransport::Uds {
             path: PathBuf::from("/nonexistent/vsock-5253.sock"),
         },
@@ -900,9 +887,6 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         "network_limits": params.network_limits,
         "ingress": params.ingress,
     });
-    if let Some(tools) = params.tools.filter(|rules| !rules.is_empty()) {
-        cfg["tools"] = serde_json::to_value(tools).expect("ToolRules serializes to JSON");
-    }
     if params.telemetry {
         // The embedded collector's inputs, derived here so the spawner's one
         // provisioning decision fans out to every path the endpoint needs.
@@ -2222,7 +2206,6 @@ mod tests {
             tenant: "tenant-x",
             secrets: &[],
             redaction: &redaction,
-            tools: None,
             transport: EndpointTransport::Uds { path: sock.clone() },
             egress_proxy: None,
             session_marker: None,
@@ -2288,7 +2271,6 @@ mod tests {
             tenant: "tenant-x",
             secrets: &[],
             redaction: &redaction,
-            tools: None,
             transport: EndpointTransport::Uds {
                 path: dir.join("vsock-5253.sock"),
             },
@@ -2364,7 +2346,6 @@ mod tests {
             tenant: "tenant-x",
             secrets: &[],
             redaction: &redaction,
-            tools: None,
             transport: EndpointTransport::Uds {
                 path: dir.join("vsock-5253.sock"),
             },
@@ -2436,7 +2417,6 @@ mod tests {
             tenant: "tenant-x",
             secrets: &[],
             redaction: &redaction,
-            tools: None,
             transport: EndpointTransport::Uds {
                 path: dir.join("vsock-5253.sock"),
             },
@@ -2502,7 +2482,6 @@ mod tests {
             tenant: "tenant-x",
             secrets: &[],
             redaction,
-            tools: None,
             transport: EndpointTransport::Uds {
                 path: sock.to_path_buf(),
             },
@@ -2645,26 +2624,6 @@ mod tests {
         let round: NetworkPolicy = serde_json::from_value(cfg["network_policy"].clone())
             .expect("network_policy deserializes back");
         assert_eq!(round, policy);
-    }
-
-    #[test]
-    fn endpoint_config_json_carries_only_nonempty_admitted_tool_rules() {
-        use mvm_contract::policy::tool_rules::ToolRules;
-
-        let redaction = mvm_core::policy::RedactionPolicy::default();
-        let sock = Path::new("/tmp/vsock-5253.sock");
-        let mut params = minimal_params(&redaction, sock, None);
-        assert!(build_endpoint_config_json(&params).get("tools").is_none());
-
-        let rules = ToolRules {
-            allow: vec!["shell".into()],
-            ..ToolRules::default()
-        };
-        params.tools = Some(&rules);
-        let config = build_endpoint_config_json(&params);
-        let round: ToolRules =
-            serde_json::from_value(config["tools"].clone()).expect("decode tool rules");
-        assert_eq!(round, rules);
     }
 
     // The converged FlowMux path: identity material must land in the stdin

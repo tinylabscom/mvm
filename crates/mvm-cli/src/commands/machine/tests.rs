@@ -1,3 +1,4 @@
+use super::lifecycle::finish_machine_exec;
 use super::receipt::MachineStartInitPolicy;
 use super::remove::{
     remove_machine_runtime_state, remove_machine_spec, resolve_remove_targets, rm_running_refusal,
@@ -84,6 +85,35 @@ fn exec_refuses_a_torn_journal_before_command_or_shell_dispatch() {
         assert_eq!(std::fs::read(&path).expect("unchanged"), torn);
         assert!(!dir.join("input-artifacts").exists());
     }
+}
+
+#[test]
+fn nonzero_machine_exec_finishes_its_journal_before_returning_the_guest_status() {
+    let _state = IsolatedMachineState::new();
+    let dir = config::machine_state_dir("nonzero-exec");
+    let _lock = input_journal::lock(&dir).expect("journal lock");
+    let first = input_journal::begin_exec(&dir, &["false".into()]).expect("begin first exec");
+
+    assert_eq!(
+        finish_machine_exec(&dir, first, Ok(7)).expect("finish nonzero exec"),
+        7
+    );
+    assert_eq!(input_journal::cursor(&dir).expect("finished cursor"), 1);
+    assert!(!input_journal::read(&dir).expect("journal")[0].succeeded);
+
+    let second = input_journal::begin_exec(&dir, &["echo".into()]).expect("begin next exec");
+    assert_eq!(
+        finish_machine_exec(&dir, second, Ok(0)).expect("finish next exec"),
+        0
+    );
+    assert_eq!(input_journal::cursor(&dir).expect("next cursor"), 2);
+
+    let third = input_journal::begin_exec(&dir, &["missing".into()]).expect("begin third exec");
+    let error = finish_machine_exec(&dir, third, Err(anyhow::anyhow!("transport failed")))
+        .expect_err("transport error is still returned");
+    assert_eq!(error.to_string(), "transport failed");
+    assert_eq!(input_journal::cursor(&dir).expect("failed cursor"), 3);
+    assert!(!input_journal::read(&dir).expect("journal")[2].succeeded);
 }
 
 #[test]
@@ -186,6 +216,7 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::Stop(_) => "stop",
         MachineAction::Quarantine(_) => "quarantine",
         MachineAction::Replace(_) => "replace",
+        MachineAction::Mailbox(_) => "mailbox",
         MachineAction::Reconfigure(_) => "reconfigure",
         MachineAction::Rm(_) => "rm",
         MachineAction::Ls(_) => "ls",
@@ -1147,7 +1178,6 @@ fn spec_fixture(name: &str) -> MachineSpec {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: vec![],
         peer: Vec::new(),
@@ -1215,28 +1245,16 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
 }
 
 #[test]
-fn run_spec_records_tool_rules_with_their_scope() {
-    let _state = IsolatedMachineState::new();
-    let mut args =
-        parse_run(&["run", "--image", "alpine:3.20", "--name", "toolbox"]).expect("parse");
-    args.run.applied_policy = Some(
-        toml::from_str(
-            "[tools]\nallow = [\"git\"]\n[tools.detail.git]\nargv = [\"git status*\"]\n",
-        )
-        .expect("tool policy parses"),
-    );
-    let spec = machine_run_spec(&args, "toolbox".to_string(), None).expect("spec");
-    assert_eq!(spec.tools.allow, ["git"]);
-    assert_eq!(spec.tools.detail["git"].argv, ["git status*"]);
-
-    args.run.applied_policy = Some(
-        toml::from_str(
-            "[tools]\nallow = [\"git\"]\n[tools.detail.git]\nroutes = [\"example.com:443\"]\n",
-        )
-        .expect("scoped route parses"),
-    );
-    let spec = machine_run_spec(&args, "toolbox".to_string(), None).expect("scoped spec");
-    assert_eq!(spec.tools.detail["git"].routes, ["example.com:443"]);
+fn run_spec_refuses_tool_rules() {
+    for text in [
+        "[tools]\nallow = [\"git\"]\n[tools.detail.git]\nargv = [\"git status*\"]\n",
+        "[tools]\nallow = [\"git\"]\n[tools.detail.git]\nroutes = [\"example.com:443\"]\n",
+    ] {
+        assert!(
+            toml::from_str::<mvm_client::policy_profiles::PolicyBody>(text).is_err(),
+            "{text}"
+        );
+    }
 }
 
 #[test]
@@ -2168,6 +2186,12 @@ fn readme_persistent_machine_workflow_parses() {
         MachineAction::Replace(_)
     ));
     assert!(matches!(
+        parse(&["mailbox", "recv", "web"]).expect("machine mailbox recv parses"),
+        MachineAction::Mailbox(MachineMailboxAction::Recv { name }) if name == "web"
+    ));
+    assert!(parse(&["mailbox", "recv"]).is_err());
+    assert!(parse(&["mailbox", "send", "web"]).is_err());
+    assert!(matches!(
         parse(&["rm", "web"]).expect("README machine rm command parses"),
         MachineAction::Rm(_)
     ));
@@ -2485,7 +2509,6 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2751,7 +2774,6 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         resolved_digest: Some("sha256:abc".to_string()),
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: vec!["api.example.com".to_string()],
         peer: Vec::new(),
@@ -2850,7 +2872,6 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: vec!["api.example.com".to_string()],
         peer: Vec::new(),
@@ -2924,7 +2945,6 @@ fn create_refuses_overwrite_without_force() {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -2965,7 +2985,6 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -3008,7 +3027,6 @@ fn seed_machine_spec(name: &str) {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
@@ -3405,7 +3423,6 @@ fn top_level_cli_routes_machine_exec() {
             MachineAction::Exec(exec) => {
                 assert_eq!(exec.name, "web");
                 assert_eq!(exec.argv, vec!["echo", "hi"]);
-                assert_eq!(exec.tool, None);
             }
             other => panic!("expected exec action, got {other:?}"),
         },
@@ -3414,30 +3431,21 @@ fn top_level_cli_routes_machine_exec() {
 }
 
 #[test]
-fn top_level_cli_routes_declared_machine_tool_without_running_it() {
-    let cli = Cli::try_parse_from([
-        "mvmctl",
-        "machine",
-        "exec",
-        "web",
-        "--tool",
-        "read",
-        "--",
-        "/bin/echo",
-        "hi",
-    ])
-    .expect("top-level parse");
-    match cli.command {
-        Commands::Machine(args) => match args.action {
-            MachineAction::Exec(exec) => {
-                assert_eq!(exec.tool.as_deref(), Some("read"));
-                assert_eq!(exec.argv, vec!["/bin/echo", "hi"]);
-                assert!(!exec.tty);
-            }
-            other => panic!("expected exec action, got {other:?}"),
-        },
-        other => panic!("expected Commands::Machine, got {other:?}"),
-    }
+fn top_level_cli_refuses_retired_tool_flag() {
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "machine",
+            "exec",
+            "web",
+            "--tool",
+            "read",
+            "--",
+            "/bin/echo",
+            "hi",
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -3690,7 +3698,6 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: Default::default(),
         net: false,
         allow_host: vec![],
         peer: Vec::new(),

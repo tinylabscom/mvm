@@ -293,7 +293,6 @@ pub(super) fn spawn_forward(task: ForwardTask) {
     runtime.spawn(async move {
         let request_url = head.url.clone();
         // A typed HTTP flow names no invocation, so it belongs to no tool.
-        let unattributed = crate::supervisor::network_endpoint_proxy::FlowAttribution::default();
         let result = tokio::select! {
             biased;
             canceled = cancellation.changed() => {
@@ -305,7 +304,7 @@ pub(super) fn spawn_forward(task: ForwardTask) {
                 service.audit_http_stream_failure(&request_url, reason).await;
                 Ok(())
             }
-            response = service.process_body_stream(head, body, &unattributed) => {
+            response = service.process_body_stream(head, body) => {
                 match response {
                     Ok(response) => write_stream_response(&session, &writer, stream_id, response).await,
                     Err(refusal) => write_response(&session, &writer, stream_id, refusal),

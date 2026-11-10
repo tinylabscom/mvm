@@ -35,6 +35,8 @@ pub enum Refusal {
     StorageFull,
     #[error("mailbox retry budget exhausted; reconcile the stable message ID")]
     RetriesExhausted,
+    #[error("mailbox operation is not authorized")]
+    NotAuthorized,
     #[error("frame is malformed")]
     Malformed,
     #[error("destination is unavailable")]
@@ -68,10 +70,16 @@ pub fn decode_frame(body: &[u8]) -> Result<(SignedMailboxCapability, MailboxEnve
     ))
 }
 
+/// A guest may name its own granted mailbox without knowing its host-derived
+/// recipient principal. The host resolves this alias before admission.
+pub const OWN_MAILBOX_RECIPIENT: [u8; 32] = [0; 32];
+
 /// What a guest asks its host to send: an immutable operation identity,
 /// recipient, and plaintext body.
 /// Nothing here is sealed or signed; the host does that under keys the guest
-/// never holds. Wire form: 32 recipient bytes, 32 message-ID bytes, then body.
+/// never holds. Recipient may name [`OWN_MAILBOX_RECIPIENT`] or the mailbox
+/// ID; the host resolves either to the grant's recipient. Wire form: 32
+/// recipient bytes, 32 message-ID bytes, then body.
 #[derive(Clone, PartialEq, Eq)]
 pub struct OutboxMessage {
     pub recipient: PrincipalId,

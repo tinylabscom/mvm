@@ -720,8 +720,8 @@ pub struct AuditTaxonomy {
 ///
 /// This is the binding between a plan's declared purpose and the
 /// concrete enforcement surfaces the runtime must use. The separate
-/// top-level `network_policy`, `egress_policy`, `tool_policy`, and
-/// `secrets` fields remain for backwards-compatible consumers; this
+/// top-level `network_policy`, `egress_policy`, and `secrets` fields
+/// remain for backwards-compatible consumers; this
 /// profile records why those refs were selected and which taxonomy
 /// audit should use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -733,7 +733,6 @@ pub struct AdmissionProfile {
     pub network_policy: PolicyRef,
     pub fs_policy: FsPolicyRef,
     pub egress_policy: PolicyRef,
-    pub tool_policy: PolicyRef,
     pub secret_release: SecretReleasePolicy,
     pub audit: AuditTaxonomy,
 }
@@ -752,8 +751,7 @@ impl AdmissionProfile {
             seccomp_tier,
             network_policy: policy.clone(),
             fs_policy,
-            egress_policy: policy.clone(),
-            tool_policy: policy,
+            egress_policy: policy,
             secret_release: SecretReleasePolicy::None,
             audit: AuditTaxonomy {
                 event_prefix: intent.replace(':', "."),

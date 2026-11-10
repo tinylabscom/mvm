@@ -80,8 +80,6 @@ pub struct PersistentImageStartParams<'a> {
     pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     /// Publisher-verified image pack to bind on every start, if selected.
     pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
-    /// Resolved per-tool rules persisted with the machine.
-    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     /// True when the caller will run a trailing `-- argv` command after boot
     /// (i.e. the machine is booted only to exec an ad-hoc command). An ad-hoc
     /// command issues the DevOnly `Exec` verb, so the admitted plan must NOT
@@ -235,7 +233,6 @@ fn prepare_persistent_boot(
         agent_verb,
         caller_commitment,
         registry_pack_image,
-        tools,
         has_ad_hoc_argv,
         grants,
         mailbox,
@@ -375,7 +372,6 @@ fn prepare_persistent_boot(
                         .map(crate::admission::AssetSpec::RegistryPack)
                         .collect(),
                     redaction: mvm_core::policy::RedactionPolicy::default(),
-                    tools,
                     network_policy: network_policy.clone(),
                     agent_verb_override: agent_verb.to_vec(),
                     // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
@@ -498,7 +494,7 @@ fn finish_legacy_persistent(
     let started = match (|| -> Result<_> {
         let mut images = prepared_volumes.take_writable_images();
         complete_writable_images(&start_config, &mut images)?;
-        mvm_hostd::mailbox_process::require_servable(&start_config, backend.kind())?;
+        mvm_hostd::mailbox_process::require_servable(&start_config, &backend)?;
         Ok(crate::boot::start_prepared_custodied(
             backend,
             &start_config,

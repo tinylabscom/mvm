@@ -28,7 +28,7 @@ use mvm_core::image_set_revocation::{
 use mvm_core::packs::PackRevocationChecker;
 use mvm_core::plan::bundle::{CapturedCanonicalLinuxInputs, PlanArtifact};
 #[cfg(feature = "host-state")]
-use mvm_core::plan::bundle::{FsTrustStore, capture_canonical_linux_inputs};
+use mvm_core::plan::bundle::{TrustStore, capture_canonical_linux_inputs};
 use mvm_core::vm_backend::BackendKind;
 #[cfg(feature = "host-state")]
 use std::fs::File;
@@ -275,18 +275,17 @@ pub fn supports_lifetime_custody(backend: BackendKind) -> bool {
 /// signed feed through the existing rollback-protected store. Missing, stale,
 /// invalid, revoked or rolled-back evidence refuses. No download, trust-key
 /// enrollment, source build, runtime selection or native start occurs here.
+/// The caller supplies the trust already used to authenticate the bundle's
+/// origin; host-local signing authority requires a signed local-build label.
 #[cfg(feature = "host-state")]
 pub fn prepare_canonical_linux(
     archive: &Path,
     pin: &PlanArtifact,
     backend: BackendKind,
     host_protocols: HostProtocolSupport,
+    trust: &dyn TrustStore,
 ) -> Result<PreparedCanonicalLinux> {
-    let trust = crate::registry_pack::application_bundle::trust_for_installed_archive(
-        FsTrustStore::default_path()?,
-        archive,
-    );
-    let inputs = capture_canonical_linux_inputs(archive, pin, &trust)?;
+    let inputs = capture_canonical_linux_inputs(archive, pin, trust)?;
     prepare_with_clock(inputs, backend, host_protocols, Utc::now)
 }
 

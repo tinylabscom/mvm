@@ -16,8 +16,9 @@ use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_po
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::protocol::hvf_control::HvfInstance;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, StandbyError, StandbyHandle, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
+    LayerCoverage, ResourceControls, StandbyError, StandbyHandle, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_control_transport as stop_wire;
@@ -299,6 +300,7 @@ fn relay_supervisor_config_with_handoff(
         .filter(|p| {
             p.direction == mvm_vmm::driver::spec::VsockDirection::HostDials
                 && (p.service == GuestService::Telemetry
+                    || p.service == GuestService::Mailbox
                     || matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port)))
         })
         .map(|p| HostDialSocket {
@@ -797,6 +799,9 @@ impl VmmDriver for HvfDriver {
             // GPU remoting rides the same per-port vsock relay as every
             // other guest-dialed channel; the host endpoint binds the UDS.
             gpu: true,
+            // A host-dialed `Mailbox` port is bridged to a per-port socket,
+            // like telemetry.
+            guest_mailbox: true,
 
             // The hvf VMM is vsock-only by design: no guest NIC, and egress rides
             // the host vsock proxy (the per-VM gating endpoint), not a guest NIC.
@@ -1009,6 +1014,12 @@ impl VmmDriver for HvfDriver {
         // the agent bridge is a fixed vsock port wired by the runner, not a
         // channel the driver answers on demand.
         bail!("hvf does not provide guest channel info")
+    }
+
+    fn host_dial_route(&self, state_dir: &Path, port: u32) -> Option<HostDialRoute> {
+        Some(HostDialRoute::PortSocket(vm_hvf_vsock_port_socket_at(
+            state_dir, port,
+        )))
     }
 
     fn workload_base_bootargs(&self, has_disk: bool) -> String {
@@ -1536,6 +1547,7 @@ mod tests {
         assert!(capabilities.standby_pool);
         assert!(capabilities.vsock);
         assert!(capabilities.gpu);
+        assert!(capabilities.guest_mailbox);
         assert!(capabilities.no_routable_guest_nic);
         assert!(capabilities.host_vsock_proxy);
         assert!(capabilities.free_page_reporting);

@@ -6,13 +6,13 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{PackReference, RegistryPackVerificationError};
+use super::{MAX_REGISTRY_DESCRIPTOR_BYTES, PackReference, RegistryPackVerificationError};
 use crate::packs::Sha256Hex;
 use crate::plan::KeyId;
 
 /// The application wire format does not change the policy-manifest version.
 pub const APPLICATION_MANIFEST_SCHEMA_VERSION: u32 = 2;
-const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
+const MAX_DESCRIPTOR_BYTES: usize = MAX_REGISTRY_DESCRIPTOR_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ApplicationManifestKind {
@@ -110,7 +110,7 @@ pub fn parse_application_manifest(
     Ok(manifest)
 }
 
-fn deserialize_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+pub(super) fn deserialize_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,

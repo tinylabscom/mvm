@@ -16,7 +16,7 @@ use mvm_contract::protocol::vm_backend::BackendKind;
     ArgGroup::new("subject")
         .required(true)
         .multiple(false)
-        .args(["host", "path", "tool", "secret"])
+        .args(["host", "path", "secret"])
 ))]
 pub(in crate::commands) struct Args {
     /// Ask whether HOST[:PORT] is reachable (port defaults to 443)
@@ -31,9 +31,6 @@ pub(in crate::commands) struct Args {
     /// Ask whether this host path is shared with the workload
     #[arg(long, value_name = "PATH")]
     pub path: Option<PathBuf>,
-    /// Ask whether the authored policy allows this tool
-    #[arg(long, value_name = "TOOL")]
-    pub tool: Option<String>,
     /// Ask whether the authored policy binds this stored secret
     #[arg(long, value_name = "SECRET")]
     pub secret: Option<String>,
@@ -87,9 +84,6 @@ fn selected_query(args: &Args) -> Result<PolicyQuery> {
         let absolute = std::path::absolute(path)
             .with_context(|| format!("resolving path {}", path.display()))?;
         return Ok(PolicyQuery::Path(absolute));
-    }
-    if let Some(tool) = &args.tool {
-        return Ok(PolicyQuery::Tool(tool.clone()));
     }
     if let Some(secret) = &args.secret {
         return Ok(PolicyQuery::Secret(secret.clone()));
@@ -200,7 +194,6 @@ mod tests {
             method: None,
             request_path: None,
             path: None,
-            tool: None,
             secret: None,
             profile: Vec::new(),
             plan: None,
@@ -227,7 +220,6 @@ mod tests {
             method: None,
             request_path: None,
             path: None,
-            tool: None,
             secret: None,
             profile: Vec::new(),
             plan: Some(path),
@@ -256,7 +248,6 @@ mod tests {
             method: None,
             request_path: None,
             path: None,
-            tool: None,
             secret: Some("api".into()),
             profile: Vec::new(),
             plan: None,

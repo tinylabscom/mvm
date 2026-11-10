@@ -213,9 +213,9 @@ If the agent needs outbound access, issue a separate reviewed grant:
 }
 ```
 
-Do not let the model invent network destinations. The application should map
-approved tool capabilities to concrete policy, then pass only that policy to the
-sandbox.
+Do not let the model invent network destinations. The application or operator
+chooses the admitted destinations for the microVM; MVM enforces that network
+policy regardless of which application tool sends a request.
 
 ## Secrets
 

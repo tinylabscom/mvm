@@ -23,6 +23,7 @@ use mvm_core::mailbox::journal::{
     ReceivedMailboxMessage,
 };
 use mvm_core::mailbox::{MailboxError, OpenContext, ReplayIdentity};
+use mvm_core::vm_backend::HostDialRoute;
 
 use super::{GuestSealer, IO_TIMEOUT, MailboxLimits, MailboxPolicy, read_frame};
 
@@ -124,13 +125,11 @@ impl DurableMailboxService {
     /// and anchor have committed; an idle connection returns `false`.
     pub fn serve_guest(
         &self,
-        per_port: &Path,
-        firecracker_mux: &Path,
+        route: &HostDialRoute,
         sealer: &mut GuestSealer,
     ) -> std::io::Result<bool> {
-        let mut stream = crate::telemetry_collector::dial_guest_port(
-            per_port,
-            firecracker_mux,
+        let mut stream = crate::telemetry_collector::dial_guest_route(
+            route,
             mvm_contract::protocol::mailbox::MAILBOX_PORT,
         )?;
         stream.set_read_timeout(Some(std::time::Duration::from_secs(7)))?;
@@ -271,6 +270,7 @@ fn admit(
             |tip| shared.anchor.commit(tip),
         )
         .map_err(|error| match error {
+            JournalError::Mailbox(MailboxError::WrongRecipient) => Refusal::NotAuthorized,
             JournalError::Mailbox(MailboxError::CapabilityPayloadExceeded) => {
                 Refusal::Oversized(capability.grant.max_payload_bytes as usize)
             }

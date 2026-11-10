@@ -634,7 +634,7 @@ The IR hash isn't decorative — it's load-bearing in the admission path.
 5. Enforces validity window (G4) and nonce replay-store.
 6. Dispatches to the backend.
 
-The admission profile is the security-posture binding. It records the declared intent, selected seccomp tier, network/filesystem/egress/tool policy refs, secret-release posture, and audit taxonomy. It is deliberately not a new runtime engine: seccomp is still enforced by the guest manifest, network and tool policies are still enforced by their existing resolvers. The profile makes those choices signed and auditable.
+The admission profile is the security-posture binding. It records the declared intent, selected seccomp tier, network/filesystem/egress policy refs, secret-release posture, and audit taxonomy. It is deliberately not a new runtime engine: seccomp is still enforced by the guest manifest and network policy by the admitted host endpoint. The profile makes those choices signed and auditable.
 
 **Audit emissions** (`crates/mvm-hostd/src/supervisor/audit_recorder.rs`):
 

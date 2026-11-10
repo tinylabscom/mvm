@@ -182,6 +182,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
             #[cfg(not(unix))]
             anyhow::bail!("kernel generation retained: lifetime release unsupported");
         }
+        lifecycle.release_installed_bundle_after_stop(&id.0)?;
 
         let timing = StopTiming {
             attach,
@@ -291,6 +292,10 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
 
     fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
         self.driver.guest_channel_info(id)
+    }
+
+    fn host_dial_route(&self, state_dir: &std::path::Path, port: u32) -> Option<HostDialRoute> {
+        self.driver.host_dial_route(state_dir, port)
     }
 
     fn is_available(&self) -> Result<bool> {

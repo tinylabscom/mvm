@@ -651,6 +651,9 @@ fn declarations_for(
             },
         ));
     }
+    if let Some(composition) = &inputs.local_composition {
+        members.push(BundleMember::LocalComposition(composition.clone()));
+    }
     if inputs.boot_assets.is_some() {
         members.push(BundleMember::EmbeddedBootAssets {
             manifest_artifact: BOOT_MANIFEST_NAME.to_string(),
@@ -683,7 +686,7 @@ fn declarations_for(
 /// bundle stays readable by the oldest reader that understands it: 3 for
 /// plain declarations, 4 for historical boot assets, 5 for an environment
 /// descriptor, 6 for a portable CLI-runtime closure, and 7 for canonical
-/// Linux publisher/revocation evidence.
+/// Linux publisher/revocation evidence; 8 binds local composition inputs.
 fn schema_for(members: &[BundleMember]) -> u32 {
     members
         .iter()

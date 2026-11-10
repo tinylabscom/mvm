@@ -137,6 +137,7 @@ pub(crate) fn init_mailbox() {
 
 /// One host connection at a time, each answered from the outbox.
 fn accept_loop(listener_fd: RawFd) {
+    let mut refused = 0u32;
     while !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
         let Some(cfd) = accept_vsock(listener_fd, "mailbox") else {
             continue;
@@ -154,7 +155,10 @@ fn accept_loop(listener_fd: RawFd) {
         ) {
             Ok(()) | Err(Refusal::Unavailable) => {}
             Err(refusal) => {
-                eprintln!("mvm-guest-agent: mailbox frame not delivered: {refusal}")
+                if refused < 3 || refused.is_multiple_of(100) {
+                    eprintln!("mvm-guest-agent: mailbox frame not delivered: {refusal}");
+                }
+                refused = refused.saturating_add(1);
             }
         }
     }

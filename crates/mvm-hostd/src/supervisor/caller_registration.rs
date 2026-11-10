@@ -600,6 +600,9 @@ fn reopen_caller_image(
                     ));
                 }
             }
+            VerifiedRegistryManifest::RuntimeLayer(_) => {
+                anyhow::bail!("a runtime layer cannot be used as a caller boot image");
+            }
             VerifiedRegistryManifest::Application(_) => {
                 use mvm_core::plan::bundle::{
                     ArtifactRole, BundleRegistry, FsBundleResolver, FsTrustStore,
@@ -626,12 +629,14 @@ fn reopen_caller_image(
                     plan.bundle.as_ref() == Some(&original),
                     "caller application differs from original bundle"
                 );
+                let archive = registry.archive_path(&original.bundle_sha256);
+                let trust =
+                    mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
+                        trust, &archive,
+                    );
                 let owner =
                     std::sync::Arc::new(mvm_core::canonical_linux::prepare_canonical_linux(
-                        &registry.archive_path(&original.bundle_sha256),
-                        &original,
-                        backend,
-                        protocols,
+                        &archive, &original, backend, protocols, &trust,
                     )?);
                 anyhow::ensure!(owner.arch() == arch, "caller kernel architecture differs");
                 // This projection is only for independent byte authentication.
