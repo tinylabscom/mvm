@@ -18,6 +18,10 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -25,6 +29,7 @@ jobs:
       - name: Reproduce and verify an unpublished Python runtime input
         env:
           MVM_EMBED: "0"
+          ARCH: ${{ matrix.arch }}
           IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
         run: |
           set -euo pipefail
@@ -32,15 +37,26 @@ jobs:
           command -v zstd
           tmp="$(mktemp -d)"
           trap 'rm -rf -- "$tmp"' EXIT
+          case "$ARCH" in
+            x86_64)
+              source_url='https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18%2B20261026-x86_64-unknown-linux-musl-lto%2Bstatic-full.tar.zst'
+              expected='9f5dfaf983a54a62212184f08f5dfc36d1474052d71a799cdfd3f1a53dc970d4'
+              size=63836160
+              ;;
+            aarch64)
+              source_url='https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18%2B20261026-aarch64-unknown-linux-musl-lto%2Bstatic-full.tar.zst'
+              expected='2c65e1c400098a3a8141a58f2f2f66a3df667d5f947d86d982f3d115b023b0f2'
+              size=64798720
+              ;;
+          esac
           curl -fLsS --retry 2 --max-time 120 \
-            'https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18%2B20261026-x86_64-unknown-linux-musl-lto%2Bstatic-full.tar.zst' \
+            "$source_url" \
             -o "$tmp/source.tar.zst"
-          python3 scripts/build-python-runtime-layer.py "$tmp/source.tar.zst" "$tmp/layer.tar"
-          python3 scripts/build-python-runtime-layer.py "$tmp/source.tar.zst" "$tmp/again.tar"
+          python3 scripts/build-python-runtime-layer.py --arch "$ARCH" "$tmp/source.tar.zst" "$tmp/layer.tar"
+          python3 scripts/build-python-runtime-layer.py --arch "$ARCH" "$tmp/source.tar.zst" "$tmp/again.tar"
           cmp "$tmp/layer.tar" "$tmp/again.tar"
-          printf '9f5dfaf983a54a62212184f08f5dfc36d1474052d71a799cdfd3f1a53dc970d4  %s\n' \
-            "$tmp/layer.tar" | sha256sum --check
-          test "$(stat -c %s "$tmp/layer.tar")" -eq 63836160
+          printf '%s  %s\n' "$expected" "$tmp/layer.tar" | sha256sum --check
+          test "$(stat -c %s "$tmp/layer.tar")" -eq "$size"
 
           mkdir -p "$tmp/files/pack"
           printf 'description = "Offline Python runtime"\nrequired = true\n[network]\nblock = true\n' \
@@ -58,7 +74,7 @@ jobs:
               "description": "Unpublished offline Python input test",
               "runtime_layer": {
                   "schema_version": 1,
-                  "guest_arch": "x86_64",
+                  "guest_arch": os.environ["ARCH"],
                   "dependencies": [],
                   "archive": {
                       "source": "https://example.invalid/unpublished/runtime/python/1.1.0/layer.tar",
