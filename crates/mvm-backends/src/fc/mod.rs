@@ -9,6 +9,7 @@ pub mod capabilities;
 pub mod control;
 pub mod daemon;
 pub mod fc_api;
+pub mod fetch;
 pub mod fork_devices;
 pub mod guards;
 pub mod host;
