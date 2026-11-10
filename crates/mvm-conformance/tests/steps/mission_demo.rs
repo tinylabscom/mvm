@@ -66,7 +66,7 @@ fn says_simulated(world: &mut CliWorld) {
     let out = stdout(world);
     assert!(
         out.contains(
-            "simulated: the three nodes are simulated nodes in one test process; their VMs are gated and audited but none boots here; node-to-node mailbox delivery is a local Unix socket or a loopback TCP transport (no Iroh, no cross-host transport); the booted-guest mailbox path is a separate manual Firecracker witness, see Demo status in specs/contracts/host-interface-distributed-execution.md"
+            "simulated: the three nodes are simulated nodes in one test process; their VMs are gated and audited but none boots here; node-to-node mailbox delivery is a local Unix socket or a loopback TCP transport (no Iroh, no cross-host transport); the booted-guest mailbox path is wired through the backend capability on Firecracker and HVF and live-witnessed by separate manual runs on each, not CI lanes, see Demo status in specs/contracts/host-interface-distributed-execution.md"
         ),
         "the demo must disclose what it simulates:\n{out}"
     );

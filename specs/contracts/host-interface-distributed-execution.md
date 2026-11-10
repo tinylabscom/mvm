@@ -500,12 +500,17 @@ is not built.
 - The guest mailbox host process (`mvm-mailbox`) and the guest-side outbox are
   covered by their own tests; no booted guest is involved.
 
-#### Live-witnessed (manual, Firecracker)
+#### Live-witnessed (manual, Firecracker and HVF)
 
-Three manual runs on a real Firecracker KVM host (dev profile, alpine guest)
-observed the guest-mailbox chain end to end. This is not a CI lane: it needs
-KVM and a runtime bootstrap of roughly 22 minutes, and the result is recorded
-in issue #5121. Observed:
+The guest mailbox is a backend capability (`VmCapabilities::guest_mailbox`) with
+a host-dialed vsock port (`GuestService::Mailbox`). Firecracker and HVF declare
+it and serve it. Each was witnessed by its own manual run, and neither is a CI
+lane: Firecracker needs a KVM host and a runtime bootstrap of roughly 22
+minutes (recorded in issue #5121), and HVF needs a macOS 26+ Apple Silicon
+host with a source-built guest runtime.
+
+Firecracker: three runs on a real KVM host (dev profile, alpine guest)
+observed the guest-mailbox chain end to end. Observed:
 
 - A granted run (`--mailbox <64-hex id>`) boots with exactly one `mvm.mailbox=1`
   on the guest command line. Only then does the guest agent create
@@ -524,6 +529,22 @@ in issue #5121. Observed:
 - `machine stop` leaves no `mvm-mailbox` process (gone within about 2 s). An
   ungranted VM has no token, directory, process or socket.
 
+HVF (isolated `MVM_HOME`, `--builder hvf --hypervisor hvf`, source-built guest
+runtime): one run observed the same properties on the in-house VMM. Observed:
+
+- Exactly one `mvm.mailbox=1` on the guest command line; `/run/mvm/mailbox` is
+  mode 0700 and owned by the workload user (uid 901).
+- The host `mvm-mailbox` process has a one-word argv and no mailbox id, key or
+  seed path in its environment. `mailbox.sock` is mode 0600.
+- A frame written as uid 901 (a 32-byte all-zero recipient followed by the body)
+  was returned exactly by `mvmctl machine mailbox recv`. The frame was written
+  from the workload's own boot command: a later `machine exec` missed the
+  host's dial window under heavy load.
+- `mvmctl trust audit verify` passed, and the `mailbox.read` entry carries
+  counts only, no body.
+- `machine stop --yes` ended the mailbox process within 1 s. An ungranted run
+  had no token, directory, process, socket or bridge.
+
 Reproduce, on a Linux host with KVM and a sibling or installed mvm-images set:
 
 ```sh
@@ -532,24 +553,41 @@ cargo build -p mvm-hostd --bin mvm-mailbox    # beside mvmctl; or set MVM_MAILBO
 MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build ./target/debug/mvmctl bootstrap
 ./target/debug/mvmctl machine run --image alpine --mailbox <64-hex id> \
     --hypervisor firecracker --name n -- sleep 900
-# within ~30 s of boot, as uid 901 in the guest (machine cp / machine exec),
+# early after boot, as uid 901 in the guest (machine cp / machine exec),
 # run a writer that calls mvm_agentd::mailbox_outbox::write_outbox
 ./target/debug/mvmctl machine mailbox recv n  # exact plaintext, then empty
 ./target/debug/mvmctl trust audit verify
 ./target/debug/mvmctl machine stop n --yes    # no mvm-mailbox process remains
 ```
 
-Observed on the Firecracker backend only, in the dev profile.
+The HVF variant runs on macOS 26+ Apple Silicon with the same sequence, adding
+`--builder hvf` and using `--hypervisor hvf` in place of `--hypervisor
+firecracker`. Write the frame early, from the workload's own command, as the
+witnessed runs did (see the late-frame limit below).
+
+Both witnesses are in the dev profile, one per backend, and not repeated.
 
 #### Not wired / not claimed
 
-- Only the Firecracker backend is wired. HVF, libkrun, QEMU, apple-container and
-  wasm refuse a mailbox grant.
-- A frame written more than about 30 s after boot is missed: that is the host's
-  dial retry window.
+- libkrun, QEMU, apple-container, wasm and the mock backend refuse a granted
+  plan before boot. libkrun and QEMU accept arbitrary host-dialed ports, but
+  they bind them at the flat per-port path while the mailbox process dials the
+  `vsock/` subdirectory path HVF uses; reconciling the two is a follow-up.
+- A granted warm-claimed or forked HVF child is untested.
+- Late frames: the witnessed runs above predate a host change under which the
+  host re-dials every 2 s for the VM's life once the initial 100 ms window of
+  about 30 s ends, so a frame written after about 30 s is delivered. That is
+  covered by a hermetic test only and is pending a recheck on a booted guest.
+  In those witnessed runs a frame written after about 30 s was missed, so write
+  the frame early in any demo.
+- `build_config` still names the per-port socket and the Firecracker mux path
+  itself rather than taking them from the backend, because `GuestChannelInfo`
+  carries only a cid and a port. Moving that onto the backend is a follow-up.
+- `machine run -d` printed an unrelated `session i/o error` on the HVF run
+  although the machine ran.
 - There is no cross-host transport in the product and no node-to-node delivery
   between physical hosts. Iroh is not wired (#4633 is open); the loopback TCP
   transport above exists only in tests.
-- The live run is a manual witness, not a CI lane.
+- The live runs are manual witnesses, not CI lanes.
 - The three-node demo boots no VM, and no test attests hardware.
 - Mailbox encryption is host to host, as described above.
