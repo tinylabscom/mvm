@@ -745,6 +745,27 @@ mod tests {
     }
 
     #[test]
+    fn empty_grant_serves_only_baseline_verbs() {
+        use mvm_core::plan::{Nonce, VerbGrant};
+
+        let grant = VerbGrant {
+            session_id: "s".into(),
+            plan_nonce: Nonce::from_bytes([0u8; 16]),
+            not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
+            verbs: Vec::new(),
+            drive: None,
+            application_terminal: None,
+            sig: vec![],
+        };
+        assert!(enforce_verb_grant(&GuestRequest::Ping, Some(&grant)).is_none());
+        let idle = GuestRequest::UpdateIdleTimeout { secs: 0 };
+        assert!(matches!(
+            enforce_verb_grant(&idle, Some(&grant)),
+            Some(GuestResponse::VerbNotAuthorized { verb }) if verb == "update-idle-timeout"
+        ));
+    }
+
+    #[test]
     fn prod_safe_grant_refuses_all_dev_only_requests() {
         use mvm_core::plan::{Nonce, VerbGrant, VerbId};
 

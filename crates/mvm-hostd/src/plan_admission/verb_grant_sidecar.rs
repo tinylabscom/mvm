@@ -89,10 +89,10 @@ pub(super) fn mint_verb_grant_sidecar(
 /// so minting one for display alone would take every unlisted verb away from a
 /// plan that never asked for that.
 fn granted_verbs(plan: &ExecutionPlan, other_authority: bool) -> Option<Vec<VerbId>> {
-    let mut verbs = plan.agent_verbs.clone().unwrap_or_default();
-    if verbs.is_empty() && !other_authority {
+    if plan.agent_verbs.is_none() && !other_authority {
         return None;
     }
+    let mut verbs = plan.agent_verbs.clone().unwrap_or_default();
     for verb in mvm_contract::stream::display_verbs(plan) {
         if !verbs.contains(&verb) {
             verbs.push(verb);
@@ -143,6 +143,45 @@ mod tests {
     #[test]
     fn a_plan_still_in_its_window_mints() {
         assert!(refuse_expired_plan(&plan_valid(5, 600), chrono::Utc::now()).is_ok());
+    }
+
+    #[test]
+    fn explicit_empty_verbs_mint_a_signed_closed_grant() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("isolated home");
+        env.isolate_mvm_home(home.path());
+        let state_dir = home.path().join("empty-verbs");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+
+        let mut plan = plan_valid(5, 600);
+        plan.agent_verbs = Some(Vec::new());
+        let signed = serde_json::to_string(&SignedExecutionPlan(
+            mvm_core::protocol::signing::SignedPayload {
+                payload: serde_json::to_vec(&plan).expect("plan payload"),
+                signature: vec![],
+                signer_id: "test".into(),
+            },
+        ))
+        .expect("signed plan envelope");
+
+        let envelope = mint_verb_grant_sidecar(&signed, "empty-verbs", &state_dir)
+            .expect("empty allowlist plan")
+            .expect("explicit empty allowlist requires a grant");
+        assert!(state_dir.join("verb-grant.json").is_file());
+        assert!(envelope.grant.verbs.is_empty());
+        assert!(envelope.grant.permits("ping"));
+        assert!(!envelope.grant.permits("worker-status"));
+        let key = crate::audit::host_keypair::load_or_init_at(&mvm_core::config::mvm_keys_dir())
+            .expect("host signer");
+        envelope
+            .grant
+            .verify(
+                &key.verifying,
+                "empty-verbs",
+                &plan.nonce,
+                chrono::Utc::now(),
+            )
+            .expect("empty grant is signed and bound to the plan");
     }
 
     #[test]
