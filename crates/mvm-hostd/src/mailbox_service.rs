@@ -17,10 +17,11 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -267,13 +268,26 @@ pub fn recv(path: &Path) -> std::io::Result<Received> {
         .map_err(|r| io_err(format!("mailbox refused the request: {r:?}")))
 }
 
-/// How often the accept loop looks for a connection and for the stop flag.
-const ACCEPT_POLL: Duration = Duration::from_millis(20);
+/// Block until `listener` or `wake` is readable. Returns whether `listener` is.
+fn wait_readable(listener: &UnixListener, wake: &UnixStream) -> bool {
+    let mut fds = [listener.as_raw_fd(), wake.as_raw_fd()].map(|fd| libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    // SAFETY: `fds` is a live array of two descriptors the caller owns for the call.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+    ready > 0 && fds[0].revents & libc::POLLIN != 0
+}
 
 pub struct MailboxService {
     shared: Arc<Shared>,
     path: PathBuf,
     stop: Arc<AtomicBool>,
+    wake: UnixStream,
+    /// Accept-loop wakeups; only the idle-cost test reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    wakeups: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -287,9 +301,11 @@ impl MailboxService {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        // Polled rather than blocked on, so stopping never depends on the
-        // socket path still existing.
+        // Non-blocking so a connection that vanishes between poll and accept
+        // cannot park the worker past a stop.
         listener.set_nonblocking(true)?;
+        let (wake, wake_read) = UnixStream::pair()?;
+        let wakeups = Arc::new(AtomicU64::new(0));
         let shared = Arc::new(Shared {
             limits,
             state: Mutex::new(State {
@@ -302,16 +318,17 @@ impl MailboxService {
         });
         let stop = Arc::new(AtomicBool::new(false));
         let worker = {
-            let (shared, stop) = (shared.clone(), stop.clone());
+            let (shared, stop, wakeups) = (shared.clone(), stop.clone(), wakeups.clone());
             std::thread::spawn(move || {
+                // Blocks on the listener and the wake end, so an idle service
+                // costs no wakeups and a stop never depends on the socket path.
                 while !stop.load(Ordering::SeqCst) {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
-                            // A listener's non-blocking mode is inherited on some hosts.
-                            let _ = stream.set_nonblocking(false);
-                            serve_peer(&shared, stream);
-                        }
-                        Err(_) => std::thread::sleep(ACCEPT_POLL),
+                    let connection = wait_readable(&listener, &wake_read);
+                    wakeups.fetch_add(1, Ordering::Relaxed);
+                    if let (true, Ok((stream, _))) = (connection, listener.accept()) {
+                        // A listener's non-blocking mode is inherited on some hosts.
+                        let _ = stream.set_nonblocking(false);
+                        serve_peer(&shared, stream);
                     }
                 }
             })
@@ -320,6 +337,8 @@ impl MailboxService {
             shared,
             path: path.to_owned(),
             stop,
+            wake,
+            wakeups,
             worker: Some(worker),
         })
     }
@@ -372,6 +391,7 @@ impl MailboxService {
 impl Drop for MailboxService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        let _ = (&self.wake).write_all(&[0]);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -507,4 +527,56 @@ fn admit(
     state.queue.push_back(plaintext);
     state.accepted += 1;
     Ok(())
+}
+
+#[cfg(test)]
+mod accept_loop_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn service(dir: &Path) -> MailboxService {
+        crate::audit::host_keypair::load_or_init_at(dir).unwrap();
+        let mailbox = mvm_contract::protocol::mailbox::MailboxId::from_bytes([5; 32]);
+        let grant = MailboxGrant {
+            mailbox,
+            authority_key: crate::mailbox_launch::authority_key_for(dir, &mailbox)
+                .unwrap()
+                .to_bytes(),
+            epoch: ExecutionEpoch::new(1).unwrap(),
+        };
+        let (trust, _) = crate::mailbox_launch::host_trust(dir, &grant).unwrap();
+        let limits = MailboxLimits {
+            max_depth: 4,
+            max_frame_bytes: 1024,
+        };
+        MailboxService::bind(&dir.join("m.sock"), limits, trust).unwrap()
+    }
+
+    #[test]
+    fn an_idle_service_blocks_instead_of_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(service.wakeups.load(Ordering::Relaxed) <= 2);
+    }
+
+    #[test]
+    fn stopping_is_prompt_with_the_socket_path_already_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path());
+        std::fs::remove_file(dir.path().join("m.sock")).unwrap();
+        let start = Instant::now();
+        drop(service);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_burst_of_sequential_requests_is_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let _service = service(dir.path());
+        for _ in 0..50 {
+            let got = recv(&dir.path().join("m.sock")).unwrap();
+            assert!(got.message.is_none());
+        }
+    }
 }
