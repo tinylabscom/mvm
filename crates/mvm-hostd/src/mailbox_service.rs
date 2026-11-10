@@ -543,9 +543,13 @@ mod accept_loop_tests {
         let mailbox = mvm_contract::protocol::mailbox::MailboxId::from_bytes([5; 32]);
         let grant = MailboxGrant {
             mailbox,
-            authority_key: crate::mailbox_launch::authority_key_for(dir, &mailbox, ExecutionEpoch::new(1).unwrap())
-                .unwrap()
-                .to_bytes(),
+            authority_key: crate::mailbox_launch::authority_key_for(
+                dir,
+                &mailbox,
+                ExecutionEpoch::new(1).unwrap(),
+            )
+            .unwrap()
+            .to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
         };
         let (trust, _) = crate::mailbox_launch::host_trust(dir, &grant).unwrap();
