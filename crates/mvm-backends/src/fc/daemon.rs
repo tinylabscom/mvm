@@ -430,7 +430,7 @@ pub(crate) fn sudo_prefix_for_euid(euid: u32) -> &'static str {
     if euid == 0 { "" } else { "sudo " }
 }
 
-fn effective_user_id() -> u32 {
+pub(crate) fn effective_user_id() -> u32 {
     // SAFETY: `geteuid` takes no arguments, dereferences no pointers, and
     // always returns the effective uid of the calling process.
     unsafe { libc::geteuid() }
