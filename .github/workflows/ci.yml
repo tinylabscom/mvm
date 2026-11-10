@@ -523,7 +523,7 @@ jobs:
       # compiler lint lane, so start them on their own runner.
       - uses: ./.github/actions/apt-deps
         with:
-          packages: lld ripgrep shellcheck
+          packages: lld ripgrep shellcheck python3-pip
 
       # Nothing else validates the workflow files. A wrong `if:`, a typo'd
       # `needs:` job name, or a bad `${{ }}` reference does not fail a PR — it
@@ -578,6 +578,11 @@ jobs:
 
       - name: Zig bootstrap tests
         run: python3 scripts/test_install_zigbuild.py
+
+      - name: Contributor Zig toolchain PEP 668 tests
+        env:
+          MVM_EXPECT_PEP668: "1"
+        run: /usr/bin/python3 scripts/test_payload_toolchain.py
 
       - name: ShellCheck added scripts
         if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'

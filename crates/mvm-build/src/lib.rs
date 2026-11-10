@@ -304,4 +304,4 @@ pub use nix::manifest as nix_manifest;
 #[cfg(unix)]
 pub use nix::scripts;
 #[cfg(unix)]
-pub use pipeline::{build, dev_build, orchestrator, vsock_builder};
+pub use pipeline::{build, dev_build, orchestrator};

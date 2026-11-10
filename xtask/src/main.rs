@@ -39,6 +39,7 @@ mod check_dormant_controls;
 mod check_duplicate_majors;
 mod check_feature_closure_budget;
 mod check_file_size;
+mod check_firecracker_pin;
 mod check_forbidden_deps;
 mod check_guest_agent_in_all_images;
 mod check_guest_agent_runtime_free;
@@ -231,6 +232,10 @@ fn main() -> Result<()> {
         Some("check-image-lock") => {
             let workspace = workspace_root();
             check_image_lock::run(&workspace)
+        }
+        Some("check-firecracker-pin") => {
+            let workspace = workspace_root();
+            check_firecracker_pin::run(&workspace)
         }
         Some("check-honesty") => {
             let workspace = workspace_root();
@@ -556,7 +561,7 @@ fn main() -> Result<()> {
             check_all::run_all(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, emit-backend-components-tsv, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, publish-plan, check-publish-readiness, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, report-compile-units, check-compile-report-sync, check-kernel-pin-freshness, check-builder-shell-job-sites, check-bundle-trust-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-history-in-comments, check-no-string-backend-dispatch, check-spec-hygiene, check-root-layout, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-thin-cli, check-cli-help-matches-docs, check-claim-catalog, check-documented-env, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-single-workspace-write-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, emit-backend-components-tsv, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-firecracker-pin, check-closure-budget, publish-plan, check-publish-readiness, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, report-compile-units, check-compile-report-sync, check-kernel-pin-freshness, check-builder-shell-job-sites, check-bundle-trust-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-history-in-comments, check-no-string-backend-dispatch, check-spec-hygiene, check-root-layout, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-thin-cli, check-cli-help-matches-docs, check-claim-catalog, check-documented-env, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-single-workspace-write-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -617,7 +622,10 @@ fn main() -> Result<()> {
                 "  check-image-lock                        Assert every workflow, script and test reads the boot image pin from images.lock rather than copying it"
             );
             eprintln!(
-                "  check-bundle-trust-sites                Assert every application-bundle verification site composes the pinned author keys, and freeze the raw-store sites"
+                "  check-firecracker-pin                   Assert the Firecracker version, reader and remote runner agree with firecracker.lock, and no unlisted file downloads Firecracker"
+            );
+            eprintln!(
+                "  check-bundle-trust-sites               Assert every application-bundle verification site composes the pinned author keys, and freeze the raw-store sites"
             );
             eprintln!(
                 "  check-builder-shell-job-sites          Plan 204 WS-D: freeze the set of files that construct a legacy builder shell-job request"

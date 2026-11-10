@@ -55,9 +55,15 @@ pub fn decode_frame(body: &[u8]) -> Result<(SignedMailboxCapability, MailboxEnve
     ))
 }
 
+/// The recipient a guest writes to address its own granted mailbox without
+/// knowing any host-derived value. The mailbox id means the same.
+pub const OWN_MAILBOX_RECIPIENT: [u8; 32] = [0; 32];
+
 /// What a guest asks its host to send: a recipient and a plaintext body.
 /// Nothing here is sealed or signed; the host does that under keys the guest
-/// never holds. Wire form: the 32 recipient bytes, then the body.
+/// never holds. The recipient is [`OWN_MAILBOX_RECIPIENT`] or the mailbox id;
+/// the host maps either to the recipient its policy names and refuses any
+/// other value at admission. Wire form: the 32 recipient bytes, then the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxMessage {
     pub recipient: PrincipalId,

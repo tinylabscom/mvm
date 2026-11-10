@@ -357,6 +357,7 @@ jobs:
               --bin mvm-network-endpoint \
               --bin mvm-broker \
               --bin mvm-audit-signer \
+              --bin mvm-mailbox \
               --bin mvm-gpu-endpoint
             # The in-process SDK host library: the language SDKs load it by
             # the platform file name, and the release ships it beside
@@ -378,6 +379,7 @@ jobs:
               --bin mvm-network-endpoint \
               --bin mvm-broker \
               --bin mvm-audit-signer \
+              --bin mvm-mailbox \
               --bin mvm-gpu-endpoint
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib \
               --features mvm-client/release-channel
@@ -470,7 +472,7 @@ jobs:
           fi
           cargo run --package xtask -- report-compile-units \
             --build "mvmctl (release-min)=build --profile release-min --target ${BUILD_TARGET} --features ${MVMCTL_RELEASE_FEATURES}" \
-            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-gpu-endpoint" \
+            --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-mailbox --bin mvm-gpu-endpoint" \
             --build "mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel" \
             "${hvf_build[@]}" \
             "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
@@ -555,7 +557,7 @@ jobs:
           # Fail closed rather than copy-if-exists: a binary that failed to
           # build would otherwise be silently dropped from the tarball and
           # surface much later as a spawn failure on a user's machine.
-          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-gpu-endpoint"
+          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-mailbox mvm-gpu-endpoint"
           if [[ "${TARGET}" == *apple-darwin ]]; then
             REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
           fi
@@ -589,6 +591,17 @@ jobs:
             cp -R "${LIBKRUN_TIER}/sources" "staging/${ARCHIVE_NAME}/"
             cp "${LIBKRUN_TIER}/SOURCE-OFFER.txt" \
               "${LIBKRUN_TIER}/SOURCE-PINS" "staging/${ARCHIVE_NAME}/"
+          fi
+          # The pinned Firecracker, beside mvmctl: a Linux first run boots with
+          # it, and a downloaded install has no other source. The script
+          # refuses any tarball or binary that is not the one
+          # crates/mvm-core/firecracker.lock pins, so the archive signature
+          # covers the bytes the pin names. A directory, not a top-level
+          # executable, so install never links it onto PATH.
+          if [[ "${TARGET}" == *-unknown-linux-gnu ]]; then
+            scripts/release/stage-firecracker.sh "${TARGET%%-*}" \
+              "staging/${ARCHIVE_NAME}/firecracker"
+            echo "bundled firecracker"
           fi
           # The SDK host library, beside mvmctl: the SDKs' third lookup is
           # the platform file name next to the resolved mvmctl, and a

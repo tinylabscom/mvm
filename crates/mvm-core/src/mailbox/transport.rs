@@ -475,6 +475,11 @@ pub struct ChannelLimits {
 }
 
 impl ChannelLimits {
+    #[must_use]
+    pub const fn max_frame_bytes(&self) -> usize {
+        self.max_frame_bytes
+    }
+
     pub fn new(max_frame_bytes: usize, max_pending_bytes: usize) -> Result<Self, TransportError> {
         if max_frame_bytes == 0
             || max_frame_bytes > MAX_ENCODED_ENVELOPE_BYTES
@@ -552,6 +557,12 @@ impl AuthorizedMailboxFrame {
     #[must_use]
     pub fn encoded_len(&self) -> usize {
         self.bytes.len()
+    }
+
+    /// The canonical encoded envelope, for a transport to carry unchanged.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
     }
 }
 

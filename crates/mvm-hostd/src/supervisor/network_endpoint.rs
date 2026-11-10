@@ -1225,6 +1225,16 @@ mod tests {
     }
 
     #[test]
+    fn the_endpoint_config_has_no_mailbox_section() {
+        let cfg = vsock_cfg(Vec::new(), std::path::Path::new("/tmp/x"));
+        let mut value = serde_json::to_value(&cfg).unwrap();
+        assert!(value.get("mailbox").is_none());
+        value["mailbox"] = serde_json::json!({"state_dir": "/tmp/x"});
+        let err = parse(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got {err}");
+    }
+
+    #[test]
     fn config_roundtrips_and_rejects_unknown_fields() {
         let cfg = vsock_cfg(
             vec![SecretBinding {

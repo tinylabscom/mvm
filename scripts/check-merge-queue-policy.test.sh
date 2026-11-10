@@ -21,7 +21,8 @@ cat >"$tmp/good.json" <<'JSON'
       "max_entries_to_build": 1,
       "max_entries_to_merge": 1,
       "min_entries_to_merge": 1,
-      "min_entries_to_merge_wait_minutes": 0
+      "min_entries_to_merge_wait_minutes": 0,
+      "check_response_timeout_minutes": 40
     }
   }]
 }
@@ -67,6 +68,7 @@ expect_refusal batched-six-per-group "$BATCHED"' | (.rules[] | select(.type == "
 expect_refusal batched-min-two "$BATCHED"' | (.rules[] | select(.type == "merge_queue") | .parameters).min_entries_to_merge = 2'
 expect_refusal batched-long-wait "$BATCHED"' | (.rules[] | select(.type == "merge_queue") | .parameters).min_entries_to_merge_wait_minutes = 10'
 expect_refusal batched-excluded-main "$BATCHED"' | .conditions.ref_name.exclude = ["refs/heads/main"]'
+expect_refusal four-hour-timeout '(.rules[] | select(.type == "merge_queue") | .parameters).check_response_timeout_minutes = 240'
 expect_refusal duplicate-rule '.rules += [.rules[0]]'
 
 echo "merge queue policy guard tests passed"

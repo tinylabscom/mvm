@@ -1,3 +1,4 @@
+use super::lifecycle::finish_machine_exec;
 use super::receipt::MachineStartInitPolicy;
 use super::remove::{
     remove_machine_runtime_state, remove_machine_spec, resolve_remove_targets, rm_running_refusal,
@@ -84,6 +85,35 @@ fn exec_refuses_a_torn_journal_before_command_or_shell_dispatch() {
         assert_eq!(std::fs::read(&path).expect("unchanged"), torn);
         assert!(!dir.join("input-artifacts").exists());
     }
+}
+
+#[test]
+fn nonzero_machine_exec_finishes_its_journal_before_returning_the_guest_status() {
+    let _state = IsolatedMachineState::new();
+    let dir = config::machine_state_dir("nonzero-exec");
+    let _lock = input_journal::lock(&dir).expect("journal lock");
+    let first = input_journal::begin_exec(&dir, &["false".into()]).expect("begin first exec");
+
+    assert_eq!(
+        finish_machine_exec(&dir, first, Ok(7)).expect("finish nonzero exec"),
+        7
+    );
+    assert_eq!(input_journal::cursor(&dir).expect("finished cursor"), 1);
+    assert!(!input_journal::read(&dir).expect("journal")[0].succeeded);
+
+    let second = input_journal::begin_exec(&dir, &["echo".into()]).expect("begin next exec");
+    assert_eq!(
+        finish_machine_exec(&dir, second, Ok(0)).expect("finish next exec"),
+        0
+    );
+    assert_eq!(input_journal::cursor(&dir).expect("next cursor"), 2);
+
+    let third = input_journal::begin_exec(&dir, &["missing".into()]).expect("begin third exec");
+    let error = finish_machine_exec(&dir, third, Err(anyhow::anyhow!("transport failed")))
+        .expect_err("transport error is still returned");
+    assert_eq!(error.to_string(), "transport failed");
+    assert_eq!(input_journal::cursor(&dir).expect("failed cursor"), 3);
+    assert!(!input_journal::read(&dir).expect("journal")[2].succeeded);
 }
 
 #[test]
@@ -186,6 +216,7 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::Stop(_) => "stop",
         MachineAction::Quarantine(_) => "quarantine",
         MachineAction::Replace(_) => "replace",
+        MachineAction::Mailbox(_) => "mailbox",
         MachineAction::Reconfigure(_) => "reconfigure",
         MachineAction::Rm(_) => "rm",
         MachineAction::Ls(_) => "ls",
@@ -2167,6 +2198,12 @@ fn readme_persistent_machine_workflow_parses() {
         parse(&["replace", "web"]).expect("machine replace parses"),
         MachineAction::Replace(_)
     ));
+    assert!(matches!(
+        parse(&["mailbox", "recv", "web"]).expect("machine mailbox recv parses"),
+        MachineAction::Mailbox(MachineMailboxAction::Recv { name }) if name == "web"
+    ));
+    assert!(parse(&["mailbox", "recv"]).is_err());
+    assert!(parse(&["mailbox", "send", "web"]).is_err());
     assert!(matches!(
         parse(&["rm", "web"]).expect("README machine rm command parses"),
         MachineAction::Rm(_)
@@ -4321,6 +4358,7 @@ fn start_args_with_create_flags(
         hypervisor: None,
         kernel_pin: None,
         has_ad_hoc_argv: false,
+        mailbox: None,
     }
 }
 
@@ -4652,4 +4690,25 @@ fn a_mailbox_id_is_accepted_on_run_and_absent_by_default() {
     assert_eq!(run.run.mailbox.as_deref(), Some(id.as_str()));
     let plain = parse_run(&["run", "--image", "alpine"]).expect("plain run parses");
     assert!(plain.run.mailbox.is_none());
+}
+
+/// The detached path boots under the grant `--mailbox` names, and under none
+/// without it: the grant used to be dropped on the way to the persistent boot.
+#[test]
+fn a_detached_machine_start_carries_the_mailbox_grant() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let id = "ab".repeat(32);
+    let granted = parse_run(&["run", "--image", "alpine", "-d", "--mailbox", &id]).unwrap();
+    let start = runtime::start_args_with_grant(&granted, "vm").unwrap();
+    let grant = start.mailbox.expect("the grant reaches the start");
+    assert_eq!(grant.mailbox.as_bytes(), &[0xab; 32]);
+    let plain = parse_run(&["run", "--image", "alpine", "-d"]).unwrap();
+    assert!(
+        runtime::start_args_with_grant(&plain, "vm")
+            .unwrap()
+            .mailbox
+            .is_none()
+    );
 }

@@ -98,8 +98,9 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
     ),
     (
         "crates/mvm-build/src/embed_toolchain.rs",
-        &[Rule::HomeRead],
-        "host toolchain discovery (~/.cargo/bin/rustup, mise python installs) lives in the real $HOME",
+        &[Rule::HomeRead, Rule::HomeLiteral],
+        "host toolchain discovery (rustup, mise and the isolated Zig package) lives in \
+         the real $HOME, not MVM_HOME; this file is also used by a build script below mvm-core",
     ),
     (
         "crates/mvm-build/src/image_source/repository_config.rs",
