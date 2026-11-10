@@ -169,13 +169,13 @@ mvmctl init my-vm  --preset minimal     # bare minimum (default)
 
 Each preset emits a different `flake.nix` plus a `mvm.toml` with sensible resource defaults (`cpus = 2, mem = "1024M"` for HTTP/Python, `cpus = 1, mem = "512M"` for workers, etc.).
 
-### Prompt-driven scaffolding (LLM-assisted)
+### Prompt-driven scaffolding
 
 ```bash
 mvmctl init my-api --prompt "FastAPI app with Postgres backend"
 ```
 
-A heuristic planner picks a preset from the prompt. With `OPENAI_API_KEY` set, an LLM refines the plan via structured output (JSON Schema, deterministic). With Ollama or another OpenAI-compatible local endpoint at `127.0.0.1:11434` or `127.0.0.1:8080`, mvmctl auto-detects and uses it instead. Override via `MVM_TEMPLATE_PROVIDER=auto|openai|local|heuristic`.
+The built-in heuristic planner picks a preset from the prompt by default, even when a model or `OPENAI_API_KEY` is available. To opt into model-assisted planning, set `MVM_TEMPLATE_PROVIDER=openai` (requires `OPENAI_API_KEY`) or `MVM_TEMPLATE_PROVIDER=local` (requires a local base URL). Explicit `MVM_TEMPLATE_PROVIDER=auto` probes an OpenAI-compatible local endpoint at `127.0.0.1:11434` or `127.0.0.1:8080`, then falls back to OpenAI if a key is set. Set `MVM_TEMPLATE_PROVIDER=heuristic` to force the built-in planner.
 
 The planner outputs a structured plan (preset, features, http port, entrypoint, resources) — no free-form Nix or shell. Generated `flake.nix` comes from a fixed preset corpus, not from the LLM.
 
