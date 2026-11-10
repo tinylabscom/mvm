@@ -5,7 +5,7 @@
 //! the API socket: tens of milliseconds, and the D-Bus leg alone varies from 6
 //! to 30 on a loaded host. None of it depends on the guest. So after a launch
 //! boots, a replacement process is started in the background — same launch
-//! line, same `sudo`/`setsid` posture, already inside a scope carrying the
+//! line, same `setsid` posture, already inside a scope carrying the
 //! ceilings a launch of that shape would get — and the next launch of that
 //! shape claims it.
 //!
@@ -719,7 +719,7 @@ fn entry_id() -> String {
 /// if the pool directory itself is gone, stops it regardless, because nothing
 /// is left that could claim or find it.
 fn reaper_script() -> &'static str {
-    r#"E=$1; T=$2; S=$3
+    r#"E=$1; T=$2
 st() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
 i=0
 while [ ! -s "$E/fc.pid" ] && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
@@ -735,23 +735,16 @@ if [ "$owned" = 1 ] && [ -n "$P" ] && [ -n "$P0" ] \
    && [ "$(st "$P")" = "$P0" ] \
    && [ "$(cat /proc/$P/comm 2>/dev/null)" = firecracker ] \
    && tr '\0' '\n' < /proc/$P/cmdline | grep -qxF "$E/fc.socket"; then
-  $S kill "$P"
+  kill "$P"
 fi
 rm -rf "$E.expired""#
 }
 
 fn start_reaper(dir: &Path) -> Result<()> {
-    let sudo = super::sudo_prefix_for_euid(effective_uid()).trim();
-    let sudo = if sudo.is_empty() {
-        String::new()
-    } else {
-        format!("{sudo} -n")
-    };
     let child = mvm_core::env_hygiene::helper_command("setsid")
         .args(["sh", "-c", reaper_script(), "mvm-fc-idle-reaper"])
         .arg(dir)
         .arg(idle_lifetime().as_secs().to_string())
-        .arg(sudo)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -894,7 +887,8 @@ mod tests {
         }
         let scripts = scripts.lock().unwrap();
         assert_eq!(scripts.len(), 1);
-        assert!(scripts[0].contains("sudo kill"));
+        assert!(scripts[0].contains("kill "));
+        assert!(!scripts[0].contains("sudo"));
     }
 
     #[test]

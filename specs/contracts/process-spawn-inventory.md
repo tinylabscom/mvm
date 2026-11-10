@@ -67,7 +67,6 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-agentd | `src/lifecycle_hooks.rs` | 2 | guest workload | before_/after_ lifecycle hook scripts | guest | CHS | - | RAW_SITES (guest) | guest-side |
 | mvm-agentd | `src/process_rpc.rs` | 1 | guest workload | process-control RPC start of a requested program | guest | CHS | - | RAW_SITES (guest) | guest-side |
 | mvm-agentd | `src/worker_pool.rs` | 1 | guest workload | warm worker-pool process | guest | CHS | - | RAW_SITES (guest) | guest-side |
-| mvm-backends | `src/driver/fc.rs` | 1 | systemd-run / sudo | signal a Firecracker process through sudo kill on Linux | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-backends | `src/driver/hvf.rs` | 2 | hypervisor supervisor | spawn mvm-hvf-supervisor for an HVF VM (cold and restore) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-backends | `src/driver/hvf_restore.rs` | 1 | hypervisor supervisor | spawn mvm-hvf-supervisor for a snapshot restore | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-backends | `src/driver/libkrun.rs` | 1 | hypervisor supervisor | spawn mvm-libkrun-supervisor | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
@@ -137,7 +136,6 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-runtime | `src/storage/backend.rs` | 1 | storage tool | dmsetup thin-pool operations | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | bounded-fixed-argv-utility |
 | mvm-runtime | `src/storage/volume/encrypted_linux.rs` | 7 | storage tool | cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | bounded-fixed-argv-utility |
 | mvm-setpriv | `src/lib.rs` | 1 | guest helper | privilege-drop-and-exec of the target command | guest | CHS | - | RAW_SITES (guest) | guest-side |
-| mvm-vmm | `src/driver/prepared_disks.rs` | 1 | systemd-run / sudo | inventory a Firecracker process's descriptors through sudo find on Linux | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub | required-host-primitive |
 | mvm-vmm | `src/host/aux_bin.rs` | 2 | helper bin | `--contract-version` probe of a helper; cargo build of helpers from source | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-vmm | `src/host/broker_services_spawn.rs` | 1 | helper bin | spawn the per-VM host-services broker | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub | required-host-primitive |
 | mvm-vmm | `src/host/gpu_endpoint_spawn.rs` | 1 | helper bin | spawn the per-VM GPU endpoint | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub; check-single-network-path | required-host-primitive |
@@ -147,12 +145,12 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-vmm | `src/host/network_endpoint_spawn/owned.rs` | 1 | helper bin | spawn an owned network endpoint | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; check-single-network-path | required-host-primitive |
 | mvm-vmm | `src/host/shell/exec.rs` | 6 | shell script | run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
 
-Totals: 185 production sites in 96 files.
+Totals: 183 production sites in 94 files.
 
 | Crate | Sites |
 |---|--:|
 | mvm-agentd | 27 |
-| mvm-backends | 8 |
+| mvm-backends | 7 |
 | mvm-build | 27 |
 | mvm-builder-guest | 32 |
 | mvm-capture | 6 |
@@ -164,7 +162,7 @@ Totals: 185 production sites in 96 files.
 | mvm-hostd | 10 |
 | mvm-runtime | 11 |
 | mvm-setpriv | 1 |
-| mvm-vmm | 17 |
+| mvm-vmm | 16 |
 
 | Disposition | Sites | Files |
 |---|--:|--:|
@@ -176,7 +174,7 @@ Totals: 185 production sites in 96 files.
 | fixed-argv-utility | 7 | 4 |
 | guest-side | 60 | 27 |
 | open-review | 12 | 3 |
-| required-host-primitive | 38 | 22 |
+| required-host-primitive | 36 | 20 |
 | test-only | 4 | 2 |
 
 Reviewed library-reachable sites (disposition, then why):
@@ -204,7 +202,7 @@ Still open-review, and the concrete missing piece:
 | `mvm-vmm/src/host/linux_env.rs` | `NativeEnv::{run, run_visible, run_capture}` run `bash -c <script>` for every `LinuxEnv` caller. Same gap as `shell/exec.rs`: callers are audited and tested, the wrapper is not constrained. |
 | `mvm-vmm/src/host/shell/exec.rs` | `run_in_vm*`/`run_on_vm*` hand a caller-built script to `bash -c` (host bash on native Linux and for custom VM names); `run_host` runs a caller-named program but has CLI callers only. Every library caller was read (see the shell-wrapper caller audit) and the unquoted ones fixed, but the seam itself still accepts any string, so nothing stops a new caller interpolating raw. Missing: a gate or typed command form that makes unquoted interpolation into these scripts unrepresentable, and a wall-clock bound (builds are long-running, so the bound has to be per caller). |
 
-By construct: `Command::new` 57, `helper_command` 117, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
+By construct: `Command::new` 57, `helper_command` 115, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
 
 Linked and Traced are host-side facts about the crate and the call graph. A `guest` or `builder VM` row is crate-linked into the host closure (so `CHS`), but its binary only ever runs inside the microVM; the host never calls it. Read those rows by Authority.

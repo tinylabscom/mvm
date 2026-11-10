@@ -603,7 +603,6 @@ const HELPER_SPAWNS: &[(&str, &str)] = &[
         "crates/mvm-backends/src/driver/qemu_process.rs",
         "fn spawn_vsock_bridges(",
     ),
-    ("crates/mvm-backends/src/driver/fc.rs", "fn fc_sudo_signal("),
     (
         "crates/mvm-hostd/src/supervisor/services/spawn.rs",
         "impl SubprocessSpawner for ProcessSpawner",

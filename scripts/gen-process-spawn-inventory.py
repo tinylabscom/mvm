@@ -240,8 +240,6 @@ A = {
     "mvm-builder-guest/src/bin/stage0-init/store_gc.rs": ("builder job", "nix store garbage collection"),
     "mvm-builder-guest/src/builderd.rs": ("builder job", "builderd runs job argv and the rootfs runner"),
     # host libraries
-    "mvm-vmm/src/driver/prepared_disks.rs": ("systemd-run / sudo", "inventory a Firecracker process's descriptors through sudo find on Linux"),
-    "mvm-backends/src/driver/fc.rs": ("systemd-run / sudo", "signal a Firecracker process through sudo kill on Linux"),
     "mvm-backends/src/driver/hvf.rs": ("hypervisor supervisor", "spawn mvm-hvf-supervisor for an HVF VM (cold and restore)"),
     "mvm-backends/src/driver/hvf_restore.rs": ("hypervisor supervisor", "spawn mvm-hvf-supervisor for a snapshot restore"),
     "mvm-backends/src/driver/libkrun.rs": ("hypervisor supervisor", "spawn mvm-libkrun-supervisor"),
