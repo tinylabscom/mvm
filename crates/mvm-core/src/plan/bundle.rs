@@ -196,6 +196,30 @@ pub fn bundle_origin(
     }
 }
 
+/// A host signature alone cannot authorize a schema-8 local package to run.
+///
+/// The caller passes explicit operator-enrolled publisher trust, never the
+/// `LocalBundleTrustStore` which automatically contains the host key.
+pub fn require_composable_local_enrollment(
+    manifest: &BundleManifest,
+    enrolled: &dyn TrustStore,
+) -> Result<(), BundleVerifyError> {
+    if manifest.schema_version >= LOCAL_COMPOSITION_MIN_SCHEMA
+        && manifest
+            .labels
+            .get(BUNDLE_ORIGIN_LABEL)
+            .is_some_and(|origin| origin == LOCAL_BUILD_ORIGIN)
+        && !enrolled
+            .lookup(&manifest.key_id)
+            .is_some_and(|key| key_id_from_pubkey(&key) == manifest.key_id)
+    {
+        return Err(BundleVerifyError::UnknownKey {
+            key_id: manifest.key_id.0.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// Whether registry ingress or egress must reject this manifest before trust
 /// lookup. Either the host key or the reserved local-build label is sufficient
 /// for refusal; neither can be made publishable by enrolling the host key.
@@ -1525,6 +1549,21 @@ mod tests {
             ),
             BundleOrigin::Untrusted
         );
+    }
+
+    #[test]
+    fn schema_eight_local_build_requires_separate_operator_enrollment() {
+        let host = fresh_key();
+        let mut manifest = make_manifest(key_id_from_pubkey(&host.verifying_key()), Vec::new());
+        mark_local_build(&mut manifest);
+        let empty = MapTrustStore(HashMap::new());
+        assert!(require_composable_local_enrollment(&manifest, &empty).is_ok());
+        manifest.schema_version = LOCAL_COMPOSITION_MIN_SCHEMA;
+        assert!(matches!(
+            require_composable_local_enrollment(&manifest, &empty),
+            Err(BundleVerifyError::UnknownKey { .. })
+        ));
+        require_composable_local_enrollment(&manifest, &trust(&host)).unwrap();
     }
 
     #[test]
