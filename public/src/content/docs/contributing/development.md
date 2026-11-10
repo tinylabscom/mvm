@@ -689,10 +689,16 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 |----------|---------|--------------|
 | `ci.yml` | PRs, push to main, manual dispatch | Scoped fast gate: formatting, clippy, policy checks, workspace test compilation and sharded tests, Windows portability checks, and static documentation checks; required verdict is `Test` |
 | `ci.yml` (merge queue) | Merge group | `Lint core` and `Build workspace tests` for code changes (formatting, clippy and a compile of every test target against latest main), plus `Docs static` for documentation changes; other validation lanes passed on the PR head and run again on push to main |
+| `merge-queue-watch.yml` | Merge-group CI completion, every five minutes, manual dispatch | Re-runs a failed merge-group CI once only when it scheduled zero jobs; opens or updates a `Merge queue stalled` issue if the queue head has waited over 30 minutes |
 | `ci-main.yml` | Push to main, manual dispatch | The slow lanes (feature suites, BDD, aarch64, release-profile and musl witnesses, eBPF, Linux coverage, Nix evaluation, boot ceiling), gated by `Test (main)`; a pull request and the merge queue never list them |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
 | `publish-crates.yml` | Dispatched by `release.yml` on a tag | Publishes the public crates (`mvm-contract`) to crates.io; every other crate is `publish = false` |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
+
+The `main merge queue` ruleset allows 40 minutes for checks (longer than the
+expected 25-minute worst case). The watchdog never retries a CI run with a
+failed job or changes queue membership. Investigate and close its tracking
+issue after recovery; a GitHub Actions outage can delay the watchdog too.
 
 The SDK publishing workflows retain the raw `npm-dist` tarballs and
 `pypi-dist-*` wheels for 30 days, including dry runs. Download them from the

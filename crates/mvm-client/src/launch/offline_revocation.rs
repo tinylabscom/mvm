@@ -72,30 +72,6 @@ impl PackRevocationChecker for OfflineRevocationPolicy {
     }
 }
 
-/// Load an authenticated revocation policy for offline built-pack admission.
-///
-/// This is the entry point for the offline admission path: it loads the
-/// applied image-set revocation list, re-authenticates it against the
-/// durable checkpoint, and returns a `PackRevocationChecker` that can be
-/// passed to pack verification.
-///
-/// The caller is responsible for having applied a signed list via
-/// `mvmctl image revocations update` before any offline admission.
-pub fn load_offline_revocation_policy() -> Result<OfflineRevocationPolicy> {
-    OfflineRevocationPolicy::load_from_host().map_err(|e| match e {
-        ImageSetRevocationStoreError::Missing => anyhow::anyhow!(
-            "offline built-pack admission requires an applied image-set revocation list; \
-             download and apply one with `mvmctl image revocations update`"
-        ),
-        ImageSetRevocationStoreError::Verification(ref inner) => anyhow::anyhow!(
-            "the applied image-set revocation list failed re-authentication for offline \
-             admission: {inner}; fetch and apply a fresh list with \
-             `mvmctl image revocations update`"
-        ),
-        other => anyhow::anyhow!("loading revocation policy for offline admission: {other}"),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

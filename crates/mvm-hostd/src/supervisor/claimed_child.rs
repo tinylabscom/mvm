@@ -14,17 +14,12 @@
 //! committed at that point — the host is still waiting on the child's identity
 //! handshake — so a refused arm fails the claim instead of half-admitting it.
 
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use mvm_vmm::hvf_handoff::AcceptedHandoff;
 
 use super::wall_clock::{SupervisorTimerInputs, WallClockGuard};
-
-/// Exit code for a claimed child whose bound could not be armed; the same one
-/// a cold boot refuses with.
-const REFUSED_BOUND_EXIT_CODE: i32 = 7;
 
 /// Arm the wall-clock timer and the session expiry watcher for the child
 /// `accepted` names, from the plan it was admitted under.
@@ -80,42 +75,6 @@ fn arm_child_with_policy(
         .context("arming the claimed child's wall-clock bound")?;
     super::session_expiry::arm_for_supervisor(&inputs, killer());
     Ok(guard)
-}
-
-/// Wait on `accepted` for the handoff this standby parent takes, then arm the
-/// claimed child's bounds and hold them for the rest of the process.
-///
-/// The thread ends without arming anything if the parent is never claimed:
-/// the sender goes with the VM.
-pub fn arm_on_handoff(accepted: Receiver<AcceptedHandoff>, pid_file: PathBuf) {
-    let spawned = std::thread::Builder::new()
-        .name("mvm-claimed-child".to_string())
-        .spawn(move || {
-            let Ok(handoff) = accepted.recv() else {
-                return;
-            };
-            match arm_for_claimed_child(&handoff, &pid_file) {
-                Ok(guard) => {
-                    // Dropping the guard stands the timer down, so it lives on
-                    // this thread for as long as the process does.
-                    let _guard = guard;
-                    loop {
-                        std::thread::park();
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "supervisor: refusing claimed child {}: {e:#}",
-                        handoff.child_vm_name
-                    );
-                    std::process::exit(REFUSED_BOUND_EXIT_CODE);
-                }
-            }
-        });
-    if let Err(e) = spawned {
-        eprintln!("supervisor: cannot watch for a claim, so cannot bound one: {e}");
-        std::process::exit(REFUSED_BOUND_EXIT_CODE);
-    }
 }
 
 #[cfg(test)]

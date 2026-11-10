@@ -78,6 +78,7 @@ pub use events::{
     agent_prompt_audit, checkpoint_audit, display_audit, drive_audit, grants_audit, image_audit,
     instruction_audit, stream_audit, wall_clock_audit,
 };
+mod mailbox;
 mod workspace;
 pub use workspace::{WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit};
 

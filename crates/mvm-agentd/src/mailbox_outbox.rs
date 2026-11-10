@@ -3,7 +3,8 @@
 //! verdict.
 //!
 //! The guest holds no key and seals nothing. The outbox carries a recipient
-//! and a body; the host seals and signs it under the capability the signed
+//! (`OWN_MAILBOX_RECIPIENT` or the mailbox id, which the host maps to the
+//! recipient its policy names) and a body; the host seals and signs it under the capability the signed
 //! plan granted, then admits it. Encryption is host to host.
 //!
 //! [`write_outbox`] is the workload side: it leaves that one message where

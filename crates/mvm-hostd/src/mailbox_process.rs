@@ -8,7 +8,9 @@
 //! stdin. Nothing secret travels in argv or the environment.
 //!
 //! The process lives as long as its launcher or its VM does, the rule the
-//! per-VM egress endpoint's keeper applies.
+//! per-VM egress endpoint's keeper applies, and it also stops when the VM's
+//! state directory is gone. The stop path reaps it by its pid file with the
+//! VM's other helpers.
 //!
 //! Only a Firecracker guest is wired: its vsock mux is a fixed path reached by
 //! the `CONNECT` handshake. The other backends bridge a host-dialed port only
@@ -38,7 +40,7 @@ pub const MAILBOX_BIN: &str = "mvm-mailbox";
 /// Path-override variable for the helper binary.
 pub const MAILBOX_BIN_ENV: &str = "MVM_MAILBOX_PATH";
 /// Where the process's pid is recorded, beside the VM.
-pub const MAILBOX_PID_FILE: &str = "mailbox.pid";
+pub use mvm_vmm::host::vm_helpers::MAILBOX_PID_FILE;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// What the process reads on stdin. `deny_unknown_fields`, so a field a newer
@@ -82,7 +84,9 @@ pub fn serve(config: MailboxProcessConfig) -> i32 {
         },
         LAUNCH_LIMITS,
     );
-    while endpoint_needed(launcher_is_alive(launcher), vm_is_alive(&vm_state_dir)) {
+    while vm_state_dir.exists()
+        && endpoint_needed(launcher_is_alive(launcher), vm_is_alive(&vm_state_dir))
+    {
         std::thread::sleep(POLL_INTERVAL);
     }
     0
