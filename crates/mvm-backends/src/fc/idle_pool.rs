@@ -362,6 +362,11 @@ fn recover_incomplete_claims_in(root: &Path) {
             }
             continue;
         };
+        // A claim another launch is adopting right now carries the same journal
+        // as one whose claimant died; only the age tells them apart.
+        if !older_than(&claimed, INTERRUPTED_CLAIM_AFTER) {
+            continue;
+        }
         let origin = infer_origin_dir(root, name_str);
         tracing::info!(
             claimed = %claimed.display(),
@@ -663,6 +668,11 @@ fn refill(root: &Path, shape: IdleShape) -> Result<()> {
 /// How long an entry may go without a running process before it is taken to
 /// be a refill that died partway (its `mvmctl` exited first, say).
 const ABANDONED_AFTER: Duration = Duration::from_secs(10);
+
+/// How long a journaled claim may go without a file moving before its claimant
+/// is taken to have died. Generous, because a live adoption on a loaded host
+/// is slow and recovering it would kill the process it is handing over.
+const INTERRUPTED_CLAIM_AFTER: Duration = Duration::from_secs(120);
 
 /// Remove entries whose process never came up, so they do not hold a shape's
 /// place in the pool until their reaper's timer runs out.
@@ -1326,6 +1336,15 @@ mod tests {
         .unwrap();
         assert!(claimed.exists());
 
+        // A claim another launch is adopting right now is left alone.
+        recover_incomplete_claims_in(root.path());
+        assert!(claimed.exists(), "a live claim must not be recovered");
+
+        let long_ago = std::time::SystemTime::now() - INTERRUPTED_CLAIM_AFTER * 2;
+        std::fs::File::open(&claimed)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
         recover_incomplete_claims_in(root.path());
 
         assert!(!claimed.exists(), "the incomplete claim must be removed");
