@@ -110,10 +110,6 @@ struct Check {
     info: String,
 }
 
-/// Whether the installed Firecracker hands a guest's trimmed blocks back to
-/// the host. `install` keeps an existing Firecracker, so a host provisioned
-/// before the pin moved can sit below the version that added discard, and the
-/// builder stores then keep their high-water mark with nothing saying why.
 /// Which Firecracker a launch on this host will exec, and why that one.
 fn firecracker_binary_check() -> Check {
     use mvm_backends::fc::binary::resolve_for_host;
@@ -169,6 +165,10 @@ fn describe_firecracker(
     }
 }
 
+/// Whether the installed Firecracker hands a guest's trimmed blocks back to
+/// the host. `install` keeps an existing Firecracker, so a host provisioned
+/// before the pin moved can sit below the version that added discard, and the
+/// builder stores then keep their high-water mark with nothing saying why.
 fn fc_block_discard_check(version_output: &str) -> Check {
     let installed = version_output
         .lines()
