@@ -24,8 +24,8 @@ use mvm_agentd::vsock::{
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
+    LayerCoverage, ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
     VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
@@ -46,10 +46,12 @@ use mvm_vmm::host::boot_config::{
 };
 
 mod config;
+mod dial;
 mod kernel;
 mod stop;
 pub use config::FcApiPut;
 use config::fc_drive_puts;
+use dial::fc_guest_dial_socket;
 #[cfg(all(test, unix))]
 use kernel::fc_descriptor_recipe;
 use kernel::resolve_fc_kernel_path;
@@ -315,13 +317,6 @@ fn fork_restore_error(e: anyhow::Error) -> StandbyError {
 /// failure unactionable and hides Firecracker's API response or launch log.
 fn preload_spawn_error(action: &str, error: anyhow::Error) -> StandbyError {
     StandbyError::SpawnFailed(format!("{action}: {error:#}"))
-}
-
-/// The host UDS Firecracker connects *out* to when the guest dials
-/// `CID_HOST:<port>`: the sibling `<runtime_dir>/v.sock_<port>` of the vsock mux
-/// socket. The host must own a listener there before the guest dials.
-fn fc_guest_dial_socket(runtime_dir: &Path, port: u32) -> PathBuf {
-    runtime_dir.join(format!("v.sock_{port}"))
 }
 
 /// Wire every guest-dialed vsock port (except the workload-exit port, which the
@@ -1314,6 +1309,10 @@ impl VmmDriver for FcDriver {
 
     fn guest_channel_info(&self, _id: &VmId) -> Result<GuestChannelInfo> {
         anyhow::bail!("firecracker does not provide guest channel info")
+    }
+
+    fn host_dial_route(&self, state_dir: &Path, _port: u32) -> Option<HostDialRoute> {
+        Some(dial::mux_route(state_dir))
     }
 }
 
