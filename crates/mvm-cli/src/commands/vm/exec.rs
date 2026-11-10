@@ -735,11 +735,6 @@ pub(in crate::commands) fn run_secure_started(
     let application_for_admit = args.resolved_application.clone();
     let denials = super::egress_denials::PendingWatch::for_run(args.json, args.pty);
     let denials_for_admit = std::rc::Rc::clone(&denials);
-    let applied_tool_rules = args
-        .applied_policy
-        .as_ref()
-        .map(|policy| policy.tools.to_tool_rules())
-        .unwrap_or_default();
     let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let crate::exec::AdmitInputs {
@@ -800,7 +795,6 @@ pub(in crate::commands) fn run_secure_started(
             // attachment has something to be checked against (claim 1).
             shares: mvm_client::admission::policy::admitted_shares_for_boot(volumes, sdk_sidecar),
             redaction: mvm_core::policy::RedactionPolicy::default(),
-            tools: applied_tool_rules.clone(),
             network_policy: admit_network_policy.clone(),
             agent_verb_override: admit_agent_verb.clone(),
             restrict_agent_verbs: crate::commands::vm::agent_verbs::grant_eligible(

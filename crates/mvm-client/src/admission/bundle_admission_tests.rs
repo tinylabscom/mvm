@@ -296,7 +296,9 @@ fn an_installed_manifest_changed_after_install_is_refused_at_admission() {
 #[test]
 fn a_cached_archive_changed_after_install_is_refused_before_a_plan_exists() {
     let fixture = InstalledFixture::new();
-    let archive = mvm_core::config::bundles_dir().join(format!("{}.mvmpkg", fixture.sha256));
+    let archive = mvm_core::plan::bundle::BundleRegistry::default_path()
+        .unwrap()
+        .archive_path(&fixture.sha256);
     let mut bytes = std::fs::read(&archive).expect("read archive");
     let last = bytes.len() / 2;
     bytes[last] ^= 0xff;
@@ -306,7 +308,10 @@ fn a_cached_archive_changed_after_install_is_refused_before_a_plan_exists() {
         .admit()
         .expect_err("a tampered archive must not boot");
 
-    assert!(format!("{err:#}").contains("verifying bundle"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("reading bundle archive"),
+        "{err:#}"
+    );
     assert!(!fixture.chain().contains("plan.admitted"));
 }
 
@@ -314,7 +319,9 @@ fn a_cached_archive_changed_after_install_is_refused_before_a_plan_exists() {
 fn a_missing_cached_archive_is_refused() {
     let fixture = InstalledFixture::new();
     std::fs::remove_file(
-        mvm_core::config::bundles_dir().join(format!("{}.mvmpkg", fixture.sha256)),
+        mvm_core::plan::bundle::BundleRegistry::default_path()
+            .unwrap()
+            .archive_path(&fixture.sha256),
     )
     .expect("remove archive");
 
@@ -392,7 +399,9 @@ impl BundleBootedParent {
     }
 
     fn archive(&self) -> std::path::PathBuf {
-        mvm_core::config::bundles_dir().join(format!("{}.mvmpkg", self.fixture.sha256))
+        mvm_core::plan::bundle::BundleRegistry::default_path()
+            .unwrap()
+            .archive_path(&self.fixture.sha256)
     }
 }
 
@@ -459,7 +468,10 @@ fn a_parent_archive_replaced_by_another_trusted_bundle_refuses_the_child() {
     let other = SigningKey::from_bytes(&[3; 32]);
     trust_publisher(parent.fixture.home.path(), &other);
     let (replacement, _) = make_bundle_for_pin(&other);
-    std::fs::write(parent.archive(), replacement).expect("replace archive");
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, &replacement).expect("compress replacement");
+    std::fs::write(parent.archive(), encoder.finish().expect("finish gzip"))
+        .expect("replace archive");
 
     let err = parent
         .admit_child()

@@ -130,7 +130,7 @@ pub(crate) fn verify_retained(
         proof.arch == mvm_core::arch::GuestArch::host(),
         "portable guest architecture mismatch"
     );
-    let original = OriginalArchive(std::fs::read(&proof.archive)?);
+    let original = OriginalArchive(mvm_core::plan::bundle::read_bundle_archive(&proof.archive)?);
     let bundle = verify_plan_bundle(&proof.pin, &original, &FsTrustStore::default_path()?)?;
     ensure!(
         matches!(bundle.manifest.schema_version, 4 | 5)

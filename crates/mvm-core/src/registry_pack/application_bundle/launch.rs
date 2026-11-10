@@ -276,7 +276,7 @@ pub fn trust_for_installed_archive<T: TrustStore>(
     inner: T,
     archive: &Path,
 ) -> crate::registry_pack::BuiltinAuthorTrust<T> {
-    match crate::crypto::image_verify::sha256_file(archive) {
+    match crate::plan::bundle::archive_sha256(archive) {
         Ok(digest) => trust_for_installed_bundle(inner, &digest),
         Err(_) => crate::registry_pack::BuiltinAuthorTrust::without_builtin(inner),
     }
@@ -294,7 +294,7 @@ pub(super) fn trust_for_installed_archive_with<T: TrustStore>(
     check_signature: RegistryPackSignatureChecker,
     check_revocations: RevocationChecker,
 ) -> crate::registry_pack::BuiltinAuthorTrust<T> {
-    match crate::crypto::image_verify::sha256_file(archive) {
+    match crate::plan::bundle::archive_sha256(archive) {
         Ok(digest) => trust_for_installed_bundle_with(
             inner,
             &digest,
@@ -474,6 +474,13 @@ pub(super) fn resolve_bundle_with_checks(
             .as_str(),
     );
     let bundle = verify_application_bundle(&application, &archive, trust)?;
+    if std::fs::symlink_metadata(registry.install_dir(&bundle.bundle().bundle_sha256))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        registry
+            .materialize_cached(&bundle.bundle().bundle_sha256, trust)
+            .map_err(ApplicationBundleError::from)?;
+    }
     require_installed_metadata(&registry, &bundle)?;
     Ok(bundle)
 }

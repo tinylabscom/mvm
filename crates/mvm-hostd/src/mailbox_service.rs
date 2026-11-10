@@ -179,10 +179,24 @@ pub fn serve_grant(
     socket: &Path,
     guest: (&Path, &Path),
 ) -> std::io::Result<MailboxService> {
-    let mut sealer = sealer.with_grant(grant)?;
-    let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
+    let (service, mut sealer) = bind_grant(grant, trust, sealer, limits, socket)?;
     service.serve_guest(guest.0, guest.1, &mut sealer)?;
     Ok(service)
+}
+
+/// Bind the service for `grant` without dialing the guest, and hand back the
+/// grant-bound sealer to serve it with, so a caller can serve the same queue
+/// and replay state over many connections.
+pub fn bind_grant(
+    grant: &MailboxGrant,
+    trust: MailboxPolicy,
+    sealer: GuestSealer,
+    limits: MailboxLimits,
+    socket: &Path,
+) -> std::io::Result<(MailboxService, GuestSealer)> {
+    let sealer = sealer.with_grant(grant)?;
+    let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
+    Ok((service, sealer))
 }
 
 struct State {

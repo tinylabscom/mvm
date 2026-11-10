@@ -461,13 +461,16 @@ fn acquire_application(
         mvm_core::config::pack_lockfile_path(),
         registry.root(),
     );
-    install_application_bundle(
+    let installed = install_application_bundle(
         &candidate,
         &store,
         &mvm_core::config::registry_pack_publisher_policy_path(),
         &trust,
-    )
-    .map_err(Into::into)
+    )?;
+    registry
+        .evict_extracted_if_unused(&installed.bundle().sha256)
+        .context("retaining only the installed application archive")?;
+    Ok(installed)
 }
 
 fn register_dependency(

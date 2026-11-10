@@ -16,8 +16,9 @@ use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_po
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::protocol::hvf_control::HvfInstance;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, StandbyError, StandbyHandle, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, HostDialRoute,
+    LayerCoverage, ResourceControls, StandbyError, StandbyHandle, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_control_transport as stop_wire;
@@ -1013,6 +1014,12 @@ impl VmmDriver for HvfDriver {
         // the agent bridge is a fixed vsock port wired by the runner, not a
         // channel the driver answers on demand.
         bail!("hvf does not provide guest channel info")
+    }
+
+    fn host_dial_route(&self, state_dir: &Path, port: u32) -> Option<HostDialRoute> {
+        Some(HostDialRoute::PortSocket(vm_hvf_vsock_port_socket_at(
+            state_dir, port,
+        )))
     }
 
     fn workload_base_bootargs(&self, has_disk: bool) -> String {

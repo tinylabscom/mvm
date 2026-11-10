@@ -225,8 +225,6 @@ A = {
     "mvm-agentd/src/late_volumes.rs": ("guest helper", "re-exec self as the late-volume mount helper"),
     "mvm-agentd/src/lifecycle_hooks.rs": ("guest workload", "before_/after_ lifecycle hook scripts"),
     "mvm-agentd/src/process_rpc.rs": ("guest workload", "process-control RPC start of a requested program"),
-    "mvm-agentd/src/tool_helper.rs": ("guest helper", "fork and execveat of a mediated tool invocation"),
-    "mvm-agentd/src/tool_install.rs": ("guest helper", "start the declared-command tool helper before privilege drop"),
     "mvm-agentd/src/worker_pool.rs": ("guest workload", "warm worker-pool process"),
     "mvm-setpriv/src/lib.rs": ("guest helper", "privilege-drop-and-exec of the target command"),
     # builder VM
@@ -242,8 +240,6 @@ A = {
     "mvm-builder-guest/src/bin/stage0-init/store_gc.rs": ("builder job", "nix store garbage collection"),
     "mvm-builder-guest/src/builderd.rs": ("builder job", "builderd runs job argv and the rootfs runner"),
     # host libraries
-    "mvm-vmm/src/driver/prepared_disks.rs": ("systemd-run / sudo", "inventory a Firecracker process's descriptors through sudo find on Linux"),
-    "mvm-backends/src/driver/fc.rs": ("systemd-run / sudo", "signal a Firecracker process through sudo kill on Linux"),
     "mvm-backends/src/driver/hvf.rs": ("hypervisor supervisor", "spawn mvm-hvf-supervisor for an HVF VM (cold and restore)"),
     "mvm-backends/src/driver/hvf_restore.rs": ("hypervisor supervisor", "spawn mvm-hvf-supervisor for a snapshot restore"),
     "mvm-backends/src/driver/libkrun.rs": ("hypervisor supervisor", "spawn mvm-libkrun-supervisor"),

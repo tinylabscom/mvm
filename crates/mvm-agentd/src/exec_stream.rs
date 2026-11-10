@@ -8,7 +8,6 @@
 //! `handle_proc_wait` sleep-poll loop (the in-repo streaming idiom — mvm-guest
 //! has no `libc::poll` usage).
 use crate::vsock::ExecEvent;
-use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -141,98 +140,24 @@ pub fn stream_exec_argv<F: FnMut(ExecEvent)>(
     argv: &[String],
     stdin_data: Option<&str>,
     timeout_secs: Option<u64>,
-    emit: F,
-) -> ExecEvent {
-    stream_exec_mediated(
-        MediatedCommand {
-            argv,
-            stdin: stdin_data,
-            timeout_secs,
-            env: &[],
-            binding: None,
-        },
-        emit,
-    )
-}
-
-/// A declared command as the agent starts it once the host has allowed it.
-#[derive(Debug, Clone, Copy)]
-pub struct MediatedCommand<'a> {
-    /// Spawned directly, never through a shell.
-    pub argv: &'a [String],
-    pub stdin: Option<&'a str>,
-    pub timeout_secs: Option<u64>,
-    /// Host-provisioned variables applied over the workload environment.
-    pub env: &'a [(String, String)],
-    /// When the host bound the invocation, the command leads a session of its
-    /// own whose loopback egress is attributed to this binding while it runs.
-    pub binding: Option<&'a ToolInvocationBinding>,
-}
-
-/// Run a declared command with the streaming, cap, timeout and teardown of
-/// [`stream_exec`].
-pub fn stream_exec_mediated<F: FnMut(ExecEvent)>(
-    command: MediatedCommand<'_>,
     mut emit: F,
 ) -> ExecEvent {
-    let Some((program, args)) = command.argv.split_first() else {
+    let Some((program, args)) = argv.split_first() else {
         emit(ExecEvent::Stderr {
-            chunk: b"empty declared command argv".to_vec(),
+            chunk: b"empty command argv".to_vec(),
         });
         return ExecEvent::Exit { code: -1 };
     };
     if program.is_empty() {
         emit(ExecEvent::Stderr {
-            chunk: b"empty declared command program".to_vec(),
+            chunk: b"empty command program".to_vec(),
         });
         return ExecEvent::Exit { code: -1 };
     }
     let environment = resolve_exec_environment();
     let mut builder = Command::new(program);
-    builder.args(args).envs(
-        command
-            .env
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str())),
-    );
-    let leader = leader_for(command.binding, program);
-    stream_command_with_environment(
-        builder,
-        leader,
-        command.stdin,
-        command.timeout_secs,
-        &environment,
-        emit,
-    )
-}
-
-/// How the streamed child is made the leader of what teardown kills.
-#[derive(Debug, Clone, Copy)]
-enum Leader<'a> {
-    /// A new process group in the agent's session.
-    ProcessGroup,
-    /// A new session, attributed to a host binding while the child runs.
-    AttributedSession(&'a ToolInvocationBinding),
-    /// A host-decided MediatedExec without a binding: an ordinary process
-    /// group spawn plus the decided marker the shim consults.
-    MediatedRelay,
-}
-
-/// The spawn shape for one host-decided command.
-///
-/// A bound invocation leads an attributed session. An unbound declared tool
-/// — a path activation substituted with the shim — relays through the shim,
-/// which consults the decision marker recorded under the relay's pid rather
-/// than paying for a second host decision; that shim is the mediation control
-/// plane, whose helper handshake needs connect(2), which the standard workload
-/// seccomp tier refuses, so the relay is not confined. Any other program is
-/// workload code and starts under the admitted tier exactly like a plain exec.
-fn leader_for<'a>(binding: Option<&'a ToolInvocationBinding>, program: &str) -> Leader<'a> {
-    match binding {
-        Some(binding) => Leader::AttributedSession(binding),
-        None if crate::tool_install::is_substituted_path(program) => Leader::MediatedRelay,
-        None => Leader::ProcessGroup,
-    }
+    builder.args(args);
+    stream_command_with_environment(builder, stdin_data, timeout_secs, &environment, emit)
 }
 
 fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
@@ -244,19 +169,11 @@ fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
 ) -> ExecEvent {
     let mut builder = Command::new("/bin/sh");
     builder.arg("-c").arg(command);
-    stream_command_with_environment(
-        builder,
-        Leader::ProcessGroup,
-        stdin_data,
-        timeout_secs,
-        environment,
-        emit,
-    )
+    stream_command_with_environment(builder, stdin_data, timeout_secs, environment, emit)
 }
 
 fn configure_stream_environment(
     builder: &mut Command,
-    leader: Leader<'_>,
     environment: &crate::workload_env::WorkloadEnvironment,
 ) {
     // Variables already set on the builder are the caller's and win over
@@ -270,22 +187,16 @@ fn configure_stream_environment(
         .envs(environment.vars())
         .envs(provisioned)
         .current_dir(environment.working_dir());
-    if matches!(leader, Leader::AttributedSession(_) | Leader::MediatedRelay) {
-        // Sanitize after merging all image/request variables so mediated
-        // execution cannot reintroduce startup controls or a workload PATH.
-        crate::trusted_env::configure_explicit_command(builder);
-    }
 }
 
 fn stream_command_with_environment<F: FnMut(ExecEvent)>(
     mut builder: Command,
-    leader: Leader<'_>,
     stdin_data: Option<&str>,
     timeout_secs: Option<u64>,
     environment: &crate::workload_env::WorkloadEnvironment,
     mut emit: F,
 ) -> ExecEvent {
-    configure_stream_environment(&mut builder, leader, environment);
+    configure_stream_environment(&mut builder, environment);
     builder
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
@@ -295,39 +206,11 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::fd_hygiene::configure_close_fds(&mut builder, 3, None);
-    // Held until the child has been waited for: dropping it ends the
-    // attribution of the child's session.
-    let spawned = match leader {
-        Leader::ProcessGroup => {
-            #[cfg(unix)]
-            builder.process_group(0);
-            crate::workload_seccomp::confine(&mut builder);
-            builder.spawn().map(|child| (child, None))
-        }
-        #[cfg(any(target_os = "linux", test))]
-        Leader::AttributedSession(binding) => {
-            crate::tool_attribution::spawn_attributed(&mut builder, binding)
-                .map(|(child, registration)| (child, Some(registration)))
-        }
-        #[cfg(any(target_os = "linux", test))]
-        Leader::MediatedRelay => {
-            crate::tool_attribution::spawn_decided_relay(&mut builder).map(|child| (child, None))
-        }
-        // Attribution and the tool group exist only in a Linux guest. Running
-        // a bound command anywhere else would run it without either, so it
-        // is refused.
-        #[cfg(not(any(target_os = "linux", test)))]
-        Leader::AttributedSession(_binding) => Err::<(Child, Option<()>), _>(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "a bound tool invocation runs only in a Linux guest",
-        )),
-        // Off Linux the decided marker has no consumer (the decision socket
-        // is Linux-only), so the relay degrades to an ordinary process-group
-        // spawn and the host-decided semantics are unchanged.
-        #[cfg(not(any(target_os = "linux", test)))]
-        Leader::MediatedRelay => builder.spawn().map(|child| (child, None)),
-    };
-    let (mut child, _registration) = match spawned {
+    #[cfg(unix)]
+    builder.process_group(0);
+    crate::workload_seccomp::confine(&mut builder);
+    let spawned = builder.spawn();
+    let mut child = match spawned {
         Ok(spawned) => spawned,
         Err(e) => {
             emit(ExecEvent::Stderr {
@@ -465,43 +348,6 @@ mod tests {
     }
 
     #[test]
-    fn mediated_environment_is_sanitized_after_image_and_request_overrides() {
-        let environment = crate::workload_env::WorkloadEnvironment::builder()
-            .overrides([
-                ("PATH", "/work/image-bin"),
-                ("PYTHONPATH", "/work/image-lib"),
-            ])
-            .build();
-        let binding = ToolInvocationBinding::from_random([8; 16]);
-        for leader in [Leader::MediatedRelay, Leader::AttributedSession(&binding)] {
-            let mut command = Command::new("/bin/sh");
-            command
-                .env("PATH", "/data/request-bin")
-                .env("LD_PRELOAD", "/data/request.so")
-                .env("BASH_ENV", "/data/startup")
-                .env("APPLICATION_VALUE", "kept");
-            configure_stream_environment(&mut command, leader, &environment);
-            let value = |key: &str| {
-                command
-                    .get_envs()
-                    .find(|(name, _)| *name == key)
-                    .and_then(|(_, value)| value)
-            };
-            assert_eq!(
-                value("PATH"),
-                Some(std::ffi::OsStr::new(crate::trusted_env::TRUSTED_PATH))
-            );
-            for key in ["LD_PRELOAD", "BASH_ENV", "PYTHONPATH"] {
-                assert!(value(key).is_none(), "{key} survived mediated launch");
-            }
-            assert_eq!(
-                value("APPLICATION_VALUE"),
-                Some(std::ffi::OsStr::new("kept"))
-            );
-        }
-    }
-
-    #[test]
     fn ordinary_stream_environment_preserves_request_search_and_loader_settings() {
         let environment = crate::workload_env::WorkloadEnvironment::builder()
             .overrides([("PATH", "/work/image-bin")])
@@ -510,7 +356,7 @@ mod tests {
         command
             .env("PATH", "/data/request-bin")
             .env("LD_PRELOAD", "/data/request.so");
-        configure_stream_environment(&mut command, Leader::ProcessGroup, &environment);
+        configure_stream_environment(&mut command, &environment);
         for (key, expected) in [
             ("PATH", "/data/request-bin"),
             ("LD_PRELOAD", "/data/request.so"),
@@ -744,43 +590,6 @@ mod tests {
         let mut events = Vec::new();
         let term = stream_exec("printf done", None, None, |e| events.push(e));
         assert!(matches!(term, ExecEvent::Exit { code: 0 }), "got {term:?}");
-    }
-
-    /// The relay dispatch: only a substituted declared path rides the
-    /// (unconfined) mediation shim; every other program is workload code and
-    /// starts under the admitted seccomp tier as a plain process group.
-    #[test]
-    fn the_relay_dispatch_separates_shim_paths_from_workload_code() {
-        let _guard = crate::tool_install::SUBSTITUTED_PATHS_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let map = crate::tool_map::ToolMap {
-            tools: vec![crate::tool_map::ToolEntry {
-                tool: "dispatch-probe".into(),
-                executable: "/dispatch-test/python3".into(),
-                aliases: vec!["/dispatch-test/py3".into()],
-                stash: "/dispatch-test/stash".into(),
-                digest: "00".repeat(32),
-            }],
-        };
-        crate::tool_install::record_substituted_paths(&map);
-        assert!(matches!(
-            leader_for(None, "/dispatch-test/python3"),
-            Leader::MediatedRelay
-        ));
-        assert!(matches!(
-            leader_for(None, "/dispatch-test/py3"),
-            Leader::MediatedRelay
-        ));
-        assert!(matches!(leader_for(None, "/bin/sh"), Leader::ProcessGroup));
-        let binding =
-            mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding::from_random(
-                [7; 16],
-            );
-        assert!(matches!(
-            leader_for(Some(&binding), "/bin/sh"),
-            Leader::AttributedSession(_)
-        ));
     }
 
     #[test]

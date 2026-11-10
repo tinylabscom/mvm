@@ -39,6 +39,7 @@ sha2.workspace = true
 # (`plan::bundle::stream` and the archive-reading functions in
 # `plan::bundle`) parses or writes tar; enabled by `host-state`.
 tar = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
 thiserror.workspace = true
 # Optional: the only default-build async surface left is
 # `protocol`'s hostd IPC transport, gated behind `hostd-transport`.
@@ -145,6 +146,7 @@ host-state = [
     "dep:unicode-normalization",
     "dep:aho-corasick",
     "dep:tar",
+    "dep:flate2",
     "dep:toml",
     "dep:regex",
 ]

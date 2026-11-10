@@ -54,7 +54,6 @@ impl GuestRequest {
             GuestRequest::ProbeStatus => Verb::ProbeStatus,
             GuestRequest::PrimedStatus => Verb::PrimedStatus,
             GuestRequest::Exec { .. } => Verb::Exec,
-            GuestRequest::MediatedExec(_) => Verb::MediatedExec,
             GuestRequest::ExecBatch { .. } => Verb::ExecBatch,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
             GuestRequest::AgentPrompt { .. } => Verb::AgentPrompt,
@@ -163,7 +162,6 @@ impl GuestRequest {
             // mounted-volume contents, so the entire filesystem
             // RPC surface is DevOnly in v1.
             GuestRequest::Exec { .. }
-            | GuestRequest::MediatedExec(_)
             | GuestRequest::ExecBatch { .. }
             | GuestRequest::RunDetached { .. }
             | GuestRequest::FsDiff
@@ -299,13 +297,6 @@ mod tests {
                 stdin: None,
                 timeout_secs: None,
             },
-            GuestRequest::MediatedExec(MediatedExecCall {
-                tool: "shell".into(),
-                argv: vec!["echo".into(), "ok".into()],
-                stdin: None,
-                timeout_secs: None,
-                env: Vec::new(),
-            }),
             GuestRequest::RunEntrypoint {
                 stdin: vec![],
                 timeout_secs: 1,
@@ -555,13 +546,6 @@ mod tests {
                 stdin: None,
                 timeout_secs: None,
             },
-            GuestRequest::MediatedExec(MediatedExecCall {
-                tool: "shell".into(),
-                argv: vec!["echo".into(), "ok".into()],
-                stdin: None,
-                timeout_secs: None,
-                env: Vec::new(),
-            }),
             GuestRequest::ConsoleOpen {
                 cols: 80,
                 rows: 24,
@@ -772,7 +756,6 @@ mod tests {
             }],
             extensions: Vec::new(),
             verb_grant_envelope: None,
-            tool_commands: Default::default(),
         });
         assert_eq!(req.verb(), Verb::ActivateEnvironment);
         assert_eq!(req.kind_name(), "activate-environment");

@@ -718,12 +718,6 @@ fn machine_run_spec(
         resolved_digest: None,
         runtime_pack: args.run.runtime_pack,
         registry_pack_image: args.run.registry_pack_image.clone(),
-        tools: args
-            .run
-            .applied_policy
-            .as_ref()
-            .map(|policy| policy.tools.to_tool_rules())
-            .unwrap_or_default(),
         net,
         allow_host,
         peer: Vec::new(),
@@ -979,10 +973,6 @@ pub(in crate::commands) struct MachineExecArgs {
     /// Accepted as an alias for `-t` so `-it` parses.
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
-    /// Declared tool name to authorize through this VM's admitted rules.
-    /// Requires a non-interactive command after `--`.
-    #[arg(long, value_name = "NAME")]
-    pub tool: Option<String>,
     /// Argv to run inside the guest (use `--` to separate). Omit to drop into
     /// an interactive shell, like `machine shell`.
     #[arg(trailing_var_arg = true)]
@@ -1268,11 +1258,6 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         resolved_digest: None,
         runtime_pack: false,
         registry_pack_image: None,
-        tools: policy
-            .policy
-            .as_ref()
-            .map(|body| body.tools.to_tool_rules())
-            .unwrap_or_default(),
         net,
         allow_host,
         peer: inputs.peer.to_vec(),
