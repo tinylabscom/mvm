@@ -343,7 +343,11 @@ impl MailboxService {
         })
     }
 
-    /// The execution epoch this node currently accepts.
+    /// The execution epoch this node currently accepts, for a service that
+    /// outlives a workload replacement (the scripted three-node demo). The
+    /// per-VM mailbox process never calls it: it takes its epoch from its
+    /// grant, and a replacement is a new process under a grant whose epoch
+    /// and keys are both new.
     pub fn set_current_epoch(&self, epoch: ExecutionEpoch) {
         self.shared
             .state
@@ -539,7 +543,7 @@ mod accept_loop_tests {
         let mailbox = mvm_contract::protocol::mailbox::MailboxId::from_bytes([5; 32]);
         let grant = MailboxGrant {
             mailbox,
-            authority_key: crate::mailbox_launch::authority_key_for(dir, &mailbox)
+            authority_key: crate::mailbox_launch::authority_key_for(dir, &mailbox, ExecutionEpoch::new(1).unwrap())
                 .unwrap()
                 .to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
@@ -578,5 +582,88 @@ mod accept_loop_tests {
             let got = recv(&dir.path().join("m.sock")).unwrap();
             assert!(got.message.is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mailbox_launch::{LAUNCH_LIMITS, authority_key_for, derive_launch_keys};
+    use mvm_contract::protocol::mailbox::MailboxId;
+
+    const MAILBOX: [u8; 32] = [4; 32];
+
+    fn grant_at(keys: &Path, epoch: u64) -> MailboxGrant {
+        let mailbox = MailboxId::from_bytes(MAILBOX);
+        let epoch = ExecutionEpoch::new(epoch).unwrap();
+        MailboxGrant {
+            mailbox,
+            authority_key: authority_key_for(keys, &mailbox, epoch).unwrap().to_bytes(),
+            epoch,
+        }
+    }
+
+    fn greeting() -> OutboxMessage {
+        OutboxMessage {
+            recipient: PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT),
+            body: b"epoch one secret".to_vec(),
+        }
+    }
+
+    /// What the real launch path builds for one epoch: the service and the
+    /// sealer, both from the host key directory through the grant.
+    fn launch(keys: &Path, socket: &Path, epoch: u64) -> (MailboxService, GuestSealer) {
+        let grant = grant_at(keys, epoch);
+        let (policy, sealer) = derive_launch_keys(keys, &grant).unwrap().trust();
+        bind_grant(&grant, policy, sealer, LAUNCH_LIMITS, socket).unwrap()
+    }
+
+    #[test]
+    fn an_old_epoch_envelope_is_refused_by_the_replacement_and_a_fresh_one_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
+
+        // The replaced workload's mailbox, at epoch 1, seals a message.
+        let (old_service, mut old_sealer) = launch(dir.path(), &dir.path().join("old.sock"), 1);
+        let (capability, envelope) = old_sealer.seal(greeting()).unwrap();
+        send(&dir.path().join("old.sock"), &capability, &envelope).expect("the old epoch opens it");
+        assert_eq!(
+            old_service.receive().as_deref(),
+            Some(&b"epoch one secret"[..])
+        );
+        drop(old_service);
+
+        // The replacement runs under epoch 2: it cannot open the captured
+        // envelope, and nothing is queued for it.
+        let socket = dir.path().join("new.sock");
+        let (new_service, mut new_sealer) = launch(dir.path(), &socket, 2);
+        assert!(send(&socket, &capability, &envelope).is_err());
+        assert!(new_service.receive().is_none());
+
+        // Its own message, sealed under its own epoch, is accepted.
+        let (capability, envelope) = new_sealer.seal(greeting()).unwrap();
+        send(&socket, &capability, &envelope).expect("the replacement's own epoch opens");
+        assert!(new_service.receive().is_some());
+    }
+
+    #[test]
+    fn the_same_keys_at_a_newer_epoch_are_refused_as_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
+        let (_service, mut sealer) = launch(dir.path(), &dir.path().join("a.sock"), 1);
+        let (capability, envelope) = sealer.seal(greeting()).unwrap();
+
+        let socket = dir.path().join("b.sock");
+        let (policy, _) = derive_launch_keys(dir.path(), &grant_at(dir.path(), 1))
+            .unwrap()
+            .trust();
+        let service = MailboxService::bind(&socket, LAUNCH_LIMITS, policy).unwrap();
+        service.set_current_epoch(ExecutionEpoch::new(2).unwrap());
+        assert_eq!(
+            send(&socket, &capability, &envelope),
+            Err(Refusal::Mailbox(
+                mvm_core::mailbox::MailboxError::StaleExecutionEpoch.to_string()
+            ))
+        );
     }
 }
