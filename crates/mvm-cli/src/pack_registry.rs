@@ -37,7 +37,9 @@ pub use mvm_client::registry_application::discovery::{
     DEFAULT_PACK_REGISTRY, PACK_REGISTRY_ENV, PackIndexEntry, PackIndexVersion, PackRegistryConfig,
     fetch_index, resolve_version, resolve_version_for_arch, search_index,
 };
-use mvm_client::registry_application::discovery::{block_on, fetch_bytes};
+use mvm_client::registry_application::discovery::{
+    block_on, fetch_bytes, resolve_runtime_layer_pin,
+};
 
 const PACKS_DIR: &str = "packs";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -91,11 +93,43 @@ pub fn download_pack(
     })
 }
 
-/// Acquire one explicitly pinned runtime layer as private build input only.
+/// Resolve one architecture-specific runtime to a pinned, private build input.
 ///
 /// This path does not install a boot image, update the user's pack lock, or
-/// treat signed policy requests as host grants. The caller must resolve and
-/// verify the entire layer dependency graph before composing a workload.
+/// treat signed policy requests as host grants. A caller resolving multiple
+/// layers must verify the complete pinned dependency graph before composition.
+///
+/// # Errors
+///
+/// Refuses missing or wrong-architecture advertisements, altered signed bytes,
+/// untrusted publishers, stale revocations and unsupported release origins.
+pub fn acquire_runtime_layer_for_arch(
+    config: &PackRegistryConfig,
+    requested: &PackReference,
+    guest_arch: &str,
+) -> Result<VerifiedRuntimeLayerInputs> {
+    let catalog = fetch_index(config)?;
+    let entry = catalog
+        .iter()
+        .find(|entry| entry.namespace == requested.namespace() && entry.name == requested.name())
+        .context("requested runtime layer is not in the catalog")?;
+    let pin = resolve_runtime_layer_pin(entry, requested, guest_arch)?;
+    let held = acquire_runtime_layer(config, &pin)?;
+    if held
+        .archive()
+        .descriptor()
+        .manifest()
+        .runtime_layer
+        .guest_arch
+        != guest_arch
+    {
+        bail!("signed runtime layer architecture differs from the requested guest");
+    }
+    held.reverify()?;
+    Ok(held)
+}
+
+/// Acquire an already resolved, exact-version-and-manifest-digest runtime.
 ///
 /// # Errors
 ///
@@ -937,6 +971,34 @@ mod tests {
         assert_eq!(
             resolve_version(&entries[0], &requested).expect("resolve"),
             requested
+        );
+    }
+
+    #[test]
+    fn runtime_build_refuses_wrong_architecture_before_metadata_fetch() {
+        let mut index = catalog();
+        index["packs"][0]["versions"][0]["guest_arch"] = serde_json::json!("x86_64");
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("index.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let config = PackRegistryConfig {
+            registry_url: format!("file://{}", root.path().display()),
+        };
+        let request = "runtime/python".parse().unwrap();
+        let error = acquire_runtime_layer_for_arch(&config, &request, "aarch64")
+            .expect_err("wrong-arch discovery must refuse before touching missing manifest");
+        assert!(
+            format!("{error:#}").contains("no runtime layer for aarch64"),
+            "{error:#}"
+        );
+        let error = acquire_runtime_layer_for_arch(&config, &request, "x86_64")
+            .expect_err("catalog digest alone must not authenticate missing manifest");
+        assert!(
+            !format!("{error:#}").contains("no runtime layer"),
+            "{error:#}"
         );
     }
 
