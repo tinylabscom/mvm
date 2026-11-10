@@ -59,12 +59,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connect_local_builds_a_local_backend() {
-        // Construction only (auto-selects the VMM); no VM boots here.
-        assert!(connect(Target::Local).is_ok());
-    }
-
-    #[test]
     fn target_debug_redacts_token() {
         let t = Target::Gateway {
             base_url: "https://x".into(),

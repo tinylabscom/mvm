@@ -70,11 +70,11 @@ ${issue_body}
 
 ## Instructions
 
-1. Read and follow the repository guidance below. Start by using the repo's Graft context graph as instructed in `.github/copilot-instructions.md`; inspect exact source spans before editing.
+1. Read and follow the repository guidance below. Start by using the repo's Trail context graph as instructed in `.github/copilot-instructions.md`; inspect exact source spans before editing.
 2. Before changing files, summarize the likely root cause and a short implementation/test plan. If the issue lacks enough detail or conflicts with repository contracts, ask a clarifying question in the issue/PR context instead of guessing.
 3. Implement only the smallest change that satisfies the issue's explicit expected behavior and acceptance criteria. Preserve existing security boundaries and fail-closed behavior. Do not weaken checks, widen permissions, or increase timeouts to hide a race.
 4. Add or update meaningful tests for the behavior and failure cases. Run the narrow relevant tests first, then the applicable repository gates. Follow the repo's host-versus-builder VM rules; do not run VM/Nix/Linux-only operations on the wrong host.
-5. Keep the GitHub issue authoritative for status and remaining scope. Update an ADR or contract only when a decision changes; do not create or update shared progress dashboards under `specs/`. Refresh the Graft graph after substantial code changes.
+5. Keep the GitHub issue authoritative for status and remaining scope. Update an ADR or contract only when a decision changes; do not create or update shared progress dashboards under `specs/`. Refresh the Trail graph after substantial code changes.
 6. Open a focused PR that links this issue and reports root cause, changes, tests run, and any checks that could not be run. Do not merge it.
 7. Keep PR title/body and commits free of assistant, model, or tool attribution. Do not make unrelated edits.
 

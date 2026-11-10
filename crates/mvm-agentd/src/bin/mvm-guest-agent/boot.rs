@@ -236,7 +236,9 @@ pub(crate) fn init_integrations(
     if count > 0 {
         boot_state.set_integrations(ComponentState::Ready);
         let health_state = Arc::clone(integration_state);
-        std::thread::spawn(move || integration_health_loop(health_state));
+        let _ = mvm_agentd::detached::spawn_named("integration-health", move || {
+            integration_health_loop(health_state)
+        });
     } else {
         boot_state.set_integrations(ComponentState::Disabled);
     }
@@ -261,7 +263,9 @@ pub(crate) fn init_probes(boot_state: &Arc<AgentBootState>, probe_state: &Arc<Mu
     if count > 0 {
         boot_state.set_probes(ComponentState::Ready);
         let health_state = Arc::clone(probe_state);
-        std::thread::spawn(move || probe_health_loop(health_state));
+        let _ = mvm_agentd::detached::spawn_named("probe-health", move || {
+            probe_health_loop(health_state)
+        });
     } else {
         boot_state.set_probes(ComponentState::Disabled);
     }

@@ -159,7 +159,14 @@ impl KernelBoundLaunch {
     ) -> Result<Box<dyn RunningVm>> {
         self.before_boot(spec)?;
         disks.validate_spec(spec)?;
-        driver.boot_custodied(spec, self.kernel.as_ref(), disks)
+        driver.boot_custodied(
+            spec,
+            mvm_vmm::driver::prepared_disks::PreparedBootFiles {
+                kernel: self.kernel.as_ref(),
+                writable: disks,
+                data: None,
+            },
+        )
     }
 
     /// Validate the physical recipe passed to the driver, not a reconstructed

@@ -444,7 +444,7 @@ mod tests {
         // four arms expand cleanly against `LocalAuditKind` variants
         // and the surrounding builder API. Renaming a variant or
         // changing `LocalAuditBuilder`'s signature surfaces here as a
-        // compile error before the migration sites notice.
+        // compile error before the call sites notice.
         if false {
             crate::audit_emit!(CachePrune);
             crate::audit_emit!(StorageGc, "count={n}", n = 3);

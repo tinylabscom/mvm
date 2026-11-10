@@ -320,7 +320,7 @@ fn command_with_env(cmd: &str, env: &[(String, String)]) -> String {
     }
     let exports = env
         .iter()
-        .map(|(key, value)| format!("{key}={}", crate::exec::shell_quote(value)))
+        .map(|(key, value)| format!("{key}={}", mvm_vmm::host::shell::shell_quote(value)))
         .collect::<Vec<_>>()
         .join(" ");
     format!("{exports} {cmd}")
@@ -411,7 +411,6 @@ pub(in crate::commands) fn console_interactive(
         attached.kind.audit_label()
     );
 
-    // Set up SIGWINCH handler to forward terminal resizes
     let resize_sender = setup_sigwinch_handler(transport.clone(), session_id);
 
     // Enter raw terminal mode and suppress the Ctrl-C handler so that Ctrl+C

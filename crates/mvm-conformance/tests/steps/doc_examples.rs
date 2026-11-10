@@ -429,6 +429,10 @@ fn execute_in(
 /// between a tier that reflects the CLI and one that reflects the fixture set.
 fn stage_fixture(name: &str, dir: &Path, home: &Path) {
     match name {
+        "pack-sources" => {
+            std::fs::create_dir(dir.join("pack-sources"))
+                .expect("create empty registry source directory");
+        }
         // `show` reads only public metadata. This fixture does not enroll or
         // claim that a matching native credential exists.
         "caller-public-pin-only" => {

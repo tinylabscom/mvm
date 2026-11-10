@@ -24,6 +24,19 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     ensure_workload_kernel_with(super::local_pair::pair_workload_kernel_fingerprint)
 }
 
+/// A first image run may fetch a missing kernel, but never replace a present
+/// entry whose verification or dm-verity capability failed.
+pub(crate) fn prepare_workload_kernel_for_launch() -> Result<String> {
+    let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let arch = builder_vm_host_arch();
+    let label = mvm_build::kernel_fetch::workload_kernel_label();
+    if mvm_build::kernel_fetch::kernel_cache_dir(&cache, arch, label).exists() {
+        ensure_workload_kernel()
+    } else {
+        prepare_workload_kernel()
+    }
+}
+
 fn ensure_workload_kernel_with(
     pair_fingerprint: impl FnOnce(
         &mvm_build::image_source::LocalImageCheckout,
@@ -703,6 +716,38 @@ mod pair_default_image_tests {
 
         let error = ensure_workload_kernel().expect_err("launch must not acquire a kernel");
         assert!(error.to_string().contains("mvmctl bootstrap"), "{error}");
+    }
+
+    #[test]
+    fn first_run_does_not_replace_a_verified_non_verity_kernel() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
+        let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let kernel = mvm_build::kernel_fetch::cached_kernel_path(
+            &cache,
+            builder_vm_host_arch(),
+            mvm_build::kernel_fetch::workload_kernel_label(),
+        );
+        std::fs::create_dir_all(kernel.parent().unwrap()).unwrap();
+        std::fs::write(&kernel, b"KALLSYMS-free fake kernel bytes\n").unwrap();
+        mvm_build::kernel_fetch::record_kernel_digest(&kernel).unwrap();
+        let config = kernel.with_file_name("config");
+        std::fs::write(
+            &config,
+            "# CONFIG_BLK_DEV_DM is not set\n# CONFIG_DM_VERITY is not set\n",
+        )
+        .unwrap();
+
+        let error =
+            prepare_workload_kernel_for_launch().expect_err("a non-verity kernel must fail");
+        assert!(error.to_string().contains("CONFIG_DM_VERITY"), "{error}");
+        assert_eq!(
+            std::fs::read(&kernel).unwrap(),
+            b"KALLSYMS-free fake kernel bytes\n"
+        );
+        assert!(config.is_file());
     }
 
     /// The five default-tenant artifacts, with the sizes and ext4 magic the

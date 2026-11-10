@@ -7,9 +7,10 @@ use rand::Rng;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+use mvm_contract::ir::host_matches;
 use mvm_core::policy::{
-    OpaqueRewriteToken, ReversibleReplacementAction, RewriteFlowId, RewriteProofRecord,
-    RewriteSurface, SensitiveClass,
+    OpaqueRewriteToken, ReversibleReplacementAction, ReversibleReplacementPolicy, RewriteFlowId,
+    RewriteProofRecord, RewriteSurface, SensitiveClass,
 };
 
 use crate::supervisor::find_subslice;
@@ -509,6 +510,19 @@ fn digest_hex(key: &[u8; 32], bytes: &[u8]) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// First matching profile wins; else the default action.
+pub fn resolve_replacement<'a>(
+    policy: &'a ReversibleReplacementPolicy,
+    dest: &str,
+) -> &'a ReversibleReplacementAction {
+    policy
+        .profiles
+        .iter()
+        .find(|profile| host_matches(&profile.host, dest))
+        .map(|profile| &profile.action)
+        .unwrap_or(&policy.default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,5 +640,29 @@ mod tests {
         let proofs = flow.replace_request(&mut headers, &mut body);
         assert_eq!(proofs.len(), 2);
         assert_eq!(proofs[0].token_id, proofs[1].token_id);
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use mvm_core::policy::{
+        ReversibleReplacementAction, ReversibleReplacementPolicy, ReversibleReplacementProfile,
+    };
+
+    #[test]
+    fn first_match_wins_else_default() {
+        let policy = ReversibleReplacementPolicy {
+            default: ReversibleReplacementAction::default(),
+            profiles: vec![ReversibleReplacementProfile {
+                host: "*.openai.com".into(),
+                action: ReversibleReplacementAction {
+                    enabled: true,
+                    ..Default::default()
+                },
+            }],
+        };
+        assert!(resolve_replacement(&policy, "api.openai.com").enabled);
+        assert!(!resolve_replacement(&policy, "example.com").enabled);
     }
 }

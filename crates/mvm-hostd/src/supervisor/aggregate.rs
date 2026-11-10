@@ -245,18 +245,6 @@ impl Supervisor {
         self
     }
 
-    /// Wire a prebuilt egress proxy slot.
-    pub fn with_egress_proxy(mut self, egress: Arc<dyn SupervisorEgressProxy>) -> Self {
-        self.egress = egress;
-        self
-    }
-
-    /// Wire a prebuilt keystore releaser slot.
-    pub fn with_keystore_releaser(mut self, keystore: Arc<dyn KeystoreReleaser>) -> Self {
-        self.keystore = keystore;
-        self
-    }
-
     /// Wire a prebuilt audit signer slot.
     pub fn with_audit_signer(mut self, audit: Arc<dyn AuditSigner>) -> Self {
         self.audit = audit;
@@ -1123,7 +1111,6 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::*;
     use rand::Rng;
-    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     /// Test backend that records every call and lets the test pick

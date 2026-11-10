@@ -2,6 +2,160 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.27.0] — 2026-11-07
+
+Final release of the 0.27.0 line. It carries everything in rc.3 and rc.4 plus the changes below.
+
+### Added
+- **packs**: The official bundle-author key is pinned in the client, so official application packs verify without `trust add`; the pinned keys apply at every installed-application launch and admission site
+- **packs**: The official revocation feed is refreshed on demand and applied to applications signed by the built-in publisher
+
+### Changed
+- **cli**: Pack bundle downloads follow at most five HTTPS redirects (no IP-literal, localhost, userinfo or port-changing targets, public-address-only resolution after the first hop, one deadline and byte budget across hops); the general client and other fetches still never redirect
+- **examples**: The Claude application candidate and its demo scripts move to agent/claude@2.0.1
+
+### Documentation
+- Drop the removed pack compatibility commands from the CLI reference, tier manifest and surface inventory
+
+## [0.27.0] — 2026-11-07
+
+Final release of the 0.27.0 line. It carries everything in rc.3 and rc.4 plus the changes below.
+
+### Added
+- **packs**: The official bundle-author key is pinned in the client, so official application packs verify without `trust add`; the pinned keys apply at every installed-application launch and admission site
+- **packs**: The official revocation feed is refreshed on demand and applied to applications signed by the built-in publisher
+
+### Changed
+- **cli**: Pack bundle downloads follow at most five HTTPS redirects (no IP-literal, localhost, userinfo or port-changing targets, public-address-only resolution after the first hop, one deadline and byte budget across hops); the general client and other fetches still never redirect
+- **examples**: The Claude application candidate and its demo scripts move to agent/claude@2.0.1
+
+### Documentation
+- Drop the removed pack compatibility commands from the CLI reference, tier manifest and surface inventory
+
+## [0.27.0-rc.4] — 2026-11-06
+
+### Changed
+- SDK runtime compatibility follows the workspace version
+- Remove dead configuration surface and gate documented env vars
+
+### Documentation
+- **adr-054**: State both layers of first-run runtime preparation
+
+### Fixed
+- **cli**: Pack rm accepts the :latest spelling pull, info and verify accept
+- **release**: Reconcile detached standby during smoke cleanup
+
+### Testing
+- **plan**: Reuse shared plan fixtures
+
+## [0.27.0-rc.3] — 2026-11-06
+
+v0.27.0-rc.1 and v0.27.0-rc.2 did not publish. rc.1 was stopped by the BDD gate, which caught a first-run cached-kernel regression. rc.2 was stopped in distro-packages, which rejected the hyphenated pre-release RPM version. rc.3 carries both fixes.
+
+### Added
+- **cli**: Pack index tags, platform and size, with a pre-download arch warning
+- **core**: Add signed offline leases, a command replay gate and a reconnect gate
+- **cli**: Scaffold registry policy packs with new-pack
+- **core**: Contain and replace a single workload under a fresh epoch
+
+### Documentation
+- **adr-001**: Audit claim witnesses and cite claim 14's provenance test
+
+### Fixed
+- **release**: Build .deb/.rpm for pre-release tags
+- **hostd**: Point the eBPF loader at the folded EgressEvent type
+- **mvm-fs**: Ext4 layout underflowed when the inode count, not the data, set the group count
+
+### Testing
+- Sign pack fixtures under the current publisher identity (unblocks CI)
+- **cli**: Remove obsolete publisher override
+- **cli**: Outcome tests in place of self-asserting and source-text tests
+- **hostd**: Script the three-node contain, terminate and rebuild demo
+- **hostd**: Time the host-interface preflight against the launch budgets
+- **cli**: Decide 'installed' by a marker, not a path guess, in the rollback test
+
+## [0.27.0-rc.2] — 2026-11-05
+
+### Fixed
+- **cli**: Preserve incompatible cached kernel on first run
+
+## [0.27.0-rc.1] — 2026-11-05
+
+### Added
+- Expose checkpoint lineage verification to SDKs
+- **crypto**: Add purpose-bound recovery possession proof
+- Expose prompt step checkpoints to SDKs
+- **bundle**: Show verified publisher in artifact preview
+
+### Changed
+- **scripts**: Remove the retired linux-gate VMM scripts
+- Remove local editor and agent state
+- Deny unreachable_pub in xtask, mvm-core, mvm-capture, mvm-build, mvm-cli
+- **hostd**: Delete unused LifecycleHooks, EventBus and blocking DNS audit emitters
+- **runtime**: Drop unused security re-exports kept for backward compatibility
+- **core,contract,runtime**: Return errors instead of panicking on reachable inputs
+- **build**: Delete the unrendered download_builder_artifacts template
+- **build**: Delete three builder script templates nothing renders
+- **build**: Delete the vsock-disk extract template nothing renders
+
+### Documentation
+- **contracts**: Record the section 3 applied state at 3d17ff9fdd
+- **trail**: Note on merging near-identical gate scripts
+- **cli**: Say pack update installs an application like pack pull
+- Sync CLI reference and guides with the shipped surface
+- **cli**: Add reference rows for 41 documented-nowhere subcommands
+- **unsafe**: State the invariant at first-party unsafe sites
+- **sdk**: Drop env vars no code reads from the Rust SDK page
+- **sdk**: Make the gateway example compile again
+- Add distributed host interface plan
+- Switch agent instructions from graft to trail context graph
+
+### Fixed
+- **hvf**: Bound and validate supervisor status diagnostics
+- Refuse overrides of host-provisioned egress variables
+- **hvf**: Keep waking vCPUs until a stop lands; sample stuck supervisors in e2e
+- Centralize and protect the machine input journal
+- **hvf**: Serialize vCPU exits with destruction
+- **hvf**: Notify the cancellation driver on completion
+- Return typed errors instead of panicking on empty workloads, bare image references and unnamed persistent requests
+- **exec**: The CLI's own proxy variables are not an --env override
+- Refuse torn machine input journals
+- **hvf**: Preserve exit requests across vCPU exits
+- **docs**: Restore release conformance witnesses
+- **runtime**: Keep endpoint wait failure irreversible
+- **client**: Register transient request volumes under a durable ownership receipt
+- **agentd,vmm,hostd**: Turn reachable panic paths into typed errors
+- **cli,build,backends,capture,hostlib**: Turn reachable panic paths into typed errors
+- **release**: Reuse pinned artifacts across failed-job reruns
+- **backends,build**: Turn reachable panic paths into typed errors
+- **cli**: Turn reachable panic paths into typed errors
+- **cli**: Prepare first image run without bootstrap
+
+### Other
+- Shrink mvm-hostd: consolidate fragmented modules, remove forwarding shims (#4839 slice 1)
+- **hvf**: Mark the sub-phases of the live standby fork
+- **hvf**: Say how far the supervisor got when its exit stays unconfirmed
+- V0.27.0
+
+### Refactored
+- Narrow unreachable pub items in xtask, mvm-conformance, root tests and stragglers
+- **runtime**: Drop the driver::spec forwarding module
+- **hostd**: Deduplicate supervisor byte searches
+- **scripts**: One host-authority gate for the agent and builderd
+- Share one lowercase-hex encoder from mvm-contract
+- **cli**: Retire legacy launch-plan inputs
+
+### Testing
+- **cli**: Witness policy denial at the signed application environment boundary
+- Verify snapshot lineage and fork isolation
+- **fc**: Isolate the systemd launch fixture environment
+- **build**: Isolate last-close lock lifetime probes
+- **mailbox**: Witness binding authority key rotation
+- **e2e**: Avoid max-vCPU standby in clamp scenario
+- Optimize core crypto in dev builds for volume tests
+- Make machine removal denial noninteractive
+- **cli**: Keep OCI runtime tests after launch functions
+
 ## [0.27.0] — 2026-11-04
 
 ### Added

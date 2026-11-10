@@ -26,7 +26,7 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
     let token = canonical_regex();
     let mut hits: Vec<String> = Vec::new();
 
-    for root in ["crates", "xtask", "nix", "src"] {
+    for root in ["crates", "xtask", "nix", "src", "scripts"] {
         crate::fs_walk::walk_files(&workspace.join(root), &mut |path| {
             scan_file(workspace, path, &token, &mut hits);
         })?;
@@ -106,7 +106,7 @@ fn comment_lines(src: &str, style: CommentStyle) -> Vec<(usize, String)> {
 /// Rust: `//`, `///`, `//!`, and `/* … */` (nested) comments. Skips `"…"`,
 /// `r#*"…"#*` raw strings, and `'…'` char literals so their contents
 /// (including any embedded `#`/`//`) are never treated as comments.
-fn rust_comments(src: &str) -> Vec<(usize, String)> {
+pub(crate) fn rust_comments(src: &str) -> Vec<(usize, String)> {
     let b = src.as_bytes();
     let n = b.len();
     let mut out = Vec::new();
@@ -208,7 +208,7 @@ fn rust_comments(src: &str) -> Vec<(usize, String)> {
 
 /// `#` line comments for nix / sh / toml. Skips `"…"` and `'…'` strings
 /// and nix `''…''` strings so a `#` inside a string is not a comment.
-fn hash_comments(src: &str) -> Vec<(usize, String)> {
+pub(crate) fn hash_comments(src: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for (idx, raw) in src.lines().enumerate() {
         if let Some(comment) = hash_comment_on_line(raw) {

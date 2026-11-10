@@ -45,9 +45,7 @@ struct VerifiedFile {
 }
 
 pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<()> {
-    let reference: PackReference = reference_arg
-        .parse()
-        .with_context(|| format!("invalid pack reference {reference_arg:?}"))?;
+    let reference: PackReference = crate::pack_registry::parse_user_reference(reference_arg)?;
     let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path())?;
     let publisher = load_publisher_policy_or_official_default(
         &mvm_core::config::registry_pack_publisher_policy_path(),
@@ -146,42 +144,51 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
         return crate::json_out::emit_json(&info);
     }
     if verify_only {
-        println!("Verified {} ({})", info.reference, info.manifest_sha256);
-        println!("Signer identity: {}", info.signer_identity);
-        println!("Signer issuer: {}", info.signer_issuer);
+        println!(
+            "Verified {} ({})",
+            safe(&info.reference),
+            safe(&info.manifest_sha256)
+        );
+        println!("Signer identity: {}", safe(&info.signer_identity));
+        println!("Signer issuer: {}", safe(&info.signer_issuer));
         for line in trust_status_lines(official, revocation_required) {
             println!("{line}");
         }
         println!("Signature proves publisher identity and integrity, not safety.");
         return Ok(());
     }
-    println!("Pack: {}", info.reference);
-    println!("Description: {}", info.description);
-    println!("Manifest SHA-256: {}", info.manifest_sha256);
-    println!("Signer identity: {}", info.signer_identity);
-    println!("Signer issuer: {}", info.signer_issuer);
+    println!("Pack: {}", safe(&info.reference));
+    println!("Description: {}", safe(&info.description));
+    println!("Manifest SHA-256: {}", safe(&info.manifest_sha256));
+    println!("Signer identity: {}", safe(&info.signer_identity));
+    println!("Signer issuer: {}", safe(&info.signer_issuer));
     for line in trust_status_lines(official, revocation_required) {
         println!("{line}");
     }
-    println!("Publisher issuer: {}", info.publisher_issuer);
+    println!("Publisher issuer: {}", safe(&info.publisher_issuer));
     println!(
         "Accepted signing identities: {}",
-        info.accepted_signing_identities.join(", ")
+        safe_join(&info.accepted_signing_identities)
     );
-    println!("Policy files: {}", info.policy_files.join(", "));
+    println!("Policy files: {}", safe_join(&info.policy_files));
     for policy in &info.policy_documents {
         println!(
             "Policy {}: {}",
-            policy.path,
+            safe(&policy.path),
             serde_json::to_string(&policy.text)?
         );
     }
     if let Some(image) = &info.image_manifest {
-        println!("Image source manifest: {image}");
+        println!("Image source manifest: {}", safe(image));
     }
     println!("Payload files: {}", info.files.len());
     for file in &info.files {
-        println!("  {}  {}  {} bytes", file.sha256, file.path, file.size);
+        println!(
+            "  {}  {}  {} bytes",
+            safe(file.sha256.as_str()),
+            safe(&file.path),
+            file.size
+        );
     }
     println!("Signature proves publisher identity and integrity, not safety.");
     Ok(())
@@ -200,6 +207,39 @@ struct ApplicationInfo {
     verification_scope: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     bundle_manifest: Option<mvm_core::plan::bundle::BundleManifest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch: Option<LaunchSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arch_warning: Option<String>,
+}
+
+/// What the signed bundle says the application runs and may do, lifted from
+/// its manifest so `pack info` answers it without a second command.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+struct LaunchSummary {
+    entrypoint: Vec<String>,
+    working_dir: Option<String>,
+    vcpus: Option<u32>,
+    mem_mib: Option<u32>,
+    egress_allowed: Option<bool>,
+    allow_hosts: Vec<String>,
+}
+
+fn launch_summary(manifest: &mvm_core::plan::bundle::BundleManifest) -> Option<LaunchSummary> {
+    let environment = manifest.environment()?;
+    let resources = manifest.resources.as_ref();
+    Some(LaunchSummary {
+        entrypoint: environment.entrypoint.argv.clone(),
+        working_dir: environment.entrypoint.working_dir.clone(),
+        vcpus: resources.map(|r| r.vcpus),
+        mem_mib: resources.map(|r| r.mem_mib),
+        egress_allowed: manifest.security_posture().map(|p| p.allows_egress),
+        allow_hosts: environment
+            .policy
+            .as_ref()
+            .map(|policy| policy.allow_hosts.clone())
+            .unwrap_or_default(),
+    })
 }
 
 fn application_info(
@@ -218,6 +258,12 @@ fn application_info(
         bundle: manifest.application.bundle.clone(),
         verification_scope: "descriptor_and_bundle_archive",
         bundle_manifest: None,
+        launch: None,
+        arch_warning: crate::pack_registry::arch_mismatch_warning(
+            &manifest.reference.to_string(),
+            &manifest.application.guest_arch,
+            mvm_build::builder_vm::host_arch_tag(),
+        ),
     }
 }
 
@@ -230,7 +276,11 @@ fn inspect_application(
     use mvm_core::registry_pack::application_bundle::verify_application_bundle;
 
     let registry = BundleRegistry::default_path()?;
-    let trust = FsTrustStore::default_path()?;
+    let enrolled = FsTrustStore::default_path()?;
+    let loaded = mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+    )?;
+    let trust = mvm_core::registry_pack::BuiltinAuthorTrust::for_policy(&enrolled, &loaded);
     let archive = registry.archive_path(
         application
             .manifest()
@@ -255,6 +305,7 @@ fn inspect_application(
         application.manifest_sha256(),
         application.signer(),
     );
+    info.launch = launch_summary(&verified_archive.bundle().manifest);
     info.bundle_manifest = Some(verified_archive.bundle().manifest.clone());
     if json {
         return crate::json_out::emit_json(&info);
@@ -262,29 +313,95 @@ fn inspect_application(
     if verify_only {
         println!(
             "Verified application descriptor and bundle archive: {} ({})",
-            info.reference, info.manifest_sha256
+            safe(&info.reference),
+            safe(&info.manifest_sha256)
         );
     } else {
-        println!("Application: {}", info.reference);
-        println!("Description: {}", info.description);
-        println!("Manifest SHA-256: {}", info.manifest_sha256);
+        println!("Application: {}", safe(&info.reference));
+        println!("Description: {}", safe(&info.description));
+        println!("Manifest SHA-256: {}", safe(&info.manifest_sha256));
     }
-    println!("Signer identity: {}", info.signer_identity);
-    println!("Signer issuer: {}", info.signer_issuer);
-    for line in trust_status_lines(application.reference().namespace() == "mvm", false) {
+    println!("Signer identity: {}", safe(&info.signer_identity));
+    println!("Signer issuer: {}", safe(&info.signer_issuer));
+    let built_in_signer = info.signer_identity
+        == mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+        && loaded.is_official_default();
+    let feed_valid_until =
+        mvm_core::registry_pack_store::official_registry_pack_revocation_valid_until();
+    for line in application_trust_lines(
+        application.reference().namespace() == "mvm",
+        built_in_signer,
+        feed_valid_until,
+    ) {
         println!("{line}");
     }
-    println!("Guest architecture: {}", info.guest_arch);
+    println!("Guest architecture: {}", safe(&info.guest_arch));
     println!(
         "Bundle archive SHA-256: {}",
-        info.bundle.archive_sha256.as_str()
+        safe(info.bundle.archive_sha256.as_str())
     );
-    println!("Bundle archive size: {}", info.bundle.archive_size);
-    println!("Bundle author key: {}", info.bundle.key_id.0);
+    println!("Bundle archive size: {} bytes", info.bundle.archive_size);
+    println!("Bundle author key: {}", safe(&info.bundle.key_id.0));
+    if let Some(launch) = &info.launch {
+        for line in launch_lines(launch) {
+            println!("{line}");
+        }
+    }
+    if let Some(warning) = &info.arch_warning {
+        crate::ui::warn(&safe(warning));
+    }
     println!(
         "Verification covers the descriptor and archive, not extracted-file custody or launch admission."
     );
     Ok(())
+}
+
+/// Neutralize terminal control characters (ESC, CR, newline, C1 and the
+/// rest) in a publisher-supplied string, which a signature does not make safe
+/// to print raw.
+pub(crate) fn safe(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_debug().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+fn safe_join(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| safe(item))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Text lines for the launch summary; each argv element is quoted separately.
+fn launch_lines(launch: &LaunchSummary) -> Vec<String> {
+    let argv: Vec<String> = launch
+        .entrypoint
+        .iter()
+        .map(|arg| format!("\"{}\"", safe(arg)))
+        .collect();
+    let mut lines = vec![format!("Entrypoint: {}", argv.join(" "))];
+    if let Some(dir) = &launch.working_dir {
+        lines.push(format!("Working directory: {}", safe(dir)));
+    }
+    if let (Some(vcpus), Some(mem)) = (launch.vcpus, launch.mem_mib) {
+        lines.push(format!("Resources: {vcpus} vCPU, {mem} MiB"));
+    }
+    match launch.egress_allowed {
+        Some(true) => lines.push(format!(
+            "Policy: egress allowed to [{}]",
+            safe_join(&launch.allow_hosts)
+        )),
+        Some(false) => lines.push("Policy: no network egress".to_owned()),
+        None => {}
+    }
+    lines
 }
 
 /// Human-readable trust status. `official` is only passed after the pack and
@@ -306,9 +423,72 @@ fn trust_status_lines(official: bool, revocation_required: bool) -> [&'static st
     }
 }
 
+/// Trust lines for an application. A signer that is the built-in publish
+/// identity is named as such: that is identity, not the reserved `mvm/`
+/// namespace's official status, and the official feed is what gates it.
+fn application_trust_lines(
+    mvm_namespace: bool,
+    built_in_signer: bool,
+    feed_valid_until: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<String> {
+    if mvm_namespace || !built_in_signer {
+        return trust_status_lines(mvm_namespace, false)
+            .map(str::to_owned)
+            .to_vec();
+    }
+    let scope = match feed_valid_until {
+        Some(end) => format!(
+            "Revocation scope: official signed feed (verified cache valid until {})",
+            end.to_rfc3339()
+        ),
+        None => "Revocation scope: official signed feed required; no current verified copy is cached (`mvmctl pull` refreshes it)".to_owned(),
+    };
+    vec![
+        "Publisher: signed by the built-in official publisher identity (the mvm/ namespace is not implied)".to_owned(),
+        scope,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{application_info, trust_status_lines};
+    use super::{
+        LaunchSummary, application_info, application_trust_lines, launch_lines, safe,
+        trust_status_lines,
+    };
+
+    const HOSTILE: &str = "a\x1b[2Jb\rc\nd\u{9b}e";
+
+    fn assert_no_control(text: &str) {
+        assert!(
+            !text.chars().any(char::is_control),
+            "raw control in {text:?}"
+        );
+    }
+
+    #[test]
+    fn safe_escapes_every_control_character() {
+        let out = safe(HOSTILE);
+        assert_no_control(&out);
+        assert!(out.contains("\\u{1b}") && out.contains("\\r") && out.contains("\\n"));
+        assert!(out.contains("\\u{9b}"));
+    }
+
+    #[test]
+    fn hostile_launch_fields_never_print_a_control_character() {
+        let launch = LaunchSummary {
+            entrypoint: vec![HOSTILE.into(), "ok".into()],
+            working_dir: Some(HOSTILE.into()),
+            vcpus: Some(1),
+            mem_mib: Some(128),
+            egress_allowed: Some(true),
+            allow_hosts: vec![HOSTILE.into()],
+        };
+        let lines = launch_lines(&launch);
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            assert_no_control(line);
+        }
+    }
 
     #[test]
     fn application_info_keeps_descriptor_and_bundle_identities_distinct() {
@@ -349,6 +529,27 @@ mod tests {
         assert!(info.get("files").is_none());
         assert!(info.get("policy_documents").is_none());
         assert!(info.get("launch_authorized").is_none());
+        assert!(info.get("launch").is_none());
+    }
+
+    #[test]
+    fn launch_summary_is_absent_without_an_environment_member() {
+        let manifest = mvm_core::plan::bundle::BundleManifest {
+            schema_version: 5,
+            publisher: "p".into(),
+            key_id: mvm_core::plan::bundle::KeyId("b".repeat(32)),
+            arch: "x86_64".into(),
+            kernel_version: None,
+            profile: None,
+            workload_label: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            labels: Default::default(),
+            artifacts: vec![],
+            members: vec![],
+            verity: None,
+            resources: None,
+        };
+        assert_eq!(super::launch_summary(&manifest), None);
     }
 
     #[test]
@@ -362,5 +563,23 @@ mod tests {
             assert!(!scope.contains("MVM-controlled"));
             assert_eq!(scope.contains("fresh signed feed required"), required);
         }
+    }
+
+    #[test]
+    fn application_trust_lines_name_the_feed_that_applies() {
+        let end = "2026-11-09T00:00:00Z".parse().unwrap();
+        let cached = application_trust_lines(false, true, Some(end));
+        assert!(cached[0].contains("built-in official publisher identity"));
+        assert!(cached[1].contains("valid until 2026-11-09T00:00:00+00:00"));
+        let cold = application_trust_lines(false, true, None);
+        assert!(cold[1].contains("no current verified copy"));
+        let operator = application_trust_lines(false, false, Some(end));
+        assert_eq!(
+            operator,
+            [
+                "Official status: not established by this verification",
+                "Revocation scope: operator-configured signed feed only; no feed is required"
+            ]
+        );
     }
 }

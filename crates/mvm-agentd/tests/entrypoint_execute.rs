@@ -44,8 +44,8 @@ fn make_wrapper() -> (tempfile::TempDir, ValidatedEntrypoint) {
 ///
 /// For those, the deadline is a safety net so a hung wrapper cannot hang the
 /// suite; it is not the property under test, and none of them care whether it
-/// is five seconds or sixty. It used to be five, which is long enough on an
-/// idle machine and not long enough under a full parallel run: the spawned
+/// is five seconds or sixty. Five is long enough on an idle machine but not
+/// under a full parallel run, so the value is generous: the spawned
 /// wrapper simply does not get scheduled in time, `execute` returns
 /// `Timeout { stdout: [], stderr: [], controls: [] }`, and a test that has
 /// nothing to do with timing fails.

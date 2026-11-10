@@ -180,6 +180,72 @@ fn a_failed_preparation_step_fails_before_the_first_command() {
 }
 
 #[test]
+fn cold_first_boot_runs_before_any_image_pull() {
+    let smoke = Smoke::new();
+    let mvmctl = fake_mvmctl("1.2.3", ECHO_TOKEN).replace(
+        "  machine) shift 2",
+        "  image) [ \"$3\" != alpine ] || { echo 'premature alpine pull' >&2; exit 1; } ;;\n  machine) shift 2",
+    );
+    let installer = stand_in_installer(smoke.dir.path(), &mvmctl, 0);
+
+    let output = smoke.run(&installer, Some("v1.2.3"), &[("MVM_SMOKE_COLD_FIRST", "1")]);
+
+    assert!(output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    let first = transcript.find("=== first command").unwrap();
+    assert!(
+        !transcript[..first].contains("=== prepare:"),
+        "{transcript}"
+    );
+}
+
+#[test]
+fn cleanup_retries_a_transient_concurrent_write_without_losing_the_boot_verdict() {
+    let smoke = Smoke::new();
+    let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", ECHO_TOKEN), 0);
+    let bin = smoke.dir.path().join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let rm = bin.join("rm");
+    std::fs::write(
+        &rm,
+        r#"#!/bin/sh
+if [ "$1" = -rf ]; then
+  case "$2" in
+    /tmp/mvm-fresh.*|/private/tmp/mvm-fresh.*)
+      if [ ! -f "$MVM_TEST_RM_ONCE" ]; then
+        printf '%s\n' "$2" > "$MVM_TEST_RM_ONCE"
+        echo 'simulated concurrent write during removal' >&2
+        exit 1
+      fi ;;
+  esac
+fi
+exec /bin/rm "$@"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&rm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let marker = smoke.dir.path().join("first-rm");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+
+    let output = smoke.run(
+        &installer,
+        Some("v1.2.3"),
+        &[
+            ("PATH", &path),
+            ("MVM_TEST_RM_ONCE", marker.to_str().unwrap()),
+        ],
+    );
+
+    assert!(output.status.success(), "{}", combined(&output));
+    assert!(
+        combined(&output).contains("simulated concurrent write"),
+        "the retry must be exercised"
+    );
+    assert!(!std::path::Path::new(std::fs::read_to_string(marker).unwrap().trim()).exists());
+    assert!(smoke.transcript().contains("PASS: mvmctl 1.2.3 installed"));
+}
+
+#[test]
 fn a_first_command_that_prints_the_token_passes() {
     let smoke = Smoke::new();
     let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", ECHO_TOKEN), 0);
@@ -1201,4 +1267,142 @@ fn the_quick_start_runs_with_no_residency_and_no_warm_up() {
     let transcript = smoke.transcript();
     assert!(!transcript.contains("MVM_RESIDENCY"), "{transcript}");
     assert!(!transcript.contains("pool warm"), "{transcript}");
+}
+
+/// Start `command` detached in its own session, once, recording its pid in
+/// `pidfile`. The fake `mvmctl` uses it the way a run leaves a standby behind.
+/// A `cleared` child keeps nothing of the smoke's environment, not even its
+/// HOME, and only learns the directory to write into as `$D`.
+fn detached_once(dir: &Path, pidfile: &Path, command: &str, cleared: bool) -> String {
+    let spawn = dir.join("spawn.py");
+    std::fs::write(
+        &spawn,
+        "import os, subprocess, sys\n\
+         pidfile, cleared, command = sys.argv[1:4]\n\
+         env = {'D': os.environ['HOME'] + '/.mvm'} if cleared == '1' else None\n\
+         child = subprocess.Popen(['sh', '-c', command], start_new_session=True, env=env,\n\
+             cwd='/' if env else None, stdin=subprocess.DEVNULL,\n\
+             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n\
+         open(pidfile, 'w').write(str(child.pid))\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("command.sh"), command).unwrap();
+    format!(
+        "    [ -f '{pid}' ] || python3 '{spawn}' '{pid}' {flag} \"$(cat '{cmd}')\"",
+        pid = pidfile.display(),
+        spawn = spawn.display(),
+        flag = u8::from(cleared),
+        cmd = dir.join("command.sh").display(),
+    )
+}
+
+fn alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// Kills the exact process a fixture recorded in `pidfile` when the test ends,
+/// however it ends, so a failing assertion cannot leave a detached writer.
+struct KillOnDrop(PathBuf);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Ok(pid) = std::fs::read_to_string(&self.0) {
+            let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+        }
+    }
+}
+
+/// The throwaway root the transcript names.
+fn smoke_root(smoke: &Smoke) -> PathBuf {
+    let transcript = smoke.transcript();
+    let home = transcript
+        .lines()
+        .find_map(|line| line.strip_prefix("HOME:       "))
+        .unwrap_or_else(|| panic!("no HOME line: {transcript}"));
+    Path::new(home).parent().unwrap().to_path_buf()
+}
+
+const STANDBY: &str =
+    "cd \"$HOME\"; while :; do mkdir -p .mvm/pool; echo x >> .mvm/pool/log; sleep 0.05; done";
+
+/// A standby the last boot spawned keeps writing into the throwaway HOME. The
+/// smoke ends it before removing the root, and exits with its own verdict.
+#[test]
+fn a_standby_left_writing_into_the_home_is_stopped_before_the_root_is_removed() {
+    for (body_ok, code) in [(true, 0), (false, 1)] {
+        let smoke = Smoke::new();
+        let pidfile = smoke.dir.path().join("standby.pid");
+        let _guard = KillOnDrop(pidfile.clone());
+        let run = if body_ok {
+            ECHO_TOKEN.to_string()
+        } else {
+            fail_from_run(4, "egress broke")
+        };
+        let body = format!(
+            "{}\n{run}",
+            detached_once(smoke.dir.path(), &pidfile, STANDBY, false)
+        );
+        let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", &body), 0);
+
+        let output = smoke.run(&installer, Some("v1.2.3"), &[]);
+
+        assert_eq!(output.status.code(), Some(code), "{}", combined(&output));
+        assert!(
+            !combined(&output).contains("cleanup incomplete"),
+            "{}",
+            combined(&output)
+        );
+        assert!(!smoke_root(&smoke).exists(), "the root must be gone");
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        assert!(!alive(&pid), "the standby {pid} must not outlive the smoke");
+    }
+}
+
+/// A root that will not come off, whatever the reason: an `rm` that always
+/// fails stands in for it, so the path is taken every time and no race decides it.
+/// The leftovers are named once on stderr and the verdict is still the smoke's.
+#[test]
+fn a_root_that_cannot_be_removed_is_named_and_keeps_the_verdict() {
+    for (body_ok, code) in [(true, 0), (false, 1)] {
+        let smoke = Smoke::new();
+        let bin = smoke.dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let calls = smoke.dir.path().join("rm.calls");
+        let rm = bin.join("rm");
+        std::fs::write(
+            &rm,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\nexit 1\n", calls.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let run = if body_ok {
+            ECHO_TOKEN.to_string()
+        } else {
+            fail_from_run(4, "egress broke")
+        };
+        let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", &run), 0);
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+
+        let output = smoke.run(&installer, Some("v1.2.3"), &[("PATH", &path)]);
+        let root = smoke_root(&smoke);
+        let text = combined(&output);
+        let leftover_exists = root.exists();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(output.status.code(), Some(code), "{text}");
+        assert!(leftover_exists, "the stub rm must leave the root: {text}");
+        let marker = format!("[smoke] cleanup incomplete: {}", root.display());
+        assert_eq!(text.matches(&marker).count(), 1, "{text}");
+        assert!(
+            std::fs::read_to_string(&calls)
+                .unwrap()
+                .contains(root.to_str().unwrap()),
+            "rm must have been asked to remove the root"
+        );
+    }
 }

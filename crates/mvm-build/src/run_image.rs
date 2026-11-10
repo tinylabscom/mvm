@@ -723,9 +723,9 @@ fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
     let explicit = crate::builder_backend_select::resolve_env_override().is_some();
     crate::builder_backend_select::run_with_builder_fallback(selected, explicit, |choice| {
         // Through the trait, so the backend the selection resolved is the one
-        // that runs the job. This used to match on the choice here, and mapped
-        // `Hvf` onto `LibkrunBuilderVm` — which quietly ran an HVF host's shell
-        // jobs on libkrun, and is exactly the coupling the builder path is
+        // that runs the job. Matching on the choice here and mapping `Hvf` onto
+        // `LibkrunBuilderVm` would quietly run an HVF host's shell jobs on
+        // libkrun, which is exactly the coupling the builder path is
         // meant not to have.
         crate::builder_backend_select::try_resolve_builder_backend_for(choice)?
             .run_shell_script(&shell_job)

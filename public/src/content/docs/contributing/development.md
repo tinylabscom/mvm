@@ -462,6 +462,14 @@ command propagates nextest failures and keeps the pinned fast toolchain and
 worktree-isolated target directory. This is the edit/test loop, not a replacement
 for the final workspace tests, clippy and applicable Linux/BDD checks.
 
+Cargo unifies features per invocation, and `-p <crate>` selects a smaller set
+than `--workspace` (for instance `manifest-verify`, `test-support` and `addons`
+are off for `mvm-cli`). Alternating the two in one target directory therefore
+rebuilds about twenty workspace crates each time: 4 min 34 s on an Apple
+Silicon laptop and 2 min 04 s on a 12-core Linux host in a measured run. Stay on
+one selection style per worktree target directory, or point the other at its own
+`CARGO_TARGET_DIR`.
+
 ## Profiling
 
 Functions carrying `#[instrument]` are timed when `MVM_SPAN_TIMINGS` is set.
@@ -681,10 +689,16 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 |----------|---------|--------------|
 | `ci.yml` | PRs, push to main, manual dispatch | Scoped fast gate: formatting, clippy, policy checks, workspace test compilation and sharded tests, Windows portability checks, and static documentation checks; required verdict is `Test` |
 | `ci.yml` (merge queue) | Merge group | `Lint core` and `Build workspace tests` for code changes (formatting, clippy and a compile of every test target against latest main), plus `Docs static` for documentation changes; other validation lanes passed on the PR head and run again on push to main |
+| `merge-queue-watch.yml` | Merge-group CI completion, every five minutes, manual dispatch | Re-runs a failed merge-group CI once only when it scheduled zero jobs; opens or updates a `Merge queue stalled` issue if the queue head has waited over 30 minutes |
 | `ci-main.yml` | Push to main, manual dispatch | The slow lanes (feature suites, BDD, aarch64, release-profile and musl witnesses, eBPF, Linux coverage, Nix evaluation, boot ceiling), gated by `Test (main)`; a pull request and the merge queue never list them |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
 | `publish-crates.yml` | Dispatched by `release.yml` on a tag | Publishes the public crates (`mvm-contract`) to crates.io; every other crate is `publish = false` |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
+
+The `main merge queue` ruleset allows 40 minutes for checks (longer than the
+expected 25-minute worst case). The watchdog never retries a CI run with a
+failed job or changes queue membership. Investigate and close its tracking
+issue after recovery; a GitHub Actions outage can delay the watchdog too.
 
 The SDK publishing workflows retain the raw `npm-dist` tarballs and
 `pypi-dist-*` wheels for 30 days, including dry runs. Download them from the
@@ -692,6 +706,32 @@ same workflow run when reviewing package contents, license notices, and native
 library provenance; smoke reports alone are not package-content evidence.
 Missing distribution files fail the artifact upload. This retention window
 does not replace published release assets or a permanent evidence archive.
+
+### Reproducing a CI lane locally
+
+`just ci` runs `just lint` (fmt, clippy, clippy with `bdd`, the model gates,
+`xtask check-all`, the toolchain pin), the nextest suite, doctests and the
+hermetic BDD run. `xtask check-all` is the same driver the `lint-policy` job
+runs; it is the gate list, and a unit test in `xtask/src/check_all.rs` fails
+when a workflow runs a gate `xtask` does not dispatch, or when a gate is left
+out of `check-all` without a recorded reason.
+
+| Coverage | Owning job | Local command |
+|----------|------------|---------------|
+| Policy gates | `ci.yml` `lint-policy` | `just lints::policy` |
+| Gates outside `check-all` | `ci.yml` (`check-declared-backing`), `ci-main.yml` (`check-nextest-groups`), `release.yml` (`check-binary-size`), `claim-witness-freshness.yml`, `e2e-docs.yml` (`check-release-evidence`) | `cargo run -p xtask -- <gate>` |
+| aarch64 tests | `ci-main.yml` `test-workspace-aarch64` (native runner) | `cargo nextest run --workspace --exclude mvm-fs --all-targets` on an aarch64 Linux host |
+| wasm32 / no_std `mvm-contract` | `ci-main.yml` `test-linux`, via `scripts/ci-linux-coverage.sh` | `just check::embedded` for the riscv32 build; the wasm32 build and wasmtime test steps are in the script |
+| Windows portability | `ci.yml` `lint-windows` | `cargo check --target x86_64-pc-windows-gnu -p mvm-contract -p mvm-core -p mvm-net -p mvm-bundler -p mvm-backends` |
+| Fuzz targets compile | `ci.yml` `lint-policy` (when a manifest or fuzz dir changes) | `cargo check --locked --manifest-path crates/<crate>/fuzz/Cargo.toml --all-targets` |
+| Fuzz runs | `security.yml` `fuzz` (nightly, tags) | `just audit::fuzz-guest-request`, or `cargo +nightly fuzz run <target>` in the fuzz directory |
+| eBPF telemetry | `ci-main.yml` `test-ebpf-telemetry` | `just check::ebpf`, then `cargo test -p mvm-hostd --features ebpf-telemetry --lib` |
+| Supply chain | `security.yml` `cargo-deny`, `cargo-audit` (nightly, tags) | `just audit::supply-chain` |
+| Release build | `release.yml` `build` | `just release-build` |
+| Linux-gated and feature-gated type checks | `ci.yml` `test-workspace-build` | `just check::gated` |
+
+The pre-commit hook runs fmt and scoped clippy only; everything above is a
+manual or CI step.
 
 ### Static documentation gate
 

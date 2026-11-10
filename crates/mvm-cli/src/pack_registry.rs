@@ -32,7 +32,7 @@ use mvm_core::registry_pack_store::{
 
 pub use mvm_client::registry_application::discovery::{
     DEFAULT_PACK_REGISTRY, PACK_REGISTRY_ENV, PackIndexEntry, PackIndexVersion, PackRegistryConfig,
-    fetch_index, resolve_version, search_index,
+    fetch_index, resolve_version, resolve_version_for_arch, search_index,
 };
 use mvm_client::registry_application::discovery::{block_on, fetch_bytes};
 
@@ -194,6 +194,55 @@ fn download_payload_file(url: &str, target: &Path, size: u64, release: bool) -> 
     Ok(())
 }
 
+/// Parse a reference as a user types it: `ns/name`, `ns/name@version`, or
+/// `ns/name:latest`. The registry publishes exact versions only, so `:latest`
+/// is the unversioned form and any other tag is refused with the fix.
+pub fn parse_user_reference(value: &str) -> Result<PackReference> {
+    let canonical = match value.rsplit_once(':') {
+        Some((coordinate, "latest")) if !value.contains('@') => coordinate,
+        Some((_, _)) if !value.contains('@') => {
+            bail!(
+                "pack tags other than `latest` are not published; pin a version with `@version` ({value:?})"
+            )
+        }
+        _ => value,
+    };
+    canonical
+        .parse()
+        .with_context(|| format!("invalid pack reference {value:?}"))
+}
+
+/// Warning for a pack built for a different architecture than the host, or
+/// `None` when they agree.
+pub fn arch_mismatch_warning(reference: &str, guest_arch: &str, host_arch: &str) -> Option<String> {
+    (guest_arch != host_arch).then(|| {
+        format!(
+            "{reference} is built for {guest_arch} but this host is {host_arch}, so it will not run here; pull a version published for {host_arch}"
+        )
+    })
+}
+
+/// Pre-download warning from the untrusted index: the chosen version
+/// advertises a different architecture than the host. Advisory only, since the
+/// signed manifest is what decides at install. Index text is escaped.
+pub fn index_arch_warning(
+    entry: &PackIndexEntry,
+    chosen: &PackIndexVersion,
+    host_arch: &str,
+) -> Option<String> {
+    use crate::commands::pack::inspect::safe;
+    let guest_arch = chosen.guest_arch.as_deref()?;
+    let reference = format!("{}@{}", entry.coordinate(), chosen.version);
+    let mut warning = arch_mismatch_warning(&safe(&reference), &safe(guest_arch), host_arch)?;
+    if let Some(alternative) = entry.versions.iter().find(|v| v.runs_on(host_arch)) {
+        warning.push_str(&format!(
+            " (the index lists {})",
+            safe(&alternative.version)
+        ));
+    }
+    Some(warning)
+}
+
 /// What `mvmctl pull` did, for the caller to render.
 #[derive(Debug)]
 pub struct PullSummary {
@@ -233,9 +282,7 @@ impl VerifiedPull {
 /// written only after installation succeeds. Applications independently verify
 /// their bundle under local consumer trust before installation and pin commit.
 pub fn pull(reference_arg: &str) -> Result<PullOutcome> {
-    let requested: PackReference = reference_arg
-        .parse()
-        .with_context(|| format!("invalid pack reference {reference_arg:?}"))?;
+    let requested = parse_user_reference(reference_arg)?;
     let config = PackRegistryConfig::load();
     let index = fetch_index(&config)?;
     let mut seen = BTreeMap::new();
@@ -247,17 +294,24 @@ pub fn pull(reference_arg: &str) -> Result<PullOutcome> {
         &mut seen,
         &mut active,
         &mut |config, reference| {
-            let advertised = index
+            let entry = index
                 .iter()
                 .find(|entry| entry.coordinate() == reference.coordinate_string())
-                .and_then(|entry| {
-                    entry.versions.iter().find(|version| {
-                        reference
-                            .version()
-                            .is_some_and(|resolved| resolved.to_string() == version.version)
-                    })
+                .context("resolved pack is missing from the catalog")?;
+            let advertised = entry
+                .versions
+                .iter()
+                .find(|version| {
+                    reference
+                        .version()
+                        .is_some_and(|resolved| resolved.to_string() == version.version)
                 })
                 .context("resolved version is missing catalog digest")?;
+            if let Some(warning) =
+                index_arch_warning(entry, advertised, mvm_build::builder_vm::host_arch_tag())
+            {
+                crate::ui::warn(&warning);
+            }
             pull_one(config, reference, &advertised.manifest_sha256)
         },
     )?
@@ -270,18 +324,39 @@ pub fn pull(reference_arg: &str) -> Result<PullOutcome> {
     }
 }
 
+/// The one revocation gate for a pulled application: refresh the built-in
+/// feed when it is due and the application uses it, then require a current feed.
+fn check_application_revocations_refreshing(
+    application: &VerifiedRegistryApplication,
+) -> Result<()> {
+    if application.reference().namespace() == "mvm"
+        || application.signer().identity == mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+    {
+        crate::official_revocations::ensure_official_feed_fresh();
+    }
+    application.check_current_revocations()?;
+    Ok(())
+}
+
 fn acquire_application(
     application: &VerifiedRegistryApplication,
 ) -> Result<InstalledRegistryApplication> {
     use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, TrustStore};
-    application.check_current_revocations()?;
+    check_application_revocations_refreshing(application)?;
     crate::commands::bundle::fetch::admit_application_source(application)?;
-    let trust = FsTrustStore::default_path()?;
+    let enrolled = FsTrustStore::default_path()?;
+    let loaded = load_publisher_policy_or_official_default(
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+    )?;
+    // Official-default hosts also trust the author keys pinned in this release;
+    // an operator policy file replaces them. Nothing is written to the store.
+    let trust = mvm_core::registry_pack::BuiltinAuthorTrust::for_policy(&enrolled, &loaded);
     anyhow::ensure!(
         trust
             .lookup(&application.manifest().application.bundle.key_id)
             .is_some(),
-        "application bundle key is not independently enrolled in the consumer trust store"
+        "application bundle key is not independently enrolled in the consumer trust store; \
+         enroll it with `mvmctl trust add` (official agent/ and runtime/ packs need no enrollment under the built-in publisher policy)"
     );
     let registry = BundleRegistry::default_path()?;
     if let Ok(metadata) = std::fs::symlink_metadata(registry.root()) {
@@ -377,7 +452,8 @@ where
                 requested.name()
             )
         })?;
-    let reference = resolve_version(entry, requested)?;
+    let reference =
+        resolve_version_for_arch(entry, requested, mvm_build::builder_vm::host_arch_tag())?;
     if !register_dependency(seen, &reference)? {
         if active.contains(&reference) {
             bail!("signed pack dependency cycle at {reference}");
@@ -417,9 +493,8 @@ fn pull_one(
     let loaded = load_publisher_policy_or_official_default(&policy_path)?;
     if loaded.is_official_default() {
         crate::ui::info(&format!(
-            "no publisher policy at {}; using built-in trust for agent/ and runtime/ \
-             signed by {} (or the former identity until 2026-11-06 UTC). \
-             Write that file to make your own trust decision.",
+            "no publisher policy at {}; trusting only the official publisher for agent/ and \
+             runtime/ packs ({}). Write that file to choose your own publishers.",
             policy_path.display(),
             mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
         ));
@@ -451,7 +526,7 @@ fn pull_one(
     };
     let verified = match verified {
         VerifiedRegistryManifest::Application(application) => {
-            application.check_current_revocations()?;
+            check_application_revocations_refreshing(&application)?;
             // Persist a pin only after acquisition succeeds. The handoff retains
             // authenticated bytes and digest for that later transaction.
             return Ok((VerifiedPull::Application(Box::new(application)), Vec::new()));
@@ -530,9 +605,100 @@ mod tests {
                 .map(|version| PackIndexVersion {
                     version: version.to_string(),
                     manifest_sha256: Sha256Hex::from_bytes(b"test manifest"),
+                    tags: Vec::new(),
+                    guest_arch: None,
+                    size_bytes: None,
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn latest_tag_is_the_unversioned_reference() {
+        assert_eq!(
+            parse_user_reference("mvm/python:latest")
+                .unwrap()
+                .to_string(),
+            "mvm/python"
+        );
+        assert_eq!(
+            parse_user_reference("mvm/python@1.2.3")
+                .unwrap()
+                .to_string(),
+            "mvm/python@1.2.3"
+        );
+        let err = parse_user_reference("mvm/python:stable").unwrap_err();
+        assert!(err.to_string().contains("@version"), "{err}");
+    }
+
+    fn version_for(version: &str, arch: Option<&str>) -> PackIndexVersion {
+        PackIndexVersion {
+            version: version.into(),
+            manifest_sha256: Sha256Hex::from_bytes(b"test manifest"),
+            tags: vec!["latest".into()],
+            guest_arch: arch.map(str::to_string),
+            size_bytes: None,
+        }
+    }
+
+    #[test]
+    fn index_arch_warning_fires_only_on_mismatch() {
+        let mut pack = entry("mvm", "x", &[]);
+        pack.versions = vec![
+            version_for("1.0.0", Some("aarch64")),
+            version_for("0.9.0", Some("x86_64")),
+            version_for("0.8.0", None),
+        ];
+        assert!(index_arch_warning(&pack, &pack.versions[0], "aarch64").is_none());
+        assert!(index_arch_warning(&pack, &pack.versions[2], "aarch64").is_none());
+        let warning = index_arch_warning(&pack, &pack.versions[0], "x86_64").unwrap();
+        assert!(
+            warning.contains("aarch64") && warning.contains("0.9.0"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn hostile_index_arch_is_escaped_in_the_warning() {
+        let mut pack = entry("mvm", "x", &[]);
+        pack.versions = vec![version_for("1.0.0", Some("a\u{1b}[31m\r\n"))];
+        let warning = index_arch_warning(&pack, &pack.versions[0], "x86_64").unwrap();
+        assert!(!warning.chars().any(char::is_control), "{warning:?}");
+    }
+
+    #[test]
+    fn a_pre_extension_index_still_resolves_and_never_warns() {
+        let entries = fetch_catalog(&catalog()).expect("old-shape catalog");
+        let version = &entries[0].versions[0];
+        assert!(version.tags.is_empty() && version.guest_arch.is_none());
+        assert!(index_arch_warning(&entries[0], version, "x86_64").is_none());
+    }
+
+    #[test]
+    fn an_advertised_digest_that_differs_from_the_manifest_is_refused() {
+        let root = tempfile::tempdir().expect("registry");
+        let dir = root.path().join("packs/runtime/python/1.2.3");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(MANIFEST_FILE), b"{}").unwrap();
+        std::fs::write(dir.join(SIGNATURE_FILE), b"{}").unwrap();
+        let config = PackRegistryConfig {
+            registry_url: format!("file://{}", root.path().display()),
+        };
+        let reference = "runtime/python@1.2.3".parse().unwrap();
+        // The index claims a tagged digest that is not the fetched manifest's.
+        let advertised = Sha256Hex::from_bytes(b"something else");
+        let error = pull_one(&config, &reference, &advertised).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("digest mismatch"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn arch_warning_only_fires_on_mismatch() {
+        assert!(arch_mismatch_warning("mvm/x", "x86_64", "x86_64").is_none());
+        let warning = arch_mismatch_warning("mvm/x", "x86_64", "aarch64").unwrap();
+        assert!(warning.contains("x86_64") && warning.contains("aarch64"));
     }
 
     #[test]
@@ -550,6 +716,76 @@ mod tests {
         assert_eq!(hits[0].coordinate(), "runtime/python");
         let hits = search_index(&index, Some("the"));
         assert_eq!(hits.len(), 2);
+    }
+
+    fn file_registry(manifest: &[u8]) -> (tempfile::TempDir, PackRegistryConfig) {
+        let registry = tempfile::tempdir().unwrap();
+        let pack = registry.path().join("packs/runtime/python/1.2.3");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join(MANIFEST_FILE), manifest).unwrap();
+        std::fs::write(pack.join(SIGNATURE_FILE), b"not a signature").unwrap();
+        std::fs::write(
+            registry.path().join("index.json"),
+            serde_json::to_vec(&catalog()).unwrap(),
+        )
+        .unwrap();
+        let config = PackRegistryConfig {
+            registry_url: format!("file://{}", registry.path().display()),
+        };
+        (registry, config)
+    }
+
+    #[test]
+    fn catalog_hash_binds_the_exact_manifest_bytes() {
+        let manifest = br#"{"files":[]}"#;
+        let (_registry, config) = file_registry(manifest);
+        let reference: PackReference = "runtime/python@1.2.3".parse().unwrap();
+        let mut reformatted = manifest.to_vec();
+        reformatted.push(b'\n');
+        let error = pull_one(&config, &reference, &Sha256Hex::from_bytes(&reformatted))
+            .expect_err("a re-serialised manifest is not the advertised one");
+        assert!(
+            format!("{error:#}").contains("digest mismatch"),
+            "{error:#}"
+        );
+        // Matching bytes get past the catalog check and are then refused on
+        // their own merits, so the check above is the one that fired.
+        let error = pull_one(&config, &reference, &Sha256Hex::from_bytes(manifest))
+            .expect_err("an unsigned manifest is not admitted");
+        assert!(
+            !format!("{error:#}").contains("digest mismatch"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn catalog_discovery_and_a_matching_hash_enroll_and_admit_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let manifest = br#"{"files":[]}"#;
+        let (_registry, config) = file_registry(manifest);
+        let index = fetch_index(&config).unwrap();
+        assert_eq!(search_index(&index, Some("python")).len(), 1);
+        pull_one(
+            &config,
+            &"runtime/python@1.2.3".parse().unwrap(),
+            &Sha256Hex::from_bytes(manifest),
+        )
+        .expect_err("the catalog hash alone admits nothing");
+        let left: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert!(left.is_empty(), "discovery wrote host state: {left:?}");
+    }
+
+    #[test]
+    fn an_explicit_older_version_resolves_while_a_newer_one_is_published() {
+        let entry = entry("runtime", "python", &["1.2.3", "1.10.0"]);
+        let requested: PackReference = "runtime/python@1.2.3".parse().expect("reference");
+        let resolved = resolve_version(&entry, &requested).expect("older version");
+        assert_eq!(resolved.to_string(), "runtime/python@1.2.3");
     }
 
     #[test]

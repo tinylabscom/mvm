@@ -1029,6 +1029,9 @@ impl VmmDriver for FcDriver {
             // GPU remoting rides the multiplexed vsock device; the
             // guest-dial bridge lands the GPU port on its host UDS.
             gpu: true,
+            // The host reaches any guest port through the vsock mux's
+            // `CONNECT` handshake.
+            guest_mailbox: true,
             tap_networking: false,
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
@@ -1318,9 +1321,14 @@ impl VmmDriver for FcDriver {
     fn boot_custodied(
         &self,
         spec: &VmmSpec,
-        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
-        disks: mvm_vmm::driver::prepared_disks::PreparedWritableDisks,
+        files: mvm_vmm::driver::prepared_disks::PreparedBootFiles<'_>,
     ) -> Result<Box<dyn RunningVm>> {
+        files.require_no_data()?;
+        let mvm_vmm::driver::prepared_disks::PreparedBootFiles {
+            kernel,
+            writable: disks,
+            ..
+        } = files;
         disks.validate_spec(spec)?;
         if disks.is_empty() {
             return match kernel {
@@ -3081,8 +3089,7 @@ mod console_verbosity_tests {
             "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0 rootwait init=/init"
         );
         // The other shape is the verity/initramfs boot, where the initramfs
-        // PID 1 owns root/init selection. The virtiofs-root shape that used to
-        // be here is gone.
+        // PID 1 owns root/init selection; there is no virtiofs-root shape.
         assert_eq!(
             fc_base_bootargs(false),
             "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0"

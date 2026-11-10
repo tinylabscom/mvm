@@ -207,18 +207,6 @@ const RAW_SITES: &[RawSite] = &[
         "Command::new(program)",
         "the builder agent, inside the builder VM",
     ),
-    builder(
-        "crates/mvm-agentd/src/builder_build.rs",
-        "run_nix_build",
-        "Command::new(\"sh\")",
-        "a nix build run by the builder agent inside the builder VM",
-    ),
-    builder(
-        "crates/mvm-agentd/src/builder_build.rs",
-        "run_nix_build",
-        "Command::new(\"sh\")",
-        "a nix build run by the builder agent inside the builder VM",
-    ),
     guest(
         "crates/mvm-agentd/src/console.rs",
         "spawn_shell",

@@ -130,6 +130,9 @@ authors = ["mvm contributors"]
 # Member crates inherit this policy via `lints.workspace = true`.
 [workspace.lints.clippy]
 too_many_arguments = "deny"
+# A guard held across an `.await` deadlocks the executor thread that polls it.
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
 
 [workspace.dependencies]
 # Async runtime.
@@ -378,6 +381,9 @@ assets = [
     ["target/distro-pkg/doc/README.md", "usr/share/doc/mvmctl/", "644"],
     ["target/distro-pkg/man/*", "usr/share/man/man1/", "644"],
     ["target/distro-pkg/guest-runtime/*", "usr/lib/mvmctl/guest-runtime/", "644"],
+    ["target/distro-pkg/firecracker/firecracker", "usr/lib/mvmctl/firecracker/", "755"],
+    ["target/distro-pkg/firecracker/LICENSE", "usr/lib/mvmctl/firecracker/", "644"],
+    ["target/distro-pkg/firecracker/NOTICE", "usr/lib/mvmctl/firecracker/", "644"],
     ["target/distro-pkg/package-managed/deb", "usr/share/mvmctl/package-managed", "644"],
 ]
 
@@ -390,6 +396,9 @@ assets = [
     { source = "target/distro-pkg/doc/README.md", dest = "/usr/share/doc/mvmctl/README.md", mode = "644", doc = true },
     { source = "target/distro-pkg/man/*", dest = "/usr/share/man/man1/", mode = "644", doc = true },
     { source = "target/distro-pkg/guest-runtime/*", dest = "/usr/lib/mvmctl/guest-runtime/", mode = "644" },
+    { source = "target/distro-pkg/firecracker/firecracker", dest = "/usr/lib/mvmctl/firecracker/firecracker", mode = "755" },
+    { source = "target/distro-pkg/firecracker/LICENSE", dest = "/usr/lib/mvmctl/firecracker/LICENSE", mode = "644" },
+    { source = "target/distro-pkg/firecracker/NOTICE", dest = "/usr/lib/mvmctl/firecracker/NOTICE", mode = "644" },
     { source = "target/distro-pkg/package-managed/rpm", dest = "/usr/share/mvmctl/package-managed", mode = "644" },
 ]
 
@@ -512,14 +521,11 @@ user = [
 # user, so `dev` builds an `mvmctl` that runs EVERY README/website-docs example
 # on the default (HVF) backend (OCI + flake `machine run`, `machine build`/`build
 # compile`, persistent-machine verbs, `dev up`/`shell`, the SDK compile path).
-# Not a third surface — host + user + the source-checkout bootstrap. The
+# Not a third surface — host + user. The
 # `check-two-surfaces` lint asserts it always aggregates both surfaces.
 dev = [
     "host",
     "user",
-    "mvm-runtime/contributor-bootstrap",
-    "mvm-build/contributor-bootstrap",
-    "mvm-cli/contributor-bootstrap",
 ]
 
 # Optional integration test/development path for the libkrun C VMM. Standard

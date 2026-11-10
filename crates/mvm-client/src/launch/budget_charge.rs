@@ -40,15 +40,10 @@ pub fn record_boot_charge(
     )
 }
 
-pub(crate) fn record_owned_charge(
-    owner: &mut crate::entrypoint::boot::OwnedClientBoot,
-) -> anyhow::Result<()> {
-    owner.record_charge()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admission::admit_plan_tests::admitted_libkrun;
     use mvm_contract::grants::budget::MachineCharge;
     use mvm_hostd::plan_admission::InMemoryNonceLedger;
 
@@ -131,7 +126,7 @@ mod tests {
         env.isolate_mvm_home(home.path());
 
         let vm = "vm-budget-charge";
-        let (ctx, _keys, _audit) = admitted(vm);
+        let (ctx, _keys, _audit) = admitted_libkrun(vm, None);
         // The success path never touches the backend — the record is a file
         // write — so a fabricated StartedVm answers without a boot. The
         // failure path, which must observe a stop, uses the mock in the test
@@ -171,7 +166,7 @@ mod tests {
         env.isolate_mvm_home(home.path());
 
         let vm = "vm-budget-blocked";
-        let (ctx, _keys, audit_dir) = admitted(vm);
+        let (ctx, _keys, audit_dir) = admitted_libkrun(vm, None);
         let mock = mvm_runtime::MockBackend::new();
         let started = started_on_mock(&mock, vm);
 

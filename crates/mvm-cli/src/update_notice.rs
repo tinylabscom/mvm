@@ -16,8 +16,9 @@
 //!   after the command path finishes, so a slow or absent network adds no
 //!   latency to what the user asked for.
 
+use mvm_core::util::time::now_unix_secs;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// How often an interactive session re-checks the releases API.
 const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24);
@@ -29,12 +30,6 @@ pub(crate) const OPT_OUT_ENV: &str = "MVM_NO_UPDATE_CHECK";
 struct UpdateCheckState {
     checked_at_unix: u64,
     latest_tag: String,
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// Whether a state recorded at `checked_at` is fresh enough to skip the call.
@@ -60,7 +55,7 @@ fn read_state(path: &Path) -> Option<UpdateCheckState> {
 
 fn write_state(path: &Path, latest_tag: &str) {
     let state = UpdateCheckState {
-        checked_at_unix: now_unix(),
+        checked_at_unix: now_unix_secs(),
         latest_tag: latest_tag.to_string(),
     };
     if let Ok(body) = serde_json::to_string(&state)
@@ -86,7 +81,7 @@ pub(crate) fn maybe_notify() {
         return;
     }
     let path = mvm_core::config::mvm_update_check_path();
-    let now = now_unix();
+    let now = now_unix_secs();
     if read_state(&path).is_some_and(|state| is_fresh(state.checked_at_unix, now)) {
         return;
     }
@@ -121,7 +116,7 @@ mod tests {
         write_state(&path, "v9.9.9");
         let state = read_state(&path).expect("the state parses back");
         assert_eq!(state.latest_tag, "v9.9.9");
-        assert!(is_fresh(state.checked_at_unix, now_unix()));
+        assert!(is_fresh(state.checked_at_unix, now_unix_secs()));
     }
 
     #[test]

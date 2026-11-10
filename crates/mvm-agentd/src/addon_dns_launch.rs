@@ -56,7 +56,7 @@ impl Upstream {
         }
     }
 
-    /// Whether the image's resolvers must be captured before the rewrite.
+    /// Whether the image's resolvers must be captured ahead of the resolver rewrite.
     #[must_use]
     pub fn needs_snapshot(self) -> bool {
         self == Self::ImageResolvers

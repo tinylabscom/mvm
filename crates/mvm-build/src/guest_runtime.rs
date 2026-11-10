@@ -96,16 +96,6 @@ enum ArchiveScope {
     Release,
 }
 
-/// Check a release-shaped tree's host layout without granting release authority.
-/// Signed evidence additionally requires schema 2 and both assembly declarations.
-pub fn validate_release_guest_runtime_layout(
-    manifest: &GuestBinsManifest,
-    version: &str,
-    arch: GuestArch,
-) -> Result<(), GuestRuntimeError> {
-    validate_manifest(manifest, version, arch, ArchiveScope::Release)
-}
-
 fn validate_manifest(
     manifest: &GuestBinsManifest,
     version: &str,
@@ -213,25 +203,6 @@ pub fn install_signed_guest_runtime_archive(
         arch,
     });
     Ok(runtime)
-}
-
-/// Acquire the CLI-version-locked runtime. A packaged archive takes precedence;
-/// any verification failure is terminal, never a reason to try another source.
-/// Cached release triplets are reverified on every use, including offline use.
-pub fn resolve_or_download_guest_runtime(
-    cache_root: &Path,
-    version: &str,
-    arch: GuestArch,
-) -> Result<GuestRuntime, GuestRuntimeError> {
-    let executable = std::env::current_exe()?.canonicalize()?;
-    resolve_release_guest_runtime(
-        cache_root,
-        version,
-        arch,
-        &packaged_runtime_locations(&executable)?,
-        &format!("https://github.com/tinylabscom/mvm/releases/download/v{version}"),
-        false,
-    )
 }
 
 /// Acquire all four signed release files for portable packaging. Unlike the
@@ -2742,37 +2713,6 @@ mod tests {
                 .is_err()
         );
         assert!(!target.join("guest-runtime/v1/sources").exists());
-    }
-
-    #[test]
-    fn a_release_runtime_carries_both_architectures_and_needs_the_hosts_complete() {
-        let mut release = fixture_manifest(GuestArch::X86_64);
-        release
-            .files
-            .extend(fixture_manifest(GuestArch::Aarch64).files);
-        for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
-            validate_release_guest_runtime_layout(&release, "1.2.3", arch).unwrap();
-            assert!(
-                matches!(
-                    validate_guest_runtime_manifest(&release, "1.2.3", arch),
-                    Err(GuestRuntimeError::ForeignArchitecture(_))
-                ),
-                "a source build stays single-architecture"
-            );
-        }
-        assert!(matches!(
-            validate_release_guest_runtime_layout(&release, "1.2.4", GuestArch::X86_64),
-            Err(GuestRuntimeError::Version { .. })
-        ));
-        // The host's members must be whole even when the other architecture's
-        // are: an assembled overlay would otherwise miss a binary.
-        let mut incomplete = release.clone();
-        incomplete.files.remove("x86_64/bin/mvm-setpriv");
-        assert!(matches!(
-            validate_release_guest_runtime_layout(&incomplete, "1.2.3", GuestArch::X86_64),
-            Err(GuestRuntimeError::MissingRequired(member)) if member == "x86_64/bin/mvm-setpriv"
-        ));
-        validate_release_guest_runtime_layout(&incomplete, "1.2.3", GuestArch::Aarch64).unwrap();
     }
 
     #[test]

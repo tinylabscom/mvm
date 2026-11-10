@@ -225,17 +225,152 @@ pub fn resolve_installed_application_bundle(
     publisher_policy_path: &Path,
     trust: &dyn TrustStore,
 ) -> Result<VerifiedApplicationBundle, ApplicationLaunchError> {
-    let policy = crate::registry_pack_store::load_publisher_policy_or_official_default(
+    let loaded = crate::registry_pack_store::load_publisher_policy_or_official_default(
         publisher_policy_path,
-    )?
-    .policy;
+    )?;
+    let trust = crate::registry_pack::BuiltinAuthorTrust::for_policy(trust, &loaded);
     resolve_bundle_with(
         reference,
         store,
-        &policy,
-        trust,
+        &loaded.policy,
+        &trust,
         check_registry_pack_signature,
     )
+}
+
+/// Trust view for a bundle whose kind the caller does not know.
+///
+/// The pinned author keys apply only when the bundle's digest is the archive of
+/// an installed application whose descriptor authenticates under the built-in
+/// publisher policy. Anything else, and any error while finding out, gets the
+/// raw store, so a non-application bundle is never widened.
+pub fn trust_for_installed_bundle<T: TrustStore>(
+    inner: T,
+    bundle_sha256: &str,
+) -> crate::registry_pack::BuiltinAuthorTrust<T> {
+    let Ok(registry) = BundleRegistry::default_path() else {
+        return crate::registry_pack::BuiltinAuthorTrust::without_builtin(inner);
+    };
+    let store = ApplicationInstallStore::new(
+        crate::config::registry_pack_cache_dir(),
+        crate::config::pack_lockfile_path(),
+        registry.root(),
+    );
+    let loaded = crate::registry_pack_store::load_publisher_policy_or_official_default(
+        &crate::config::registry_pack_publisher_policy_path(),
+    );
+    trust_for_installed_bundle_with(
+        inner,
+        bundle_sha256,
+        &store,
+        loaded,
+        check_registry_pack_signature,
+        crate::registry_pack::VerifiedRegistryApplication::check_current_revocations,
+    )
+}
+
+/// Like [`trust_for_installed_bundle`], keyed on the archive file itself: the
+/// digest is computed from the bytes at `archive`, so a different file planted
+/// under an installed application's name gets no pinned keys.
+pub fn trust_for_installed_archive<T: TrustStore>(
+    inner: T,
+    archive: &Path,
+) -> crate::registry_pack::BuiltinAuthorTrust<T> {
+    match crate::crypto::image_verify::sha256_file(archive) {
+        Ok(digest) => trust_for_installed_bundle(inner, &digest),
+        Err(_) => crate::registry_pack::BuiltinAuthorTrust::without_builtin(inner),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn trust_for_installed_archive_with<T: TrustStore>(
+    inner: T,
+    archive: &Path,
+    store: &ApplicationInstallStore,
+    loaded: Result<
+        crate::registry_pack_store::LoadedPublisherPolicy,
+        crate::registry_pack_store::RegistryPackStoreError,
+    >,
+    check_signature: RegistryPackSignatureChecker,
+    check_revocations: RevocationChecker,
+) -> crate::registry_pack::BuiltinAuthorTrust<T> {
+    match crate::crypto::image_verify::sha256_file(archive) {
+        Ok(digest) => trust_for_installed_bundle_with(
+            inner,
+            &digest,
+            store,
+            loaded,
+            check_signature,
+            check_revocations,
+        ),
+        Err(_) => crate::registry_pack::BuiltinAuthorTrust::without_builtin(inner),
+    }
+}
+
+/// A revoked application never gets the pinned keys; any error refuses.
+type RevocationChecker = fn(
+    &crate::registry_pack::VerifiedRegistryApplication,
+) -> Result<(), crate::registry_pack_store::RegistryPackStoreError>;
+
+pub(super) fn trust_for_installed_bundle_with<T: TrustStore>(
+    inner: T,
+    bundle_sha256: &str,
+    store: &ApplicationInstallStore,
+    loaded: Result<
+        crate::registry_pack_store::LoadedPublisherPolicy,
+        crate::registry_pack_store::RegistryPackStoreError,
+    >,
+    check_signature: RegistryPackSignatureChecker,
+    check_revocations: RevocationChecker,
+) -> crate::registry_pack::BuiltinAuthorTrust<T> {
+    use crate::registry_pack::BuiltinAuthorTrust;
+    let Ok(loaded) = loaded else {
+        return BuiltinAuthorTrust::without_builtin(inner);
+    };
+    if names_installed_bundle(
+        store,
+        &loaded.policy,
+        bundle_sha256,
+        check_signature,
+        check_revocations,
+    ) {
+        BuiltinAuthorTrust::for_policy(inner, &loaded)
+    } else {
+        BuiltinAuthorTrust::without_builtin(inner)
+    }
+}
+
+fn names_installed_bundle(
+    store: &ApplicationInstallStore,
+    policy: &RegistryPackPublisherPolicy,
+    bundle_sha256: &str,
+    check_signature: RegistryPackSignatureChecker,
+    check_revocations: RevocationChecker,
+) -> bool {
+    let Ok(lock) = load_pack_lockfile(&store.lock_path) else {
+        return false;
+    };
+    lock.pins().iter().any(|pin| {
+        let descriptor = store
+            .descriptor_cache_root
+            .join(pin.manifest_sha256().as_str());
+        let read = |name| super::super::local_input::read_metadata(&descriptor.join(name));
+        let (Ok(manifest), Ok(signature)) = (
+            read(REGISTRY_MANIFEST_FILE_NAME),
+            read(REGISTRY_SIGNATURE_FILE_NAME),
+        ) else {
+            return false;
+        };
+        matches!(
+            super::super::dispatch::verify_with(
+                &RegistryPackVerification::new(pin.reference(), &manifest, &signature, &lock, policy),
+                check_signature,
+            ),
+            Ok(VerifiedRegistryManifest::Application(application))
+                if application.manifest().application.bundle.archive_sha256.as_str() == bundle_sha256
+                    && check_revocations(&application).is_ok()
+        )
+    })
 }
 
 pub(super) fn resolve_bundle_with(

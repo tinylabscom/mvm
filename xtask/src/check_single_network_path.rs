@@ -146,7 +146,7 @@ const BUILDER_PROBE_DIAL: &str = r"TcpStream::connect(?:_timeout)?\(\s*&proxy_ad
 const BUILDER_DIAL_TOKENS: &[&str] = &["TcpStream::connect(", "TcpStream::connect_timeout("];
 const BUILDER_LISTEN_TOKENS: &[&str] = &["TcpListener::bind(", "UdpSocket::bind("];
 
-/// The guest-side proxy that used to front dependency installs, dialing
+/// The retired guest-side proxy that fronted dependency installs, dialing
 /// upstream itself. The host-binary manifests are what put a binary into
 /// `mvmctl`'s embedded payload and the builder rootfs, so a name here must
 /// never reappear in one.
@@ -155,15 +155,6 @@ const BUILDER_BINARY_MANIFESTS: &[&str] = &[
     "crates/mvm-builder-guest/src/host_payload_manifest.rs",
     "nix/lib/mvm-host-binaries.nix",
 ];
-
-/// Builder-crate sources that open sockets and are allowed to, each exact and
-/// purpose-labelled. An entry that stops opening a socket, or disappears, is
-/// reported stale so the list only shrinks.
-const BUILDER_SOCKET_EXEMPTIONS: &[(&str, &str)] = &[(
-    "crates/mvm-build/src/egress_proxy/proxy.rs",
-    "the retired guest proxy's source, kept while the image repository still compiles its \
-     cargo target; the retired-binary check keeps it out of every host-binary manifest",
-)];
 
 /// QEMU takes its devices as string arguments, which `production_code`
 /// blanks, so its launch code is read with only comments removed.
@@ -760,25 +751,6 @@ fn check_builder_egress(workspace: &Path) -> Result<()> {
         },
     )?;
     let mut violations = Vec::new();
-    for (path, purpose) in BUILDER_SOCKET_EXEMPTIONS {
-        let opens = sources.iter().any(|(rel, code)| {
-            rel == path
-                && BUILDER_DIAL_TOKENS
-                    .iter()
-                    .chain(BUILDER_LISTEN_TOKENS)
-                    .any(|token| code.contains(token))
-        });
-        if !opens {
-            violations.push(format!(
-                "{path}: stale builder socket exemption ({purpose}); delete it from the gate"
-            ));
-        }
-    }
-    sources.retain(|(rel, _)| {
-        !BUILDER_SOCKET_EXEMPTIONS
-            .iter()
-            .any(|(path, _)| rel == path)
-    });
     violations.extend(builder_socket_violations(&sources));
     violations.extend(builder_tap_violations(&sources));
 

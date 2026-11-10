@@ -52,9 +52,12 @@ const TELEMETRY_CMDLINE_TOKEN: &str = "mvm.telemetry=1";
 
 /// Whether `cmdline` asserts a telemetry endpoint for this boot.
 fn telemetry_asserted(cmdline: &str) -> bool {
-    cmdline
-        .split_ascii_whitespace()
-        .any(|tok| tok == TELEMETRY_CMDLINE_TOKEN)
+    cmdline_asserts(cmdline, TELEMETRY_CMDLINE_TOKEN)
+}
+
+/// Whether `cmdline` carries exactly the launch assertion `token`.
+pub(crate) fn cmdline_asserts(cmdline: &str, token: &str) -> bool {
+    cmdline.split_ascii_whitespace().any(|tok| tok == token)
 }
 
 /// The agent's capture queue: slots × the record ceiling. 128 slots (4 MiB,
@@ -184,7 +187,7 @@ pub(crate) fn init_telemetry() {
         eprintln!("mvm-guest-agent: telemetry subscriber install failed");
     }
     emit_coverage(&state, CoverageState::Started, "guest-agent");
-    std::thread::spawn(move || {
+    let _ = mvm_agentd::detached::spawn_named("telemetry-listener", move || {
         let fd = match bind_vsock_listener(TELEMETRY_PORT) {
             Ok(fd) => fd,
             Err(e) => {

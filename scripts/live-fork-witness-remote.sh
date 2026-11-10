@@ -33,7 +33,7 @@
 # Evidence from runs with this script's exact shape: two children forked from
 # one running parent restored in 39-47 ms (FC_FORK_RESTORE_MS), the parent
 # served alongside both children, and per-child generation tokens and
-# post-restore kernel randomness diverged. See issue #3552.
+# post-restore kernel randomness diverged.
 
 set -euo pipefail
 
@@ -169,7 +169,7 @@ if [ "${KEEP_REMOTE_PATCHES:-0}" != "1" ]; then
     rsync -a -e "$SSH" \
         --exclude='/.git' --exclude='/target' --exclude='/.mvm-test' \
         --exclude='/.venv' --exclude='/.ruff_cache' --exclude='/out' \
-        --exclude='/output' --exclude='/artifacts' --exclude='/graft/.cache' \
+        --exclude='/output' --exclude='/artifacts' --exclude='/.trail' \
         --exclude='/.lima' --exclude='/.claude' --exclude='node_modules' \
         "$SRC_ROOT/" "$TARGET:$REMOTE_DIR/"
 fi

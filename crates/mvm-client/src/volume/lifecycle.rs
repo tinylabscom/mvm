@@ -108,8 +108,7 @@ pub(crate) fn lock_staging_path(ciphertext_path: &Path) -> PathBuf {
 
 /// Create a volume directory with the whole chain under the mvm home private.
 ///
-/// A second copy of this used to live here, chmodding only the leaf. That is
-/// the ancestor bug: `create_dir_all` makes every missing parent at the
+/// A copy that chmods only the leaf is the ancestor bug: `create_dir_all` makes every missing parent at the
 /// process umask, so `~/.mvm/volumes/<id>/ciphertext` could arrive with two
 /// world-readable directories above it holding the same encrypted state.
 /// Delegating keeps one implementation of the rule rather than two that drift.

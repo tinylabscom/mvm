@@ -48,18 +48,15 @@ few extra steps, covered in
 
 ```bash
 mvmctl doctor --workflow cli-run
-mvmctl bootstrap
-mvmctl image pull alpine
-MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref )"
 mvmctl machine run --name local-demo --profile dev \
-  --image "${MVM_DEMO_IMAGE:?Run preparation in this terminal first}" \
+  --image alpine \
   --cpus 1 --memory 256M --timeout 30 \
   -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'
 ```
 
-`bootstrap` fetches the kernel, guest runtime and builder image. `image pull`
-fetches and unpacks an OCI image; a `machine run --image` launch reads only the
-local cache and never downloads anything.
+The first run fetches the kernel and image and prepares the release guest runtime;
+subsequent runs reuse the cache. `mvmctl bootstrap` and `mvmctl image pull alpine`
+can prewarm these artifacts ahead of time.
 
 The named foreground run above is transient and cold: its workload VM is torn
 down on exit, with no persistent volume or standby requested. It needs no

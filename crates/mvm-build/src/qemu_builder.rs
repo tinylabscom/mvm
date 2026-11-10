@@ -287,11 +287,12 @@ fn run_stage0_qemu(
         crate::builder_cmdline::checked_builder_cmdline(append)
             .map_err(BuilderVmError::NixBuildFailed)?,
     );
-    for disk in [&vda, &vdb, &vdc, &vdd] {
-        cmd.arg("-drive")
-            .arg(format!("file={},if=virtio,format=raw", disk.display()));
-    }
-    attach_stage0_identity_and_store(&mut cmd, &identity_drive, nix_store_lock.path());
+    attach_stage0_drives(
+        &mut cmd,
+        [&vda, &vdb, &vdc, &vdd],
+        &identity_drive,
+        nix_store_lock.path(),
+    );
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
     cmd.args(["-display", "none"]);
@@ -339,6 +340,21 @@ fn run_stage0_qemu(
         let _ = std::fs::remove_file(img);
     }
     Ok(())
+}
+
+/// Attach every Stage 0 disk: the four packed ext4 images in device order, then
+/// the host-owned identity and Nix store.
+fn attach_stage0_drives(
+    cmd: &mut Command,
+    images: [&Path; 4],
+    identity_drive: &Path,
+    nix_store: &Path,
+) {
+    for disk in images {
+        cmd.arg("-drive")
+            .arg(format!("file={},if=virtio,format=raw", disk.display()));
+    }
+    attach_stage0_identity_and_store(cmd, identity_drive, nix_store);
 }
 
 /// Attach the two host-owned Stage 0 data disks exactly once and in a stable
@@ -1814,29 +1830,36 @@ fi
         );
     }
 
-    /// Stage 0 delegates the host-owned disks to the single-purpose helper once.
-    ///
-    /// The FlowMux identity image was attached twice, which consumed a device
-    /// letter and pushed the Nix store one slot further down the enumeration —
-    /// past where the guest looked for it. The guest then fell back to
-    /// enumeration order and selected the 32 KiB identity image as its store,
-    /// failing closed on every Stage 0 kernel build.
+    /// The FlowMux identity image was once attached twice, which consumed a
+    /// device letter and pushed the Nix store one slot down the enumeration,
+    /// past where the guest looked for it. The guest then took the 32 KiB
+    /// identity image for its store and failed closed on every Stage 0 kernel
+    /// build.
     #[test]
-    fn stage0_calls_host_owned_disk_attachment_once() {
-        let src = include_str!("qemu_builder.rs");
-        let block = src
-            .split_once("for disk in [&vda, &vdb, &vdc, &vdd]")
-            .expect("stage 0 still attaches its disks here")
-            .1
-            .split_once("\"-device\"")
-            .expect("the drive list ends before the vsock device")
-            .0;
+    fn stage0_attaches_each_disk_once_in_device_order() {
+        let mut command = std::process::Command::new("qemu-system-test");
+        let images = ["/w/seed", "/w/work", "/w/out", "/w/bins"].map(std::path::Path::new);
+        let identity = std::path::Path::new("/w/identity");
+        let store = std::path::Path::new("/w/store");
 
-        let calls = block.matches("attach_stage0_identity_and_store(").count();
+        attach_stage0_drives(&mut command, images, identity, store);
+
+        let drives: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .filter(|arg| arg.starts_with("file="))
+            .map(|arg| arg.split(',').next().unwrap().to_string())
+            .collect();
         assert_eq!(
-            calls, 1,
-            "the host-owned Stage 0 disks are attached through the helper {calls} times; \
-             duplicate attachment re-letters every disk behind them"
+            drives,
+            [
+                "file=/w/seed",
+                "file=/w/work",
+                "file=/w/out",
+                "file=/w/bins",
+                "file=/w/identity",
+                "file=/w/store"
+            ]
         );
     }
 }

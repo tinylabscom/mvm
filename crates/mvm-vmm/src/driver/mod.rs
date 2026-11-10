@@ -7,6 +7,8 @@
 
 #[cfg(unix)]
 pub mod prepared_disks;
+#[cfg(unix)]
+pub mod readonly_data;
 pub mod spec;
 pub mod traits;
 

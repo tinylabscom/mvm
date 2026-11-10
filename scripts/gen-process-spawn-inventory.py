@@ -230,7 +230,6 @@ A = {
     # builder VM
     "mvm-agentd/src/bin/mvm-builder-agent.rs": ("builder job", "run a builder job's command"),
     "mvm-agentd/src/builder_agent.rs": ("builder job", "run a builder job's command"),
-    "mvm-agentd/src/builder_build.rs": ("builder job", "nix build and artifact staging via sh"),
     "mvm-builder-guest/src/bin/mvm-host-vm-init.rs": ("builder init", "builder VM PID 1: busybox/mount/network setup, nix-store, mkfs, workload netns, agent fork"),
     "mvm-builder-guest/src/bin/mvm-host-vm-init/boot_stage.rs": ("builder init", "exec the next boot stage"),
     "mvm-builder-guest/src/bin/mvm-host-vm-init/builder_hooks.rs": ("builder init", "fsck and loop-device hooks"),
@@ -257,7 +256,6 @@ A = {
     "mvm-build/src/embed_toolchain.rs": ("toolchain", "probe rustup/cargo/rustc/zig/python3 for the pinned embed toolchain"),
     "mvm-build/src/guest_agent_build.rs": ("toolchain", "cargo / rustup build of guest binaries from this tree"),
     "mvm-build/src/libkrun_builder.rs": ("hypervisor supervisor", "cargo build of helpers, libkrun builder supervisor (explicit libkrun only)"),
-    "mvm-build/src/provenance_mark.rs": ("storage tool", "debugfs read of image provenance mark"),
     "mvm-build/src/qemu_builder.rs": ("hypervisor", "QEMU builder: timeout-wrapped boot, zstd, mkfs.ext4, debugfs"),
     "mvm-build/src/runtime_overlay.rs": ("network fetch", "curl download of a release artifact"),
     "mvm-build/src/stage0.rs": ("archive tool", "native tar -xJf of the Stage 0 root tarball (pure-Rust path is the alternative)"),
@@ -265,6 +263,7 @@ A = {
     "mvm-capture/src/collect/trace.rs": ("capture probe", "strace under timeout to trace a project command"),
     "mvm-capture/src/verify.rs": ("mvmctl self re-exec", "run `mvmctl __builder-shell-job` to verify a capture"),
     "mvm-core/src/crypto/key_rotation.rs": ("storage tool", "cryptsetup luksChangeKey"),
+    "mvm-core/src/bounded_run.rs": ("test harness", "test-support only: writes a test script through a short-lived sh (absent from a build without the test-support feature)"),
     "mvm-core/src/env_hygiene.rs": ("factory", "the sanctioned Command constructor: scrubs denied env, then everything above calls it"),
     "mvm-core/src/host_storage_encryption.rs": ("host probe", "diskutil / findmnt / tune2fs / lsblk encryption-at-rest probes"),
     "mvm-core/src/platform/platform.rs": ("host probe", "sw_vers and nix presence probe"),
@@ -272,7 +271,6 @@ A = {
     "mvm-fs/src/oci_to_rootfs/ext4.rs": ("storage tool", "mke2fs to materialize an OCI rootfs (Linux)"),
     "mvm-fs/src/oci_to_rootfs/verity.rs": ("storage tool", "veritysetup format of a rootfs (Linux)"),
     "mvm-runtime/src/host_shell.rs": ("shell script", "bash -c for ShellEnvironment host commands"),
-    "mvm-runtime/src/microvm/run_info.rs": ("process control", "kill of a recorded VM pid"),
     "mvm-runtime/src/storage/backend.rs": ("storage tool", "dmsetup thin-pool operations"),
     "mvm-runtime/src/storage/volume/encrypted_linux.rs": ("storage tool", "cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume"),
     "mvm-vmm/src/host/aux_bin.rs": ("helper bin", "`--contract-version` probe of a helper; cargo build of helpers from source"),
@@ -288,6 +286,7 @@ A = {
     "mvm-hostd/src/bin/mvm-host-agent.rs": ("helper bin", "re-exec self as a worker process"),
     "mvm-hostd/src/bin/mvm-hvf-supervisor.rs": ("codesign / self re-exec", "ad-hoc codesign of the binary, then re-exec self signed"),
     "mvm-hostd/src/bin/mvm-network-endpoint.rs": ("helper bin", "keeper re-execs the endpoint binary for a long-lived VM"),
+    "mvm-hostd/src/mailbox_process.rs": ("helper bin", "launch path starts the per-VM mailbox process with derived keys on stdin"),
     "mvm-hostd/src/health_probe.rs": ("mvmctl self re-exec", "`mvmctl machine restart` after a failed healthcheck (embedder-refused)"),
     "mvm-hostd/src/supervisor/firewall/linux_nft.rs": ("net (nft)", "install host nftables rules"),
     "mvm-hostd/src/supervisor/services/spawn.rs": ("helper bin", "ProcessSpawner: start a signed, integrity-checked host service binary"),
@@ -321,11 +320,12 @@ AUTH = {
     "mvm-conformance": "dev harness, not shipped",
 }
 AUTH_OVERRIDE = {f: "builder VM" for f in (
-    "mvm-agentd/src/bin/mvm-builder-agent.rs", "mvm-agentd/src/builder_agent.rs", "mvm-agentd/src/builder_build.rs")}
+    "mvm-agentd/src/bin/mvm-builder-agent.rs", "mvm-agentd/src/builder_agent.rs")}
 AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-hvf-supervisor.rs"] = "per-VM supervisor bin"
 AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-network-endpoint.rs"] = "per-VM endpoint bin"
 AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-host-agent.rs"] = "host daemon bin"
 AUTH_OVERRIDE["mvm-cli/src/commands/bootstrap.rs"] = "CLI hidden verb"
+AUTH_OVERRIDE["mvm-core/src/bounded_run.rs"] = "dev harness, not shipped"
 LIB_AUTH = "library: caller's process (CLI, daemon, embedder)"
 
 
@@ -343,13 +343,70 @@ def guard(rel, kinds, places, fns):
         pl = {places.get((rel, f)) or next((w for (gf, _), w in places.items() if gf == rel and None in fns), None) for f in fns}
         g.append("RAW_SITES (" + "/".join(sorted(p for p in pl if p)) + ")" if pl - {None} else "UNCLASSIFIED raw spawn")
     src = open(os.path.join(ROOT, rel)).read()
-    if "refuse_cli_spawn" in src or "CliSpawn::" in src:
+    if "refuse_cli_spawn" in src or "CliSpawn::" in src or "refuse_toolchain_spawn" in src:
         g.append("embedder refusal")
     if "network_endpoint" in rel or "gpu_endpoint" in rel:
         g.append("check-single-network-path")
     if crate_of(rel) in ("mvm-client", "mvm-hostlib", "mvm-sdk"):
         g.append("check-no-cli-shellout")
     return "; ".join(g)
+
+
+# Ratchet: sites a library-reachable process may start that are not yet shown
+# to be required, refused or CLI-only. It may only go down; raising it needs a
+# written reason in the contract doc.
+OPEN_REVIEW_CEILING = 12
+# Library-reachable spawn files that were read and judged. Each entry is
+# (disposition, reason); the reason names the functions a reviewer can open.
+# A file listed here that is no longer open-review by derivation is an error.
+REVIEWED = {
+    "mvm-build/src/builder_vm_image.rs": ("fixed-argv-utility", "`prepopulate_with_mkfs`: program is the e2fsprogs `mkfs.ext4` path from `find_host_mkfs_ext4` (fixed candidate list), argv is a fixed flag list plus typed paths and a block count, no shell, status checked and mapped to `BuilderVmError`. Formats the builder's own store image from a digest-verified seed; no caller-supplied text reaches argv. Stdio is inherited and there is no wall-clock bound (not changed: the output is the operator's progress display, not captured)."),
+    "mvm-build/src/builder_vm_runtime.rs": ("bounded-fixed-argv-utility", "`debugfs_cat`: read-only `debugfs -R` on the builder store image. The request comes from `debugfs_cat_request` (refuses a relative path or whitespace and control characters). It runs under `mvm_core::bounded_run::run_bounded` with a 60 s timeout (typed error) and a 1 MiB stdout cap, and its error text is `excerpt`-capped; tests drive a fake tool for the hang, the 10 MB output and the normal and not-found paths."),
+    "mvm-core/src/crypto/key_rotation.rs": ("bounded-fixed-argv-utility", "`rotate_luks_slot` via `run_change_key`: fixed `cryptsetup luksChangeKey`; both passphrases go through 0600 tempfiles named in argv, never argv text or env. Runs under `run_bounded` (5 min timeout, 64 KiB capture, stdin null); the error carries a capped, control-stripped stderr excerpt only. Requires a live LUKS device by contract."),
+    "mvm-fs/src/oci_to_rootfs/ext4.rs": ("bounded-fixed-argv-utility", "`build_mke2fs_command`/`run_mke2fs_bounded`: program is `mke2fs` or an explicit `Mke2fsOptions` path, argv is fixed flags plus typed label, uuid, hash seed, block size and paths as separate args (no shell), deterministic-time env set. Runs under `run_bounded` (15 min timeout, 64 KiB capture per stream); the error quotes at most 2000 characters of each stream. Linux only."),
+    "mvm-fs/src/oci_to_rootfs/verity.rs": ("bounded-fixed-argv-utility", "`run_veritysetup_format_bounded`: `veritysetup format` with typed options as `--flag=value` args and two paths, no shell. Runs under `run_bounded` (15 min timeout, 64 KiB capture); the error quotes at most 2000 characters of each stream; the `Root hash:` line is parsed from the captured stdout or an error is returned. Linux only."),
+    "mvm-runtime/src/storage/backend.rs": ("bounded-fixed-argv-utility", "`dmsetup_linux::probe`: `dmsetup --version` availability probe, fixed argv, under `run_bounded` (30 s timeout, 4 KiB capture); a hang or non-zero exit maps to `StorageError::BackendUnavailable`."),
+    "mvm-runtime/src/storage/volume/encrypted_linux.rs": ("bounded-fixed-argv-utility", "`attach`/`detach`/`format_image`/`close_mapper` through one `check_bounded` helper: fixed programs (`cryptsetup`, `mount`, `umount`, `mkfs.ext4`), argv is fixed subcommands plus typed volume paths and a mapper name derived from a validated `VolumeName` (lowercase alphanumerics, `-`, `_`); the data key goes only through a 0600 tempfile. Each step runs under `run_bounded` (10 min timeout, stdin null, 64 KiB capture) and a failure quotes at most 1000 characters of stderr. Linux only."),
+    "mvm-core/src/host_storage_encryption.rs": ("fixed-argv-utility", "`detect_macos`/`detect_linux`: read-only `diskutil info`, `findmnt --json`, `tune2fs -l` and `lsblk --inverse` probes with fixed argv; the only variable argument is a path or a `/dev/` device that `detect_linux` checks with `starts_with(\"/dev/\")` before `tune2fs` and `lsblk` (after `--`). The runner is injected, and tests pin fail-closed behaviour (`missing_tools_fail_closed`, `failed_findmnt_never_inspects_a_device`, `failed_diskutil_refuses_even_with_encrypted_stdout`). A failed or absent probe means not-encrypted. No wall-clock bound."),
+    "mvm-core/src/platform/platform.rs": ("fixed-argv-utility", "`macos_major_version` runs `sw_vers -productVersion` (fixed argv, parsed to a number, 0 on failure). The `nix --version` presence probe that used to sit beside it had no callers anywhere in the tree and was deleted."),
+    "mvm-client/src/secret/source.rs": ("bounded-user-adapter", "`SecretSourceResolver::run_cli`: the program is one of two fixed names (`Cli::OnePassword`, `Cli::Bitwarden`) found only in trusted directories (`find_trusted`: absolute, canonical, not under an untrusted root, owner and mode checked); argv is a fixed subcommand plus typed references; environment is scrubbed with only that CLI's own session variables re-admitted by exact name (`helper_command_with`); stdin null; run through the shared `mvm_core::bounded_run::run_bounded` with stdout capped at `MAX_SOURCE_BYTES` and stderr at 4 KiB, and a wall-clock timeout that kills the child (`CliTimedOut`); errors carry at most 200 characters of the first stderr line and never the value. It cannot run `mvmctl` (`check-no-cli-shellout`)."),
+    "mvm-build/src/stage0.rs": ("fixed-argv-utility", "`extract_nix_store_tarball_with_native_tar`: fixed `tar -xJf <tarball> -C <dir> --strip-components 1` on the Stage 0 root tarball, which is a bootstrap seed digest-verified before extraction; any failure clears the partial extract and falls back to the in-process extractor (`extract_nix_store_tarball_pure_rust`), so the spawn is an optimisation with a typed error and a pure-Rust alternative. No wall-clock bound."),
+    "mvm-build/src/embed_toolchain.rs": ("embedder-refused-by-caller", "The module is shared with `build.rs` and the CLI payload build, which are not library paths. The only non-CLI caller is `rustc_has_target`, reached from `guest_agent_build::ensure_rust_targets` after `zigbuild_tools`, whose first statement is `refuse_toolchain_spawn` (`CliSpawn::GuestRuntimeToolchain`); a library embedder is refused before any `rustup`, `cargo`, `rustc`, `zig` or `python3` probe runs. The module cannot call that function itself because `build.rs` includes it without `mvm-vmm`."),
+}
+
+# What is missing for each file that stays open-review. Every open-review file
+# must have an entry, so a new open site cannot appear without naming its gap.
+OPEN_NOTES = {
+    "mvm-vmm/src/host/shell/exec.rs": "`run_in_vm*`/`run_on_vm*` hand a caller-built script to `bash -c` (host bash on native Linux and for custom VM names); `run_host` runs a caller-named program but has CLI callers only. Every library caller was read (see the shell-wrapper caller audit) and the unquoted ones fixed, but the seam itself still accepts any string, so nothing stops a new caller interpolating raw. Missing: a gate or typed command form that makes unquoted interpolation into these scripts unrepresentable, and a wall-clock bound (builds are long-running, so the bound has to be per caller).",
+    "mvm-vmm/src/host/linux_env.rs": "`NativeEnv::{run, run_visible, run_capture}` run `bash -c <script>` for every `LinuxEnv` caller. Same gap as `shell/exec.rs`: callers are audited and tested, the wrapper is not constrained.",
+    "mvm-runtime/src/host_shell.rs": "`HostShellEnvironment` implements `ShellEnvironment` by running `bash -c <script>` on the host (the Linux nix-build fallback). Its library callers (`mvm-build` `shell_scripts`, `backend/host.rs`, `lifecycle/build.rs`) are audited and tested; the Mvmfile recipe in `image.rs` is author-trusted by design. Missing: the same constraint on the seam and a per-caller timeout.",
+}
+
+REQUIRED_CLASSES = ("hypervisor", "helper bin", "systemd-run", "net (nft)", "codesign", "factory", "process control")
+
+
+def disposition(key, cls, auth, linked, guard_text):
+    """required-host-primitive | embedder-refused | cli-only | guest-side | test-only | open-review.
+
+    open-review is the honest remainder: a program the client closure can
+    start that is neither the product's own VMM/role process nor refused for
+    a library embedder. The process-boundary decision permits fixed-argv
+    utilities, but each is listed until its path is shown to be typed,
+    admitted and bounded; none is claimed to be a violation here.
+    """
+    if auth.startswith("dev harness"):
+        return "test-only"
+    if auth in ("guest", "builder VM"):
+        return "guest-side"
+    if linked == "-" or auth.startswith("CLI"):
+        return "cli-only"
+    if "embedder refusal" in guard_text:
+        return "embedder-refused"
+    if cls.startswith(REQUIRED_CLASSES) or cls == "hypervisor supervisor":
+        return "required-host-primitive"
+    if key in REVIEWED:
+        return REVIEWED[key][0]
+    return "open-review"
 
 
 def render():
@@ -377,17 +434,39 @@ def render():
         kinds = [x["kind"] for x in v]
         t = "".join(ch for ch in t if ch in linked)
         t = t or "-"
-        rows.append((c, k.split("/", 1)[1], len(v), cls, why, auth, linked, t, guard(f, kinds, places, {x["fn"] for x in v})))
+        g = guard(f, kinds, places, {x["fn"] for x in v})
+        rows.append((c, k.split("/", 1)[1], len(v), cls, why, auth, linked, t, g, disposition(k, cls, auth, linked, g)))
     rows.sort(key=lambda r: (r[0], r[1]))
     cc = collections.Counter()
     for r in rows:
         cc[r[0]] += r[2]
-    out = ["| Crate | Module (under `src/` unless a crate root file) | Sites | Class | Purpose | Authority | Linked | Traced | Guard |",
-           "|---|---|--:|---|---|---|:-:|:-:|---|"]
+    out = ["| Crate | Module (under `src/` unless a crate root file) | Sites | Class | Purpose | Authority | Linked | Traced | Guard | Disposition |",
+           "|---|---|--:|---|---|---|:-:|:-:|---|---|"]
     for r in rows:
-        out.append("| %s | `%s` | %d | %s | %s | %s | %s | %s | %s |" % r)
+        out.append("| %s | `%s` | %d | %s | %s | %s | %s | %s | %s | %s |" % r)
     out += ["", "Totals: %d production sites in %d files." % (sum(cc.values()), len(rows)), "",
             "| Crate | Sites |", "|---|--:|"] + ["| %s | %d |" % kv for kv in sorted(cc.items())]
+    dc, df = collections.Counter(), collections.Counter()
+    for r in rows:
+        dc[r[9]] += r[2]
+        df[r[9]] += 1
+    out += ["", "| Disposition | Sites | Files |", "|---|--:|--:|"] + ["| %s | %d | %d |" % (d, dc[d], df[d]) for d in sorted(dc)]
+    unused = [k for k in REVIEWED if k.replace("mvm-", "mvm-", 1) not in {r[0] + "/" + r[1] for r in rows}]
+    if unused:
+        sys.exit("REVIEWED entries without a spawn row:\n  " + "\n  ".join(unused))
+    if REVIEWED:
+        out += ["", "Reviewed library-reachable sites (disposition, then why):", "",
+                "| File | Disposition | Reason |", "|---|---|---|"]
+        out += ["| `%s` | %s | %s |" % (k, v[0], v[1]) for k, v in sorted(REVIEWED.items())]
+    gaps = sorted({r[0] + "/" + r[1] for r in rows if r[9] == "open-review"})
+    if set(gaps) != set(OPEN_NOTES):
+        sys.exit("OPEN_NOTES must name exactly the open-review files; have %s, need %s" % (sorted(OPEN_NOTES), gaps))
+    out += ["", "Still open-review, and the concrete missing piece:", "", "| File | Missing |", "|---|---|"]
+    out += ["| `%s` | %s |" % (k, OPEN_NOTES[k]) for k in gaps]
+    if dc["open-review"] > OPEN_REVIEW_CEILING:
+        sys.exit("open-review spawn sites rose to %d (ceiling %d): classify the new site as required, "
+                 "refused for an embedder or CLI-only, or justify raising OPEN_REVIEW_CEILING"
+                 % (dc["open-review"], OPEN_REVIEW_CEILING))
     kinds = collections.Counter(s["kind"] for s in sites)
     out += ["", "By construct: " + ", ".join("`%s` %d" % kv for kv in sorted(kinds.items())) + "."]
     return "\n".join(out)

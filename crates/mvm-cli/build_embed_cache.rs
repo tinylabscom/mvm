@@ -171,9 +171,8 @@ pub(crate) enum Stored {
 /// Read one stored artifact and check it against its recorded digest.
 ///
 /// The key proves which *sources* an entry was built from; only the digest can
-/// say the bytes are still the ones that were built. An entry published before
-/// digests were recorded has none, and adopts the digest of its bytes as they
-/// stand — the same trust every restore gave it until now.
+/// say the bytes are still the ones that were built. An entry with no recorded
+/// digest is a miss.
 pub(crate) fn inspect(root: &Path, key: &str, binary: &str) -> Stored {
     let path = artifact_path(root, key, binary);
     let Ok(bytes) = std::fs::read(&path) else {
@@ -191,13 +190,9 @@ pub(crate) fn inspect(root: &Path, key: &str, binary: &str) -> Stored {
             recorded: recorded.trim().to_string(),
             actual,
         },
-        Err(_) => {
-            write_digest(&digest, &actual);
-            Stored::Verified {
-                path,
-                sha256: actual,
-            }
-        }
+        // No recorded digest means nothing vouches for these bytes: a miss,
+        // rebuilt and republished with a digest, never adopted as they stand.
+        Err(_) => Stored::Missing,
     }
 }
 

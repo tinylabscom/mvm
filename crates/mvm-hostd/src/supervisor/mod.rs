@@ -72,7 +72,6 @@ pub mod instance_sampler;
 pub mod keystore;
 pub mod l7_proxy;
 pub mod name_scanner;
-pub mod names_gazetteer;
 // Observer trait + Pipeline builder for the gateway audit substrate.
 // Observers consume `&FlowEvent` references inside `signer_task`
 // (fan-out before chain signing). Host-allowlisted via
@@ -92,12 +91,10 @@ pub mod network_endpoint_proxy;
 pub mod pii_redactor;
 pub mod proxy;
 pub mod reaper;
-pub mod redaction_resolve;
 /// Undeclared secret/PII redaction shared by the egress endpoint and the
 /// declared-ingress transform.
 pub mod redactor;
 pub mod reversible_replacement;
-pub mod reversible_replacement_resolve;
 /// Chain-signed `secret.substituted` / `secret.placeholder_dropped`
 /// audit events (claim 13: metadata only, never the secret value).
 pub mod secret_audit;

@@ -71,7 +71,7 @@ impl SubstitutionService {
             return Some("destination requires secret substitution over typed HTTP");
         }
 
-        if crate::supervisor::reversible_replacement_resolve::resolve(
+        if crate::supervisor::reversible_replacement::resolve_replacement(
             &self.reversible_replacement_policy,
             destination,
         )

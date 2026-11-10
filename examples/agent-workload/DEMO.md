@@ -1,13 +1,24 @@
 # Claude application candidate
 
-`environment.json` declares `agent/claude@2.0.0`, the baked
+`environment.json` declares `agent/claude@2.0.1`, the baked
 `/etc/mvm/entrypoint`, a required `ANTHROPIC_API_KEY` slot, and only
 `api.anthropic.com:443` egress. The old `agent/claude@1.0.1` is policy-only.
 Source definitions and a locally signed archive are not registry publication.
 
 The example registers only WebFetch with strict MCP configuration and bakes
 three-turn and $0.50 limits into its entrypoint. The shared wrapper retains
-`--bare` unless a caller explicitly supplies a tool list. Provider-side budget
+`--bare` unless a caller explicitly supplies a tool list.
+
+The signed policy also carries a `request_budget` of one request, 500000
+micro-USD and the exact model `claude-haiku-4-5-20251001`. That is what
+admission enforces at the egress endpoint: every `POST /v1/messages` reserves
+one request (retries and a tool-use follow-up turn each count, with no refund)
+and the full 200K context at $2/MTok plus `max_tokens` at $5/MTok; a request
+with another model, a `max_tokens` above 20000, an `anthropic-beta` header or a
+provider-side tool is refused. The entrypoint's `--model` and
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS=20000` only make the client fit that ceiling;
+`--max-turns` and `--max-budget-usd` remain the client's own flags and are not
+admission-enforced. It is not a provider-account cap, so provider-side budget
 limits remain necessary.
 
 ## Source-only export witness

@@ -707,25 +707,6 @@ pub fn cached_guest_binaries(
     layout.is_complete().then(|| layout.binaries())
 }
 
-/// Whether resolving the guest runtime for `(cache_root, arch)` would trigger a
-/// source-checkout cross-compile: a source workspace is detected and its
-/// content-keyed cache is cold. Mirrors [`resolve_or_build_guest_binaries`]'s
-/// build/no-build decision so a caller can announce the slow, output-silent
-/// `cargo zigbuild` before it runs.
-pub fn source_build_pending(cache_root: &Path, arch: GuestArch) -> bool {
-    match detect_source_workspace() {
-        Some(ws) => source_build_pending_for(cache_root, arch, &ws),
-        None => false,
-    }
-}
-
-fn source_build_pending_for(cache_root: &Path, arch: GuestArch, workspace_root: &Path) -> bool {
-    match source_cache_key(workspace_root) {
-        Ok(cache_key) => cached_guest_binaries(cache_root, &cache_key, arch).is_none(),
-        Err(_) => false,
-    }
-}
-
 /// Resolve the full runtime-overlay guest-binary set for `(version, arch)`,
 /// building + caching it from `workspace_root` on a cache miss.
 ///
@@ -1246,26 +1227,6 @@ mod tests {
         ] {
             write_exec(path, bytes).expect("seed guest cache binary");
         }
-    }
-
-    #[test]
-    fn source_build_pending_flips_when_the_source_keyed_cache_is_seeded() {
-        // A deterministic workspace root: this crate's manifest dir has the
-        // workspace root as an ancestor, independent of the test's CWD.
-        let ws = source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
-            .expect("workspace root resolves from the crate manifest dir");
-        let cache = tempfile::tempdir().expect("tempdir");
-        let arch = GuestArch::Aarch64;
-
-        // Cold cache: resolving the guest runtime would cross-compile.
-        assert!(source_build_pending_for(cache.path(), arch, &ws));
-
-        // Seed the exact content-keyed slot the resolver would fill.
-        let key = source_cache_key(&ws).expect("source cache key");
-        seed_complete_guest_cache(cache.path(), &key, arch, b"x");
-
-        // Warm cache: no cross-compile pending.
-        assert!(!source_build_pending_for(cache.path(), arch, &ws));
     }
 
     /// The cache must not accept an artifact the guest could not execute.
@@ -1857,16 +1818,6 @@ rust = "1.91.1"
         assert!(matches!(
             guest_binary_source().expect("explicit source guest runtime"),
             GuestBinarySource::SourceCheckout { .. }
-        ));
-    }
-
-    #[cfg(feature = "release-channel")]
-    #[test]
-    fn official_build_does_not_detect_the_checkout_it_was_compiled_in() {
-        assert_eq!(detect_source_workspace(), None);
-        assert!(!source_build_pending(
-            Path::new("/tmp/official-release-empty-cache"),
-            GuestArch::host(),
         ));
     }
 

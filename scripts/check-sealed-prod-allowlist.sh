@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Plan 76 Phase 1 / Phase 8 (partial) — sealed-prod vsock allowlist
-# regression gate.
+# Sealed-prod vsock allowlist regression gate.
 #
 # The `cargo test ... -- --exact <name>` invocation exits 0 when no
 # tests match the filter — so if any of the named tests are renamed
@@ -15,7 +14,7 @@
 
 set -euo pipefail
 
-# Test names locked by plan 76 Phase 1. Adding a test to this list
+# Test names locked by this gate. Adding a test to this list
 # requires updating EXPECTED_GUEST_COUNT / EXPECTED_CONTRACT_COUNT to
 # match.
 GUEST_TESTS=(

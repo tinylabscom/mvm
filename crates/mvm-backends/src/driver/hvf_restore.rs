@@ -151,6 +151,10 @@ fn require_unregistered_restore(parent: &HvfSupervisorConfig) -> Result<()> {
         parent.caller_registration.is_none(),
         "caller-registered checkpoints require a fresh cold launch; restore is unsupported"
     );
+    anyhow::ensure!(
+        parent.readonly_data_disk_fds.is_empty(),
+        "private DATA descriptors require a fresh original launch; restore is unsupported"
+    );
     Ok(())
 }
 
@@ -265,6 +269,7 @@ pub fn hvf_child_restore_config(
         kernel_fd: None,
         boot_image_fds: None,
         writable_disk_fds: Vec::new(),
+        readonly_data_disk_fds: Vec::new(),
         cmdline: parent.cmdline.clone(),
         memory_mib: parent.memory_mib,
         // A restored child resumes the parent's saved vCPU state, so it must
@@ -578,6 +583,22 @@ fn restore_failure(req: &HvfRestoreRequest<'_>, what: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn readonly_data_restore_refuses_stale_descriptor_custody_before_opening_state() {
+        let mut cfg = parent_config(Path::new("/absent-fixture-state"), Vec::new());
+        cfg.readonly_data_disk_fds
+            .push(mvm_vmm::host::hvf_supervisor::HvfReadOnlyDataDiskFd {
+                disk: 2,
+                fd: 42,
+                expected: mvm_vmm::driver::readonly_data::DataDiskExpectation {
+                    len: 512,
+                    sha256: "ab".repeat(32),
+                },
+            });
+        let error = require_unregistered_restore(&cfg).unwrap_err();
+        assert!(error.to_string().contains("fresh original launch"));
+    }
+
     fn parent_config(state: &Path, disks: Vec<HvfDisk>) -> HvfSupervisorConfig {
         HvfSupervisorConfig {
             console_capture: mvm_vmm::host::hvf_supervisor::HvfConsoleCapture::Encrypted,
@@ -588,6 +609,7 @@ mod tests {
             kernel_fd: None,
             boot_image_fds: None,
             writable_disk_fds: Vec::new(),
+            readonly_data_disk_fds: Vec::new(),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
             memory_mib: 512,
             vcpus: 1,

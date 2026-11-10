@@ -16,6 +16,7 @@ use mvm_core::launch_trace::PhaseTimingMode;
 use mvm_core::vm_backend::{SnapshotCapability, VmId, VmStartConfig, VmVolume};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport;
+use mvm_vmm::host::shell::shell_quote;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -355,24 +356,6 @@ impl ExecRequest {
 fn quote_argv_for_exec(argv: &[String]) -> String {
     let quoted: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
     format!("exec {}", quoted.join(" "))
-}
-
-/// Quote a single argument for inclusion in a shell command line.
-///
-/// Wraps in single quotes and escapes embedded single quotes the
-/// portable POSIX way (`'` → `'\''`).
-pub fn shell_quote(arg: &str) -> String {
-    let mut out = String::with_capacity(arg.len() + 2);
-    out.push('\'');
-    for ch in arg.chars() {
-        if ch == '\'' {
-            out.push_str(r"'\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 /// Build the wrapper script that runs inside the guest:
@@ -784,6 +767,7 @@ fn run_inner(
             backend: backend.name(),
             exit_code: reported_exit_code,
             completed: workload_completed,
+            posture: posture.filter(|_| result.is_ok()).map(std::cell::Cell::get),
         }
     });
     let stopped = teardown_transient_vm(
@@ -1684,7 +1668,6 @@ mod tests {
     fn select_exec_backend_none_with_no_env_falls_to_auto_detect() {
         let mut env = TestEnv::new();
         env.remove("MVM_HYPERVISOR");
-        env.remove("MVM_BACKEND");
         let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
         let backend =
             select_exec_backend(false, &deny_all, None).expect("auto-detect always resolves");
@@ -1697,7 +1680,6 @@ mod tests {
     #[test]
     fn select_exec_backend_requested_flag_beats_conflicting_env() {
         let mut env = TestEnv::new();
-        env.remove("MVM_BACKEND");
         env.set("MVM_HYPERVISOR", "qemu");
         let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
         let backend = select_exec_backend(false, &deny_all, Some("libkrun"))
@@ -1887,17 +1869,6 @@ mod tests {
             minted.elapsed() < std::time::Duration::from_millis(20),
             "the grant window must start when admission runs, not before preparation"
         );
-    }
-
-    #[test]
-    fn shell_quote_basic() {
-        assert_eq!(shell_quote("hello"), "'hello'");
-        assert_eq!(shell_quote("hello world"), "'hello world'");
-    }
-
-    #[test]
-    fn shell_quote_escapes_single_quotes() {
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
     #[test]

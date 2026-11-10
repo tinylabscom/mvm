@@ -119,6 +119,28 @@ pub(crate) fn installed_for_running_binary(
     })
 }
 
+/// Install only the OCI shims needed by an image launch.
+pub(crate) fn prepare_oci_for_running_binary(cache_root: &Path) -> Result<()> {
+    let version = crate::update::current_version();
+    let arch = mvm_core::arch::GuestArch::host();
+    let runtime = installed_for_running_binary(cache_root, arch)?;
+    mvm_build::runtime_pieces::install_oci_guest_runtime(cache_root, version, arch, &runtime)
+        .context("installing OCI guest shims from the verified release runtime")
+}
+
+/// Assemble the version-locked launch artifacts from the authenticated release.
+pub(crate) fn prepare_launch_pieces_for_running_binary(cache_root: &Path) -> Result<()> {
+    let release = prepare_for_running_binary()?;
+    mvm_build::runtime_pieces::assemble_release_runtime_pieces(
+        cache_root,
+        crate::update::current_version(),
+        mvm_core::arch::GuestArch::host(),
+        &release.archive,
+    )
+    .context("assembling the release guest runtime for first launch")?;
+    Ok(())
+}
+
 /// Fetch and verify the guest runtime the release `tag` ships, for
 /// `mvmctl env update` to call before it replaces the binary. A failure here
 /// leaves the installed CLI as it was, so an update never produces a CLI

@@ -785,6 +785,14 @@ class CandidateTransportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 candidate.package_members("0.24.0", self.zipped(changed))
 
+    def test_package_member_selector_maps_a_prerelease_to_the_tilde_version(self):
+        names = [
+            "mvmctl_0.27.0~rc.2-1_amd64.deb", "mvmctl_0.27.0~rc.2-1_arm64.deb",
+            "mvmctl-0.27.0~rc.2-1.x86_64.rpm", "mvmctl-0.27.0~rc.2-1.aarch64.rpm",
+        ]
+        entries = [(name, b"mock") for name in names + [name + ".sha256" for name in names]]
+        self.assertEqual(len(candidate.package_members("0.27.0-rc.2", self.zipped(entries))), 8)
+
     def test_checksum_sidecar_cannot_add_an_unrelated_subject(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

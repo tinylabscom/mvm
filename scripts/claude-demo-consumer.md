@@ -32,7 +32,7 @@ Obtain these nonsecret assertions independently from the public release:
   `--runtime-version`, `--runtime-archive-sha256`,
   `--runtime-overlay-roothash`.
 
-The genuine public `agent/claude@2.0.0` archive must carry a signed environment
+The genuine public `agent/claude@2.0.1` archive must carry a signed environment
 with its normal default entrypoint, exactly the required `ANTHROPIC_API_KEY`
 slot, and this policy:
 
@@ -76,7 +76,7 @@ mvmctl env caller-identity show
 mvmctl secret ls
 mvmctl search agent/claude
 mvmctl pull agent/claude
-mvmctl pack verify agent/claude@2.0.0 --json
+mvmctl pack verify agent/claude@2.0.1 --json
 printf '%s\n' 'tell me a joke' | mvmctl run agent/claude
 ```
 
@@ -93,7 +93,11 @@ intent file nor a PID observation is proof that a model ran or did not run.
 
 ## Evidence and recovery
 
-Private `/tmp/mvm-claude-consumer-*` evidence preserves actual stdout/stderr,
+Evidence goes to a fresh private `mvm-claude-consumer-*` directory under
+`--results-dir` (absolute, existing, not group/world writable; default `/tmp`).
+Before exit every file there is scanned for secret-looking shapes; a hit is
+recorded by file and pattern name only, and forces `demo_acceptance` false.
+The directory preserves actual stdout/stderr,
 the exact command vectors, release/artifact assertions, and canonical audit
 verifier/show results. A particular joke is not asserted. Passing requires:
 

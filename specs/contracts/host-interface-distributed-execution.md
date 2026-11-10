@@ -467,3 +467,89 @@ The first demo promises **contain, terminate, and rebuild**. It does not
 promise verified physical wipe. A remote command cannot immediately affect a
 disconnected node, and revocation takes effect only where current revocation
 state is known or an offline lease has expired.
+
+### Demo status: what runs today
+
+`crates/mvm-hostd/tests/mission_demo.rs` scripts the sequence above across
+three nodes, and `features/suites/s40_mission_demo/` runs it as a conformance
+scenario. Run it with
+`cargo nextest run -p mvm-hostd --test mission_demo --no-capture`.
+
+Mailbox encryption is host to host: a guest's outbox carries plaintext and a
+recipient, and the host service seals and signs it under keys the host holds,
+so the host sees the plaintext and a compromised host agent can read messages.
+Guest-to-guest or host-blind delivery would need hardware-backed attestation
+(key release only to an attested guest), a separate high-assurance track that
+is not built.
+
+#### Hermetic (CI)
+
+- The three-node demo: launch preflight and per-workload ledger, quarantine and
+  replacement with chain-signed entries, the signed offline lease, the command
+  replay gate, the reconnect challenge, and the sealed mailbox envelope with its
+  capability, replay and execution-epoch checks. The nodes are simulated nodes
+  in one test process; their VMs are gated and audited, and none boots.
+- One-host delivery: the sender's sealed envelope crosses a Unix domain socket
+  to the receiving node's `MailboxService` (`mvm-hostd::mailbox_service`), which
+  opens it and enqueues it under a bounded queue; refusals return as typed
+  replies. Only the aircraft node runs a service.
+- Two-node delivery: `two_nodes_deliver_over_a_loopback_tcp_peer_transport`
+  uses a loopback TCP `PeerTransport` between two nodes with separate state
+  directories and audit chains, inside one test process. The transport is
+  test-support only.
+- The guest mailbox host process (`mvm-mailbox`) and the guest-side outbox are
+  covered by their own tests; no booted guest is involved.
+
+#### Live-witnessed (manual, Firecracker)
+
+Three manual runs on a real Firecracker KVM host (dev profile, alpine guest)
+observed the guest-mailbox chain end to end. This is not a CI lane: it needs
+KVM and a runtime bootstrap of roughly 22 minutes, and the result is recorded
+in issue #5121. Observed:
+
+- A granted run (`--mailbox <64-hex id>`) boots with exactly one `mvm.mailbox=1`
+  on the guest command line. Only then does the guest agent create
+  `/run/mvm/mailbox` (uid 901, mode 0700). The host spawns a separate
+  `mvm-mailbox` process holding derived keys only: its argv is just its path,
+  and its environment and argv contain no seed-like hex, mailbox id or
+  host-signer path. Its socket is mode 0600.
+- A test-only writer calling `mvm_agentd::mailbox_outbox::write_outbox` as uid
+  901 delivered one frame to the host. `mvmctl machine mailbox recv <name>`
+  returned the exact plaintext, then empty. The chain-signed `mailbox.read`
+  entry carries the length and totals but not the body (no plaintext or base64
+  match in the audit log), and `mvmctl trust audit verify` passed.
+- Addressing: the guest may name the all-zero recipient or its own mailbox id.
+  Any other recipient is refused: the guest console shows the refusal, `recv`
+  returns empty, and the refusal text leaks nothing.
+- `machine stop` leaves no `mvm-mailbox` process (gone within about 2 s). An
+  ungranted VM has no token, directory, process or socket.
+
+Reproduce, on a Linux host with KVM and a sibling or installed mvm-images set:
+
+```sh
+cargo build                                   # mvmctl
+cargo build -p mvm-hostd --bin mvm-mailbox    # beside mvmctl; or set MVM_MAILBOX_PATH
+MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build ./target/debug/mvmctl bootstrap
+./target/debug/mvmctl machine run --image alpine --mailbox <64-hex id> \
+    --hypervisor firecracker --name n -- sleep 900
+# within ~30 s of boot, as uid 901 in the guest (machine cp / machine exec),
+# run a writer that calls mvm_agentd::mailbox_outbox::write_outbox
+./target/debug/mvmctl machine mailbox recv n  # exact plaintext, then empty
+./target/debug/mvmctl trust audit verify
+./target/debug/mvmctl machine stop n --yes    # no mvm-mailbox process remains
+```
+
+Observed on the Firecracker backend only, in the dev profile.
+
+#### Not wired / not claimed
+
+- Only the Firecracker backend is wired. HVF, libkrun, QEMU, apple-container and
+  wasm refuse a mailbox grant.
+- A frame written more than about 30 s after boot is missed: that is the host's
+  dial retry window.
+- There is no cross-host transport in the product and no node-to-node delivery
+  between physical hosts. Iroh is not wired (#4633 is open); the loopback TCP
+  transport above exists only in tests.
+- The live run is a manual witness, not a CI lane.
+- The three-node demo boots no VM, and no test attests hardware.
+- Mailbox encryption is host to host, as described above.

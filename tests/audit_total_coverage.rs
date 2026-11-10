@@ -278,14 +278,12 @@ const PACK_SYSTEM_SUB: &[(&str, AuditPosture)] = &[
     ("list", AuditPosture::ReadOnly),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
-    ("download", AuditPosture::ReadOnly),
-    ("update", AuditPosture::ReadOnly),
 ];
 
 const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
+    ("new", AuditPosture::InteractiveOrControl),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
-    ("list", AuditPosture::ReadOnly),
     ("info", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
     ("search", AuditPosture::ReadOnly),
@@ -294,9 +292,6 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("lock", AuditPosture::ReadOnly),
     ("compile", AuditPosture::ReadOnly),
     ("pull", AuditPosture::Emits("RegistryPackPin")),
-    ("rollback", AuditPosture::Emits("PackCacheChange")),
-    ("prune", AuditPosture::Emits("CachePrune")),
-    ("download", AuditPosture::ReadOnly),
     ("update", AuditPosture::Emits("RegistryPackPin")),
     ("registry", AuditPosture::DelegatesToSub(PACK_REGISTRY_SUB)),
     ("system", AuditPosture::DelegatesToSub(PACK_SYSTEM_SUB)),
@@ -312,7 +307,10 @@ const DEPLOYMENTS_SUB: &[(&str, AuditPosture)] = &[("ls", AuditPosture::ReadOnly
 // mutations use `ConfigChange` because they rewrite the operator's machine
 // inventory; lifecycle wrappers delegate to existing interactive/control
 // surfaces after first resolving the named machine.
+const MACHINE_MAILBOX: &[(&str, AuditPosture)] = &[("recv", AuditPosture::Emits("mailbox.read"))];
+
 const MACHINE_SUB: &[(&str, AuditPosture)] = &[
+    ("mailbox", AuditPosture::DelegatesToSub(MACHINE_MAILBOX)),
     ("run", AuditPosture::InteractiveOrControl),
     ("ps", AuditPosture::ReadOnly),
     ("build", AuditPosture::Emits("TemplateBuild")),
@@ -325,6 +323,10 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("exec", AuditPosture::InteractiveOrControl),
     ("shell", AuditPosture::InteractiveOrControl),
     ("stop", AuditPosture::Emits("VmStop")),
+    // Containment records before stopping; a failed stop leaves the workload
+    // quarantined. Replacement records before advancing the workload epoch.
+    ("quarantine", AuditPosture::Emits("workload.quarantined")),
+    ("replace", AuditPosture::Emits("workload.replaced")),
     ("set-timeout", AuditPosture::Emits("VmTtlSet")),
     // Verify a signed `.mvmpkg` and preview its posture. Read-only: no
     // install, no boot, no audit-chain emission.
@@ -594,6 +596,7 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("tail", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
     ("show", AuditPosture::ReadOnly),
+    ("timeline", AuditPosture::ReadOnly),
     // Lists sessions from a verified chain; writes nothing.
     ("sessions", AuditPosture::ReadOnly),
     ("posture", AuditPosture::ReadOnly),
@@ -994,6 +997,12 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-326 chain-structure event: `trust audit prune` records the
         // removal in the chain before deleting the segments it names.
         "chain.pruned",
+        // Per-workload containment: `machine quarantine` and `machine replace`
+        // each write a chain-signed entry (see `mvm_hostd::containment`).
+        "workload.quarantined",
+        "workload.replaced",
+        // `machine mailbox recv` signs one payload-free read entry.
+        "mailbox.read",
         // Top-level command audit envelopes.
         "cmd.agent-session",
         "cmd.build",

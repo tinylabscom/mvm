@@ -61,7 +61,7 @@ const PINNED: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/deps/libkrun-sys/src/context.rs",
-        7,
+        6,
         "the safe `add_virtio_fs` wrapper over the C symbol above, plus its tests",
     ),
     // ── backend-neutral type and explicit refusal witnesses ─────────────────

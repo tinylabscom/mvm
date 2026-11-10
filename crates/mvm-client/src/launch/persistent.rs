@@ -91,6 +91,7 @@ pub struct PersistentImageStartParams<'a> {
     /// [`network_policy`](Self::network_policy), which the caller derived from
     /// the same spec.
     pub grants: Option<mvm_contract::grants::Grants>,
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
     /// GPU remoting plane from the persisted spec (`--gpu` at create/start).
     pub gpu: bool,
     /// Optional host GPU ordinal persisted with the machine.
@@ -212,54 +213,6 @@ struct PreparedPersistentBoot {
     built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
 }
 
-/// A real owning receiver for an ordinary native boot. No registry, DTO or
-/// process-exit fallback is a durable handoff. The caller must retain this.
-pub fn start_persistent_oci_machine_owned(
-    params: PersistentImageStartParams<'_>,
-) -> Result<crate::entrypoint::boot::OwnedClientBoot> {
-    let prepared = prepare_persistent_boot(params)?;
-    let mut owner =
-        crate::boot::start_prepared_owned(crate::entrypoint::boot::ClientBootResources {
-            backend: prepared.backend,
-            config: prepared.start_config,
-            admission: prepared.admission,
-            _volumes: Some(prepared.prepared_volumes),
-            built_runtime: prepared.built_runtime,
-        })
-        .map_err(|mut failure| {
-            failure.emit_failed("backend-start");
-            anyhow::Error::new(failure)
-        })?;
-    if let Err(error) =
-        super::detached::require_serving_owned(&mut owner, std::time::Duration::from_secs(30))
-    {
-        let name = owner.resources().config.name.clone();
-        let mut failure = owner.failure(anyhow::Error::new(error));
-        failure.emit_failed("guest-readiness");
-        failure.observe_failure(|context, error| {
-            if let Some(error) = error.downcast_ref::<super::detached::DetachedReadinessError>() {
-                audit_detached_readiness_failure(context, &name, error);
-            }
-        });
-        return Err(anyhow::Error::new(failure));
-    }
-    if let Err(error) = super::grants_report::report_owned_grants(&mut owner) {
-        let mut failure = owner.failure(error);
-        failure.emit_failed("grants");
-        return Err(anyhow::Error::new(failure));
-    }
-    if let Err(error) = super::budget_charge::record_owned_charge(&mut owner) {
-        let mut failure = owner.failure(error);
-        failure.emit_failed("host-budget");
-        return Err(anyhow::Error::new(failure));
-    }
-    let resources = owner.resources();
-    emit_launched(&resources.admission, resources.backend.name(), true);
-    record_vm_readiness(&resources.config.name, InstanceReadiness::LaunchAccepted);
-    mvm_core::audit_emit!(VmStart, vm: &resources.config.name);
-    Ok(owner)
-}
-
 fn prepare_persistent_boot(
     params: PersistentImageStartParams<'_>,
 ) -> Result<PreparedPersistentBoot> {
@@ -282,6 +235,7 @@ fn prepare_persistent_boot(
         registry_pack_image,
         has_ad_hoc_argv,
         grants,
+        mailbox,
         gpu,
         gpu_device,
         workload_dir,
@@ -378,6 +332,7 @@ fn prepare_persistent_boot(
                 .collect::<Vec<_>>();
             admit_plan_for_boot_configured_ingress(
                 AdmitPlanForBootParams {
+                    mailbox,
                     // What the backend will arm, so the admitted tier opens
                     // the GPU endpoint's vsock socket exactly when there is one.
                     gpu: config.gpu,
@@ -539,6 +494,7 @@ fn finish_legacy_persistent(
     let started = match (|| -> Result<_> {
         let mut images = prepared_volumes.take_writable_images();
         complete_writable_images(&start_config, &mut images)?;
+        mvm_hostd::mailbox_process::require_servable(&start_config, &backend)?;
         Ok(crate::boot::start_prepared_custodied(
             backend,
             &start_config,
@@ -561,6 +517,17 @@ fn finish_legacy_persistent(
             return Err(err);
         }
     };
+    // The guest asserts a mailbox exactly when the plan grants one, so the
+    // host side starts here or the launch is rolled back.
+    if let Err(error) =
+        mvm_hostd::mailbox_process::serve_started(started.backend(), started.vm_id(), &start_config)
+    {
+        emit_failed(&admission, "mailbox-process", &error);
+        if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
+            tracing::warn!(error = %cleanup_error, machine = name, "removing runtime state after a refused mailbox failed");
+        }
+        return Err(error);
+    }
     // A backend accepting a start only means its host process was spawned.
     // Detached callers must not observe success until the authenticated guest
     // control plane is actually serving; failure rolls the partial start back
@@ -629,6 +596,7 @@ fn audit_detached_readiness_failure(
 mod persistent_oci_boot_tests {
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    use crate::admission::admit_plan_tests::admitted_libkrun;
     use mvm_core::util::test_env::TestEnv;
     use mvm_hostd::plan_admission::InMemoryNonceLedger;
 
@@ -691,7 +659,7 @@ mod persistent_oci_boot_tests {
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
 
-        let (resolved, _resolved_keys, resolved_audit) = admitted("resolved-abort");
+        let (resolved, _resolved_keys, resolved_audit) = admitted_libkrun("resolved-abort", None);
         super::audit_detached_readiness_failure(
             &resolved,
             "resolved-abort",
@@ -716,7 +684,8 @@ mod persistent_oci_boot_tests {
             "{resolved_chain}"
         );
 
-        let (unresolved, _unresolved_keys, unresolved_audit) = admitted("unresolved-abort");
+        let (unresolved, _unresolved_keys, unresolved_audit) =
+            admitted_libkrun("unresolved-abort", None);
         super::audit_detached_readiness_failure(
             &unresolved,
             "unresolved-abort",

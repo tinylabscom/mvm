@@ -174,6 +174,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         mvm_client::launch::machine_start::MachineStartParams {
             hypervisor: &effective_hypervisor,
             has_ad_hoc_argv: args.has_ad_hoc_argv,
+            mailbox: args.mailbox,
         },
     )?;
     let boot_digest = started.resolved_digest;
@@ -293,7 +294,7 @@ impl mvm_client::launch::machine_start::StartHost for CliStartHost {
 /// rather than on it having a persisted spec.
 ///
 /// Both verbs reach the guest over the per-VM vsock socket under
-/// `~/.mvm/vms/<name>/` and never read the spec they used to load — it was a
+/// `~/.mvm/vms/<name>/` and never read the spec: loading it would be a
 /// bare existence check. But `machine run` boots a transient VM that has a
 /// live console and no spec, so that check refused, with "does not exist", a
 /// machine `machine ps` was listing as running.
@@ -419,6 +420,37 @@ pub(super) fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) ->
     if had_err {
         anyhow::bail!("one or more machines failed to stop");
     }
+    Ok(())
+}
+
+/// Record the quarantine first, so the workload cannot relaunch, then stop it.
+/// A failed stop still leaves the workload quarantined and says so.
+pub(super) fn quarantine_machine(
+    cli: &Cli,
+    args: super::MachineQuarantineArgs,
+    cfg: &MvmConfig,
+) -> Result<()> {
+    mvm_client::containment::quarantine(&args.name, &args.reason)?;
+    println!(
+        "quarantined {}: it will not launch again until replaced",
+        args.name
+    );
+    down::run(
+        cli,
+        down::Args {
+            name: Some(args.name.clone()),
+        },
+        cfg,
+    )
+    .with_context(|| format!("{} is quarantined but could not be stopped", args.name))
+}
+
+pub(super) fn replace_machine(args: &super::MachineReplaceArgs) -> Result<()> {
+    let epoch = mvm_client::containment::replace(&args.name)?;
+    println!(
+        "{} may launch again under execution epoch {epoch}",
+        args.name
+    );
     Ok(())
 }
 

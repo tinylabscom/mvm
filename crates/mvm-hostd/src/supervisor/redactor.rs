@@ -7,6 +7,8 @@
 //! boundaries without releasing a prefix that a later chunk could turn into a
 //! match.
 
+use mvm_contract::ir::host_matches;
+use mvm_core::policy::{RedactionAction, RedactionPolicy};
 use zeroize::Zeroizing;
 
 use crate::supervisor::pii_redactor::{PiiRedactor, REDACTION_MASK};
@@ -327,6 +329,17 @@ fn redact_or_copy(
         Some((redacted, hits)) => Ok((redacted, hits)),
         None => Ok((bytes.to_vec(), RedactionHits::default())),
     }
+}
+
+/// First profile whose `host` pattern matches `dest` wins; else the policy
+/// default. First-match-wins gives operators precedence control by ordering.
+pub fn resolve_redaction<'a>(policy: &'a RedactionPolicy, dest: &str) -> &'a RedactionAction {
+    policy
+        .profiles
+        .iter()
+        .find(|p| host_matches(&p.host, dest))
+        .map(|p| &p.action)
+        .unwrap_or(&policy.default)
 }
 
 #[cfg(test)]
@@ -681,5 +694,66 @@ mod tests {
         assert!(hits.is_empty());
         emitted = emitted.saturating_add(tail.len());
         assert_eq!(emitted, chunk.len() * 1024);
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use mvm_core::policy::{
+        EntropyMode, NameMode, RedactionAction, RedactionPolicy, RedactionProfile,
+    };
+
+    fn entropy_redact() -> RedactionAction {
+        RedactionAction {
+            entropy: EntropyMode::Redact {
+                min_bits_per_char: 4.0,
+                min_run_len: 20,
+            },
+            names: NameMode::Redact,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn first_matching_wildcard_wins_else_default() {
+        let pol = RedactionPolicy {
+            default: RedactionAction::default(),
+            profiles: vec![RedactionProfile {
+                host: "*.openai.com".into(),
+                action: entropy_redact(),
+            }],
+        };
+        // matches the wildcard
+        assert!(matches!(
+            resolve_redaction(&pol, "api.openai.com").entropy,
+            EntropyMode::Redact { .. }
+        ));
+        // no match → default (Off)
+        assert!(matches!(
+            resolve_redaction(&pol, "example.com").entropy,
+            EntropyMode::Off
+        ));
+    }
+
+    #[test]
+    fn earlier_profile_wins_on_overlap() {
+        let pol = RedactionPolicy {
+            default: RedactionAction::default(),
+            profiles: vec![
+                RedactionProfile {
+                    host: "api.openai.com".into(),
+                    action: entropy_redact(),
+                },
+                RedactionProfile {
+                    host: "*.openai.com".into(),
+                    action: RedactionAction::default(),
+                },
+            ],
+        };
+        assert!(matches!(
+            resolve_redaction(&pol, "api.openai.com").entropy,
+            EntropyMode::Redact { .. }
+        ));
     }
 }

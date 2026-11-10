@@ -184,6 +184,9 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::Start(_) => "start",
         MachineAction::Restart(_) => "restart",
         MachineAction::Stop(_) => "stop",
+        MachineAction::Quarantine(_) => "quarantine",
+        MachineAction::Replace(_) => "replace",
+        MachineAction::Mailbox(_) => "mailbox",
         MachineAction::Reconfigure(_) => "reconfigure",
         MachineAction::Rm(_) => "rm",
         MachineAction::Ls(_) => "ls",
@@ -2145,6 +2148,20 @@ fn readme_persistent_machine_workflow_parses() {
         MachineAction::Stop(_)
     ));
     assert!(matches!(
+        parse(&["quarantine", "web", "--reason", "compromise"]).expect("machine quarantine parses"),
+        MachineAction::Quarantine(_)
+    ));
+    assert!(matches!(
+        parse(&["replace", "web"]).expect("machine replace parses"),
+        MachineAction::Replace(_)
+    ));
+    assert!(matches!(
+        parse(&["mailbox", "recv", "web"]).expect("machine mailbox recv parses"),
+        MachineAction::Mailbox(MachineMailboxAction::Recv { name }) if name == "web"
+    ));
+    assert!(parse(&["mailbox", "recv"]).is_err());
+    assert!(parse(&["mailbox", "send", "web"]).is_err());
+    assert!(matches!(
         parse(&["rm", "web"]).expect("README machine rm command parses"),
         MachineAction::Rm(_)
     ));
@@ -3026,8 +3043,8 @@ fn seed_runtime_state(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn removing_a_machine_removes_its_runtime_state_not_only_its_spec() {
-    // `machine rm` deletes `machines/<name>/`. It used to stop there, so a
-    // removed machine kept its console log, sockets and pid file under
+    // `machine rm` deletes `machines/<name>/` and must not stop there: a
+    // removed machine would keep its console log, sockets and pid file under
     // `vms/<name>/` forever — and `machine ps`, which reads that directory,
     // kept listing it.
     let _state = IsolatedMachineState::new();
@@ -4281,6 +4298,7 @@ fn start_args_with_create_flags(
         hypervisor: None,
         kernel_pin: None,
         has_ad_hoc_argv: false,
+        mailbox: None,
     }
 }
 
@@ -4602,4 +4620,35 @@ fn an_attached_entrypoint_infers_no_boot_source() {
 
     let transient = parse_run(&["run", "--", "true"]).expect("transient run parses");
     assert_eq!(transient.source_inference(), Inference::Enabled);
+}
+
+#[test]
+fn a_mailbox_id_is_accepted_on_run_and_absent_by_default() {
+    let id = "ab".repeat(32);
+    let run =
+        parse_run(&["run", "--image", "alpine", "--mailbox", &id]).expect("run accepts --mailbox");
+    assert_eq!(run.run.mailbox.as_deref(), Some(id.as_str()));
+    let plain = parse_run(&["run", "--image", "alpine"]).expect("plain run parses");
+    assert!(plain.run.mailbox.is_none());
+}
+
+/// The detached path boots under the grant `--mailbox` names, and under none
+/// without it: the grant used to be dropped on the way to the persistent boot.
+#[test]
+fn a_detached_machine_start_carries_the_mailbox_grant() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let id = "ab".repeat(32);
+    let granted = parse_run(&["run", "--image", "alpine", "-d", "--mailbox", &id]).unwrap();
+    let start = runtime::start_args_with_grant(&granted, "vm").unwrap();
+    let grant = start.mailbox.expect("the grant reaches the start");
+    assert_eq!(grant.mailbox.as_bytes(), &[0xab; 32]);
+    let plain = parse_run(&["run", "--image", "alpine", "-d"]).unwrap();
+    assert!(
+        runtime::start_args_with_grant(&plain, "vm")
+            .unwrap()
+            .mailbox
+            .is_none()
+    );
 }

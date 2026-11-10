@@ -9,6 +9,10 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+/// Dedicated mailbox vsock service. Its own port, so mailbox traffic never
+/// shares a queue or credit with machine control (5252), `NetworkFlow` (5253),
+/// telemetry (5254), display (5255) or GPU (5256).
+pub const MAILBOX_PORT: u32 = 5257;
 /// Current mailbox protocol version.
 pub const MAILBOX_PROTOCOL_VERSION: u16 = 1;
 /// Current signature algorithm identifier (Ed25519).
@@ -161,6 +165,19 @@ impl From<ExecutionEpoch> for u64 {
     fn from(value: ExecutionEpoch) -> Self {
         value.0
     }
+}
+
+/// What a signed `ExecutionPlan` admits for one workload's mailbox: which
+/// mailbox, the key whose capabilities are honored, and the execution epoch.
+/// Everything else the receiving node trusts (encryption and sender keys,
+/// identities) is host-held and never rides in a plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxGrant {
+    pub mailbox: MailboxId,
+    /// Ed25519 verifying key that must have signed any accepted capability.
+    pub authority_key: [u8; 32],
+    pub epoch: ExecutionEpoch,
 }
 
 /// Monotonic sequence within one declared ordering scope.

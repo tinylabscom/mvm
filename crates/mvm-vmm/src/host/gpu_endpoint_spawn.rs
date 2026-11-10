@@ -142,12 +142,17 @@ pub fn spawn_gpu_endpoint(
 
 /// Reap this VM's GPU endpoint, if one was spawned. Idempotent.
 pub fn reap_gpu_endpoint(state_dir: &Path) {
-    let pid_path = state_dir.join(GPU_ENDPOINT_PID_FILE);
-    let Ok(raw) = std::fs::read_to_string(&pid_path) else {
+    reap_pid_file(&state_dir.join(GPU_ENDPOINT_PID_FILE));
+}
+
+/// Stop the process whose pid `pid_path` records (SIGTERM, then SIGKILL after
+/// a short grace) and remove the file. Idempotent; a missing file is a no-op.
+pub fn reap_pid_file(pid_path: &Path) {
+    let Ok(raw) = std::fs::read_to_string(pid_path) else {
         return;
     };
     let Ok(pid) = raw.trim().parse::<i32>() else {
-        let _ = std::fs::remove_file(&pid_path);
+        let _ = std::fs::remove_file(pid_path);
         return;
     };
     // SIGTERM first: the endpoint arms a flag for a clean accept-loop exit.
@@ -170,17 +175,7 @@ pub fn reap_gpu_endpoint(state_dir: &Path) {
     unsafe {
         libc::kill(pid, libc::SIGKILL);
     }
-    let _ = std::fs::remove_file(&pid_path);
-}
-
-/// Parse a bind proof path from a `--listen unix:...` value, for tests and
-/// for callers that need to know the socket without re-deriving it.
-#[must_use]
-pub fn uds_bind_path(listen: &str) -> Option<PathBuf> {
-    listen
-        .strip_prefix("unix:")
-        .map(std::path::Path::new)
-        .map(std::path::Path::to_path_buf)
+    let _ = std::fs::remove_file(pid_path);
 }
 
 #[cfg(test)]
@@ -235,15 +230,6 @@ mod tests {
         // so the probe must fail.
         let probe = unsafe { libc::kill(i32::try_from(pid).expect("pid fits i32"), 0) };
         assert_ne!(probe, 0, "a reaped child must not answer a liveness probe");
-    }
-
-    #[test]
-    fn uds_bind_path_parses_the_listen_value() {
-        assert_eq!(
-            uds_bind_path("unix:/run/gpu.sock"),
-            Some(PathBuf::from("/run/gpu.sock"))
-        );
-        assert_eq!(uds_bind_path("vsock:5256"), None);
     }
 
     #[test]

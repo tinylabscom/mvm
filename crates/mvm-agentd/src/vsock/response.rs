@@ -1383,6 +1383,55 @@ mod tests {
     }
 
     #[test]
+    fn a_hello_ack_grants_only_what_was_asked_for() {
+        let resp = protocol_hello_response(
+            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL_VERSION,
+            "host-test",
+            &[GuestCapability::Ping],
+        );
+        assert!(matches!(
+            resp,
+            GuestResponse::ProtocolHelloAck { capabilities, .. }
+                if capabilities == vec![GuestCapability::Ping]
+        ));
+    }
+
+    #[test]
+    fn a_hello_outside_the_supported_range_is_a_typed_mismatch_naming_the_remedy() {
+        let mismatch = |host_min, host_max| {
+            protocol_hello_response(host_max, host_min, "host-test", &[GuestCapability::Ping])
+        };
+        // Host entirely below the agent's floor: the host must move up.
+        assert!(matches!(
+            mismatch(0, MIN_SUPPORTED_PROTOCOL_VERSION - 1),
+            GuestResponse::ProtocolMismatch {
+                required_action: ProtocolUpgradeAction::UpgradeHost,
+                ..
+            }
+        ));
+        // Host entirely above the agent's ceiling: the guest must be rebuilt.
+        assert!(matches!(
+            mismatch(PROTOCOL_VERSION + 1, PROTOCOL_VERSION + 2),
+            GuestResponse::ProtocolMismatch {
+                required_action: ProtocolUpgradeAction::RebuildGuest,
+                ..
+            }
+        ));
+        // Touching either end of the agent's range is still compatible, and a
+        // mismatch never carries a capability grant.
+        for (host_min, host_max) in [
+            (0, MIN_SUPPORTED_PROTOCOL_VERSION),
+            (PROTOCOL_VERSION, PROTOCOL_VERSION + 1),
+        ] {
+            assert!(matches!(
+                mismatch(host_min, host_max),
+                GuestResponse::ProtocolHelloAck { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn test_supported_capabilities_include_unix_socket_forward() {
         assert!(supported_capabilities().contains(&GuestCapability::UnixSocketForward));
     }

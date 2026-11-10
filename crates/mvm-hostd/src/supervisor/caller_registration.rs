@@ -65,7 +65,26 @@ pub struct PreparedCallerStartup {
 pub struct StartupFiles {
     kernel: Option<std::fs::File>,
     images: Option<[std::fs::File; 4]>,
+    restore: Option<[std::fs::File; 2]>,
     writable: Vec<(usize, mvm_core::util::writable_image::LockedWritableImage)>,
+    readonly_data: ReadOnlyDataStartupFiles,
+}
+
+/// Adopted DATA files, consumed once by their declared disk, never by pathname.
+pub struct ReadOnlyDataStartupFiles {
+    disks: Vec<(usize, Option<std::fs::File>)>,
+}
+
+impl ReadOnlyDataStartupFiles {
+    /// Absence permits legacy path handling; a consumed supplied slot is an error.
+    pub fn take_disk(&mut self, disk: usize) -> Result<Option<std::fs::File>> {
+        let Some((_, file)) = self.disks.iter_mut().find(|(index, _)| *index == disk) else {
+            return Ok(None);
+        };
+        file.take()
+            .map(Some)
+            .context("read-only DATA disk already consumed; refusing path fallback")
+    }
 }
 
 /// Sidecars stay here after their backings move into the actual disk devices.
@@ -150,6 +169,8 @@ impl BoundCallerBoot {
 pub fn preflight_startup_files(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
 ) -> Result<()> {
+    cfg.validate_readonly_data_disks()
+        .map_err(anyhow::Error::msg)?;
     let mut readonly = cfg.kernel_fd.into_iter().collect::<Vec<_>>();
     if let Some(table) = cfg.boot_image_fds {
         anyhow::ensure!(
@@ -161,6 +182,7 @@ pub fn preflight_startup_files(
     if let Some(restore) = cfg.restore_fds {
         readonly.extend([restore.ram, restore.frame]);
     }
+    readonly.extend(cfg.readonly_data_disk_fds.iter().map(|disk| disk.fd));
     let writable = cfg
         .writable_disk_fds
         .iter()
@@ -194,40 +216,68 @@ pub fn preflight_startup_files(
 pub fn adopt_startup_files(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
 ) -> Result<StartupFiles> {
-    use mvm_vmm::host::restore_image::adopt_inherited;
+    use mvm_vmm::host::restore_image::protect_inherited_file;
+    use std::os::fd::FromRawFd;
 
     preflight_startup_files(cfg)?;
-    let kernel = cfg.kernel_fd.map(adopt_inherited).transpose()?;
+    // SAFETY: complete non-owning preflight established live, distinct descriptors
+    // transferred exclusively to this startup. Own ALL of them before any
+    // fallible protection, locking or content check can return.
+    let adopt = |fd| unsafe { std::fs::File::from_raw_fd(fd) };
+    let kernel = cfg.kernel_fd.map(adopt);
     let images = cfg
         .boot_image_fds
-        .map(|table| {
-            let [rootfs, verity, metadata, hash] = table.descriptors();
-            Ok::<_, anyhow::Error>([
-                adopt_inherited(rootfs)?,
-                adopt_inherited(verity)?,
-                adopt_inherited(metadata)?,
-                adopt_inherited(hash)?,
-            ])
-        })
-        .transpose()?;
+        .map(|table| table.descriptors().map(adopt));
+    let restore = cfg
+        .restore_fds
+        .map(|table| [table.ram, table.frame].map(adopt));
     let writable = cfg
         .writable_disk_fds
         .iter()
-        .map(|disk| {
-            // SAFETY: the complete preflight established live, distinct descriptors
-            // assigned to this startup; no other owner adopts these numbers.
-            let backing = unsafe { std::os::fd::FromRawFd::from_raw_fd(disk.backing) };
-            // SAFETY: same single-adoption contract as `backing` above.
-            let sidecar = unsafe { std::os::fd::FromRawFd::from_raw_fd(disk.sidecar) };
+        .map(|disk| (disk.disk, adopt(disk.backing), adopt(disk.sidecar)))
+        .collect::<Vec<_>>();
+    let readonly_data = cfg
+        .readonly_data_disk_fds
+        .iter()
+        .map(|disk| (disk.disk, adopt(disk.fd)))
+        .collect::<Vec<_>>();
+
+    for file in kernel
+        .iter()
+        .chain(images.iter().flatten())
+        .chain(restore.iter().flatten())
+        .chain(readonly_data.iter().map(|(_, file)| file))
+    {
+        protect_inherited_file(file)?;
+    }
+    let writable = writable
+        .into_iter()
+        .map(|(disk, backing, sidecar)| {
             let image =
                 mvm_core::util::writable_image::LockedWritableImage::acquire(backing, sidecar)?;
-            Ok((disk.disk, image))
+            Ok((disk, image))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let readonly_data = readonly_data
+        .into_iter()
+        .zip(&cfg.readonly_data_disk_fds)
+        .map(|((disk, file), declaration)| {
+            mvm_vmm::host::restore_image::verify_private_file(
+                &file,
+                declaration.expected.len,
+                &declaration.expected.sha256,
+            )?;
+            Ok((disk, Some(file)))
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(StartupFiles {
         kernel,
         images,
+        restore,
         writable,
+        readonly_data: ReadOnlyDataStartupFiles {
+            disks: readonly_data,
+        },
     })
 }
 
@@ -299,14 +349,7 @@ fn descriptor_role(fd: i32) -> Result<(libc::stat, i32)> {
 fn validate_startup_descriptors(fds: &[i32]) -> Result<()> {
     validate_descriptor_namespace(fds)?;
     for fd in fds {
-        let (stat, status) = descriptor_role(*fd)?;
-        anyhow::ensure!(
-            status >= 0
-                && (status & libc::O_ACCMODE) == libc::O_RDONLY
-                && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
-                && stat.st_nlink == 0,
-            "startup descriptor is not a distinct private read-only file"
-        );
+        mvm_vmm::host::restore_image::validate_private_descriptor(*fd)?;
     }
     Ok(())
 }
@@ -372,6 +415,18 @@ impl std::io::Read for BootReader<'_> {
 }
 
 impl StartupFiles {
+    /// Transfer already-owned restore files without readopting descriptor numbers.
+    pub fn take_restore(&mut self) -> Option<[std::fs::File; 2]> {
+        self.restore.take()
+    }
+
+    /// Separate DATA custody before consuming the kernel/caller group.
+    pub fn take_readonly_data(&mut self) -> ReadOnlyDataStartupFiles {
+        ReadOnlyDataStartupFiles {
+            disks: std::mem::take(&mut self.readonly_data.disks),
+        }
+    }
+
     /// Split writer custody from kernel/caller consumption without reopening anything.
     pub fn take_writable(&mut self) -> WritableStartupFiles {
         WritableStartupFiles {
@@ -391,8 +446,8 @@ impl StartupFiles {
 
     pub fn into_legacy_kernel(self) -> Result<Option<std::fs::File>> {
         anyhow::ensure!(
-            self.images.is_none(),
-            "checked images cannot use legacy startup"
+            self.images.is_none() && self.restore.is_none() && self.readonly_data.disks.is_empty(),
+            "checked images or unconsumed restore/DATA files cannot use legacy kernel startup"
         );
         Ok(self.kernel)
     }
@@ -403,6 +458,14 @@ impl StartupFiles {
         cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
     ) -> Result<BoundCallerBoot> {
         use mvm_core::registry_pack_boot::BootImageAsset as Role;
+        anyhow::ensure!(
+            self.restore.is_none(),
+            "checked images cannot consume restore files"
+        );
+        anyhow::ensure!(
+            cfg.readonly_data_disk_fds.is_empty() && self.readonly_data.disks.is_empty(),
+            "checked entrypoint authority does not allow DATA descriptors"
+        );
         anyhow::ensure!(
             launch.vm == cfg.vm_name,
             "boot image caller identity mismatch"
@@ -584,7 +647,10 @@ fn reopen_caller_image(
                 let verified = verify_canonical_plan_bundle(
                     &original,
                     &FsBundleResolver::new(registry.root()),
-                    &trust,
+                    &mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
+                        &trust,
+                        &registry.archive_path(&original.bundle_sha256),
+                    ),
                     &owner,
                     &config,
                     backend,
@@ -629,6 +695,8 @@ fn reopen_caller_image(
 pub fn prepare_startup(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
 ) -> Result<Option<PreparedCallerStartup>> {
+    cfg.validate_readonly_data_disks()
+        .map_err(anyhow::Error::msg)?;
     let Some(registration) = cfg.caller_registration.as_ref() else {
         anyhow::ensure!(
             cfg.boot_image_fds.is_none(),

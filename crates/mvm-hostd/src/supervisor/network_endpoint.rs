@@ -1145,6 +1145,16 @@ mod tests {
     }
 
     #[test]
+    fn the_endpoint_config_has_no_mailbox_section() {
+        let cfg = vsock_cfg(Vec::new(), std::path::Path::new("/tmp/x"));
+        let mut value = serde_json::to_value(&cfg).unwrap();
+        assert!(value.get("mailbox").is_none());
+        value["mailbox"] = serde_json::json!({"state_dir": "/tmp/x"});
+        let err = parse(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got {err}");
+    }
+
+    #[test]
     fn config_roundtrips_and_rejects_unknown_fields() {
         let cfg = vsock_cfg(
             vec![SecretBinding {
@@ -1283,7 +1293,7 @@ mod tests {
         let (service, _handed) = assemble(&cfg).unwrap();
         let token = "Xa9Kf2pQ7vL0mZ3rT8wB1nC4yH6dJ5sG2eU0iO9";
         let body = format!("k={token} e").into_bytes();
-        let action = crate::supervisor::redaction_resolve::resolve(
+        let action = crate::supervisor::redactor::resolve_redaction(
             // SAFETY: assemble built the service from cfg.redaction; we re-resolve
             // the same policy here to assert the opt-in took effect end-to-end.
             &cfg.redaction,

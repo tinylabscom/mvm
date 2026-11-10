@@ -73,6 +73,10 @@ pub struct MachineStartParams<'a> {
     /// Whether the caller will run an ad-hoc command after boot, which issues
     /// a DevOnly verb and so rules out an attenuated ProdSafe grant.
     pub has_ad_hoc_argv: bool,
+    /// The mailbox this start grants, minted into its plan. Not persisted with
+    /// the definition: a grant belongs to one start, so a later start without
+    /// one boots without.
+    pub mailbox: Option<mvm_contract::protocol::mailbox::MailboxGrant>,
 }
 
 /// What a start resolved, for the caller to record once the machine is up.
@@ -123,8 +127,8 @@ pub fn resolve_local_deployment(path: &Path) -> Result<LocalDeployment> {
 /// `firecracker` (the default `--hypervisor`) delegates to the runtime's
 /// canonical auto-detect ladder: KVM → firecracker, supported Apple Silicon
 /// macOS → hvf, else firecracker (surfaces a clear "not available" error). Any
-/// explicit value is returned as-is. The `MVM_HYPERVISOR` env var (alias
-/// `MVM_BACKEND`) overrides auto-detect — the workload-VMM override mirroring
+/// explicit value is returned as-is. The `MVM_HYPERVISOR` env var
+/// overrides auto-detect — the workload-VMM override mirroring
 /// `MVM_BUILDER_BACKEND` for the builder, so a Linux/KVM host can opt into
 /// `libkrun` instead of the Firecracker default. Single source of truth, shared
 /// by the run/pool paths so they agree on the backend.
@@ -133,15 +137,12 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
         return requested.to_string();
     }
     // Env override (auto-detect mode only — an explicit `--hypervisor` flag
-    // already won above): `MVM_HYPERVISOR=<firecracker|libkrun|hvf|qemu>`, with
-    // the older `MVM_BACKEND` kept as a back-compat alias. Does not change the
-    // platform default.
-    for var in ["MVM_HYPERVISOR", "MVM_BACKEND"] {
-        if let Some(name) = std::env::var_os(var) {
-            let name = name.to_string_lossy().trim().to_ascii_lowercase();
-            if !name.is_empty() {
-                return name;
-            }
+    // already won above): `MVM_HYPERVISOR=<firecracker|libkrun|hvf|qemu>`. Does
+    // not change the platform default.
+    if let Some(name) = std::env::var_os("MVM_HYPERVISOR") {
+        let name = name.to_string_lossy().trim().to_ascii_lowercase();
+        if !name.is_empty() {
+            return name;
         }
     }
     crate::auto_selected_backend_name()
@@ -184,9 +185,9 @@ fn resolve_boot_source(spec: &mp::MachineSpec, host: &dyn StartHost) -> Result<B
     }
     if let Some(slot_hash) = &spec.manifest {
         let (_, vmlinux, _initrd, rootfs, rev) =
-            mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot(slot_hash)
+            mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(slot_hash)
                 .with_context(|| {
-                    format!("loading manifest slot {slot_hash:?} for machine start")
+                    format!("resolving manifest source {slot_hash:?} for machine start")
                 })?;
         return Ok(BootSource {
             kernel: super::bundle_runtime::installed_archive_for_rootfs(Path::new(&rootfs))?
@@ -291,6 +292,7 @@ pub fn start_machine_spec(
         registry_pack_image: spec.registry_pack_image.clone(),
         has_ad_hoc_argv: params.has_ad_hoc_argv,
         grants: spec.grants.clone(),
+        mailbox: params.mailbox,
         gpu: spec.gpu,
         gpu_device: spec.gpu_device,
         workload_dir: workload_dir.as_deref(),
@@ -646,6 +648,46 @@ mod tests {
     }
 
     #[test]
+    fn an_installed_bundle_manifest_resolves_from_the_bundle_registry() {
+        let home = tempfile::tempdir().expect("home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        env.remove("MVM_DIRECT_BOOT");
+        let publisher = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let (archive, key_id) =
+            crate::admission::policy::bundle_pin_tests::make_bundle_for_pin(&publisher);
+        let trust_dir = home.path().join("trusted-publishers");
+        std::fs::create_dir_all(&trust_dir).expect("trust directory");
+        std::fs::write(
+            trust_dir.join(format!("{}.pub", key_id.0)),
+            publisher.verifying_key().to_bytes(),
+        )
+        .expect("trust publisher");
+        let registry = mvm_core::plan::BundleRegistry::default_path().expect("registry");
+        let trust = mvm_core::plan::FsTrustStore::default_path().expect("trust store");
+        let installed = registry
+            .install(&archive, &trust, false)
+            .expect("install signed bundle");
+        let sha = installed.sha256;
+        let bundle = registry.root().join(&sha);
+        let mut machine = spec("bundle");
+        machine.manifest = Some(sha.clone());
+
+        let boot = resolve_boot_source(&machine, &image_host()).expect("installed bundle source");
+        assert_eq!(boot.rootfs, bundle.join("artifacts/rootfs.ext4"));
+        assert_eq!(
+            boot.kernel.as_deref(),
+            bundle.join("artifacts/vmlinux").to_str()
+        );
+        assert_eq!(boot.digest, sha);
+        assert_eq!(
+            super::super::bundle_runtime::installed_archive_for_rootfs(&boot.rootfs)
+                .expect("installed archive"),
+            Some(registry.archive_path(&boot.digest)),
+        );
+    }
+
+    #[test]
     fn persistent_workload_dir_prefers_the_persisted_source_dir() {
         let mut machine = spec("web");
         machine.workload_dir = Some("/persisted/project".to_string());
@@ -846,21 +888,16 @@ mod tests {
         assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
     }
 
-    /// `MVM_HYPERVISOR` overrides auto-detect (and `MVM_BACKEND` is the
-    /// back-compat alias); an explicit flag still wins over both. Process-isolated
+    /// `MVM_HYPERVISOR` overrides auto-detect; an explicit flag still wins.
+    /// Process-isolated
     /// under nextest; restored here so a threaded runner doesn't leak it.
     #[test]
-    fn env_overrides_auto_detect_with_alias() {
+    fn env_overrides_auto_detect() {
         let mut env = TestEnv::new();
-        env.remove("MVM_BACKEND");
         env.set("MVM_HYPERVISOR", "libkrun");
         assert_eq!(resolve_effective_hypervisor("firecracker"), "libkrun");
         // An explicit flag wins over the env override.
         assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
-        // The older alias is still honored.
-        env.remove("MVM_HYPERVISOR");
-        env.set("MVM_BACKEND", "hvf");
-        assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
     }
 
     /// On the macOS-26 Apple Silicon tier the auto-detect default is the
@@ -874,7 +911,6 @@ mod tests {
         }
         let mut env = TestEnv::new();
         env.remove("MVM_HYPERVISOR");
-        env.remove("MVM_BACKEND");
         assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
     }
 }

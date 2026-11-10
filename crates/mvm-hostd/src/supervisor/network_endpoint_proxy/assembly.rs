@@ -591,7 +591,7 @@ mod server_tests {
             egress_gate: Arc::new(EgressGate::default_deny()),
         })
         .unwrap();
-        let resolved = crate::supervisor::redaction_resolve::resolve(
+        let resolved = crate::supervisor::redactor::resolve_redaction(
             service.redaction_policy(),
             "api.openai.com",
         );

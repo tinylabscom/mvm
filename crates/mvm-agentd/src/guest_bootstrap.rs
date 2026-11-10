@@ -106,6 +106,7 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_workload_identity();
     mount_network_utilities();
     provision_verb_grant();
+    provision_mailbox_dir();
     // Before `provision_egress_ca`: the certificate it builds a trust bundle
     // from arrives on the identity drive this copies out.
     provision_flowmux_identity();
@@ -611,6 +612,26 @@ pub fn provision_verb_grant() {
     let _ = fs::create_dir_all("/run/mvm");
     if let Err(e) = fs::write("/run/mvm/verb-grant.json", grant) {
         eprintln!("mvm-guest-init: write verb grant: {e}");
+    }
+}
+
+/// Create the mailbox outbox directory for the workload identity, only on a
+/// boot whose cmdline asserts a mailbox. Runs as root, before the privilege
+/// drop, because the agent cannot create it under `/run/mvm` afterwards.
+fn provision_mailbox_dir() {
+    use crate::mailbox_outbox::{MAILBOX_CMDLINE_TOKEN, OUTBOX_PATH, provision_outbox_dir};
+    if !cmdline_has_flag(MAILBOX_CMDLINE_TOKEN) {
+        return;
+    }
+    let dir = Path::new(OUTBOX_PATH)
+        .parent()
+        .expect("outbox has a parent");
+    if let Err(e) = provision_outbox_dir(
+        dir,
+        crate::guest_mount::WORKLOAD_UID,
+        crate::guest_mount::WORKLOAD_GID,
+    ) {
+        eprintln!("mvm-guest-init: mailbox outbox directory: {e}");
     }
 }
 

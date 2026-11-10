@@ -101,7 +101,7 @@ libkrun:
 
 # ── Utilities ────────────────────────────────────────────────────────────
 
-# Generate a disposable issue → ADR/contract → Graft briefing
+# Generate a disposable issue → ADR/contract → Trail briefing
 task-context ISSUE:
     python3 scripts/task-context.py {{ ISSUE }}
 

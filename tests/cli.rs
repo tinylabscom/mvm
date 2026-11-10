@@ -831,7 +831,7 @@ fn why_routed_host_requires_request_context_and_reports_the_matching_rule() {
     );
 }
 
-/// `pack --help` advertises all five lifecycle subcommands.
+/// `pack --help` advertises every pack subcommand.
 #[test]
 fn pack_help_lists_all_subcommands() {
     #[allow(deprecated)]
@@ -847,14 +847,14 @@ fn pack_help_lists_all_subcommands() {
     );
     let help = String::from_utf8_lossy(&out.stdout);
     for verb in [
-        "ls", "rm", "system", "list", "rollback", "prune", "download", "update", "lock", "compile",
-        "build",
+        "ls", "new", "rm", "system", "update", "info", "verify", "lock", "compile", "search",
+        "pull", "registry",
     ] {
         assert!(help.contains(verb), "help is missing '{verb}':\n{help}");
     }
 }
 
-/// `pack list --json` parses and exits cleanly on a fresh/empty pack cache.
+/// `pack system list --json` parses and exits cleanly on a fresh/empty pack cache.
 #[test]
 fn pack_list_json_parses_cleanly() {
     let mvm_home = tempfile::tempdir().unwrap();
@@ -864,12 +864,12 @@ fn pack_list_json_parses_cleanly() {
         .env("MVM_HOME", mvm_home.path())
         .env("HOME", mvm_home.path())
         .env("MVM_NO_AUTO_DEV", "1")
-        .args(["pack", "list", "--json"])
+        .args(["pack", "system", "list", "--json"])
         .output()
         .unwrap();
     assert!(
         out.status.success(),
-        "pack list --json must exit 0, stderr: {}",
+        "pack system list --json must exit 0, stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -2489,7 +2489,7 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
     assert_eq!(details["manifest_sha256"], digest);
     assert_eq!(
         details["signer_identity"],
-        mvm_core::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
+        mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
     );
     assert_eq!(
         details["signer_issuer"],
@@ -2525,7 +2525,7 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
     assert_eq!(verification["manifest_sha256"], digest);
     assert_eq!(
         verification["signer_identity"],
-        mvm_core::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
+        mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
     );
     assert_eq!(verification["official_status"], "not_established");
 
@@ -2727,27 +2727,6 @@ fn pack_registry_ls_starts_empty_and_rm_unpinned_is_a_no_op() {
 }
 
 #[test]
-fn system_pack_list_preserves_legacy_json_output() {
-    let home = tempfile::tempdir().unwrap();
-    let run = |command: &[&str]| {
-        let output = mvmctl_isolated(home.path())
-            .args(command)
-            .output()
-            .expect("run system pack list");
-        assert!(
-            output.status.success(),
-            "{command:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("system list JSON")
-    };
-    assert_eq!(
-        run(&["pack", "system", "list", "--json"]),
-        run(&["pack", "list", "--json"])
-    );
-}
-
-#[test]
 fn pack_update_dispatches_by_exact_target_shape() {
     let home = tempfile::tempdir().unwrap();
     let missing_registry = format!("file://{}", home.path().join("missing-registry").display());
@@ -2763,15 +2742,6 @@ fn pack_update_dispatches_by_exact_target_shape() {
     assert!(!workload.status.success());
     assert!(!legacy.status.success());
     assert_eq!(workload.stderr, legacy.stderr);
-
-    let system = run(&["pack", "update", "runtime"]);
-    assert!(!system.status.success());
-    assert!(
-        String::from_utf8_lossy(&system.stderr).contains("not yet fetchable"),
-        "{}",
-        String::from_utf8_lossy(&system.stderr)
-    );
-    assert_ne!(system.stderr, workload.stderr);
 }
 
 /// `machine run --manifest <app.mvmpkg> -- <cmd>` parses as a bundle-archive

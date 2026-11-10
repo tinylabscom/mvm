@@ -9,7 +9,7 @@ use mvm_core::user_config::MvmConfig;
 use mvm_hostd::plan_admission::InMemoryNonceLedger;
 
 use super::*;
-use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
+use crate::admission::admit_plan_tests::pinning_params;
 use crate::admission::run_grants::{GrantInputs, RunGrants, resolve_run_grants};
 use crate::admission::{AdmitPlanForBootParams, admit_plan_for_boot};
 
@@ -48,36 +48,12 @@ fn admitted_plan(grants: &RunGrants, dir: &std::path::Path) -> mvm_core::plan::E
         network_mode: mvm_contract::plan::NetworkMode::default(),
         tenant: "local",
         vm_name: "vm-equivalence",
-        backend_name: "firecracker",
-        configured_images_dir: None,
-        rootfs_path: &rootfs,
-        runtime_config: None,
-        kernel_path: None,
-        precomputed_image_sha256: None,
-        boot_artifact_identity: None,
-        cpus: 2,
-        mem_mib: 512,
-        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-        secret_release: mvm_core::plan::SecretReleasePolicy::None,
-        secrets: Vec::new(),
-        caller_commitment: None,
-        ledger: &ledger,
         keys_dir: Some(&keys),
         audit_dir: Some(&audit),
-        policy_dir: None,
-        bundle_pin: None,
-        bundle_posture: None,
-        deps_volume: None,
-        shares: Vec::new(),
-        redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: grants.network_policy.clone(),
-        agent_verb_override: vec![],
         restrict_agent_verbs: false,
-        services: Vec::new(),
         grants: grants.plan_grants.clone(),
-        backend_kind: None,
-        entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-        assets: Vec::new(),
+        ..pinning_params(&rootfs, &ledger)
     })
     .expect("admission succeeds");
     ctx.admitted.plan().clone()

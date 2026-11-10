@@ -154,7 +154,7 @@ Totals: 188 production sites in 97 files.
 |---|--:|
 | mvm-agentd | 29 |
 | mvm-backends | 8 |
-| mvm-build | 28 |
+| mvm-build | 27 |
 | mvm-builder-guest | 32 |
 | mvm-capture | 6 |
 | mvm-cli | 26 |
@@ -162,8 +162,8 @@ Totals: 188 production sites in 97 files.
 | mvm-conformance | 3 |
 | mvm-core | 14 |
 | mvm-fs | 2 |
-| mvm-hostd | 9 |
-| mvm-runtime | 12 |
+| mvm-hostd | 10 |
+| mvm-runtime | 11 |
 | mvm-setpriv | 1 |
 | mvm-vmm | 17 |
 

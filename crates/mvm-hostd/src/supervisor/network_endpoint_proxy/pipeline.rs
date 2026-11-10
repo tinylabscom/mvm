@@ -225,7 +225,7 @@ impl SubstitutionService {
         let replacement_action = destination
             .as_deref()
             .map(|dest| {
-                crate::supervisor::reversible_replacement_resolve::resolve(
+                crate::supervisor::reversible_replacement::resolve_replacement(
                     &self.reversible_replacement_policy,
                     dest,
                 )

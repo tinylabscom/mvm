@@ -254,6 +254,9 @@ pub enum CliSpawn {
     GuestRuntimeToolchain,
     /// Running the current executable as the builder VM's egress supervisor.
     BuilderEgressSupervisor,
+    /// Running `mvmctl __builder-shell-job` to verify a captured workload in
+    /// the builder VM.
+    BuilderShellJob,
     /// Running `mvmctl machine restart` for a workload that failed its
     /// healthcheck.
     HealthRestart,
@@ -287,6 +290,9 @@ impl CliSpawn {
                  as `mvmctl`"
                     .to_string()
             }
+            Self::BuilderShellJob => {
+                "verifying a captured workload would run `mvmctl __builder-shell-job`".to_string()
+            }
             Self::HealthRestart => {
                 "restarting an unhealthy workload would run `mvmctl machine restart`".to_string()
             }
@@ -304,7 +310,8 @@ impl CliSpawn {
             Self::BuilderBootstrapHelper
             | Self::HostPayloadBuild
             | Self::GuestRuntimeToolchain
-            | Self::BuilderEgressSupervisor => {
+            | Self::BuilderEgressSupervisor
+            | Self::BuilderShellJob => {
                 "Bootstrap this host with `mvmctl bootstrap` first, then retry."
             }
             Self::HealthRestart => "Restart it with `mvmctl machine restart`.",

@@ -87,18 +87,26 @@ impl Default for DmsetupBackend {
 mod dmsetup_linux {
     use super::*;
 
+    /// Wall-clock limit for the availability probe.
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     pub(crate) fn check_available() -> Result<()> {
-        match mvm_core::env_hygiene::helper_command("dmsetup")
-            .arg("--version")
-            .output()
-        {
+        let mut cmd = mvm_core::env_hygiene::helper_command("dmsetup");
+        cmd.arg("--version");
+        probe(cmd, PROBE_TIMEOUT)
+    }
+
+    pub(super) fn probe(cmd: std::process::Command, timeout: std::time::Duration) -> Result<()> {
+        use mvm_core::bounded_run::{BoundedRunError, RunBounds, run_bounded};
+        match run_bounded(cmd, RunBounds::new(timeout, 4096)) {
             Ok(o) if o.status.success() => Ok(()),
             Ok(_) => Err(StorageError::BackendUnavailable(
                 "dmsetup --version exited non-zero".to_string(),
             )),
-            Err(e) => Err(StorageError::BackendUnavailable(format!(
+            Err(BoundedRunError::Spawn(e)) => Err(StorageError::BackendUnavailable(format!(
                 "dmsetup not on PATH: {e}"
             ))),
+            Err(other) => Err(StorageError::BackendUnavailable(format!("dmsetup {other}"))),
         }
     }
 }
@@ -384,6 +392,32 @@ impl DeviceMapperBackend for MockBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    fn fake_dmsetup(body: &str) -> (tempfile::TempDir, std::process::Command) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fake-dmsetup");
+        mvm_core::bounded_run::test_support::write_executable_script(&path, body);
+        let cmd = mvm_core::env_hygiene::helper_command(path);
+        (dir, cmd)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_hung_dmsetup_probe_is_unavailable_not_a_hang() {
+        let (_dir, cmd) = fake_dmsetup("exec sleep 30");
+        let err = dmsetup_linux::probe(cmd, std::time::Duration::from_millis(200)).unwrap_err();
+        assert!(err.to_string().contains("did not finish within"), "{err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dmsetup_probe_maps_exit_status() {
+        let (_d1, ok) = fake_dmsetup("head -c 10485760 /dev/zero; exit 0");
+        dmsetup_linux::probe(ok, std::time::Duration::from_secs(30)).unwrap();
+        let (_d2, bad) = fake_dmsetup("exit 1");
+        assert!(dmsetup_linux::probe(bad, std::time::Duration::from_secs(10)).is_err());
+    }
 
     #[test]
     fn mock_pool_round_trips() {

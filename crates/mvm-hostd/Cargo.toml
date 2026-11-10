@@ -56,6 +56,10 @@ path = "src/bin/mvm-signer-helper.rs"
 # Per-VM secret-substitution moat (the one process holding secrets
 # in the clear; opens the host stores, serves guest→host substitution).
 [[bin]]
+name = "mvm-mailbox"
+path = "src/bin/mvm-mailbox.rs"
+
+[[bin]]
 name = "mvm-network-endpoint"
 path = "src/bin/mvm-network-endpoint.rs"
 

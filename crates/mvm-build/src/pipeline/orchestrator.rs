@@ -1,5 +1,4 @@
-use anyhow::{Result, bail};
-use std::env;
+use anyhow::Result;
 
 use mvm_core::build_env::BuildEnvironment;
 use mvm_core::naming;
@@ -10,17 +9,8 @@ use crate::backend::host::HostBackend;
 use crate::backend::{BackendParams, BuilderBackend};
 use crate::build::{DEFAULT_TIMEOUT_SECS, PoolBuildOpts, record_build_history};
 use crate::cache::maybe_skip_by_lock_hash;
+use crate::shell_scripts;
 use crate::template_reuse::reuse_template_artifacts;
-
-fn validate_builder_mode(value: Option<&str>) -> Result<()> {
-    match value.map(str::to_ascii_lowercase).as_deref() {
-        None | Some("host") => Ok(()),
-        Some("vsock" | "auto") => bail!(
-            "MVM_BUILDER_MODE=vsock|auto is retired: the old Firecracker builder attached a TAP NIC"
-        ),
-        Some(other) => bail!("unsupported MVM_BUILDER_MODE={other}"),
-    }
-}
 
 /// Build artifacts for a pool. Default mode runs `nix build` on the host;
 /// `opts` carries the timeout and builder resource overrides.
@@ -31,8 +21,6 @@ pub fn pool_build(
     pool_id: &str,
     opts: PoolBuildOpts,
 ) -> Result<()> {
-    let mode = env::var("MVM_BUILDER_MODE").ok();
-    validate_builder_mode(mode.as_deref())?;
     let timeout = opts.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let spec = env.load_pool_spec(tenant_id, pool_id)?;
     let _tenant = env.load_tenant_config(tenant_id)?;
@@ -66,7 +54,7 @@ pub fn pool_build(
     // Create a unique build ID for this run.
     let build_id = naming::generate_instance_id().replace("i-", "b-");
     let build_run_dir = format!("{}/run/{}", crate::build::BUILDER_DIR, build_id);
-    env.shell_exec(&format!("mkdir -p {}", build_run_dir))?;
+    env.shell_exec(&shell_scripts::mkdir_p(&build_run_dir))?;
 
     env.log_info(&format!("Build ID: {}", build_id));
 
@@ -100,10 +88,7 @@ pub fn pool_build(
         let arts_dir = pool_artifacts_dir(tenant_id, pool_id);
         let rev_dir = format!("{}/revisions/{}", arts_dir, revision_hash);
         let has_initrd = env
-            .shell_exec_stdout(&format!(
-                "test -f {}/initrd && echo yes || echo no",
-                rev_dir
-            ))
+            .shell_exec_stdout(&shell_scripts::test_file(&format!("{rev_dir}/initrd")))
             .map(|s| s.trim() == "yes")
             .unwrap_or(false);
 
@@ -131,11 +116,10 @@ pub fn pool_build(
         if let Some(hash) = lock_hash {
             let artifacts_dir = pool_artifacts_dir(tenant_id, pool_id);
             let lock_hash_path = format!("{}/last_flake_lock.hash", artifacts_dir);
-            env.shell_exec(&format!(
-                "mkdir -p {dir} && echo '{hash}' > {path}",
-                dir = artifacts_dir,
-                hash = hash,
-                path = lock_hash_path
+            env.shell_exec(&shell_scripts::write_value(
+                &artifacts_dir,
+                &lock_hash_path,
+                &hash,
             ))?;
         }
 
@@ -147,21 +131,7 @@ pub fn pool_build(
         Ok(())
     })();
 
-    let _ = env.shell_exec(&format!("rm -rf {}", build_run_dir));
+    let _ = env.shell_exec(&shell_scripts::rm_rf(&build_run_dir));
 
     build_result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_builder_mode;
-
-    #[test]
-    fn retired_tap_builder_modes_fail_closed() {
-        assert!(validate_builder_mode(None).is_ok());
-        assert!(validate_builder_mode(Some("host")).is_ok());
-        for mode in ["vsock", "AUTO", "unknown"] {
-            assert!(validate_builder_mode(Some(mode)).is_err(), "{mode}");
-        }
-    }
 }

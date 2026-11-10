@@ -141,7 +141,6 @@ from your normal terminal. You do **not** need Nix on the host for normal use.
 After installation, the shortest current image-backed path is:
 
 ```bash
-mvmctl image pull alpine
 mvmctl run --image alpine -- uname -a
 ```
 
@@ -258,8 +257,6 @@ mvmctl env update
 ```
 
 A source checkout updates the usual way — `git pull && cargo build --release`.
-Cached build artifacts are refreshed separately with `mvmctl pack update <KIND>`
-(`builder`, `runtime`, `dev-image`, or `extension`).
 
 ## Prerequisites
 

@@ -20,7 +20,7 @@ witness = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(witness)
 Blocked = witness.Blocked
 require = witness.require
-REFERENCE = "agent/claude@2.0.0"
+REFERENCE = "agent/claude@2.0.1"
 
 
 def sha256(value):
@@ -157,9 +157,9 @@ def preflight(args, runner, report):
     require(version["stdout"].strip() == args.version, "released CLI version mismatch")
     search = runner.run("search", [args.cli, "search", "agent/claude"], env)
     require(any(re.search(r"\bagent/claude\b", line)
-                and re.search(r"(?<![\d.])2\.0\.0(?![\d.])", line)
+                and re.search(r"(?<![\d.])2\.0\.1(?![\d.])", line)
                 for line in search["stdout"].splitlines()),
-            "public search did not name agent/claude version 2.0.0")
+            "public search did not name agent/claude version 2.0.1")
     runner.run("pull", [args.cli, "pull", "agent/claude"], env)
     verified = runner.run("verify", [args.cli, "pack", "verify", REFERENCE, "--json"], env)
     info = json.loads(verified["stdout"])

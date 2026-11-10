@@ -282,7 +282,11 @@ pub fn prepare_canonical_linux(
     backend: BackendKind,
     host_protocols: HostProtocolSupport,
 ) -> Result<PreparedCanonicalLinux> {
-    let inputs = capture_canonical_linux_inputs(archive, pin, &FsTrustStore::default_path()?)?;
+    let trust = crate::registry_pack::application_bundle::trust_for_installed_archive(
+        FsTrustStore::default_path()?,
+        archive,
+    );
+    let inputs = capture_canonical_linux_inputs(archive, pin, &trust)?;
     prepare_with_clock(inputs, backend, host_protocols, Utc::now)
 }
 

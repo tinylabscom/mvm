@@ -67,15 +67,6 @@ pub(in crate::commands) struct SaveArgs {
     pub json: bool,
 }
 
-#[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct RestoreArgs {
-    /// Checkpoint id to restore.
-    pub id: String,
-    /// Output the restore result as JSON.
-    #[arg(long)]
-    pub json: bool,
-}
-
 /// Which kind of checkpoint to capture. `fs-quick` clones the rootfs of a
 /// quiesced VM (no memory); `vm-full` captures a running VM's {rootfs, memory,
 /// machine-id} triple in one pause window.
@@ -1030,6 +1021,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     let ledger = mvm_client::admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        mailbox: None,
         gpu: false,
         instructions: Default::default(),
         outputs: Vec::new(),

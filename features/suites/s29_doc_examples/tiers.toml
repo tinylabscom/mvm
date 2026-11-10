@@ -193,6 +193,11 @@ path = "init"
 tier = "exec"
 
 [[command]]
+path = "pack new"
+tier = "exec"
+fixture = "pack-sources"
+
+[[command]]
 path = "machine apply"
 tier = "parse"
 reason = "the bare documented form prompts on a terminal; --yes/--dry-run need a machine with a registered workspace volume — the s26 BDD scenarios exercise both hermetically, exec-tier fixtures are follow-on"
@@ -453,11 +458,6 @@ path = "ops metrics"
 tier = "exec"
 
 [[command]]
-path = "pack download"
-tier = "parse"
-reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"
-
-[[command]]
 path = "pack update"
 tier = "parse"
 reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"
@@ -650,10 +650,6 @@ tier = "parse"
 reason = "a long-lived stdio server: it never exits, so an exec-tier run would hang rather than assert"
 
 [[command]]
-path = "pack list"
-tier = "exec"
-
-[[command]]
 path = "pack ls"
 tier = "exec"
 
@@ -685,11 +681,6 @@ reason = "requires an externally published, signed revocation document and bundl
 path = "pack search"
 tier = "parse"
 reason = "queries a remote registry index over the network, so the outcome tracks the registry rather than mvm; the fail-closed path is exercised by tests/cli.rs against a file:// registry"
-
-[[command]]
-path = "pack prune"
-tier = "parse"
-reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"
 
 [[command]]
 path = "plugin list"

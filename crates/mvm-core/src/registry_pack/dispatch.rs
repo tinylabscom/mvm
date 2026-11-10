@@ -30,8 +30,9 @@ impl VerifiedRegistryApplication {
 
     /// Require a current, independently authenticated revocation feed before use.
     ///
-    /// Official applications use the built-in MVM feed. Other applications
-    /// require operator-configured trust and a verified cached feed. This does
+    /// `mvm/` applications and applications signed by the built-in publisher
+    /// use the built-in MVM feed; an operator feed is additive. Other
+    /// applications require operator-configured trust and a verified cached feed. This does
     /// not acquire an archive or grant permission to execute it.
     pub fn check_current_revocations(
         &self,
@@ -346,6 +347,49 @@ mod tests {
             .unwrap(),
             VerifiedRegistryManifest::Application(_)
         ));
+    }
+
+    #[test]
+    fn an_image_set_signer_cannot_sign_an_application_descriptor() {
+        let policy = publisher_policy();
+        let reference = "runtime/python@1.2.3".parse().unwrap();
+        let bytes = application_bytes();
+        let signers = crate::release_trust::accepted_image_set_identities("0.1.0")
+            .into_iter()
+            .chain(crate::release_trust::accepted_release_identities("0.1.0"));
+        for identity in signers {
+            let result = adopt_with(
+                &PackAdoption {
+                    requested: &reference,
+                    manifest_bytes: &bytes,
+                    signature_bundle: identity.as_bytes(),
+                    publisher_policy: &policy,
+                },
+                |_, bundle, trust| {
+                    let identity = std::str::from_utf8(bundle).unwrap();
+                    trust
+                        .accepted_identities
+                        .iter()
+                        .any(|allowed| allowed == identity)
+                        .then(|| VerifiedSigner {
+                            identity: identity.to_string(),
+                            issuer: trust.issuer.clone(),
+                        })
+                        .ok_or_else(|| {
+                            RegistryPackVerificationError::SignatureInvalid(
+                                "not the namespace publisher".to_string(),
+                            )
+                        })
+                },
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(RegistryPackVerificationError::SignatureInvalid(_))
+                ),
+                "{identity}"
+            );
+        }
     }
 
     #[test]

@@ -43,7 +43,8 @@
 #   MVM_TRUSTED_COSIGN_SHA256 trusted bootstrap-cosign hash override (rotation only)
 #   MVM_SKIP_HASH_VERIFY   set to 1 to skip the release-manifest checksum (emergency only)
 #   MVM_SKIP_CODESIGN      set to 1 to skip macOS codesign
-#   MVM_SKIP_BOOTSTRAP     set to 1 to skip preparing the builder VM
+#   MVM_BOOTSTRAP_ON_INSTALL set to 1 to prewarm launch artifacts during install
+#   MVM_SKIP_BOOTSTRAP     set to 1 to override prewarming
 #   MVM_UPDATE_API_URL     override https://api.github.com (tests)
 #   MVM_UPDATE_DOWNLOAD_URL override https://github.com (tests)
 #   MVM_COSIGN_DOWNLOAD_URL override the pinned cosign release base (tests)
@@ -869,6 +870,23 @@ verify_release_signature() {
   fi
 }
 
+# Download and verify the standalone checksum the release publishes for its
+# guest runtime, with its signature, and check that it names the archive just
+# verified. A release mvmctl authenticates the runtime from the archive, this
+# checksum and their signature bundles, so all four must be staged together.
+fetch_guest_runtime_sidecar() {
+  # POSIX sh has no locals and verify_release_signature assigns `asset`, so
+  # this function keeps its own names.
+  archive_name="$1"
+  sidecar="$archive_name.sha256"
+  curl -fsSL "$REL/$sidecar" -o "$TMP/$sidecar" 2>/dev/null \
+    || die "no checksum sidecar published for $sidecar"
+  verify_release_signature "$sidecar"
+  [ "$(grep " $archive_name\$" "$TMP/$sidecar" | awk '{print $1}' | head -n1)" = "$(sha256_of "$TMP/$archive_name")" ] \
+    || die "$sidecar does not describe $archive_name"
+  say "Checksum sidecar verified: $sidecar"
+}
+
 # Download, verify and stage the release's guest runtime beside mvmctl, so the
 # release directory holds the CLI and the guest runtime of the same version.
 # Only a 404 is tolerated, and only because releases before the asset existed
@@ -888,9 +906,12 @@ stage_guest_runtime() {
   fi
   verify_release_checksum "$runtime"
   verify_release_signature "$runtime"
+  fetch_guest_runtime_sidecar "$runtime"
   mkdir -p "$SRC/guest-runtime"
-  mv "$TMP/$runtime" "$SRC/guest-runtime/$runtime" \
-    || die "could not stage $runtime beside mvmctl"
+  for staged in "$runtime" "$runtime.bundle" "$runtime.sha256" "$runtime.sha256.bundle"; do
+    mv "$TMP/$staged" "$SRC/guest-runtime/$staged" \
+      || die "could not stage $staged beside mvmctl"
+  done
 }
 
 # --- Backend component selection ---------------------------------------------
@@ -1214,22 +1235,17 @@ case ":$PATH:" in
   *) say "Add to PATH:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 
-# Prepare the builder VM and workload kernel ahead of the first machine run
-# instead of paying their one-time download/build cost on the launch path. Opt out with
-# MVM_SKIP_BOOTSTRAP=1 (bandwidth-limited, headless, or CI installs).
-# `mvmctl bootstrap` also honors the finer MVM_SKIP_DEV_IMAGE_PREFETCH knob.
-# Non-fatal and outside the atomic step: the binaries are already verified, and
-# what bootstrap prepares lives in the mvm state directory rather than in the
-# release directory, so a network failure here is no reason to roll back.
-if [ "${MVM_SKIP_BOOTSTRAP:-}" != "1" ]; then
-  say "Preparing the builder VM and workload kernel for your first machine run (skip with MVM_SKIP_BOOTSTRAP=1)..."
+# Keep installation bounded to verified release assets. Explicitly opt in to
+# prewarming everything; the first machine run prepares what it needs.
+if [ "${MVM_BOOTSTRAP_ON_INSTALL:-}" = "1" ] && [ "${MVM_SKIP_BOOTSTRAP:-}" != "1" ]; then
+  say "Prewarming the builder VM and workload kernel..."
   if "$INSTALL_DIR/mvmctl" bootstrap; then
     say "Builder VM and workload kernel ready."
   else
     warn "bootstrap failed — the first machine command will retry, or re-run 'mvmctl bootstrap' now."
   fi
 else
-  say "Skipping bootstrap — run 'mvmctl bootstrap' before your first machine command for a ready first run."
+  say "Installed. Your first machine run prepares any missing launch artifacts automatically."
 fi
 
 say "Run 'mvmctl doctor' to check your host."

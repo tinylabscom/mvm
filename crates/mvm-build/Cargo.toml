@@ -9,10 +9,6 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
-[[bin]]
-name = "mvm-egress-proxy"
-path = "src/bin/mvm-egress-proxy.rs"
-
 [dependencies]
 # OCI layer unpack to a staging rootfs. `tar` and
 # `flate2` are workspace deps already (used by `mvm-sdk`'s addon
@@ -143,7 +139,6 @@ release-channel = []
 # `builder_pack`'s tests can exercise `verify_pack_keyless_at` without
 # every mvm-build build pulling the sigstore dependency tree.
 manifest-verify = ["mvm-core/manifest-verify"]
-contributor-bootstrap = []
 # Exposes `published_image_set::fixture`, a signed-root-shaped image set served
 # from a directory, to other crates' tests.
 test-support = ["mvm-fs/test-support"]

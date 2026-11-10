@@ -41,7 +41,7 @@ provenance so admission can bind the files that are later booted.
 | Builder VM | `builder_vm`, `builder_orchestrator`, `persistent_builder`, `builderd`, `builder_protocol` |
 | Guest images | `rootfs`, `initramfs`, `rootfs_inject`, `oci_runtime_inject` |
 | Toolchain | `nix`, `app_deps`, `embed_toolchain`, `guest_agent_build` |
-| Networking | `builder_route`, `egress_proxy`, `egress_readiness` |
+| Networking | `builder_route`, `egress_readiness` |
 | Integrity | `provenance`, `runtime_identity`, `cache`, `cache_install` |
 
 ## Features
@@ -50,8 +50,8 @@ Repository observation, local manifest production, source/cache primitives and
 read-only ext4 contract validation are platform-neutral library capabilities.
 Builder orchestration, artifact acquisition and VM runtime modules are exposed
 only on Unix hosts; Windows support does not include executing builder jobs.
-Unix public module paths remain unchanged through reexports. The remaining opt-ins are `manifest-verify`,
-`contributor-bootstrap`, and `release-channel`; native libkrun linkage remains
+Unix public module paths remain unchanged through reexports. The remaining opt-ins are `manifest-verify`
+and `release-channel`; native libkrun linkage remains
 behind the `libkrun-sys` crate's own feature. Platform-specific operations still
 run only on supported hosts.
 

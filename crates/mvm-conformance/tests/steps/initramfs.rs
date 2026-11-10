@@ -174,8 +174,8 @@ fn assemble_twice(world: &mut CliWorld) {
         .initramfs_agent_bytes
         .as_ref()
         .expect("a prior step must fix the agent bytes");
-    world.initramfs_cpio_a = Some(mvm_build::initramfs::initramfs_cpio(bytes));
-    world.initramfs_cpio_b = Some(mvm_build::initramfs::initramfs_cpio(bytes));
+    world.initramfs_cpio_a = Some(mvm_build::initramfs::initramfs_cpio(bytes).expect("cpio"));
+    world.initramfs_cpio_b = Some(mvm_build::initramfs::initramfs_cpio(bytes).expect("cpio"));
 }
 
 #[then("the two cpios are byte-identical")]

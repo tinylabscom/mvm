@@ -431,13 +431,13 @@ impl SubstitutionService {
         let action = destination
             .as_deref()
             .map(|d| {
-                crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, d).clone()
+                crate::supervisor::redactor::resolve_redaction(&self.redaction_policy, d).clone()
             })
             .unwrap_or_default();
         let replacement_action = destination
             .as_deref()
             .map(|d| {
-                crate::supervisor::reversible_replacement_resolve::resolve(
+                crate::supervisor::reversible_replacement::resolve_replacement(
                     &self.reversible_replacement_policy,
                     d,
                 )
@@ -806,8 +806,8 @@ mod server_tests {
         );
     }
 
-    /// The peer refusal holds on every service. It used to sit behind an
-    /// optional gate, so a service built without one forwarded a peer name to
+    /// The peer refusal holds on every service. It does not sit behind an
+    /// optional gate, which would let a service built without one forward a peer name to
     /// the forward leg like any other host.
     #[tokio::test]
     async fn a_peer_destination_is_refused_by_every_service() {

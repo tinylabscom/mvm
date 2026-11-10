@@ -122,10 +122,6 @@ pub mod builderd_client;
 pub use mvm_builder_guest::builderd_protocol;
 #[cfg(unix)]
 pub mod cache;
-/// The lib half of the retired `mvm-egress-proxy` bin, which no builder VM
-/// installs or runs any more; see the module docs.
-#[cfg(unix)]
-pub mod egress_proxy;
 #[cfg(unix)]
 pub use mvm_builder_guest::egress_readiness;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
@@ -173,6 +169,8 @@ pub mod published_image_set;
 /// sparse file; formatting and copying happen inside the builder VM.
 #[cfg(unix)]
 pub mod rootfs;
+#[cfg(unix)]
+pub(crate) mod shell_scripts;
 /// In-process newc cpio writer for host-assembled initramfs archives.
 #[cfg(unix)]
 pub use mvm_builder_guest::rootfs_inject;
@@ -303,4 +301,4 @@ pub use nix::manifest as nix_manifest;
 #[cfg(unix)]
 pub use nix::scripts;
 #[cfg(unix)]
-pub use pipeline::{build, dev_build, orchestrator, vsock_builder};
+pub use pipeline::{build, dev_build, orchestrator};

@@ -82,16 +82,6 @@ pub fn run_on_vm_visible(vm_name: &str, script: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run a bash script in the Linux environment, returning stdout as String.
-#[instrument(skip_all, fields(vm_name))]
-pub fn run_on_vm_stdout(vm_name: &str, script: &str) -> Result<String> {
-    if vm_name == VM_NAME {
-        return linux_env::default_env().run_stdout(script);
-    }
-    let output = run_on_vm(vm_name, script)?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 /// Run a bash script in the default Linux environment, capturing output.
 #[instrument(skip_all)]
 pub fn run_in_vm(script: &str) -> Result<Output> {
@@ -180,16 +170,6 @@ pub fn replace_process(cmd: &str, args: &[&str]) -> Result<()> {
     Err(err).with_context(|| format!("Failed to replace process: {} {}", cmd, args.join(" ")))
 }
 
-/// Replace the current process with `cmd args...`, wrapped for the VM runtime.
-///
-/// Mirrors [`run_in_vm`] but uses process replacement (Unix exec) instead of
-/// spawning a child. Needed for interactive TTY pass-through (e.g. interactive
-/// shells launched from `mvmctl`).
-#[cfg(unix)]
-pub fn replace_process_in_vm(cmd: &str, args: &[&str]) -> Result<()> {
-    replace_process(cmd, args)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +230,14 @@ mod tests {
             shell_quote("/tmp/path with spaces/file"),
             "'/tmp/path with spaces/file'"
         );
+    }
+
+    #[test]
+    fn shell_quote_covers_the_cases_of_the_removed_per_crate_copies() {
+        assert_eq!(shell_quote("path:/work"), "'path:/work'");
+        assert_eq!(shell_quote("a b $c|d"), "'a b $c|d'");
+        assert_eq!(shell_quote("don't"), r"'don'\''t'");
+        assert_eq!(shell_quote("''"), r"''\'''\'''");
     }
 
     #[test]

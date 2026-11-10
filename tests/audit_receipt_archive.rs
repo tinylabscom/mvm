@@ -591,6 +591,75 @@ fn a_leaf_listed_twice_in_place_of_another_fails_completeness_despite_equal_coun
     );
 }
 
+/// Rewrite `manifest.json`'s `manifest.leaves` array in place.
+fn edit_leaves(bytes: &[u8], edit: impl FnOnce(&mut Vec<serde_json::Value>)) -> Vec<u8> {
+    rewrite(bytes, |m| {
+        let raw = m
+            .iter()
+            .find(|(n, _)| n == "manifest.json")
+            .unwrap()
+            .1
+            .clone();
+        let mut v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        edit(v["manifest"]["leaves"].as_array_mut().unwrap());
+        set_member(m, "manifest.json", serde_json::to_vec_pretty(&v).unwrap());
+    })
+}
+
+#[test]
+fn a_plan_scoped_archive_cannot_hide_a_repeated_leaf_behind_attestation() {
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(
+        dir.path(),
+        ArchiveScope::Plan {
+            plan_id: sample_plan_id().0,
+        },
+    );
+    let repeated = edit_leaves(&bytes, |leaves| {
+        let first = leaves[0].clone();
+        leaves.push(first);
+    });
+    let report = verify_archive(&repeated).expect("verify runs to completion");
+    assert!(
+        matches!(&report.completeness, CompletenessResult::Failed(why) if why.contains("more than once")),
+        "attested coverage must still account for each entry once: {report:?}"
+    );
+    assert_eq!(report.exit_code() & 4, 4);
+}
+
+#[test]
+fn a_derivable_archive_citing_a_leaf_beyond_the_tree_fails_completeness() {
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
+    let tree_size = read_manifest(&bytes).manifest.audit_root.tree_size;
+    // Same leaf count, all indices distinct, but one is not in the tree.
+    let outside = edit_leaves(&bytes, |leaves| {
+        leaves.last_mut().unwrap()["index"] = serde_json::json!(tree_size);
+    });
+    let report = verify_archive(&outside).expect("verify runs to completion");
+    assert!(
+        matches!(report.completeness, CompletenessResult::Failed(_)),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn a_receipt_without_its_inclusion_proof_fails_inclusion() {
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
+    let proof = tar_member_names(&bytes)
+        .into_iter()
+        .find(|n| n.starts_with("proofs/"))
+        .expect("a proof member");
+    let stripped = rewrite(&bytes, |m| m.retain(|(n, _)| *n != proof));
+    let report = verify_archive(&stripped).expect("verify runs to completion");
+    assert!(
+        matches!(&report.inclusion, CheckResult::Failed(why) if why.contains("no proof")),
+        "a signed receipt with no proof is not evidence of inclusion: {report:?}"
+    );
+    assert_eq!(report.exit_code() & 2, 2, "inclusion bit must be set");
+}
+
 #[test]
 fn a_foreign_host_key_fails_integrity() {
     let dir = TempDir::new().unwrap();

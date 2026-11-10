@@ -9,9 +9,8 @@
 //! backend without a row — or a row without an implementation — fails a
 //! test instead of drifting.
 //!
-//! A backend with no host components (firecracker, qemu, wasm, …) has an
-//! empty `files` list: it is installable in the sense that there is nothing
-//! to place. `selectable` marks the backends install can offer or accept
+//! A backend with no host components (qemu, wasm, …) has an empty `files`
+//! list: it is installable in the sense that there is nothing to place. `selectable` marks the backends install can offer or accept
 //! through `--backend`; opt-in special-purpose tiers stay out of that
 //! surface.
 
@@ -271,6 +270,19 @@ const HVF_FILES: &[ComponentFile] = &[ComponentFile {
     kind: ComponentKind::Binary,
 }];
 
+/// The pinned Firecracker, its LICENSE and NOTICE.
+///
+/// A directory, not a `Binary`: install links every top-level executable onto
+/// `PATH`, and a `firecracker` there would shadow one the user already has.
+/// A subdirectory is staged beside `mvmctl` and never linked, which is also how
+/// the guest runtime travels. The release stages it with
+/// `scripts/release/stage-firecracker.sh`, from the digest `firecracker.lock`
+/// pins.
+const FIRECRACKER_FILES: &[ComponentFile] = &[ComponentFile {
+    path: "firecracker",
+    kind: ComponentKind::Directory,
+}];
+
 /// The canonical per-backend component table: one row per `BackendKind`.
 ///
 /// `every_backend_kind_has_exactly_one_row` holds the row set equal to
@@ -281,7 +293,7 @@ pub const BACKEND_COMPONENT_TABLE: &[BackendComponentSet] = &[
     BackendComponentSet {
         backend: BackendKind::Firecracker,
         hosts: FIRECRACKER_HOSTS,
-        files: &[],
+        files: FIRECRACKER_FILES,
         summary: "KVM microVMs with jailer + seccomp; the production Linux tier",
         unavailable: "",
     },
@@ -719,6 +731,55 @@ mod tests {
             assert!(line.contains(path), "the libkrun row must name {path}");
         }
         assert!(line.contains("\t13\t26\t"), "the libkrun window is 13–25");
+    }
+
+    /// Install links every top-level executable onto PATH, so a Firecracker
+    /// that travelled as a `Binary` would land as `firecracker` beside the
+    /// user's own. A directory is staged beside `mvmctl` and never linked.
+    #[test]
+    fn firecracker_ships_its_pinned_binary_as_an_unlinked_directory() {
+        let row = row_for(BackendKind::Firecracker);
+        assert_eq!(row.files.len(), 1);
+        assert_eq!(row.files[0].path, "firecracker");
+        assert_eq!(row.files[0].kind, ComponentKind::Directory);
+        assert!(
+            row.files
+                .iter()
+                .all(|file| file.kind != ComponentKind::Binary),
+            "a Firecracker Binary component would be linked onto PATH"
+        );
+    }
+
+    #[test]
+    fn the_tsv_gives_both_linux_archives_the_firecracker_directory() {
+        let text = render_components_tsv();
+        let rows: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("firecracker\t"))
+            .collect();
+        assert_eq!(rows.len(), 2, "one row per Linux target");
+        for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+            let row = rows
+                .iter()
+                .find(|row| row.contains(target))
+                .unwrap_or_else(|| panic!("a firecracker row for {target}"));
+            assert!(row.ends_with("dir:firecracker"), "{target}: {row}");
+        }
+    }
+
+    /// QEMU, wasm and the rest still carry nothing, so a host that picks one
+    /// of them never receives Firecracker's files.
+    #[test]
+    fn only_the_firecracker_row_among_the_linux_backends_carries_firecracker() {
+        for backend in [BackendKind::Qemu, BackendKind::Wasm] {
+            assert!(
+                row_for(backend)
+                    .files
+                    .iter()
+                    .all(|file| file.path != "firecracker"),
+                "{backend:?} must not list the Firecracker directory"
+            );
+        }
     }
 
     #[test]

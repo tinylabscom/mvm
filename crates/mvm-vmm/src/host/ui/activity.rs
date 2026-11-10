@@ -453,14 +453,6 @@ pub(crate) fn start_terminal_only(label: impl Into<String>) -> Activity {
     start_with(label.into(), Visibility::TerminalOnly)
 }
 
-/// Set the detail of the innermost live activity, for code that reports
-/// progress without holding the handle of the phase it runs inside. A no-op
-/// when nothing is live.
-pub fn set_current_detail(detail: impl Into<String>) {
-    let detail = detail.into();
-    with_board(|shared, _| shared.board.set_detail(None, Some(detail)));
-}
-
 /// Print one line of ordinary output to stderr without tearing the live line.
 pub fn println_above(line: &str) {
     with_board(|shared, out| shared.board.passthrough(out, line, Instant::now()));

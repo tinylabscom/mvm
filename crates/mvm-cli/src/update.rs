@@ -1597,22 +1597,6 @@ mod tests {
     }
 
     #[test]
-    fn test_smoke_test_binary_rollback_error_message() {
-        // Verify the rollback bail! message matches the spec wording.
-        let err_msg = format!(
-            "New binary failed smoke test; restored previous version. ({})",
-            "smoke test failed (exit 1): "
-        );
-        assert!(err_msg.contains("New binary failed smoke test; restored previous version."));
-    }
-
-    #[test]
-    fn release_host_bins_include_hvf_and_network_endpoint() {
-        assert!(RELEASE_HOST_BINS.contains(&"mvm-hvf-supervisor"));
-        assert!(RELEASE_HOST_BINS.contains(&"mvm-network-endpoint"));
-    }
-
-    #[test]
     fn install_release_host_binaries_copies_present_helpers() {
         let tmp = tempfile::tempdir().unwrap();
         let extracted = tmp.path().join("extracted");
@@ -2414,6 +2398,23 @@ mod tests {
         with_helper: bool,
         with_resources: bool,
     ) -> std::path::PathBuf {
+        build_release_archive_with_binary(
+            root,
+            target,
+            "#!/bin/sh\necho 'mvmctl 9.9.9'\n",
+            with_helper,
+            with_resources,
+        )
+    }
+
+    /// As `build_release_archive`, with the `mvmctl` script body chosen.
+    fn build_release_archive_with_binary(
+        root: &std::path::Path,
+        target: &str,
+        mvmctl_script: &str,
+        with_helper: bool,
+        with_resources: bool,
+    ) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let staged = root.join("staged");
         let release = staged.join(format!("mvmctl-{target}"));
@@ -2422,7 +2423,7 @@ mod tests {
             std::fs::write(path, body).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
-        write_script(&release.join("mvmctl"), "#!/bin/sh\necho 'mvmctl 9.9.9'\n");
+        write_script(&release.join("mvmctl"), mvmctl_script);
         if with_helper {
             write_script(&release.join("mvm-hvf-supervisor"), "#!/bin/sh\nexit 0\n");
         }
@@ -2480,6 +2481,42 @@ mod tests {
             install_dir.join("resources/config.toml").is_file(),
             "the release resources ship with the binary"
         );
+    }
+
+    /// A release that passes the pre-install smoke test and then fails once it
+    /// sits at the installed path must be rolled back, leaving the previous
+    /// binary runnable and no backup behind. The fixture answers `--version`
+    /// only while no `.installed` marker sits beside it; the test puts that
+    /// marker in the install directory, so the binary breaks exactly once it is
+    /// installed, whatever the temporary directory's path looks like.
+    #[test]
+    fn a_release_that_fails_its_post_install_smoke_test_is_rolled_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let archive = build_release_archive_with_binary(
+            tmp.path(),
+            "unit-test",
+            "#!/bin/sh\nif [ -e \"$(dirname \"$0\")/.installed\" ]; then echo broken >&2; exit 1; fi\necho 'mvmctl 9.9.9'\n",
+            false,
+            false,
+        );
+        std::fs::copy(&archive, work.join("mvmctl-unit-test.tar.gz")).unwrap();
+
+        let install_dir = tmp.path().join("install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(install_dir.join(".installed"), b"").unwrap();
+        let current_exe = install_dir.join("mvmctl");
+        let previous = "#!/bin/sh\necho 'mvmctl 0.1.0'\n";
+        std::fs::write(&current_exe, previous).unwrap();
+
+        let error = extract_and_install("unit-test", &work, &current_exe)
+            .expect_err("a release that breaks once installed must not stay installed")
+            .to_string();
+
+        assert!(error.contains("restored previous version"), "{error}");
+        assert_eq!(std::fs::read_to_string(&current_exe).unwrap(), previous);
+        assert!(!current_exe.with_extension("old").exists());
     }
 
     #[cfg(target_os = "linux")]

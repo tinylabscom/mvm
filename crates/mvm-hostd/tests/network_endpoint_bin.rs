@@ -165,9 +165,6 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         .unwrap();
 
     let cfg = EndpointConfig {
-        telemetry: None,
-        tenant_id: "local".into(),
-        instance_id: "test".into(),
         secrets: vec![SecretBinding {
             name: "OPENAI_API_KEY".into(),
             source: SecretSource::Keystore {
@@ -185,7 +182,6 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         no_proxy: None,
         secret_store_dir: Some(dir.path().join("secrets")),
         binding_store_dir: Some(dir.path().join("bindings")),
-        tls_intermediate: None,
         // The policy admits the unbound destination, so the refusal below can
         // only be the binding check's. It is a literal address because the
         // endpoint resolves a policy's host names when it starts.
@@ -195,15 +191,9 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
                 443,
             )],
         )),
-        network_limits: mvm_core::plan::NetworkLimits::default(),
-        ingress: Vec::new(),
         egress_mode: EgressMode::Wire,
-        resolver: ResolverBackend::default(),
-        session_marker: None,
-        session_ready_socket: None,
         connector_uds_path: Some(connector.clone()),
-        approval_socket: None,
-        flowmux_identity: None,
+        ..test_config(EndpointTransport::Uds { path: sock.clone() })
     };
 
     let mut child = Command::new(BIN)
@@ -292,9 +282,6 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         .unwrap();
 
     let cfg = EndpointConfig {
-        telemetry: None,
-        tenant_id: "local".into(),
-        instance_id: "test".into(),
         secrets: vec![SecretBinding {
             name: "OPENAI_API_KEY".into(),
             source: SecretSource::Keystore {
@@ -312,18 +299,10 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         no_proxy: None,
         secret_store_dir: Some(dir.path().join("secrets")),
         binding_store_dir: Some(dir.path().join("bindings")),
-        tls_intermediate: None,
         // Deny-all: the endpoint gates every destination — even the bound one.
         network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all()),
-        network_limits: mvm_core::plan::NetworkLimits::default(),
-        ingress: Vec::new(),
         egress_mode: mvm_hostd::supervisor::network_endpoint::EgressMode::Wire,
-        resolver: ResolverBackend::default(),
-        session_marker: None,
-        session_ready_socket: None,
-        connector_uds_path: None,
-        approval_socket: None,
-        flowmux_identity: None,
+        ..test_config(EndpointTransport::Uds { path: sock.clone() })
     };
 
     let mut child = Command::new(BIN)
@@ -405,16 +384,14 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
         network_limits: mvm_core::plan::NetworkLimits::default(),
         ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
-        resolver: ResolverBackend::default(),
         session_marker: Some(session_marker.clone()),
         session_ready_socket: Some(session_ready_socket.clone()),
-        connector_uds_path: None,
-        approval_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "keeps-serving".into(),
             host_signing_key_base64: b64.encode(host_key.to_bytes()),
             guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
         }),
+        ..test_config(EndpointTransport::Uds { path: sock.clone() })
     };
 
     let mut child = Command::new(BIN)
@@ -512,18 +489,13 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
             .max_udp_associations(1)
             .build()
             .unwrap(),
-        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
-        resolver: ResolverBackend::default(),
-        session_marker: None,
-        connector_uds_path: None,
-        approval_socket: None,
-        session_ready_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "shared-limit".into(),
             host_signing_key_base64: b64.encode(host_key.to_bytes()),
             guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
         }),
+        ..test_config(EndpointTransport::Uds { path: sock.clone() })
     };
 
     let mut child = Command::new(BIN)
@@ -614,11 +586,6 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
         network_limits: mvm_core::plan::NetworkLimits::default(),
         ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
-        resolver: ResolverBackend::default(),
-        session_marker: None,
-        session_ready_socket: None,
-        connector_uds_path: None,
-        approval_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "invalid-limit".into(),
             host_signing_key_base64: b64.encode([23u8; 32]),
@@ -628,6 +595,7 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
                     .to_bytes(),
             ),
         }),
+        ..test_config(EndpointTransport::Uds { path: sock })
     })
     .unwrap();
     cfg["network_limits"]["max_udp_associations"] = serde_json::json!(0);
@@ -673,15 +641,13 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
     );
 }
 
-/// A minimal endpoint config whose only listener is the host connector.
-fn connector_only_config(connector: &std::path::Path, sock: &std::path::Path) -> EndpointConfig {
+/// Shared passive endpoint fixture data; each caller selects its transport and mode.
+fn test_config(transport: EndpointTransport) -> EndpointConfig {
     EndpointConfig {
         tenant_id: "local".into(),
-        instance_id: "lifetime".into(),
+        instance_id: "test".into(),
         secrets: vec![],
-        transport: EndpointTransport::Uds {
-            path: sock.to_path_buf(),
-        },
+        transport,
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         forward_timeout_secs: 30,
@@ -698,10 +664,22 @@ fn connector_only_config(connector: &std::path::Path, sock: &std::path::Path) ->
         resolver: ResolverBackend::default(),
         session_marker: None,
         session_ready_socket: None,
-        connector_uds_path: Some(connector.to_path_buf()),
+        connector_uds_path: None,
         approval_socket: None,
         flowmux_identity: None,
         telemetry: None,
+    }
+}
+
+/// A minimal endpoint config whose only listener is the host connector.
+fn connector_only_config(connector: &std::path::Path, sock: &std::path::Path) -> EndpointConfig {
+    EndpointConfig {
+        instance_id: "lifetime".into(),
+        egress_mode: EgressMode::Wire,
+        connector_uds_path: Some(connector.to_path_buf()),
+        ..test_config(EndpointTransport::Uds {
+            path: sock.to_path_buf(),
+        })
     }
 }
 
@@ -916,16 +894,12 @@ fn every_endpoint_thread_serves_under_confinement() {
         network_limits: mvm_core::plan::NetworkLimits::default(),
         ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
-        resolver: ResolverBackend::default(),
-        session_marker: None,
-        session_ready_socket: None,
-        connector_uds_path: None,
-        approval_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "every-thread-confined".into(),
             host_signing_key_base64: b64.encode(host_key.to_bytes()),
             guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
         }),
+        ..test_config(EndpointTransport::Uds { path: sock.clone() })
     };
 
     let mut child = Command::new(BIN)
@@ -1106,7 +1080,6 @@ fn an_endpoint_embedding_the_collector_collects_and_keeps_serving() {
             records_byte_cap: 64 * 1024,
             records_key_b64: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=".into(),
         }),
-        tenant_id: "local".into(),
         instance_id: VM.into(),
         secrets: vec![],
         transport: EndpointTransport::Uds { path: sock.clone() },
@@ -1123,16 +1096,13 @@ fn an_endpoint_embedding_the_collector_collects_and_keeps_serving() {
         network_limits: mvm_core::plan::NetworkLimits::default(),
         ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
-        resolver: ResolverBackend::default(),
         session_marker: Some(state_dir.join("session.marker")),
-        session_ready_socket: None,
-        connector_uds_path: None,
-        approval_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: VM.into(),
             host_signing_key_base64: b64.encode(host_key.to_bytes()),
             guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
         }),
+        ..test_config(EndpointTransport::Uds { path: sock.clone() })
     };
 
     let mut child = Command::new(BIN)
@@ -1234,7 +1204,6 @@ fn an_endpoint_whose_collector_cannot_start_keeps_serving() {
             records_byte_cap: 64 * 1024,
             records_key_b64: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=".into(),
         }),
-        tenant_id: "local".into(),
         instance_id: "collector-refused-vm".into(),
         secrets: vec![],
         transport: EndpointTransport::Uds { path: sock.clone() },
@@ -1251,16 +1220,13 @@ fn an_endpoint_whose_collector_cannot_start_keeps_serving() {
         network_limits: mvm_core::plan::NetworkLimits::default(),
         ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
-        resolver: ResolverBackend::default(),
         session_marker: Some(state_dir.join("session.marker")),
-        session_ready_socket: None,
-        connector_uds_path: None,
-        approval_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "collector-refused-vm".into(),
             host_signing_key_base64: b64.encode(host_key.to_bytes()),
             guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
         }),
+        ..test_config(EndpointTransport::Uds { path: sock.clone() })
     };
 
     let mut child = Command::new(BIN)

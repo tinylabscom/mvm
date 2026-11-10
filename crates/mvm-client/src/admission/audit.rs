@@ -132,7 +132,7 @@ pub(super) fn emit_policy_audit_invalid(
 #[cfg(test)]
 mod policy_audit_admission_tests {
     use super::*;
-    use mvm_core::plan::SynthesisInput;
+    use mvm_core::plan::{ExecutionPlan, FsPolicyRef, PolicyRef, SynthesisInput};
     use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
     use std::io::Write;
 
@@ -186,19 +186,20 @@ chain_signing = true
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"live-payload");
         let ledger = InMemoryNonceLedger::new();
-        let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
                 ingress: Vec::new(),
-                vm_name: "vm-live",
+                vm_name,
                 tenant: Some("acme"),
                 backend_name: "firecracker",
-                image_name: "vm-live",
+                image_name: vm_name,
                 image_sha256: &sha,
                 image_cosign_bundle: None,
                 intent: None,
@@ -230,7 +231,7 @@ chain_signing = true
             },
             &SystemClock,
             &ledger,
-            Some(keys_dir.path()),
+            Some(keys_dir),
             None,
             mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         )
@@ -267,7 +268,6 @@ chain_signing = true
 
     #[test]
     fn admission_uses_bundle_audit_file_destination() {
-        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -385,7 +385,6 @@ stream_destinations = ["file://{}"]
 
     #[test]
     fn admission_audits_rejected_unsigned_policy_audit() {
-        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -493,7 +492,6 @@ chain_signing = false
         // A plan whose refs name `acme:nope` but no bundle exists on
         // disk must fail admission with a typed `policy-bundle-not-found`
         // error and emit `plan.failed` with that class.
-        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -580,7 +578,6 @@ chain_signing = false
         // typo must fail admission with
         // `error_class=policy-egress-invalid` rather than silently
         // booting with the inspector still enforced.
-        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -687,7 +684,6 @@ disabled_inspectors = ["ssrf_guarrd"]
         // unparseable `dst_cidr` must fail admission with
         // `policy-l4-spec-invalid`. Same hermetic shape as the
         // missing-bundle test.
-        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();

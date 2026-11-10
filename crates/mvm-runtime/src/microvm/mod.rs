@@ -2,12 +2,11 @@
 //!
 //! Submodules split by concern; every item keeps its original visibility so
 //! `crate::microvm::<name>` (and `mvm_runtime::microvm::<name>` for external
-//! crates) resolves identically to before the split.
+//! crates) resolves identically.
 
 pub(crate) mod activation;
 mod boot_config;
 mod flake_run;
-mod run_info;
 mod snapshot;
 
 pub use activation::*;
@@ -21,13 +20,11 @@ pub use mvm_backends::fc::guards::*;
 pub use mvm_backends::fc::lifecycle::*;
 pub use mvm_backends::fc::observe::*;
 pub use mvm_backends::fc::snapshot::*;
-pub use run_info::*;
 pub use snapshot::*;
 
 // The per-VM path layout moved to mvm-backends::fc with the Firecracker
 // mechanics that read it. Re-exported so `crate::microvm::<name>` and the
 // external `mvm_runtime::microvm::<name>` paths keep resolving.
-pub(crate) use mvm_backends::fc::abs_vms_dir;
 pub use mvm_backends::fc::{
     ensure_fc_sockets_in_state_dir, fc_pid_path, firecracker_vsock_uds_path, resolve_running_vm_dir,
 };

@@ -75,6 +75,12 @@ jobs:
         if: runner.os == 'macOS'
         uses: ./.github/actions/python3-via-uv
 
+      # The published-bytes check runs `gh release download` and `gh
+      # attestation verify`; the self-hosted runner does not ship gh.
+      - name: Provide the GitHub CLI
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/gh-cli
+
       - name: Install cosign for authoritative evidence
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: sigstore/cosign-installer@v3
@@ -95,6 +101,7 @@ jobs:
         env:
           TAG_NAME: ${{ inputs.tag }}
           MVM_SMOKE_OUT: ${{ runner.temp }}/first-run
+          MVM_SMOKE_COLD_FIRST: "1"
         run: sh scripts/smoke-fresh-install.sh "${TAG_NAME}"
 
       - name: Upload successful installed boot lane

@@ -12,7 +12,9 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import subprocess
+import time
 import tarfile
 import tempfile
 
@@ -44,6 +46,41 @@ def stream_sha(stream):
 
 def run(*args, **kwargs):
     subprocess.run(args, check=True, **kwargs)
+
+
+def owned_pids(root):
+    """Pids that run from, sit in, or have a HOME inside this smoke's own root."""
+    root = str(root)
+    if not Path("/proc/self").is_dir():
+        found = subprocess.run(["lsof", "-t", "+D", root], capture_output=True, text=True)
+        return {int(p) for p in found.stdout.split()} - {os.getpid()}
+    pids = set()
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            places = [os.readlink(proc / "cwd"), os.readlink(proc / "exe")]
+            environ = (proc / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if (any(p == root or p.startswith(root + "/") for p in places)
+                or any(e.startswith(f"HOME={root}/".encode()) for e in environ)):
+            pids.add(int(proc.name))
+    return pids - {os.getpid()}
+
+
+def stop_owned(root):
+    """End the detached standby a boot leaves writing into the kept HOME."""
+    for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 5)):
+        pids = owned_pids(root)
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        deadline = time.time() + wait
+        while pids and time.time() < deadline and (pids := owned_pids(root)):
+            time.sleep(0.1)
+        if not pids:
+            return
 
 
 def identity(tag):
@@ -163,7 +200,8 @@ def lane(args):
     # No archive shortcut or inherited runtime overrides can enter this witness.
     env = {k: v for k, v in os.environ.items() if not k.startswith("MVM_")}
     state_file = args.out / "smoke-home.txt"
-    env.update(MVM_SMOKE_KEEP="1", MVM_SMOKE_OUT=str(args.out / "smoke"),
+    env.update(MVM_SMOKE_KEEP="1", MVM_SMOKE_COLD_FIRST="1",
+               MVM_SMOKE_OUT=str(args.out / "smoke"),
                MVM_SMOKE_STATE_FILE=str(state_file))
     transcript = args.out / "smoke/transcript.log"
     # Deletion authority comes only from this wrapper-created root, NEVER the
@@ -173,10 +211,13 @@ def lane(args):
     with tempfile.TemporaryDirectory(prefix="w.", dir="/tmp") as scratch:
         owned_root = Path(scratch).resolve()
         env["MVM_SMOKE_TEMP_PARENT"] = str(owned_root)
-        run("sh", "scripts/smoke-fresh-install.sh", args.tag, env=env)
-        home = smoke_home(state_file, owned_root)
-        installed = installed_hashes(home, assets_dir, args.target, args.tag)
-        checks = boot_checks(transcript.parent)
+        try:
+            run("sh", "scripts/smoke-fresh-install.sh", args.tag, env=env)
+            home = smoke_home(state_file, owned_root)
+            installed = installed_hashes(home, assets_dir, args.target, args.tag)
+            checks = boot_checks(transcript.parent)
+        finally:
+            stop_owned(owned_root)
     text = transcript.read_text()
     require("\nPASS: " in text and "\nFAIL:" not in text, "smoke did not pass")
     report.update(assets=assets, boots=[{

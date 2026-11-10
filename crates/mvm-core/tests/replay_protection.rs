@@ -16,11 +16,13 @@ use mvm_core::plan::{ExecutionPlan, SCHEMA_VERSION};
 
 fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
     ExecutionPlan {
+        execution_epoch: 1,
         grants: None,
         environment: None,
         build_provenance: Default::default(),
         snapshot_at: Default::default(),
         network_mode: Default::default(),
+        mailbox: None,
         stream_retention: Default::default(),
         action_budget: None,
         protected_paths: Default::default(),

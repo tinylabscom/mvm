@@ -148,6 +148,10 @@ pub struct WorkloadSockets<'a> {
     /// per-VM `mvm-gpu-endpoint` process binds here. Present only when the
     /// launch asked for the GPU remoting plane.
     pub gpu: Option<&'a Path>,
+    /// Guest mailbox: the host dials `MAILBOX_PORT` and the per-VM
+    /// `mvm-mailbox` process serves it. Present only when the admitted plan
+    /// grants a mailbox, so an ungranted guest carries no such port.
+    pub mailbox: Option<&'a Path>,
     /// Dev-only interactive console data ports: one host UDS per port in
     /// `dev_console_data_ports()`, pre-opened so a PTY can attach. Empty for
     /// sealed prod boots (`dev_console = false` in `VmStartConfig`).
@@ -206,6 +210,13 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
             service: GuestService::Gpu,
             host_uds: gpu.into(),
             direction: VsockDirection::GuestDials,
+        });
+    }
+    if let Some(mailbox) = socks.mailbox {
+        ports.push(VsockPort {
+            service: GuestService::Mailbox,
+            host_uds: mailbox.into(),
+            direction: VsockDirection::HostDials,
         });
     }
     // The guest agent allocates `CONSOLE_PORT_BASE + session_id` per ConsoleOpen
@@ -821,8 +832,7 @@ mod tests {
         assert_eq!(blocks[1].source, PathBuf::from("/vol/data.img"));
     }
 
-    /// The inverse of what this used to assert, and the property that matters
-    /// now: a user volume never becomes a virtio-fs share. A granted directory
+    /// The property that matters: a user volume never becomes a virtio-fs share. A granted directory
     /// is materialized into an image and attached as virtio-blk, so the only
     /// share a workload spec can carry is the dev-tier root.
     #[test]
@@ -873,6 +883,7 @@ mod tests {
             broker: None,
             display: None,
             gpu: None,
+            mailbox: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -904,6 +915,7 @@ mod tests {
             broker: None,
             display: None,
             gpu: None,
+            mailbox: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -934,6 +946,7 @@ mod tests {
             broker: None,
             display: None,
             gpu: None,
+            mailbox: None,
             console_data: Vec::new(),
         }
     }
@@ -942,6 +955,7 @@ mod tests {
     fn workload_vsock_ports_emit_the_gpu_channel_only_when_requested() {
         let with_gpu = WorkloadSockets {
             gpu: Some(Path::new("/run/gpu.sock")),
+            mailbox: None,
             ..sample_sockets()
         };
         let gpu = workload_vsock_ports(&with_gpu)
@@ -990,6 +1004,7 @@ mod tests {
             broker: Some(Path::new("/run/broker.sock")),
             display: None,
             gpu: None,
+            mailbox: None,
             console_data: Vec::new(),
         };
         let broker = workload_vsock_ports(&admitted)
@@ -1018,6 +1033,7 @@ mod tests {
         let granted = WorkloadSockets {
             display: Some(Path::new("/run/display.sock")),
             gpu: None,
+            mailbox: None,
             ..sample_sockets()
         };
         let display = workload_vsock_ports(&granted)
@@ -1199,6 +1215,7 @@ mod tests {
             broker: None,
             display: None,
             gpu: None,
+            mailbox: None,
             console_data,
         };
         let ports = workload_vsock_ports(&socks);
@@ -1230,6 +1247,7 @@ mod tests {
             broker: None,
             display: None,
             gpu: None,
+            mailbox: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -1255,6 +1273,7 @@ mod tests {
                 broker: None,
                 display: None,
                 gpu: None,
+                mailbox: None,
                 console_data,
             },
             cmdline: String::new(),

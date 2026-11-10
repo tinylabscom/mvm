@@ -98,17 +98,6 @@ pub fn redaction_from_signed_json(
     Ok(plan.redaction)
 }
 
-/// Extract the reversible replacement policy from a signed plan's payload,
-/// without re-verifying the signature — same trust posture as
-/// [`redaction_from_signed_json`].
-pub fn reversible_replacement_from_signed_json(
-    plan_json: &str,
-) -> Result<crate::policy::ReversibleReplacementPolicy, serde_json::Error> {
-    let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
-    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
-    Ok(plan.reversible_replacement)
-}
-
 /// Extract the cumulative action budget from a signed plan's payload, without
 /// re-verifying the signature — same trust posture as
 /// [`redaction_from_signed_json`]. Returns `None` for plans that carry no
@@ -555,6 +544,56 @@ mod tests {
             Err(PlanVerifyError::SignatureInvalid(_)) => {}
             other => panic!("expected SignatureInvalid, got {other:?}"),
         }
+    }
+
+    fn mailbox_grant() -> mvm_contract::protocol::mailbox::MailboxGrant {
+        use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxGrant, MailboxId};
+        MailboxGrant {
+            mailbox: MailboxId::from_bytes([7; 32]),
+            authority_key: [9; 32],
+            epoch: ExecutionEpoch::new(3).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_mailbox_grant_is_signature_bound_and_absence_stays_absent() {
+        let (sk, vk) = fresh_key();
+        let absent = sign_plan(&sample_plan(), &sk, "test-signer");
+        assert!(!String::from_utf8_lossy(&absent.0.payload).contains("mailbox"));
+        assert_eq!(
+            verify_plan(&absent, &[("test-signer", &vk)])
+                .unwrap()
+                .mailbox,
+            None
+        );
+
+        let mut plan = sample_plan();
+        plan.mailbox = Some(mailbox_grant());
+        let mut signed = sign_plan(&plan, &sk, "test-signer");
+        assert_eq!(
+            verify_plan(&signed, &[("test-signer", &vk)])
+                .unwrap()
+                .mailbox,
+            Some(mailbox_grant())
+        );
+
+        // Widening the epoch, and adding a grant to a plan signed without
+        // one, both break the signature.
+        let mut payload: serde_json::Value = serde_json::from_slice(&signed.0.payload).unwrap();
+        payload["mailbox"]["epoch"] = serde_json::json!(4);
+        signed.0.payload = serde_json::to_vec(&payload).unwrap();
+        assert!(matches!(
+            verify_plan(&signed, &[("test-signer", &vk)]),
+            Err(PlanVerifyError::SignatureInvalid(_))
+        ));
+        let mut forged = absent.clone();
+        let mut payload: serde_json::Value = serde_json::from_slice(&forged.0.payload).unwrap();
+        payload["mailbox"] = serde_json::to_value(mailbox_grant()).unwrap();
+        forged.0.payload = serde_json::to_vec(&payload).unwrap();
+        assert!(matches!(
+            verify_plan(&forged, &[("test-signer", &vk)]),
+            Err(PlanVerifyError::SignatureInvalid(_))
+        ));
     }
 
     #[test]

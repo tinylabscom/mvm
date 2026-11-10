@@ -57,8 +57,9 @@ regardless of what the host happens to have installed.
    2026-10-05 by ADR-054; see Status.) Image
    construction lives in mvm-images (the in-repo image flakes were deleted in
    2026-09). When `mvmctl` runs from a source checkout and an mvm-images
-   checkout is selected (`MVM_IMAGES_DIR`, or a sibling `../mvm-images`), both
-   the builder-VM image and every user-facing image build locally from it.
+   checkout is selected (`MVM_IMAGES_DIR`, or a sibling `../mvm-images`), every
+   user-facing image builds locally from it, and the builder-VM image does so
+   only when `MVM_ALLOW_LOCAL_BUILDER_BUILD=1` opts in (see Status).
    Without one, the checkout fetches the signed image set `images.lock` pins
    and verifies it against its root. The explicit `MVM_BOOT_IMAGE=fetch`
    escape hatch may fetch the published boot image even with a checkout

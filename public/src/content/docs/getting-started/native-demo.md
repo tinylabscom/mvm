@@ -1,6 +1,6 @@
 ---
 title: Native local demo
-description: Prepare a pinned image once, then run a bounded transient microVM without mvmd.
+description: Run a bounded transient microVM directly, without mvmd or a separate bootstrap.
 ---
 
 This demo runs a real Linux microVM on your own machine through `mvmctl`.
@@ -14,46 +14,11 @@ Use a supported host: macOS 26+ on Apple Silicon, or Linux with `/dev/kvm`.
 Install the published CLI using the [installation guide](/getting-started/installation/).
 No source build, host Nix, or Docker is needed for this image-backed workflow.
 
-## Prepare once
-
-Run these commands in the same terminal:
-
-```bash
-mvmctl doctor --workflow cli-run
-mvmctl bootstrap
-mvmctl image pull alpine
-MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref )"
-printf '%s\n' "$MVM_DEMO_IMAGE"
-```
-
-Preparation downloads and materializes the runtime and OCI image. It can take
-longer than launching an already-prepared workload; do not include it in a
-startup-latency claim.
-
-If a preparation command fails, resolve that error before launching. Do not
-continue by disabling a verification or admission check.
-
-The tag `alpine` is used only to discover an image during preparation.
-`--digest-ref` prints its cached, canonical digest-pinned reference for this
-host's architecture. Subsequent launches use that reference rather than
-re-resolving a moving tag. Keep the terminal open, or save the printed reference
-to reuse it later. Preparing a newer image does not update a previously saved
-digest.
-
-If the prepared source was already pinned to a multi-architecture index,
-`--digest-ref` preserves that index pin; it does not silently replace it with
-the selected platform manifest's digest.
-
-A digest identifies content; it does not authenticate its publisher.
-This is a local **development-profile** demonstration, not a sealed production
-workload or a replacement for the production OCI trust policy. Runtime artifact
-verification and normal launch admission remain enabled.
-
 ## Launch with one command
 
 ```bash
 mvmctl machine run --name local-demo --profile dev \
-  --image "${MVM_DEMO_IMAGE:?Run preparation in this terminal first}" \
+  --image alpine \
   --cpus 1 --memory 256M --timeout 30 \
   -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'
 ```
@@ -76,9 +41,30 @@ access. Existing operator policy still applies; this workflow does not disable
 security checks or silently switch to another backend if the native backend
 is unavailable.
 
-Only preparation acquires the image. `machine run` is cache-only: a missing
-image or required artifact produces a preparation error rather than a hidden
-download or build in the launch step.
+The first run downloads the kernel and image, prepares the guest runtime
+shipped with the CLI, and caches them for later runs. It may take longer than
+launching an already-prepared workload; keep that acquisition time separate
+from prepared-startup measurements. This is a local **development-profile**
+demonstration, not a sealed production workload or a replacement for the
+production OCI trust policy. Verification and normal launch admission remain
+enabled.
+
+## Prewarm or pin the image (optional)
+
+To move acquisition ahead of the run and save a digest-pinned image reference:
+
+```bash
+mvmctl bootstrap
+mvmctl image pull alpine
+MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref)"
+printf '%s\n' "$MVM_DEMO_IMAGE"
+```
+
+Replace `--image alpine` with `--image "$MVM_DEMO_IMAGE"` for a later run.
+`--digest-ref` prints the cached canonical pin for this host's architecture
+and preserves a multi-architecture index pin when the source had one.
+The tag may move; a previously saved digest does not. A digest identifies
+content, not its publisher. Do not bypass a verification or admission refusal.
 
 ## Check teardown
 
@@ -98,7 +84,7 @@ not claim a warm-start latency.
 
 ## Contributor smoke test
 
-From a source checkout, with Python 3 and the image prepared:
+From a source checkout, with Python 3 and the image prepared and pinned as above:
 
 ```bash
 python3 scripts/smoke-local-demo.py --image "$MVM_DEMO_IMAGE"
@@ -120,8 +106,9 @@ whole run and teardown, not just startup.
 
 - **Unknown `--digest-ref`:** use a CLI version containing this option. Do not
   replace the captured digest with a mutable tag to hide the mismatch.
-- **Image is missing:** run the preparation step. If you deliberately removed
-  the cached image, pull the saved digest reference to prepare those same bytes.
+- **Image acquisition fails:** check the reported network or registry error.
+  If you deliberately removed a pinned image, pull its saved digest reference
+  to prepare those same bytes.
 - **Signature, scan, or admission refusal:** follow the named policy error;
   do not disable verification for the demo.
 - **Unsupported host/backend:** use a supported native host. The browser demo

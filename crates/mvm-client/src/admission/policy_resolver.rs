@@ -419,12 +419,7 @@ fn load_tenant_workload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::plan::{
-        AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, KeyRotationSpec,
-        Nonce, PlanId, PlanSeccompTier, PostRunLifecycle, Resources, RuntimeProfileRef,
-        SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
-    };
-    use std::collections::BTreeMap;
+    use mvm_core::plan::test_support::PlanFixture;
 
     fn fixture_plan() -> ExecutionPlan {
         let now = chrono::Utc::now();

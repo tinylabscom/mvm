@@ -31,7 +31,7 @@ after scaffolding; the next build reads the current contents from disk.
 ```toml
 flake = "."
 profile = "default"
-vcpus = 2
+cpus = 2
 mem = "1024M"
 data_disk = "0"
 name = "my-worker"

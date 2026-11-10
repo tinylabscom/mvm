@@ -635,6 +635,56 @@ mod tests {
         assert!(!chain.contains("host.flow.allowed"), "{chain}");
     }
 
+    /// The default policy, projected the way the supervisor projects every
+    /// admitted policy, refuses a flow no rule admits and leaves a
+    /// chain-verified denial rather than an allow in the audit log.
+    #[test]
+    fn a_flow_no_rule_admits_is_refused_and_audited_under_the_default_policy() {
+        const TARGET: &str = "example.com:443";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (recorder, audit_key) = recorder_at(&audit_path);
+        let gate = crate::supervisor::network_endpoint::build_egress_gate(
+            &mvm_core::policy::network_policy::NetworkPolicy::default(),
+        );
+        let (mut guest, mut guest_session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, gate).with_recorder(Some(recorder))
+            });
+
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            TARGET.as_bytes(),
+        );
+        let (opcode, ..) = loop {
+            let frame = read_flowmux_frame(&mut guest, &mut guest_session);
+            if frame.1 == 1 {
+                break frame;
+            }
+        };
+        assert_eq!(opcode, Opcode::Refused);
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+
+        crate::supervisor::audit_file::verify_audit_chain(&audit_path, &audit_key)
+            .expect("audit chain verifies");
+        let chain = std::fs::read_to_string(&audit_path).expect("read audit chain");
+        let denied: Vec<&str> = chain
+            .lines()
+            .filter(|line| line.contains("host.flow.denied"))
+            .collect();
+        assert_eq!(denied.len(), 1, "{chain}");
+        assert!(
+            denied[0].contains(TARGET) && denied[0].contains("policy_denied"),
+            "{chain}"
+        );
+        assert!(!chain.contains("host.flow.allowed"), "{chain}");
+    }
+
     #[test]
     fn open_tcp_to_denied_local_addr_is_refused() {
         let addr = tcp_echo_server();

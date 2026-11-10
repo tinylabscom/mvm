@@ -11,7 +11,7 @@
 .codex/
 /.cursor/
 /.mcp.json
-/.trail/
+.trail/
 /.zed/
 /.delta/
 .claude/*
@@ -92,9 +92,6 @@ __pycache__/
 .ruff_cache
 .venv/
 
-# graft's local graph cache — regenerable, not committed (run `graft build`).
-graft/
-/.graft/
 /weblinux-pack-out/
 
 # Qwen Code session directory

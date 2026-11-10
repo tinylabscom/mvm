@@ -145,6 +145,7 @@ impl EntrypointAdmission {
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let materialized_mounts = crate::admission::instructions::materialized_mounts(volumes);
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            mailbox: None,
             gpu: false,
             instructions: crate::admission::InstructionSources::for_workload(None)
                 .with_mount_roots(&[])

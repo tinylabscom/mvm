@@ -444,17 +444,6 @@ pub fn host_payload() -> io::Result<&'static [PayloadBinary]> {
     Ok(PAYLOAD.get_or_init(|| loaded))
 }
 
-/// The payload, or an empty one when this process has no way to get it.
-///
-/// For identity folds, which treat a binary without a payload the way they
-/// always treated an empty compiled-in table.
-pub fn host_payload_if_any() -> io::Result<&'static [PayloadBinary]> {
-    if current_choice() == PayloadChoice::Unavailable {
-        return Ok(&[]);
-    }
-    host_payload()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

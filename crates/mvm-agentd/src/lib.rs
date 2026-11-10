@@ -19,7 +19,6 @@ pub mod broker_client;
 pub mod builder_agent;
 /// The hvf-VMM builder's guest-side nix build (stages artifacts for the
 /// session to stream back).
-pub mod builder_build;
 /// The hvf-VMM builder's host↔guest build session over one vsock stream.
 pub mod builder_session;
 /// Builder-VM file transfer over vsock (the hvf VMM has no virtio-fs).
@@ -37,6 +36,8 @@ pub mod console_loglevel;
 /// Immediate kernel CRNG reseed through a helper process that holds the one
 /// capability the agent does not.
 pub mod crng_reseed;
+/// Detached threads that name themselves and report a panic.
+pub mod detached;
 /// Fixed-method Chrome DevTools bridge. It emits view-only frames to the host,
 /// and with `--input` turns admitted display input into a fixed set of CDP
 /// input commands. No host byte is ever forwarded to Chrome verbatim.
@@ -107,6 +108,8 @@ pub mod icmp_mediator;
 pub mod integrations;
 pub mod late_volumes;
 pub mod lifecycle_hooks;
+/// Guest side of the mailbox port: forwards the workload's plaintext message.
+pub mod mailbox_outbox;
 /// Guest-side network defense. The `mvm-guest-netinit`
 /// binary calls into this module at boot to install kernel blackhole
 /// routes for `MANDATORY_DENY_RANGES` before any workload code runs.

@@ -78,6 +78,7 @@ pub use events::{
     agent_prompt_audit, checkpoint_audit, display_audit, drive_audit, grants_audit, image_audit,
     instruction_audit, stream_audit, wall_clock_audit,
 };
+mod mailbox;
 mod workspace;
 pub use workspace::{WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit};
 
@@ -213,9 +214,9 @@ pub struct AuditEmitter {
 impl Drop for AuditEmitter {
     /// Shut the cached runtime down without blocking.
     ///
-    /// Caching the runtime removed a per-entry construction, but it also moved
-    /// where the runtime is *dropped*: it used to die inside the synchronous
-    /// emit that built it, and now it dies with the emitter. An emitter
+    /// Caching the runtime removes a per-entry construction, but it also moves
+    /// where the runtime is *dropped*: with the emitter, not inside the
+    /// synchronous emit that built it. An emitter
     /// constructed from inside someone else's async context therefore drops
     /// its runtime there, and a blocking drop from async is a tokio panic by
     /// design —
@@ -412,6 +413,7 @@ impl AuditEmitter {
     /// nothing and settles the question from the chain alone.
     pub fn emit_admitted(&self, plan: &ExecutionPlan, signer_id: &str) -> Result<()> {
         let mut labels = vec![
+            ("workload".to_string(), plan.workload.0.clone()),
             ("signer_id".to_string(), signer_id.to_string()),
             ("authorizer_principal".to_string(), signer_id.to_string()),
             (
@@ -437,6 +439,7 @@ impl AuditEmitter {
             plan,
             "plan.admission_refused",
             [
+                ("workload".to_string(), plan.workload.0.clone()),
                 ("stage".to_string(), stage.to_string()),
                 ("reason".to_string(), reason.to_string()),
                 (
@@ -574,7 +577,10 @@ impl AuditEmitter {
         self.emit(
             plan,
             "plan.launched",
-            [("backend".to_string(), backend.to_string())],
+            [
+                ("workload".to_string(), plan.workload.0.clone()),
+                ("backend".to_string(), backend.to_string()),
+            ],
         )
     }
 

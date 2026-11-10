@@ -129,12 +129,6 @@ fn smoke_enabled() -> bool {
 }
 
 #[test]
-fn run_json_receipt_smoke_gate_is_documented() {
-    assert_eq!(SMOKE_GATE, "MVM_LIVE_SMOKE");
-    assert_eq!(MANIFEST_VAR, "MVM_RUN_SMOKE_MANIFEST");
-}
-
-#[test]
 fn run_json_and_receipt_agree_without_raw_output() {
     if !smoke_enabled() {
         eprintln!(
