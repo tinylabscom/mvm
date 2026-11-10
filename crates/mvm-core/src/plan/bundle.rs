@@ -1564,6 +1564,15 @@ mod tests {
             require_composable_local_enrollment(&manifest, &empty),
             Err(BundleVerifyError::UnknownKey { .. })
         ));
+        let other = fresh_key();
+        let substituted = MapTrustStore(HashMap::from([(
+            manifest.key_id.clone(),
+            other.verifying_key(),
+        )]));
+        assert!(matches!(
+            require_composable_local_enrollment(&manifest, &substituted),
+            Err(BundleVerifyError::UnknownKey { .. })
+        ));
         require_composable_local_enrollment(&manifest, &trust(&host)).unwrap();
     }
 
