@@ -1,13 +1,21 @@
 use super::*;
 use mvm_contract::protocol::mailbox::{
     AuthorizationDomainId, BootId, CapabilityId, CapabilityOperations, CausationId,
-    CiphertextPadding, ContentType, CorrelationId, DeliveryId, EncryptionAlgorithm,
-    EncryptionContext, MailboxCapabilityGrant, MailboxId, MailboxMessageKind, MailboxRoutingFrame,
-    MessageId, OrderingScope, ReplayNonce, RevocationId, SequenceNumber, TenantId,
+    CiphertextPadding, ContentType, CorrelationId, DeliveryId, DeliveryOutcome,
+    EncryptionAlgorithm, EncryptionContext, MailboxCapabilityGrant, MailboxId, MailboxMessageKind,
+    MailboxRoutingFrame, MessageId, OrderingScope, ReplayNonce, RevocationId, SequenceNumber,
+    TenantId,
 };
 
 use crate::crypto::aead::Key;
-use crate::mailbox::{SealRequest, sign_capability};
+use crate::mailbox::journal::{
+    FileJournalAnchor, JournalAdmission, JournalError, JournalLimits, JournalReceive, JournalTip,
+    MailboxJournal,
+};
+use crate::mailbox::{
+    InMemoryReplayProtector, SealRequest, decode_envelope, open_authenticated_envelope,
+    sign_capability,
+};
 
 const NOW: i64 = 1_800_000_000_000;
 
@@ -187,6 +195,780 @@ fn mailbox_fixture() -> MailboxFixture {
         context,
         capability_authority,
     }
+}
+
+#[test]
+fn only_an_authenticated_inner_header_can_supply_a_durable_replay_identity() {
+    let fixture = mailbox_fixture();
+    let mut replay = InMemoryReplayProtector::default();
+    let sender_key = SigningKey::from_bytes(&id(22)).verifying_key();
+    let opened = open_authenticated_envelope(
+        fixture.prepared.envelope(),
+        &fixture.capability,
+        &fixture.context,
+        &Key::from_bytes(id(21)),
+        &sender_key,
+        &fixture.capability_authority.verifying_key(),
+        &mut replay,
+    )
+    .expect("signed envelope and capability");
+    assert_eq!(opened.header().message_id, MessageId::from_bytes(id(14)));
+    assert_eq!(opened.payload(), b"hello");
+    assert!(
+        !format!("{opened:?}").contains("hello"),
+        "debug output must not disclose mailbox plaintext"
+    );
+    assert_eq!(
+        open_authenticated_envelope(
+            fixture.prepared.envelope(),
+            &fixture.capability,
+            &fixture.context,
+            &Key::from_bytes(id(21)),
+            &sender_key,
+            &fixture.capability_authority.verifying_key(),
+            &mut replay,
+        ),
+        Err(MailboxError::Replay),
+        "the same verified header cannot be admitted twice"
+    );
+    let mut tampered = fixture.capability.clone();
+    tampered.signature[0] ^= 1;
+    assert_eq!(
+        open_authenticated_envelope(
+            fixture.prepared.envelope(),
+            &tampered,
+            &fixture.context,
+            &Key::from_bytes(id(21)),
+            &sender_key,
+            &fixture.capability_authority.verifying_key(),
+            &mut InMemoryReplayProtector::default(),
+        ),
+        Err(MailboxError::CapabilitySignatureInvalid),
+        "an unverified capability cannot yield a journal identity"
+    );
+}
+
+#[test]
+fn receive_requires_its_own_signed_recipient_capability_not_the_send_grant() {
+    let fixture = mailbox_fixture();
+    let header = mailbox_header_for_retry();
+    let mut context = fixture.context.clone();
+    context.acting_principal = address().recipient;
+    context.required_operation = MailboxOperation::Receive;
+    assert_eq!(
+        crate::mailbox::authorize_receive(
+            &header,
+            &fixture.capability,
+            &context,
+            &fixture.capability_authority.verifying_key()
+        ),
+        Err(MailboxError::WrongCapabilitySubject),
+        "the signed Send grant cannot double as Receive authority"
+    );
+    let mut grant = fixture.capability.grant.clone();
+    grant.capability_id = CapabilityId::from_bytes(id(99));
+    grant.subject = address().recipient;
+    grant.operations = CapabilityOperations::from_operations(&[MailboxOperation::Receive]);
+    let receive = sign_capability(grant, &fixture.capability_authority).unwrap();
+    crate::mailbox::authorize_receive(
+        &header,
+        &receive,
+        &context,
+        &fixture.capability_authority.verifying_key(),
+    )
+    .expect("independent Receive capability is authorized");
+    let mut stale = context.clone();
+    stale.current_execution_epoch = ExecutionEpoch::new(8).unwrap();
+    assert_eq!(
+        crate::mailbox::authorize_receive(
+            &header,
+            &receive,
+            &stale,
+            &fixture.capability_authority.verifying_key()
+        ),
+        Err(MailboxError::StaleExecutionEpoch)
+    );
+}
+
+#[test]
+fn receive_and_ack_require_independent_authority_and_survive_recovery() {
+    let dir = tempfile::tempdir().expect("journal directory");
+    let fixture = mailbox_fixture();
+    let signer = &fixture.capability_authority;
+    let sender = SigningKey::from_bytes(&id(22)).verifying_key();
+    let encryption_key = Key::from_bytes(id(21));
+    let limits = JournalLimits {
+        max_records: 3,
+        max_bytes: 64 * 1024,
+    };
+    let mut journal = MailboxJournal::open(
+        dir.path(),
+        address(),
+        signer.verifying_key(),
+        id(90),
+        limits,
+        JournalTip::genesis(),
+    )
+    .expect("empty journal");
+    let mut tip = JournalTip::genesis();
+    journal
+        .admit(
+            JournalAdmission {
+                envelope: fixture.prepared.envelope(),
+                capability: &fixture.capability,
+                context: &fixture.context,
+                encryption_key: &encryption_key,
+                sender_key: &sender,
+                signer,
+            },
+            |committed| {
+                tip = committed;
+                Ok(())
+            },
+        )
+        .expect("durable Send");
+    let mut grant = fixture.capability.grant.clone();
+    grant.capability_id = CapabilityId::from_bytes(id(99));
+    grant.subject = address().recipient;
+    grant.operations = CapabilityOperations::from_operations(&[MailboxOperation::Receive]);
+    let receive_capability = sign_capability(grant, signer).expect("Receive capability");
+    let mut reader = fixture.context.clone();
+    reader.acting_principal = address().recipient;
+    reader.required_operation = MailboxOperation::Receive;
+    let request = |capability| JournalReceive {
+        capability,
+        context: &reader,
+        encryption_key: &encryption_key,
+        sender_key: &sender,
+    };
+    assert!(matches!(
+        journal.receive_next(request(&fixture.capability)),
+        Err(JournalError::Mailbox(MailboxError::WrongCapabilitySubject))
+    ));
+    let pending = journal
+        .receive_next(request(&receive_capability))
+        .expect("authorized Receive")
+        .expect("one pending message");
+    assert_eq!(pending.payload(), b"hello");
+    let identity = pending.identity();
+    assert_eq!(
+        journal
+            .receive_next(request(&receive_capability))
+            .expect("at-least-once redelivery before ACK")
+            .expect("still pending")
+            .identity(),
+        identity
+    );
+    journal
+        .acknowledge(identity, request(&receive_capability), |committed| {
+            tip = committed;
+            Ok(())
+        })
+        .expect("durable ACK");
+    assert_eq!(
+        journal
+            .acknowledge(identity, request(&receive_capability), |_| {
+                panic!("an idempotent ACK cannot append a second event")
+            })
+            .expect("duplicate ACK"),
+        tip
+    );
+    let mut stale_reader = reader.clone();
+    stale_reader.current_execution_epoch = ExecutionEpoch::new(8).unwrap();
+    assert!(matches!(
+        journal.acknowledge(
+            identity,
+            JournalReceive {
+                capability: &receive_capability,
+                context: &stale_reader,
+                encryption_key: &encryption_key,
+                sender_key: &sender,
+            },
+            |_| Ok(()),
+        ),
+        Err(JournalError::Mailbox(MailboxError::StaleExecutionEpoch))
+    ));
+    assert!(
+        journal
+            .receive_next(request(&receive_capability))
+            .expect("queue after ACK")
+            .is_none()
+    );
+    drop(journal);
+    let recovered = MailboxJournal::open(
+        dir.path(),
+        address(),
+        signer.verifying_key(),
+        id(90),
+        limits,
+        tip,
+    )
+    .expect("journal and ACK recover");
+    assert!(
+        recovered
+            .receive_next(request(&receive_capability))
+            .expect("recovered queue")
+            .is_none()
+    );
+    drop(recovered);
+    let ack_path = dir.path().join("entry-00000000000000000002.bin");
+    let ack = std::fs::read(&ack_path).expect("ACK record");
+    let mut tampered = ack.clone();
+    tampered[40] ^= 1;
+    std::fs::write(&ack_path, tampered).expect("tamper ACK fixture");
+    assert!(matches!(
+        MailboxJournal::open(
+            dir.path(),
+            address(),
+            signer.verifying_key(),
+            id(90),
+            limits,
+            tip
+        ),
+        Err(JournalError::Corrupt)
+    ));
+    std::fs::remove_file(&ack_path).expect("roll back ACK fixture");
+    assert!(matches!(
+        MailboxJournal::open(
+            dir.path(),
+            address(),
+            signer.verifying_key(),
+            id(90),
+            limits,
+            tip
+        ),
+        Err(JournalError::Rollback)
+    ));
+    std::fs::write(&ack_path, ack).expect("restore ACK fixture");
+}
+
+#[test]
+fn durable_admission_recovers_ciphertext_dedup_and_a_signed_destination_verdict() {
+    use mvm_contract::protocol::mailbox::DeliveryOutcome;
+
+    let dir = tempfile::tempdir().expect("journal directory");
+    let fixture = mailbox_fixture();
+    let signer = &fixture.capability_authority;
+    let sender = SigningKey::from_bytes(&id(22)).verifying_key();
+    let limits = JournalLimits {
+        max_records: 2,
+        max_bytes: 64 * 1024,
+    };
+    let mut journal = MailboxJournal::open(
+        dir.path(),
+        address(),
+        signer.verifying_key(),
+        id(90),
+        limits,
+        JournalTip::genesis(),
+    )
+    .expect("empty journal");
+    let mut anchored = None;
+    let receipt = journal
+        .admit(
+            JournalAdmission {
+                envelope: fixture.prepared.envelope(),
+                capability: &fixture.capability,
+                context: &fixture.context,
+                encryption_key: &Key::from_bytes(id(21)),
+                sender_key: &sender,
+                signer,
+            },
+            |tip| {
+                anchored = Some(tip);
+                Ok(())
+            },
+        )
+        .expect("durable acceptance");
+    assert_eq!(receipt.receipt.outcome, DeliveryOutcome::AcceptedDurable);
+    crate::mailbox::verify_receipt(&receipt, &signer.verifying_key())
+        .expect("destination authority signature");
+    let tip = anchored.expect("external anchor is published before acceptance");
+    assert_eq!(journal.tip(), tip);
+    let bytes =
+        std::fs::read(dir.path().join("entry-00000000000000000001.bin")).expect("durable record");
+    assert!(
+        !bytes.windows(5).any(|w| w == b"hello"),
+        "journal contains no plaintext"
+    );
+    for metadata in [b"recipient".as_slice(), b"capability_id", b"message_id"] {
+        assert!(
+            !bytes.windows(metadata.len()).any(|w| w == metadata),
+            "journal record must conceal authenticated inner metadata"
+        );
+    }
+    drop(journal);
+
+    let mut recovered = MailboxJournal::open(
+        dir.path(),
+        address(),
+        signer.verifying_key(),
+        id(90),
+        limits,
+        tip,
+    )
+    .expect("recover accepted entry");
+    let duplicate = recovered
+        .admit(
+            JournalAdmission {
+                envelope: fixture.prepared.envelope(),
+                capability: &fixture.capability,
+                context: &fixture.context,
+                encryption_key: &Key::from_bytes(id(21)),
+                sender_key: &sender,
+                signer,
+            },
+            |_| panic!("a duplicate cannot advance the external anchor"),
+        )
+        .expect("duplicate receipt");
+    assert_eq!(duplicate.receipt.outcome, DeliveryOutcome::Duplicate);
+    assert_eq!(
+        recovered.tip(),
+        tip,
+        "duplicate does not append a second entry"
+    );
+    let original = fixture.prepared.envelope();
+    let conflicting = crate::mailbox::seal_envelope(
+        SealRequest {
+            routing: original.routing.clone(),
+            header: mailbox_header_for_retry(),
+            plaintext: b"hello",
+        },
+        &Key::from_bytes(id(21)),
+        &SigningKey::from_bytes(&id(22)),
+    )
+    .expect("fresh ciphertext with the same signed message identity");
+    assert!(matches!(
+        recovered.admit(
+            JournalAdmission {
+                envelope: &conflicting,
+                capability: &fixture.capability,
+                context: &fixture.context,
+                encryption_key: &Key::from_bytes(id(21)),
+                sender_key: &sender,
+                signer,
+            },
+            |_| Ok(()),
+        ),
+        Err(JournalError::ConflictingRetry)
+    ));
+}
+
+#[test]
+fn a_transport_verdict_cannot_substitute_for_a_matching_signed_destination_receipt() {
+    use mvm_contract::protocol::mailbox::{
+        DeliveryOutcome, DestinationReceipt, SignedDestinationReceipt,
+    };
+    use std::io::{Read, Write};
+
+    struct Reply(std::io::Cursor<Vec<u8>>);
+    impl Read for Reply {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+    impl Write for Reply {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let fixture = mailbox_fixture();
+    let envelope = fixture.prepared.envelope();
+    let header = &fixture.prepared.header;
+    let key = fixture.capability_authority.verifying_key();
+    let receipt = crate::mailbox::sign_receipt(
+        DestinationReceipt {
+            protocol_version: ProtocolVersion::V1,
+            signature_algorithm: SignatureAlgorithm::ED25519,
+            delivery_id: envelope.routing.delivery_id,
+            message_id: header.message_id,
+            address: address(),
+            execution_epoch: header.execution_epoch,
+            outcome: DeliveryOutcome::AcceptedDurable,
+            observed_at_unix_ms: NOW,
+            ciphertext_commitment: envelope.ciphertext_commitment,
+        },
+        &fixture.capability_authority,
+    )
+    .expect("signed receipt");
+    let exchange = |signed: &SignedDestinationReceipt| {
+        let reply = serde_json::to_vec(&Ok::<_, crate::mailbox::frame::Refusal>(signed))
+            .expect("reply serialization");
+        crate::mailbox::frame::send_receipted_frame(
+            &mut Reply(std::io::Cursor::new(reply)),
+            &fixture.capability,
+            envelope,
+            header,
+            &key,
+        )
+    };
+    assert_eq!(exchange(&receipt), Ok(receipt.clone()));
+
+    let mut wrong_message = receipt.clone();
+    wrong_message.receipt.message_id = MessageId::from_bytes(id(77));
+    wrong_message =
+        crate::mailbox::sign_receipt(wrong_message.receipt, &fixture.capability_authority)
+            .expect("different signed message ID");
+    assert_eq!(
+        exchange(&wrong_message),
+        Err(crate::mailbox::frame::Refusal::Malformed)
+    );
+    let mut forged = receipt.clone();
+    forged.signature[0] ^= 1;
+    assert_eq!(
+        exchange(&forged),
+        Err(crate::mailbox::frame::Refusal::Malformed)
+    );
+    let refused = crate::mailbox::sign_receipt(
+        DestinationReceipt {
+            outcome: DeliveryOutcome::Refused,
+            ..receipt.receipt
+        },
+        &fixture.capability_authority,
+    )
+    .expect("signed refusal");
+    assert_eq!(
+        exchange(&refused),
+        Err(crate::mailbox::frame::Refusal::Malformed)
+    );
+}
+
+fn mailbox_header_for_retry() -> MailboxEnvelopeHeader {
+    // The fixture seals a stable message ID for a retry. Recovering the inner
+    // header through the authority gate avoids constructing a second identity.
+    let fixture = mailbox_fixture();
+    let mut replay = InMemoryReplayProtector::default();
+    open_authenticated_envelope(
+        fixture.prepared.envelope(),
+        &fixture.capability,
+        &fixture.context,
+        &Key::from_bytes(id(21)),
+        &SigningKey::from_bytes(&id(22)).verifying_key(),
+        &fixture.capability_authority.verifying_key(),
+        &mut replay,
+    )
+    .expect("fixture opens")
+    .header()
+    .clone()
+}
+
+#[test]
+fn journal_recovery_refuses_wrong_key_tamper_truncation_and_rollback() {
+    let dir = tempfile::tempdir().expect("journal directory");
+    let fixture = mailbox_fixture();
+    let signer = &fixture.capability_authority;
+    let sender = SigningKey::from_bytes(&id(22)).verifying_key();
+    let limits = JournalLimits {
+        max_records: 1,
+        max_bytes: 64 * 1024,
+    };
+    let mut journal = MailboxJournal::open(
+        dir.path(),
+        address(),
+        signer.verifying_key(),
+        id(90),
+        limits,
+        JournalTip::genesis(),
+    )
+    .expect("empty journal");
+    journal
+        .admit(
+            JournalAdmission {
+                envelope: fixture.prepared.envelope(),
+                capability: &fixture.capability,
+                context: &fixture.context,
+                encryption_key: &Key::from_bytes(id(21)),
+                sender_key: &sender,
+                signer,
+            },
+            |_| Ok(()),
+        )
+        .expect("accepted");
+    let tip = journal.tip();
+    drop(journal);
+    assert!(matches!(
+        MailboxJournal::open(
+            dir.path(),
+            address(),
+            signer.verifying_key(),
+            id(91),
+            limits,
+            tip
+        ),
+        Err(JournalError::Corrupt)
+    ));
+    let mut wrong_address = address();
+    wrong_address.tenant = TenantId::from_bytes(id(99));
+    assert!(matches!(
+        MailboxJournal::open(
+            dir.path(),
+            wrong_address,
+            signer.verifying_key(),
+            id(90),
+            limits,
+            tip
+        ),
+        Err(JournalError::Corrupt)
+    ));
+    assert!(matches!(
+        MailboxJournal::open(
+            dir.path(),
+            address(),
+            signer.verifying_key(),
+            id(90),
+            limits,
+            JournalTip::genesis()
+        ),
+        Err(JournalError::Rollback)
+    ));
+    let path = dir.path().join("entry-00000000000000000001.bin");
+    let original = std::fs::read(&path).expect("record");
+    let mut tampered = original.clone();
+    tampered[40] ^= 1;
+    std::fs::write(&path, tampered).expect("tamper fixture");
+    assert!(matches!(
+        MailboxJournal::open(
+            dir.path(),
+            address(),
+            signer.verifying_key(),
+            id(90),
+            limits,
+            tip
+        ),
+        Err(JournalError::Corrupt)
+    ));
+    std::fs::write(&path, &original[..original.len() - 1]).expect("truncate fixture");
+    assert!(matches!(
+        MailboxJournal::open(
+            dir.path(),
+            address(),
+            signer.verifying_key(),
+            id(90),
+            limits,
+            tip
+        ),
+        Err(JournalError::Corrupt)
+    ));
+}
+
+#[test]
+fn a_full_journal_never_publishes_a_durable_acceptance_or_advances_its_tip() {
+    let dir = tempfile::tempdir().expect("journal directory");
+    let fixture = mailbox_fixture();
+    let signer = &fixture.capability_authority;
+    let sender = SigningKey::from_bytes(&id(22)).verifying_key();
+    let mut journal = MailboxJournal::open(
+        dir.path(),
+        address(),
+        signer.verifying_key(),
+        id(90),
+        JournalLimits {
+            max_records: 1,
+            max_bytes: 1,
+        },
+        JournalTip::genesis(),
+    )
+    .expect("empty journal");
+    assert!(matches!(
+        journal.admit(
+            JournalAdmission {
+                envelope: fixture.prepared.envelope(),
+                capability: &fixture.capability,
+                context: &fixture.context,
+                encryption_key: &Key::from_bytes(id(21)),
+                sender_key: &sender,
+                signer,
+            },
+            |_| panic!("a quota refusal must not update the external anchor"),
+        ),
+        Err(JournalError::Full)
+    ));
+    assert_eq!(journal.tip(), JournalTip::genesis());
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .expect("journal directory")
+            .count(),
+        1,
+        "only the writer lock exists; no accepted record was published"
+    );
+}
+
+#[test]
+fn anchor_failure_after_fsync_returns_uncertain_and_blocks_further_admission() {
+    let dir = tempfile::tempdir().expect("journal directory");
+    let fixture = mailbox_fixture();
+    let signer = &fixture.capability_authority;
+    let sender = SigningKey::from_bytes(&id(22)).verifying_key();
+    let limits = JournalLimits {
+        max_records: 2,
+        max_bytes: 64 * 1024,
+    };
+    let mut journal = MailboxJournal::open(
+        dir.path(),
+        address(),
+        signer.verifying_key(),
+        id(90),
+        limits,
+        JournalTip::genesis(),
+    )
+    .expect("empty journal");
+    let encryption_key = Key::from_bytes(id(21));
+    let request = || JournalAdmission {
+        envelope: fixture.prepared.envelope(),
+        capability: &fixture.capability,
+        context: &fixture.context,
+        encryption_key: &encryption_key,
+        sender_key: &sender,
+        signer,
+    };
+    assert!(matches!(
+        journal.admit(request(), |_| Err(JournalError::Uncertain)),
+        Err(JournalError::Uncertain)
+    ));
+    assert_eq!(
+        journal.tip().cursor,
+        1,
+        "ciphertext was committed before anchoring"
+    );
+    assert!(
+        matches!(
+            journal.admit(request(), |_| Ok(())),
+            Err(JournalError::Uncertain)
+        ),
+        "a failed anchor cannot be mistaken for a fresh acceptance"
+    );
+    drop(journal);
+    assert!(
+        matches!(
+            MailboxJournal::open(
+                dir.path(),
+                address(),
+                signer.verifying_key(),
+                id(90),
+                limits,
+                JournalTip::genesis()
+            ),
+            Err(JournalError::Rollback)
+        ),
+        "recovery with the old anchor fails closed until reconciliation"
+    );
+}
+
+#[test]
+fn startup_reconciles_only_a_verified_fsynced_suffix_before_accepting_retries() {
+    let dir = tempfile::tempdir().expect("destination");
+    let root = dir.path().join("journal");
+    let anchor_path = dir.path().join("anchor");
+    let fixture = mailbox_fixture();
+    let signer = &fixture.capability_authority;
+    let sender = SigningKey::from_bytes(&id(22)).verifying_key();
+    let encryption_key = Key::from_bytes(id(21));
+    let limits = JournalLimits {
+        max_records: 2,
+        max_bytes: 64 * 1024,
+    };
+    let anchor = FileJournalAnchor::open(&anchor_path, address(), id(91)).expect("anchor");
+    let mut journal = MailboxJournal::open_reconciling(
+        &root,
+        address(),
+        signer.verifying_key(),
+        id(90),
+        limits,
+        &anchor,
+    )
+    .expect("empty journal");
+    let request = || JournalAdmission {
+        envelope: fixture.prepared.envelope(),
+        capability: &fixture.capability,
+        context: &fixture.context,
+        encryption_key: &encryption_key,
+        sender_key: &sender,
+        signer,
+    };
+    assert!(matches!(
+        journal.admit(request(), |_| Err(JournalError::Uncertain)),
+        Err(JournalError::Uncertain)
+    ));
+    assert_eq!(anchor.tip(), JournalTip::genesis());
+    let fsynced = journal.tip();
+    drop(journal);
+    drop(anchor);
+
+    let anchor = FileJournalAnchor::open(&anchor_path, address(), id(91)).expect("reopen anchor");
+    let mut recovered = MailboxJournal::open_reconciling(
+        &root,
+        address(),
+        signer.verifying_key(),
+        id(90),
+        limits,
+        &anchor,
+    )
+    .expect("reconcile verified suffix");
+    assert_eq!(anchor.tip(), fsynced);
+    let duplicate = recovered
+        .admit(request(), |_| panic!("a duplicate must not append"))
+        .expect("retry after reconciliation");
+    assert_eq!(duplicate.receipt.outcome, DeliveryOutcome::Duplicate);
+    assert_eq!(recovered.tip(), fsynced);
+    drop(recovered);
+    drop(anchor);
+
+    let bad_anchor_path = dir.path().join("wrong-anchor");
+    let bad_anchor = FileJournalAnchor::open(&bad_anchor_path, address(), id(91))
+        .expect("independent wrong anchor");
+    bad_anchor
+        .advance(JournalTip {
+            cursor: 1,
+            head: id(99),
+        })
+        .expect("valid MAC, wrong chain head");
+    assert!(matches!(
+        MailboxJournal::open_reconciling(
+            &root,
+            address(),
+            signer.verifying_key(),
+            id(90),
+            limits,
+            &bad_anchor,
+        ),
+        Err(JournalError::Rollback)
+    ));
+}
+
+#[test]
+fn private_anchor_survives_reopen_and_refuses_wrong_key_tamper_and_backward_move() {
+    let dir = tempfile::tempdir().expect("anchor directory");
+    let path = dir.path().join("mailbox-anchor");
+    let anchor = FileJournalAnchor::open(&path, address(), id(91)).expect("genesis anchor");
+    assert_eq!(anchor.tip(), JournalTip::genesis());
+    let tip = JournalTip {
+        cursor: 1,
+        head: id(92),
+    };
+    anchor.advance(tip).expect("durable advance");
+    assert!(matches!(anchor.advance(tip), Err(JournalError::Rollback)));
+    drop(anchor);
+    assert_eq!(
+        FileJournalAnchor::open(&path, address(), id(91))
+            .expect("reopen anchor")
+            .tip(),
+        tip
+    );
+    assert!(matches!(
+        FileJournalAnchor::open(&path, address(), id(90)),
+        Err(JournalError::Corrupt)
+    ));
+    let mut tampered = std::fs::read(&path).expect("anchor bytes");
+    tampered[18] ^= 1;
+    std::fs::write(&path, tampered).expect("tamper fixture");
+    assert!(matches!(
+        FileJournalAnchor::open(&path, address(), id(91)),
+        Err(JournalError::Corrupt)
+    ));
 }
 
 #[test]
@@ -394,6 +1176,46 @@ fn authorized_frame(route: &AuthorizedRoute) -> AuthorizedMailboxFrame {
         route,
     })
     .expect("outbound authority")
+}
+
+#[test]
+fn authorized_frame_retains_the_verified_capability_without_reencoding_the_envelope() {
+    let authority = SigningKey::from_bytes(&id(53));
+    let (_, route) = signed_route(TransportPath::Direct, 54, &authority);
+    let mut fixture = mailbox_fixture();
+    let frame = authorize_outbound(OutboundAuthorization {
+        prepared: &fixture.prepared,
+        capability: &fixture.capability,
+        context: &fixture.context,
+        capability_authority_key: &fixture.capability_authority.verifying_key(),
+        route: &route,
+    })
+    .expect("outbound authority");
+    let original = fixture.capability.clone();
+    fixture.capability.signature[0] ^= 1;
+    assert_eq!(
+        frame.capability(),
+        &original,
+        "the verified grant is retained"
+    );
+    assert_eq!(
+        decode_envelope(frame.as_bytes()).expect("canonical envelope"),
+        *fixture.prepared.envelope(),
+        "the envelope remains unchanged and separate from its capability"
+    );
+    assert_eq!(
+        authorize_outbound(OutboundAuthorization {
+            prepared: &fixture.prepared,
+            capability: &fixture.capability,
+            context: &fixture.context,
+            capability_authority_key: &fixture.capability_authority.verifying_key(),
+            route: &route,
+        }),
+        Err(OutboundAuthorizationError::Mailbox(
+            MailboxError::CapabilitySignatureInvalid
+        )),
+        "tampered capability must never reach a transport"
+    );
 }
 
 #[test]

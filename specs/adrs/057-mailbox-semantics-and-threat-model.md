@@ -193,6 +193,18 @@ revocation state before payload disclosure or queue allocation. A sender field
 inside the envelope never authorizes itself. Delegation may only remove
 authority or tighten bounds.
 
+Guest Receive and ACK use a separate, signed Receive capability and a distinct
+per-boot guest-held mailbox ACK signing key, not the FlowMux egress identity or
+the host's mailbox sealing key. The destination authority enrolls its public
+key against the signed plan ID/nonce, recipient, current authenticated guest
+boot and reader session, execution/policy epoch, capability ID, and validity
+window. The guest proves possession over a fresh challenge before delivery;
+the destination signs a lease binding that session, delivery, ciphertext
+commitment, and deadline. ACKs are signed by the enrolled guest key over the
+exact lease and are replay-checked and journaled before a terminal disposition.
+A transport connection, inherited warm-parent key, or structurally valid
+enrollment without signature and current-boot verification authorizes nothing.
+
 ### 5. `call`, `cast`, reply, cancellation, and admission
 
 Version 1 has three application message kinds:
@@ -376,11 +388,13 @@ Overlay resolution conveys no send authority. Transport authentication conveys
 no mailbox authority. The encoded canonical envelope crosses the byte
 transport unchanged.
 
-Iroh is the first planned cross-host transport behind `PeerTransport`. Direct
-and customer-configured relay paths are the default; public relay use requires
-explicit configuration and cannot be a silent fallback. HeatNet/UOR and a
-future virtual NIC are evaluated separately and cannot smuggle packet
-forwarding into mailbox authority.
+`mvm` defines the mailbox contract, authorization gates, and transport-neutral
+interfaces; it does not implement a cross-host network. `mvmd` owns concrete
+cross-host transport and orchestration, including the planned Iroh adapter
+behind `PeerTransport`. Direct and customer-configured relay paths are the
+default; public relay use requires explicit configuration and cannot be a
+silent fallback. HeatNet/UOR and a future virtual NIC are evaluated separately
+and cannot smuggle packet forwarding into mailbox authority.
 
 `mvmd` may enroll principals, place workloads, distribute signed route hints,
 and store or forward opaque ciphertext. It cannot define a second envelope,
@@ -389,9 +403,10 @@ an ordinary coordinator; or become required for local delivery.
 
 The MVM interfaces reuse operational lessons from the earlier `mvmd`
 `AgentTransport` work without importing an `mvmd` crate or runtime dependency.
-Optional coordinator metadata enters through a narrow route-hint adapter that
-selects an already authorized path; it cannot edit, decrypt, or re-sign the
-canonical envelope.
+`mvmd` implements cross-host adapters for the interfaces and may adapt its
+coordinator metadata into authorized route hints; it cannot edit, decrypt, or
+re-sign the canonical envelope. Local mailbox delivery remains usable without
+`mvmd`.
 
 ### 14. Prototype `mvmd` type migration
 

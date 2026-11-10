@@ -29,9 +29,7 @@ use mvm_core::mailbox::OpenContext;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::mailbox_service::{
-    GuestSealer, MailboxLimits, MailboxPolicy, MailboxService, serve_grant,
-};
+use crate::mailbox_service::{GuestSealer, MailboxLimits, MailboxPolicy, MailboxService};
 
 const SIGNER_SECRET: &str = "host-signer.ed25519";
 const SIGNER_PUBLIC: &str = "host-signer.pub";
@@ -105,6 +103,8 @@ pub struct DerivedMailboxKeys {
     sender: [u8; 32],
     authority: [u8; 32],
     encryption: [u8; 32],
+    journal_mac: [u8; 32],
+    anchor_mac: [u8; 32],
     template: MailboxTemplate,
 }
 
@@ -122,10 +122,21 @@ impl Drop for DerivedMailboxKeys {
         self.sender.zeroize();
         self.authority.zeroize();
         self.encryption.zeroize();
+        self.journal_mac.zeroize();
+        self.anchor_mac.zeroize();
     }
 }
 
 impl DerivedMailboxKeys {
+    /// Mailbox-scoped destination signer and separate journal/anchor MAC keys.
+    pub(crate) fn durable_material(&self) -> (SigningKey, [u8; 32], [u8; 32]) {
+        (
+            SigningKey::from_bytes(&self.authority),
+            self.journal_mac,
+            self.anchor_mac,
+        )
+    }
+
     /// The host trust and sealer these keys stand for. Pure: no file is read,
     /// so it can be rebuilt on every dial attempt.
     pub fn trust(&self) -> (MailboxPolicy, GuestSealer) {
@@ -161,6 +172,7 @@ impl DerivedMailboxKeys {
             header: template.header,
             routing: template.routing,
             sent: 0,
+            intent_dir: None,
         };
         (policy, sealer)
     }
@@ -184,6 +196,8 @@ pub fn derive_launch_keys(keys_dir: &Path, grant: &MailboxGrant) -> Result<Deriv
         sender: derived.sender.to_bytes(),
         authority: derived.authority.to_bytes(),
         encryption: *derived.encryption,
+        journal_mac: *derive(&derived.root, b"mvm-mailbox-journal-v1", &grant.mailbox),
+        anchor_mac: *derive(&derived.root, b"mvm-mailbox-anchor-v1", &grant.mailbox),
         template,
     })
 }
@@ -333,10 +347,12 @@ pub struct ServePaths {
     pub socket: PathBuf,
     pub guest_port: PathBuf,
     pub firecracker_mux: PathBuf,
+    pub intent_dir: Option<PathBuf>,
 }
 
-/// Dial the guest's mailbox port from its own thread, retrying for up to 30 s
-/// while the guest comes up, and serve it under `keys`. Returns at once.
+/// Bind the local service and dial the guest for the VM's lifetime. The first
+/// guest connection has a bounded 30-second readiness window; after readiness
+/// an idle outbox is normal and does not stop later submissions.
 pub fn serve_derived(
     grant: MailboxGrant,
     keys: DerivedMailboxKeys,
@@ -347,19 +363,40 @@ pub fn serve_derived(
     let service = Arc::new(OnceLock::new());
     let (thread_stop, thread_service) = (stop.clone(), service.clone());
     std::thread::spawn(move || {
-        for _ in 0..DIAL_ATTEMPTS {
-            if thread_stop.load(Ordering::SeqCst) {
-                return;
-            }
-            let (trust, sealer) = keys.trust();
-            let guest = (paths.guest_port.as_path(), paths.firecracker_mux.as_path());
-            match serve_grant(&grant, trust, sealer, limits, &paths.socket, guest) {
-                Ok(served) => {
-                    let _ = thread_service.set(served);
-                    return;
+        let (trust, mut sealer) = keys.trust();
+        sealer.intent_dir = paths.intent_dir;
+        let (Ok(trust), Ok(mut sealer)) = (trust.with_grant(&grant), sealer.with_grant(&grant))
+        else {
+            tracing::warn!("mailbox launch refused mismatched host-held grant");
+            return;
+        };
+        let Ok(served) = MailboxService::bind_live(&paths.socket, limits, trust) else {
+            tracing::warn!("mailbox service could not bind");
+            return;
+        };
+        let _ = thread_service.set(served);
+        let Some(served) = thread_service.get() else {
+            return;
+        };
+        let guest = (paths.guest_port.as_path(), paths.firecracker_mux.as_path());
+        let mut ready = false;
+        let mut attempts = 0;
+        while !thread_stop.load(Ordering::SeqCst) {
+            match served.serve_guest(guest.0, guest.1, &mut sealer) {
+                Ok(_) => {
+                    ready = true;
+                    attempts = 0;
                 }
-                Err(_) => std::thread::sleep(DIAL_INTERVAL),
+                Err(_) if !ready => {
+                    attempts += 1;
+                    if attempts >= DIAL_ATTEMPTS {
+                        tracing::warn!("mailbox guest port did not become ready");
+                        return;
+                    }
+                }
+                Err(_) => {}
             }
+            std::thread::sleep(DIAL_INTERVAL);
         }
     });
     MailboxLaunch { stop, service }
@@ -374,7 +411,8 @@ pub const LAUNCH_LIMITS: MailboxLimits = MailboxLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_contract::protocol::mailbox::ExecutionEpoch;
+    use mvm_contract::protocol::mailbox::{ExecutionEpoch, MessageId};
+    use mvm_core::mailbox::frame::OutboxMessage;
 
     fn keys_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -389,6 +427,47 @@ mod tests {
             authority_key: authority_key_for(dir, &mailbox).unwrap().to_bytes(),
             epoch: ExecutionEpoch::new(1).unwrap(),
         }
+    }
+
+    #[test]
+    fn a_retry_reuses_exact_sealed_intent_after_helper_restart() {
+        let dir = keys_dir();
+        let grant = grant(dir.path(), [4; 32]);
+        let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+        let intents = dir.path().join("intents");
+        let sealer = || {
+            let (_, mut sealer) = keys.trust();
+            sealer.intent_dir = Some(intents.clone());
+            sealer.with_grant(&grant).unwrap()
+        };
+        let message = OutboxMessage {
+            recipient: sealer().header.recipient,
+            message_id: MessageId::from_bytes([45; 32]),
+            body: b"first".to_vec(),
+        };
+        let first = sealer().seal(message.clone()).expect("first seal");
+        let retry = sealer().seal(message.clone()).expect("retry after restart");
+        assert_eq!(
+            first, retry,
+            "retry must reuse canonical ciphertext and delivery ID"
+        );
+        for _ in 2..8 {
+            assert_eq!(
+                sealer().seal(message.clone()).expect("bounded retry"),
+                first
+            );
+        }
+        assert_eq!(
+            sealer().seal(message.clone()),
+            Err(crate::mailbox_service::Refusal::RetriesExhausted),
+            "the attempt count survives a fresh helper using the same source intent"
+        );
+        let mut conflicting = message;
+        conflicting.body = b"different".to_vec();
+        assert!(matches!(
+            sealer().seal(conflicting),
+            Err(crate::mailbox_service::Refusal::Mailbox(_))
+        ));
     }
 
     #[test]

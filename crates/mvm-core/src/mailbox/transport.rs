@@ -546,14 +546,17 @@ pub fn prepare_mailbox_envelope(
     Ok(PreparedMailboxEnvelope { envelope, header })
 }
 
-/// Canonically encoded ciphertext admitted by mailbox authority. Its bytes are
-/// private so a transport cannot be used as an arbitrary packet-forwarding API.
+/// Canonically encoded ciphertext and the exact signed capability admitted by
+/// mailbox authority. The bytes are private so a transport cannot be used as
+/// an arbitrary packet-forwarding API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedMailboxFrame {
     bytes: Vec<u8>,
+    capability: SignedMailboxCapability,
 }
 
 impl AuthorizedMailboxFrame {
+    /// Canonical envelope length, excluding the separately carried capability.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
         self.bytes.len()
@@ -563,6 +566,12 @@ impl AuthorizedMailboxFrame {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// The signed send capability verified with this exact envelope.
+    #[must_use]
+    pub fn capability(&self) -> &SignedMailboxCapability {
+        &self.capability
     }
 }
 
@@ -590,7 +599,7 @@ pub fn authorize_outbound(
     }
     verify_identity_and_time(header, request.context)?;
     verify_capability_signature(request.capability, request.capability_authority_key)?;
-    verify_capability_scope(header, request.capability, request.context)?;
+    verify_capability_scope(header, request.capability, request.context, true)?;
     let claims = &request.route.claims;
     if claims.address.tenant != header.tenant
         || claims.address.authorization_domain != header.authorization_domain
@@ -606,6 +615,7 @@ pub fn authorize_outbound(
     }
     Ok(AuthorizedMailboxFrame {
         bytes: encode_envelope(envelope)?,
+        capability: request.capability.clone(),
     })
 }
 

@@ -2,8 +2,8 @@
 //! plaintext message the workload left in the outbox and return the host's
 //! verdict.
 //!
-//! The guest holds no key and seals nothing. The outbox carries a recipient
-//! and a body; the host seals and signs it under the capability the signed
+//! The guest holds no key and seals nothing. The outbox carries a stable
+//! message ID, recipient and body; the host seals and signs under the capability the signed
 //! plan granted, then admits it. Encryption is host to host.
 //!
 //! [`write_outbox`] is the workload side: it leaves that one message where
@@ -11,11 +11,13 @@
 //! and size limits the host decodes with.
 
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
+use std::time::Duration;
 
 use mvm_contract::protocol::mailbox::MAX_MAILBOX_PAYLOAD_BYTES;
 use mvm_core::mailbox::frame::{OutboxMessage, Refusal, send_outbox_message};
+use mvm_core::util::atomic_io::{atomic_write_new, sync_dir};
 
 /// Where the workload leaves its message and the agent reads it.
 pub const OUTBOX_PATH: &str = "/run/mvm/mailbox/outbox";
@@ -31,20 +33,117 @@ pub const MAILBOX_CMDLINE_TOKEN: &str = "mvm.mailbox=1";
 /// can list, read or replace anything in it.
 pub const OUTBOX_DIR_MODE: u32 = 0o700;
 
-/// Owner read/write, group read. Nobody else may read the plaintext.
-pub const OUTBOX_FILE_MODE: u32 = 0o640;
+/// Owner-only read/write. Nobody else may read the plaintext.
+pub const OUTBOX_FILE_MODE: u32 = 0o600;
 
-/// The recipient bytes beside the largest body the host will seal.
-const MAX_OUTBOX_BYTES: u64 = MAX_MAILBOX_PAYLOAD_BYTES as u64 + 32;
+/// The recipient and stable message ID beside the largest body the host seals.
+const MAX_OUTBOX_BYTES: u64 = MAX_MAILBOX_PAYLOAD_BYTES as u64 + 64;
+const MAX_ARCHIVED_OUTBOX: usize = 64;
+const IDLE_CHECKS: usize = 16;
+const IDLE_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Forward the outbox message over `stream`. An absent, oversized or
-/// malformed outbox is refused here, before a byte is sent to the host.
+/// Wait at most four seconds for a later workload write on an already
+/// connected mailbox port. The host's read deadline is longer than this
+/// window; an idle window closes cleanly so teardown is always bounded.
+pub fn wait_and_forward_outbox<S: Read + Write>(
+    stream: &mut S,
+    outbox: &Path,
+) -> Result<(), Refusal> {
+    for _ in 0..IDLE_CHECKS {
+        if outbox.exists() {
+            return forward_outbox(stream, outbox);
+        }
+        std::thread::sleep(IDLE_INTERVAL);
+    }
+    Err(Refusal::Unavailable)
+}
+
+/// Forward one immutable outbox operation over `stream`. A refused or uncertain
+/// send leaves it in place for a same-ID retry; only an accepted verdict removes
+/// it under the writer lock.
 pub fn forward_outbox<S: Read + Write>(stream: &mut S, outbox: &Path) -> Result<(), Refusal> {
+    let dir = outbox.parent().ok_or(Refusal::Malformed)?;
+    let _lock = lock_outbox_dir(dir)?;
     let mut bytes = Vec::new();
-    std::fs::File::open(outbox)
+    open_outbox(outbox)
         .and_then(|file| file.take(MAX_OUTBOX_BYTES + 1).read_to_end(&mut bytes))
         .map_err(|_| Refusal::Malformed)?;
-    send_outbox_message(stream, &OutboxMessage::decode(&bytes)?)
+    let message = OutboxMessage::decode(&bytes)?;
+    match send_outbox_message(stream, &message) {
+        Ok(()) => {}
+        Err(refusal @ (Refusal::RetriesExhausted | Refusal::Oversized(_))) => {
+            let prefix = if matches!(refusal, Refusal::Oversized(_)) {
+                "rejected"
+            } else {
+                "uncertain"
+            };
+            archive_outbox(outbox, &message, prefix)?;
+            return Err(refusal);
+        }
+        Err(error) => return Err(error),
+    }
+    std::fs::remove_file(outbox).map_err(|_| Refusal::Unavailable)?;
+    sync_dir(dir).map_err(|_| Refusal::Unavailable)
+}
+
+fn archive_outbox(outbox: &Path, message: &OutboxMessage, prefix: &str) -> Result<(), Refusal> {
+    let dir = outbox.parent().ok_or(Refusal::Malformed)?;
+    let id = message
+        .message_id
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let archived = dir.join(format!("{prefix}-{id}"));
+    let bytes = message.encode();
+    let mut previous = Vec::new();
+    match open_outbox(&archived)
+        .and_then(|file| file.take(MAX_OUTBOX_BYTES + 1).read_to_end(&mut previous))
+    {
+        Ok(_) if previous != bytes => return Err(Refusal::Malformed),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut count = 0;
+            for entry in std::fs::read_dir(dir).map_err(|_| Refusal::Unavailable)? {
+                let entry = entry.map_err(|_| Refusal::Unavailable)?;
+                if entry.file_name() != "outbox" {
+                    count += 1;
+                    if count >= MAX_ARCHIVED_OUTBOX {
+                        return Err(Refusal::QueueFull(MAX_ARCHIVED_OUTBOX));
+                    }
+                }
+            }
+            atomic_write_new(&archived, &bytes).map_err(|_| Refusal::Unavailable)?;
+        }
+        Err(_) => return Err(Refusal::Unavailable),
+    }
+    std::fs::remove_file(outbox).map_err(|_| Refusal::Unavailable)?;
+    sync_dir(dir).map_err(|_| Refusal::Unavailable)
+}
+
+fn lock_outbox_dir(dir: &Path) -> Result<std::fs::File, Refusal> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(dir)
+        .map_err(|_| Refusal::Unavailable)?;
+    file.try_lock().map_err(|_| Refusal::Unavailable)?;
+    Ok(file)
+}
+
+fn open_outbox(outbox: &Path) -> std::io::Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(outbox)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "outbox must be a single-link regular file",
+        ));
+    }
+    Ok(file)
 }
 
 /// Create the outbox directory, owned by `uid`:`gid` at [`OUTBOX_DIR_MODE`].
@@ -78,11 +177,16 @@ pub fn provision_outbox_dir_if_asserted(
     provision_outbox_dir(dir, uid, gid).map(|()| true)
 }
 
-/// Workload side: atomically leave `message` at `outbox`. The directory must
-/// already exist, since it is how the launch grants a mailbox; without it this
-/// refuses and creates nothing. Written to a sibling temp file, then renamed,
-/// so the agent never reads a partial frame.
+/// Workload side: atomically publish one immutable message. A second writer
+/// cannot replace a pending operation; retrying identical bytes is idempotent.
+/// The directory must already exist as the launch grant.
 pub fn write_outbox(outbox: &Path, message: &OutboxMessage) -> Result<(), Refusal> {
+    if message.body.is_empty() {
+        return Err(Refusal::Malformed);
+    }
+    if message.body.len() > MAX_MAILBOX_PAYLOAD_BYTES {
+        return Err(Refusal::Oversized(MAX_MAILBOX_PAYLOAD_BYTES));
+    }
     let bytes = message.encode();
     // Same validation the host applies on receipt (empty, oversized).
     OutboxMessage::decode(&bytes)?;
@@ -90,29 +194,30 @@ pub fn write_outbox(outbox: &Path, message: &OutboxMessage) -> Result<(), Refusa
         .parent()
         .filter(|d| d.is_dir())
         .ok_or(Refusal::Malformed)?;
-    let tmp = dir.join(format!(".outbox.{}.tmp", std::process::id()));
-    let written = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(OUTBOX_FILE_MODE)
-        .open(&tmp)
-        .and_then(|mut f| f.write_all(&bytes))
-        .and_then(|()| std::fs::rename(&tmp, outbox));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(Refusal::Malformed);
+    let _lock = lock_outbox_dir(dir)?;
+    let mut existing = Vec::new();
+    match open_outbox(outbox)
+        .and_then(|file| file.take(MAX_OUTBOX_BYTES + 1).read_to_end(&mut existing))
+    {
+        Ok(_) if existing.len() as u64 > MAX_OUTBOX_BYTES => return Err(Refusal::Malformed),
+        Ok(_) if existing == bytes => return Ok(()),
+        Ok(_) => return Err(Refusal::QueueFull(1)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(Refusal::Unavailable),
     }
-    Ok(())
+    atomic_write_new(outbox, &bytes).map_err(|_| Refusal::Unavailable)?;
+    sync_dir(dir).map_err(|_| Refusal::Unavailable)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_contract::protocol::mailbox::PrincipalId;
+    use mvm_contract::protocol::mailbox::{MessageId, PrincipalId};
 
     fn message(body: &[u8]) -> OutboxMessage {
         OutboxMessage {
             recipient: PrincipalId::from_bytes([7; 32]),
+            message_id: MessageId::from_bytes([8; 32]),
             body: body.to_vec(),
         }
     }
@@ -137,10 +242,39 @@ mod tests {
             OutboxMessage::decode(&host.join().unwrap()),
             Ok(message(b"hello"))
         );
+        assert!(
+            !outbox.exists(),
+            "accepted submission frees the single slot"
+        );
     }
 
     #[test]
-    fn the_outbox_file_is_group_readable_never_world_readable_and_leaves_no_temp() {
+    fn a_connected_guest_delivers_a_message_written_after_the_host_dials() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = dir.path().join("outbox");
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let host = std::thread::spawn(move || {
+            let mut len = [0u8; 4];
+            theirs.read_exact(&mut len).unwrap();
+            let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+            theirs.read_exact(&mut body).unwrap();
+            theirs.write_all(b"{\"Ok\":null}").unwrap();
+            OutboxMessage::decode(&body).unwrap()
+        });
+        let written = message(b"later");
+        let path = outbox.clone();
+        let workload = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            write_outbox(&path, &written).unwrap();
+        });
+        wait_and_forward_outbox(&mut ours, &outbox).expect("late write was forwarded");
+        workload.join().unwrap();
+        assert_eq!(host.join().unwrap(), message(b"later"));
+        assert!(!outbox.exists());
+    }
+
+    #[test]
+    fn the_outbox_file_is_owner_only_and_leaves_no_temp() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let outbox = dir.path().join("outbox");
@@ -196,13 +330,17 @@ mod tests {
     }
 
     #[test]
-    fn a_second_write_replaces_the_first_atomically() {
+    fn a_pending_outbox_cannot_be_overwritten_but_an_identical_retry_is_safe() {
         let dir = tempfile::tempdir().unwrap();
         let outbox = dir.path().join("outbox");
         write_outbox(&outbox, &message(b"one")).unwrap();
-        write_outbox(&outbox, &message(b"two")).unwrap();
+        write_outbox(&outbox, &message(b"one")).unwrap();
+        assert_eq!(
+            write_outbox(&outbox, &message(b"two")),
+            Err(Refusal::QueueFull(1))
+        );
         let on_disk = std::fs::read(&outbox).unwrap();
-        assert_eq!(OutboxMessage::decode(&on_disk), Ok(message(b"two")));
+        assert_eq!(OutboxMessage::decode(&on_disk), Ok(message(b"one")));
     }
 
     #[test]
@@ -252,6 +390,148 @@ mod tests {
         assert!(seen.is_empty(), "nothing reached the host");
     }
 
+    #[test]
+    fn an_unknown_verdict_keeps_the_same_operation_for_a_later_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = dir.path().join("outbox");
+        write_outbox(&outbox, &message(b"once")).unwrap();
+        let original = std::fs::read(&outbox).unwrap();
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let host = std::thread::spawn(move || {
+            let mut len = [0u8; 4];
+            theirs.read_exact(&mut len).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(len) as usize];
+            theirs.read_exact(&mut body).unwrap();
+            body
+        });
+        assert_eq!(forward_outbox(&mut ours, &outbox), Err(Refusal::Malformed));
+        assert_eq!(host.join().unwrap(), original);
+        assert_eq!(std::fs::read(&outbox).unwrap(), original);
+        write_outbox(&outbox, &message(b"once")).expect("same-ID retry stays valid");
+    }
+
+    #[test]
+    fn exhausted_retries_preserve_an_uncertain_operation_without_blocking_new_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = dir.path().join("outbox");
+        let pending = message(b"once");
+        write_outbox(&outbox, &pending).unwrap();
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let host = std::thread::spawn(move || {
+            let mut len = [0u8; 4];
+            theirs.read_exact(&mut len).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(len) as usize];
+            theirs.read_exact(&mut body).unwrap();
+            theirs.write_all(b"{\"Err\":\"RetriesExhausted\"}").unwrap();
+        });
+        assert_eq!(
+            forward_outbox(&mut ours, &outbox),
+            Err(Refusal::RetriesExhausted)
+        );
+        host.join().unwrap();
+        assert!(
+            !outbox.exists(),
+            "the next operation can use the single slot"
+        );
+        let uncertain = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .next()
+            .expect("an uncertain operation is retained");
+        assert_eq!(
+            OutboxMessage::decode(&std::fs::read(uncertain).unwrap()),
+            Ok(pending)
+        );
+        write_outbox(&outbox, &message(b"next")).unwrap();
+    }
+
+    #[test]
+    fn a_signed_capability_payload_refusal_archives_the_exact_rejected_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = dir.path().join("outbox");
+        let pending = message(b"too large for this grant");
+        write_outbox(&outbox, &pending).unwrap();
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let host = std::thread::spawn(move || {
+            let mut len = [0u8; 4];
+            theirs.read_exact(&mut len).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(len) as usize];
+            theirs.read_exact(&mut body).unwrap();
+            theirs.write_all(b"{\"Err\":{\"Oversized\":16}}").unwrap();
+        });
+        assert_eq!(
+            forward_outbox(&mut ours, &outbox),
+            Err(Refusal::Oversized(16))
+        );
+        host.join().unwrap();
+        assert!(!outbox.exists());
+        let rejected = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .next()
+            .expect("retain terminal refusal");
+        assert!(
+            rejected
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("rejected-"),
+            "a known terminal refusal is not an uncertain delivery"
+        );
+        assert_eq!(
+            OutboxMessage::decode(&std::fs::read(rejected).unwrap()),
+            Ok(pending)
+        );
+    }
+
+    #[test]
+    fn archive_exhaustion_retains_pending_bytes_and_refuses_more_disk_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = dir.path().join("outbox");
+        let pending = message(b"once");
+        write_outbox(&outbox, &pending).unwrap();
+        for i in 0..MAX_ARCHIVED_OUTBOX {
+            std::fs::write(dir.path().join(format!("uncertain-{i}")), b"old").unwrap();
+        }
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let host = std::thread::spawn(move || {
+            let mut len = [0u8; 4];
+            theirs.read_exact(&mut len).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(len) as usize];
+            theirs.read_exact(&mut body).unwrap();
+            theirs.write_all(b"{\"Err\":\"RetriesExhausted\"}").unwrap();
+        });
+        assert_eq!(
+            forward_outbox(&mut ours, &outbox),
+            Err(Refusal::QueueFull(MAX_ARCHIVED_OUTBOX))
+        );
+        host.join().unwrap();
+        assert_eq!(
+            OutboxMessage::decode(&std::fs::read(&outbox).unwrap()),
+            Ok(pending)
+        );
+    }
+
+    #[test]
+    fn an_outbox_symlink_is_never_followed_to_a_different_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("other");
+        let outbox = dir.path().join("outbox");
+        std::fs::write(&secret, message(b"secret").encode()).unwrap();
+        std::os::unix::fs::symlink(&secret, &outbox).unwrap();
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert_eq!(forward_outbox(&mut ours, &outbox), Err(Refusal::Malformed));
+        assert_eq!(
+            write_outbox(&outbox, &message(b"overwrite")),
+            Err(Refusal::Unavailable)
+        );
+        drop(ours);
+        let mut seen = Vec::new();
+        theirs.read_to_end(&mut seen).unwrap();
+        assert!(seen.is_empty());
+        assert_eq!(std::fs::read(secret).unwrap(), message(b"secret").encode());
+    }
+
     /// The wire carries the plaintext message and nothing else: no
     /// capability, envelope, signature or key, and this path names no key
     /// type to build one from.
@@ -259,7 +539,7 @@ mod tests {
     fn the_frame_on_the_wire_is_exactly_the_plaintext_message() {
         let dir = tempfile::tempdir().unwrap();
         let outbox = dir.path().join("outbox");
-        let message = [&[9u8; 32][..], b"hello"].concat();
+        let message = [&[9u8; 32][..], &[10u8; 32][..], b"hello"].concat();
         std::fs::write(&outbox, &message).unwrap();
         let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
         let host = std::thread::spawn(move || {

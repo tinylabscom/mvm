@@ -12,27 +12,37 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::mailbox::{
-    ExecutionEpoch, MailboxCapabilityGrant, MailboxEnvelope, MailboxEnvelopeHeader, MailboxGrant,
-    MailboxRoutingFrame, MessageId, ReplayNonce, SequenceNumber, SignedMailboxCapability,
+    BootId, CorrelationId, DeliveryId, ExecutionEpoch, MailboxCapabilityGrant, MailboxEnvelope,
+    MailboxEnvelopeHeader, MailboxGrant, MailboxRoutingFrame, ReplayNonce, SequenceNumber,
+    SignedMailboxCapability,
 };
 use mvm_core::crypto::aead::Key;
 pub use mvm_core::mailbox::frame::Refusal;
-use mvm_core::mailbox::frame::{OutboxMessage, decode_frame, send_frame};
+use mvm_core::mailbox::frame::{OutboxMessage, decode_frame, encode_frame, send_frame};
 use mvm_core::mailbox::{
-    InMemoryReplayProtector, OpenContext, SealRequest, open_envelope, seal_envelope,
-    sign_capability,
+    InMemoryReplayProtector, OpenContext, SealRequest, open_authenticated_envelope, open_envelope,
+    seal_envelope, sign_capability,
 };
+use mvm_core::private_fs;
+use mvm_core::util::atomic_io::{FileLock, atomic_write_durable, atomic_write_new, sync_dir};
+
+/// Separate destination path that returns a signed, journal-backed verdict.
+pub mod durable;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_SOURCE_INTENTS: usize = 64;
+const MAX_SOURCE_INTENT_BYTES: usize = 64 * 1024;
+const MAX_SOURCE_ATTEMPTS: u8 = 8;
 
 /// Bounds on what one node will hold or accept.
 #[derive(Debug, Clone, Copy)]
@@ -77,6 +87,8 @@ pub struct GuestSealer {
     pub routing: MailboxRoutingFrame,
     /// Messages sealed so far; start at 0.
     pub sent: u64,
+    /// Private, bounded source intents retain exact sealed bytes for retries.
+    pub intent_dir: Option<PathBuf>,
 }
 
 impl GuestSealer {
@@ -92,16 +104,126 @@ impl GuestSealer {
         self.capability.address.mailbox = grant.mailbox;
         self.header.mailbox = grant.mailbox;
         self.header.execution_epoch = grant.epoch;
+        // The template is stable across restarts; its counter starts over in each
+        // process. A fresh boot identity keeps those message/replay IDs distinct.
+        self.header.sender_boot = BootId::from_bytes(rand::random());
         Ok(self)
     }
 
-    fn seal(
+    pub(crate) fn seal(
         &mut self,
         message: OutboxMessage,
     ) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal> {
+        let Some(dir) = self.intent_dir.clone() else {
+            let (capability, envelope, n) = self.seal_new(&message)?;
+            self.sent = n;
+            return Ok((capability, envelope));
+        };
+        private_fs::ensure_private_dir(&dir).map_err(|_| Refusal::Unavailable)?;
+        sync_dir(dir.parent().ok_or(Refusal::Malformed)?).map_err(|_| Refusal::Unavailable)?;
+        let _lock = FileLock::try_acquire(&dir.join("intent"))
+            .map_err(|_| Refusal::Unavailable)?
+            .ok_or(Refusal::Unavailable)?;
+        let path = dir.join(hex::encode(message.message_id.as_bytes()));
+        if path.exists() {
+            let reused = self.read_intent(&path, &message)?;
+            charge_source_attempt(&dir, &message)?;
+            return Ok(reused);
+        }
+        let mut count = 0;
+        for entry in std::fs::read_dir(&dir).map_err(|_| Refusal::Unavailable)? {
+            let entry = entry.map_err(|_| Refusal::Unavailable)?;
+            let name = entry.file_name();
+            if name == "intent.lock" || name.to_string_lossy().ends_with(".attempts") {
+                continue;
+            }
+            count += 1;
+            if count >= MAX_SOURCE_INTENTS {
+                return Err(Refusal::QueueFull(MAX_SOURCE_INTENTS));
+            }
+        }
+        let (capability, envelope, n) = self.seal_new(&message)?;
+        let bytes = encode_frame(&capability, &envelope)?;
+        if bytes.len() > MAX_SOURCE_INTENT_BYTES {
+            return Err(Refusal::Oversized(MAX_SOURCE_INTENT_BYTES));
+        }
+        atomic_write_new(&path, &bytes).map_err(|_| Refusal::Unavailable)?;
+        sync_dir(&dir).map_err(|_| Refusal::Unavailable)?;
+        charge_source_attempt(&dir, &message)?;
+        self.sent = n;
+        Ok((capability, envelope))
+    }
+
+    fn read_intent(
+        &self,
+        path: &Path,
+        message: &OutboxMessage,
+    ) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal> {
+        let meta = std::fs::symlink_metadata(path).map_err(|_| Refusal::Unavailable)?;
+        if !meta.file_type().is_file()
+            || meta.nlink() != 1
+            || meta.len() > MAX_SOURCE_INTENT_BYTES as u64
+        {
+            return Err(Refusal::Malformed);
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|_| Refusal::Unavailable)?
+            .take(MAX_SOURCE_INTENT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Refusal::Unavailable)?;
+        if bytes.len() > MAX_SOURCE_INTENT_BYTES {
+            return Err(Refusal::Oversized(MAX_SOURCE_INTENT_BYTES));
+        }
+        let (capability, envelope) = decode_frame(&bytes)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Refusal::Unavailable)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| Refusal::Unavailable)?;
+        let context = OpenContext {
+            expected_tenant: self.header.tenant,
+            expected_authorization_domain: self.header.authorization_domain,
+            expected_mailbox: self.header.mailbox,
+            expected_sender: self.header.sender,
+            expected_recipient: message.recipient,
+            acting_principal: self.capability.subject,
+            expected_capability_issuer: self.capability.issuer,
+            current_execution_epoch: self.header.execution_epoch,
+            current_policy_epoch: self.header.policy_epoch,
+            required_operation: mvm_contract::protocol::mailbox::MailboxOperation::Send,
+            now_unix_ms: now,
+            accepted_content_types: vec![self.header.content_type.clone()],
+            revoked_capabilities: Vec::new(),
+        };
+        let opened = open_authenticated_envelope(
+            &envelope,
+            &capability,
+            &context,
+            &self.encryption_key,
+            &self.sender_key.verifying_key(),
+            &self.authority_key.verifying_key(),
+            &mut InMemoryReplayProtector::default(),
+        )
+        .map_err(|e| Refusal::Mailbox(e.to_string()))?;
+        if opened.header().message_id != message.message_id
+            || opened.header().kind != self.header.kind
+            || opened.payload() != message.body
+        {
+            return Err(Refusal::Mailbox(
+                "message identity was reused with different bytes".into(),
+            ));
+        }
+        Ok((capability, envelope))
+    }
+
+    fn seal_new(
+        &self,
+        message: &OutboxMessage,
+    ) -> Result<(SignedMailboxCapability, MailboxEnvelope, u64), Refusal> {
         let gate = |e: mvm_core::mailbox::MailboxError| Refusal::Mailbox(e.to_string());
-        self.sent += 1;
-        let n = self.sent;
+        let n = self.sent.checked_add(1).ok_or(Refusal::Malformed)?;
         let counter = |width: usize| {
             let mut bytes = vec![0; width];
             bytes[width - 8..].copy_from_slice(&n.to_be_bytes());
@@ -109,15 +231,22 @@ impl GuestSealer {
         };
         let mut header = self.header.clone();
         header.recipient = message.recipient;
-        header.message_id = MessageId::from_bytes(counter(32).try_into().unwrap());
+        header.message_id = message.message_id;
+        header.correlation_id = CorrelationId::from_bytes(*message.message_id.as_bytes());
         header.nonce = ReplayNonce::from_bytes(counter(16).try_into().unwrap());
         header.sequence = SequenceNumber::new(n).map_err(|_| Refusal::Malformed)?;
-        header.plaintext_len = message.body.len() as u32;
+        header.plaintext_len = message
+            .body
+            .len()
+            .try_into()
+            .map_err(|_| Refusal::Malformed)?;
         let capability =
             sign_capability(self.capability.clone(), &self.authority_key).map_err(gate)?;
+        let mut routing = self.routing.clone();
+        routing.delivery_id = DeliveryId::from_bytes(rand::random());
         let envelope = seal_envelope(
             SealRequest {
-                routing: self.routing.clone(),
+                routing,
                 header,
                 plaintext: &message.body,
             },
@@ -125,8 +254,32 @@ impl GuestSealer {
             &self.sender_key,
         )
         .map_err(gate)?;
-        Ok((capability, envelope))
+        Ok((capability, envelope, n))
     }
+}
+
+fn charge_source_attempt(dir: &Path, message: &OutboxMessage) -> Result<(), Refusal> {
+    let path = dir.join(format!(
+        "{}.attempts",
+        hex::encode(message.message_id.as_bytes())
+    ));
+    let count = match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() && meta.len() <= 3 => {
+            let raw = std::fs::read(&path).map_err(|_| Refusal::Unavailable)?;
+            std::str::from_utf8(&raw)
+                .ok()
+                .and_then(|n| n.parse::<u8>().ok())
+                .ok_or(Refusal::Malformed)?
+        }
+        Ok(_) => return Err(Refusal::Malformed),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(_) => return Err(Refusal::Unavailable),
+    };
+    if count >= MAX_SOURCE_ATTEMPTS {
+        return Err(Refusal::RetriesExhausted);
+    }
+    atomic_write_durable(&path, (count + 1).to_string().as_bytes())
+        .map_err(|_| Refusal::Unavailable)
 }
 
 /// Launch-path entry: serve the guest's mailbox port only when the signed
@@ -159,9 +312,15 @@ pub fn serve_grant(
     guest: (&Path, &Path),
 ) -> std::io::Result<MailboxService> {
     let mut sealer = sealer.with_grant(grant)?;
-    let service = MailboxService::bind(socket, limits, trust.with_grant(grant)?)?;
-    service.serve_guest(guest.0, guest.1, &mut sealer)?;
+    let service = MailboxService::bind_live(socket, limits, trust.with_grant(grant)?)?;
+    let _ = service.serve_guest(guest.0, guest.1, &mut sealer)?;
     Ok(service)
+}
+
+#[derive(Clone, Copy)]
+enum Clock {
+    Context,
+    Wall,
 }
 
 struct State {
@@ -172,6 +331,7 @@ struct State {
 
 struct Shared {
     limits: MailboxLimits,
+    clock: Clock,
     state: Mutex<State>,
 }
 
@@ -183,16 +343,36 @@ pub struct MailboxService {
 }
 
 impl MailboxService {
-    /// Bind `path` (replacing a stale socket file) and serve until dropped.
+    /// Bind `path` (replacing a stale socket file) with the caller-supplied
+    /// context clock; useful for deterministic callers. The production launch
+    /// uses `bind_live` to advance the clock at every admission.
     pub fn bind(
         path: &Path,
         limits: MailboxLimits,
         policy: MailboxPolicy,
     ) -> std::io::Result<Self> {
+        Self::bind_with_clock(path, limits, policy, Clock::Context)
+    }
+
+    pub(crate) fn bind_live(
+        path: &Path,
+        limits: MailboxLimits,
+        policy: MailboxPolicy,
+    ) -> std::io::Result<Self> {
+        Self::bind_with_clock(path, limits, policy, Clock::Wall)
+    }
+
+    fn bind_with_clock(
+        path: &Path,
+        limits: MailboxLimits,
+        policy: MailboxPolicy,
+        clock: Clock,
+    ) -> std::io::Result<Self> {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
         let shared = Arc::new(Shared {
             limits,
+            clock,
             state: Mutex::new(State {
                 queue: VecDeque::new(),
                 replay: InMemoryReplayProtector::default(),
@@ -247,17 +427,16 @@ impl MailboxService {
         per_port: &Path,
         firecracker_mux: &Path,
         sealer: &mut GuestSealer,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<bool> {
         let stream = crate::telemetry_collector::dial_guest_port(
             per_port,
             firecracker_mux,
             mvm_contract::protocol::mailbox::MAILBOX_PORT,
         )?;
-        serve(&self.shared, stream, |body| {
+        stream.set_read_timeout(Some(Duration::from_secs(7)))?;
+        Ok(serve(&self.shared, stream, |body| {
             sealer.seal(OutboxMessage::decode(body)?)
-        })
-        .then_some(())
-        .ok_or_else(|| std::io::Error::other("the guest sent no mailbox frame"))
+        }))
     }
 
     /// Take the oldest accepted plaintext, if any.
@@ -309,9 +488,11 @@ fn serve(
     mut stream: UnixStream,
     prepare: impl FnOnce(&[u8]) -> Result<(SignedMailboxCapability, MailboxEnvelope), Refusal>,
 ) -> bool {
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    if stream.read_timeout().ok().flatten().is_none() {
+        let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    }
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let frame = read_frame(shared, &mut stream);
+    let frame = read_frame(shared.limits.max_frame_bytes, &mut stream);
     let received = frame.is_ok();
     let verdict = frame
         .and_then(|body| prepare(&body))
@@ -322,8 +503,7 @@ fn serve(
     received
 }
 
-fn read_frame(shared: &Shared, stream: &mut UnixStream) -> Result<Vec<u8>, Refusal> {
-    let max = shared.limits.max_frame_bytes;
+fn read_frame(max: usize, stream: &mut UnixStream) -> Result<Vec<u8>, Refusal> {
     let mut len = [0u8; 4];
     stream
         .read_exact(&mut len)
@@ -348,6 +528,13 @@ fn admit(
     let state = &mut *guard;
     if state.queue.len() >= shared.limits.max_depth {
         return Err(Refusal::QueueFull(shared.limits.max_depth));
+    }
+    if let Clock::Wall = shared.clock {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Refusal::Malformed)?
+            .as_millis();
+        state.policy.context.now_unix_ms = now.try_into().map_err(|_| Refusal::Malformed)?;
     }
     let p = &state.policy;
     let plaintext = open_envelope(

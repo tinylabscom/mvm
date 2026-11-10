@@ -20,17 +20,18 @@ use std::io::{Error, ErrorKind, Result, Write as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
 use mvm_contract::protocol::mailbox::{MAILBOX_PORT, MailboxGrant};
+use mvm_core::mailbox::journal::{FileJournalAnchor, JournalLimits, MailboxJournal};
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::vm_backend::{BackendKind, VmId, VmStartConfig};
 use mvm_runtime::backend::AnyBackend;
 use mvm_vmm::host::aux_bin::AuxBin;
 
-use crate::mailbox_launch::{
-    DerivedMailboxKeys, LAUNCH_LIMITS, ServePaths, derive_launch_keys, serve_derived,
-};
+use crate::mailbox_launch::{DerivedMailboxKeys, LAUNCH_LIMITS, derive_launch_keys};
+use crate::mailbox_service::durable::DurableMailboxService;
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
 /// The helper binary this module spawns.
@@ -40,6 +41,8 @@ pub const MAILBOX_BIN_ENV: &str = "MVM_MAILBOX_PATH";
 /// Where the process's pid is recorded, beside the VM.
 pub const MAILBOX_PID_FILE: &str = "mailbox.pid";
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+const READY_MARKER: &[u8; 6] = b"READY\n";
 
 /// What the process reads on stdin. `deny_unknown_fields`, so a field a newer
 /// launcher adds fails closed here.
@@ -62,6 +65,16 @@ pub fn parse(raw: &[u8]) -> serde_json::Result<MailboxProcessConfig> {
 
 /// Serve until neither the launcher nor the VM is left; the exit code.
 pub fn serve(config: MailboxProcessConfig) -> i32 {
+    match serve_durable(config) {
+        Ok(()) => 0,
+        Err(error) => {
+            tracing::error!(%error, "mailbox service failed closed");
+            1
+        }
+    }
+}
+
+fn serve_durable(config: MailboxProcessConfig) -> Result<()> {
     // SAFETY: `getppid` is async-signal-safe and infallible.
     let launcher = unsafe { libc::getppid() };
     let MailboxProcessConfig {
@@ -72,20 +85,44 @@ pub fn serve(config: MailboxProcessConfig) -> i32 {
         firecracker_mux,
         vm_state_dir,
     } = config;
-    let _serving = serve_derived(
-        grant,
-        keys,
-        ServePaths {
-            socket,
-            guest_port,
-            firecracker_mux,
+    let (policy, mut sealer) = keys.trust();
+    let (signer, journal_key, anchor_key) = keys.durable_material();
+    sealer.intent_dir = Some(vm_state_dir.join("mailbox-intents"));
+    let sealer = sealer.with_grant(&grant)?;
+    let address = sealer.capability.address;
+    let anchor = FileJournalAnchor::open(&vm_state_dir.join("mailbox-anchor"), address, anchor_key)
+        .map_err(Error::other)?;
+    let journal = MailboxJournal::open_reconciling(
+        &vm_state_dir.join("mailbox-journal"),
+        address,
+        signer.verifying_key(),
+        journal_key,
+        JournalLimits {
+            max_records: 64,
+            max_bytes: 4 * 1024 * 1024,
         },
+        &anchor,
+    )
+    .map_err(Error::other)?;
+    let service = DurableMailboxService::bind(
+        &socket,
         LAUNCH_LIMITS,
-    );
+        policy.with_grant(&grant)?,
+        signer,
+        journal,
+        anchor,
+    )?;
+    std::io::stdout().write_all(READY_MARKER)?;
+    let mut sealer = sealer;
     while endpoint_needed(launcher_is_alive(launcher), vm_is_alive(&vm_state_dir)) {
-        std::thread::sleep(POLL_INTERVAL);
+        if service
+            .serve_guest(&guest_port, &firecracker_mux, &mut sealer)
+            .is_err()
+        {
+            std::thread::sleep(POLL_INTERVAL);
+        }
     }
-    0
+    Ok(())
 }
 
 fn vm_is_alive(state_dir: &Path) -> bool {
@@ -121,10 +158,29 @@ pub fn build_config(
 fn command(bin: &Path) -> Command {
     let mut cmd = mvm_core::env_hygiene::helper_command(bin);
     cmd.stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
     cmd
+}
+
+fn wait_ready(mut stdout: impl std::io::Read + Send + 'static, timeout: Duration) -> Result<()> {
+    let (tx, rx) = sync_channel(1);
+    std::thread::spawn(move || {
+        let mut marker = [0u8; READY_MARKER.len()];
+        let outcome = stdout.read_exact(&mut marker).map(|()| marker);
+        let _ = tx.send(outcome);
+    });
+    let marker = rx
+        .recv_timeout(timeout)
+        .map_err(|_| Error::new(ErrorKind::TimedOut, "mailbox helper readiness timed out"))??;
+    if &marker != READY_MARKER {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "mailbox helper sent an invalid readiness marker",
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse a launch whose plan grants a mailbox on a backend that cannot reach
@@ -219,7 +275,21 @@ pub fn spawn_for_launch(
         let _ = child.wait();
         return Err(error);
     }
-    std::fs::write(state_dir.join(MAILBOX_PID_FILE), child.id().to_string())?;
+    let ready = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::other("mvm-mailbox stdout was not piped"))
+        .and_then(|stdout| wait_ready(stdout, READY_TIMEOUT));
+    if let Err(error) = ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    if let Err(error) = std::fs::write(state_dir.join(MAILBOX_PID_FILE), child.id().to_string()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     Ok(Some(child.id()))
 }
 
@@ -227,6 +297,32 @@ pub fn spawn_for_launch(
 mod tests {
     use super::*;
     use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxId};
+
+    #[test]
+    fn helper_readiness_requires_the_exact_marker_before_launch_succeeds() {
+        let timeout = Duration::from_millis(100);
+        assert!(wait_ready(std::io::Cursor::new(*READY_MARKER), timeout).is_ok());
+        assert_eq!(
+            wait_ready(std::io::Cursor::new(*b"WRONG\n"), timeout)
+                .expect_err("wrong marker")
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            wait_ready(std::io::Cursor::new(Vec::<u8>::new()), timeout)
+                .expect_err("helper exited")
+                .kind(),
+            ErrorKind::UnexpectedEof
+        );
+        let (blocked, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert_eq!(
+            wait_ready(blocked, Duration::from_millis(1))
+                .expect_err("silent helper cannot hang the launch")
+                .kind(),
+            ErrorKind::TimedOut
+        );
+        drop(peer);
+    }
 
     fn keys_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

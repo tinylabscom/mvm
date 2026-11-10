@@ -294,6 +294,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
                     &IdentityDriveContents {
                         ingress: req.ingress,
                         egress_ca_cert_pem: egress_ca.guest_cert_pem(),
+                        mailbox_ack_key: None,
                     },
                 )?;
                 // Persisted so a warm child claimed from this VM pins the key

@@ -29,6 +29,10 @@ pub const IDENTITY_DRIVE_LABEL: &str = "mvm-identity";
 /// Basename of the guest's 32-byte signing key on the drive.
 pub const GUEST_SIGNING_KEY_FILE: &str = "flowmux-guest-signing-key";
 
+/// Optional per-boot mailbox ACK signing seed, independently enrolled before use.
+/// The root-owned guest agent alone may read this; the egress client cannot.
+pub const MAILBOX_ACK_SIGNING_KEY_FILE: &str = "mailbox-ack-signing-key";
+
 /// Basename of the host-signer trust anchor on the drive.
 pub const HOST_SIGNER_PUB_FILE: &str = "host-signer.pub";
 
@@ -121,6 +125,9 @@ pub fn install_egress_ca_trust(run_dir: &Path, baked_roots: &[&Path]) -> std::io
 
 /// Mode the signing key is written with inside the guest.
 pub const GUEST_SIGNING_KEY_MODE: u32 = 0o400;
+
+/// The mailbox ACK key stays root-owned, never assigned to the egress service.
+pub const MAILBOX_ACK_SIGNING_KEY_MODE: u32 = 0o400;
 
 /// Mode the public anchor is written with inside the guest.
 pub const HOST_SIGNER_PUB_MODE: u32 = 0o444;
@@ -292,7 +299,8 @@ mod linux {
     use super::{
         EGRESS_CA_CERT_FILE, EGRESS_CA_CERT_MODE, GUEST_SIGNING_KEY_FILE, GUEST_SIGNING_KEY_MODE,
         HOST_SIGNER_PUB_FILE, HOST_SIGNER_PUB_MODE, IDENTITY_DRIVE_LABEL, INGRESS_TARGETS_FILE,
-        INGRESS_TARGETS_MODE, IdentityDriveError, RUN_MVM_DIR, find_labeled_ext4_disk_among,
+        INGRESS_TARGETS_MODE, IdentityDriveError, MAILBOX_ACK_SIGNING_KEY_FILE,
+        MAILBOX_ACK_SIGNING_KEY_MODE, RUN_MVM_DIR, find_labeled_ext4_disk_among,
         virtio_block_devices,
     };
     use std::path::Path;
@@ -318,8 +326,12 @@ mod linux {
     pub fn provision_identity_from_drive_for_uid(
         signing_key_uid: u32,
     ) -> Result<(), IdentityDriveError> {
-        let device = find_labeled_ext4_disk_among(virtio_block_devices(), IDENTITY_DRIVE_LABEL)
-            .ok_or(IdentityDriveError::NotAttached)?;
+        let Some(device) =
+            find_labeled_ext4_disk_among(virtio_block_devices(), IDENTITY_DRIVE_LABEL)
+        else {
+            clear_mailbox_ack_key(&Path::new(RUN_MVM_DIR).join(MAILBOX_ACK_SIGNING_KEY_FILE))?;
+            return Err(IdentityDriveError::NotAttached);
+        };
 
         std::fs::create_dir_all(MOUNTPOINT).map_err(io_err("create the identity mountpoint"))?;
         mount_ro(&device, MOUNTPOINT)?;
@@ -357,7 +369,80 @@ mod linux {
             EGRESS_CA_CERT_FILE,
             EGRESS_CA_CERT_MODE,
             "the per-VM egress CA certificate",
-        )
+        )?;
+        install_mailbox_ack_key(Path::new(MOUNTPOINT), Path::new(RUN_MVM_DIR))
+    }
+
+    pub(super) fn install_mailbox_ack_key(
+        drive_dir: &Path,
+        run_dir: &Path,
+    ) -> Result<(), IdentityDriveError> {
+        let to = run_dir.join(MAILBOX_ACK_SIGNING_KEY_FILE);
+        // A restored guest must never keep a previous boot's key, and a
+        // symlink at the destination must not redirect secret bytes.
+        clear_mailbox_ack_key(&to)?;
+        let seed = read_optional_mailbox_ack_key(&drive_dir.join(MAILBOX_ACK_SIGNING_KEY_FILE))?;
+        if let Some(seed) = seed {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(MAILBOX_ACK_SIGNING_KEY_MODE)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&to)
+                .map_err(io_err("create the root-only mailbox ACK key"))?;
+            file.write_all(&seed)
+                .map_err(io_err("write the mailbox ACK key to /run/mvm"))?;
+        }
+        Ok(())
+    }
+
+    fn clear_mailbox_ack_key(path: &Path) -> Result<(), IdentityDriveError> {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(IdentityDriveError::Unreadable(format!(
+                    "replace stale mailbox ACK key: {error}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn read_optional_mailbox_ack_key(
+        path: &Path,
+    ) -> Result<Option<[u8; 32]>, IdentityDriveError> {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(IdentityDriveError::Unreadable(format!(
+                    "open mailbox ACK key: {error}"
+                )));
+            }
+        };
+        let metadata = file.metadata().map_err(io_err("inspect mailbox ACK key"))?;
+        if !metadata.file_type().is_file() || metadata.len() != 32 {
+            return Err(IdentityDriveError::Unreadable(
+                "mailbox ACK key must be a regular 32-byte file".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(33)
+            .read_to_end(&mut bytes)
+            .map_err(io_err("read mailbox ACK key from the drive"))?;
+        let seed = bytes.try_into().map_err(|_: Vec<u8>| {
+            IdentityDriveError::Unreadable("mailbox ACK key must be exactly 32 bytes".into())
+        })?;
+        Ok(Some(seed))
     }
 
     /// Copy a drive file that a boot may legitimately not carry.
@@ -449,6 +534,74 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mailbox_ack_key_is_optional_but_present_material_must_be_exactly_32_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(MAILBOX_ACK_SIGNING_KEY_FILE);
+        assert!(
+            linux::read_optional_mailbox_ack_key(&path)
+                .unwrap()
+                .is_none()
+        );
+        for size in [0, 31, 33, 1024 * 1024] {
+            std::fs::write(&path, vec![7u8; size]).expect("write bad key");
+            assert!(
+                linux::read_optional_mailbox_ack_key(&path).is_err(),
+                "{size}"
+            );
+        }
+        std::fs::write(&path, [7u8; 32]).expect("write key");
+        assert_eq!(
+            linux::read_optional_mailbox_ack_key(&path).expect("read key"),
+            Some([7u8; 32])
+        );
+        std::fs::remove_file(&path).expect("remove key");
+        std::fs::create_dir(&path).expect("unreadable key");
+        assert!(linux::read_optional_mailbox_ack_key(&path).is_err());
+        std::fs::remove_dir(&path).expect("remove directory");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &path).expect("symlink");
+        assert!(
+            linux::read_optional_mailbox_ack_key(&path).is_err(),
+            "a dangling symlink is not an absent key"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mailbox_ack_key_is_root_only_and_absence_clears_a_stale_boot() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let drive = tempfile::tempdir().expect("drive");
+        let run = tempfile::tempdir().expect("run");
+        let output = run.path().join(MAILBOX_ACK_SIGNING_KEY_FILE);
+        let supplied = drive.path().join(MAILBOX_ACK_SIGNING_KEY_FILE);
+        let outside = run.path().join("outside");
+        std::fs::write(&outside, b"untouched").expect("sentinel");
+        std::os::unix::fs::symlink(&outside, &output).expect("stale symlink");
+        std::fs::write(&supplied, [42; 32]).expect("drive key");
+        linux::install_mailbox_ack_key(drive.path(), run.path()).expect("copy");
+        let meta = std::fs::symlink_metadata(&output).expect("installed key");
+        assert!(meta.file_type().is_file());
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            MAILBOX_ACK_SIGNING_KEY_MODE
+        );
+        assert_eq!(
+            meta.uid(),
+            std::fs::metadata(run.path()).unwrap().uid(),
+            "the key belongs to the provisioning principal, root in the guest"
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), [42; 32]);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+        std::fs::remove_file(&supplied).expect("no key on next boot");
+        linux::install_mailbox_ack_key(drive.path(), run.path()).expect("remove stale key");
+        assert!(!output.exists());
+        std::fs::write(&output, [9; 32]).expect("plant previous boot key");
+        std::fs::write(&supplied, [7; 31]).expect("malformed next boot key");
+        assert!(linux::install_mailbox_ack_key(drive.path(), run.path()).is_err());
+        assert!(!output.exists(), "malformed new key must clear the old one");
+    }
 
     #[test]
     fn the_trust_bundle_is_the_baked_roots_plus_the_delivered_certificate() {

@@ -320,6 +320,7 @@ fn sealer(channel: &Channel, operations: &[MailboxOperation]) -> GuestSealer {
         header: header(1, 1),
         routing: routing(),
         sent: 0,
+        intent_dir: None,
     }
 }
 
@@ -327,6 +328,7 @@ fn sealer(channel: &Channel, operations: &[MailboxOperation]) -> GuestSealer {
 fn outbox_message() -> OutboxMessage {
     OutboxMessage {
         recipient: aircraft_principal(),
+        message_id: MessageId::from_bytes([25; 32]),
         body: b"hello".to_vec(),
     }
 }
@@ -611,7 +613,7 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
     // A Firecracker-style mux: the guest end answers CONNECT, then sends.
     let guest = std::thread::spawn(move || {
         let mut verdicts = Vec::new();
-        for _ in 0..=LIMITS.max_depth {
+        for n in 0..=LIMITS.max_depth {
             let (stream, _) = listener.accept().unwrap();
             let mut line = String::new();
             BufReader::new(stream.try_clone().unwrap())
@@ -620,7 +622,9 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
             assert_eq!(line.trim(), "CONNECT 5257");
             (&stream).write_all(b"OK 1\n").unwrap();
             let mut stream = stream;
-            verdicts.push(send_outbox_message(&mut stream, &outbox_message()));
+            let mut message = outbox_message();
+            message.message_id = MessageId::from_bytes([n as u8 + 1; 32]);
+            verdicts.push(send_outbox_message(&mut stream, &message));
         }
         verdicts
     });
@@ -735,7 +739,14 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
     let listener = UnixListener::bind(&per_port).unwrap();
     listener.set_nonblocking(true).unwrap();
     let (plan, trust) = plan_and_trust(&channel, false);
-    let sealer_for = || sealer(&channel, &ops);
+    let sealer_for = || {
+        let mut sealer = sealer(&channel, &ops);
+        let future = 4_000_000_000_000;
+        sealer.capability.expires_at_unix_ms = future;
+        sealer.header.expires_at_unix_ms = future;
+        sealer.routing.expires_at_unix_ms = future;
+        sealer
+    };
     let none = serve_granted_guest(
         plan.mailbox.as_ref(),
         trust,
@@ -754,7 +765,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
     // A grant naming an authority the host does not hold is refused.
     let (mut plan, trust) = plan_and_trust(&channel, true);
     plan.mailbox.as_mut().unwrap().authority_key = [1; 32];
-    let refused = serve_granted_guest(
+    let foreign = serve_granted_guest(
         plan.mailbox.as_ref(),
         trust,
         sealer_for(),
@@ -762,7 +773,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
         &socket,
         (&per_port, &absent_mux),
     );
-    assert!(refused.is_err(), "a foreign authority key is not honored");
+    assert!(foreign.is_err(), "a foreign authority key is not honored");
 
     // Grant present: the guest forwards plaintext, the host seals and queues.
     listener.set_nonblocking(false).unwrap();
@@ -783,6 +794,23 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
     .expect("a granted plan is served");
     assert_eq!(guest.join().unwrap(), Ok(()));
     assert_eq!(service.receive().unwrap(), b"hello");
+
+    let expired = seal_envelope(
+        SealRequest {
+            routing: routing(),
+            header: header(1, 2),
+            plaintext: b"hello",
+        },
+        &channel.encryption_key,
+        &channel.sender_key,
+    )
+    .unwrap();
+    let capability = sign_capability(grant(&ops), &channel.authority_key).unwrap();
+    assert_eq!(
+        send(&socket, &capability, &expired),
+        Err(refused(MailboxError::Expired)),
+        "live admission must not reuse the clock captured when the service started"
+    );
 }
 
 /// A host key directory in a tempdir: the signing key, its public half and the
@@ -822,6 +850,26 @@ fn granted_plan(authority_key: [u8; 32]) -> ExecutionPlan {
         epoch: MbEpoch::new(1).unwrap(),
     });
     plan
+}
+
+#[test]
+fn a_restarted_mailbox_sealer_does_not_reuse_its_sender_boot() {
+    use mvm_hostd::mailbox_launch::{authority_key_for, derive_launch_keys};
+
+    let dir = tempfile::tempdir().unwrap();
+    host_keys(dir.path(), 5);
+    let authority = authority_key_for(dir.path(), &address().mailbox).unwrap();
+    let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
+    let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+    let (_, first) = keys.trust();
+    let (_, restarted) = keys.trust();
+    let first = first.with_grant(&grant).unwrap();
+    let restarted = restarted.with_grant(&grant).unwrap();
+
+    assert_ne!(
+        first.header.sender_boot, restarted.header.sender_boot,
+        "a fresh process starts its sequence at one but must not replay the prior boot's identity"
+    );
 }
 
 /// The sealing keys are derived from the host key per mailbox: they differ
@@ -886,6 +934,7 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
             socket: dir.path().join("mailbox.sock"),
             guest_port: dir.path().join("port.sock"),
             firecracker_mux: dir.path().join("absent-mux"),
+            intent_dir: Some(dir.path().join("intents")),
         },
         LAUNCH_LIMITS,
     );
@@ -897,6 +946,297 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
         })
     });
     assert_eq!(received.unwrap(), b"hello");
+}
+
+#[test]
+fn a_running_guest_submits_again_after_its_first_message_was_consumed() {
+    use mvm_hostd::mailbox_launch::{
+        LAUNCH_LIMITS, ServePaths, authority_key_for, derive_launch_keys, serve_derived,
+    };
+    use std::os::unix::net::UnixListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    host_keys(dir.path(), 5);
+    let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
+    let authority = authority_key_for(dir.path(), &address().mailbox).unwrap();
+    let grant = granted_plan(authority.to_bytes()).mailbox.unwrap();
+    let keys = derive_launch_keys(dir.path(), &grant).unwrap();
+    let outbox = dir.path().join("outbox");
+    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
+    let guest_outbox = outbox.clone();
+    let guest = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            mvm_agentd::mailbox_outbox::wait_and_forward_outbox(&mut stream, &guest_outbox)
+                .expect("guest submits pending operation");
+        }
+    });
+    let launch = serve_derived(
+        grant,
+        keys,
+        ServePaths {
+            socket: dir.path().join("mailbox.sock"),
+            guest_port: dir.path().join("port.sock"),
+            firecracker_mux: dir.path().join("absent-mux"),
+            intent_dir: Some(dir.path().join("intents")),
+        },
+        LAUNCH_LIMITS,
+    );
+    let receive = || {
+        (0..100)
+            .find_map(|_| {
+                launch.receive().or_else(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    None
+                })
+            })
+            .expect("the live guest message arrives")
+    };
+    assert_eq!(receive(), b"hello");
+    let next = OutboxMessage::new(aircraft_principal(), b"after-start".to_vec());
+    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &next).unwrap();
+    assert_eq!(receive(), b"after-start");
+    guest.join().unwrap();
+}
+
+#[test]
+fn durable_local_destination_signs_only_after_journal_and_anchor_commit() {
+    use mvm_contract::protocol::mailbox::DeliveryOutcome;
+    use mvm_core::mailbox::journal::{FileJournalAnchor, JournalLimits, MailboxJournal};
+    use mvm_hostd::mailbox_service::durable::{DurableMailboxService, send as send_durable};
+
+    let (node, channel) = channel_with_one_node();
+    let journal_dir = node.home.path().join("journal");
+    let anchor_path = node.home.path().join("mailbox-anchor");
+    let socket = node.home.path().join("durable.sock");
+    let signer = channel.authority_key.clone();
+    let authority = signer.verifying_key();
+    let limits = JournalLimits {
+        max_records: 2,
+        max_bytes: 64 * 1024,
+    };
+    let mut header = header(1, 3);
+    header.expires_at_unix_ms = 4_000_000_000_000;
+    let mut routing = routing();
+    routing.expires_at_unix_ms = header.expires_at_unix_ms;
+    let mut capability_grant = grant(&[MailboxOperation::Send]);
+    capability_grant.expires_at_unix_ms = header.expires_at_unix_ms;
+    let mut undersized_grant = capability_grant.clone();
+    undersized_grant.max_payload_bytes = 4;
+    let undersized = sign_capability(undersized_grant, &signer).unwrap();
+    let capability = sign_capability(capability_grant, &signer).unwrap();
+    let envelope = seal_envelope(
+        SealRequest {
+            routing,
+            header: header.clone(),
+            plaintext: b"hello",
+        },
+        &channel.encryption_key,
+        &channel.sender_key,
+    )
+    .unwrap();
+
+    let start = || {
+        let anchor = FileJournalAnchor::open(&anchor_path, address(), [91; 32])
+            .expect("private local anchor");
+        let journal = MailboxJournal::open(
+            &journal_dir,
+            address(),
+            authority,
+            [90; 32],
+            limits,
+            anchor.tip(),
+        )
+        .expect("journal recovery");
+        DurableMailboxService::bind(
+            &socket,
+            LIMITS,
+            MailboxPolicy {
+                context: context(1),
+                encryption_key: Key::from_bytes([23; 32]),
+                sender_key: channel.sender_key.verifying_key(),
+                authority_key: authority,
+            },
+            signer.clone(),
+            journal,
+            anchor,
+        )
+        .expect("destination listener")
+    };
+
+    let service = start();
+    assert_eq!(
+        send_durable(&socket, &undersized, &envelope, &header, &authority),
+        Err(Refusal::Oversized(4)),
+        "the signed payload ceiling is a terminal refusal, not a durable receipt"
+    );
+    let accepted = send_durable(&socket, &capability, &envelope, &header, &authority)
+        .expect("destination signed durable verdict");
+    assert_eq!(accepted.receipt.outcome, DeliveryOutcome::AcceptedDurable);
+    let mut receive_grant = grant(&[MailboxOperation::Receive]);
+    receive_grant.subject = aircraft_principal();
+    receive_grant.capability_id = CapabilityId::from_bytes([88; 32]);
+    receive_grant.expires_at_unix_ms = header.expires_at_unix_ms;
+    let receive_capability = sign_capability(receive_grant, &signer).unwrap();
+    let mut reader = context(1);
+    reader.acting_principal = aircraft_principal();
+    reader.required_operation = MailboxOperation::Receive;
+    assert!(matches!(
+        service.receive_next(&capability, &reader),
+        Err(mvm_core::mailbox::journal::JournalError::Mailbox(
+            MailboxError::WrongCapabilitySubject
+        ))
+    ));
+    let pending = service
+        .receive_next(&receive_capability, &reader)
+        .expect("independent Receive authority")
+        .expect("pending message");
+    assert_eq!(pending.payload(), b"hello");
+    let identity = pending.identity();
+    service
+        .acknowledge(identity, &receive_capability, &reader)
+        .expect("durable ACK");
+    assert!(
+        service
+            .receive_next(&receive_capability, &reader)
+            .expect("after ACK")
+            .is_none()
+    );
+    drop(service);
+    let anchor = FileJournalAnchor::open(&anchor_path, address(), [91; 32])
+        .expect("anchor survived destination restart");
+    let tip = anchor.tip();
+    assert_eq!(tip.cursor, 2, "acceptance and ACK each advanced the anchor");
+    drop(anchor);
+    let service = start();
+    assert!(
+        service
+            .receive_next(&receive_capability, &reader)
+            .expect("ACK survived restart")
+            .is_none()
+    );
+    let duplicate = send_durable(&socket, &capability, &envelope, &header, &authority)
+        .expect("retry after service restart");
+    assert_eq!(duplicate.receipt.outcome, DeliveryOutcome::Duplicate);
+    drop(service);
+    let anchor = FileJournalAnchor::open(&anchor_path, address(), [91; 32])
+        .expect("retry did not corrupt the anchor");
+    assert_eq!(anchor.tip(), tip, "retry must not append a record");
+}
+
+#[test]
+fn durable_mailbox_helper_process() {
+    let Ok(root) = std::env::var("MVM_MAILBOX_TEST_ROOT") else {
+        return;
+    };
+    use mvm_core::mailbox::journal::{FileJournalAnchor, JournalLimits, MailboxJournal};
+    use mvm_hostd::mailbox_service::durable::DurableMailboxService;
+
+    let root = std::path::Path::new(&root);
+    let signer = SigningKey::from_bytes(&[22; 32]);
+    let authority = signer.verifying_key();
+    let anchor = FileJournalAnchor::open(&root.join("anchor"), address(), [91; 32])
+        .expect("recover software anchor");
+    let journal = MailboxJournal::open_reconciling(
+        &root.join("journal"),
+        address(),
+        authority,
+        [90; 32],
+        JournalLimits {
+            max_records: 2,
+            max_bytes: 64 * 1024,
+        },
+        &anchor,
+    )
+    .expect("recover journal and dedup");
+    let _service = DurableMailboxService::bind(
+        &root.join("durable.sock"),
+        LIMITS,
+        MailboxPolicy {
+            context: context(1),
+            encryption_key: Key::from_bytes([23; 32]),
+            sender_key: SigningKey::from_bytes(&[21; 32]).verifying_key(),
+            authority_key: authority,
+        },
+        signer,
+        journal,
+        anchor,
+    )
+    .expect("bind destination");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+#[test]
+fn a_killed_destination_reopens_its_anchor_and_deduplicates_the_retry() {
+    use mvm_contract::protocol::mailbox::DeliveryOutcome;
+    use mvm_core::mailbox::journal::FileJournalAnchor;
+    use mvm_hostd::mailbox_service::durable::send as send_durable;
+
+    let dir = tempfile::tempdir_in("/tmp").expect("short Unix socket path");
+    let socket = dir.path().join("durable.sock");
+    let signer = SigningKey::from_bytes(&[22; 32]);
+    let authority = signer.verifying_key();
+    let mut header = header(1, 3);
+    header.expires_at_unix_ms = 4_000_000_000_000;
+    let mut routing = routing();
+    routing.expires_at_unix_ms = header.expires_at_unix_ms;
+    let mut capability_grant = grant(&[MailboxOperation::Send]);
+    capability_grant.expires_at_unix_ms = header.expires_at_unix_ms;
+    let capability = sign_capability(capability_grant, &signer).unwrap();
+    let envelope = seal_envelope(
+        SealRequest {
+            routing,
+            header: header.clone(),
+            plaintext: b"hello",
+        },
+        &Key::from_bytes([23; 32]),
+        &SigningKey::from_bytes(&[21; 32]),
+    )
+    .unwrap();
+    let launch = || {
+        KillOnDrop(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "durable_mailbox_helper_process"])
+                .env("MVM_MAILBOX_TEST_ROOT", dir.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("start destination process"),
+            dir.path().join("child.log"),
+        )
+    };
+    let submit = || {
+        (0..100)
+            .find_map(|_| {
+                match send_durable(&socket, &capability, &envelope, &header, &authority) {
+                    Ok(receipt) => Some(receipt),
+                    Err(Refusal::Unavailable) => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        None
+                    }
+                    Err(other) => panic!("unexpected destination refusal: {other}"),
+                }
+            })
+            .expect("destination was ready within two seconds")
+    };
+
+    let mut process = launch();
+    assert_eq!(submit().receipt.outcome, DeliveryOutcome::AcceptedDurable);
+    process.0.kill().expect("crash destination");
+    process.0.wait().expect("reap crashed process");
+    drop(process);
+    let anchor = FileJournalAnchor::open(&dir.path().join("anchor"), address(), [91; 32])
+        .expect("anchor survives process crash");
+    assert_eq!(
+        anchor.tip().cursor,
+        1,
+        "the signed verdict followed durable commit"
+    );
+    drop(anchor);
+    let _restarted = launch();
+    assert_eq!(submit().receipt.outcome, DeliveryOutcome::Duplicate);
 }
 
 struct KillOnDrop(std::process::Child, std::path::PathBuf);
@@ -985,6 +1325,95 @@ fn the_mailbox_process_serves_a_granted_mailbox_from_derived_keys_alone() {
         }),
         "the host service bound its socket; stderr:\n{}",
         process.stderr()
+    );
+    assert!(
+        !outbox.exists(),
+        "guest received a durable admission verdict"
+    );
+    assert!(state_dir.join("mailbox-anchor").exists());
+    let record = std::fs::read(
+        state_dir
+            .join("mailbox-journal")
+            .join("entry-00000000000000000001.bin"),
+    )
+    .expect("accepted canonical ciphertext is durable");
+    assert!(
+        !record.windows(5).any(|w| w == b"hello"),
+        "the durable record never stores guest plaintext"
+    );
+    let later = OutboxMessage::new(aircraft_principal(), b"after-start".to_vec());
+    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &later).unwrap();
+    let mut stream = process.accept(&listener);
+    assert_eq!(
+        mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox),
+        Ok(()),
+        "the running process keeps serving the live guest"
+    );
+    assert!(
+        state_dir
+            .join("mailbox-journal")
+            .join("entry-00000000000000000002.bin")
+            .exists(),
+        "a post-start operation committed durably"
+    );
+    process.0.kill().expect("crash the mailbox helper");
+    process.0.wait().expect("reap the crashed helper");
+    drop(process);
+    mvm_agentd::mailbox_outbox::write_outbox(&outbox, &outbox_message()).unwrap();
+    let mut restarted = spawn_mailbox_process(&wire);
+    let forwarded = (0..8).any(|_| {
+        let mut stream = restarted.accept(&listener);
+        matches!(
+            mvm_agentd::mailbox_outbox::forward_outbox(&mut stream, &outbox),
+            Ok(())
+        )
+    });
+    assert!(
+        forwarded,
+        "the same immutable guest operation must be reconciled after restart"
+    );
+    assert!(
+        !state_dir
+            .join("mailbox-journal")
+            .join("entry-00000000000000000003.bin")
+            .exists(),
+        "a recovered duplicate does not create a second durable acceptance"
+    );
+}
+
+#[test]
+fn a_corrupt_mailbox_anchor_prevents_the_helper_from_reporting_ready() {
+    use mvm_hostd::mailbox_process::build_config;
+
+    let dir = tempfile::tempdir().unwrap();
+    let keys = dir.path().join("keys");
+    std::fs::create_dir_all(&keys).unwrap();
+    host_keys(&keys, 5);
+    let state_dir = dir.path().join("vm");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let authority = mvm_hostd::mailbox_launch::authority_key_for(&keys, &address().mailbox)
+        .unwrap()
+        .to_bytes();
+    let grant = granted_plan(authority).mailbox.unwrap();
+    let config = build_config(&keys, &grant, &state_dir).unwrap();
+    std::fs::write(state_dir.join("mailbox-anchor"), b"{").unwrap();
+    let mut process = spawn_mailbox_process(&serde_json::to_vec(&config).unwrap());
+    let status = (0..100).find_map(|_| {
+        let exited = process.0.try_wait().unwrap();
+        if exited.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        exited
+    });
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(1),
+        "a corrupt anchor must fail closed; stderr:\n{}",
+        process.stderr()
+    );
+    assert!(
+        !config.socket.exists(),
+        "no mailbox endpoint may be published from a corrupt anchor"
     );
 }
 
