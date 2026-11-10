@@ -22,9 +22,10 @@
 //! Between nodes there is no Iroh or relay and no cross-host transport; the
 //! TCP transport is loopback inside this process. Only the aircraft node runs
 //! a service. A booted guest's mailbox path is not exercised by this test: it
-//! was witnessed by hand on a Firecracker host, as recorded under "Demo
-//! status" in `specs/contracts/host-interface-distributed-execution.md`. Run
-//! with `--nocapture` to read the timeline.
+//! was witnessed by hand, separately, on a Firecracker host and on an HVF host
+//! (macOS 26+ Apple Silicon), as recorded under "Demo status" in
+//! `specs/contracts/host-interface-distributed-execution.md`. Neither is a CI
+//! lane. Run with `--nocapture` to read the timeline.
 
 use ed25519_dalek::SigningKey;
 use mvm_contract::protocol::mailbox::{
@@ -524,7 +525,7 @@ fn contain_terminate_and_rebuild() {
     }
     let timeline = ship.timeline("analyst");
     println!(
-        "\nsimulated: the three nodes are simulated nodes in one test process; their VMs are gated and audited but none boots here; node-to-node mailbox delivery is a local Unix socket or a loopback TCP transport (no Iroh, no cross-host transport); the booted-guest mailbox path is a separate manual Firecracker witness, see Demo status in specs/contracts/host-interface-distributed-execution.md"
+        "\nsimulated: the three nodes are simulated nodes in one test process; their VMs are gated and audited but none boots here; node-to-node mailbox delivery is a local Unix socket or a loopback TCP transport (no Iroh, no cross-host transport); the booted-guest mailbox path is wired through the backend capability on Firecracker and HVF and live-witnessed by separate manual runs on each, not CI lanes, see Demo status in specs/contracts/host-interface-distributed-execution.md"
     );
     println!("\n--- evidence timeline: ship / analyst ---");
     for line in &timeline {
