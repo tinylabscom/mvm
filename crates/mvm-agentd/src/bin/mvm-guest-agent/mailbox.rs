@@ -38,6 +38,12 @@ pub(crate) fn init_mailbox() {
     });
 }
 
+/// The host re-dials an idle guest forever, so only the first few refusals
+/// and then one in a hundred are logged.
+fn logs_refusal(refused: u32) -> bool {
+    refused < 3 || refused.is_multiple_of(100)
+}
+
 /// One host connection at a time, each answered from the outbox.
 fn accept_loop(listener_fd: RawFd) {
     let mut refused = 0u32;
@@ -50,9 +56,7 @@ fn accept_loop(listener_fd: RawFd) {
         let mut stream = unsafe { std::fs::File::from_raw_fd(cfd) };
         let _ = bound_socket_io(cfd, MAILBOX_IO_TIMEOUT);
         if let Err(refusal) = forward_outbox(&mut stream, Path::new(OUTBOX_PATH)) {
-            // The host re-dials until the workload writes its frame; log the
-            // first few refusals and then one in a hundred.
-            if refused < 3 || refused.is_multiple_of(100) {
+            if logs_refusal(refused) {
                 eprintln!("mvm-guest-agent: mailbox frame not delivered: {refusal}");
             }
             refused = refused.saturating_add(1);
@@ -63,6 +67,11 @@ fn accept_loop(listener_fd: RawFd) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_idle_guest_logs_a_bounded_number_of_refusals() {
+        assert_eq!((0..1000).filter(|&n| logs_refusal(n)).count(), 3 + 10 - 1);
+    }
 
     #[test]
     fn only_the_exact_token_asserts_a_mailbox() {
