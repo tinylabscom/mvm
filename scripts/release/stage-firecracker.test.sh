@@ -86,7 +86,7 @@ write_lock "$up"
 out="$(run_script "$work/ok" --base-url "file://$up" 2>&1)" || fail "good bytes were refused: $out"
 grep -qF "staged firecracker $version ($arch)" <<<"$out" || fail "no summary line: $out"
 [ -x "$work/ok/firecracker" ] || fail "firecracker is not executable"
-[ ! -x "$work/ok/LICENSE" ] && [ ! -x "$work/ok/NOTICE" ] || fail "a license file is executable"
+[[ ! -x "$work/ok/LICENSE" && ! -x "$work/ok/NOTICE" ]] || fail "a license file is executable"
 cmp -s "$work/ok/firecracker" "$work/pack/$binary" || fail "the staged binary differs from the upstream one"
 staged_names="$(find "$work/ok" -mindepth 1 -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ')"
 [ "$staged_names" = "LICENSE NOTICE firecracker " ] \

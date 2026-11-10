@@ -81,7 +81,7 @@ tar -xzf "$work/$tarball" -C "$work" "$binary" "$member_dir/LICENSE" "$member_di
   || fail "$tarball does not contain $binary with its LICENSE and NOTICE"
 
 extracted="$work/$binary"
-[ -f "$extracted" ] && [ ! -L "$extracted" ] || fail "$binary is not a regular file"
+[[ -f "$extracted" && ! -L "$extracted" ]] || fail "$binary is not a regular file"
 got="$(sha256_of "$extracted")"
 [ "$got" = "$binary_sha256" ] \
   || fail "$binary is $got, but the lock pins $binary_sha256; nothing was staged"
