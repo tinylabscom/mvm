@@ -59,6 +59,8 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_published_installed_boot.py' -v
           python3 -m unittest discover -s scripts/release -p 'test_*.py' -v
           python3 -m unittest discover -s nix/packaging/aur -p 'test_*.py' -v
+          bash scripts/release/stage-firecracker.test.sh
+          bash scripts/build-distro-packages.test.sh
           bash nix/packaging/release/verify-release-assets.test.sh
           python3 nix/packaging/release/verify-release-assets.auth.test.py
           python3 scripts/test_rust_registry_smoke.py

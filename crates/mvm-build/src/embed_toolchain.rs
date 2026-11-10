@@ -98,6 +98,9 @@ pub fn resolve_pinned_zig(zig_pin: &str) -> Result<Option<String>, String> {
     {
         return Ok(Some(p));
     }
+    if let Some(path) = home_dir().and_then(|home| ziglang_isolated_path(zig_pin, &home)) {
+        return Ok(Some(path));
+    }
     if let Some(path) = ziglang_zig_path(zig_pin) {
         return Ok(Some(path));
     }
@@ -232,6 +235,15 @@ fn zig_path_matches(path: &str, zig_pin: &str) -> bool {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn ziglang_isolated_path(zig_pin: &str, home: &Path) -> Option<String> {
+    let candidate = home
+        .join(".local/share/mvm/toolchains/zig")
+        .join(zig_pin)
+        .join("ziglang/zig");
+    let path = candidate.display().to_string();
+    zig_path_matches(&path, zig_pin).then_some(path)
 }
 
 pub(crate) fn ziglang_mise_path(zig_pin: &str, home: &Path) -> Option<String> {
@@ -437,5 +449,30 @@ aarch64 = "aarch64-unknown-linux-musl"
         }
 
         assert!(ziglang_mise_path("0.13.0", tmp.path()).is_none());
+    }
+
+    #[test]
+    fn ziglang_isolated_path_requires_the_pinned_binary_version() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let zig = tmp
+            .path()
+            .join(".local/share/mvm/toolchains/zig/0.13.0/ziglang/zig");
+        std::fs::create_dir_all(zig.parent().expect("zig has a parent")).expect("mkdir zig");
+        std::fs::write(&zig, "#!/bin/sh\necho 0.13.0\n").expect("write zig");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&zig).expect("stat zig").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&zig, perms).expect("chmod zig");
+        }
+
+        assert_eq!(
+            ziglang_isolated_path("0.13.0", tmp.path()).as_deref(),
+            zig.to_str()
+        );
+        assert!(ziglang_isolated_path("0.14.0", tmp.path()).is_none());
+        std::fs::write(&zig, "#!/bin/sh\necho 0.12.0\n").expect("replace zig version");
+        assert!(ziglang_isolated_path("0.13.0", tmp.path()).is_none());
     }
 }

@@ -6,7 +6,7 @@
 //! in `/usr/local/bin` without checking it at all.
 //!
 //! The pin lives in `crates/mvm-core/firecracker.lock` now, and this gate holds
-//! the places that cannot call a Rust API to it. Five things fail:
+//! the places that cannot call a Rust API to it. Six things fail:
 //!
 //!   - The default Firecracker version in `mvm-core` is not the locked one.
 //!   - `scripts/locked-firecracker.sh` prints something other than what the
@@ -15,6 +15,8 @@
 //!     one.
 //!   - Any `FC_VERSION` literal in a workflow, script or provisioning file
 //!     names a version other than the locked one.
+//!   - The release workflow stops running `scripts/release/stage-firecracker.sh`,
+//!     so a Linux archive would ship without a Firecracker.
 //!   - A file outside the allow-list names a download from the upstream
 //!     Firecracker release page. Every such download is a place the bytes that
 //!     boot guests were never compared with the lock.
@@ -39,6 +41,22 @@ const READER: &str = "scripts/locked-firecracker.sh";
 
 /// The remote KVM runner, which checks a tarball it cannot read the lock for.
 const REMOTE_RUNNER: &str = "scripts/run-gcp-kvm-test-remote.sh";
+
+/// The release workflow, which must put the pinned Firecracker in every Linux
+/// archive, and the script that does it.
+const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
+const STAGE_SCRIPT: &str = "scripts/release/stage-firecracker.sh";
+
+/// Whether the release workflow still stages the pinned Firecracker. Without it
+/// a Linux archive ships no VMM and a first run on that install cannot boot.
+fn staging_finding(workflow: &str) -> Option<String> {
+    (!workflow.contains(STAGE_SCRIPT)).then(|| {
+        format!(
+            "{RELEASE_WORKFLOW} no longer runs {STAGE_SCRIPT}, so the Linux archives ship no \
+             Firecracker"
+        )
+    })
+}
 
 /// Trees whose files could name a Firecracker download. Documentation and specs
 /// are excluded: prose about a release is a record, not a fetch.
@@ -234,6 +252,11 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
         .with_context(|| format!("reading {}", runner_path.display()))?;
     findings.extend(runner_findings(&runner, &lock));
 
+    let release_path = workspace.join(RELEASE_WORKFLOW);
+    let release = std::fs::read_to_string(&release_path)
+        .with_context(|| format!("reading {}", release_path.display()))?;
+    findings.extend(staging_finding(&release));
+
     let mut seen = BTreeSet::new();
     for dir in SCANNED_DIRS {
         crate::fs_walk::walk_files(&workspace.join(dir), &mut |path| {
@@ -385,6 +408,19 @@ mod tests {
                 "{other} must not be a finding"
             );
         }
+    }
+
+    #[test]
+    fn a_release_workflow_that_stages_the_pinned_firecracker_is_clean() {
+        let workflow = format!("run: {STAGE_SCRIPT} \"${{TARGET%%-*}}\" staging/x/firecracker\n");
+        assert_eq!(staging_finding(&workflow), None);
+    }
+
+    #[test]
+    fn a_release_workflow_that_stopped_staging_firecracker_is_a_finding() {
+        let finding = staging_finding("run: echo no firecracker here\n")
+            .expect("a workflow that never stages Firecracker");
+        assert!(finding.contains(STAGE_SCRIPT) && finding.contains(RELEASE_WORKFLOW));
     }
 
     #[test]
