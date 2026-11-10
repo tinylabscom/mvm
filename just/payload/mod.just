@@ -20,7 +20,7 @@ toolchain:
     ZIG=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['zig'])")
     ZIGBUILD=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['cargo-zigbuild'])")
     echo "installing pinned Rust ${RUST} + zig ${ZIG} (ziglang) + musl/glibc targets + cargo-zigbuild ${ZIGBUILD}"
-    python3 -m pip install --quiet "ziglang==${ZIG}"
+    python3 -m pip install --quiet --upgrade --target "${HOME}/.local/share/mvm/toolchains/zig/${ZIG}" "ziglang==${ZIG}"
     rustup toolchain install "${RUST}" --profile minimal
     rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
         aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu --toolchain "${RUST}"

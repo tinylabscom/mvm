@@ -299,6 +299,7 @@ fn relay_supervisor_config_with_handoff(
         .filter(|p| {
             p.direction == mvm_vmm::driver::spec::VsockDirection::HostDials
                 && (p.service == GuestService::Telemetry
+                    || p.service == GuestService::Mailbox
                     || matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port)))
         })
         .map(|p| HostDialSocket {
@@ -797,6 +798,9 @@ impl VmmDriver for HvfDriver {
             // GPU remoting rides the same per-port vsock relay as every
             // other guest-dialed channel; the host endpoint binds the UDS.
             gpu: true,
+            // A host-dialed `Mailbox` port is bridged to a per-port socket,
+            // like telemetry.
+            guest_mailbox: true,
 
             // The hvf VMM is vsock-only by design: no guest NIC, and egress rides
             // the host vsock proxy (the per-VM gating endpoint), not a guest NIC.
@@ -1536,6 +1540,7 @@ mod tests {
         assert!(capabilities.standby_pool);
         assert!(capabilities.vsock);
         assert!(capabilities.gpu);
+        assert!(capabilities.guest_mailbox);
         assert!(capabilities.no_routable_guest_nic);
         assert!(capabilities.host_vsock_proxy);
         assert!(capabilities.free_page_reporting);

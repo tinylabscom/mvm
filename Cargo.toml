@@ -381,6 +381,9 @@ assets = [
     ["target/distro-pkg/doc/README.md", "usr/share/doc/mvmctl/", "644"],
     ["target/distro-pkg/man/*", "usr/share/man/man1/", "644"],
     ["target/distro-pkg/guest-runtime/*", "usr/lib/mvmctl/guest-runtime/", "644"],
+    ["target/distro-pkg/firecracker/firecracker", "usr/lib/mvmctl/firecracker/", "755"],
+    ["target/distro-pkg/firecracker/LICENSE", "usr/lib/mvmctl/firecracker/", "644"],
+    ["target/distro-pkg/firecracker/NOTICE", "usr/lib/mvmctl/firecracker/", "644"],
     ["target/distro-pkg/package-managed/deb", "usr/share/mvmctl/package-managed", "644"],
 ]
 
@@ -393,6 +396,9 @@ assets = [
     { source = "target/distro-pkg/doc/README.md", dest = "/usr/share/doc/mvmctl/README.md", mode = "644", doc = true },
     { source = "target/distro-pkg/man/*", dest = "/usr/share/man/man1/", mode = "644", doc = true },
     { source = "target/distro-pkg/guest-runtime/*", dest = "/usr/lib/mvmctl/guest-runtime/", mode = "644" },
+    { source = "target/distro-pkg/firecracker/firecracker", dest = "/usr/lib/mvmctl/firecracker/firecracker", mode = "755" },
+    { source = "target/distro-pkg/firecracker/LICENSE", dest = "/usr/lib/mvmctl/firecracker/LICENSE", mode = "644" },
+    { source = "target/distro-pkg/firecracker/NOTICE", dest = "/usr/lib/mvmctl/firecracker/NOTICE", mode = "644" },
     { source = "target/distro-pkg/package-managed/rpm", dest = "/usr/share/mvmctl/package-managed", mode = "644" },
 ]
 

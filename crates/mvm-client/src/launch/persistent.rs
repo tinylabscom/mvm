@@ -498,7 +498,7 @@ fn finish_legacy_persistent(
     let started = match (|| -> Result<_> {
         let mut images = prepared_volumes.take_writable_images();
         complete_writable_images(&start_config, &mut images)?;
-        mvm_hostd::mailbox_process::require_servable(&start_config, backend.kind())?;
+        mvm_hostd::mailbox_process::require_servable(&start_config, &backend)?;
         Ok(crate::boot::start_prepared_custodied(
             backend,
             &start_config,

@@ -38,6 +38,7 @@ pub(crate) fn init_mailbox() {
 
 /// One host connection at a time, each answered from the outbox.
 fn accept_loop(listener_fd: RawFd) {
+    let mut refused = 0u32;
     while !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
         let Some(cfd) = accept_vsock(listener_fd, "mailbox") else {
             continue;
@@ -46,7 +47,12 @@ fn accept_loop(listener_fd: RawFd) {
         // closed on drop.
         let mut stream = unsafe { std::fs::File::from_raw_fd(cfd) };
         if let Err(refusal) = forward_outbox(&mut stream, Path::new(OUTBOX_PATH)) {
-            eprintln!("mvm-guest-agent: mailbox frame not delivered: {refusal}");
+            // The host re-dials until the workload writes its frame; log the
+            // first few refusals and then one in a hundred.
+            if refused < 3 || refused.is_multiple_of(100) {
+                eprintln!("mvm-guest-agent: mailbox frame not delivered: {refusal}");
+            }
+            refused = refused.saturating_add(1);
         }
     }
 }

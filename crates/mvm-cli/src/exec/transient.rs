@@ -164,7 +164,7 @@ pub(super) fn boot_transient_vm(
         };
 
     if !booted {
-        mvm_hostd::mailbox_process::require_servable(attempt.start_config, attempt.backend.kind())?;
+        mvm_hostd::mailbox_process::require_servable(attempt.start_config, attempt.backend)?;
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
         if mvm_runtime::catalog::descriptor(attempt.backend.kind()).is_workload
             && let Err(error) =
