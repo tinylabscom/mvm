@@ -245,6 +245,7 @@ A = {
     "mvm-backends/src/driver/libkrun.rs": ("hypervisor supervisor", "spawn mvm-libkrun-supervisor"),
     "mvm-backends/src/driver/qemu.rs": ("hypervisor", "launch QEMU"),
     "mvm-backends/src/driver/qemu_process.rs": ("mvmctl self re-exec", "start `mvmctl __qemu-vsock-bridge`"),
+    "mvm-backends/src/fc/fetch.rs": ("network fetch", "curl of the pinned Firecracker release, then tar of the digest-checked archive"),
     "mvm-backends/src/fc/idle_pool.rs": ("process control", "setsid-detached idle standby holder"),
     "mvm-build/src/builder_egress_process.rs": ("mvmctl self re-exec", "start `mvmctl __builder-egress-supervisor`"),
     "mvm-build/src/builder_vm_bootstrap.rs": ("mvmctl self re-exec", "run the bootstrap helper to prepare the builder image"),
@@ -358,6 +359,7 @@ OPEN_REVIEW_CEILING = 12
 # (disposition, reason); the reason names the functions a reviewer can open.
 # A file listed here that is no longer open-review by derivation is an error.
 REVIEWED = {
+    "mvm-backends/src/fc/fetch.rs": ("fixed-argv-utility", "`curl` accepts only the lock-derived HTTPS URL and writes to a private temporary file; `tar` extracts only the lock-named member after verifying the archive digest. Both use separate argv under `helper_command`, and the binary's size and digest are checked before installation. Neither spawn has a wall-clock bound."),
     "mvm-build/src/builder_vm_image.rs": ("fixed-argv-utility", "`prepopulate_with_mkfs`: program is the e2fsprogs `mkfs.ext4` path from `find_host_mkfs_ext4` (fixed candidate list), argv is a fixed flag list plus typed paths and a block count, no shell, status checked and mapped to `BuilderVmError`. Formats the builder's own store image from a digest-verified seed; no caller-supplied text reaches argv. Stdio is inherited and there is no wall-clock bound (not changed: the output is the operator's progress display, not captured)."),
     "mvm-build/src/builder_vm_runtime.rs": ("bounded-fixed-argv-utility", "`debugfs_cat`: read-only `debugfs -R` on the builder store image. The request comes from `debugfs_cat_request` (refuses a relative path or whitespace and control characters). It runs under `mvm_core::bounded_run::run_bounded` with a 60 s timeout (typed error) and a 1 MiB stdout cap, and its error text is `excerpt`-capped; tests drive a fake tool for the hang, the 10 MB output and the normal and not-found paths."),
     "mvm-core/src/crypto/key_rotation.rs": ("bounded-fixed-argv-utility", "`rotate_luks_slot` via `run_change_key`: fixed `cryptsetup luksChangeKey`; both passphrases go through 0600 tempfiles named in argv, never argv text or env. Runs under `run_bounded` (5 min timeout, 64 KiB capture, stdin null); the error carries a capped, control-stripped stderr excerpt only. Requires a live LUKS device by contract."),
