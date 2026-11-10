@@ -161,7 +161,7 @@ pub enum EndpointLifetime {
     /// serving after its launcher exits for as long as a VM process recorded
     /// there is alive, and stops when neither is. A detached machine needs
     /// this: `machine start` returns while the VM keeps running, and an
-    /// endpoint that went with it left the VM's egress and tool-decision
+    /// endpoint that went with it would leave the VM's egress and credential
     /// sockets bound to nothing.
     Vm,
 }

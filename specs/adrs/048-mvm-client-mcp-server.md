@@ -32,7 +32,9 @@ existing facade DTO and invokes exactly one facade operation.
 The adapter is a module, not a separate package: the CLI is its only production
 consumer and already needs its dependency closure. This preserves the protocol
 boundary without a public Rust API or another workspace crate. The stdio command
-binds the resolved tool-policy gate and any signed-plan-backed drive grant.
+binds any signed-plan-backed drive grant. Issue #5115 retired the authored
+per-tool gate; startup rejects legacy policy rather than serving MCP calls
+with its former restrictions silently discarded.
 
 The catalog is derived from `BackendCapabilityReport.operations`. Those
 operation capabilities are a serialized deny-all-by-default field, distinct

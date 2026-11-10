@@ -319,6 +319,8 @@ pub(crate) mod tests {
 
     pub(crate) fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
+            execution_epoch: 1,
+            mailbox: None,
             grants: None,
             environment: None,
             build_provenance: Default::default(),

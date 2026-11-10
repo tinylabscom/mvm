@@ -243,10 +243,9 @@ pub struct EndpointConfig {
     /// trust bundle.
     #[serde(default)]
     pub tls_intermediate: Option<TlsIntermediate>,
-    /// The VM's resolved network policy for claim-10 egress. When set, the endpoint
-    /// gates every destination itself (the run loop relays without gating); absent ⇒
-    /// the endpoint does not gate (the legacy in-loop gate is still active). Fail
-    /// closed when set: an unadmitted destination is refused before any forward.
+    /// The VM's resolved network policy for claim-10 egress. The endpoint
+    /// gates every destination itself; absent projects a default-deny gate.
+    /// An unadmitted destination is refused before any forward.
     #[serde(default)]
     pub network_policy: Option<mvm_core::policy::network_policy::NetworkPolicy>,
     /// Transport-neutral resource ceilings from the admitted execution plan.
@@ -259,8 +258,8 @@ pub struct EndpointConfig {
     #[serde(default)]
     pub ingress: Vec<mvm_core::plan::IngressMapping>,
     /// Which egress protocol the relayed guest stream carries. `Wire` (default,
-    /// secret-bearing) keeps the existing WireRequest substitution serve loop; `Raw`
-    /// selects the raw-TCP splice serve loop. Fixed at admission — never sniffed.
+    /// secret-bearing) keeps the WireRequest substitution serve loop; `FlowMux`
+    /// serves authenticated guest networking. Fixed at admission — never sniffed.
     #[serde(default)]
     pub egress_mode: EgressMode,
     /// Where to record that a guest completed an authenticated session.
@@ -297,7 +296,7 @@ pub struct EndpointConfig {
     #[serde(default)]
     pub resolver: ResolverBackend,
     /// Identity material for the authenticated FlowMux session. Required when
-    /// `egress_mode` is `FlowMux`; ignored for `Wire` and `Raw`.
+    /// `egress_mode` is `FlowMux`; ignored for `Wire`.
     #[serde(default)]
     pub flowmux_identity: Option<FlowMuxIdentity>,
 }

@@ -132,7 +132,7 @@ pub(super) fn emit_policy_audit_invalid(
 #[cfg(test)]
 mod policy_audit_admission_tests {
     use super::*;
-    use mvm_core::plan::{ExecutionPlan, FsPolicyRef, PolicyRef, SynthesisInput};
+    use mvm_core::plan::{PolicyRef, SynthesisInput};
     use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
     use std::io::Write;
 
@@ -186,7 +186,8 @@ chain_signing = true
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"live-payload");
         let ledger = InMemoryNonceLedger::new();
-        let sha = mvm_core::crypto::image_verify::sha256_file(rootfs).unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
+        let vm_name = "vm-live";
         let mut plan = admit_for_run(
             &SynthesisInput {
                 mailbox: None,
@@ -231,7 +232,7 @@ chain_signing = true
             },
             &SystemClock,
             &ledger,
-            Some(keys_dir),
+            Some(keys_dir.path()),
             None,
             mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         )
@@ -303,6 +304,7 @@ stream_destinations = ["file://{}"]
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
@@ -414,6 +416,7 @@ chain_signing = false
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
@@ -501,6 +504,7 @@ chain_signing = false
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
@@ -607,6 +611,7 @@ disabled_inspectors = ["ssrf_guarrd"]
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),
@@ -719,6 +724,7 @@ port_hi  = 443
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                mailbox: None,
                 outputs: Vec::new(),
                 grants: None,
                 stream_edges: Vec::new(),

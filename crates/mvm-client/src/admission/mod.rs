@@ -1695,20 +1695,7 @@ pub(crate) mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::PlanBound,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission");
         assert!(!ctx.admitted.plan_id().0.is_empty());
@@ -1750,20 +1737,7 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            ..pinning_params(std::path::Path::new("/nonexistent/rootfs.ext4"), &ledger)
         })
         .expect_err("missing rootfs must fail");
         assert!(
@@ -1865,20 +1839,7 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            services: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            assets: Vec::new(),
-            restrict_agent_verbs: true,
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            ..pinning_params(&rootfs, &ledger)
         })
         .unwrap();
         let a2 = admit_plan_for_boot(AdmitPlanForBootParams {
@@ -1888,20 +1849,7 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .unwrap();
         assert_ne!(a1.admitted.plan_id(), a2.admitted.plan_id());
@@ -1925,20 +1873,7 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir),
             audit_dir: Some(audit_dir),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission")
     }
@@ -2062,19 +1997,7 @@ pub(crate) mod admit_plan_tests {
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             policy_dir: Some(policy_dir.path()),
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-            assets: Vec::new(),
+            ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission");
 

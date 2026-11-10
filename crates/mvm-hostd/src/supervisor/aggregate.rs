@@ -1259,6 +1259,8 @@ mod tests {
 
     fn sample_plan() -> ExecutionPlan {
         let mut plan = ExecutionPlan {
+            execution_epoch: 1,
+            mailbox: None,
             grants: None,
             environment: None,
             build_provenance: Default::default(),
@@ -1319,10 +1321,7 @@ mod tests {
                 snapshot_on_idle: false,
                 idle_secs: 0,
             },
-            // Replay-protection fields. The
-            // supervisor's admission gate doesn't enforce these yet —
-            // that's a follow-up. Today they're populated so the
-            // wire format compiles and signing roundtrips work.
+            // Stable validity window and nonce for admission tests.
             valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
             valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
             nonce: Nonce::from_bytes([0xab; 16]),

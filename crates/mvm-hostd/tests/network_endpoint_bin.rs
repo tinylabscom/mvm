@@ -173,13 +173,6 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
             destinations: Vec::new(),
             approval_required: false,
         }],
-        transport: EndpointTransport::Uds { path: sock.clone() },
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        forward_timeout_secs: 30,
-        proxy_https: None,
-        proxy_http: None,
-        no_proxy: None,
         secret_store_dir: Some(dir.path().join("secrets")),
         binding_store_dir: Some(dir.path().join("bindings")),
         // The policy admits the unbound destination, so the refusal below can
@@ -290,13 +283,6 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
             destinations: Vec::new(),
             approval_required: false,
         }],
-        transport: EndpointTransport::Uds { path: sock.clone() },
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        forward_timeout_secs: 30,
-        proxy_https: None,
-        proxy_http: None,
-        no_proxy: None,
         secret_store_dir: Some(dir.path().join("secrets")),
         binding_store_dir: Some(dir.path().join("bindings")),
         // Deny-all: the endpoint gates every destination — even the bound one.
@@ -366,23 +352,6 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
     let b64 = base64::engine::general_purpose::STANDARD;
 
     let cfg = EndpointConfig {
-        telemetry: None,
-        tenant_id: "local".into(),
-        instance_id: "test".into(),
-        secrets: vec![],
-        transport: EndpointTransport::Uds { path: sock.clone() },
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        forward_timeout_secs: 30,
-        proxy_https: None,
-        proxy_http: None,
-        no_proxy: None,
-        secret_store_dir: None,
-        binding_store_dir: None,
-        tls_intermediate: None,
-        network_policy: None,
-        network_limits: mvm_core::plan::NetworkLimits::default(),
-        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
         session_marker: Some(session_marker.clone()),
         session_ready_socket: Some(session_ready_socket.clone()),
@@ -468,20 +437,6 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
     let guest_key = ed25519_dalek::SigningKey::from_bytes(&[19u8; 32]);
     let b64 = base64::engine::general_purpose::STANDARD;
     let cfg = EndpointConfig {
-        telemetry: None,
-        tenant_id: "local".into(),
-        instance_id: "test".into(),
-        secrets: vec![],
-        transport: EndpointTransport::Uds { path: sock.clone() },
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        forward_timeout_secs: 30,
-        proxy_https: None,
-        proxy_http: None,
-        no_proxy: None,
-        secret_store_dir: None,
-        binding_store_dir: None,
-        tls_intermediate: None,
         // The ceiling is under test, not the policy: admit UDP so the first
         // association opens and the second meets the ceiling.
         network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::unrestricted()),
@@ -567,37 +522,18 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("network.sock");
     let b64 = base64::engine::general_purpose::STANDARD;
-    let mut cfg = serde_json::to_value(EndpointConfig {
-        telemetry: None,
-        tenant_id: "local".into(),
-        instance_id: "test".into(),
-        secrets: vec![],
-        transport: EndpointTransport::Uds { path: sock },
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        forward_timeout_secs: 30,
-        proxy_https: None,
-        proxy_http: None,
-        no_proxy: None,
-        secret_store_dir: None,
-        binding_store_dir: None,
-        tls_intermediate: None,
-        network_policy: None,
-        network_limits: mvm_core::plan::NetworkLimits::default(),
-        ingress: Vec::new(),
-        egress_mode: EgressMode::FlowMux,
-        flowmux_identity: Some(FlowMuxIdentity {
-            session_id: "invalid-limit".into(),
-            host_signing_key_base64: b64.encode([23u8; 32]),
-            guest_verifying_key_base64: b64.encode(
-                ed25519_dalek::SigningKey::from_bytes(&[29u8; 32])
-                    .verifying_key()
-                    .to_bytes(),
-            ),
-        }),
-        ..test_config(EndpointTransport::Uds { path: sock })
-    })
-    .unwrap();
+    let mut config = test_config(EndpointTransport::Uds { path: sock });
+    config.egress_mode = EgressMode::FlowMux;
+    config.flowmux_identity = Some(FlowMuxIdentity {
+        session_id: "invalid-limit".into(),
+        host_signing_key_base64: b64.encode([23u8; 32]),
+        guest_verifying_key_base64: b64.encode(
+            ed25519_dalek::SigningKey::from_bytes(&[29u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        ),
+    });
+    let mut cfg = serde_json::to_value(config).unwrap();
     cfg["network_limits"]["max_udp_associations"] = serde_json::json!(0);
 
     let mut child = Command::new(BIN)
@@ -876,23 +812,6 @@ fn every_endpoint_thread_serves_under_confinement() {
     let guest_key = ed25519_dalek::SigningKey::from_bytes(&[29u8; 32]);
     let b64 = base64::engine::general_purpose::STANDARD;
     let cfg = EndpointConfig {
-        telemetry: None,
-        tenant_id: "local".into(),
-        instance_id: "test".into(),
-        secrets: vec![],
-        transport: EndpointTransport::Uds { path: sock.clone() },
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        forward_timeout_secs: 30,
-        proxy_https: None,
-        proxy_http: None,
-        no_proxy: None,
-        secret_store_dir: None,
-        binding_store_dir: None,
-        tls_intermediate: None,
-        network_policy: None,
-        network_limits: mvm_core::plan::NetworkLimits::default(),
-        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "every-thread-confined".into(),
@@ -1081,20 +1000,6 @@ fn an_endpoint_embedding_the_collector_collects_and_keeps_serving() {
             records_key_b64: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=".into(),
         }),
         instance_id: VM.into(),
-        secrets: vec![],
-        transport: EndpointTransport::Uds { path: sock.clone() },
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        forward_timeout_secs: 30,
-        proxy_https: None,
-        proxy_http: None,
-        no_proxy: None,
-        secret_store_dir: None,
-        binding_store_dir: None,
-        tls_intermediate: None,
-        network_policy: None,
-        network_limits: mvm_core::plan::NetworkLimits::default(),
-        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
         session_marker: Some(state_dir.join("session.marker")),
         flowmux_identity: Some(FlowMuxIdentity {
@@ -1205,20 +1110,6 @@ fn an_endpoint_whose_collector_cannot_start_keeps_serving() {
             records_key_b64: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=".into(),
         }),
         instance_id: "collector-refused-vm".into(),
-        secrets: vec![],
-        transport: EndpointTransport::Uds { path: sock.clone() },
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        forward_timeout_secs: 30,
-        proxy_https: None,
-        proxy_http: None,
-        no_proxy: None,
-        secret_store_dir: None,
-        binding_store_dir: None,
-        tls_intermediate: None,
-        network_policy: None,
-        network_limits: mvm_core::plan::NetworkLimits::default(),
-        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
         session_marker: Some(state_dir.join("session.marker")),
         flowmux_identity: Some(FlowMuxIdentity {

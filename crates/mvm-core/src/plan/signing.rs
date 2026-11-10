@@ -218,78 +218,29 @@ pub mod test_support {
     /// A minimal valid `ExecutionPlan` with a fixed validity window + nonce.
     /// Callers override `valid_from`/`valid_until`/`nonce` for their scenario.
     pub fn sample_plan() -> ExecutionPlan {
-        ExecutionPlan {
-            grants: None,
-            environment: None,
-            build_provenance: Default::default(),
-            snapshot_at: Default::default(),
-            network_mode: Default::default(),
-            stream_retention: Default::default(),
-            action_budget: None,
-            protected_paths: Default::default(),
-            ingress: Vec::new(),
-            network_limits: Default::default(),
-            schema_version: SCHEMA_VERSION,
-            plan_id: PlanId("01HXTESTPLAN000000000000".to_string()),
-            plan_version: 1,
-            tenant: TenantId("tenant-a".to_string()),
-            workload: WorkloadId("workload-1".to_string()),
-            runtime_profile: RuntimeProfileRef("firecracker".to_string()),
-            image: SignedImageRef {
-                name: "tenant-worker-aarch64".to_string(),
-                sha256: "a".repeat(64),
-                cosign_bundle: None,
-                entrypoint_present: true,
-            },
-            resources: Resources {
-                cpus: 2,
-                mem_mib: 1024,
-                disk_mib: 4096,
-                timeouts: TimeoutSpec {
-                    boot_secs: 30,
-                    exec_secs: 600,
-                },
-            },
-            admission_profile: AdmissionProfile::local_default(
-                "code:execute",
-                PlanSeccompTier::Standard,
-            ),
-            network_policy: PolicyRef("default-deny".to_string()),
-            fs_policy: FsPolicyRef("default".to_string()),
-            secrets: vec![],
-            egress_policy: PolicyRef("agent-l7".to_string()),
-            redaction: crate::policy::RedactionPolicy::default(),
-            reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
-            artifact_policy: ArtifactPolicy {
-                capture_paths: vec!["/artifacts".to_string()],
-                retention_days: 30,
-            },
-            caller_commitment: None,
-            audit_labels: BTreeMap::from([("workflow".to_string(), "etl-1".to_string())]),
-            key_rotation: KeyRotationSpec { interval_days: 7 },
-            attestation: AttestationRequirement {
-                mode: AttestationMode::Noop,
-            },
-            release_pin: None,
-            post_run: PostRunLifecycle {
-                destroy_on_exit: true,
-                snapshot_on_idle: false,
-                idle_secs: 0,
-            },
-            valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
-            valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
-            nonce: Nonce::from_bytes([0xab; 16]),
-            agent_verbs: None,
-            bundle: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            asset_identities: Vec::new(),
-            outputs: Vec::new(),
-            services: Vec::new(),
-            extensions: Vec::new(),
-            stream_edges: Vec::new(),
-            sdk_uses_sidecar: true,
-        }
+        let from = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+        let mut plan = crate::plan::test_support::PlanFixture::new()
+            .plan_id("01HXTESTPLAN000000000000")
+            .tenant("tenant-a")
+            .workload("workload-1")
+            .nonce([0xab; 16])
+            .validity(from, from + chrono::Duration::hours(1))
+            .audit_labels(BTreeMap::from([("workflow".into(), "etl-1".into())]))
+            .build();
+        plan.image.name = "tenant-worker-aarch64".into();
+        plan.resources.cpus = 2;
+        plan.resources.mem_mib = 1024;
+        plan.resources.disk_mib = 4096;
+        plan.resources.timeouts.exec_secs = 600;
+        plan.admission_profile =
+            AdmissionProfile::local_default("code:execute", PlanSeccompTier::Standard);
+        plan.network_policy = PolicyRef("default-deny".into());
+        plan.fs_policy = FsPolicyRef("default".into());
+        plan.egress_policy = PolicyRef("agent-l7".into());
+        plan.artifact_policy.capture_paths = vec!["/artifacts".into()];
+        plan.artifact_policy.retention_days = 30;
+        plan.key_rotation.interval_days = 7;
+        plan
     }
 }
 
