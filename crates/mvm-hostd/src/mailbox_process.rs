@@ -358,6 +358,32 @@ mod tests {
         assert!(none.borrow().is_empty());
     }
 
+    /// An idle process with nothing dialing it still exits once its VM's state
+    /// directory is gone, however long the dial loop has been running.
+    #[test]
+    fn the_process_exits_when_the_state_dir_disappears() {
+        let dir = keys_dir();
+        let grant = grant(dir.path());
+        let state = tempfile::tempdir().unwrap();
+        let state_path = state.path().to_path_buf();
+        let config = MailboxProcessConfig {
+            keys: derive_launch_keys(dir.path(), &grant).unwrap(),
+            grant,
+            socket: dir.path().join("mailbox.sock"),
+            guest_port: dir.path().join("absent-port"),
+            firecracker_mux: dir.path().join("absent-mux"),
+            vm_state_dir: state_path,
+        };
+        let serving = std::thread::spawn(move || serve(config));
+        drop(state);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !serving.is_finished() {
+            assert!(std::time::Instant::now() < deadline, "process did not exit");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(serving.join().unwrap(), 0);
+    }
+
     #[test]
     fn a_grant_that_cannot_be_served_fails_the_launch() {
         let dir = keys_dir();
