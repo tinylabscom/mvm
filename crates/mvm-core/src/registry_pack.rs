@@ -26,6 +26,7 @@ pub const REGISTRY_PACK_MANIFEST_SCHEMA_VERSION: u32 = 1;
 /// Current publisher trust-policy schema.
 pub const REGISTRY_PACK_PUBLISHER_POLICY_SCHEMA_VERSION: u32 = 1;
 
+pub(super) const MAX_REGISTRY_DESCRIPTOR_BYTES: usize = 1024 * 1024;
 const REGISTRY_PAYLOAD_DIR_NAME: &str = "payload";
 const MAX_REGISTRY_PAYLOAD_FILES: usize = 4096;
 const MAX_REGISTRY_PAYLOAD_BYTES: u64 = 32 * 1024 * 1024 * 1024;
@@ -1051,9 +1052,10 @@ pub use builtin_author_keys::{
     BuiltinAuthorTrust, OFFICIAL_BUNDLE_AUTHOR_KEYS, REVOKED_OFFICIAL_BUNDLE_AUTHOR_KEY_IDS,
 };
 mod dispatch;
+pub mod runtime_layer;
 pub use dispatch::{
     AuthenticatedRegistryManifest, VerifiedRegistryApplication, VerifiedRegistryManifest,
-    adopt_registry_manifest, verify_registry_manifest,
+    VerifiedRegistryRuntimeLayer, adopt_registry_manifest, verify_registry_manifest,
 };
 
 pub(crate) fn verify_registry_manifest_with(

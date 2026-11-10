@@ -21,11 +21,15 @@
 //! compile.
 
 mod app_tree;
+mod composable;
 mod frozen;
 mod lock;
 mod lower;
 pub mod python;
 
+pub use composable::{
+    ComposableStageError, StagedComposableApplication, stage_composable_application,
+};
 pub use frozen::{compile_frozen, lock_pack};
 pub use lock::{LockField, spec_sha256, stale_fields};
 pub use lower::{

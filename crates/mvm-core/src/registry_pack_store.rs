@@ -106,7 +106,7 @@ pub fn check_registry_pack_revocations_if_configured(
 /// operator publisher policy replaces built-in trust wholesale, and an
 /// operator-configured feed is checked in addition to the built-in one.
 pub(crate) fn check_application_revocations(
-    verified: &crate::registry_pack::VerifiedRegistryApplication,
+    verified: &impl AuthenticatedRegistryManifest,
 ) -> Result<(), RegistryPackStoreError> {
     let builtin_policy = load_publisher_policy_or_official_default(
         &crate::config::registry_pack_publisher_policy_path(),
@@ -132,17 +132,14 @@ pub(crate) fn check_application_revocations(
     )
 }
 
-fn uses_builtin_feed(
-    verified: &crate::registry_pack::VerifiedRegistryApplication,
-    builtin_policy: bool,
-) -> bool {
+fn uses_builtin_feed(verified: &impl AuthenticatedRegistryManifest, builtin_policy: bool) -> bool {
     verified.reference().namespace() == "mvm"
         || (builtin_policy
             && verified.signer().identity == crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY)
 }
 
 fn check_application_revocations_at<O, P>(
-    verified: &crate::registry_pack::VerifiedRegistryApplication,
+    verified: &impl AuthenticatedRegistryManifest,
     builtin_policy: bool,
     operator_trust_path: &Path,
     now: DateTime<Utc>,
@@ -192,7 +189,7 @@ pub fn official_registry_pack_revocation_valid_until() -> Option<DateTime<Utc>> 
 }
 
 fn check_application_revocations_with<F>(
-    verified: &crate::registry_pack::VerifiedRegistryApplication,
+    verified: &impl AuthenticatedRegistryManifest,
     trust_path: &Path,
     now: DateTime<Utc>,
     load: F,
@@ -960,6 +957,13 @@ pub(crate) fn open_installed_registry_pack_with(
             }
             .into())
         }
+        VerifiedRegistryManifest::RuntimeLayer(layer) => {
+            Err(RegistryPackVerificationError::UnsupportedManifestSchema {
+                got: layer.manifest().schema_version,
+                expected: crate::registry_pack::REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
+            }
+            .into())
+        }
     }
 }
 
@@ -1025,6 +1029,12 @@ fn open_installed_registry_manifest_with_checks(
         }
         VerifiedRegistryManifest::Application(application) => {
             check_application(application)?;
+        }
+        VerifiedRegistryManifest::RuntimeLayer(_) => {
+            return Err(RegistryPackVerificationError::ManifestParse(
+                "runtime layer install requires verified archive custody".to_string(),
+            )
+            .into());
         }
     }
     Ok((installed, verified))

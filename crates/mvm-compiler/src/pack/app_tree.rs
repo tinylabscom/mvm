@@ -12,6 +12,7 @@ use super::lower::{NPM_LOCKFILE, NPM_MANIFEST, app_relative};
 use super::python::{UV_LOCKFILE, UV_MANIFEST};
 use mvm_contract::ir::Dependencies;
 use mvm_contract::pack_spec::PackSpec;
+use mvm_contract::pack_spec_v2::ComposablePackSpec;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +42,22 @@ pub(super) fn assemble(
     };
     for name in files {
         place_dependency_file(&root, out, name)?;
+    }
+    Ok(())
+}
+
+/// Stage only the v2 application's declared copies, never its runtime layers.
+pub(super) fn assemble_v2(
+    spec: &ComposablePackSpec,
+    snapshot: &Path,
+    out: &Path,
+) -> Result<(), PackError> {
+    let root = canonical(snapshot)?;
+    create_dir(out)?;
+    for copy in &spec.copy {
+        let source = contained_source(&root, &copy.source)?;
+        let destination = out.join(copy.destination.trim_start_matches('/'));
+        copy_entry(&source, &destination, &copy.source, &copy.destination)?;
     }
     Ok(())
 }

@@ -8,8 +8,9 @@ Feature: The three-node mission demo contains, terminates and rebuilds
   simulated nodes in one process, their VMs are gated and audited but none
   boots, and node-to-node delivery is a loopback TCP transport (not Iroh, #4633,
   and not different physical hosts). A booted guest's mailbox was witnessed by
-  hand on a Firecracker host; that is not a CI lane, and the "Demo status"
-  section of specs/contracts/host-interface-distributed-execution.md records it.
+  hand, separately, on a Firecracker host and on an HVF host (macOS 26+ Apple
+  Silicon); neither is a CI lane, and the "Demo status" section of
+  specs/contracts/host-interface-distributed-execution.md records both.
 
   Scenario: The compromised workload is contained and replaced in the audit timeline
     When the scripted mission demo runs
