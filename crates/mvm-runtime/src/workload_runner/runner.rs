@@ -18,9 +18,9 @@ use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::protocol::broker::ServiceId;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyClaim, StandbyError,
-    StandbyHandle, StandbySpec, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo,
-    VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, StandbyClaim,
+    StandbyError, StandbyHandle, StandbySpec, StartMode, VmBackend, VmCapabilities, VmExitStatus,
+    VmId, VmInfo, VmStartConfig, VmStatus,
 };
 use mvm_fs::snapshot_store::FsSnapshotStore;
 

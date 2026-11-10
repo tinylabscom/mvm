@@ -92,7 +92,7 @@ impl FirecrackerIO {
     /// Verify the live writer against this launch's original locked objects.
     pub fn verify_writable_writer(
         &self,
-        handoff: &mvm_vmm::driver::prepared_disks::SudoWritableHandoff,
+        handoff: &mvm_vmm::driver::prepared_disks::LaunchWritableHandoff,
     ) -> Result<()> {
         let vm_dir = self
             .socket_path
@@ -214,7 +214,7 @@ impl FirecrackerIO {
         &self,
         live_config: &str,
         fork: Option<&super::ForkDevices>,
-    ) -> Result<Option<mvm_vmm::driver::prepared_disks::SudoWritableHandoff>> {
+    ) -> Result<Option<mvm_vmm::driver::prepared_disks::LaunchWritableHandoff>> {
         let config: RestoreConfig = serde_json::from_str(live_config)
             .context("parsing the stopped writer's authenticated live configuration")?;
         let mut images = Vec::new();
@@ -282,7 +282,7 @@ impl FirecrackerIO {
         if disks.is_empty() {
             return Ok(None);
         }
-        Ok(Some(disks.into_sudo_handoff(&spec)?))
+        Ok(Some(disks.into_launch_handoff(&spec)?))
     }
 
     /// Load a sealed snapshot into a fresh VMM, leaving vCPUs paused.
@@ -354,7 +354,7 @@ impl FirecrackerIO {
         dir: &Path,
         fork: Option<&super::ForkDevices>,
         scope: &str,
-        handoff: Option<&mvm_vmm::driver::prepared_disks::SudoWritableHandoff>,
+        handoff: Option<&mvm_vmm::driver::prepared_disks::LaunchWritableHandoff>,
     ) -> Result<()> {
         let vm_dir = self
             .socket_path

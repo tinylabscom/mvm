@@ -1,6 +1,6 @@
-//! Guest side of the mailbox port: when the host dials it, send the one
-//! plaintext message the workload left in the outbox and return the host's
-//! verdict.
+//! Guest side of the mailbox port: when the host dials it, send the
+//! plaintext message the workload left in the outbox, consume it, and return
+//! the host's verdict.
 //!
 //! The guest holds no key and seals nothing. The outbox carries a recipient
 //! (`OWN_MAILBOX_RECIPIENT` or the mailbox id, which the host maps to the
@@ -38,13 +38,19 @@ pub const OUTBOX_FILE_MODE: u32 = 0o640;
 /// The recipient bytes beside the largest body the host will seal.
 const MAX_OUTBOX_BYTES: u64 = MAX_MAILBOX_PAYLOAD_BYTES as u64 + 32;
 
-/// Forward the outbox message over `stream`. An absent, oversized or
-/// malformed outbox is refused here, before a byte is sent to the host.
+/// Forward the outbox message over `stream` and consume it, whatever the
+/// verdict, so the next dial sees only a newer message. The file is renamed
+/// aside first, so a writer's rename of the next message is never lost. An
+/// absent, oversized or malformed outbox is refused here, before a byte is
+/// sent to the host.
 pub fn forward_outbox<S: Read + Write>(stream: &mut S, outbox: &Path) -> Result<(), Refusal> {
+    let claimed = outbox.with_file_name(".outbox.forwarding");
+    std::fs::rename(outbox, &claimed).map_err(|_| Refusal::Malformed)?;
     let mut bytes = Vec::new();
-    std::fs::File::open(outbox)
-        .and_then(|file| file.take(MAX_OUTBOX_BYTES + 1).read_to_end(&mut bytes))
-        .map_err(|_| Refusal::Malformed)?;
+    let read = std::fs::File::open(&claimed)
+        .and_then(|file| file.take(MAX_OUTBOX_BYTES + 1).read_to_end(&mut bytes));
+    let _ = std::fs::remove_file(&claimed);
+    read.map_err(|_| Refusal::Malformed)?;
     send_outbox_message(stream, &OutboxMessage::decode(&bytes)?)
 }
 
@@ -138,6 +144,18 @@ mod tests {
             OutboxMessage::decode(&host.join().unwrap()),
             Ok(message(b"hello"))
         );
+    }
+
+    #[test]
+    fn a_forwarded_outbox_is_consumed_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = dir.path().join("outbox");
+        write_outbox(&outbox, &message(b"one")).unwrap();
+        let (mut ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(theirs); // hangs up without a verdict; the frame is still consumed
+        let _ = forward_outbox(&mut ours, &outbox);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(forward_outbox(&mut ours, &outbox), Err(Refusal::Malformed));
     }
 
     #[test]

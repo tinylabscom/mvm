@@ -114,3 +114,6 @@ outputs/
 
 # Local drafts stay ignored; these maintained documents are shared.
 /docs/*
+
+# Regenerable local Trail graph (run `trail build`).
+/graft/

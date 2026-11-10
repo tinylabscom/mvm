@@ -677,6 +677,74 @@ impl RuntimeLifecycleLease {
     pub(crate) fn canonical_kernel_record(&self) -> PathBuf {
         self.directory.join("canonical-kernel.json")
     }
+
+    fn bundle_use_record(&self) -> PathBuf {
+        self.directory.join("bundle-use.sha256")
+    }
+
+    fn retain_installed_bundle(&self, config: &VmStartConfig) -> Result<()> {
+        let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
+        let Ok(relative) = Path::new(&config.rootfs_path).strip_prefix(registry.root()) else {
+            return Ok(());
+        };
+        let Some(sha) = relative
+            .components()
+            .next()
+            .and_then(|part| part.as_os_str().to_str())
+        else {
+            bail!("installed bundle rootfs has no address");
+        };
+        anyhow::ensure!(
+            mvm_core::manifest::is_slot_hash_dirname(sha),
+            "invalid installed bundle rootfs address"
+        );
+        let record = self.bundle_use_record();
+        anyhow::ensure!(
+            std::fs::symlink_metadata(&record)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "an unresolved bundle use already owns this VM name"
+        );
+        registry.retain_for_vm(sha, &config.name)?;
+        write_private_new(&record, sha.as_bytes())?;
+        sync_file(&record)?;
+        sync_dir(&self.directory)?;
+        Ok(())
+    }
+
+    /// Only a backend's confirmed terminal stop may call this method.
+    pub(crate) fn release_installed_bundle_after_stop(&self, vm: &str) -> Result<()> {
+        use std::io::Read;
+
+        let record = self.bundle_use_record();
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = match options.open(&record) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        anyhow::ensure!(
+            file.metadata()?.is_file() && file.metadata()?.len() == 64,
+            "bundle use record is not a fixed-size regular file"
+        );
+        let mut bytes = Vec::new();
+        file.take(65).read_to_end(&mut bytes)?;
+        let sha = std::str::from_utf8(&bytes)?;
+        anyhow::ensure!(
+            mvm_core::manifest::is_slot_hash_dirname(sha),
+            "bundle use record has an invalid address"
+        );
+        mvm_core::plan::bundle::BundleRegistry::default_path()?.release_after_stop(sha, vm)?;
+        std::fs::remove_file(&record)?;
+        sync_dir(&self.directory)?;
+        Ok(())
+    }
+
     pub(crate) fn acquire(vm_name: &str) -> Result<Self> {
         mvm_core::naming::validate_vm_name(vm_name)?;
         let root = namespace::root(true)?;
@@ -693,6 +761,7 @@ impl RuntimeLifecycleLease {
     /// Once persisted, neither an error return nor dropping the VM handle
     /// removes the artifacts.
     pub(crate) fn bind(&self, config: &VmStartConfig) -> Result<VmStartConfig> {
+        self.retain_installed_bundle(config)?;
         let minimum_protocol = mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION;
         let home = self
             .directory
@@ -830,6 +899,48 @@ mod tests {
         mvm_core::private_fs::set_mode(&overlay, 0o600).unwrap();
         std::fs::write(&overlay, b"swapped").unwrap();
         assert!(verify_runtime_binding(&binding).is_err());
+    }
+
+    #[test]
+    fn bundle_use_is_durable_before_start_and_requires_explicit_release() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let registry = mvm_core::plan::bundle::BundleRegistry::default_path().unwrap();
+        let sha = "a".repeat(64);
+        let rootfs = registry.install_dir(&sha).join("artifacts/rootfs.ext4");
+        mvm_core::config::create_private_dir(rootfs.parent().unwrap()).unwrap();
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let config = VmStartConfig {
+            name: "bundle-use-unit".into(),
+            rootfs_path: rootfs.display().to_string(),
+            ..Default::default()
+        };
+
+        let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
+        lease.bind(&config).unwrap();
+        let claim = registry.root().join(format!(".{sha}.uses/{}", config.name));
+        assert!(claim.is_file());
+        assert!(lease.bundle_use_record().is_file());
+        assert!(
+            lease.bind(&config).is_err(),
+            "an unresolved VM cannot be reused"
+        );
+        drop(lease);
+        assert!(claim.is_file(), "a crash cannot release the bundle by Drop");
+
+        // The real caller invokes release only after the original backend
+        // confirmed exit; this unit checks the durable-record mechanics.
+        let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
+        lease
+            .release_installed_bundle_after_stop(&config.name)
+            .unwrap();
+        assert!(!claim.exists());
+        assert!(!lease.bundle_use_record().exists());
+        assert!(rootfs.exists(), "an older install is not eviction-eligible");
     }
 
     #[test]
