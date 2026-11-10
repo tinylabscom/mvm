@@ -2106,6 +2106,9 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
         &admitted,
         params.emitter,
     )?;
+    // Before the boot, so a grant this backend cannot serve never reaches a
+    // guest that would assert it.
+    crate::mailbox_process::require_servable(&config, backend)?;
     // Spent before the backend starts, so an admission that reached dispatch
     // can never authorize another launch, whatever the start's outcome.
     admitted.dispatched = true;
@@ -2160,6 +2163,22 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
                     stage: "assurance-session",
                     reason: "the declared assurance campaign could not be opened",
                     err,
+                }));
+            }
+            // Last, so no earlier rollback leaves a mailbox process behind.
+            // A grant that cannot be served is refused rather than booting a
+            // guest whose mailbox port nobody answers.
+            if let Err(err) =
+                crate::mailbox_process::spawn_for_launch(admitted.plan(), backend, &vm_name)
+            {
+                return Err(undo_launch(UndoLaunch {
+                    backend,
+                    vm_id: &vm_id,
+                    admitted: &admitted,
+                    emitter: params.emitter,
+                    stage: "mailbox-process",
+                    reason: "the granted guest mailbox could not be served",
+                    err: err.into(),
                 }));
             }
             Ok(StartedMachine {

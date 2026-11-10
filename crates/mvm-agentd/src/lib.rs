@@ -19,7 +19,6 @@ pub mod broker_client;
 pub mod builder_agent;
 /// The hvf-VMM builder's guest-side nix build (stages artifacts for the
 /// session to stream back).
-pub mod builder_build;
 /// The hvf-VMM builder's host↔guest build session over one vsock stream.
 pub mod builder_session;
 /// Builder-VM file transfer over vsock (the hvf VMM has no virtio-fs).

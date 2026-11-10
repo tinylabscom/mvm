@@ -6,35 +6,15 @@
 //! optimisation (kernel cmdline trim, handshake pipelining, the warm
 //! pool) is judged against this harness — without measurement we'd
 //! optimise the wrong thing. The measurement substrate here —
-//! per-iteration host wall-clock timing, N-run statistics, a
-//! versioned JSON report, and baseline regression-gating — is pure
-//! and fully unit-tested via a mock [`LaunchProbe`](harness::LaunchProbe).
-//!
-//! The live probe MUST drive signed-plan admission so the harness measures
-//! a launch shape that can actually ship. It is feature-gated behind
-//! `libkrun-live` since it boots a real guest.
+//! per-iteration host wall-clock timing, N-run statistics and a
+//! versioned JSON report — is pure and unit-tested.
 
 pub mod cold_launch;
 pub mod cold_launch_runner;
 pub mod doc_table;
 pub mod harness;
-pub mod interaction;
-pub mod probe;
-#[cfg(feature = "libkrun-live")]
-pub mod probes;
-pub mod regression;
 pub mod report;
-pub mod span_profile;
 pub mod stats;
-
-// `BootMarks` and the boot-timing-sidecar writer are the only bench-internal
-// items another file (`probe.rs`, under `libkrun-live`) reaches through
-// this module's path — everything else submodules need from each other they
-// reach directly via `super::<submodule>`.
-#[cfg(feature = "libkrun-live")]
-pub(crate) use probes::write_boot_timing_sidecar;
-#[cfg(feature = "libkrun-live")]
-pub use stats::BootMarks;
 
 use std::path::PathBuf;
 

@@ -988,6 +988,7 @@ impl LocalBackend {
             machine_start::MachineStartParams {
                 hypervisor: &backend,
                 has_ad_hoc_argv,
+                mailbox: None,
             },
         )
         .map_err(|e| crate::local::backend_err(format!("{e:#}")))?;

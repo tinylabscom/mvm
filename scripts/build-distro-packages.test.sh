@@ -38,6 +38,13 @@ pkg="${work}/src/mvmctl-x86_64-unknown-linux-gnu"
 mkdir -p "${pkg}/man" "${work}/repo"
 : > "${pkg}/README.md"
 : > "${pkg}/man/mvmctl.1"
+# The release stages the pinned Firecracker as a directory beside mvmctl; a
+# package must carry it, or a first run on a package install has no VMM.
+mkdir -p "${pkg}/firecracker"
+printf '\177ELF fake firecracker\n' > "${pkg}/firecracker/firecracker"
+chmod 755 "${pkg}/firecracker/firecracker"
+printf 'fake license\n' > "${pkg}/firecracker/LICENSE"
+printf 'fake notice\n' > "${pkg}/firecracker/NOTICE"
 printf '[package.metadata.deb]\n' > "${work}/repo/Cargo.toml"
 ( cd "${work}/repo" && git init -q && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m t )
 
@@ -52,6 +59,34 @@ done
 [ -f "${work}/out-0.27.0/mvmctl-0.27.0-1.x86_64.rpm" ] || fail "stable rpm name changed"
 [ -f "${work}/out-0.27.0-rc.3/mvmctl_0.27.0~rc.3-1_amd64.deb" ] || fail "rc deb not mapped"
 [ -f "${work}/out-0.27.0-rc.3/mvmctl-0.27.0~rc.3-1.x86_64.rpm" ] || fail "rc rpm not mapped"
+
+# The Firecracker directory is staged for both packages, kept executable, kept
+# out of /usr/bin, and listed in the payload manifest the smoke checks.
+staged="${work}/repo/target/distro-pkg"
+[ -x "${staged}/firecracker/firecracker" ] || fail "firecracker was not staged executable"
+[ -f "${staged}/firecracker/LICENSE" ] && [ -f "${staged}/firecracker/NOTICE" ] \
+  || fail "the firecracker licence files were not staged"
+[ ! -e "${staged}/bin/firecracker" ] || fail "firecracker was staged into /usr/bin"
+sums="${work}/out-0.27.0/payload-x86_64-unknown-linux-gnu.sha256sums"
+for name in firecracker LICENSE NOTICE; do
+  want="$(shasum -a 256 "${pkg}/firecracker/${name}" | cut -d' ' -f1)"
+  grep -qxF "${want}  /usr/lib/mvmctl/firecracker/${name}" "${sums}" \
+    || fail "payload manifest lacks /usr/lib/mvmctl/firecracker/${name}"
+done
+# The metadata must install exactly what was staged, to /usr/lib not /usr/bin.
+for pattern in 'distro-pkg/firecracker/firecracker' 'usr/lib/mvmctl/firecracker/'; do
+  [ "$(grep -c "${pattern}" "${repo}/Cargo.toml")" -ge 2 ] \
+    || fail "Cargo.toml must install the firecracker directory in both the deb and the rpm (${pattern})"
+done
+
+# An archive with no firecracker directory is refused, not packaged without it.
+mv "${pkg}/firecracker" "${work}/firecracker.off"
+tar czf "${work}/t.tar.gz" -C "${work}/src" mvmctl-x86_64-unknown-linux-gnu
+if build 0.27.0 "${work}/out-nofc" 2>/dev/null; then
+  fail "an archive with no firecracker directory was packaged"
+fi
+mv "${work}/firecracker.off" "${pkg}/firecracker"
+tar czf "${work}/t.tar.gz" -C "${work}/src" mvmctl-x86_64-unknown-linux-gnu
 
 if command -v dpkg >/dev/null; then
   dpkg --compare-versions 0.27.0~rc.2 lt 0.27.0 || fail "dpkg: rc must sort before final"

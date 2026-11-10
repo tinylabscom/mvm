@@ -307,7 +307,10 @@ const DEPLOYMENTS_SUB: &[(&str, AuditPosture)] = &[("ls", AuditPosture::ReadOnly
 // mutations use `ConfigChange` because they rewrite the operator's machine
 // inventory; lifecycle wrappers delegate to existing interactive/control
 // surfaces after first resolving the named machine.
+const MACHINE_MAILBOX: &[(&str, AuditPosture)] = &[("recv", AuditPosture::Emits("mailbox.read"))];
+
 const MACHINE_SUB: &[(&str, AuditPosture)] = &[
+    ("mailbox", AuditPosture::DelegatesToSub(MACHINE_MAILBOX)),
     ("run", AuditPosture::InteractiveOrControl),
     ("ps", AuditPosture::ReadOnly),
     ("build", AuditPosture::Emits("TemplateBuild")),
@@ -998,6 +1001,8 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // each write a chain-signed entry (see `mvm_hostd::containment`).
         "workload.quarantined",
         "workload.replaced",
+        // `machine mailbox recv` signs one payload-free read entry.
+        "mailbox.read",
         // Top-level command audit envelopes.
         "cmd.agent-session",
         "cmd.build",

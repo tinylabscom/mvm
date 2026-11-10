@@ -1,0 +1,44 @@
+# The Firecracker VMM that mvm ships and boots, pinned in one checked-in file.
+#
+# Firecracker runs every Linux guest, so the bytes that run it must be named by
+# this tree and not by whatever a download served last. Each architecture pins
+# two digests: the upstream release tarball, which is what a fetch is checked
+# against, and the `firecracker` binary inside it, which is what a launch is
+# checked against.
+#
+# It lives inside `mvm-core` for the same reason `images.lock` does: `mvm-core`
+# compiles it in, and a file inside the crate is inside every tree that builds
+# the crate.
+#
+# Rust reads this file through `mvm_core::firecracker_lock::firecracker_lock()`.
+# Shell and YAML read it through `scripts/locked-firecracker.sh`.
+# `xtask check-firecracker-pin` fails the build when the default Firecracker
+# version, the reader, or a script that still names a digest disagrees with the
+# lock, or when a Firecracker download appears that is not on its allow-list.
+#
+# Bump `version` only to a release that exists. Copy each `tarball_sha256` from
+# the `.sha256.txt` that release publishes beside the tarball, and compute each
+# `binary_sha256` and `binary_size` from the file extracted out of that tarball.
+# A pin inherits exactly the trust of the checksum it was copied out of.
+
+schema_version = 1
+
+# Where the artifacts below are published. Part of the pin, not configuration:
+# moving hosting is a trust-root change.
+repository = "firecracker-microvm/firecracker"
+
+version = "v1.17.0"
+
+[x86_64]
+tarball = "firecracker-v1.17.0-x86_64.tgz"
+tarball_sha256 = "06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558"
+binary = "release-v1.17.0-x86_64/firecracker-v1.17.0-x86_64"
+binary_sha256 = "99ad0f5cd0514a88aad0e9ae8cfdb3cc3b4ab9d190e1194602406c786b5de7a5"
+binary_size = 3676680
+
+[aarch64]
+tarball = "firecracker-v1.17.0-aarch64.tgz"
+tarball_sha256 = "e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256"
+binary = "release-v1.17.0-aarch64/firecracker-v1.17.0-aarch64"
+binary_sha256 = "fe726e0b43c04363ac07e358be4dee982c3947c65ed3ae10c770fef5e1cd756c"
+binary_size = 3377624

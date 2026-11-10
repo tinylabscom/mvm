@@ -34,14 +34,13 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// The v2 composable pack's authenticated composition, pinned input custody
-// and first-slice signed deny-all policy refusals, plus main's mailbox work,
-// measure 978,687 SLOC / 1,249,122 physical lines. Keep the bounds tight without dropping
-// a trust-boundary test; the prior v2 limits were 977,000 / 1,247,000.
+// The v2 composable pack's authenticated composition and trust-boundary tests
+// measured 978,687 SLOC / 1,249,122 physical lines before main's subsequent
+// Firecracker launch wiring. Allow that measured growth without dropping tests.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 978_750;
+const MAX_TOTAL_SLOC: usize = 979_200;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_249_200;
+const MAX_TOTAL_PHYSICAL: usize = 1_249_600;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 

@@ -503,15 +503,6 @@ pub fn pack_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_cache_dir()).join("packs")
 }
 
-/// Work directory `mvmctl build` compiles one locked pack spec into,
-/// keyed by the lock's workload digest. The flake built from it records this
-/// path, so rebuilding the same lock reuses the same template slot.
-pub fn pack_build_dir(workload_sha256: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_cache_dir())
-        .join("pack-builds")
-        .join(workload_sha256)
-}
-
 /// Resolve `<pack_cache_dir>/<pack_hash>` for a single promoted pack.
 /// The directory only appears after `verify_pack_at` accepts the staged
 /// pack, so a reader that observes it can trust its content — but every
@@ -884,6 +875,11 @@ pub const VM_APPROVAL_SOCKET: &str = "approval.sock";
 /// connects to it when a decision is `ask`.
 pub fn vm_approval_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     vm_socket_dir_at(state_dir).join(VM_APPROVAL_SOCKET)
+}
+
+/// Where a VM's launch-time mailbox service binds for host consumers.
+pub fn vm_mailbox_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join("mailbox.sock")
 }
 
 /// [`vm_approval_socket_at`] for a named VM.
