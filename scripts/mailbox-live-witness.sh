@@ -20,10 +20,9 @@
 #                read by mvmctl itself; set them to point a source build at
 #                its helper binaries. Leave them unset to test an install.
 #
-# Messages are sent one at a time, each read before the next is written. A
-# back-to-back burst is a separate known gap, being fixed by the outbox spool
-# change (#5295); when that lands the frame layout changes, and write_frame is
-# the only place that knows it.
+# Messages are sent one at a time, each read before the next is written. This
+# witnesses sequential delivery, not a back-to-back burst. The frame layout
+# is owned by write_frame below.
 set -euo pipefail
 
 MVMCTL="${MVMCTL:-mvmctl}"
