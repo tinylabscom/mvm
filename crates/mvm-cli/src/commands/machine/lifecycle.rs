@@ -327,7 +327,7 @@ pub(in crate::commands) fn exec_machine(
     cli: &Cli,
     args: MachineExecArgs,
     cfg: &MvmConfig,
-) -> Result<()> {
+) -> Result<i32> {
     require_console_target(&args.name)?;
     if let Some(tool) = args.tool {
         anyhow::ensure!(
@@ -350,20 +350,13 @@ pub(in crate::commands) fn exec_machine(
         require_tty(std::io::stdin().is_terminal())?;
         console::enforce_accessible_gate(&args.name, args.force)?;
         return match command {
-            Some(cmd) => console::console_pty_command(&args.name, cmd, Vec::new()),
+            Some(cmd) => console::run_pty_command_for_exit(&args.name, cmd, Vec::new()),
             None => {
-                let exit_code = console::console_interactive(
-                    &args.name,
-                    console::ConsoleSessionOptions::default(),
-                )?;
-                if exit_code != 0 {
-                    crate::observability::exit(exit_code);
-                }
-                Ok(())
+                console::console_interactive(&args.name, console::ConsoleSessionOptions::default())
             }
         };
     }
-    console::run(
+    console::run_for_exit(
         cli,
         console::Args {
             name: args.name,

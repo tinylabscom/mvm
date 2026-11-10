@@ -87,6 +87,35 @@ fn exec_refuses_a_torn_journal_before_command_or_shell_dispatch() {
 }
 
 #[test]
+fn nonzero_machine_exec_finishes_its_journal_before_returning_the_guest_status() {
+    let _state = IsolatedMachineState::new();
+    let dir = config::machine_state_dir("nonzero-exec");
+    let _lock = input_journal::lock(&dir).expect("journal lock");
+    let first = input_journal::begin_exec(&dir, &["false".into()]).expect("begin first exec");
+
+    assert_eq!(
+        finish_machine_exec(&dir, first, Ok(7)).expect("finish nonzero exec"),
+        7
+    );
+    assert_eq!(input_journal::cursor(&dir).expect("finished cursor"), 1);
+    assert!(!input_journal::read(&dir).expect("journal")[0].succeeded);
+
+    let second = input_journal::begin_exec(&dir, &["echo".into()]).expect("begin next exec");
+    assert_eq!(
+        finish_machine_exec(&dir, second, Ok(0)).expect("finish next exec"),
+        0
+    );
+    assert_eq!(input_journal::cursor(&dir).expect("next cursor"), 2);
+
+    let third = input_journal::begin_exec(&dir, &["missing".into()]).expect("begin third exec");
+    let error = finish_machine_exec(&dir, third, Err(anyhow::anyhow!("transport failed")))
+        .expect_err("transport error is still returned");
+    assert_eq!(error.to_string(), "transport failed");
+    assert_eq!(input_journal::cursor(&dir).expect("failed cursor"), 3);
+    assert!(!input_journal::read(&dir).expect("journal")[2].succeeded);
+}
+
+#[test]
 fn named_transient_with_registered_volume_explains_the_mount_is_not_attached() {
     let warning = transient_volume_warning("dirvol-test", 1);
 

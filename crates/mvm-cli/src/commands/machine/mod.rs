@@ -1552,11 +1552,15 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
         MachineAction::Exec(exec_args) => {
             let state_dir = config::machine_state_dir(&exec_args.name);
-            let _journal_lock = input_journal::lock(&state_dir)?;
-            let pending = input_journal::begin_exec(&state_dir, &exec_args.argv)?;
-            let outcome = exec_machine(cli, exec_args, cfg);
-            input_journal::finish_exec(&state_dir, pending, outcome.is_ok())?;
-            outcome
+            let exit_code = {
+                let _journal_lock = input_journal::lock(&state_dir)?;
+                let pending = input_journal::begin_exec(&state_dir, &exec_args.argv)?;
+                finish_machine_exec(&state_dir, pending, exec_machine(cli, exec_args, cfg))?
+            };
+            if exit_code != 0 {
+                crate::observability::exit(exit_code);
+            }
+            Ok(())
         }
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
@@ -1586,6 +1590,19 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
     }
+}
+
+fn finish_machine_exec(
+    state_dir: &Path,
+    pending: Option<input_journal::PendingExec>,
+    outcome: Result<i32>,
+) -> Result<i32> {
+    input_journal::finish_exec(
+        state_dir,
+        pending,
+        outcome.as_ref().is_ok_and(|code| *code == 0),
+    )?;
+    outcome
 }
 
 /// Run `machine warm-restore`: fork a vm_full checkpoint into a fresh child VM.
