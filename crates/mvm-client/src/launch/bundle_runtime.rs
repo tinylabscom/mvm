@@ -10,8 +10,8 @@ use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{BackendImageSupport, ImageSetMember};
 use mvm_core::plan::FsTrustStore;
 use mvm_core::plan::bundle::{
-    ArtifactRole, BundleRegistry, VerifiedEmbeddedImageSet, select_boot_asset_members,
-    verify_bundle_file,
+    ArtifactRole, BundleOrigin, BundleRegistry, LocalBundleTrustStore, VerifiedEmbeddedImageSet,
+    bundle_origin, key_id_from_pubkey, select_boot_asset_members, verify_bundle_file,
 };
 use mvm_core::vm_backend::{BackendKind, BundleBootAssetsPin, VmStartConfig};
 
@@ -52,11 +52,22 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         return Ok(false);
     };
     let registry = BundleRegistry::default_path()?;
-    let trust = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
+    let release = mvm_core::registry_pack::application_bundle::trust_for_installed_archive(
         FsTrustStore::default_path()?,
         &archive,
     );
-    let verified = verify_bundle_file(&archive, &trust).context("verifying bundle boot assets")?;
+    let verified = if let Some(host) = mvm_core::plan::bundle::existing_local_build_key()? {
+        let id = key_id_from_pubkey(&host);
+        let trust = LocalBundleTrustStore::new(release, id.clone(), host);
+        let verified = verify_bundle_file(&archive, &trust)?;
+        ensure!(
+            bundle_origin(&verified.manifest, &id, trust.release()) != BundleOrigin::Untrusted,
+            "bundle boot assets refuse an unlabelled or foreign host build"
+        );
+        verified
+    } else {
+        verify_bundle_file(&archive, &release)?
+    };
     let canonical = verified.manifest.members.iter().any(|member| {
         matches!(
             member,

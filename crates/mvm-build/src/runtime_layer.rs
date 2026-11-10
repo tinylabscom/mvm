@@ -143,6 +143,21 @@ pub struct ResolvedComposableLock {
 }
 
 impl ResolvedComposableLock {
+    /// Exact signed image-set root used to select the base filesystem.
+    pub fn base_manifest_sha256(&self) -> &Sha256Hex {
+        &self.base_manifest_sha256
+    }
+
+    /// Publisher-authenticated runtime manifests in composition order.
+    pub fn runtime_pins(&self) -> &[PackPin] {
+        &self.runtime_pins
+    }
+
+    /// Architecture selected by the authenticated source recipe.
+    pub fn target(&self) -> PackTarget {
+        self.target
+    }
+
     /// Compare against freshly resolved inputs before a production build.
     ///
     /// # Errors
@@ -187,6 +202,31 @@ impl ComposedApplicationRootfs {
         producer_revision: &str,
     ) -> Result<ResolvedComposableLock, RuntimeLayerStageError> {
         spec.check_mode_request(BuildMode::Production)?;
+        self.lock_for(spec, source_tree_sha256, producer_revision)
+    }
+
+    /// Bind a development build to the same immutable inputs without claiming
+    /// production intent or a publisher signature.
+    ///
+    /// # Errors
+    ///
+    /// Refuses changed source, policy, layer or producer identities.
+    pub fn development_lock(
+        &self,
+        spec: &ComposablePackSpec,
+        source_tree_sha256: &Sha256Hex,
+        producer_revision: &str,
+    ) -> Result<ResolvedComposableLock, RuntimeLayerStageError> {
+        spec.check_mode_request(BuildMode::Development)?;
+        self.lock_for(spec, source_tree_sha256, producer_revision)
+    }
+
+    fn lock_for(
+        &self,
+        spec: &ComposablePackSpec,
+        source_tree_sha256: &Sha256Hex,
+        producer_revision: &str,
+    ) -> Result<ResolvedComposableLock, RuntimeLayerStageError> {
         let spec_sha256 = Sha256Hex::from_bytes(&spec.canonical_json()?);
         if self.tree.authored_spec_sha256.as_ref() != Some(&spec_sha256)
             || producer_revision.len() != 40
@@ -1367,38 +1407,39 @@ mod tests {
         let served = tempfile::tempdir().unwrap();
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&base_tar(b"1\n", 901)).unwrap();
-        let compressed = encoder.finish().unwrap();
-        let arch = GuestArch::Aarch64;
+        let real_tar = std::env::var_os("MVM_TEST_SIGNED_BASE_TAR").map(PathBuf::from);
+        let compressed = match &real_tar {
+            Some(path) => std::fs::read(path).unwrap(),
+            None => encoder.finish().unwrap(),
+        };
+        let arch = if real_tar.is_some() {
+            GuestArch::X86_64
+        } else {
+            GuestArch::Aarch64
+        };
+        let kernel = match std::env::var_os("MVM_TEST_SIGNED_BASE_KERNEL") {
+            Some(path) if real_tar.is_some() => std::fs::read(path).unwrap(),
+            None if real_tar.is_none() => b"kernel".to_vec(),
+            _ => panic!("real composition tar and boot kernel must be supplied together"),
+        };
         let target = MemberTarget::Arch(arch);
         let profile = WorkloadImageProfile::DefaultTenant;
         let root = ImageSetRole::WorkloadRootfs(profile);
+        let base = format!("base-rootfs-{arch}");
         let fixture = ImageSetFixture::complete()
             .with_base_image_contract(Some(BaseImageContract::LINUX_LAYER))
             .publish(
                 ImageSetRole::WorkloadKernel(profile),
                 target,
-                "base-vmlinux-aarch64",
-                b"kernel".to_vec(),
+                &format!("base-vmlinux-{arch}"),
+                kernel,
             )
-            .publish(root, target, "base-rootfs-aarch64.ext4", b"ext4".to_vec())
-            .publish_extra(
-                root,
-                target,
-                "base-rootfs-aarch64.verity",
-                b"verity".to_vec(),
-            )
-            .with_artifact_format("base-rootfs-aarch64.verity", ArtifactFormat::VerityHashTree)
-            .publish_extra(
-                root,
-                target,
-                "base-rootfs-aarch64.roothash",
-                b"hash".to_vec(),
-            )
-            .with_artifact_format(
-                "base-rootfs-aarch64.roothash",
-                ArtifactFormat::VerityRootHash,
-            )
-            .publish_extra(root, target, "base-rootfs-aarch64.tar.gz", compressed);
+            .publish(root, target, &format!("{base}.ext4"), b"ext4".to_vec())
+            .publish_extra(root, target, &format!("{base}.verity"), b"verity".to_vec())
+            .with_artifact_format(&format!("{base}.verity"), ArtifactFormat::VerityHashTree)
+            .publish_extra(root, target, &format!("{base}.roothash"), b"hash".to_vec())
+            .with_artifact_format(&format!("{base}.roothash"), ArtifactFormat::VerityRootHash)
+            .publish_extra(root, target, &format!("{base}.tar.gz"), compressed);
         let images = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
         if let Some(directory) = std::env::var_os("MVM_TEST_SIGNED_BASE_DIR") {
             let directory = PathBuf::from(directory);
@@ -1425,6 +1466,28 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(Sha256Hex::from_bytes(&std::fs::read(&tar).unwrap()), digest);
+                if let Some(kernel_path) = std::env::var_os("MVM_TEST_SIGNED_BASE_KERNEL") {
+                    let kernel_member = images
+                        .manifest()
+                        .members
+                        .iter()
+                        .find(|member| {
+                            member.role == ImageSetRole::WorkloadKernel(profile)
+                                && member.target == target
+                                && member.build_mode.is_none()
+                        })
+                        .unwrap();
+                    let [kernel] = kernel_member.artifacts.as_slice() else {
+                        panic!("synthetic signed root must name one boot kernel");
+                    };
+                    images
+                        .fetch_artifact(kernel, &fetched.path().join("kernel"))
+                        .unwrap();
+                    assert_eq!(
+                        Sha256Hex::from_bytes(&std::fs::read(kernel_path).unwrap()),
+                        kernel.sha256
+                    );
+                }
             } else {
                 std::fs::create_dir(&directory).unwrap();
                 std::fs::write(&manifest, images.manifest_bytes()).unwrap();
@@ -1435,10 +1498,12 @@ mod tests {
         }
         let mut composed =
             compose_signed_workload_tree_with(&images, arch, profile, &[], |_| Ok(())).unwrap();
-        assert_eq!(
-            std::fs::read(composed.root().join("usr/bin/sh")).unwrap(),
-            b"busybox"
-        );
+        if real_tar.is_none() {
+            assert_eq!(
+                std::fs::read(composed.root().join("usr/bin/sh")).unwrap(),
+                b"busybox"
+            );
+        }
         assert_eq!(composed.ownership().owner_of("/home/mvm-worker").uid, 901);
         assert_eq!(
             composed.base_manifest_sha256(),
@@ -1450,14 +1515,27 @@ mod tests {
         // base composition -> verity bytes without claiming a signed boot.
         let project = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("main.py"), b"print('ready')\n").unwrap();
+        let probe = project.path().join("probe.sh");
+        std::fs::write(
+            &probe,
+            b"#!/usr/bin/sh\nIFS= read -r value < /srv/app/main.py\nprintf 'COMPOSED_GUEST_VALUE=%s\\n' \"$value\"\n",
+        ).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let spec: ComposablePackSpec = serde_json::from_value(serde_json::json!({
             "schema": "mvm.pack-spec/v2",
             "identity": {"name": "agent/example", "version": "1.0.0"},
-            "target": "aarch64-linux",
+            "target": if arch == GuestArch::X86_64 { "x86_64-linux" } else { "aarch64-linux" },
             "source": {"kind": "local", "path": "."},
             "runtimes": [],
-            "copy": [{"source": "main.py", "destination": "/srv/app/main.py"}],
-            "entrypoint": ["/usr/bin/sh", "/srv/app/main.py"],
+            "copy": [
+                {"source": "main.py", "destination": "/srv/app/main.py"},
+                {"source": "probe.sh", "destination": "/srv/app/probe.sh"}
+            ],
+            "entrypoint": ["/srv/app/probe.sh"],
             "resources": {"cpu_cores": 1, "memory_mb": 256},
             "production": {}
         }))
@@ -1563,6 +1641,12 @@ mod tests {
                 ComposablePackError::ProductionNotSelected
             ))
         ));
+        assert!(
+            application
+                .development_lock(&dev, &source_sha256, &revision)
+                .is_err(),
+            "a dev lock still must bind the exact authored spec used for composition"
+        );
         let mut changed_spec = spec.clone();
         changed_spec.entrypoint[0] = "/bin/other".into();
         assert!(matches!(
@@ -1594,6 +1678,20 @@ mod tests {
                 .read_regular_file_no_symlinks("srv/app/main.py", 128)
                 .unwrap(),
             b"print('ready')\n"
+        );
+        if real_tar.is_some() && std::env::var_os("MVM_TEST_SIGNED_BASE_VERIFY").is_some() {
+            let directory = PathBuf::from(std::env::var_os("MVM_TEST_SIGNED_BASE_DIR").unwrap());
+            std::fs::copy(&image, directory.join("composed.ext4")).unwrap();
+        }
+        let mut development = application;
+        development.tree.authored_spec_sha256 =
+            Some(Sha256Hex::from_bytes(&dev.canonical_json().unwrap()));
+        assert_eq!(
+            development
+                .development_lock(&dev, &source_sha256, &revision)
+                .unwrap()
+                .base_manifest_sha256(),
+            lock.base_manifest_sha256()
         );
     }
 

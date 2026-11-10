@@ -630,6 +630,34 @@ pub fn require_offline_runtime_policies(
     require_offline_policy_shape(policies)
 }
 
+/// Recheck a bundled layer's signed policy without retaining its build-only archive.
+///
+/// # Errors
+///
+/// Refuses changed publisher trust, expired or withdrawn revocations, mismatched
+/// policy bytes, profiles, and any grant beyond the first offline-only group.
+pub fn require_offline_runtime_group_at_admission(
+    descriptor: &VerifiedRegistryRuntimeLayer,
+    group: &[u8],
+) -> Result<(), OfflineRuntimePolicyError> {
+    descriptor
+        .reverify_publisher()
+        .map_err(RuntimeLayerPolicyError::from)?;
+    descriptor
+        .check_current_revocations()
+        .map_err(RuntimeLayerPolicyError::from)?;
+    let [file] = descriptor.manifest().files.as_slice() else {
+        return Err(OfflineRuntimePolicyError::Unsupported);
+    };
+    if file.path != GROUP_FILE
+        || file.size != group.len() as u64
+        || file.sha256 != crate::packs::Sha256Hex::from_bytes(group)
+    {
+        return Err(OfflineRuntimePolicyError::Unsupported);
+    }
+    require_offline_group(group)
+}
+
 fn require_offline_policy_shape(
     policies: &VerifiedRuntimeLayerPolicies,
 ) -> Result<(), OfflineRuntimePolicyError> {

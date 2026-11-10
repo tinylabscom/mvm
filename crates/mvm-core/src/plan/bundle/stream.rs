@@ -365,9 +365,13 @@ pub struct VerifiedBundleFile {
 
 #[cfg(feature = "host-state")]
 impl VerifiedBundleFile {
-    /// Internal bounded selection over an independently positioned owned file.
-    /// The application facade supplies only its identity-safe retained snapshot.
-    pub(crate) fn read_small_verified_member(
+    /// Reopen a bounded member from an archive matching this verified file's
+    /// full SHA-256. This is evidence, not permission to boot without admission.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a changed archive, missing or ambiguous artifact, or invalid bytes.
+    pub fn read_small_verified_member(
         &self,
         mut archive: File,
         name: &str,

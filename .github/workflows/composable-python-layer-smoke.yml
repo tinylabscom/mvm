@@ -7,6 +7,10 @@ on:
       - scripts/build-python-runtime-layer.py
       - scripts/test_build_python_runtime_layer.py
       - crates/mvm-build/src/runtime_layer.rs
+      - crates/mvm-cli/src/commands/vm/exec/**
+      - crates/mvm-hostd/src/plan_admission/composition.rs
+      - crates/mvm-contract/src/plan/bundle.rs
+      - crates/mvm-core/src/registry_pack/runtime_layer.rs
       - crates/mvm-core/examples/verify-runtime-layer-fixture.rs
   workflow_dispatch:
 
@@ -161,3 +165,67 @@ jobs:
             echo "changed synthetic base archive was accepted" >&2
             exit 1
           fi
+
+  composed-base-guest-read:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: signed-base
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: 8c947dc9ac15741e10b627540dbd2641259ab8c3
+          path: mvm-images
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: sigstore/cosign-installer@v3
+      - name: Read an authored value in a QEMU guest from a signed-input composition
+        env:
+          MVM_EMBED: "0"
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/composable-python-layer-smoke.yml@${{ github.ref }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+          result="$(cd mvm-images && nix build '.#legacyPackages.x86_64-linux.default-tenant.default' --no-link --print-out-paths)"
+          test -s "$result/rootfs.tar.gz"
+          test -s "$result/vmlinux"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp"' EXIT
+          export MVM_TEST_SIGNED_BASE_DIR="$tmp/base"
+          export MVM_TEST_SIGNED_BASE_TAR="$result/rootfs.tar.gz"
+          export MVM_TEST_SIGNED_BASE_KERNEL="$result/vmlinux"
+          cargo test --locked -p mvm-build --features manifest-verify --lib \
+            runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+            -- --exact
+          cosign sign-blob --yes --new-bundle-format \
+            --bundle "$tmp/base/image-set.bundle" "$tmp/base/image-set.json"
+          MVM_TEST_SIGNED_BASE_VERIFY=1 MVM_TEST_SIGNED_BASE_IDENTITY="$IDENTITY" \
+            cargo test --locked -p mvm-build --features manifest-verify --lib \
+              runtime_layer::tests::signed_set_composition_fetches_and_checks_the_production_base \
+              -- --exact
+          test -s "$tmp/base/composed.ext4"
+          for run in first repeat; do
+            status=0
+            timeout 120s qemu-system-x86_64 -nodefaults -no-user-config \
+              -machine q35,accel=tcg -m 512 -smp 1 -display none \
+              -monitor none -serial stdio -no-reboot -kernel "$result/vmlinux" \
+              -drive "file=$tmp/base/composed.ext4,format=raw,if=none,id=rootfs,readonly=on" \
+              -device virtio-blk-pci,drive=rootfs \
+              -append 'console=ttyS0 root=/dev/vda ro rootfstype=ext4 rootwait init=/srv/app/probe.sh panic=1 loglevel=4' \
+              > "$tmp/$run.log" 2>&1 || status=$?
+            if [ "$status" -eq 124 ]; then
+              echo "$run guest timed out" >&2
+              exit 1
+            fi
+            python3 - "$tmp/$run.log" "$run" <<'PY'
+          import pathlib, sys
+          log = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+          marker = "COMPOSED_GUEST_VALUE=print('ready')"
+          if marker not in log:
+              raise SystemExit(f"{sys.argv[2]} guest did not read the authored file:\n{log[-4000:]}")
+          print(f"{sys.argv[2]} guest read: {marker}")
+          PY
+          done

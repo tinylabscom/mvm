@@ -93,6 +93,7 @@ use sha2::{Digest, Sha256};
 mod assurance_runtime;
 mod bundle_environment;
 mod canonical_kernel;
+mod composition;
 mod display_grants;
 mod final_gates;
 mod host_gates;
@@ -573,6 +574,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         }
         .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
         bundle_environment::verify_environment(&verified, &verified_bundle.manifest, posture)?;
+        composition::verify(&verified, &verified_bundle)?;
         if !verified_bundle.embedded_image_sets.is_empty() {
             let image = ctx.image.ok_or_else(|| {
                 anyhow::anyhow!(

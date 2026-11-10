@@ -34,13 +34,13 @@ use std::process::Command;
 
 use crate::rust_source::{CommentSyntax, blank_comments};
 
-// The v2 candidate plus one-command default acquisition and reverified
-// runtime publisher trust measure 978,957 SLOC / 1,249,417 physical lines.
-// Allow only the measured increment, not an open-ended composition budget.
+// The composable-run candidate measures 979,909 SLOC / 1,250,438 physical
+// lines. This single bounded increase covers its typed local evidence,
+// admission rechecks, CLI path and tests; it is not a rolling budget.
 /// Ceiling on total SLOC, all categories.
-const MAX_TOTAL_SLOC: usize = 979_000;
+const MAX_TOTAL_SLOC: usize = 980_000;
 /// Ceiling on total physical lines, all categories.
-const MAX_TOTAL_PHYSICAL: usize = 1_249_500;
+const MAX_TOTAL_PHYSICAL: usize = 1_250_600;
 /// How far under a ceiling the tree may sit before the ceiling must drop.
 const SLACK: usize = 10_000;
 

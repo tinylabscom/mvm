@@ -438,17 +438,28 @@ impl PublishedImageSet {
             }
         }
 
-        // A base image provides no evidence about the separately attached runtime.
-        let (protocol_version, init_system, agent_binary) = (0, "cli-initramfs", "");
+        self.workload_sidecar("mvm-default-microvm", Vec::new())
+            .write_to_dir(dir)
+            .context("write default image sidecar derived from signed manifest")?;
+        Ok(())
+    }
+
+    /// Describe a derived sealed rootfs without attributing its application
+    /// or separately signed CLI runtime to the Linux base publisher.
+    pub fn workload_sidecar(
+        &self,
+        name: &str,
+        entrypoint: Vec<String>,
+    ) -> crate::builder_vm::GuestSidecar {
         crate::builder_vm::GuestSidecar {
-            name: "mvm-default-microvm".to_string(),
+            name: name.to_string(),
             accessible: false,
             sealed: true,
             entrypoint_kind: "command".to_string(),
-            entrypoint_argv: Vec::new(),
-            init_system: init_system.to_string(),
+            entrypoint_argv: entrypoint,
+            init_system: "cli-initramfs".to_string(),
             expected_boot_ms: 300,
-            agent_binary: agent_binary.to_string(),
+            agent_binary: String::new(),
             rootless_entrypoint: true,
             hypervisor: "firecracker".to_string(),
             overlay_aware: true,
@@ -456,7 +467,7 @@ impl PublishedImageSet {
             image_tag: String::new(),
             source: String::new(),
             built_at: String::new(),
-            protocol_version,
+            protocol_version: 0,
             generator_rev: self
                 .manifest
                 .mvm_source_commit
@@ -464,9 +475,6 @@ impl PublishedImageSet {
                 .map_or_else(String::new, |commit| commit.as_str().to_string()),
             libc: Default::default(),
         }
-        .write_to_dir(dir)
-        .context("write default image sidecar derived from signed manifest")?;
-        Ok(())
     }
 
     /// Fetch a signed production base's composition source, not a boot image.
