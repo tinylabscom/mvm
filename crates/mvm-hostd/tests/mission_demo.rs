@@ -627,11 +627,13 @@ fn a_guest_flooding_the_mailbox_port_is_refused_at_its_own_queue() {
         }
         verdicts
     });
-    let absent = node.home.path().join("absent.sock");
     for _ in 0..=LIMITS.max_depth {
         channel
             .service
-            .serve_guest(&absent, &mux, &mut sealer)
+            .serve_guest(
+                &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+                &mut sealer,
+            )
             .unwrap();
     }
     let verdicts = guest.join().unwrap();
@@ -662,11 +664,13 @@ fn a_guest_that_closes_without_a_frame_is_dialed_again() {
             .unwrap();
         stream.write_all(b"OK 1\n").unwrap();
     });
-    let absent = node.home.path().join("absent.sock");
     assert!(
         channel
             .service
-            .serve_guest(&absent, &mux, &mut sealer)
+            .serve_guest(
+                &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+                &mut sealer
+            )
             .is_err()
     );
     guest.join().unwrap();
@@ -692,7 +696,10 @@ fn a_guest_without_the_send_operation_is_refused_across_the_port() {
     });
     channel
         .service
-        .serve_guest(&node.home.path().join("absent.sock"), &mux, &mut sealer)
+        .serve_guest(
+            &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+            &mut sealer,
+        )
         .unwrap();
     assert!(matches!(guest.join().unwrap(), Err(Refusal::Mailbox(_))));
     assert!(channel.service.receive().is_none(), "nothing was queued");
@@ -722,7 +729,10 @@ fn guest_sends_to(recipient: PrincipalId) -> (Result<(), Refusal>, Option<Vec<u8
     });
     channel
         .service
-        .serve_guest(&node.home.path().join("absent.sock"), &mux, &mut sealer)
+        .serve_guest(
+            &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+            &mut sealer,
+        )
         .unwrap();
     (guest.join().unwrap(), channel.service.receive())
 }
@@ -792,10 +802,10 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
     std::fs::write(&outbox, outbox_message().encode()).unwrap();
     let per_port = node.home.path().join("port.sock");
     let socket = node.home.path().join("granted.sock");
-    let absent_mux = node.home.path().join("absent-mux");
 
     // No grant: nothing is bound and the guest port is never dialed.
     let listener = UnixListener::bind(&per_port).unwrap();
+    let route = mvm_core::vm_backend::HostDialRoute::PortSocket(per_port.clone());
     listener.set_nonblocking(true).unwrap();
     let (plan, trust) = plan_and_trust(&channel, false);
     let sealer_for = || sealer(&channel, &ops);
@@ -805,7 +815,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
         sealer_for(),
         LIMITS,
         &socket,
-        (&per_port, &absent_mux),
+        &route,
     );
     assert!(none.unwrap().is_none());
     assert!(!socket.exists(), "no service socket without a grant");
@@ -823,7 +833,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
         sealer_for(),
         LIMITS,
         &socket,
-        (&per_port, &absent_mux),
+        &route,
     );
     assert!(refused.is_err(), "a foreign authority key is not honored");
 
@@ -840,7 +850,7 @@ fn a_signed_mailbox_grant_alone_makes_the_host_serve_the_guest_port() {
         sealer_for(),
         LIMITS,
         &socket,
-        (&per_port, &absent_mux),
+        &route,
     )
     .unwrap()
     .expect("a granted plan is served");
@@ -947,8 +957,7 @@ fn derived_keys_serve_the_guest_port_and_queue_what_the_guest_sent() {
         keys,
         ServePaths {
             socket: dir.path().join("mailbox.sock"),
-            guest_port: dir.path().join("port.sock"),
-            firecracker_mux: dir.path().join("absent-mux"),
+            route: mvm_core::vm_backend::HostDialRoute::PortSocket(dir.path().join("port.sock")),
         },
         LAUNCH_LIMITS,
     );
@@ -1001,11 +1010,13 @@ fn guest_sends(node: &Node, channel: &Channel, bodies: &[&[u8]]) -> Vec<Result<(
             })
             .collect::<Vec<_>>()
     });
-    let absent = node.home.path().join("absent.sock");
     for _ in bodies {
         channel
             .service
-            .serve_guest(&absent, &mux, &mut sealer)
+            .serve_guest(
+                &mvm_core::vm_backend::HostDialRoute::Mux(mux.clone()),
+                &mut sealer,
+            )
             .unwrap();
     }
     guest.join().unwrap()
@@ -1137,9 +1148,20 @@ fn served_mailbox_process(dir: &std::path::Path) -> (KillOnDrop, std::path::Path
         .unwrap()
         .to_bytes();
     let grant = granted_plan(authority).mailbox.unwrap();
-    let config = build_config(&keys, &grant, &state_dir).unwrap();
-    std::fs::create_dir_all(config.guest_port.parent().unwrap()).unwrap();
-    let listener = UnixListener::bind(&config.guest_port).unwrap();
+    let config = build_config(
+        &keys,
+        &grant,
+        &state_dir,
+        mvm_runtime::backend::AnyBackend::from_hypervisor("hvf")
+            .host_dial_route(&state_dir, mvm_contract::protocol::mailbox::MAILBOX_PORT)
+            .unwrap(),
+    )
+    .unwrap();
+    let mvm_core::vm_backend::HostDialRoute::PortSocket(port_socket) = &config.route else {
+        panic!("the HVF route is a per-port socket");
+    };
+    std::fs::create_dir_all(port_socket.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(port_socket).unwrap();
     let wire = serde_json::to_vec(&config).unwrap();
     let seed = std::fs::read(keys.join("host-signer.ed25519")).unwrap();
     assert!(
