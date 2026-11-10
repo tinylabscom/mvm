@@ -474,13 +474,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
         let outbox = dir.path().join("outbox");
-        std::fs::write(
+        std::fs::create_dir(&outbox).unwrap();
+        mvm_agentd::mailbox_outbox::write_outbox(
             &outbox,
-            mvm_core::mailbox::frame::OutboxMessage {
+            &mvm_core::mailbox::frame::OutboxMessage {
                 recipient: mvm_contract::protocol::mailbox::PrincipalId::from_bytes([7; 32]),
                 body: b"late".to_vec(),
-            }
-            .encode(),
+            },
         )
         .unwrap();
         let guest = std::thread::spawn(move || {
@@ -519,6 +519,7 @@ mod tests {
     fn fake_guest(dir: &Path) -> (PathBuf, std::sync::mpsc::Receiver<Verdict>) {
         let listener = std::os::unix::net::UnixListener::bind(dir.join("port.sock")).unwrap();
         let outbox = dir.join("outbox");
+        std::fs::create_dir(&outbox).unwrap();
         let (path, (tx, rx)) = (outbox.clone(), std::sync::mpsc::channel());
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
